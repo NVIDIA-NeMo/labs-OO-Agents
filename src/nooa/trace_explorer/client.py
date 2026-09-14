@@ -16,9 +16,22 @@ Usage:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
+
+
+def viewer_headers() -> dict[str, str]:
+    """Auth headers for viewer API calls.
+
+    The viewer requires Bearer auth on /api/*; without this every thin-client
+    call 401s. The token comes from the environment (NOOA_VIEWER_AUTH_TOKEN).
+    """
+    token = os.environ.get("NOOA_VIEWER_AUTH_TOKEN", "")
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
 
 
 class TraceExplorerClient:
@@ -58,7 +71,11 @@ class TraceExplorerClient:
         if params:
             all_params.update(params)
 
-        async with httpx.AsyncClient(timeout=self._timeout, trust_env=False) as client:
+        # trust_env must stay ON: on hosts whose egress requires the corporate
+        # proxy (HTTP_PROXY=gateway.docker.internal:3128), bypassing it made
+        # every viewer call fail with ConnectError.
+        async with httpx.AsyncClient(timeout=self._timeout, trust_env=True,
+                                     headers=viewer_headers()) as client:
             try:
                 resp = await client.get(url, params=all_params)
                 if resp.status_code == 404:
