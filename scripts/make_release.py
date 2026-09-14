@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -326,6 +327,74 @@ def tool_versions(image_digest: str | None) -> dict[str, str]:
             else "unavailable"
         )
     return versions
+
+
+def provider_checks(artifact_dir: Path, manifest: ReleaseManifest | None = None) -> None:
+    """Check replay and cache behavior on the candidate before creating a draft.
+
+    Use the existing opt-in Hub tests, not the much larger integration suite.
+    Seven cases make at most 17 capped calls without retries. A fresh report
+    directory and explicit pass count prevent stale or skipped evidence from
+    satisfying the gate. Session databases and reports stay in private artifacts.
+    """
+    env = os.environ.copy()
+    key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_INTERNAL_API_KEY")
+    if not key:
+        die("NVIDIA_INFERENCE_API_KEY (or NVIDIA_INTERNAL_API_KEY) is required for provider checks")
+    env.update(
+        NVIDIA_INFERENCE_API_KEY=key, NOOA_RUN_OPEN_MODEL_REPLAY="1", NOOA_RUN_CACHE_RESUME_LIVE="1"
+    )
+    env.pop(
+        "NOOA_TEST_OMITTED_REASONING", None
+    )  # Optional A/B calls are outside the release budget.
+    env.pop("OTLP_ENDPOINT", None)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="provider-validation-", dir=artifact_dir))
+    report = directory / "results.xml"
+    evidence = {"outcome": "running", "report": str(report), "expected_cases": 7}
+    if manifest:
+        manifest.update(provider_validation=evidence)
+    step("Provider replay and cache checks (17 capped Hub requests)")
+    try:
+        run(
+            [
+                "uv",
+                "run",
+                "--frozen",
+                "pytest",
+                "-q",
+                "-m",
+                "integration",
+                "--reruns",
+                "0",
+                "--tb=no",
+                "-o",
+                "junit_family=xunit1",
+                "--junitxml",
+                str(report),
+                "--basetemp",
+                str(directory / "sessions"),
+                "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume",
+                "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume",
+            ],
+            env=env,
+            timeout=900,
+            capture=False,
+        )
+        cases = ET.parse(report).findall(".//testcase")
+        if len(cases) != 7 or any(
+            case.find(status) is not None
+            for case in cases
+            for status in ("skipped", "failure", "error")
+        ):
+            die("Provider validation requires all seven cases to pass; no skips")
+    except (ReleaseError, OSError, ET.ParseError) as exc:
+        if manifest:
+            manifest.update(provider_validation={**evidence, "outcome": "failed"})
+        die(f"Provider validation failed; inspect private evidence in {directory}: {exc}")
+    if manifest:
+        manifest.update(provider_validation={**evidence, "outcome": "passed"})
+    ok("all seven provider cases passed")
 
 
 # ---------------------------------------------------------------------------
@@ -1554,6 +1623,7 @@ def _write_job_summary(artifact_dir: Path, manifest: ReleaseManifest) -> None:
         f"- Candidate: `{data.get('candidate_sha', '')}`",
         f"- Previous: `{data.get('previous_release_tag', '')}`",
         f"- Capability hard gate: **{cap.get('hard_gate_outcome', 'not run')}**",
+        f"- Provider replay/cache gate: **{data.get('provider_validation', {}).get('outcome', 'not run')}**",
     ]
     if data.get("github_draft_url"):
         lines.append(f"- GitHub draft: {data['github_draft_url']}")
@@ -1667,6 +1737,8 @@ def ci_main(args: argparse.Namespace) -> int:
         distributions = _copy_distributions(artifact_dir)
         manifest.update(distributions=distributions)
 
+        provider_checks(artifact_dir, manifest)
+
         manifest.update(capability={"hard_gate_outcome": "running"})
         try:
             diff, baseline, candidate = capability_diff(
@@ -1773,6 +1845,7 @@ def local_main(args: argparse.Namespace) -> int:
     head_sha, prev_tag, _prev_sha, existing = preflight(args.tag, args.allow_dirty)
     fast_checks()
     build_and_smoke(args.tag, head_sha)
+    provider_checks(REPORT_PATH.parent)
 
     report = ""
     if args.skip_capability:

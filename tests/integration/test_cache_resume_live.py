@@ -183,7 +183,9 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", MODELS)
-async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path, monkeypatch):
+async def test_reasoning_and_prompt_cache_survive_sqlite_resume(
+    family, tmp_path, monkeypatch, record_property
+):
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
     requests = []
     original_send = httpx.AsyncClient.send
@@ -310,6 +312,9 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
         assert response.finish_reason in {"stop", "tool_calls"}
         assert bool(response.tool_calls) is (response.finish_reason == "tool_calls")
     assert resumed.usage is not None
+    record_property("model", MODELS[family])
+    for phase, response in (("seed", seed), ("warm", warm), ("resumed", resumed)):
+        record_property(f"{phase}_usage", response.usage.model_dump_json())
     print(
         json.dumps(
             {

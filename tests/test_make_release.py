@@ -791,6 +791,7 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     )
     monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "provider_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
     base = mr.ArmResults("base")
     head = mr.ArmResults("head")
@@ -814,7 +815,9 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     assert manifest["unmerged_candidate"] is True
 
 
-@pytest.mark.parametrize("failure_point", ["deterministic", "infrastructure", "hard-gate"])
+@pytest.mark.parametrize(
+    "failure_point", ["deterministic", "provider", "infrastructure", "hard-gate"]
+)
 def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, failure_point):
     args = _ci_args(mr, tmp_path)
     monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
@@ -828,6 +831,14 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
+    provider_calls = []
+
+    def providers(*_args, **_kwargs):
+        provider_calls.append(True)
+        if failure_point == "provider":
+            raise mr.ReleaseError("provider replay failed")
+
+    monkeypatch.setattr(mr, "provider_checks", providers, raising=False)
     draft_calls = []
     monkeypatch.setattr(mr, "create_or_update_draft", lambda *_args: draft_calls.append(True))
 
@@ -856,6 +867,8 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
     with pytest.raises(mr.ReleaseError):
         mr.ci_main(args)
     assert draft_calls == []
+    if failure_point == "provider":
+        assert provider_calls == [True]
     manifest = json.loads((tmp_path / "artifacts" / "release-manifest.json").read_text())
     assert manifest["status"] == "failed"
 
@@ -873,6 +886,10 @@ def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monke
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
     monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    provider_calls = []
+    monkeypatch.setattr(
+        mr, "provider_checks", lambda *_args, **_kwargs: provider_calls.append(True)
+    )
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
     base = mr.ArmResults("base")
     head = mr.ArmResults("head")
@@ -887,6 +904,7 @@ def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monke
     draft_calls = []
 
     def fake_draft(*call_args):
+        assert provider_calls == [True]
         draft_calls.append(call_args)
         return "https://github.example/draft", 42
 
@@ -905,6 +923,66 @@ def test_release_runner_contains_no_publish_operation(mr):
     source = (REPO / "scripts/make_release.py").read_text()
     assert "--draft=false" not in source
     assert "def publish(" not in source
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["passed", "skipped", "failure", "error", "empty", "partial", "missing", "malformed", "exit"],
+)
+def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome):
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "test-only-key")
+    monkeypatch.setenv("NOOA_TEST_OMITTED_REASONING", "1")
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        assert kwargs["env"]["NVIDIA_INFERENCE_API_KEY"] == "test-only-key"
+        assert kwargs["env"]["NOOA_RUN_OPEN_MODEL_REPLAY"] == "1"
+        assert kwargs["env"]["NOOA_RUN_CACHE_RESUME_LIVE"] == "1"
+        assert "NOOA_TEST_OMITTED_REASONING" not in kwargs["env"]
+        assert kwargs["timeout"] == 900
+        assert cmd[cmd.index("--reruns") + 1] == "0"
+        assert cmd[-2:] == [
+            "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume",
+            "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume",
+        ]
+        report = Path(cmd[cmd.index("--junitxml") + 1])
+        count = {"empty": 0, "partial": 6}.get(outcome, 7)
+        child = f"<{outcome}/>" if outcome in {"skipped", "failure", "error"} else ""
+        if outcome != "missing":
+            report.write_text(
+                "invalid"
+                if outcome == "malformed"
+                else "<testsuites><testsuite>"
+                + "".join(
+                    f'<testcase name="case{i}">{child if i == 0 else ""}</testcase>'
+                    for i in range(count)
+                )
+                + "</testsuite></testsuites>"
+            )
+        if outcome == "exit":
+            raise mr.ReleaseError("pytest failed")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "run", run)
+    manifest = mr.ReleaseManifest(tmp_path / "manifest.json", {})
+    if outcome == "passed":
+        mr.provider_checks(tmp_path, manifest)
+        assert manifest.data["provider_validation"]["outcome"] == "passed"
+    else:
+        with pytest.raises(mr.ReleaseError):
+            mr.provider_checks(tmp_path, manifest)
+        assert manifest.data["provider_validation"]["outcome"] == "failed"
+    assert len(calls) == 1
+
+
+def test_provider_gate_requires_credentials_before_spending(mr, monkeypatch, tmp_path):
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
+    monkeypatch.setattr(mr, "run", lambda *a, **kw: pytest.fail("must fail before transport"))
+    with pytest.raises(mr.ReleaseError, match="API_KEY"):
+        mr.provider_checks(tmp_path)
 
 
 def test_existing_publication_workflow_still_uses_published_release_trigger():
