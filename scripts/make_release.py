@@ -1664,8 +1664,6 @@ def ci_main(args: argparse.Namespace) -> int:
         die("an unmerged candidate can never create a draft")
     if args.checks_only and args.create_draft:
         die("--checks-only can never be combined with --create-draft")
-    if not os.getenv("NVIDIA_INTERNAL_API_KEY"):
-        die("NVIDIA_INTERNAL_API_KEY is required for the live capability gate")
     if not unmerged_candidate and not os.getenv("GH_TOKEN"):
         die("GH_TOKEN is required in CI to inspect and reconcile release state")
     validate_https_url(args.pipeline_url, "pipeline URL")

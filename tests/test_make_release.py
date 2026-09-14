@@ -759,7 +759,6 @@ def test_unmerged_candidate_requires_reduced_scope_and_never_drafts(mr, tmp_path
     args = _ci_args(mr, tmp_path)
     args.candidate_ref = "refs/pull/163/head"
     args.create_draft = False
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "disposable-test-key")
     monkeypatch.delenv("GH_TOKEN", raising=False)
 
     with pytest.raises(mr.ReleaseError, match="requires a reduced rehearsal"):
@@ -780,7 +779,6 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     args.models = "claude-haiku"
     args.runs = 1
     args.limit = 1
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "disposable-test-key")
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
@@ -820,7 +818,6 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
 )
 def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, failure_point):
     args = _ci_args(mr, tmp_path)
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
     monkeypatch.setenv("GH_TOKEN", "masked")
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(
@@ -875,7 +872,6 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
 
 def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monkeypatch):
     args = _ci_args(mr, tmp_path)
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
     monkeypatch.setenv("GH_TOKEN", "masked")
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(
