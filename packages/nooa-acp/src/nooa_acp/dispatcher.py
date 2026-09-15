@@ -4,18 +4,22 @@
 
 import asyncio
 from collections.abc import Coroutine
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from typing import Any, cast
 
 from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
 
 from nooa.interactive import RespondReason, RespondResult
 from nooa.slash_dispatch import SlashCommandResult
+from nooa_acp.execution_tree import ACPExecutionTree
 
 
 class InteractiveSessionDispatcher:
-    def __init__(self, agent: CodingAgent) -> None:
+    def __init__(
+        self, agent: CodingAgent, *, execution_tree: ACPExecutionTree | None = None
+    ) -> None:
         self.agent = agent
+        self._execution_tree = execution_tree
         self._active_task: asyncio.Task[Any] | None = None
         self._cancel_requested = False
         self._cancelling = False
@@ -56,7 +60,10 @@ class InteractiveSessionDispatcher:
             raise RuntimeError("A prompt is already running")
 
         self._cancel_requested = False
-        task = asyncio.create_task(operation, name="nooa-acp-dispatch")
+        # create_task copies this context into the whole dispatch, including
+        # nested agents and background tasks. Restore the caller immediately.
+        with self._execution_tree.turn() if self._execution_tree else nullcontext():
+            task = asyncio.create_task(operation, name="nooa-acp-dispatch")
         self._active_task = task
         try:
             return await task

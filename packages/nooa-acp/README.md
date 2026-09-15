@@ -132,6 +132,53 @@ async command is cooperatively cancellable; a synchronous command that blocks
 that loop cannot be preempted by the current in-process adapter. The planned
 one-process-per-agent boundary is the safe kill mechanism for that case.
 
+## Optional execution trees
+
+Enable nested method activity with:
+
+```bash
+nooa-acp --model <your-model> --execution-tree
+```
+
+The flag adds tool cards for real NOOA method calls and attaches hierarchy
+metadata to method, Python, terminal, and file cards. Nested agent instances,
+parallel calls, errors, cancellation, and generator lifetimes follow the
+framework's native instrumentation. Existing tracing hooks remain active.
+`@no_trace` excludes a method; private methods otherwise follow NOOA's normal
+tracing rules.
+
+This is an opt-in, private NOOA extension carried in standard ACP tool updates.
+Method nodes describe Python execution within the agent process; they are
+independent of ACP subagent support. Clients that understand the extension can
+render a tree, and other ACP clients can display the cards as a flat list.
+
+Each start and progress update includes the complete latest value at
+`_meta["nooa.dev/execution"]`:
+
+| Field | Meaning |
+|-------|---------|
+| `version` | Schema version, currently `1`. |
+| `runId` | Foreground dispatch ID; a suspended generator retains its original run. |
+| `spanId` | Exactly the card's ACP `toolCallId`. |
+| `parentSpanId` | Parent card ID, or `null` for a root. |
+| `nodeType` | `method`, `python`, `terminal`, or `file`. |
+| `name` | Display name, such as `ResearchAgent.review`. |
+| `agent` | Agent class name on method nodes. |
+| `startedAtMs` | Start time in Unix epoch milliseconds, including fractional milliseconds. |
+| `endedAtMs` | Completion time in the same units; absent while running. |
+
+ACP's existing `status` field carries progress, success, or failure. Method
+arguments, return values, and LLM context are not exported by this extension.
+Tool cards include Python source/output, terminal output, and file diffs;
+failed method cards include bounded error messages.
+
+**History belongs to the client.** AionUi stores the tool cards and metadata it
+receives in its conversation history. NOOA's `session/load` still replays only
+user and agent text: a newly attached client cannot reconstruct an old tree
+from the NOOA session database. See the
+[AionUi experiment](../../experiments/aion_ui/README.md) for the paired renderer
+and demo setup.
+
 ## Sessions and skills
 
 Each ACP session has an independent live agent and allows one foreground prompt

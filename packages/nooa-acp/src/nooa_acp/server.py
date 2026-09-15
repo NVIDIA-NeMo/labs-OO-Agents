@@ -115,8 +115,11 @@ class _ACPSession:
 
 
 class CodingACPAdapter:
-    def __init__(self, llm_factory: Callable[[], UnifiedLLM]) -> None:
+    def __init__(
+        self, llm_factory: Callable[[], UnifiedLLM], *, execution_tree: bool = False
+    ) -> None:
         self._llm_factory = llm_factory
+        self._execution_tree = execution_tree
         self._client: Client | None = None
         self._sessions: SessionRuntimePool[_ACPSession] = SessionRuntimePool()
 
@@ -420,8 +423,10 @@ class CodingACPAdapter:
                     # connect path already offers for an unreachable server —
                     # instead of failing session/new with an opaque error.
                     registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
-            dispatcher = InteractiveSessionDispatcher(agent)
-            bridge = ACPEventBridge(agent, self._client, handle.id)
+            bridge = ACPEventBridge(
+                agent, self._client, handle.id, execution_tree=self._execution_tree
+            )
+            dispatcher = InteractiveSessionDispatcher(agent, execution_tree=bridge.execution_tree)
             commands = CodingSlashCommandRegistry(agent)
             value = _ACPSession(
                 handle,
@@ -606,8 +611,8 @@ class CodingACPAdapter:
         await self._sessions.close()
 
 
-async def serve(llm_factory: Callable[[], UnifiedLLM]) -> None:
-    adapter = CodingACPAdapter(llm_factory)
+async def serve(llm_factory: Callable[[], UnifiedLLM], *, execution_tree: bool = False) -> None:
+    adapter = CodingACPAdapter(llm_factory, execution_tree=execution_tree)
     try:
         # session/close is registered by the router as unstable. initialize()
         # advertises the close capability, so without this flag the agent

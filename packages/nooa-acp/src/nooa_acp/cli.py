@@ -25,7 +25,12 @@ if TYPE_CHECKING:
     default=None,
     help="Override the configured NOOA LLM client type.",
 )
-def command(model: str, client_type: str | None) -> None:
+@click.option(
+    "--execution-tree",
+    is_flag=True,
+    help="Expose nested NOOA method execution as ACP tool cards with tree metadata.",
+)
+def command(model: str, client_type: str | None, execution_tree: bool) -> None:
     """Serve the NOOA coding agent over ACP on standard input/output."""
     from nooa.secrets import load_secrets_into_env
     from nooa.unifiedllm import get_llm_client
@@ -38,7 +43,7 @@ def command(model: str, client_type: str | None) -> None:
         overrides = {"api_key": nvidia_api_key} if nvidia_api_key else {}
         return get_llm_client(model, client_type=client_type, **overrides)
 
-    asyncio.run(serve(llm_factory))
+    asyncio.run(serve(llm_factory, execution_tree=True) if execution_tree else serve(llm_factory))
 
 
 def main() -> None:

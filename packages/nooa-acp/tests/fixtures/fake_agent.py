@@ -34,4 +34,4 @@ def llm_factory() -> FakeLLMClient:
     )
 
 
-asyncio.run(serve(llm_factory))
+asyncio.run(serve(llm_factory, execution_tree="--execution-tree" in sys.argv))
