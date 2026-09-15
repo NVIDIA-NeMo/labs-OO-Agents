@@ -1117,6 +1117,9 @@ class UnifiedLLM(ABC):
             return self._direct.call(params)
         if responses:
             return litellm.responses(**params)
+        from ._legacy import preserve_readable_reasoning
+
+        params = preserve_readable_reasoning(params)
         if "client" in params:
             return _collect_sync(litellm.completion(**params))
         # Overrides need fresh bound wrappers, not the constructor's URL/key.
@@ -1134,6 +1137,9 @@ class UnifiedLLM(ABC):
             return await self._direct.acall(params)
         if responses:
             return await litellm.aresponses(**params)
+        from ._legacy import preserve_readable_reasoning
+
+        params = preserve_readable_reasoning(params)
         if "client" in params:
             return await _collect_async(await _litellm_acompletion(params))
         temporary = _ClientHttp.for_completion(params["model"], params, self._http_config)

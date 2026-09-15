@@ -6,6 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Direct transports add mandatory `anthropic`, `opentelemetry-api`,
+  `opentelemetry-sdk` and `openinference-semantic-conventions` dependencies;
+  remove `openinference-instrumentation-litellm`. Pin `openai==2.44.0` because
+  structured output currently uses its private schema helper; upgrades require
+  re-running the wire-contract tests. ResponsesClient now emits `token_usage`.
+- Preserve readable reasoning as portable assistant text on legacy adapters
+  that strip Chat extension fields (including Mistral); compatible routes
+  continue to send the separate `reasoning_content` field.
+
 - Breaking: remove `UnifiedLLM.count_tokens` and `TokenCalibration`; actual token
   usage comes from provider reports and summarization retains its character
   estimate fallback. See `docs/direct-provider-sdks.md` for tracing, lazy

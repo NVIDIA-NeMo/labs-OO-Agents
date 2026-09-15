@@ -56,8 +56,13 @@ the other transport.
 Replay compatibility still uses the API style, provider and exact model name
 sent to the server. Switching transports alone does not invalidate stored
 reasoning. `replay_vendor` can declare the vendor of native state explicitly.
-Readable `reasoning_content` is retained on all resolved Chat routes, including
-OpenRouter, NIM and vLLM. Unknown opaque formats are dropped with a warning.
+Readable `reasoning_content` stays a separate field on direct Chat and legacy
+OpenAI-compatible routes, including OpenRouter, NIM and vLLM. On other legacy
+adapters (for example Mistral), readable reasoning is folded into portable
+assistant text before the adapter can strip it. Native Anthropic, Gemini,
+Vertex and Bedrock keep their existing signed-state handling; this fallback
+never converts signatures or encrypted state into text.
+Unknown opaque formats are dropped with a warning.
 Editing a stored turn or switching to an incompatible model still drops its
 private fields and retains readable text.
 

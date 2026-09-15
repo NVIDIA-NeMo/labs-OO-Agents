@@ -13,6 +13,123 @@ from nooa.unifiedllm.direct import DirectTransport, anthropic_request
 from nooa.unifiedllm.http_config import HttpConfig
 
 
+@pytest.mark.parametrize(
+    "style,config,pattern",
+    [
+        ("invalid", {}, "api_style"),
+        ("chat", {"client": object()}, "client/custom_llm_provider"),
+        ("chat", {"custom_llm_provider": "openai"}, "client/custom_llm_provider"),
+    ],
+)
+def test_direct_constructor_guards_before_http(style, config, pattern):
+    with pytest.raises(ValueError, match=pattern):
+        DirectTransport("openai/test", style, None, config, HttpConfig())
+
+
+def test_direct_alias_requires_endpoint_and_style_matches_client():
+    with pytest.raises(ValueError, match="requires api_base"):
+        DirectTransport("deepseek/test", "chat", None, {}, HttpConfig())
+    with pytest.raises(ValueError, match="api_style"):
+        ResponsesClient("openai/test", transport="direct", api_style="chat", api_key="test-key")
+
+
+@pytest.mark.parametrize(
+    "style,patch,pattern",
+    [
+        ("chat", {"additional_drop_params": ["temperature"]}, "additional_drop_params"),
+        ("chat", {"num_retries": 2}, "retry_config"),
+        ("chat", {"num_retries": None}, "retry_config"),
+        ("chat", {"stream": True}, "stream=False"),
+        ("responses", {"max_output_tokens": 10}, "either max_tokens or max_output_tokens"),
+        (
+            "anthropic",
+            {
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "system", "content": "late"},
+                ]
+            },
+            "leading system",
+        ),
+    ],
+)
+async def test_direct_request_guards_make_no_http(wire, style, patch, pattern):
+    requests, _ = wire
+    route = "anthropic/test" if style == "anthropic" else "openai/test"
+    transport = DirectTransport(route, style, None, {}, HttpConfig())
+    try:
+        with pytest.raises(ValueError, match=pattern):
+            transport._request(
+                {
+                    "model": route,
+                    "api_key": "test-key",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 20,
+                    **patch,
+                },
+                asynchronous=True,
+            )
+        assert requests == []
+    finally:
+        await transport.aclose()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("transport", ["litellm", "direct"])
+@pytest.mark.parametrize(
+    "route",
+    [
+        "mistral/mistral-large-latest",
+        "openai/test",
+        "nvidia_nim/test",
+        "openrouter/test",
+        "hosted_vllm/test",
+    ],
+)
+async def test_readable_reasoning_survives_adapter_on_wire(
+    monkeypatch, asynchronous, transport, route
+):
+    bodies = []
+
+    def send(request):
+        bodies.append(json.loads(request.content))
+        data = reply("chat", "The answer is 4.")
+        data["choices"][0]["message"]["reasoning_content"] = "Two plus two is four."
+        return httpx.Response(200, json=data)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda self, request: send(request))
+
+    async def async_send(self, request):
+        return send(request)
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", async_send)
+    async with CompletionClient(
+        route,
+        transport=transport,
+        api_base="https://models.example/v1",
+        api_key="test-key",
+        max_tokens=100,
+        retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+    ) as llm:
+        messages = [{"role": "user", "content": "2+2?"}]
+        first = await llm.acall(messages=messages) if asynchronous else llm.call(messages=messages)
+        history = [*messages, first, {"role": "user", "content": "Continue"}]
+        if asynchronous:
+            await llm.acall(messages=history)
+        else:
+            llm.call(messages=history)
+    assert len(bodies) == 2
+    sent = bodies[1]["messages"][1]
+    if transport == "litellm" and route.startswith("mistral/"):
+        assert sent["content"] == "Two plus two is four.\n\nThe answer is 4."
+        assert "reasoning_content" not in sent
+    else:
+        assert sent["reasoning_content"] == "Two plus two is four."
+        assert sent["content"] == "The answer is 4."
+    assert first.content == "The answer is 4."
+    assert first.reasoning == "Two plus two is four."
+
+
 def reply(style, text="42"):
     if style == "anthropic":
         return {
