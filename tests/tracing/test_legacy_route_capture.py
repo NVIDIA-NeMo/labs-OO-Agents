@@ -17,7 +17,14 @@ from tests.unifiedllm.test_direct_review_contracts import reply
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize(
-    "route", ["override", "hosted_vllm/test", "deepseek/deepseek-chat", "gemini/gemini-2.5-flash"]
+    "route",
+    [
+        "override",
+        "override-base-url",
+        "hosted_vllm/test",
+        "deepseek/deepseek-chat",
+        "gemini/gemini-2.5-flash",
+    ],
 )
 async def test_legacy_actual_request_and_journal_survive_route_selection(
     monkeypatch, route, asynchronous
@@ -39,7 +46,7 @@ async def test_legacy_actual_request_and_journal_survive_route_selection(
 
     def send(request):
         bodies.append(json.loads(request.content))
-        if route == "override":
+        if route.startswith("override"):
             assert request.url.host == "override.example"
             assert request.headers["authorization"] == "Bearer override-test-key"
             assert bodies[-1]["model"] == "changed"
@@ -67,7 +74,7 @@ async def test_legacy_actual_request_and_journal_survive_route_selection(
         return send(request)
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", async_send)
-    model = "openai/test" if route == "override" else route
+    model = "openai/test" if route.startswith("override") else route
     async with CompletionClient(
         model,
         transport="litellm",
@@ -82,9 +89,11 @@ async def test_legacy_actual_request_and_journal_survive_route_selection(
                 "api_base": "https://override.example/v1",
                 "api_key": "override-test-key",
             }
-            if route == "override"
+            if route.startswith("override")
             else {}
         )
+        if route == "override-base-url":
+            overrides["base_url"] = overrides.pop("api_base")
         messages = [{"role": "user", "content": "test input"}]
         response = (
             await llm.acall(messages, **overrides)

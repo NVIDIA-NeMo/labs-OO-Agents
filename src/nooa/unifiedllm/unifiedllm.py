@@ -224,7 +224,7 @@ class _ClientHttp:
             _, provider, dynamic_api_key, dynamic_api_base = litellm.get_llm_provider(
                 model,
                 api_key=config.get("api_key"),
-                api_base=config.get("api_base"),
+                api_base=config.get("base_url") or config.get("api_base"),
                 custom_llm_provider=config.get("custom_llm_provider"),
             )
         except Exception as e:  # noqa: BLE001
@@ -252,7 +252,7 @@ class _ClientHttp:
 
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
-        api_base = config.get("api_base") or dynamic_api_base
+        api_base = config.get("base_url") or config.get("api_base") or dynamic_api_base
         common: dict[str, Any] = {"timeout": self._timeout}
         if api_key:
             common["api_key"] = api_key
