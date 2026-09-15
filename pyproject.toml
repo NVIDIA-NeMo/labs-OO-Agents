@@ -31,6 +31,7 @@ dependencies = [
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",
+    "msgpack>=1.2.1",
 ]
 
 [project.urls]

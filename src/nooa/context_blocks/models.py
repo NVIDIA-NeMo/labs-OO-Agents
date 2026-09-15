@@ -254,9 +254,6 @@ class BlockPart(BaseModel):
 
 MessagePart = Annotated[TextPart | BlockPart, Field(discriminator="kind")]
 
-# Internal wire marker consumed by UnifiedLLM before provider calls.
-CACHE_BOUNDARY_MESSAGE_KEY = "_nooa_cache_boundary"
-
 
 class RenderedMessage(BaseModel):
     """Neutral message emitted by a BlockFormatter.
@@ -286,6 +283,8 @@ class RenderedMessage(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    replay_message: Any = Field(default=None, exclude=True, repr=False)
+
     role: Role = Field(description="Message role (SYSTEM / USER / ASSISTANT / TOOL)")
     content: str | None = Field(
         default=None, description="Text content, pre-serialized by the BlockFormatter"
@@ -303,14 +302,10 @@ class RenderedMessage(BaseModel):
         default_factory=tuple,
         description="Complete ordered tool-call batch on an assistant turn",
     )
-    llm_state: dict[str, Any] | None = Field(
-        default=None,
-        repr=False,
-        description="Opaque state carried only to the UnifiedLLM replay boundary",
-    )
     reasoning: str | None = Field(
         default=None,
         repr=False,
+        exclude=True,
         description="Plain reasoning carried to UnifiedLLM for replay as assistant text",
     )
     tool_call_id: str | None = Field(
@@ -318,10 +313,6 @@ class RenderedMessage(BaseModel):
     )
     images: list[dict[str, Any]] | None = Field(
         default=None, description="Optional image parts (LiteLLM shape)"
-    )
-    cache_boundary_after: bool = Field(
-        default=False,
-        description="Whether the provider-cacheable prefix ends after this message",
     )
 
 

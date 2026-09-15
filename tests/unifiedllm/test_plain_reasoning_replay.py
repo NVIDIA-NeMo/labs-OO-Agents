@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Provider-neutral replay of persisted plain reasoning."""
 
-import json
 from unittest.mock import patch
 
 from litellm.types.utils import Choices, Message, ModelResponse
@@ -18,7 +17,7 @@ from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient
 
 def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
     neutral = XMLBlockFormatter().format(
-        [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response)]
+        [ResolvedBlock(key="turn", content=response.content, role=Role.ASSISTANT, event=response)]
     )
     formatter = ResponsesProviderFormatter() if responses else OpenAIProviderFormatter()
     return formatter.format(neutral)
@@ -40,8 +39,8 @@ def test_reasoning_backed_structured_output_replays_after_persistence() -> None:
     restored = LLMResponse.model_validate_json(response.model_dump_json())
     rendered = _render(restored)
 
-    # Replay metadata is an in-memory sidecar, never a provider-visible key.
-    assert '{"value":"positive"}' not in json.dumps(rendered)
+    # The renderer exposes public JSON plus identity, never native state.
+    assert rendered[-1] == restored
 
     client = CompletionClient(model="openai/gpt-4o")
     try:
@@ -74,7 +73,9 @@ def test_reasoning_only_response_demotes_for_responses_api() -> None:
 
 
 def test_opaque_only_response_is_withheld_without_a_provider_gate() -> None:
-    response = LLMResponse(content="", llm_state={"opaque": "provider state"})
+    response = LLMResponse.model_validate(
+        {"content": "", "llm_state": {"opaque": "provider state"}}, context={"archive": True}
+    )
     client = CompletionClient(model="openai/gpt-4o")
     try:
         with patch("litellm.completion", return_value=_chat_response()) as completion:

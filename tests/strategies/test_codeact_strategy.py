@@ -216,7 +216,8 @@ class TestCodeActStrategySimpleExecution:
 
     @pytest.mark.asyncio
     async def test_reasoning_items_are_stored_once_and_fail_closed_on_replay(self):
-        """The IR retains opaque state but does not replay it before #310's gate."""
+        """The IR retains opaque state but never sends it to a fake provider."""
+        from nooa.llm_types import AssistantReasoning
 
         class TestAgent(Agent, llm=_TEST_LLM):
             async def compute(self) -> int:
@@ -232,7 +233,14 @@ class TestCodeActStrategySimpleExecution:
         first_response = _resp(
             "", tool_calls=[_tool_call("value = 42\nprint(value)", call_id="call_reasoning")]
         )
-        first_response.llm_state = {"reasoning_items": [reasoning_item]}
+        first_response = LLMResponse(
+            parts=(
+                AssistantReasoning(text="", native={"reasoning_items": [reasoning_item]}),
+                *first_response.parts,
+            ),
+            replay_scope="chat:openai:test",
+            finish_reason="tool_calls",
+        )
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 first_response,
@@ -258,7 +266,7 @@ class TestCodeActStrategySimpleExecution:
         )
         assert "reasoning_items" not in type(tool_call_event).model_fields
         assert tool_call_event.llm_response_id == output_event.id
-        assert output_event.llm_state == {"reasoning_items": [reasoning_item]}
+        assert output_event.parts == first_response.parts
         replayed_tool_call = next(
             message
             for message in fake_llm.last_messages

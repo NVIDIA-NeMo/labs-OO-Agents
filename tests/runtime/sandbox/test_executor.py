@@ -10,15 +10,18 @@ the serialization boundary, and each guardrail enforced *inside a real cell*
 
 from __future__ import annotations
 
+import enum
 import os
 import sys
 import tempfile
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from nooa import Agent
 from nooa.runtime.sandbox.config import FileRule, SandboxConfig
+from nooa.runtime.sandbox.errors import CellSerializationError
 from nooa.runtime.sandbox.executor import SandboxedExecutor
 from nooa.runtime.sandbox.guards import probe_capabilities
 from nooa.unifiedllm.fake import FakeLLMClient
@@ -28,6 +31,22 @@ pytestmark = pytest.mark.sandbox
 CAPS = probe_capabilities()
 
 _side_effects: list[str] = []
+
+
+class ReportKind(enum.Enum):
+    INFO = "info"
+    WARN = "warn"
+
+
+class ReportLine(BaseModel):
+    text: str
+
+
+class Report(BaseModel):
+    """A data type the agent declares, so cells may construct and hand it back."""
+
+    lines: list[ReportLine]
+    kind: ReportKind = ReportKind.INFO
 
 
 class _LiveSkill:
@@ -62,6 +81,12 @@ class _ToolAgent(Agent, llm=FakeLLMClient()):
 
     def add_one(self, n: int) -> int:
         return n + 1
+
+    def accept_report(self, report: Report) -> str:
+        return f"{report.kind.value}:{len(report.lines)}"
+
+    def sum_array(self, arr: Any) -> float:
+        return float(arr.sum())
 
     def record(self, tag: str) -> str:
         _side_effects.append(tag)
@@ -265,7 +290,7 @@ async def test_unpicklable_return_result_payload_is_clean_error():
     try:
         res = await _run(ex, "return_result(lambda: 1)")
         assert not res.success
-        assert "picklable" in str(res.error).lower()
+        assert "sandbox boundary" in str(res.error)
         # Worker survived (namespace intact): next cell still runs.
         ok = await _run(ex, "1 + 1", 2)
         assert ok.returned_value == 2
@@ -343,7 +368,102 @@ async def test_unpicklable_return_is_clear_error():
     try:
         res = await _run(ex, "lambda x: x")
         assert not res.success
-        assert "picklable" in str(res.error).lower()
+        assert "sandbox boundary" in str(res.error)
+    finally:
+        await ex.aclose()
+
+
+# --- the pipe is not an escape hatch -----------------------------------------
+_ESCAPE_MARKER = "NOOA_SANDBOX_ESCAPE"
+_BOMB_CELL = (
+    "class Bomb:\n"
+    "    def __reduce__(self):\n"
+    f"        return (eval, (\"__import__('os').environ.__setitem__({_ESCAPE_MARKER!r}, 'pwned')\",))\n"
+    "marker = 5\n"
+)
+
+
+async def _assert_worker_survived(ex: SandboxedExecutor) -> None:
+    """The failed cell's earlier assignments are still there: no restart happened."""
+    resumed = await _run(ex, "marker + 1", 2)
+    assert resumed.success, resumed.error
+    assert resumed.returned_value == 6
+
+
+@pytest.mark.parametrize(
+    "cell",
+    ["self.value = Bomb()", "self.add_one(Bomb())", "Bomb()", "return_result(Bomb())"],
+    ids=["setattr", "tool-arg", "return", "return_result"],
+)
+async def test_hostile_reduce_payload_never_executes_in_parent(monkeypatch, cell):
+    """A ``__reduce__`` gadget is just an unserializable value: refused, parent untouched."""
+    monkeypatch.delenv(_ESCAPE_MARKER, raising=False)
+    agent = _ToolAgent()
+    ex = SandboxedExecutor(
+        agent,
+        SandboxConfig(require=False),
+        cell_timeout=10.0,
+        framework_builtins=_return_result_builtins(),
+    )
+    try:
+        res = await _run(ex, _BOMB_CELL + cell)
+        assert not res.success
+        error = getattr(res.error, "original_error", res.error)
+        assert isinstance(error, CellSerializationError)
+        assert "sandbox boundary" in str(res.error)
+        assert res.signal is None and agent.value == 41
+        assert os.environ.get(_ESCAPE_MARKER) is None
+        await _assert_worker_survived(ex)
+    finally:
+        await ex.aclose()
+
+
+async def test_undeclared_type_argument_is_clear_error_and_worker_survives():
+    ex = _executor()
+    try:
+        res = await _run(ex, "import types\nmarker = 5\nself.add_one(types.SimpleNamespace(a=1))")
+        assert not res.success
+        assert "SimpleNamespace" in str(res.error) and "sandbox boundary" in str(res.error)
+        await _assert_worker_survived(ex)
+    finally:
+        await ex.aclose()
+
+
+async def test_declared_data_types_cross_the_boundary_both_ways():
+    ex = _executor()
+    try:
+        arg = await _run(
+            ex,
+            "self.accept_report(Report(lines=[ReportLine(text='a')], kind=ReportKind.WARN))",
+            1,
+        )
+        assert arg.success, arg.error
+        assert arg.returned_value == "warn:1"
+
+        returned = await _run(ex, "Report(lines=[ReportLine(text='b')])", 2)
+        assert returned.success, returned.error
+        assert returned.returned_value == Report(lines=[ReportLine(text="b")])
+
+        signaled = await _run(ex, "return_result(Report(lines=[]))", 3)
+        assert signaled.error is None
+        assert signaled.signal is not None
+        assert signaled.signal.result == {"result": Report(lines=[])}
+    finally:
+        await ex.aclose()
+
+
+async def test_numpy_values_cross_the_boundary_both_ways():
+    np = pytest.importorskip("numpy")
+    ex = _executor()
+    try:
+        arg = await _run(ex, "import numpy as np\nself.sum_array(np.arange(4.0))", 1)
+        assert arg.success, arg.error
+        assert arg.returned_value == 6.0
+
+        returned = await _run(ex, "np.arange(3)", 2)
+        assert returned.success, returned.error
+        assert isinstance(returned.returned_value, np.ndarray)
+        assert returned.returned_value.tolist() == [0, 1, 2]
     finally:
         await ex.aclose()
 

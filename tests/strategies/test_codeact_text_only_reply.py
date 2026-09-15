@@ -91,10 +91,10 @@ async def test_default_preserves_text_adds_error_and_retries():
     events = agent.event_manager.values()
     assert events.index(outputs[0]) < events.index(corrections[0])
 
-    # The provider sees the exact assistant text followed by user feedback.
+    # Provider-visible text reasoning is demoted onto the original assistant turn.
     assert any(
         message.get("role") == "assistant"
-        and message.get("content") == "I think the answer is ready."
+        and message.get("content") == "I checked the evidence.\n\nI think the answer is ready."
         for message in fake_llm.last_messages
     )
     assert not any(message.get("tool_calls") for message in fake_llm.last_messages)

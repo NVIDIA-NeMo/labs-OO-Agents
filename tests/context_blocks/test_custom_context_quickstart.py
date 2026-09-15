@@ -77,7 +77,14 @@ async def test_custom_api_and_view_control_the_codeact_loop(monkeypatch):
     agent.context["ignored_builtin_context"] = "THIS MUST NOT REACH THE MODEL"
 
     result = await agent.investigate("What is Project Aurora's verification code?")
-    first_prompt, second_prompt = map(json.dumps, fake.requests)
+
+    def prompt_json(messages):
+        return json.dumps(
+            messages,
+            default=lambda value: value.model_dump(mode="json"),
+        )
+
+    first_prompt, second_prompt = map(prompt_json, fake.requests)
 
     assert result == example.ResearchAnswer(answer="Q7-MANGO", sources=["aurora-brief"])
     assert fake.call_count == 2
@@ -99,4 +106,4 @@ async def test_custom_api_and_view_control_the_codeact_loop(monkeypatch):
     ]
     assert len(selected_messages) == 1
     without_selected = [message for message in fake.requests[1] if message not in selected_messages]
-    assert "Q7-MANGO" not in json.dumps(without_selected)
+    assert "Q7-MANGO" not in prompt_json(without_selected)

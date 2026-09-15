@@ -32,6 +32,9 @@ from pathlib import Path
 from typing import Any
 
 import click
+from pydantic import BaseModel
+
+from nooa.agentdoc._visibility import is_hidden_field
 
 logger = logging.getLogger("nooa_bench.runner")
 
@@ -137,6 +140,29 @@ def _write_result(result: dict[str, Any], model: str, agent_type: str) -> None:
     logger.info("Result written → %s", out)
 
 
+def _public_json_default(value: Any) -> Any:
+    """Keep nested models as JSON objects without exporting hidden archive fields.
+
+    Use live public values, not model_dump(): dumping a containing model first
+    would expose any nested response's provider state before we can filter it.
+    json.dumps recursively applies this function to each nested model.
+    """
+    if isinstance(value, BaseModel):
+        fields = type(value).model_fields
+        values = (
+            value.__instance_values__()
+            if callable(getattr(type(value), "__instance_values__", None))
+            else {name: getattr(value, name) for name in fields}
+        )
+        return {
+            name: item
+            for name, item in values.items()
+            if (name not in fields or (fields[name].repr and not fields[name].exclude))
+            and not is_hidden_field(value, name)
+        }
+    return str(value)
+
+
 def _write_trajectory(agent: Any) -> None:
     """Dump the agent's full event history to LOGS_DIR/trajectory.json.
 
@@ -158,7 +184,7 @@ def _write_trajectory(agent: Any) -> None:
                 "event_type": type(event).__name__,
                 # Opaque provider replay state belongs only in the durable event
                 # backend and compatible provider requests, never debug exports.
-                **event.model_dump(mode="json", exclude={"llm_state"}),
+                **_public_json_default(event),
             }
             for event_id, event in manager.items()
         ]
@@ -168,7 +194,7 @@ def _write_trajectory(agent: Any) -> None:
 
     out = LOGS_DIR / "trajectory.json"
     try:
-        out.write_text(json.dumps(events, indent=2, default=str))
+        out.write_text(json.dumps(events, indent=2, default=_public_json_default))
     except OSError as e:
         logger.warning("Could not write %s: %s", out, e)
         return

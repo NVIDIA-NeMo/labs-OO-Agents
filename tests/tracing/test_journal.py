@@ -11,6 +11,7 @@ ContextVar (populated by the nooa actor) and posts:
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -22,7 +23,32 @@ from nooa.tracing._context_sideband import (
 )
 from nooa.tracing._litellm_journal import (
     MessageJournalCallback,
+    _extract_output_msgs,
+    _safe_msg_to_dict,
 )
+
+
+def test_unsupported_provider_object_never_uses_string_fallback():
+    class OpaqueObject:
+        encrypted_content = "private"
+
+        def __str__(self):
+            raise AssertionError("must not stringify provider objects")
+
+        def __repr__(self):
+            raise AssertionError("must not repr provider objects")
+
+    value = OpaqueObject()
+    expected = {"unsupported_type": "OpaqueObject"}
+    assert _safe_msg_to_dict(value) == expected
+    for response in (
+        SimpleNamespace(output=[value]),
+        SimpleNamespace(choices=[SimpleNamespace(message=value)]),
+    ):
+        assert _extract_output_msgs(response) == [expected]
+    assert "private" not in json.dumps(
+        _safe_msg_to_dict(SimpleNamespace(encrypted_content="private"))
+    )
 
 
 def _posts():
@@ -126,6 +152,19 @@ class TestJournalCallbackPreApiCall:
         skeleton, _ = cb._call_inputs["cid"]
         assert skeleton == [{"role": "user", "content": "hello"}]
 
+    def test_no_sideband_redacts_opaque_state_from_raw_messages(self, session_ctx):
+        cb = MessageJournalCallback("http://localhost:5001")
+        set_journal_payload(None)
+
+        cb.log_pre_api_call(
+            "m",
+            [{"type": "reasoning", "encrypted_content": "opaque-openai-state"}],
+            {"litellm_call_id": "cid"},
+        )
+
+        skeleton, _ = cb._call_inputs["cid"]
+        assert skeleton == [{"type": "reasoning", "encrypted_content": "[REDACTED]"}]
+
 
 class TestJournalCallbackSuccessEvent:
     def test_success_posts_call_record(self, session_ctx):
@@ -167,6 +206,70 @@ class TestJournalCallbackSuccessEvent:
         assert len(block_posts) >= 1
         all_blocks = {e["hash"]: e["content"] for post in block_posts for e in post[1]}
         assert all_blocks[answer_hash] == "answer"
+
+    def test_success_redacts_opaque_state_from_provider_output(self, session_ctx):
+        cb = MessageJournalCallback("http://localhost:5001")
+        calls, fake_post = _posts()
+        response = SimpleNamespace(
+            output=[{"type": "reasoning", "encrypted_content": "opaque-openai-state"}],
+            usage=None,
+        )
+
+        with patch(
+            "nooa.tracing._litellm_journal._post_json",
+            side_effect=fake_post,
+        ):
+            cb.log_pre_api_call("m", [], {"litellm_call_id": "cid"})
+            cb.log_success_event({"litellm_call_id": "cid", "model": "m"}, response, 1.0, 2.0)
+
+        record = next(payload for url, payload in calls if url.endswith("/v1/journal/calls"))
+        assert record["output_messages"] == [
+            {"type": "reasoning", "encrypted_content": "[REDACTED]"}
+        ]
+        assert "opaque-openai-state" not in repr(record)
+
+
+def test_safe_msg_to_dict_redacts_json_encoded_opaque_state():
+    message = {"content": '{"encrypted_content":"opaque-openai-state"}'}
+
+    safe = _safe_msg_to_dict(message)
+
+    assert "opaque-openai-state" not in safe["content"]
+
+
+@pytest.mark.parametrize("json_encoded", [False, True])
+def test_safe_msg_to_dict_redacts_private_replay_envelope(json_encoded):
+    from nooa.unifiedllm.replay_state import LLM_STATE_KEY
+
+    message = {LLM_STATE_KEY: {"payload": {"future_provider_blob": "opaque-state"}}}
+    original = {"content": json.dumps(message)} if json_encoded else message
+
+    safe = _safe_msg_to_dict(original)
+
+    decoded = json.loads(safe["content"]) if json_encoded else safe
+    assert decoded[LLM_STATE_KEY] == "[REDACTED]"
+    assert "opaque-state" not in repr(safe)
+    assert message[LLM_STATE_KEY]["payload"]["future_provider_blob"] == "opaque-state"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"thinking_blocks": [{"type": "thinking", "signature": "anthropic-sig"}]},
+        {"thinking_blocks": [{"type": "redacted_thinking", "data": "opaque-data"}]},
+        {"provider_specific_fields": {"thought_signature": "gemini-sig"}},
+        {"providerSpecificFields": {"thoughtSignature": "gemini-camel-sig"}},
+        {"tool_calls": [{"id": "call_1__thought__Z2VtaW5pLXNpZw=="}]},
+    ],
+)
+def test_safe_msg_to_dict_redacts_cross_provider_state(message):
+    safe = _safe_msg_to_dict(message)
+
+    assert "anthropic-sig" not in repr(safe)
+    assert "opaque-data" not in repr(safe)
+    assert "gemini-sig" not in repr(safe)
+    assert "gemini-camel-sig" not in repr(safe)
+    assert "Z2VtaW5pLXNpZw==" not in repr(safe)
 
 
 class TestSentBlocksBounding:

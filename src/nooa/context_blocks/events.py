@@ -75,7 +75,11 @@ class ResultStatus(StrEnum):
 
 
 class EventBase(BaseModel):
-    """Base class for all events.
+    """Durable record with identity, lifecycle, and public searchable fields.
+
+    Events are the public conversation IR, not provider messages. The formatter
+    decides how each public event type contributes to model context; specialized
+    assistant replay operations belong to LLMResponse, not every event.
 
     Subclasses define:
     - event_type: Auto-derived from class name (repr=False), or explicit override
@@ -90,6 +94,20 @@ class EventBase(BaseModel):
     """
 
     _role: ClassVar[Role] = Role.USER
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether this event has nothing to contribute to model context.
+
+        Events are meaningful by default, including events without text fields.
+        Specialized durable records may distinguish observability from replay.
+        """
+        return False
+
+    def searchable_fields(self) -> dict[str, Any]:
+        """Public fields for search/debug export; consumers need not know their layout."""
+        # Keep nested objects intact so their display rules still hide private fields.
+        return self.__instance_values__()
 
     # Discriminator field - excluded from repr.
     # Default is "" (empty); model_post_init fills it with cls.__name__ if unset.

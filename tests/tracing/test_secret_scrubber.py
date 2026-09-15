@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for secret scrubbing in telemetry."""
 
+import json
+from unittest.mock import patch
+
 import pytest
 
 from nooa.tracing._secret_scrubber import (
@@ -19,6 +22,28 @@ def _reset_stats():
     stats.reset()
     yield
     stats.reset()
+
+
+@pytest.mark.parametrize("shape", ["json", "mapping", "cycle", "decoded_recursion"])
+def test_excessive_nesting_redacts_the_entire_value(shape):
+    if shape == "json":
+        value = "[" * 2000 + '{"encrypted_content":"private"}' + "]" * 2000
+    elif shape == "cycle":
+        value = {}
+        value["cycle"] = value
+    elif shape == "decoded_recursion":
+        # Parsing succeeds; the recursive scrub worker fails instead.
+        value = {"encrypted_content": "private"}
+        for _ in range(2000):
+            value = [value]
+        with patch("nooa.tracing._secret_scrubber.json.loads", return_value=value):
+            assert scrub_value("[0]") == (REDACTED, 1)
+        return
+    else:
+        value = {"encrypted_content": "private"}
+        for _ in range(2000):
+            value = {"nested": value}
+    assert scrub_value(value) == (REDACTED, 1)
 
 
 class TestScrubString:
@@ -174,6 +199,41 @@ class TestScrubString:
 
 
 class TestScrubValue:
+    @pytest.mark.parametrize("as_array", [False, True])
+    def test_json_redaction_preserves_literal_unicode(self, as_array):
+        payload = {"api_key": "synthetic-secret", "text": "héllo 世界"}
+        attribute = " \n" + json.dumps([payload] if as_array else payload, ensure_ascii=False)
+
+        result, count = scrub_value(attribute)
+
+        assert "héllo 世界" in result
+        assert "synthetic-secret" not in result
+        expected = {"api_key": REDACTED, "text": "héllo 世界"}
+        assert json.loads(result) == ([expected] if as_array else expected)
+        assert count == 1
+
+    @pytest.mark.parametrize("text", ["ordinary code output", " \n héllo 世界", "", "42"])
+    def test_plain_text_never_attempts_json_parsing(self, text):
+        with patch("nooa.tracing._secret_scrubber.json.loads") as parse:
+            assert scrub_value(text) == (text, 0)
+        parse.assert_not_called()
+
+    def test_plain_text_still_redacts_without_json_parsing(self):
+        with patch("nooa.tracing._secret_scrubber.json.loads") as parse:
+            result, count = scrub_value("api_key=synthetic-secret")
+        parse.assert_not_called()
+        assert result == f"api_key={REDACTED}"
+        assert count == 1
+
+    def test_invalid_json_falls_back_to_text_scrubbing(self):
+        result, count = scrub_value("[progress] api_key=synthetic-secret")
+        assert result == f"[progress] api_key={REDACTED}"
+        assert count == 1
+
+    def test_clean_json_keeps_original_formatting(self):
+        attribute = ' \n{ "text": "héllo 世界" }\n'
+        assert scrub_value(attribute) == (attribute, 0)
+
     def test_string(self):
         """A string value is scrubbed and its redaction count returned."""
         result, count = scrub_value("key=AKIAIOSFODNN7EXAMPLE")
@@ -214,6 +274,74 @@ class TestScrubValue:
         )
         assert result == {"safe": {"client_secret": REDACTED, "refresh_token": REDACTED}}
         assert count == 2
+
+    def test_openai_encrypted_reasoning_is_redacted_from_mapping(self):
+        result, count = scrub_value(
+            {"input": [{"type": "reasoning", "encrypted_content": "opaque-openai-state"}]}
+        )
+
+        assert result["input"][0]["encrypted_content"] == REDACTED
+        assert count == 1
+
+    def test_openai_encrypted_reasoning_is_redacted_from_json_attribute(self):
+        attribute = json.dumps(
+            {"input": [{"type": "reasoning", "encrypted_content": "opaque-openai-state"}]}
+        )
+
+        result, count = scrub_value(attribute)
+
+        assert json.loads(result)["input"][0]["encrypted_content"] == REDACTED
+        assert "opaque-openai-state" not in result
+        assert count == 1
+
+    @pytest.mark.parametrize(
+        ("provider_state", "secret"),
+        [
+            (
+                {"thinking_blocks": [{"type": "thinking", "signature": "anthropic-sig"}]},
+                "anthropic-sig",
+            ),
+            (
+                {"thinking_blocks": [{"type": "redacted_thinking", "data": "opaque-data"}]},
+                "opaque-data",
+            ),
+            (
+                {"provider_specific_fields": {"thought_signature": "gemini-sig"}},
+                "gemini-sig",
+            ),
+            (
+                {"provider_specific_fields": {"thought_signatures": ["gemini-sig"]}},
+                "gemini-sig",
+            ),
+            (
+                {"providerSpecificFields": {"thoughtSignature": "gemini-camel-sig"}},
+                "gemini-camel-sig",
+            ),
+            (
+                {"providerSpecificFields": {"thoughtSignatures": ["gemini-camel-sig"]}},
+                "gemini-camel-sig",
+            ),
+        ],
+    )
+    def test_cross_provider_opaque_state_is_redacted(self, provider_state, secret):
+        result, count = scrub_value(provider_state)
+
+        assert secret not in repr(result)
+        assert REDACTED in repr(result)
+        assert count == 1
+
+    def test_gemini_inline_tool_call_signature_is_redacted_from_flat_string(self):
+        result, count = scrub_value("call_1__thought__Z2VtaW5pLXNpZw==")
+
+        assert result == f"call_1__thought__{REDACTED}"
+        assert count == 1
+
+    def test_gemini_inline_tool_call_signature_is_redacted_from_json_attribute(self):
+        result, count = scrub_value('{"tool_calls":[{"id":"call_1__thought__Z2VtaW5pLXNpZw=="}]}')
+
+        assert "Z2VtaW5pLXNpZw==" not in result
+        assert REDACTED in result
+        assert count == 1
 
 
 class TestScrubStats:

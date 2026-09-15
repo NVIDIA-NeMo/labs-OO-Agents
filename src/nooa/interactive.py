@@ -223,16 +223,10 @@ def apply_model_limits(agent: Agent) -> None:
     new context window. Runtime-level event truncation picks up the new
     window automatically on the next ``_build_messages`` call.
     """
-    from nooa.config.summarizer_config import TokenBudgetConfig
-
     summarizer_max = _summarizer_budget(agent.llm)
     for summarizer in getattr(agent, "_summarizers", []):
         current = summarizer.config
-        summarizer.config = TokenBudgetConfig(
-            max_tokens=summarizer_max,
-            preserve_recent=current.preserve_recent,
-            target_chars=current.target_chars,
-        )
+        summarizer.config = current.model_copy(update={"max_tokens": summarizer_max})
 
 
 def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:

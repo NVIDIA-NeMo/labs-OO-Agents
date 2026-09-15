@@ -4,9 +4,35 @@
 
 from typing import Annotated
 
+import pytest
 from pydantic import BaseModel
 
 from nooa.agentdoc import hidden, pformat, spec
+
+
+@pytest.mark.parametrize("wrap", [lambda obj: [obj], lambda obj: {"nested": obj}])
+def test_nested_pformat_honors_instance_hiding_for_declared_and_extra_fields(wrap):
+    class Value:
+        public: str = "visible"
+        declared: str = "declared-secret"
+
+        def __instance_values__(self):
+            return {
+                "public": self.public,
+                "declared": self.declared,
+                "extra": getattr(self, "extra", ""),
+            }
+
+    value = Value()
+    value.extra = "extra-secret"
+    spec(value, "declared", hidden=True)
+    spec(value, "extra", hidden=True)
+
+    rendered = pformat(wrap(value))
+    assert "visible" in rendered
+    assert "declared-secret" not in rendered
+    assert "extra-secret" not in rendered
+    assert "declared-secret" in pformat(wrap(Value()))  # No class-wide change.
 
 
 def test_pprint_excludes_annotated_hidden_field():

@@ -97,6 +97,46 @@ def test_collapse_returns_summary_tag():
     assert agent.events.get(last) is not None
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_summary_documents_working_archive_recovery(nested):
+    """Recovery instructions come from the archive, not generated summary text."""
+    agent = _TestAgent()
+    originals = [Task(prompt="needle: exact decision"), Task(prompt="other detail")]
+    tags = [agent.event_manager.add(event) for event in originals]
+    summary_tag = agent.events.collapse(*tags, summary_text="short recap")
+    if nested:
+        last = agent.event_manager.add(Task(prompt="later detail"))
+        summary_tag = agent.events.collapse(summary_tag, last, summary_text="second recap")
+    summary = agent.events[summary_tag]
+    search = 'self.events.query(query="keyword", limit=10)'
+    read = f'self.events["{tags[0]}"]'
+    expand = f'self.events[self.events["{summary_tag}"].children_tags]'
+    for expression in (search, read, expand):
+        assert expression in summary.doc
+    assert "archived" in summary.doc
+    assert "nested" in summary.doc
+    # Execute the documented API operations: collapse must not hide source data.
+    assert agent.events.query(query="needle", limit=10) == [originals[0]]
+    assert agent.events[tags[0]] is originals[0]
+    children = agent.events[summary.children_tags]
+    if nested:
+        children = agent.events[children[0].children_tags]
+    assert children == originals
+
+
+@pytest.mark.parametrize("formatter_name", ["MarkdownBlockFormatter", "XMLBlockFormatter"])
+def test_summary_recovery_instructions_reach_model_context(formatter_name):
+    from nooa.context_blocks import formatter
+
+    agent = _TestAgent()
+    tag = agent.event_manager.add(Task(prompt="original"))
+    summary = agent.events[agent.events.collapse(tag, tag, summary_text="recap")]
+    rendered = getattr(formatter, formatter_name)().format_event(summary)
+    assert "self.events.query" in rendered
+    assert "limit=10" in rendered
+    assert "children_tags" in rendered
+
+
 def test_keys_reflects_active_tags():
     """keys() exposes the active tag list from the manager."""
     agent = _TestAgent()

@@ -41,7 +41,6 @@ class CurrentCall:
         strategy: Resolved strategy for this generation.
         event_query: Resolved event filter visible to context views.
         model: Resolved model name, without client configuration or credentials.
-        provider: Resolved model provider, when it can be determined.
         context_window: Resolved model input window.
         context_budget: Context-block budget for this model call.
 
@@ -79,13 +78,13 @@ class CurrentCall:
     # avoids re-parsing the stringified signature (which can't reliably split on
     # commas inside Annotated[...]/defaults).
     param_names: list[str] | None = None
-    # Runtime owners used by component views. They are deliberately excluded
-    # from repr/comparison; the call remains an immutable invocation snapshot.
+    # Resolved per-request facts for views, not client/provider configuration.
+    # Runtime owners are excluded from repr/comparison so this remains an
+    # immutable invocation snapshot.
     agent: Any | None = field(default=None, repr=False, compare=False)
     strategy: Any | None = field(default=None, repr=False, compare=False)
     event_query: Any | None = field(default=None, repr=False, compare=False)
     model: str | None = None
-    provider: str | None = None
     context_window: int | None = None
     context_budget: int | None = None
     # Assembly support captured by the runtime. These fields carry no client

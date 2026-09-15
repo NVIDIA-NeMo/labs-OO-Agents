@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from nooa.unifiedllm.errors import EmptyContentError
 from nooa.unifiedllm.retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
@@ -109,21 +110,6 @@ def _is_retryable_endpoint_error(error: Exception, error_str: str) -> bool:
             "unreachable",
         )
     )
-
-
-class EmptyContentError(Exception):
-    """Raised when LLM returns empty content but has reasoning.
-
-    Some reasoning models (e.g., NVIDIA NIM nemotron, gpt-oss-20b) may return
-    reasoning_content but null/empty content. This exception enables retry
-    logic to handle these cases.
-    """
-
-    def __init__(self, reasoning: str | None = None):
-        self.reasoning = reasoning
-        super().__init__(
-            f"Empty content with reasoning: {reasoning[:100]}..." if reasoning else "Empty content"
-        )
 
 
 def _calculate_delay(

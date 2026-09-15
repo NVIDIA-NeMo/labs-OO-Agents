@@ -176,132 +176,6 @@ class TestTokenBudgetSummarizer:
         assert summarizer.config.max_tokens == 50_000
         assert summarizer.config.preserve_recent == 5
 
-    def test_should_summarize_under_budget(self, test_agent):
-        """Should not summarize when under budget."""
-        # Add a few small events (well under 100k tokens)
-        for i in range(5):
-            test_agent.event_manager.add(Message(content=f"Message {i}"))
-
-        summarizer = TokenBudgetSummarizer(test_agent)  # Default 100k budget
-
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-123",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-        assert summarizer._should_summarize(event) is False
-
-    def test_should_summarize_over_budget(self, test_agent):
-        """Should summarize when this runtime's provider-reported prompt count is over budget."""
-        test_agent.runtime._last_prompt_tokens_actual = 500
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=100))
-
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-123",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-        assert summarizer._should_summarize(event) is True
-
-    def test_should_not_summarize_from_estimate_when_actual_under_budget(self, test_agent):
-        """A local estimate alone does not trigger summarization; actual usage is authoritative."""
-        from nooa import ContextWindowStats
-
-        test_agent.runtime._last_prompt_tokens_actual = 600
-        test_agent.runtime._last_context_stats = ContextWindowStats(
-            context_blocks_count=0,
-            events_count=20,
-            context_blocks_chars=0,
-            events_chars=1500,
-            prompt_tokens=1500,
-        )
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=1000))
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-1",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-        assert summarizer._should_summarize(event) is False
-
-    def test_should_not_summarize_without_provider_actual(self, test_agent):
-        """No provider actual means no token-budget summarization trigger."""
-        from nooa import ContextWindowStats
-
-        test_agent.runtime._last_prompt_tokens_actual = None
-        test_agent.runtime._last_context_stats = ContextWindowStats(
-            context_blocks_count=0,
-            events_count=20,
-            context_blocks_chars=0,
-            events_chars=1500,
-            prompt_tokens=1500,
-        )
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=1000))
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-1",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-        assert summarizer._should_summarize(event) is False
-
-    def test_compute_range_preserves_recent(self, test_agent):
-        """Compute range preserves recent events."""
-        # Add 5 events: tags will be "1", "2", "3", "4", "5"
-        for i in range(5):
-            test_agent.event_manager.add(Message(content=f"Message {i}"))
-
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(preserve_recent=2))
-
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-123",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-        result = summarizer._compute_range(event)
-
-        # With 5 tags and preserve_recent=2, should summarize "1" to "3"
-        # (preserve "4" and "5")
-        assert result == ("1", "3")
-
-    def test_compute_range_returns_none_when_too_few_events(self, test_agent):
-        """Returns None when not enough events to summarize."""
-        # Add only 2 events
-        test_agent.event_manager.add(Message(content="Message 1"))
-        test_agent.event_manager.add(Message(content="Message 2"))
-
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(preserve_recent=5))
-
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-123",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-        result = summarizer._compute_range(event)
-        assert result is None
-
 
 # =============================================================================
 # MethodSummarizer Tests
@@ -607,8 +481,8 @@ class TestAgentSummarizerIntegration:
         """Summarizer uses its own LLM if explicitly set."""
         summarizer_llm = FakeLLMClient()
 
-        summarizer = TokenBudgetSummarizer(
-            test_agent, llm=summarizer_llm, config=TokenBudgetConfig(max_tokens=50_000)
+        summarizer = MethodSummarizer(
+            test_agent, llm=summarizer_llm, config=MethodSummarizerConfig()
         )
 
         # Summarizer should keep its own LLM
@@ -687,7 +561,7 @@ class TestSummarizationAsyncIntegration:
         for i in range(5):
             test_agent.event_manager.add(Message(content=f"Message {i}"))
 
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
+        summarizer = SummarizationAgent(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
 
         # Mock the summarize method to return a fixed summary
         summarizer.summarize = AsyncMock(return_value="Mocked summary of messages 1-3")
@@ -714,7 +588,7 @@ class TestSummarizationAsyncIntegration:
             test_agent.event_manager.add(Message(content=f"Message {i}"))
 
         # Create summarizer that will produce a mock summary
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
+        summarizer = SummarizationAgent(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
 
         # Manually set pending state (simulating completed background task)
         summarizer._pending_range = ("1", "5")
@@ -736,51 +610,13 @@ class TestSummarizationAsyncIntegration:
         assert "6" in active_tags
 
     @pytest.mark.asyncio
-    async def test_after_turn_triggers_summarization_when_over_budget(self, test_agent):
-        """_handle_after_turn schedules summarization when over token budget."""
-        # Add enough events to have something to summarize
-        for _ in range(20):
-            test_agent.event_manager.add(Message(content="x" * 100))
-
-        # Simulate this runtime's last successful call reporting an over-budget prompt.
-        test_agent.runtime._last_prompt_tokens_actual = 1000
-
-        # Very low budget to trigger summarization
-        summarizer = TokenBudgetSummarizer(
-            test_agent, config=TokenBudgetConfig(max_tokens=50, preserve_recent=5)
-        )
-
-        # Mock the summarize method
-        summarizer.summarize = AsyncMock(return_value="Summary")
-
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-123",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-
-        # Trigger after_turn handler
-        summarizer._handle_after_turn(event)
-
-        # Should have scheduled summarization
-        assert summarizer._pending_task is not None
-        assert summarizer._pending_range is not None
-
-        # Wait for task
-        await summarizer._pending_task
-
-    @pytest.mark.asyncio
     async def test_before_turn_applies_pending_summary(self, test_agent):
         """_handle_before_turn applies any pending summary."""
         # Add events
         for i in range(10):
             test_agent.event_manager.add(Message(content=f"Message {i}"))
 
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
+        summarizer = SummarizationAgent(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
 
         # Set up pending state
         summarizer._pending_range = ("1", "5")
@@ -808,110 +644,12 @@ class TestSummarizationAsyncIntegration:
         assert "1..5" in test_agent.event_manager.keys()
 
     @pytest.mark.asyncio
-    async def test_end_to_end_summarization_flow(self, fake_llm):
-        """Full flow: add events → trigger summarization → verify collapse."""
-
-        # Create agent with events
-        class SimpleAgent(Agent, llm=fake_llm):
-            pass
-
-        agent = SimpleAgent()
-
-        # Add 20 events with substantial content
-        for i in range(20):
-            agent.event_manager.add(Message(content=f"Message {i}: " + "x" * 50))
-
-        initial_tag_count = len(agent.event_manager.keys())
-        assert initial_tag_count == 20
-
-        # Simulate this runtime's last successful call reporting an over-budget prompt.
-        agent.runtime._last_prompt_tokens_actual = 1000
-
-        # Create summarizer with low threshold to trigger
-        summarizer = TokenBudgetSummarizer(
-            agent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=5)
-        )
-
-        # Mock the summarize method to return a fixed summary
-        summarizer.summarize = AsyncMock(return_value="Summary of old messages")
-
-        # Simulate after_turn event
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-123",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-
-        # This should trigger background summarization
-        summarizer._handle_after_turn(event)
-
-        # Wait for background task
-        if summarizer._pending_task:
-            await summarizer._pending_task
-
-        # Apply pending summary (normally happens on next before_turn)
-        summarizer._apply_pending_summary()
-
-        # Verify history was collapsed
-        final_tags = agent.event_manager.keys()
-        assert len(final_tags) < initial_tag_count
-
-        # Should have a summary tag
-        summary_tags = [t for t in final_tags if ".." in t]
-        assert len(summary_tags) >= 1
-
-        # Recent events should be preserved
-        assert str(initial_tag_count) in final_tags  # Last event "20"
-
-    @pytest.mark.asyncio
-    async def test_concurrent_summarization_requests_are_deduplicated(self, test_agent):
-        """Multiple after_turn events don't create multiple tasks."""
-        # Add events
-        for _ in range(20):
-            test_agent.event_manager.add(Message(content="x" * 100))
-
-        summarizer = TokenBudgetSummarizer(
-            test_agent, config=TokenBudgetConfig(max_tokens=50, preserve_recent=5)
-        )
-
-        # Mock the summarize method
-        summarizer.summarize = AsyncMock(return_value="Summary")
-
-        event = AfterTurn(
-            method_name="test",
-            strategy="CODEACT",
-            generation_id="gen-123",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=True,
-            success=True,
-        )
-
-        # Trigger multiple times
-        summarizer._handle_after_turn(event)
-        first_task = summarizer._pending_task
-
-        summarizer._handle_after_turn(event)
-        second_task = summarizer._pending_task
-
-        # Should be the same task (not a new one)
-        assert first_task is second_task
-
-        # Clean up
-        if first_task:
-            await first_task
-
-    @pytest.mark.asyncio
     async def test_summarizer_clears_own_history_after_summarization(self, test_agent):
         """Summarizer's own history is cleared after each summarize() call."""
         for i in range(10):
             test_agent.event_manager.add(Message(content=f"Message {i}"))
 
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
+        summarizer = SummarizationAgent(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
 
         # Mock the summarize method
         summarizer.summarize = AsyncMock(return_value="Summary")
@@ -937,7 +675,7 @@ class TestSummarizationAsyncIntegration:
         for i in range(10):
             test_agent.event_manager.add(Message(content=f"Message {i}"))
 
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
+        summarizer = SummarizationAgent(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
 
         # Completed pending summary waiting to be applied.
         summarizer._pending_range = ("1", "5")
@@ -962,138 +700,12 @@ class TestSummarizationAsyncIntegration:
         assert not any(".." in t for t in test_agent.event_manager.keys())
 
     @pytest.mark.asyncio
-    async def test_after_turn_skips_while_pending_task_is_done_but_unapplied(self, test_agent):
-        """Dedup guard: a done-but-unapplied pending task must block
-        scheduling a new summarization. Without this, a new schedule call
-        would overwrite ``_pending_summary`` and the already-computed
-        summary would be lost.
-        """
-        from nooa import ContextWindowStats
-
-        for _ in range(20):
-            test_agent.event_manager.add(Message(content="x" * 100))
-
-        test_agent.runtime._last_context_stats = ContextWindowStats(
-            context_blocks_count=0,
-            events_count=20,
-            context_blocks_chars=0,
-            events_chars=200_000,
-            prompt_tokens=200_000,
-        )
-        test_agent.runtime._last_prompt_tokens_actual = 200_000
-
-        summarizer = TokenBudgetSummarizer(
-            test_agent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=5)
-        )
-        summarizer.summarize = AsyncMock(return_value="Fresh Summary")
-
-        # Pretend a prior turn scheduled a summarization that already
-        # completed. The task is done, the result is sitting in
-        # _pending_summary, waiting for BeforeTurn to apply it.
-        summarizer._pending_range = ("1", "10")
-        summarizer._pending_summary = "Prior Summary"
-        summarizer._pending_task = asyncio.create_task(asyncio.sleep(0))
-        await summarizer._pending_task
-        assert summarizer._pending_task.done()
-
-        after_turn = AfterTurn(
-            method_name="t",
-            strategy="CODEACT",
-            generation_id="g",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=False,
-            success=True,
-        )
-        summarizer._handle_after_turn(after_turn)
-
-        # Pending state preserved; nothing rescheduled.
-        assert summarizer._pending_summary == "Prior Summary"
-        summarizer.summarize.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_no_cascade_across_turns(self, test_agent):
-        """End-to-end: AfterTurn schedules → BeforeTurn applies → AfterTurn
-        on fresh stats does NOT re-schedule.
-
-        Pins the design invariant: applying at a turn boundary is what
-        guarantees ``_should_summarize`` on the next AfterTurn reads
-        post-collapse stats.
-        """
-        from nooa import ContextWindowStats
-        from nooa.events import BeforeTurn
-
-        for _ in range(20):
-            test_agent.event_manager.add(Message(content="x" * 100))
-
-        # Simulate the runtime having shipped an over-budget prompt.
-        test_agent.runtime._last_context_stats = ContextWindowStats(
-            context_blocks_count=0,
-            events_count=20,
-            context_blocks_chars=0,
-            events_chars=200_000,
-            prompt_tokens=200_000,
-        )
-        test_agent.runtime._last_prompt_tokens_actual = 200_000
-
-        summarizer = TokenBudgetSummarizer(
-            test_agent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=5)
-        )
-        summarizer.summarize = AsyncMock(return_value="Summary")
-
-        after_turn = AfterTurn(
-            method_name="t",
-            strategy="CODEACT",
-            generation_id="g",
-            parent_generation_id=None,
-            turn_number=1,
-            is_final=False,
-            success=True,
-        )
-        before_turn = BeforeTurn(
-            method_name="t",
-            strategy="CODEACT",
-            generation_id="g",
-            parent_generation_id=None,
-            turn_number=2,
-        )
-
-        # Turn 1 AfterTurn — over budget → schedules.
-        summarizer._handle_after_turn(after_turn)
-        assert summarizer._pending_task is not None
-        await summarizer._pending_task
-
-        # Turn 2 BeforeTurn — applies the completed summary.
-        summarizer._handle_before_turn(before_turn)
-        test_agent.runtime._last_prompt_tokens_actual = None
-        active = test_agent.event_manager.keys()
-        assert any(".." in t for t in active), "BeforeTurn should apply the summary"
-        assert summarizer._pending_task is None
-
-        # Simulate the next _build_messages() having re-rendered with the
-        # post-collapse event list — total_tokens drops below budget.
-        test_agent.runtime._last_context_stats = ContextWindowStats(
-            context_blocks_count=0,
-            events_count=6,
-            context_blocks_chars=0,
-            events_chars=50,
-            prompt_tokens=50,
-        )
-
-        # Turn 2 AfterTurn — fresh stats say under budget, no reschedule.
-        summarizer._handle_after_turn(after_turn)
-        assert summarizer._pending_task is None
-        assert summarizer.summarize.call_count == 1, (
-            "summarize() should only have been invoked once across the whole flow"
-        )
-
-    @pytest.mark.asyncio
     async def test_uninstall_cancels_pending_task(self, test_agent):
         """_uninstall() cancels any pending summarization task."""
         for i in range(10):
             test_agent.event_manager.add(Message(content=f"Message {i}"))
 
-        summarizer = TokenBudgetSummarizer(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
+        summarizer = SummarizationAgent(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
 
         # Start a summarization
         summarizer._schedule_summarization("1", "5")

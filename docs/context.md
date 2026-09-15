@@ -14,7 +14,6 @@ class Block:
     metadata: BlockMetadata | None = None
 
 
-@dataclass(frozen=True)
 class CacheBoundary:
     """Request caching of the rendered prefix ending here, where supported."""
 
@@ -34,7 +33,7 @@ class ContextView[Owner](Protocol):
 
 The runtime assembles the selected view for every LLM request and collects it into a `tuple[ContextItem, ...]`; membership and order then remain fixed through rendering. No additional assembled-context type is needed.
 
-`CurrentCall` is the immutable per-request view of an invocation. Its invocation identity and method inputs stay stable; mutable manager and scoped selections are captured again for each request. Views may read the resolved strategy, event query, `model`, `provider`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
+`CurrentCall` is the immutable per-request view of an invocation. Its invocation identity and method inputs stay stable; mutable manager and scoped selections are captured again for each request. Views may read the resolved strategy, event query, `model`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
 
 ## Resolution
 
@@ -171,6 +170,6 @@ Keep `agent.context`, context managers, event creation, strategy/scoped override
 
 These are the default application's context APIs, not requirements of `ContextView`. A custom view may use an independent state API. Native iterative strategies still use NOOA events unless replaced together with the strategy.
 
-Legacy implicit policy is removed: `cache_control_injection_points` raises `TypeError`; `CachedBlockFormatter` no longer chooses placement; and `render_context(context_limit=...)` reports the limit but leaves eviction to the view.
+Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` no longer chooses placement; and `render_context(context_limit=...)` reports the limit but leaves eviction to the view.
 
 `DefaultAgentView` and its helpers use only public agent, call, manager, strategy, and event interfaces. `ActorRuntime` only creates `CurrentCall`, resolves and collects the view, renders it, and calls the LLM.

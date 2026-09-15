@@ -3,7 +3,6 @@
 """Composable context assembly contracts and reusable mechanisms."""
 
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -13,6 +12,7 @@ from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.models import BlockMetadata
 from nooa.context_blocks.roles import Role
 from nooa.events import LLMResponse
+from nooa.llm_types import CacheBoundary
 
 if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
@@ -27,11 +27,6 @@ class Block(BaseModel):
     content: str
     role: Role = Role.SYSTEM
     metadata: BlockMetadata | None = None
-
-
-@dataclass(frozen=True)
-class CacheBoundary:
-    """Request caching of the rendered prefix ending here, where supported."""
 
 
 type ContextItem = Block | EventBase | CacheBoundary

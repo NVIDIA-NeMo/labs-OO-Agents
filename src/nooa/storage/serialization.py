@@ -146,6 +146,10 @@ def _serialize(value: Any, allowlist: set[str]) -> Any:
     if isinstance(value, BaseModel):
         fqn = _fqn(type(value))
         allowlist.add(fqn)
+        if snapshot_data := getattr(value, "__snapshot_data__", None):
+            # Durable JSON types can own their schema and migration. Other
+            # models still need recursive envelopes for arbitrary live fields.
+            return {"__type__": _PYDANTIC, "__class__": fqn, "data": snapshot_data()}
         # Iterate over model_fields directly so nested non-Pydantic objects
         # (dataclasses, @snapshotable) are serialized with their type envelopes
         # instead of being flattened to plain dicts by model_dump().
@@ -235,6 +239,8 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str]) -> Any:
         # Deserialize nested envelopes first (e.g. dataclass/snapshotable
         # fields), then let Pydantic validate the reconstructed objects.
         deserialized_data = {k: _deserialize(v, allowlist) for k, v in data.items()}
+        if restore_snapshot := getattr(cls, "__restore_snapshot__", None):
+            return restore_snapshot(deserialized_data)
         # Filter to known fields for lenient restoration (handles extra="forbid"
         # models that would reject extra fields from schema drift).
         known_fields = set(cls.model_fields)

@@ -5,13 +5,15 @@
 from __future__ import annotations
 
 import asyncio
-import pickle
+from typing import ClassVar
 
 import pytest
+from pydantic import BaseModel
 
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.errors.formatting import format_error_for_llm
 from nooa.events import _NO_RETURN, ExecutionResult, ExecutionSignal
+from nooa.runtime.sandbox import wire
 from nooa.runtime.sandbox.cell_core import run_cell_source
 from nooa.runtime.sandbox.errors import (
     CellMemoryError,
@@ -26,7 +28,9 @@ from nooa.runtime.sandbox.readonly import SandboxStateError
 from nooa.runtime.sandbox.serialization import (
     ErrorDTO,
     ResultDTO,
+    dto_from_wire,
     dto_to_result,
+    dto_to_wire,
     result_to_dto,
 )
 
@@ -35,16 +39,25 @@ def _result_with_error(error: Exception, *, line_offset: int = 0) -> ExecutionRe
     return ExecutionResult(error=error, wrapper_line_offset=line_offset)
 
 
-class _PicklesOnlyOnce:
-    """Value whose reducer fails if transport tries to serialize it twice."""
+class _DumpsOnlyOnce(BaseModel):
+    """Value whose serializer fails if transport tries to encode it twice."""
 
-    calls = 0
+    calls: ClassVar[int] = 0
+    value: str = "serialized once"
 
-    def __reduce__(self):
+    def model_dump(self, *args, **kwargs):
         type(self).calls += 1
         if type(self).calls > 1:
-            raise RuntimeError("second pickle explodes")
-        return str, ("serialized once",)
+            raise RuntimeError("second encode explodes")
+        return super().model_dump(*args, **kwargs)
+
+
+_DECODER = wire.Codec({wire.type_key(_DumpsOnlyOnce): _DumpsOnlyOnce})
+
+
+def _transport(dto: ResultDTO) -> ResultDTO:
+    """Send the DTO through the real pipe encoding."""
+    return dto_from_wire(wire.Codec().loads(wire.Codec().dumps(dto_to_wire(dto))))
 
 
 class SignalWithResult(ExecutionSignal):
@@ -409,37 +422,34 @@ def test_base_exception_from_exception_string_does_not_escape_serialization(rais
     assert dto.error.diagnostic == "BrokenStringError: BrokenStringError"
 
 
-def test_ordinary_return_is_pickled_only_once_before_transport() -> None:
-    _PicklesOnlyOnce.calls = 0
-    dto = result_to_dto(ExecutionResult(returned_value=_PicklesOnlyOnce()))
+def test_ordinary_return_is_encoded_only_once_before_transport() -> None:
+    _DumpsOnlyOnce.calls = 0
+    dto = result_to_dto(ExecutionResult(returned_value=_DumpsOnlyOnce()))
 
-    transported_dto = pickle.loads(pickle.dumps(dto))
-    result = dto_to_result(transported_dto)
+    result = dto_to_result(_transport(dto), codec=_DECODER)
 
-    assert _PicklesOnlyOnce.calls == 1
-    assert result.returned_value == "serialized once"
+    assert _DumpsOnlyOnce.calls == 1
+    assert result.returned_value == _DumpsOnlyOnce()
 
 
-def test_return_result_payload_is_pickled_only_once_before_transport() -> None:
+def test_return_result_payload_is_encoded_only_once_before_transport() -> None:
     class Signal(ExecutionSignal):
         def __init__(self) -> None:
-            self.result = _PicklesOnlyOnce()
+            self.result = _DumpsOnlyOnce()
 
-    _PicklesOnlyOnce.calls = 0
+    _DumpsOnlyOnce.calls = 0
     dto = result_to_dto(ExecutionResult(signal=Signal()))
 
-    transported_dto = pickle.loads(pickle.dumps(dto))
     result = dto_to_result(
-        transported_dto,
-        signal_factory=lambda value: SignalWithResult(value),
+        _transport(dto), signal_factory=lambda value: SignalWithResult(value), codec=_DECODER
     )
 
-    assert _PicklesOnlyOnce.calls == 1
+    assert _DumpsOnlyOnce.calls == 1
     assert result.signal is not None
-    assert result.signal.result == "serialized once"
+    assert result.signal.result == _DumpsOnlyOnce()
 
 
-def test_unpicklable_ordinary_return_becomes_serialization_error() -> None:
+def test_unserializable_ordinary_return_becomes_serialization_error() -> None:
     def returned_value() -> None:
         pass
 
@@ -447,12 +457,11 @@ def test_unpicklable_ordinary_return_becomes_serialization_error() -> None:
     result = dto_to_result(dto)
 
     assert isinstance(result.error, CellSerializationError)
-    assert "Return value of type 'function' is not picklable" in str(result.error)
-    assert "sandbox boundary" in str(result.error)
+    assert "Return value of type 'function' cannot cross the sandbox boundary" in str(result.error)
     assert result.returned_value is _NO_RETURN
 
 
-def test_unpicklable_return_result_payload_becomes_serialization_error() -> None:
+def test_unserializable_return_result_payload_becomes_serialization_error() -> None:
     class Signal(ExecutionSignal):
         def __init__(self) -> None:
             self.result = lambda: None
@@ -462,7 +471,7 @@ def test_unpicklable_return_result_payload_becomes_serialization_error() -> None
 
     assert isinstance(result.error, CellSerializationError)
     assert "return_result(...)" in str(result.error)
-    assert "JSON/pickle-safe value" in str(result.error)
+    assert "sandbox boundary" in str(result.error)
     assert result.signal is None
 
 

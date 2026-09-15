@@ -15,6 +15,7 @@ Usage::
     provider.add_span_processor(SecretScrubSpanProcessor(inner_processor))
 """
 
+import json
 import logging
 import re
 import threading
@@ -47,6 +48,23 @@ _SENSITIVE_KEYS = frozenset(
     }
 )
 
+# Provider-owned replay state is not a user credential, but it has the same
+# telemetry rule: it may go back to its matching provider and nowhere else.
+# Provider adapters add their exact wire keys here as support is introduced.
+_OPAQUE_PROVIDER_STATE_KEYS = frozenset(
+    {
+        "encrypted_content",
+        "inline_thought_signature",
+        "signature",
+        "native",
+        "nooa_llm_state",
+        "thought_signature",
+        "thought_signatures",
+        "thoughtsignature",
+        "thoughtsignatures",
+    }
+)
+
 
 def _is_sensitive_key(key: Any) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
@@ -55,11 +73,29 @@ def _is_sensitive_key(key: Any) -> bool:
     )
 
 
+def _is_opaque_provider_state_key(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+    return normalized in _OPAQUE_PROVIDER_STATE_KEYS
+
+
+def _redact_key(key: Any) -> str | None:
+    if _is_sensitive_key(key):
+        return "sensitive_key"
+    if _is_opaque_provider_state_key(key):
+        return "opaque_provider_state"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Regex-based secret patterns — high precision, low false positives
 # ---------------------------------------------------------------------------
 
 _SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    # LiteLLM may append Gemini thought signatures to tool-call IDs.
+    (
+        "gemini_inline_thought_signature",
+        re.compile(r"__thought__(?P<secret>[A-Za-z0-9+/=_-]+)"),
+    ),
     # AWS Access Key IDs (AKIA, ASIA, AIDA, AROA + 16 alphanumeric)
     ("aws_access_key", re.compile(r"(?P<secret>(?:AKIA|ASIA|AIDA|AROA)[A-Z0-9]{16})")),
     # AWS Secret Access Keys (40-char base64 after known prefix)
@@ -212,26 +248,57 @@ def scrub_value(value: Any) -> tuple[Any, int]:
     keys are always replaced, including short or provider-specific secrets.
     Returns ``(scrubbed_value, redaction_count)`` where the count is the
     number of secrets redacted within this value.
+
+    Recursive/cyclic structures are redacted in full. Returning the original
+    value after a recursion failure would bypass opaque-state scrubbing.
     """
+    try:
+        return _scrub_value(value)
+    except RecursionError:
+        stats.record("excessive_nesting")
+        return REDACTED, 1
+
+
+def _scrub_value(value: Any) -> tuple[Any, int]:
+    """Recursive worker; only the public entry catches recursion failures."""
     if isinstance(value, str):
-        return scrub_string(value)
+        # OpenInference records LLM inputs as JSON string span attributes.
+        # Only parse objects/arrays. Matching the prefix avoids allocating a
+        # stripped copy of a potentially large tool output just to inspect it.
+        if not re.match(r"\s*[\[{]", value):
+            return scrub_string(value)
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return scrub_string(value)
+        decoded, json_count = _scrub_value(decoded)
+        if json_count:
+            return json.dumps(decoded, separators=(",", ":"), ensure_ascii=False), json_count
+        return value, 0
     if isinstance(value, dict):
-        scrubbed: dict[Any, Any] = {}
+        scrubbed_mapping: dict[Any, Any] = {}
         count = 0
+        is_thinking = value.get("type") == "thinking"
+        is_redacted_thinking = value.get("type") == "redacted_thinking"
         for key, item in value.items():
-            if _is_sensitive_key(key):
-                scrubbed[key] = REDACTED
-                stats.record("sensitive_key")
+            reason = _redact_key(key)
+            if reason is None and is_thinking and key == "signature":
+                reason = "opaque_provider_state"
+            if reason is None and is_redacted_thinking and key == "data":
+                reason = "opaque_provider_state"
+            if reason is not None:
+                scrubbed_mapping[key] = REDACTED
+                stats.record(reason)
                 count += 1
             else:
-                scrubbed[key], n = scrub_value(item)
+                scrubbed_mapping[key], n = _scrub_value(item)
                 count += n
-        return scrubbed, count
+        return scrubbed_mapping, count
     if isinstance(value, (list, tuple)):
         new_items = []
         count = 0
         for v in value:
-            new_v, n = scrub_value(v)
+            new_v, n = _scrub_value(v)
             new_items.append(new_v)
             count += n
         return type(value)(new_items), count
@@ -268,9 +335,9 @@ try:
                 redacted_count = 0
 
                 for key, value in span.attributes.items():
-                    if _is_sensitive_key(key):
+                    if reason := _redact_key(key):
                         new_value, n = REDACTED, 1
-                        stats.record("sensitive_key")
+                        stats.record(reason)
                     else:
                         new_value, n = scrub_value(value)
                     scrubbed[key] = new_value

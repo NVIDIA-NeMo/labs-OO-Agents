@@ -49,6 +49,7 @@ from nooa.strategies.generated_code import (
     ReturnValueValidator,
 )
 from nooa.strategies.template import TemplateStrategy
+from nooa.unifiedllm import ReasoningReplayError
 
 # Import httpx timeout exceptions if available (used by litellm)
 try:
@@ -268,6 +269,8 @@ class PurePythonStrategy(CompositeStrategy):
         if self.prefill:
             try:
                 await self._run_prefill(runtime, call, builtins, session)
+            except ReasoningReplayError:
+                raise
             except Exception as e:
                 logger.warning(f"[PURE_PYTHON] Prefill error (continuing): {e}")
                 runtime.event_manager.add(Error(content=f"Prefill error: {e}"))
@@ -305,6 +308,10 @@ class PurePythonStrategy(CompositeStrategy):
                 generate_event_id: str | None = None
                 try:
                     code, generate_event_id = await self._generate_code(runtime, session)
+                except ReasoningReplayError as e:
+                    turn_final = True
+                    turn_exception = type(e).__name__
+                    raise
                 except _HTTPX_TIMEOUT_EXCEPTIONS as e:
                     # Catch httpx timeout exceptions and preserve them
                     session.record_error()

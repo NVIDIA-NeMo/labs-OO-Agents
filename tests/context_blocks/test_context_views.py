@@ -581,12 +581,12 @@ def test_provider_preserves_or_rejects_layout():
             block_formatter=XMLBlockFormatter(),
             provider_formatter=AnthropicProviderFormatter(),
         )
-    with pytest.raises(UnsupportedContextLayout):
-        render_context(
-            items,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=ResponsesProviderFormatter(),
-        )
+    responses = render_context(
+        items,
+        block_formatter=XMLBlockFormatter(),
+        provider_formatter=ResponsesProviderFormatter(),
+    ).output
+    assert [message["role"] for message in responses] == ["user", "system"]
 
 
 def test_default_agent_view_satisfies_protocol():
@@ -657,7 +657,6 @@ async def test_current_call_exposes_call_overridden_model_and_budget():
         decorator="plan",
         agent=agent,
         model="call/model",
-        provider="call",
         context_window=300,
     )
     tokens = (
@@ -672,9 +671,8 @@ async def test_current_call_exposes_call_overridden_model_and_budget():
             variable.reset(token)
 
     call = captured[-1]
-    assert (call.model, call.provider, call.context_window, call.context_budget) == (
+    assert (call.model, call.context_window, call.context_budget) == (
         "call/model",
-        "call",
         300,
         17,
     )

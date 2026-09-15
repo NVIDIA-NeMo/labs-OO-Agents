@@ -19,7 +19,6 @@ from nooa.context_blocks.formatter import (
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import (
-    CACHE_BOUNDARY_MESSAGE_KEY,
     BlockMetadata,
     ResolvedBlock,
     Role,
@@ -58,10 +57,11 @@ class TestRenderContextBasic:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        assert len(result) == 2
-        assert result[0][CACHE_BOUNDARY_MESSAGE_KEY] is True
-        assert CACHE_BOUNDARY_MESSAGE_KEY not in result[1]
-        rendered = "".join(message["content"] for message in result)
+        assert len(result) == 3
+        assert result[1] == CacheBoundary()
+        rendered = "".join(
+            message["content"] for message in result if not isinstance(message, CacheBoundary)
+        )
         assert "first" in rendered and "second" in rendered
 
     def test_boundary_after_system_only_context_is_preserved(self):
@@ -71,9 +71,9 @@ class TestRenderContextBasic:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        assert len(result) == 1
+        assert len(result) == 2
         assert result[0]["role"] == "system"
-        assert result[0][CACHE_BOUNDARY_MESSAGE_KEY] is True
+        assert result[1] == CacheBoundary()
 
     def test_leading_and_consecutive_boundaries_are_noops(self):
         result = render_context(
@@ -82,7 +82,7 @@ class TestRenderContextBasic:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert len(result) == 1
-        assert CACHE_BOUNDARY_MESSAGE_KEY not in result[0]
+        assert result[0]["role"] == "system"
 
     def test_boundary_after_tool_event_marks_complete_result(self):
         event = ToolCallEvent(
@@ -96,8 +96,8 @@ class TestRenderContextBasic:
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        assert [message["role"] for message in result] == ["assistant", "tool"]
-        assert result[-1][CACHE_BOUNDARY_MESSAGE_KEY] is True
+        assert [message["role"] for message in result] == ["assistant", "tool", "metadata"]
+        assert result[-1] == CacheBoundary()
 
     def test_boundary_prevents_plain_formatter_cross_segment_merge(self):
         from nooa.events import PythonOutput, ResultStatus
@@ -123,10 +123,11 @@ class TestRenderContextBasic:
         assert [message["role"] for message in result] == [
             "assistant",
             "tool",
+            "metadata",
             "user",
         ]
-        assert result[1][CACHE_BOUNDARY_MESSAGE_KEY] is True
-        assert "2" in result[2]["content"]
+        assert result[2] == CacheBoundary()
+        assert "2" in result[3]["content"]
 
     def test_plain_formatter_rejects_context_inside_event_history(self):
         from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter

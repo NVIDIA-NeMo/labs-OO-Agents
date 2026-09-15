@@ -981,6 +981,10 @@ def _field_spec_override(obj_type: type, field_name: str, key: str) -> Any:
 
     hints = _get_type_hints_cached(obj_type)
     hint = hints.get(field_name)
+    if hint is None:
+        field = inspect.getattr_static(obj_type, field_name, None)
+        if isinstance(field, property) and field.fget is not None:
+            hint = _get_type_hints_cached(field.fget).get("return")
     if hint is None or typing.get_origin(hint) is not typing.Annotated:
         return _MISSING
     for metadata in typing.get_args(hint)[1:]:
@@ -1157,10 +1161,13 @@ def _format_instance_repr(
             if max_length and field_count >= max_length:
                 break
 
+            field_max_string = _field_spec_override(obj_type, name, "max_string")
+            if field_max_string is _MISSING:
+                field_max_string = max_string
             value_str = _format_value_to_str(
                 value,
                 max_length=max_length,
-                max_string=max_string,
+                max_string=field_max_string,
                 max_depth=(max_depth - 1) if max_depth else None,
                 expand_all=False,
                 depth=0,
@@ -1350,9 +1357,24 @@ def _format_nested_instance(
     # Collect field names in order (type fields first, then extra __dict__ attrs)
     # Only include fields that exist in values — fields absent from values are skipped
     # in the render loop below, so excluding them keeps truncated_count accurate.
-    field_names = [f.name for f in type_info.fields if f.name in values]
+    from nooa.agentdoc._visibility import is_hidden_field
+
+    excluded = {f.name for f in type_info.fields if not f.repr}
+    excluded.update(
+        name for name, field in getattr(obj_type, "model_fields", {}).items() if field.exclude
+    )
+    field_names = [
+        f.name
+        for f in type_info.fields
+        if f.name in values and f.name not in excluded and not is_hidden_field(obj, f.name)
+    ]
     for name in values:
-        if name not in field_names and not name.startswith("_"):
+        if (
+            name not in field_names
+            and name not in excluded
+            and not name.startswith("_")
+            and not is_hidden_field(obj, name)
+        ):
             field_names.append(name)
 
     # Truncate fields if needed

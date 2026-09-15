@@ -20,7 +20,7 @@ import pytest
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.strategies.codeact import CodeActStrategy
-from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+from nooa.unifiedllm import CacheBoundary, FakeLLMClient, LLMResponse, ToolCall
 
 
 def _resp(content: str = "", tool_calls: list | None = None) -> LLMResponse:
@@ -170,22 +170,13 @@ class TestNestedAgentHistoryBug:
 
         inner_prefix = from_outer_call(inner_prompt)
         outer_suffix = from_outer_call(outer_followup_prompt)
-        # Dynamic context is deliberately a recomputed trailing suffix. The
-        # explicit boundary identifies the stable history before it.
-        boundary = next(
-            i for i, message in enumerate(inner_prefix) if message.get("_nooa_cache_boundary")
-        )
-        inner_prefix = inner_prefix[: boundary + 1]
-
-        def without_cache_markers(messages):
-            return [
-                {key: value for key, value in message.items() if key != "_nooa_cache_boundary"}
-                for message in messages
-            ]
-
-        assert without_cache_markers(outer_suffix[: len(inner_prefix)]) == without_cache_markers(
-            inner_prefix
-        )
+        # Dynamic context is deliberately a recomputed trailing suffix, so
+        # compare only the stable history before it.
+        assert inner_prefix[-1]["role"] == "user"
+        assert "<state" in inner_prefix[-1]["content"]
+        assert inner_prefix[-2] == CacheBoundary()
+        inner_prefix = inner_prefix[:-2]
+        assert outer_suffix[: len(inner_prefix)] == inner_prefix
 
         receipt = next(
             message

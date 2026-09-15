@@ -49,6 +49,8 @@ class OAuthConfig:
         scope: Optional OAuth scopes
         client_secret: Optional client secret (for dynamic registration)
         registration_endpoint: Optional OAuth dynamic client registration endpoint
+        timeout: Time limit for registration, browser opening, and callback receipt
+        resource: Optional RFC 8707 protected-resource identifier
     """
 
     authorization_endpoint: str
@@ -59,6 +61,7 @@ class OAuthConfig:
     client_secret: str | None = None
     registration_endpoint: str | None = None
     timeout: float = 300.0  # 5 minutes
+    resource: str | None = None  # Appended to preserve the existing positional signature.
 
 
 @dataclass
@@ -103,11 +106,31 @@ def _system_browser_available() -> bool:
     won't trigger there. Such environments should set ``oauth_manual = true`` in
     the server config to force the out-of-band flow.
     """
+    # Explicit sandbox/container signals must win over DISPLAY/WAYLAND_DISPLAY.
+    # Container runtimes may export host display metadata for forwarding, but
+    # SBX_NO_DISPLAY=1 means there is no browser/callback route into the sandbox.
+    # Treating the forwarded WAYLAND_DISPLAY as usable makes OAuth launch on the
+    # host and then strand the browser at a sandbox-local localhost callback.
+    no_display = os.environ.get("SBX_NO_DISPLAY", "").strip().lower()
+    if os.environ.get("SANDBOX_VM_ID") and no_display in {"1", "true", "yes", "on"}:
+        return False
+
+    # A browser launched from SSH may be rendered locally through X forwarding or
+    # opened by a desktop/IDE bridge, but its ``localhost`` is then ambiguous. In
+    # particular, host browser bridges send the callback to the user's laptop while
+    # this process is listening on the remote host. Prefer the paste-back flow for
+    # every SSH session; it works with or without display forwarding and needs no
+    # tunnel. An explicit browser_open hook can still opt into loopback forwarding.
+    # Windows OpenSSH sets these variables too, so the check is OS-independent.
+    if any(os.environ.get(variable) for variable in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")):
+        return False
+
     try:
         webbrowser.get()
         return True
     except webbrowser.Error:
         pass
+
     # webbrowser.get() misses common launchers that DO open a host browser
     # (e.g. a sandbox's xdg-open that forwards to the host). If one is on PATH,
     # the loopback-callback flow can still complete — prefer it over OOB paste.
@@ -125,6 +148,16 @@ def _system_browser_available() -> bool:
     return False
 
 
+def _normalize_pasted_callback(pasted: str) -> str:
+    """Return the URL from a pasted value, unwrapping ``curl '<url>'`` quoting."""
+    value = pasted.strip()
+    # The MaaS helper page also offers ``curl '<callback-url>'``; accept that too.
+    curl_match = re.search(r"curl\s+['\"]([^'\"]+)['\"]", value)
+    if curl_match:
+        return curl_match.group(1)
+    return value
+
+
 def _extract_authorization_code(pasted: str) -> str:
     """Extract an OAuth code from either a raw code or a pasted callback URL.
 
@@ -132,14 +165,9 @@ def _extract_authorization_code(pasted: str) -> str:
     ``urn:ietf:wg:oauth:2.0:oob?code=...&state=...``. Users naturally paste
     that whole URI, so accept it instead of sending the full URI as the code.
     """
-    value = pasted.strip()
+    value = _normalize_pasted_callback(pasted)
     if not value:
         return ""
-
-    # The MaaS helper page also offers ``curl '<callback-url>'``; accept that too.
-    curl_match = re.search(r"curl\s+['\"]([^'\"]+)['\"]", value)
-    if curl_match:
-        value = curl_match.group(1)
 
     parsed = urlparse(value)
     if parsed.query:
@@ -147,6 +175,7 @@ def _extract_authorization_code(pasted: str) -> str:
         code_values = params.get("code")
         if code_values and code_values[0]:
             return code_values[0]
+        raise RuntimeError("OAuth callback URL did not include an authorization code")
 
     return value
 
@@ -213,6 +242,7 @@ class OAuthHandler:
         self._browser_open = browser_open
         self._code_verifier: str | None = None
         self._code_challenge: str | None = None
+        self._authorization_state: str | None = None
         # Set by _capture_code_via_local_server after dynamic port assignment;
         # used by exchange_code_for_token to send the exact redirect_uri the
         # authorization server received (RFC 8252 §4.1 requirement).
@@ -249,6 +279,7 @@ class OAuthHandler:
             Authorization URL
         """
         self._code_verifier, self._code_challenge = self._generate_pkce_pair()
+        self._authorization_state = secrets.token_urlsafe(32)
         if not self.config.client_id:
             raise RuntimeError(
                 "OAuth client_id is missing and dynamic client registration did not complete"
@@ -260,26 +291,93 @@ class OAuthHandler:
             "redirect_uri": redirect_uri or self.config.redirect_uri,
             "code_challenge": self._code_challenge,
             "code_challenge_method": "S256",
+            "state": self._authorization_state,
         }
 
         if self.config.scope:
             params["scope"] = self.config.scope
+        if self.config.resource:
+            params["resource"] = self.config.resource
 
         query_string = urlencode(params)
         return f"{self.config.authorization_endpoint}?{query_string}"
+
+    def _validate_callback_state(self, callback: str) -> None:
+        """Reject callback URLs that do not match this authorization request."""
+        value = _normalize_pasted_callback(callback)
+        parsed = urlparse(value)
+        if not parsed.query:
+            return  # Raw authorization codes cannot carry state.
+        params = parse_qs(parsed.query)
+        if "code" not in params and "error" not in params:
+            return
+        received = (params.get("state") or [None])[0]
+        expected = self._authorization_state
+        # compare_digest rejects non-ASCII str (a callback URL can percent-
+        # decode to anything), so compare bytes: mismatch stays a clean
+        # RuntimeError instead of an unhandled TypeError.
+        if (
+            expected is None
+            or received is None
+            or not secrets.compare_digest(received.encode("utf-8"), expected.encode("utf-8"))
+        ):
+            raise RuntimeError("OAuth callback state did not match the authorization request")
 
     async def _authorize_manual(self, open_browser: bool = True) -> str:
         """Out-of-band authorization: show the URL, collect a pasted code.
 
         No local callback server is bound, so this works in headless/remote
-        environments (e.g. a docker sandbox). Uses the OOB redirect URI and the
-        host-provided ``code_prompt`` callback to read the code, never blocking
-        ``input()``.
+        environments (e.g. a docker sandbox). Dynamic clients register an OOB
+        redirect; pre-registered clients retain their configured redirect URI.
+        The host-provided ``code_prompt`` reads the resulting code/callback URL
+        without ever blocking on ``input()``.
         """
-        oob_redirect = "urn:ietf:wg:oauth:2.0:oob"
-        self._actual_redirect_uri = oob_redirect
-        await self._register_dynamic_client(oob_redirect)
-        auth_url = self._build_authorization_url(redirect_uri=oob_redirect)
+        # A pre-registered client can only use redirect URIs provisioned for
+        # that client. In a remote sandbox, keep its configured loopback URI:
+        # the browser may fail to load localhost, but the user can paste that
+        # callback URL into the secure prompt. Dynamic clients can register OOB.
+        dynamic_client = self.config.client_id is None and bool(self.config.registration_endpoint)
+        manual_redirect = (
+            "urn:ietf:wg:oauth:2.0:oob" if dynamic_client else self.config.redirect_uri
+        )
+        self._actual_redirect_uri = manual_redirect
+
+        # Some distributed OAuth gateways acknowledge dynamic registration on
+        # one backend before the client is visible to the authorization backend.
+        # Never hand the user a URL that already reports its redirect URI as
+        # unregistered: discard that client and register a fresh one first.
+        auth_url = ""
+        attempts = range(3) if dynamic_client else range(1)
+        for attempt in attempts:
+            await self._register_dynamic_client(manual_redirect)
+            auth_url = self._build_authorization_url(redirect_uri=manual_redirect)
+            if not dynamic_client:
+                break
+            try:
+                async with httpx.AsyncClient(follow_redirects=False) as client:
+                    response = await client.get(auth_url, timeout=10.0)
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "Could not probe the OAuth authorization endpoint; continuing: %s", exc
+                )
+                break
+            invalid_registration = (
+                response.status_code == 400 and "not registered for client" in response.text.lower()
+            )
+            if not invalid_registration:
+                break
+            logger.warning(
+                "OAuth authorization endpoint rejected newly registered client; retrying "
+                "dynamic registration (%s/3)",
+                attempt + 1,
+            )
+            self.config.client_id = None
+            self.config.client_secret = None
+        else:
+            raise RuntimeError(
+                "OAuth dynamic registration did not propagate to the authorization endpoint; "
+                "retry the connection later"
+            )
 
         if open_browser:
             with contextlib.suppress(Exception):
@@ -288,7 +386,17 @@ class OAuthHandler:
 
         if self._code_prompt is None:
             raise RuntimeError("Manual OAuth requires a code prompt callback but none was provided")
-        code = _extract_authorization_code(await self._code_prompt(auth_url))
+        try:
+            pasted = await asyncio.wait_for(
+                self._code_prompt(auth_url), timeout=self.config.timeout
+            )
+        except TimeoutError:
+            raise RuntimeError(
+                "OAuth authorization timed out while waiting for the code or callback URL "
+                f"({self.config.timeout:g} seconds). Retry the connection to start a fresh flow."
+            ) from None
+        self._validate_callback_state(pasted)
+        code = _extract_authorization_code(pasted)
         if not code:
             raise RuntimeError("Authorization code not provided")
         return code
@@ -396,8 +504,16 @@ class OAuthHandler:
         error_info: list[str] = []
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
+        authorization_state: str | None = None
 
         class CallbackHandler(BaseHTTPRequestHandler):
+            # Bound the ACCEPTED connection, not just the listening socket: a
+            # client that never sends a request line must not block
+            # ``rfile.readline()`` forever — ``server_close()`` does not close
+            # accepted sockets, so an unbounded handler could outlive the
+            # join timeout and leak the callback worker thread.
+            timeout = 1.0
+
             def log_message(self, format: str, *args: object) -> None:  # noqa: A002
                 pass  # Silence request logs
 
@@ -409,7 +525,26 @@ class OAuthHandler:
                     return
 
                 params = parse_qs(req_parsed.query)
-                if "error" in params:
+                callback_state = (params.get("state") or [None])[0]
+                expected_state = authorization_state
+                valid_state = not (
+                    expected_state is None
+                    or callback_state is None
+                    # Byte-compare: non-ASCII states (possible after percent
+                    # decoding) must report invalid state, not raise TypeError
+                    # out of do_GET and leave the flow hanging.
+                    or not secrets.compare_digest(
+                        callback_state.encode("utf-8"), expected_state.encode("utf-8")
+                    )
+                )
+                if not valid_state:
+                    # A stray callback must not terminate the pending login.
+                    body = _html_page(
+                        "Authorization Failed",
+                        "<p style='color:red'>Invalid authorization state.</p>"
+                        "<p>You can close this tab and retry.</p>",
+                    )
+                elif "error" in params:
                     error_info.append(params["error"][0])
                     body = _html_page(
                         "Authorization Failed",
@@ -424,6 +559,7 @@ class OAuthHandler:
                         "<p>You can close this tab and return to the application.</p>",
                     )
                 else:
+                    error_info.append("callback did not include an authorization code")
                     body = _html_page(
                         "Unexpected Response", "<p>No code received. You can close this tab.</p>"
                     )
@@ -434,62 +570,85 @@ class OAuthHandler:
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
-                # Set the asyncio.Event from the thread using thread-safe call
-                loop.call_soon_threadsafe(done.set)
+                # The event loop may have been cancelled and closed while the
+                # callback thread was handling a late browser request.
+                if valid_state and not loop.is_closed():
+                    loop.call_soon_threadsafe(done.set)
 
         # Bind to requested port (0 means OS picks a free port, RFC 8252 §7.3)
         server = HTTPServer((host, requested_port), CallbackHandler)
-        actual_port = server.server_address[1]
-        server.timeout = 1.0  # Wake up every second to check for cancellation
-
-        # Build the redirect URI now that HTTPServer has bound the actual port.
-        # Dynamic registration happens while this server still owns the port, so
-        # no other process can claim it between port selection and callback bind.
-        actual_redirect_uri = f"{scheme}://{host}:{actual_port}{callback_path}"
-        self._actual_redirect_uri = actual_redirect_uri
-        try:
-            await self._register_dynamic_client(actual_redirect_uri)
-            auth_url = self._build_authorization_url(redirect_uri=actual_redirect_uri)
-        except Exception:
-            server.server_close()
-            raise
-
-        logger.info(f"OAuth callback server listening on {actual_redirect_uri}")
+        thread: Thread | None = None
 
         def serve() -> None:
-            while not done.is_set():
-                server.handle_request()
+            try:
+                while not done.is_set():
+                    server.handle_request()
+            except Exception as exc:
+                # Cleanup can close the socket between the done check and
+                # handle_request's selector registration. Suppress only shutdown.
+                if not (done.is_set() and isinstance(exc, (OSError, ValueError))):
+                    error_info.append(f"callback server failed ({type(exc).__name__}): {exc}")
+                    # Wake the OAuth caller instead of leaving it to report a
+                    # misleading timeout after the worker has already exited.
+                    # A closed loop means its caller has already gone away.
+                    with contextlib.suppress(RuntimeError):
+                        loop.call_soon_threadsafe(done.set)
+            finally:
+                server.server_close()
+
+        try:
+            with contextlib.suppress(TimeoutError):
+                # One deadline covers the entire asynchronous flow after binding,
+                # including registration and application-provided browser hooks.
+                async with asyncio.timeout(self.config.timeout):
+                    actual_port = server.server_address[1]
+                    server.timeout = 1.0  # Wake up every second to check for cancellation
+
+                    # Build the redirect URI now that HTTPServer has bound the actual port.
+                    # Dynamic registration happens while this server still owns the port, so
+                    # no other process can claim it between port selection and callback bind.
+                    actual_redirect_uri = f"{scheme}://{host}:{actual_port}{callback_path}"
+                    self._actual_redirect_uri = actual_redirect_uri
+                    await self._register_dynamic_client(actual_redirect_uri)
+                    auth_url = self._build_authorization_url(redirect_uri=actual_redirect_uri)
+                    authorization_state = self._authorization_state
+
+                    logger.info(f"OAuth callback server listening on {actual_redirect_uri}")
+
+                    # Run the blocking server loop in a thread (asyncio.to_thread is for one-shot
+                    # functions, but this is a long-running loop that needs to run until done)
+                    thread = Thread(target=serve, daemon=True, name="nooa-oauth-callback")
+                    thread.start()
+
+                    if open_browser:
+                        opened = False
+                        if self._browser_open is not None:
+                            try:
+                                opened = await self._browser_open(auth_url)
+                            except Exception as e:
+                                logger.warning(f"browser_open hook failed: {e}")
+                            if opened:
+                                logger.info("Opened authorization URL via browser_open hook")
+                        if not opened:
+                            try:
+                                opened = webbrowser.open(auth_url)
+                                if opened:
+                                    logger.info("Opened browser for authorization")
+                            except Exception as e:
+                                logger.warning(f"Failed to open browser: {e}")
+                            if not opened:
+                                logger.info(f"Please visit: {auth_url}")
+                    else:
+                        logger.info(f"Please visit: {auth_url}")
+
+                    await done.wait()
+        finally:
+            # Cover every exit after binding, including cancellation before the
+            # worker starts and cancellation while the browser hook is pending.
+            done.set()
             server.server_close()
-
-        # Run the blocking server loop in a thread (asyncio.to_thread is for one-shot
-        # functions, but this is a long-running loop that needs to run until done)
-        thread = Thread(target=serve, daemon=True)
-        thread.start()
-
-        if open_browser:
-            opened = False
-            if self._browser_open is not None:
-                try:
-                    opened = await self._browser_open(auth_url)
-                except Exception as e:
-                    logger.warning(f"browser_open hook failed: {e}")
-                if opened:
-                    logger.info("Opened authorization URL via browser_open hook")
-            if not opened:
-                try:
-                    webbrowser.open(auth_url)
-                    logger.info("Opened browser for authorization")
-                except Exception as e:
-                    logger.warning(f"Failed to open browser: {e}")
-                    logger.info(f"Please visit: {auth_url}")
-        else:
-            logger.info(f"Please visit: {auth_url}")
-
-        with contextlib.suppress(asyncio.TimeoutError):
-            # Timeout is handled below by checking if received_code is empty
-            await asyncio.wait_for(done.wait(), timeout=self.config.timeout)
-
-        thread.join(timeout=2)
+            if thread is not None and thread.ident is not None:
+                await asyncio.to_thread(thread.join, 2)
 
         if error_info:
             raise RuntimeError(f"OAuth authorization error: {error_info[0]}")
@@ -532,6 +691,8 @@ class OAuthHandler:
 
             if self.config.client_secret:
                 data["client_secret"] = self.config.client_secret
+            if self.config.resource:
+                data["resource"] = self.config.resource
 
             try:
                 response = await client.post(self.config.token_endpoint, data=data)
@@ -590,6 +751,8 @@ class OAuthHandler:
         }
         if self.config.scope:
             data["scope"] = self.config.scope
+        if self.config.resource:
+            data["resource"] = self.config.resource
 
         async with httpx.AsyncClient() as client:
             response = await client.post(self.config.token_endpoint, data=data, timeout=30.0)
@@ -796,6 +959,8 @@ def _load_cached_token(server_url: str) -> OAuthToken | None:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict):
+        return None
     entry = data.get(server_url)
     if not isinstance(entry, dict) or "access_token" not in entry:
         return None
@@ -842,6 +1007,7 @@ async def _refresh_access_token(
     client_id: str,
     refresh_token: str,
     client_secret: str | None = None,
+    resource: str | None = None,
 ) -> OAuthToken | None:
     """Exchange a refresh token for a fresh access token, or None on failure."""
     data = {
@@ -851,6 +1017,8 @@ async def _refresh_access_token(
     }
     if client_secret:
         data["client_secret"] = client_secret
+    if resource:
+        data["resource"] = resource
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(token_endpoint, data=data, timeout=10.0)
@@ -916,9 +1084,13 @@ async def handle_mcp_oauth(
     token_endpoint = None
     registration_endpoint = None
     grant_types: list[str] = []
+    resource: str | None = None
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         resource_metadata = await _fetch_protected_resource_metadata(client, server_url)
+        advertised_resource = resource_metadata.get("resource")
+        if isinstance(advertised_resource, str) and advertised_resource:
+            resource = advertised_resource
         if scope is None:
             scopes = resource_metadata.get("scopes_supported") or []
             if all(isinstance(s, str) for s in scopes):
@@ -947,7 +1119,11 @@ async def handle_mcp_oauth(
         refresh_client_id = client_id or cached.client_id if cached else None
         if cached and cached.refresh_token and token_endpoint and refresh_client_id:
             refreshed = await _refresh_access_token(
-                token_endpoint, refresh_client_id, cached.refresh_token, cached.client_secret
+                token_endpoint,
+                refresh_client_id,
+                cached.refresh_token,
+                cached.client_secret,
+                resource,
             )
             if refreshed:
                 logger.info("Refreshed MCP OAuth token from cache")
@@ -977,6 +1153,7 @@ async def handle_mcp_oauth(
         client_secret=final_client_secret,
         redirect_uri=redirect_uri,
         scope=scope,
+        resource=resource,
         registration_endpoint=registration_endpoint,
         # Caller-supplied timeout overrides the OAuthConfig default (300s); this
         # is the single authoritative OAuth wait — the local callback server's

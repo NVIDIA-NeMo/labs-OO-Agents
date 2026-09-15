@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from nooa_bench import bench_agent as bench_agent_module
 from nooa_bench import runner
 from nooa_bench.bench_agent import BenchAgent, TaskResult
 
 from nooa.agentdoc import doc
-from nooa.unifiedllm import FakeLLMClient, LLMResponse
+from nooa.unifiedllm import AssistantReasoning, AssistantText, FakeLLMClient, LLMResponse
 
 
 class _FakeShell:
@@ -37,8 +39,12 @@ class _FakeRepo:
 
 def test_trajectory_excludes_opaque_provider_state(monkeypatch, tmp_path):
     response = LLMResponse(
-        content="public answer",
-        llm_state={"encrypted_content": "provider-secret"},
+        parts=(
+            AssistantText(text="public answer"),
+            AssistantReasoning(
+                text="portable reasoning", native={"encrypted_content": "provider-secret"}
+            ),
+        ),
     )
     agent = type("Agent", (), {"event_manager": {response.id: response}})()
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
@@ -47,6 +53,7 @@ def test_trajectory_excludes_opaque_provider_state(monkeypatch, tmp_path):
 
     payload = (tmp_path / "trajectory.json").read_text()
     assert "public answer" in payload
+    assert "portable reasoning" in payload
     assert "provider-secret" not in payload
     assert "llm_state" not in payload
 
@@ -60,6 +67,50 @@ def test_task_result_model():
     )
     assert "URL-encoding" in r.solution_description
     assert "pytest" in r.command_to_verify
+
+
+def test_trajectory_preserves_nested_json_without_private_state(monkeypatch, tmp_path):
+    from pydantic import BaseModel, Field
+
+    from nooa.context_blocks.events import ToolCallEvent, ToolResult
+    from nooa.events import PythonOutput
+
+    class Payload(BaseModel):
+        answer: str = "visible"
+        hidden: str = Field(default="hidden-secret", repr=False)
+        excluded: str = Field(default="excluded-secret", exclude=True)
+
+    response = LLMResponse(
+        parts=(
+            AssistantText(text="public answer"),
+            AssistantReasoning(
+                text="readable thought", native={"encrypted_content": "provider-secret"}
+            ),
+        )
+    )
+    call = ToolCallEvent(
+        tool_call_id="c1",
+        name="lookup",
+        arguments={},
+        result=ToolResult(tool_call_id="c1", content="actual result"),
+    )
+    nested = PythonOutput(
+        tool_call_id="c1",
+        execution_status="complete",
+        execution_count=1,
+        value={"responses": [response], "payload": Payload()},
+    )
+    agent = type("Agent", (), {"event_manager": {call.id: call, nested.id: nested}})()
+    monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
+    runner._write_trajectory(agent)
+    encoded = (tmp_path / "trajectory.json").read_text()
+    exported = json.loads(encoded)
+    assert exported[0]["result"]["content"] == "actual result"
+    assert exported[0]["result"]["tool_call_id"] == "c1"
+    assert exported[1]["value"]["responses"][0]["content"] == "public answer"
+    assert exported[1]["value"]["responses"][0]["reasoning"] == "readable thought"
+    assert exported[1]["value"]["payload"] == {"answer": "visible"}
+    assert "secret" not in encoded
 
 
 def test_bench_agent_has_no_verify():
