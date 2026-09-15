@@ -30,8 +30,13 @@ dependencies = [
     "litellm>=1.97.0",
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
-    "openinference-instrumentation-litellm>=0.1.30",
     "msgpack>=1.2.1",
+    # Private structured-output schema helper: upgrades require wire-contract tests.
+    "openai==2.44.0",
+    "anthropic>=0.84.0",
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "openinference-semantic-conventions>=0.1.9",
 ]
 
 [project.urls]
@@ -102,7 +107,6 @@ tracing = [
     "opentelemetry-sdk>=1.20.0",
     "openinference-instrumentation>=0.1.42",
     "openinference-semantic-conventions>=0.1.9",
-    "openinference-instrumentation-litellm>=0.1.28",
 ]
 viewer = [
     "fastapi>=0.100.0",

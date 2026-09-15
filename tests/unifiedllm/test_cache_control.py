@@ -8,6 +8,9 @@ class TestCacheControlPreservePatch:
 
     def test_patch_preserves_for_anthropic(self):
         """cache_control survives for Anthropic model names."""
+        from nooa.unifiedllm.unifiedllm import _apply_cache_control_preserve_patch
+
+        _apply_cache_control_preserve_patch()
         from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
 
         config = OpenAIGPTConfig()

@@ -11,6 +11,17 @@ class ReasoningReplayError(RuntimeError):
     """A provider response or replay input violates the assistant-turn contract."""
 
 
+class UnsupportedStopReasonError(RuntimeError):
+    """A native stop needs continuation semantics the client cannot represent."""
+
+    def __init__(self, stop_reason):
+        self.stop_reason = stop_reason
+        super().__init__(
+            f"Unsupported Anthropic stop_reason {stop_reason!r}; "
+            "server-managed continuation is not supported by the direct transport"
+        )
+
+
 class EmptyContentError(Exception):
     """A model returned reasoning without the requested final content."""
 
