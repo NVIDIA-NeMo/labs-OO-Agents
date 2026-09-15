@@ -81,11 +81,19 @@ def get_quiet_mode() -> bool:
 # =============================================================================
 
 
+_PYTHON_TOOL_NAMES = ("execute_python", "python_cell")
+
+
+def _is_python_tool(name: str) -> bool:
+    """Return whether *name* denotes a model-facing Python cell tool."""
+    return name in _PYTHON_TOOL_NAMES
+
+
 def _extract_prefill_inputs(content: str) -> str | None:
     """Extract clean input arguments from prefill XML format.
 
     Prefill format looks like:
-        <execute_python expr="self.events[3].content" tool_call_id="prefill_xxx">
+        <python_cell expr="self.events[3].content" tool_call_id="prefill_xxx">
         Execution successful.
         Stdout:
         Call: async def method(self, arg1: str, arg2: list) -> Result
@@ -97,17 +105,21 @@ def _extract_prefill_inputs(content: str) -> str | None:
         [1, 2, 3]
 
         Return type: Result { ... }
-        </execute_python>
+        </python_cell>
 
     Returns the clean arguments section or None if not prefill format.
     """
     try:
-        if "<execute_python" not in content or "Stdout:" not in content:
+        tool_tag = next(
+            (name for name in _PYTHON_TOOL_NAMES if f"<{name}" in content),
+            None,
+        )
+        if tool_tag is None or "Stdout:" not in content:
             return None
 
         # Try regex extraction first (more robust to format variations)
         match = re.search(
-            r"Stdout:\s*\n(.*?)(?:</execute_python>|\Z)",
+            rf"Stdout:\s*\n(.*?)(?:</{tool_tag}>|\Z)",
             content,
             re.DOTALL,
         )
@@ -117,8 +129,9 @@ def _extract_prefill_inputs(content: str) -> str | None:
             if stdout_start == -1:
                 return None
             stdout_content = content[stdout_start + len("Stdout:") :].strip()
-            if "</execute_python>" in stdout_content:
-                stdout_content = stdout_content[: stdout_content.find("</execute_python>")].strip()
+            closing_tag = f"</{tool_tag}>"
+            if closing_tag in stdout_content:
+                stdout_content = stdout_content[: stdout_content.find(closing_tag)].strip()
         else:
             stdout_content = match.group(1).strip()
 
@@ -3271,7 +3284,7 @@ class TraceExplorer:
                 code_preview = ""
                 if turn.tool_calls:
                     tc = turn.tool_calls[0]
-                    if tc.function_name == "execute_python":
+                    if _is_python_tool(tc.function_name):
                         try:
                             args = json.loads(tc.arguments)
                             code = args.get("code", "") if isinstance(args, dict) else ""
@@ -3366,8 +3379,8 @@ class TraceExplorer:
             """Parse and format tool arguments. Extract code for readability."""
             try:
                 args = json.loads(args_json)
-                # Extract code for execute_python (common case, makes output readable)
-                if tool_name == "execute_python" and isinstance(args, dict) and "code" in args:
+                # Extract Python cell code for readability
+                if _is_python_tool(tool_name) and isinstance(args, dict) and "code" in args:
                     return args["code"]
                 return _pformat(args, max_string=200 if concise else 5000)
             except (json.JSONDecodeError, TypeError):
@@ -3595,7 +3608,7 @@ class TraceExplorer:
             """Format tool arguments, extracting code for readability."""
             try:
                 args = json.loads(args_json)
-                if tool_name == "execute_python" and isinstance(args, dict) and "code" in args:
+                if _is_python_tool(tool_name) and isinstance(args, dict) and "code" in args:
                     return args["code"]
                 return _pformat(args, max_string=5000)
             except (json.JSONDecodeError, TypeError):
@@ -3750,29 +3763,40 @@ class TraceExplorer:
 
         lines = []
 
-        # Find the LLM turn that provides context for this execution
-        # First try preceding turn (standard flow), then following (prefill flow)
+        # Match either neighboring LLM turn: later prefills can follow an
+        # unrelated completed turn, and their calls can be in request history.
         context_llm_turn: LLMTurn | None = None
         context_turn_idx = None
         context_source = ""
-
-        # Look for preceding LLM turn first
-        for i in range(turn_index - 1, -1, -1):
-            t = session.turns[i]
-            if isinstance(t, LLMTurn):
-                context_llm_turn = t
-                context_turn_idx = i
-                context_source = "preceding"
-                break
-
-        # If no preceding turn, look for following LLM turn (prefill case)
-        if not context_llm_turn:
-            for i in range(turn_index + 1, len(session.turns)):
+        matching_call = None
+        adjacent_turns: list[tuple[int, LLMTurn, str]] = []
+        for indices, source in (
+            (range(turn_index - 1, -1, -1), "preceding"),
+            (range(turn_index + 1, len(session.turns)), "following"),
+        ):
+            for i in indices:
                 t = session.turns[i]
                 if isinstance(t, LLMTurn):
-                    context_llm_turn = t
-                    context_turn_idx = i
-                    context_source = "following"
+                    adjacent_turns.append((i, t, source))
+                    break
+        if adjacent_turns:
+            context_turn_idx, context_llm_turn, context_source = adjacent_turns[0]
+        if turn.tool_call_id:
+            for i, candidate, source in adjacent_turns:
+                calls = candidate.tool_calls + [
+                    tc for message in candidate.messages for tc in message.tool_calls
+                ]
+                matching_call = next(
+                    (
+                        tc
+                        for tc in calls
+                        if _is_python_tool(tc.function_name)
+                        and tc.tool_call_id == turn.tool_call_id
+                    ),
+                    None,
+                )
+                if matching_call is not None:
+                    context_turn_idx, context_llm_turn, context_source = i, candidate, source
                     break
 
         # Add self-documenting header
@@ -3806,7 +3830,7 @@ class TraceExplorer:
                     m
                     for m in context_llm_turn.messages
                     if m.role in ("system", "user")
-                    and "<execute_python" not in (m.content or "")
+                    and not any(f"<{name}" in (m.content or "") for name in _PYTHON_TOOL_NAMES)
                     and "<tool_result" not in (m.content or "")
                 ]
 
@@ -3831,7 +3855,7 @@ class TraceExplorer:
                         try:
                             args = json.loads(tc.arguments)
                             if (
-                                tc.function_name == "execute_python"
+                                _is_python_tool(tc.function_name)
                                 and isinstance(args, dict)
                                 and "code" in args
                             ):
@@ -3853,10 +3877,19 @@ class TraceExplorer:
 
         lines.append(f'<exec_turn n="{turn_index}"{duration_str} status="{status}">')
 
-        # Code executed (tool call)
+        # Code executed (tool call). Preserve the provider-facing name when the
+        # correlated LLM turn is available; legacy traces fall back to execute_python.
         if turn.code:
+            tool_name = "execute_python"
+            if not turn.tool_call_id and context_llm_turn:
+                matching_call = next(
+                    (tc for tc in context_llm_turn.tool_calls if _is_python_tool(tc.function_name)),
+                    None,
+                )
+            if matching_call is not None:
+                tool_name = matching_call.function_name
             id_attr = f' id="{turn.tool_call_id}"' if turn.tool_call_id else ""
-            lines.append(f'  <tool_call name="execute_python"{id_attr}>')
+            lines.append(f'  <tool_call name="{tool_name}"{id_attr}>')
             lines.extend(indent(trunc(turn.code), "    "))
             lines.append("  </tool_call>")
 

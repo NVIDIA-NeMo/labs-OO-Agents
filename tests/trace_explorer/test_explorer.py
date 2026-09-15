@@ -10,14 +10,18 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from nooa.trace_explorer import (
+    AgentSession,
     ExecutionTurn,
+    LLMMessage,
     LLMTurn,
+    ToolCall,
     TraceExplorer,
 )
 from nooa.trace_explorer.explorer import (
     _extract_any_value,
     _extract_failing_line,
     _extract_messages,
+    _extract_prefill_inputs,
     _extract_reasoning_content,
     _extract_response,
     _extract_token_counts,
@@ -28,6 +32,111 @@ from nooa.trace_explorer.explorer import (
     _otlp_attrs_to_dict,
     _short_id,
 )
+
+
+class TestPythonCellViewerParity:
+    """The experimental Python tool renders like legacy execute_python."""
+
+    @pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
+    def test_extracts_prefill_inputs(self, tool_name):
+        content = f"""<{tool_name} tool_call_id="prefill_1">
+Execution successful.
+Stdout:
+Call: async def answer(self, value: int) -> int
+
+value (int):
+41
+
+Return type: int
+</{tool_name}>"""
+
+        extracted = _extract_prefill_inputs(content)
+
+        assert extracted is not None
+        assert "value (int):" in extracted
+        assert "41" in extracted
+        assert "Call:" not in extracted
+        assert f"</{tool_name}>" not in extracted
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
+    async def test_formats_python_tool_calls_as_code(self, tool_name):
+        tool_call = ToolCall(
+            function_name=tool_name,
+            arguments=json.dumps({"code": "answer = 40 + 2"}),
+            tool_call_id="call_1",
+        )
+        llm_turn = LLMTurn(
+            session_id="abcdef",
+            messages=[LLMMessage(role="user", content="compute")],
+            response="",
+            model="test-model",
+            tool_calls=[tool_call],
+        )
+        execution_turn = ExecutionTurn(
+            code="answer = 40 + 2",
+            stdout="42",
+            error=None,
+            returned_value=None,
+            tool_call_id="call_1",
+        )
+        session = AgentSession(
+            session_id="abcdef",
+            agent_name="TestAgent",
+            method_name="answer",
+            parent_session_id=None,
+            turns=[llm_turn, execution_turn],
+        )
+        trace = TraceExplorer([session], "trace.jsonl")
+
+        summary = await trace.get_session("abcdef", concise=True)
+        verbose = await trace.get_session("abcdef", concise=False)
+        execution = await trace.get_turn("abcdef", 1)
+
+        assert "answer = 40 + 2" in summary
+        assert f'<tool_call name="{tool_name}" id="call_1">' in verbose
+        assert '{"code"' not in verbose
+        assert f'<tool_call name="{tool_name}" id="call_1">' in execution
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("call_in_messages", [False, True])
+    async def test_later_prefill_uses_matching_following_turn(self, call_in_messages):
+        """An earlier completed call must not mask the next prefill's tool name."""
+        earlier = LLMTurn(
+            session_id="abcdef",
+            messages=[],
+            response="",
+            model="test-model",
+            tool_calls=[ToolCall("execute_python", '{"code": "pass"}', "call_1")],
+        )
+        completed = ExecutionTurn("pass", "", None, None, tool_call_id="call_1")
+        prefill = ExecutionTurn("print('task')", "task", None, None, tool_call_id="prefill_2")
+        matching = ToolCall("python_cell", '{"code": "print(\'task\')"}', "prefill_2")
+        following = LLMTurn(
+            session_id="abcdef",
+            messages=[LLMMessage(role="user", content="next task")],
+            response="",
+            model="test-model",
+            tool_calls=[] if call_in_messages else [matching],
+        )
+        if call_in_messages:
+            following.messages.append(
+                LLMMessage(role="assistant", content="", tool_calls=[matching])
+            )
+        session = AgentSession(
+            session_id="abcdef",
+            agent_name="TestAgent",
+            method_name="answer",
+            parent_session_id=None,
+            turns=[earlier, completed, prefill, following],
+        )
+        trace = TraceExplorer([session], "trace.jsonl")
+
+        execution = await trace.get_turn("abcdef", 2)
+
+        assert '<tool_call name="python_cell" id="prefill_2">' in execution
+        assert "## LLM Context (from turn 3)" in execution
+
 
 # =============================================================================
 # Fixtures
