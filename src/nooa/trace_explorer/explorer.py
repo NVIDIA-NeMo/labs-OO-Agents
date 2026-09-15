@@ -325,6 +325,23 @@ def _io_json_field(
             parsed = json.loads(raw) if isinstance(raw, str) else raw
             if isinstance(parsed, dict) and field_name in parsed:
                 return parsed[field_name]
+            if (
+                isinstance(parsed, dict)
+                and isinstance(parsed.get("$nooa"), dict)
+                and parsed["$nooa"].get("kind") == "truncated-json"
+                and isinstance(parsed.get("preview"), str)
+            ):
+                limit = parsed["$nooa"].get("limit_chars", "unknown")
+                preview = parsed["preview"]
+                message = (
+                    f"<trace input truncated at {limit} serialized characters>\n"
+                    f"Serialized JSON prefix:\n{preview}"
+                )
+                if field_name == "args":
+                    return [message]
+                if field_name == "kwargs":
+                    return {}
+                return message
         except (json.JSONDecodeError, TypeError):
             pass
     for k in native_keys:

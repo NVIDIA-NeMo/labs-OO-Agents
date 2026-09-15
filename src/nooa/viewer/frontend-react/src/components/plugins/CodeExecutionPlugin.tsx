@@ -1,5 +1,6 @@
 import type { PluginProps } from './registry';
 import { CodeBox } from '@/components/shared/CodeBox';
+import { parseTruncatedJson } from '@/utils/truncatedJson';
 
 function formatDuration(ns: number): string {
   if (ns <= 0) return '';
@@ -18,6 +19,14 @@ interface ParsedResult {
 // input.value = {"code": "..."} (application/json); old traces carry a flat `code`.
 function getExecCode(attrs: Record<string, unknown>): string {
   const iv = attrs['input.value'];
+  const truncated = parseTruncatedJson(iv);
+  if (truncated) {
+    return (
+      `# Trace input truncated at ${truncated.limitChars} serialized characters.\n` +
+      `# Serialized JSON prefix (${truncated.previewChars} characters):\n` +
+      truncated.preview
+    );
+  }
   if (typeof iv === 'string') {
     try {
       const o = JSON.parse(iv) as { code?: unknown };
