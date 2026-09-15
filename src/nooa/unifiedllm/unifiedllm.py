@@ -1047,6 +1047,7 @@ class UnifiedLLM(ABC):
         transport: Literal["litellm", "direct"] = "litellm",
         api_style: Literal["chat", "responses", "anthropic"] | None = None,
         replay_vendor: str | None = None,
+        chat_max_tokens_field: Literal["auto", "max_tokens", "max_completion_tokens"] = "auto",
         **config,
     ):
         import os
@@ -1056,6 +1057,15 @@ class UnifiedLLM(ABC):
             raise ValueError("transport must be 'litellm' or 'direct'")
         self.transport = transport
         self.api_style = api_style
+        if not isinstance(chat_max_tokens_field, str) or chat_max_tokens_field not in {
+            "auto",
+            "max_tokens",
+            "max_completion_tokens",
+        }:
+            raise ValueError(
+                "chat_max_tokens_field must be auto, max_tokens or max_completion_tokens"
+            )
+        self.chat_max_tokens_field = chat_max_tokens_field
         if replay_vendor is not None and (
             not isinstance(replay_vendor, str)
             or not re.fullmatch(r"[a-z][a-z0-9_]*", replay_vendor)
@@ -1081,6 +1091,12 @@ class UnifiedLLM(ABC):
         self._http: _ClientHttp | None = None
 
     def _init_transport(self, style):
+        if self.chat_max_tokens_field != "auto" and (
+            style == "responses"
+            or self.api_style == "anthropic"
+            or self.model.startswith("anthropic/")
+        ):
+            raise ValueError("chat_max_tokens_field applies only to Chat requests")
         if self.transport == "direct":
             from .direct import DirectTransport
 
@@ -1095,6 +1111,7 @@ class UnifiedLLM(ABC):
                 self.replay_vendor,
                 self.config,
                 self._http_config,
+                chat_max_tokens_field=self.chat_max_tokens_field,
             )
             self._http = self._direct
         else:
@@ -1119,6 +1136,10 @@ class UnifiedLLM(ABC):
             return litellm.responses(**params)
         from ._legacy import preserve_readable_reasoning
 
+        if self.chat_max_tokens_field != "auto":
+            from .request_params import chat_token_limit
+
+            params = chat_token_limit(params, self.chat_max_tokens_field)
         params = preserve_readable_reasoning(params)
         if "client" in params:
             return _collect_sync(litellm.completion(**params))
@@ -1139,6 +1160,10 @@ class UnifiedLLM(ABC):
             return await litellm.aresponses(**params)
         from ._legacy import preserve_readable_reasoning
 
+        if self.chat_max_tokens_field != "auto":
+            from .request_params import chat_token_limit
+
+            params = chat_token_limit(params, self.chat_max_tokens_field)
         params = preserve_readable_reasoning(params)
         if "client" in params:
             return await _collect_async(await _litellm_acompletion(params))
@@ -1192,12 +1217,12 @@ class UnifiedLLM(ABC):
                 "the messages argument"
             )
         extra_body = call_config.get("extra_body")
-        client_settings = {"transport", "api_style", "replay_vendor"}
+        client_settings = {"transport", "api_style", "replay_vendor", "chat_max_tokens_field"}
         if client_settings.intersection(call_config) or (
             isinstance(extra_body, Mapping) and client_settings.intersection(extra_body)
         ):
             raise ValueError(
-                "transport, api_style and replay_vendor are client settings, not call parameters"
+                "transport, api_style, replay_vendor and chat_max_tokens_field are client settings, not call parameters"
             )
         if extra_body is not None and not isinstance(extra_body, Mapping):
             raise ValueError("extra_body must be a mapping")

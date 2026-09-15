@@ -46,6 +46,30 @@ the other transport.
 
 ## What stays shared
 
+### Reply limits and stop conditions
+
+Keep `max_tokens` as the saved reply budget. Direct Chat sends it as
+`max_completion_tokens` when the effective endpoint is `api.openai.com`, and as
+`max_tokens` on other endpoints. This uses the endpoint, not the model name.
+For a compatible server with different requirements, set the constructor/registry
+field `chat_max_tokens_field: max_completion_tokens` (or `max_tokens`). `auto` is
+the default. Explicit selection also chooses the input cap spelling passed to
+LiteLLM; its provider adapter still owns the final legacy translation. Responses
+and Anthropic do not accept this Chat-only setting. Per-call endpoint overrides
+are respected by direct `auto`; it does not probe or retry with another spelling.
+Supply only one cap field, at the top level rather than inside `extra_body`.
+
+Direct Anthropic translates Chat `stop` (a string or list) to `stop_sequences`.
+Providing both names is an error. Native context-window exhaustion reports
+`finish_reason="length"`; the normalized raw response retains the native reason
+in `provider_specific_fields.stop_reason`. Refusal remains a content-filter error.
+`pause_turn` requires server-managed continuation, which this transport does not
+implement: it raises `UnsupportedStopReasonError` with a `stop_reason` attribute
+instead of misreporting a safety rejection. Unknown or missing native stop reasons
+raise the same explicit error. No automatic continuation or retry is added.
+
+### Shared processing
+
 1. UnifiedLLM applies the entry's reasoning-level settings and prepares the
    messages, tools, output schema and cache boundary.
 2. The selected transport sends the request. Both use the client's HTTP pool

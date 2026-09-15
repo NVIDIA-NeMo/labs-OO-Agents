@@ -20,7 +20,9 @@ from pydantic import BaseModel
 
 from nooa.tracing._llm_hooks import capture_async_request, capture_request
 
+from .errors import UnsupportedStopReasonError
 from .http_config import HttpConfig
+from .request_params import chat_token_limit
 
 # These are routing prefixes, not a model catalogue. Other model ids, including
 # ids containing slashes, are sent verbatim. Nonstandard routes require a URL.
@@ -150,6 +152,16 @@ def _anthropic_message(message, index):
 def anthropic_request(params: dict) -> dict:
     """Translate projected Chat messages, keeping signed blocks and cache markers."""
     result = dict(params)
+    if "stop" in result:
+        if "stop_sequences" in result:
+            raise ValueError("Use either stop or stop_sequences, not both")
+        stop = result.pop("stop")
+        if stop is not None:
+            if isinstance(stop, str):
+                stop = [stop]
+            if not isinstance(stop, list) or not all(isinstance(item, str) for item in stop):
+                raise ValueError("Anthropic stop must be a string or list of strings")
+            result["stop_sequences"] = list(stop)
     source = result.pop("messages", None)
     if not isinstance(source, list):
         raise ValueError("Anthropic messages must be a list")
@@ -222,6 +234,16 @@ def anthropic_response(response):
     """Normalize SDK Messages blocks without copying native text into metadata."""
     from openai.types.chat import ChatCompletion
 
+    reasons = {
+        "end_turn": "stop",
+        "stop_sequence": "stop",
+        "tool_use": "tool_calls",
+        "max_tokens": "length",
+        "model_context_window_exceeded": "length",
+        "refusal": "content_filter",
+    }
+    if response.stop_reason not in reasons:
+        raise UnsupportedStopReasonError(response.stop_reason)
     text, thinking, calls = [], [], []
     for part in response.content:
         block = part.model_dump(exclude_none=True)
@@ -243,12 +265,7 @@ def anthropic_response(response):
             )
         else:
             raise ValueError(f"Unsupported Anthropic response block: {kind!r}")
-    reason = {
-        "end_turn": "stop",
-        "stop_sequence": "stop",
-        "tool_use": "tool_calls",
-        "max_tokens": "length",
-    }.get(response.stop_reason, "content_filter")
+    reason = reasons[response.stop_reason]
     usage = response.usage.model_dump(exclude_none=True)
     usage["prompt_tokens"] = sum(
         usage.get(k, 0)
@@ -263,6 +280,7 @@ def anthropic_response(response):
             "model": response.model,
             "created": 0,
             "object": "chat.completion",
+            "provider_specific_fields": {"stop_reason": response.stop_reason},
             "choices": [
                 {
                     "index": 0,
@@ -291,10 +309,30 @@ class DirectTransport:
     sync_client = None
     async_client = None
 
-    def __init__(self, model, api_style, replay_vendor, config, http_config: HttpConfig):
+    def __init__(
+        self,
+        model,
+        api_style,
+        replay_vendor,
+        config,
+        http_config: HttpConfig,
+        *,
+        chat_max_tokens_field="auto",
+    ):
         if api_style not in {"chat", "responses", "anthropic"}:
             raise ValueError("api_style must be chat, responses, or anthropic")
+        if not isinstance(chat_max_tokens_field, str) or chat_max_tokens_field not in {
+            "auto",
+            "max_tokens",
+            "max_completion_tokens",
+        }:
+            raise ValueError(
+                "chat_max_tokens_field must be auto, max_tokens or max_completion_tokens"
+            )
+        if api_style != "chat" and chat_max_tokens_field != "auto":
+            raise ValueError("chat_max_tokens_field applies only to Chat requests")
         self.api_style = api_style
+        self.chat_max_tokens_field = chat_max_tokens_field
         if replay_vendor is not None and (
             not isinstance(replay_vendor, str)
             or not re.fullmatch(r"[a-z][a-z0-9_]*", replay_vendor)
@@ -351,6 +389,8 @@ class DirectTransport:
         from openai.lib._parsing._completions import type_to_response_format_param
 
         body = dict(params)
+        if self.api_style == "chat":
+            body = chat_token_limit(body, self.chat_max_tokens_field)
         if body.get("additional_drop_params"):
             raise ValueError(
                 "direct transport does not silently drop fields; remove additional_drop_params"
