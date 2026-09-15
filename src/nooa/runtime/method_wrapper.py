@@ -588,15 +588,19 @@ def _warn_if_agent_call_middleware_bypassed(
     agent: Any,
     original_func: Callable[..., Any],
 ) -> None:
-    """Warn when a sync agent method runs while ``agent_call`` middleware is active.
+    """Warn when a sync agent method runs while ``agent_call`` middleware is active
+    but no ``agent_call_sync`` guard is registered.
 
     Complements :func:`_warn_uncovered_agent_methods`, which only runs once an
-    instrumented async method executes. Code that calls a sync capability
+    instrumented async method executes.  Code that calls a sync capability
     directly — never entering an async agent method at all — would otherwise get
     no signal, so this covers that path and points at the offending call site.
 
-    Suppressed when the class-wide scan has already reported this class, so a
-    method is never announced twice.
+    Suppressed when:
+    - ``agent_call_sync`` middleware IS registered (the caller has opted in to
+      sync enforcement; the gap is intentionally closed).
+    - The class-wide scan has already reported this class (avoids double
+      announcement).
 
     Args:
         agent: The agent instance the method was called on.
@@ -609,6 +613,10 @@ def _warn_if_agent_call_middleware_bypassed(
             return
         if not event_manager._middleware.get("agent_call"):
             return
+        # Silence the warning when the caller has registered agent_call_sync:
+        # they are already enforcing a sync policy; the gap is closed.
+        if event_manager._middleware.get("agent_call_sync"):
+            return
 
         reported = event_manager._agent_call_bypass_reported
         if f"scan:{cls.__module__}.{cls.__qualname__}" in reported:
@@ -620,8 +628,10 @@ def _warn_if_agent_call_middleware_bypassed(
 
         message = (
             f"agent_call middleware is registered but does not apply to the "
-            f"synchronous method '{cls.__name__}.{original_func.__name__}'. Middleware "
-            f"is async and cannot wrap a sync calling convention. {_BYPASS_REMEDY}"
+            f"synchronous method '{cls.__name__}.{original_func.__name__}'. "
+            f"Register agent_call_sync middleware to enforce policy on sync "
+            f"methods (sync calling convention, no event loop required). "
+            f"{_BYPASS_REMEDY}"
         )
     except Exception:  # noqa: BLE001
         logger.debug("agent-call: sync middleware bypass warning failed", exc_info=True)
@@ -739,7 +749,27 @@ def create_sync_agent_method_wrapper(
                     parent_call_id=parent_call_id,
                     **trace_attrs,
                 )
-            result = original_func(self, *args, **kwargs)
+            # Run agent_call_sync middleware chain if any is registered;
+            # otherwise call the function directly (zero overhead fast path).
+            em = self.event_manager
+            if em._middleware.get("agent_call_sync"):
+                from nooa.runtime.middleware import AgentCallContext
+
+                ac_ctx = AgentCallContext(
+                    agent=self,
+                    method_name=original_func.__name__,
+                    args=args,
+                    kwargs=kwargs,
+                )
+
+                def _core_sync(ctx: AgentCallContext) -> AgentCallContext:
+                    ctx.result = original_func(self, *ctx.args, **ctx.kwargs)
+                    return ctx
+
+                ac_ctx = em.run_sync_middleware("agent_call_sync", ac_ctx, _core_sync)
+                result = ac_ctx.result
+            else:
+                result = original_func(self, *args, **kwargs)
             return result
         except BaseException as e:
             exception_caught = e

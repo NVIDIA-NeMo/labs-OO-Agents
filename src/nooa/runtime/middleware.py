@@ -7,17 +7,26 @@ Register middleware via ``event_manager.intercept()``::
     agent.event_manager.intercept("llm_call", my_guardrail)
     agent.event_manager.intercept("execute_python", my_sandbox)
 
-Three hooks are available:
+Four hooks are available:
 
 - ``agent_call``: wraps an instrumented async agent method (all turns, all code).
-  Does **not** apply to sync methods, ``@no_trace`` methods, ``staticmethod`` /
-  ``classmethod``, or methods inherited from non-Agent bases — see
+  Does **not** apply to sync methods — use ``agent_call_sync`` for those.
+  Also does not apply to ``@no_trace`` methods (unless generated or decorated
+  with ``@strategy``), ``staticmethod`` / ``classmethod``, or methods inherited
+  from non-Agent bases — see :class:`AgentCallContext`.
+- ``agent_call_sync``: wraps instrumented synchronous (``def``) agent methods.
+  Uses a **synchronous** ``(ctx, call_next) -> ctx`` signature so no event loop
+  is needed and the sync calling convention is preserved — see
   :class:`AgentCallContext`.
 - ``llm_call``: wraps ``runtime.generate()`` (the LLM round-trip)
 - ``execute_python``: wraps ``runtime.execute_code()`` (sandbox execution)
 
-Each middleware is ``async def(ctx, nxt) -> result`` where *ctx* is a typed
-context object and *nxt* calls the rest of the chain.
+``agent_call`` and ``agent_call_sync`` share :class:`AgentCallContext` so a
+policy author can reuse the same context shape for both.
+
+``agent_call`` middleware is ``async def(ctx, nxt) -> ctx`` where *nxt* is async.
+``agent_call_sync`` middleware is ``def(ctx, nxt) -> ctx`` where *nxt* is sync.
+All other middleware is ``async def(ctx, nxt) -> result``.
 
 **intercept() vs on()** — both live on ``EventManager``:
 
@@ -42,11 +51,14 @@ _AGENT_RESULT_NOT_SET = object()
 
 __all__ = [
     "MIDDLEWARE_AGENT_CALL",
+    "MIDDLEWARE_AGENT_CALL_SYNC",
     "MIDDLEWARE_LLM_CALL",
     "MIDDLEWARE_EXECUTE_PYTHON",
     "AgentCallContext",
     "AgentCallMiddleware",
     "AgentCallNext",
+    "SyncAgentCallMiddleware",
+    "SyncAgentCallNext",
     "LLMCallContext",
     "LLMCallMiddleware",
     "LLMCallNext",
@@ -60,6 +72,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 MIDDLEWARE_AGENT_CALL = "agent_call"
+MIDDLEWARE_AGENT_CALL_SYNC = "agent_call_sync"
 MIDDLEWARE_LLM_CALL = "llm_call"
 MIDDLEWARE_EXECUTE_PYTHON = "execute_python"
 
@@ -69,18 +82,22 @@ MIDDLEWARE_EXECUTE_PYTHON = "execute_python"
 
 
 class AgentCallContext(BaseModel):
-    """Context for ``agent_call`` middleware.
+    """Context for ``agent_call`` and ``agent_call_sync`` middleware.
 
-    Wraps the entire execution of an instrumented async agent method — all LLM
-    turns, all code executions, the final return.
+    Wraps the entire execution of an instrumented agent method.  For async
+    methods this covers all LLM turns, all code executions, and the final
+    return.  For synchronous (``def``) methods it covers the single call frame
+    — use ``agent_call_sync`` to intercept them (same context shape, sync
+    calling convention).
 
     .. warning::
-       Coverage is narrower than "every agent method". Middleware is async and
-       runs only in the wrapper the metaclass builds for traced async methods, so
-       a method executes with no ``AgentCallContext`` ever created for it when it
-       is any of:
+       Coverage is narrower than "every agent method".
 
-       - synchronous (``def``) — cannot be wrapped by an async chain;
+       ``agent_call`` (async): runs only in the wrapper the metaclass builds
+       for traced async methods.  ``agent_call_sync`` (sync): runs in the
+       wrapper for traced synchronous (``def``) methods.  A method executes
+       outside *both* chains when it is any of:
+
        - marked ``@no_trace`` and left unwrapped by the metaclass — a
          ``@no_trace`` method that is generated or carries ``@strategy`` keeps
          its async wrapper, and the middleware chain with it;
@@ -88,15 +105,13 @@ class AgentCallContext(BaseModel):
        - inherited from a base that is not itself an ``Agent``.
 
        This holds however the method is reached, including from generated CodeAct
-       Python. Traced sync methods still emit agent-call events and spans; it is
-       specifically the middleware chain, the part that can *block*, that does
-       not apply.
+       Python.  ``@no_trace``, ``staticmethod`` / ``classmethod``, and
+       non-Agent-inherited methods still emit no middleware events regardless of
+       which hook is registered.
 
-       Declare a capability as a traced ``async def`` method to place it under
-       middleware, or enforce the policy inside the method body. When
-       ``agent_call`` middleware is registered, a ``RuntimeWarning`` names the
-       uncovered methods the first time a covered method runs, and each
-       traced sync method warns on its own first call.
+       When ``agent_call`` middleware is registered but a sync method has no
+       corresponding ``agent_call_sync`` guard, a ``RuntimeWarning`` is emitted
+       to surface the gap.
 
     Attributes:
         agent: The agent instance.
@@ -180,3 +195,7 @@ LLMCallMiddleware = Callable[[LLMCallContext, LLMCallNext], Awaitable[LLMCallCon
 ExecutePythonMiddleware = Callable[
     [ExecutePythonContext, ExecutePythonNext], Awaitable[ExecutePythonContext]
 ]
+
+# Synchronous variants for agent_call_sync middleware.
+SyncAgentCallNext = Callable[[AgentCallContext], AgentCallContext]
+SyncAgentCallMiddleware = Callable[[AgentCallContext, SyncAgentCallNext], AgentCallContext]
