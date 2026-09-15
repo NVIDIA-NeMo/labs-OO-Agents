@@ -26,11 +26,14 @@ The strict gate performs:
 2. Builds all five wheels and source distributions under a temporary local tag,
    verifies their versions, and smoke-tests imports and `nooa --version` in a
    clean environment.
-3. Runs the full capability suite for the candidate and previous release, fresh
+3. Runs seven bounded [provider replay/cache checks](docs/release-provider-validation.md)
+   on the candidate (17 capped provider requests, no retries), including SQLite resume
+   and changing trailing dynamic context. Missing or skipped results fail the gate.
+4. Runs the full capability suite for the candidate and previous release, fresh
    and back-to-back: four gate models, three runs, full data, no response cache.
-4. Writes private results, traces, distributions, checksums, a JSON manifest,
+5. Writes private results, traces, distributions, checksums, a JSON manifest,
    and sanitized public notes to the GitLab job artifacts.
-5. After every hard gate passes, creates or safely updates one GitHub **draft**
+6. After every hard gate passes, creates or safely updates one GitHub **draft**
    targeting the exact tested SHA.
 
 The candidate and baseline environments receive the same explicit
