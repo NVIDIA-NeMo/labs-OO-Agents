@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import pytest
 
-from nooa.unifiedllm.unifiedllm import _is_anthropic_model
+from nooa.unifiedllm.unifiedllm import (
+    _is_anthropic_model,
+)
 
 
 @pytest.mark.parametrize(

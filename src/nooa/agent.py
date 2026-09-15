@@ -284,7 +284,7 @@ class Agent(metaclass=AgentMeta):
     @no_trace
     @hidden
     def __context_view__(self) -> "ContextView[Agent] | None":
-        """Return the instance or class context view registered for this agent."""
+        """Return the instance or class view for object-level resolution."""
         instance_view = vars(self).get("_context_view")
         if instance_view is not None:
             return instance_view
@@ -320,6 +320,16 @@ class Agent(metaclass=AgentMeta):
                         seen.add(id(nested))
                         skills.append(nested)
         return tuple(skills)
+
+    @no_trace
+    @hidden
+    async def aclose(self) -> None:
+        """Await registered background cleanup before the owner closes shared resources.
+
+        The agent does not own its LLM client or storage; callers close those
+        after this method returns. Components register with event_manager.on_close.
+        """
+        await self.event_manager.aclose()
 
     @no_trace
     @hidden

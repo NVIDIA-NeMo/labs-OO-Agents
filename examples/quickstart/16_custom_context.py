@@ -7,7 +7,7 @@ uv run python examples/quickstart/16_custom_context.py
 
 import re
 
-from nooa import Agent, Block, EventQuery, context_text, select_context_events
+from nooa import Agent, Block, CacheBoundary, EventQuery, context_text, select_context_events
 from nooa.context_blocks import Role
 from nooa.util.quickstart import BaseModel, autorun, llm
 
@@ -54,6 +54,9 @@ class ResearchContextView:
                 "Answer only from selected research and cite source IDs."
             ),
         )
+        for event in select_context_events(owner.events, call=call):
+            yield event
+        yield CacheBoundary()
         selected = owner.research_context.selected()
         if selected:
             yield Block(
@@ -61,8 +64,6 @@ class ResearchContextView:
                 content=context_text(selected, call=call),
                 role=Role.USER,
             )
-        for event in select_context_events(owner.events, call=call):
-            yield event
 
 
 class ResearchAnswer(BaseModel):

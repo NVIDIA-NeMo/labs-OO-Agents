@@ -17,6 +17,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from nooa.agentdoc import pformat
 from nooa.context_blocks import EventStatus
 from nooa.context_blocks.models import Role
 from nooa.events import (
@@ -122,6 +123,7 @@ class EventManager:
         """
         self._backend: EventBackend = backend if backend is not None else InMemoryBackend()
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
+        self._close_callbacks: list[Callable[[], Awaitable[None]]] = []
 
         # Runtime event query override (set via set_event_query())
         self._event_query: EventQuery | None = None
@@ -236,6 +238,33 @@ class EventManager:
                 pass  # already removed — idempotent
 
         return unsubscribe
+
+    def on_close(self, callback: Callable[[], Awaitable[None]]) -> Callable[[], None]:
+        """Register asynchronous cleanup; return an idempotent unsubscribe function.
+
+        Background components use this rather than synchronous event handlers
+        when shutdown must await their tasks before shared clients are closed.
+        """
+        self._close_callbacks.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._close_callbacks:
+                self._close_callbacks.remove(callback)
+
+        return unsubscribe
+
+    async def aclose(self) -> None:
+        """Await cleanup in reverse registration order, logging individual failures.
+
+        Drain registrations first so callbacks can unsubscribe and repeated close
+        calls do not run the same cleanup again. This does not close storage.
+        """
+        callbacks, self._close_callbacks = self._close_callbacks, []
+        for callback in reversed(callbacks):
+            try:
+                await callback()
+            except Exception:
+                logger.warning("Background component cleanup failed", exc_info=True)
 
     def set_backend(self, backend: EventBackend) -> None:
         """Swap the persistence backend; handlers and middleware are preserved."""
@@ -459,13 +488,9 @@ class EventManager:
         """Extract searchable text from an event's public fields."""
         parts: list[str] = []
 
-        # Opaque replay state is durable but not a conversational/search field.
-        for value in event.model_dump(exclude={"llm_state"}).values():
+        for value in event.searchable_fields().values():
             if value is not None:
-                if isinstance(value, list):
-                    parts.append(" ".join(str(item) for item in value))
-                else:
-                    parts.append(str(value))
+                parts.append(pformat(value, unquote_strings=True))
 
         return " ".join(parts) if parts else event.event_type
 
@@ -630,7 +655,15 @@ class EventManager:
             replaced_range=(actual_start, actual_end),
             children_tags=tags_to_collapse,
             summary_text=summary_text,
-            doc=f'To access collapsed events, call self.events["{summary_tag}"].children_tags',
+            # Keep recovery instructions independent of the generated summary.
+            doc=(
+                "Search original events (including archived): "
+                'self.events.query(query="keyword", limit=10). '
+                f'Read by tag, e.g. self.events["{actual_start}"]. '
+                f'Expand this summary: self.events[self.events["{summary_tag}"].children_tags]. '
+                "For nested summaries, expand their children_tags again. "
+                "Inspect originals when exact wording or omitted details matter."
+            ),
         )
         summary.tag = summary_tag
 

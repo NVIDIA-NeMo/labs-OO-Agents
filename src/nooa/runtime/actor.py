@@ -57,22 +57,6 @@ logger = logging.getLogger(__name__)
 _MISSING = object()
 
 
-def _provider_for_llm(llm_client: Any) -> str | None:
-    """Resolve provider metadata without exposing client configuration."""
-    provider = getattr(llm_client, "provider", None)
-    if provider:
-        return str(provider)
-    config = getattr(llm_client, "config", None)
-    if isinstance(config, dict):
-        configured = config.get("custom_llm_provider") or config.get("provider")
-        if configured:
-            return str(configured)
-    model = getattr(llm_client, "model", None)
-    if not model:
-        return None
-    return model.split("/", 1)[0] if "/" in model else None
-
-
 @contextmanager
 def _harness_metrics_lifecycle(should_trace: bool):
     """Start harness metrics + unifiedllm bridge, flush/restore on exit.
@@ -177,12 +161,12 @@ def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
     return m.group(2) if m is not None else ""
 
 
-def _legacy_dynamic_context_snapshot(items: tuple[Any, ...], messages: list[Any]) -> str:
-    """Reconstruct the legacy trace envelope from a trailing USER block run.
+def _dynamic_context_trace_snapshot(items: tuple[Any, ...], messages: list[Any]) -> str:
+    """Project trailing context blocks into the existing trace field.
 
-    The envelope is observability metadata only; provider messages stay exactly
-    as rendered by the selected view and formatters. Block-aware formatters give
-    us the already-rendered block bodies, including expression metadata.
+    This is observability compatibility, not context assembly: provider messages
+    stay exactly as rendered. Block-aware messages provide the final rendered
+    bodies, including expression metadata, without consulting ContextManager.
     """
     if not items or not messages:
         return ""
@@ -202,7 +186,7 @@ def _legacy_dynamic_context_snapshot(items: tuple[Any, ...], messages: list[Any]
 
 def _snapshot_llm_request(
     event_manager: Any,
-    messages: list[dict[str, Any]],
+    messages: list[Any],
     generation_id: str,
     dynamic_context_snapshot: str = "",
 ) -> str:
@@ -1015,6 +999,16 @@ class ActorRuntime:
                     params=params,
                     agent=self.agent,
                     runtime=self,
+                    client=llm_client,
+                    filtered_history=any(
+                        query is not None
+                        for query in (
+                            self.agent.event_manager.get_event_query(),
+                            _scoped_events_var.get(),
+                            _decorator_events_var.get(),
+                            self.agent.event_query,
+                        )
+                    ),
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
@@ -1034,9 +1028,10 @@ class ActorRuntime:
                     _mw_strategy_tag = (
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
                     )
-                    call_params.setdefault(
+                    ctx.params.setdefault(
                         "prompt_cache_key", f"{self.agent._agent_id}-{_mw_strategy_tag}"
                     )
+                    call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
                     ctx.response = await llm_client.acall(
                         ctx.messages,
                         output_model=om,
@@ -2765,7 +2760,6 @@ class ActorRuntime:
                     strategy=strategy,
                     event_query=event_query,
                     model=llm_model_name or None,
-                    provider=_provider_for_llm(llm_client),
                     context_window=getattr(llm_client, "context_window", None),
                     _context_format=resolved_truncation.context_block_format,
                     _method=method,
@@ -2913,7 +2907,10 @@ class ActorRuntime:
         context_limit: int | None = None,
         count_tokens: Callable[[str], int] | None = None,
     ) -> Any:
-        """Collect the selected view into one immutable context tuple."""
+        """Snapshot call facts, resolve the view, and collect its ordered items.
+
+        Content selection and ordering belong entirely to the selected view.
+        """
         from dataclasses import replace
 
         from nooa.context_view import collect_context_items, resolve_context_view
@@ -2971,7 +2968,6 @@ class ActorRuntime:
             strategy=strategy,
             event_query=event_query,
             model=model,
-            provider=base_call.provider or _provider_for_llm(llm_client),
             context_window=context_window,
             context_budget=(
                 context_limit if context_limit is not None else base_call.context_budget
@@ -2997,7 +2993,7 @@ class ActorRuntime:
         *,
         tools: list[Any] | None = None,
         max_output_tokens: int | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[Any]:
         """Build messages for LLM API.
 
         Calls _prepare_context() to gather and resolve all blocks,
@@ -3113,7 +3109,7 @@ class ActorRuntime:
         # generate() writes that actual value back into _last_context_stats after
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
-        self._last_dynamic_context_snapshot = _legacy_dynamic_context_snapshot(
+        self._last_dynamic_context_snapshot = _dynamic_context_trace_snapshot(
             tuple(blocks), result.messages
         )
         messages = result.output

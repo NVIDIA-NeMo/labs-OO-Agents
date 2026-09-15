@@ -154,6 +154,8 @@ class PlainCodeActBlockFormatter(XMLBlockFormatter):  # type: ignore[misc]  # un
         return ""
 
     def format(self, blocks: list[ResolvedBlock]) -> list[RenderedMessage]:
+        # CodeActLite alone needs strategy-specific handling: unlike regular
+        # CodeAct, it merges PythonOutput events into their tool-result messages.
         saw_event = False
         saw_non_system = False
         for block in blocks:

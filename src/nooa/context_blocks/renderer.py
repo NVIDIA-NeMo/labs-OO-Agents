@@ -203,8 +203,9 @@ def render_context(
                 raise UnsupportedContextLayout(
                     f"{type(block_formatter).__name__} emitted no message before CacheBoundary"
                 )
-            rendered[-1] = rendered[-1].model_copy(update={"cache_boundary_after": True})
         messages.extend(rendered)
+        if boundary_after:
+            messages.append(RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()))
     output = provider_formatter.format(messages)
     return RenderResult(
         output=output,

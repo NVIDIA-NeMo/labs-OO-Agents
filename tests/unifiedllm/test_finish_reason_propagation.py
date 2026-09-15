@@ -197,6 +197,16 @@ class TestCompletionClientPropagation:
             out = client.call([{"role": "user", "content": "Hi"}])
         assert out.content == "I will use the tool."
 
+    def test_sync_tool_call_normalizes_missing_arguments(self, client):
+        tc = make_tool_call("call_1", "do_thing", "{}")
+        tc.function.arguments = None  # type: ignore[assignment]
+        response = make_mock_response(content=None, tool_calls=[tc])
+
+        with patch("litellm.completion", return_value=response):
+            out = client.call([{"role": "user", "content": "Hi"}])
+
+        assert out.tool_calls[0].arguments == ""
+
     @pytest.mark.asyncio
     async def test_async_tool_call_preserves_accompanying_text(self, client):
         tc = make_tool_call("call_1", "do_thing", "{}")
@@ -220,12 +230,7 @@ def _make_responses_api_response(status: str, reason: str | None = None):
 def _make_incomplete_responses_tool_response():
     return SimpleNamespace(
         output=[
-            SimpleNamespace(
-                type="function_call",
-                call_id="call_1",
-                name="do_thing",
-                arguments="{}",
-            )
+            {"type": "function_call", "call_id": "call_1", "name": "do_thing", "arguments": "{}"}
         ],
         usage=None,
         status="incomplete",
@@ -236,13 +241,12 @@ def _make_incomplete_responses_tool_response():
 def _make_responses_tool_response(text: str):
     return SimpleNamespace(
         output=[
-            SimpleNamespace(type="message", content=[SimpleNamespace(text=text)]),
-            SimpleNamespace(
-                type="function_call",
-                call_id="call_1",
-                name="do_thing",
-                arguments="{}",
-            ),
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            },
+            {"type": "function_call", "call_id": "call_1", "name": "do_thing", "arguments": "{}"},
         ],
         usage=None,
         status="completed",
@@ -393,11 +397,14 @@ class TestCodeActAbortOnRealLengthPath:
             assert await agent_instance.my_task() == "done"
 
         events = agent_instance.event_manager.values()
-        first_output = next(event for event in events if event.event_type == "LLMResponse")
+        from nooa.context_blocks.events import ToolCallEvent
+        from nooa.unifiedllm import LLMResponse
+
+        first_output = next(event for event in events if isinstance(event, LLMResponse))
         execution = next(
             event
             for event in events
-            if event.event_type == "ToolCallEvent" and event.name == "execute_python"
+            if isinstance(event, ToolCallEvent) and event.name == "execute_python"
         )
         assert first_output.content == "I will calculate this."
         assert execution.arguments == {"code": "x = 42"}

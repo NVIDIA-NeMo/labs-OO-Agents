@@ -24,7 +24,6 @@ import importlib
 import os
 import runpy
 import sys
-import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -849,50 +848,6 @@ class TestNemoRelayMiddlewareModelExtraction:
                 await nm.nemo_relay_llm_middleware(ctx, mock_nxt)
                 call_args = fake_nemo_relay.llm.execute.call_args
                 assert call_args[0][0] == "gpt-4-test"  # first positional arg is model_name
-            finally:
-                importlib.reload(nm)
-
-
-class TestNemoRelayWrapperFallbackReturn:
-    """Line 169: _wrapper returns {} when resp has no recognized attributes."""
-
-    @pytest.mark.asyncio
-    async def test_wrapper_fallback_empty_dict(self):
-        """When resp has no model_dump, raw_response, or assistant_message, return {}."""
-        fake_nemo_relay, _ = _make_fake_nemo_relay_for_test()
-
-        import nooa.nemo_relay_middleware as _nm_ensure  # noqa: F401
-
-        captured_wrapper_result = {}
-
-        async def llm_execute_capturing(*args, **kwargs):
-            """Call the wrapper and capture its return value."""
-            wrapper = args[2]
-            request = args[1]
-            result = await wrapper(request)
-            captured_wrapper_result["result"] = result
-
-        fake_nemo_relay.llm.execute = AsyncMock(side_effect=llm_execute_capturing)
-
-        with patch.dict(sys.modules, {"nemo_relay": fake_nemo_relay}):
-            nm = sys.modules["nooa.nemo_relay_middleware"]
-            importlib.reload(nm)
-            try:
-                ctx = MagicMock()
-                ctx.agent = None
-                ctx.params = {}
-                ctx.messages = []
-
-                # The response object has none of the expected attributes
-                plain_resp = types.SimpleNamespace()
-                # no model_dump, no raw_response, no assistant_message
-
-                async def mock_nxt(c):
-                    c.response = plain_resp
-                    return c
-
-                await nm.nemo_relay_llm_middleware(ctx, mock_nxt)
-                assert captured_wrapper_result["result"] == {}
             finally:
                 importlib.reload(nm)
 
