@@ -70,9 +70,22 @@ def capture_request(request):
         span, metadata = state
         metadata["model"] = body.get("model", metadata["model"])
         messages = body.get("messages", body.get("input", []))
+        if "contents" in body:
+            messages = [
+                {
+                    "role": "assistant"
+                    if item.get("role") == "model"
+                    else item.get("role", "user"),
+                    "content": item.get("parts", []),
+                }
+                for item in body["contents"]
+            ]
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
-        leading = body.get("system", body.get("instructions"))
+        leading = body.get(
+            "system",
+            body.get("instructions", body.get("system_instruction", body.get("systemInstruction"))),
+        )
         if leading:
             messages = [{"role": "system", "content": leading}, *messages]
         span.set_attribute("llm.model_name", metadata["model"])
@@ -94,7 +107,11 @@ def capture_request(request):
                 f"llm.tools.{i}.tool.json_schema",
                 json.dumps(tool, ensure_ascii=False, sort_keys=True),
             )
-        _notify("log_pre_api_call", metadata["model"], messages, metadata)
+        # A NOOA retry belongs to the same journal call. Re-notifying consumes
+        # the one-shot block-reference sideband and replaces it with raw input.
+        if not metadata.get("input_recorded"):
+            _notify("log_pre_api_call", metadata["model"], messages, metadata)
+            metadata["input_recorded"] = True
     except Exception as exc:
         logger.warning("Could not record LLM request (%s)", type(exc).__name__)
 

@@ -225,6 +225,7 @@ class _ClientHttp:
                 model,
                 api_key=config.get("api_key"),
                 api_base=config.get("api_base"),
+                custom_llm_provider=config.get("custom_llm_provider"),
             )
         except Exception as e:  # noqa: BLE001
             # Unknown/ambiguous model — don't risk handing an incompatible client
@@ -239,6 +240,10 @@ class _ClientHttp:
         openai_family = provider == "openai" or provider in getattr(
             litellm, "openai_compatible_providers", []
         )
+        # These routes use LiteLLM's HTTP handler, not its OpenAI SDK adapter.
+        # The wrong wrapper silently loses the owned pool and its wire hooks.
+        if provider in {"hosted_vllm", "deepseek", "gemini"}:
+            openai_family = False
         if not openai_family:
             # anthropic / bedrock / vertex / ... accept AsyncHTTPHandler|HTTPHandler
             # (guarded by isinstance in their handlers).
@@ -1051,6 +1056,11 @@ class UnifiedLLM(ABC):
             raise ValueError("transport must be 'litellm' or 'direct'")
         self.transport = transport
         self.api_style = api_style
+        if replay_vendor is not None and (
+            not isinstance(replay_vendor, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]*", replay_vendor)
+        ):
+            raise ValueError("replay_vendor must be a nonempty lowercase provider name")
         self.replay_vendor = replay_vendor
         self._direct = None
         reject_legacy_cache_config(config)
@@ -1107,14 +1117,33 @@ class UnifiedLLM(ABC):
             return self._direct.call(params)
         if responses:
             return litellm.responses(**params)
-        return _collect_sync(litellm.completion(**params))
+        if "client" in params:
+            return _collect_sync(litellm.completion(**params))
+        # Overrides need fresh bound wrappers, not the constructor's URL/key.
+        temporary = _ClientHttp.for_completion(params["model"], params, self._http_config)
+        try:
+            call = dict(params)
+            if temporary.sync_client is not None:
+                call["client"] = temporary.sync_client
+            return _collect_sync(litellm.completion(**call))
+        finally:
+            temporary.close()
 
     async def _asend(self, params, *, responses=False):
         if self._direct is not None:
             return await self._direct.acall(params)
         if responses:
             return await litellm.aresponses(**params)
-        return await _collect_async(await _litellm_acompletion(params))
+        if "client" in params:
+            return await _collect_async(await _litellm_acompletion(params))
+        temporary = _ClientHttp.for_completion(params["model"], params, self._http_config)
+        try:
+            call = dict(params)
+            if temporary.async_client is not None:
+                call["client"] = temporary.async_client
+            return await _collect_async(await _litellm_acompletion(call))
+        finally:
+            await temporary.aclose()
 
     @property
     def reasoning_levels(self) -> tuple[str, ...] | None:

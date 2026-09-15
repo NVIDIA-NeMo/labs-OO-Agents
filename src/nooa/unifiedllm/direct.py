@@ -11,6 +11,7 @@ so registry-declared settings reach compatible servers unchanged.
 
 import inspect
 import json
+import os
 import re
 from typing import Any
 
@@ -112,8 +113,8 @@ def _anthropic_message(message, index):
             if not isinstance(thinking, list) or not all(isinstance(b, dict) for b in thinking):
                 raise ValueError("thinking_blocks must be a list of blocks")
             content = [*thinking, *content]
-            if message.get("reasoning_content"):
-                content.insert(0, {"type": "text", "text": message["reasoning_content"]})
+            # Chat-only reasoning is not spoken output. Native Messages
+            # replay uses signed thinking_blocks exclusively.
             calls = message.get("tool_calls") or []
             if not isinstance(calls, list):
                 raise ValueError("tool_calls must be a list")
@@ -309,7 +310,20 @@ class DirectTransport:
 
     @staticmethod
     def _http_settings(config):
-        return {"timeout": config.to_httpx_timeout(), "limits": config.to_httpx_limits()}
+        settings = {
+            "timeout": config.to_httpx_timeout(),
+            "limits": config.to_httpx_limits(),
+            "follow_redirects": True,
+        }
+        # httpx handles SSL_CERT_FILE/SSL_CERT_DIR and proxy variables itself.
+        # Do not import LiteLLM just to construct the direct HTTP pool.
+        if cert := os.environ.get("SSL_CERTIFICATE"):
+            settings["cert"] = cert
+        if verify := os.environ.get("SSL_VERIFY"):
+            settings["verify"] = (
+                verify.lower() != "false" if verify.lower() in {"true", "false"} else verify
+            )
+        return settings
 
     def route(self, model, params):
         prefix, separator, rest = model.partition("/")

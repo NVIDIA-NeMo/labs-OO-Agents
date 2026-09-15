@@ -523,8 +523,9 @@ class SummarizationAgent(Agent):
     def _input_token_counter(self) -> "Callable[[str], int]":
         """Token counter for sizing the summarizer's own input.
 
-        Prefer the summarizer LLM's ``count_tokens``; fall back to the shared
-        char-approximate counter so the cap still applies when no counter is set.
+        UnifiedLLM has no tokenizer: its normal path uses the shared character
+        estimate, not a measured token count. A custom LLM can still supply a
+        ``count_tokens`` callable. Actual usage always comes from the response.
         """
         llm = getattr(self, "_llm", None)
         counter = getattr(llm, "count_tokens", None)

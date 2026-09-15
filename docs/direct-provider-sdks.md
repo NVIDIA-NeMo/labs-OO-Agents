@@ -62,8 +62,8 @@ Editing a stored turn or switching to an incompatible model still drops its
 private fields and retains readable text.
 
 Reasoning settings come from the registry, not a new model-name mapping.
-Likewise, cache markers remain opt-in through the existing `cache_breakpoint`
-setting. An endpoint accepting a request does not establish that it used the
+Cache configuration follows the shared clients' `cache_breakpoint` policy.
+An endpoint accepting a request does not establish that it used the
 reasoning setting or served a cache hit; inspect reported usage during soaking.
 
 ## Tracing and token estimates
@@ -74,10 +74,12 @@ and native reasoning state are redacted. Journal errors are logged without
 failing or repeating the provider call. Tracing no longer instruments unrelated
 raw `litellm.completion` calls made outside UnifiedLLM.
 
-One legacy-path limitation remains: a per-call model or route override may use
-LiteLLM's own HTTP pool, bypassing the request hook. That call still records its
-public response and usage, but not its outbound input. Construct a client for
-the desired route when complete request tracing is required.
+Legacy model/URL/key overrides construct temporary bound HTTP wrappers and close
+them after dispatch, keeping the request hook attached without reusing the wrong
+credentials. Handler-backed vLLM, DeepSeek and Gemini routes use the handler
+wrapper, and Gemini `contents` are included in journal input. Providers that do
+not accept a supplied HTTP client can still bypass the hook; complete wire capture
+is not promised for arbitrary third-party LiteLLM adapters.
 
 The LiteLLM tracing instrumentor, its monkeypatch, token calibration and
 `UnifiedLLM.count_tokens` are removed. No tokenizer replaces them. Direct
@@ -88,6 +90,45 @@ LiteLLM may estimate Anthropic's reasoning-token breakdown; the direct path
 does not. When the server reports only total output tokens, that total is
 preserved and the separate reasoning count remains unknown (represented as zero
 by the existing usage type).
+
+### Migration notes (including the default LiteLLM path)
+
+This is an opt-in transport, but not a promise that every default-path observable
+is unchanged. The following shared changes apply to both transports:
+
+- `UnifiedLLM.count_tokens` and `TokenCalibration` are removed. Use reported
+  `response.usage` for actual usage. Applications that need preflight estimates
+  must supply their own counter; the summarizer uses its existing character
+  heuristic when no application counter is available. This is not a tokenizer
+  accuracy guarantee.
+- Readable `reasoning_content` on resolved compatible Chat routes is now replayed
+  in that field, not concatenated into the assistant's visible answer. This changes
+  second-turn bodies for routes outside the old provider allow-list. Opaque state
+  still requires a recognized dialect and a compatible scope.
+- Raw `reasoning_content` is not converted into spoken text by the direct native
+  Anthropic adapter. Native replay uses signed thinking blocks; portable text
+  produced by the shared cross-model projection is unchanged.
+- LiteLLM globals and its cache-control preservation patch initialize when a
+  legacy client is constructed. Unrelated raw `litellm.*` calls made earlier see
+  LiteLLM's own defaults and are not traced by NOOA.
+- Spans are named `llm.call`, one per logical call including retries. `input.value`
+  is scrubbed wire JSON; `output.value` is JSON for the public response. Model and
+  invocation attributes describe the actual request, not pre-translation kwargs.
+  Journal input follows wire messages; Anthropic input usage includes cache reads
+  and writes. Consumers relying on old span names, message indices, or cost-breakdown
+  attributes need updating. Unknown cost remains zero in the current usage type.
+
+`api_style` remains supported so existing registry/Connect entries do not break
+and native format selection need not depend on a model-name heuristic.
+`replay_vendor` is validated consistently before either transport is constructed.
+The prefix rules above remain unchanged to preserve saved replay scopes; an
+OpenRouter model whose literal name starts with a recognized prefix must retain
+the outer routing prefix (for example `openai/deepseek/deepseek-chat`).
+
+Direct HTTP clients preserve redirect handling and environment-based client
+certificates (`SSL_CERTIFICATE`) and verification (`SSL_VERIFY`, `SSL_CERT_FILE`,
+`SSL_CERT_DIR`). They do not read mutable LiteLLM Python globals. Provider SDK
+User-Agent headers may differ; HTTP-body equality does not assert header equality.
 
 ## Testing and limits
 
