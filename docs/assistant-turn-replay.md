@@ -122,18 +122,18 @@ leaves. Live SDK responses and parsed Python results are excluded from archives.
 
 ### Open-model tool replay check
 
-On 2026-09-14, two capped calls each through NVIDIA Inference Hub passed for
-DeepSeek V4 Pro, Kimi K3, GLM 5.3 and Qwen 3.5 397B. Each produced nonempty
-`reasoning_content` and a tool call. After closing/reopening SQLite, a new client
-sent exactly that text in the next request's `reasoning_content`; all four
-continuations completed. Both calls included trailing live-context messages.
-Total: 2,759 input tokens (including cached input), 797 output tokens, no retries.
-These tests establish field preservation and successful continuation, not whether
-each route rejects an omitted field or guarantees a cache hit. Run with
-`NOOA_RUN_OPEN_MODEL_REPLAY=1` and `NVIDIA_INFERENCE_API_KEY`:
+An opt-in live test covers open models that return readable `reasoning_content`
+with a tool call: two capped calls per model, no retries. After closing and
+reopening SQLite, a new client must send exactly the captured text in the next
+request's `reasoning_content`, and the continuation must complete with trailing
+live-context messages present. The test establishes field preservation and
+successful continuation, not whether each route rejects an omitted field or
+guarantees a cache hit. The routes come from `release-gate-<family>` registry
+aliases supplied by an installed bundled-config package (see
+`tests/integration/_release_gate.py`); without them the cases skip:
 
 ```bash
-uv run pytest -m integration -s tests/integration/test_open_model_tool_reasoning_live.py
+NOOA_RUN_OPEN_MODEL_REPLAY=1 uv run pytest -m integration -s tests/integration/test_open_model_tool_reasoning_live.py
 ```
 
 Set `NOOA_TEST_OMITTED_REASONING=1` to add one continuation per model with
@@ -142,6 +142,7 @@ The test checks that this is the only changed field and reports the HTTP outcome
 A successful omitted-field request does not prove that reasoning was retained or
 used: gateways differ in how they enforce the field. Rate limits, authentication
 failures and transport failures are inconclusive, not evidence of a required field.
+Recorded results are kept with the private release documentation.
 
 ## Archives and collapse
 
