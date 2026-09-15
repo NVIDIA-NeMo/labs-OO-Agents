@@ -16,12 +16,14 @@ from nooa.unifiedllm import CacheBoundary, ResponsesClient, RetryConfig, registr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["litellm", "direct"])
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("style", ["responses", "anthropic", "chat"])
 @pytest.mark.parametrize("mode", ["default", "no-boundary", "disabled"])
-async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchronous):
+async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchronous, transport):
     """Exercise renderer -> registry client -> SDK -> HTTP, with no cache opt-in."""
     entry = {
+        "transport": transport,
         "model_name": "anthropic/claude-sonnet-4-5" if style == "anthropic" else "openai/gpt-4o",
         "client_type": "responses" if style == "responses" else "completion",
         "api_base": "https://models.example"

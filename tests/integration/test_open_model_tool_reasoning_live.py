@@ -27,7 +27,7 @@ from nooa.storage.sqlite import SQLiteStorageManager
 from nooa.unifiedllm import Tool
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.retry_config import RetryConfig
-from tests.integration._release_gate import gate_client, gate_host
+from tests.integration._release_gate import gate_cases, gate_client, gate_host
 
 pytestmark = [
     pytest.mark.integration,
@@ -46,9 +46,9 @@ def lookup(key: str) -> int:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", FAMILIES)
+@pytest.mark.parametrize("family,transport", gate_cases(FAMILIES))
 async def test_open_model_tool_reasoning_after_sqlite_resume(
-    family, tmp_path, monkeypatch, record_property
+    family, transport, tmp_path, monkeypatch, record_property
 ):
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
     host = gate_host(family)
@@ -97,6 +97,7 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
         {"role": "user", "content": "Live context: phase=before lookup."},
     ]
     options = {
+        "transport": transport,
         "max_tokens": 1536,
         "http_config": HttpConfig(read_timeout=120),
         "num_retries": 0,

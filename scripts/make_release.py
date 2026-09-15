@@ -344,7 +344,7 @@ def provider_checks(
     The supplied alias wheel is loaded in uv's temporary environment, since the
     locked project sync removes packages outside the lockfile. Local callers may
     omit it when their registry aliases are otherwise available.
-    Seven cases make at most 17 capped calls without retries. A fresh report
+    Twenty cases make at most 48 capped calls without retries. A fresh report
     directory and exact case identities prevent stale or skipped evidence from
     satisfying the gate. Session databases and reports stay in private artifacts.
     """
@@ -353,7 +353,11 @@ def provider_checks(
     # controller provides it. A missing credential fails the cases, which the
     # count below rejects before any draft is created.
     env = os.environ.copy()
-    env.update(NOOA_RUN_OPEN_MODEL_REPLAY="1", NOOA_RUN_CACHE_RESUME_LIVE="1")
+    if "NOOA_LLM_TRANSPORT" in env:
+        die("Unset NOOA_LLM_TRANSPORT: the release gate explicitly checks both transports")
+    env.update(
+        NOOA_RUN_OPEN_MODEL_REPLAY="1", NOOA_RUN_CACHE_RESUME_LIVE="1", NOOA_RUN_SUMMARIZER_E2E="1"
+    )
     env.pop(
         "NOOA_TEST_OMITTED_REASONING", None
     )  # Optional A/B calls are outside the release budget.
@@ -361,10 +365,10 @@ def provider_checks(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="provider-validation-", dir=artifact_dir))
     report = directory / "results.xml"
-    evidence = {"outcome": "running", "report": str(report), "expected_cases": 7}
+    evidence = {"outcome": "running", "report": str(report), "expected_cases": 20}
     if manifest:
         manifest.update(provider_validation=evidence)
-    step("Provider replay and cache checks (17 capped provider requests)")
+    step("Provider replay and cache checks (both transports; 48 capped provider requests)")
     try:
         run(
             [
@@ -387,25 +391,47 @@ def provider_checks(
                 str(directory / "sessions"),
                 "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume",
                 "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume",
+                "tests/integration/test_summarizer_live.py::test_installed_summarizer_applies_before_next_turn",
+                "tests/integration/test_cache_resume_live.py::test_saved_turn_switches_provider_in_gate",
             ],
             env=env,
-            timeout=900,
+            timeout=2400,
             capture=False,
         )
         cases = ET.parse(report).findall(".//testcase")
-        expected = {
-            (
-                "tests.integration.test_cache_resume_live",
-                f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}]",
-            )
-            for family in ("openai", "anthropic", "gemini")
-        } | {
-            (
-                "tests.integration.test_open_model_tool_reasoning_live",
-                f"test_open_model_tool_reasoning_after_sqlite_resume[{family}]",
-            )
-            for family in ("deepseek", "kimi", "glm", "qwen")
-        }
+        expected = (
+            {
+                (
+                    "tests.integration.test_cache_resume_live",
+                    f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}-{transport}]",
+                )
+                for family in ("openai", "anthropic", "gemini")
+                for transport in ("litellm", "direct")
+            }
+            | {
+                (
+                    "tests.integration.test_open_model_tool_reasoning_live",
+                    f"test_open_model_tool_reasoning_after_sqlite_resume[{family}-{transport}]",
+                )
+                for family in ("deepseek", "kimi", "glm", "qwen")
+                for transport in ("litellm", "direct")
+            }
+            | {
+                (
+                    "tests.integration.test_summarizer_live",
+                    f"test_installed_summarizer_applies_before_next_turn[{family}-{transport}]",
+                )
+                for family in ("openai", "anthropic")
+                for transport in ("litellm", "direct")
+            }
+            | {
+                (
+                    "tests.integration.test_cache_resume_live",
+                    f"test_saved_turn_switches_provider_in_gate[anthropic-openai-{transport}]",
+                )
+                for transport in ("litellm", "direct")
+            }
+        )
         actual = {(case.get("classname"), case.get("name")) for case in cases}
         if (
             len(cases) != len(expected)
@@ -417,7 +443,7 @@ def provider_checks(
             )
         ):
             die(
-                "Provider validation requires the seven expected cases to pass exactly once; no skips. Check the alias package if cases were skipped (use --internal-wheel)."
+                "Provider validation requires the twenty expected transport-labelled cases to pass exactly once; no skips. Check the alias package if cases were skipped (use --internal-wheel)."
             )
     except (ReleaseError, OSError, ET.ParseError) as exc:
         if manifest:
@@ -425,7 +451,7 @@ def provider_checks(
         die(f"Provider validation failed; inspect private evidence in {directory}: {exc}")
     if manifest:
         manifest.update(provider_validation={**evidence, "outcome": "passed"})
-    ok("all seven provider cases passed")
+    ok("all twenty provider cases passed on both transports")
 
 
 # ---------------------------------------------------------------------------

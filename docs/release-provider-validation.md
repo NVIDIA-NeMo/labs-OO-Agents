@@ -1,6 +1,6 @@
 # Provider checks before drafting a release
 
-The release gate (`scripts/make_release.py`, `provider_checks()`) runs seven
+The release gate (`scripts/make_release.py`, `provider_checks()`) runs twenty
 real-provider tests on the candidate before the capability comparison and draft
 creation. They do not run on pull requests.
 
@@ -10,6 +10,12 @@ creation. They do not run on pull requests.
 - Four open-model families check readable reasoning and a tool exchange after
   SQLite resume, including the exact `reasoning_content` field in the next
   HTTP request.
+- Two summarizer cases verify that a background summary shares the parent prefix
+  and is applied before the next turn. One cross-provider switch reuses the
+  Anthropic resume seed and checks that no signed state reaches the OpenAI route.
+- Each of these ten cases runs once on LiteLLM and once on direct, with the
+  transport in its JUnit identity. `NOOA_LLM_TRANSPORT` is rejected before calls;
+  an alias cannot replace the selected transport or set a test-specific cache mode.
 - Offline contract tests remain on every pull request. The live checks are
   smoke tests for gateway and SDK changes that mocks cannot detect, not
   capability or answer-quality evaluations.
@@ -25,8 +31,9 @@ may omit it if their registry already contains the aliases. Without the aliases
 every case skips, and the
 gate rejects skips, so a release cannot be drafted unless the checks ran.
 
-One run makes at most 17 requests with retries disabled and a 15-minute
-timeout. The runner requires each of the seven expected test names and modules
+One run makes at most 48 requests with retries disabled and a 40-minute
+timeout (24 calls per transport). This larger budget must be approved by the
+release controller operator. The runner requires each of the twenty expected test names and modules
 to pass exactly once, records the outcome and the
 JUnit report path in the release manifest, and keeps reports and session
 databases in private artifacts; they contain provider state and must not be

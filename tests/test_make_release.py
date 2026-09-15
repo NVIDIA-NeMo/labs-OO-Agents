@@ -939,7 +939,8 @@ def test_release_runner_contains_no_publish_operation(mr):
         "wrong_module",
     ],
 )
-def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome):
+def test_provider_gate_requires_twenty_passes(mr, monkeypatch, tmp_path, outcome):
+    monkeypatch.delenv("NOOA_LLM_TRANSPORT", raising=False)
     monkeypatch.setenv("NOOA_TEST_OMITTED_REASONING", "1")
     calls = []
 
@@ -947,28 +948,51 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
         calls.append((cmd, kwargs))
         assert kwargs["env"]["NOOA_RUN_OPEN_MODEL_REPLAY"] == "1"
         assert kwargs["env"]["NOOA_RUN_CACHE_RESUME_LIVE"] == "1"
+        assert kwargs["env"]["NOOA_RUN_SUMMARIZER_E2E"] == "1"
         assert "NOOA_TEST_OMITTED_REASONING" not in kwargs["env"]
-        assert kwargs["timeout"] == 900
+        assert kwargs["timeout"] == 2400
         assert cmd[cmd.index("--reruns") + 1] == "0"
-        assert cmd[-2:] == [
+        assert cmd[-4:] == [
             "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume",
             "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume",
+            "tests/integration/test_summarizer_live.py::test_installed_summarizer_applies_before_next_turn",
+            "tests/integration/test_cache_resume_live.py::test_saved_turn_switches_provider_in_gate",
         ]
         report = Path(cmd[cmd.index("--junitxml") + 1])
-        count = {"empty": 0, "partial": 6}.get(outcome, 7)
-        identities = [
-            (
-                "tests.integration.test_cache_resume_live",
-                f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}]",
-            )
-            for family in ("openai", "anthropic", "gemini")
-        ] + [
-            (
-                "tests.integration.test_open_model_tool_reasoning_live",
-                f"test_open_model_tool_reasoning_after_sqlite_resume[{family}]",
-            )
-            for family in ("deepseek", "kimi", "glm", "qwen")
-        ]
+        count = {"empty": 0, "partial": 19}.get(outcome, 20)
+        identities = (
+            [
+                (
+                    "tests.integration.test_cache_resume_live",
+                    f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}-{transport}]",
+                )
+                for family in ("openai", "anthropic", "gemini")
+                for transport in ("litellm", "direct")
+            ]
+            + [
+                (
+                    "tests.integration.test_open_model_tool_reasoning_live",
+                    f"test_open_model_tool_reasoning_after_sqlite_resume[{family}-{transport}]",
+                )
+                for family in ("deepseek", "kimi", "glm", "qwen")
+                for transport in ("litellm", "direct")
+            ]
+            + [
+                (
+                    "tests.integration.test_summarizer_live",
+                    f"test_installed_summarizer_applies_before_next_turn[{family}-{transport}]",
+                )
+                for family in ("openai", "anthropic")
+                for transport in ("litellm", "direct")
+            ]
+            + [
+                (
+                    "tests.integration.test_cache_resume_live",
+                    f"test_saved_turn_switches_provider_in_gate[anthropic-openai-{transport}]",
+                )
+                for transport in ("litellm", "direct")
+            ]
+        )
         if outcome == "duplicate":
             identities[0] = identities[1]
         elif outcome == "wrong_name":

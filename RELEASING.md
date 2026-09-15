@@ -26,8 +26,8 @@ The strict gate performs:
 2. Builds all five wheels and source distributions under a temporary local tag,
    verifies their versions, and smoke-tests imports and `nooa --version` in a
    clean environment.
-3. Runs seven bounded [provider replay/cache checks](docs/release-provider-validation.md)
-   on the candidate (17 capped provider requests, no retries), including SQLite resume
+3. Runs twenty bounded [provider replay/cache checks](docs/release-provider-validation.md)
+   on the candidate (48 capped provider requests across both transports, no retries), including SQLite resume
    and changing trailing dynamic context. Missing or skipped results fail the gate.
 4. Runs the full capability suite for the candidate and previous release, fresh
    and back-to-back: four gate models, three runs, full data, no response cache.

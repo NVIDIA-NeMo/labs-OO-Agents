@@ -13,6 +13,7 @@ release can never be drafted without the gate having actually run.
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlparse
 
 import pytest
@@ -44,7 +45,15 @@ def gate_host(family: str) -> str:
     return host
 
 
-def gate_client(family: str, **overrides):
+def gate_cases(families):
+    return [
+        pytest.param(family, transport, id=f"{family}-{transport}")
+        for family in families
+        for transport in ("litellm", "direct")
+    ]
+
+
+def gate_client(family: str, *, transport="litellm", **overrides):
     """Build the family's client from its registry alias plus test-owned settings.
 
     Route, endpoint, credential and client type come from the alias. Request
@@ -52,5 +61,10 @@ def gate_client(family: str, **overrides):
     reasoning options) stay here so the private entry never changes what the
     public gate asserts.
     """
-    _entry(family)
-    return get_llm_client(gate_alias(family), **overrides)
+    if "NOOA_LLM_TRANSPORT" in os.environ:
+        pytest.fail("Unset NOOA_LLM_TRANSPORT: release checks select each transport explicitly")
+    config = _entry(family)
+    assert "cache_breakpoint" not in config, "Gate aliases must exercise the shipped cache defaults"
+    client = get_llm_client(gate_alias(family), transport=transport, **overrides)
+    assert client.transport == transport
+    return client

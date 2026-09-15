@@ -63,6 +63,9 @@ private fields and retains readable text.
 
 Reasoning settings come from the registry, not a new model-name mapping.
 Cache configuration follows the shared clients' `cache_breakpoint` policy.
+Both clients default to `auto`; `None` disables NOOA's explicit markers. Native
+Anthropic auto selection respects a declared API style/vendor before the legacy
+model-name compatibility fallback.
 An endpoint accepting a request does not establish that it used the
 reasoning setting or served a cache hit; inspect reported usage during soaking.
 

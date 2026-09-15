@@ -1234,7 +1234,13 @@ class UnifiedLLM(ABC):
     def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
         mapping = self.cache_breakpoint
         if mapping == "auto" and not responses:
-            mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
+            if self.api_style is not None:
+                anthropic = self.api_style == "anthropic"
+            elif self.replay_vendor is not None:
+                anthropic = self.replay_vendor == "anthropic"
+            else:
+                anthropic = _is_anthropic_model(model or self.model)
+            mapping = "anthropic" if anthropic else None
         return apply_cache_policy(messages, mapping, responses=responses, instructions=instructions)
 
     def get_model_info(self) -> "Any":

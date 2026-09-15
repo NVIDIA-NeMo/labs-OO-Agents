@@ -38,7 +38,9 @@ from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.retry_config import RetryConfig
-from tests.integration._release_gate import gate_client, gate_host
+from tests.integration._release_gate import gate_cases, gate_client, gate_host
+
+_GATE_SESSIONS = {}
 
 pytestmark = [
     pytest.mark.integration,
@@ -97,9 +99,10 @@ def _report_usage(family, phase, response):
     )
 
 
-def _client(family):
+def _client(family, transport="litellm"):
     """Route and credential come from the registry alias; behaviour stays here."""
     config = {
+        "transport": transport,
         "http_config": HttpConfig(read_timeout=120),
         "num_retries": 0,
         "retry_config": RetryConfig(max_retries=0, rate_limit_extra_retries=0),
@@ -177,9 +180,9 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", FAMILIES)
+@pytest.mark.parametrize("family,transport", gate_cases(FAMILIES))
 async def test_reasoning_and_prompt_cache_survive_sqlite_resume(
-    family, tmp_path, monkeypatch, record_property
+    family, transport, tmp_path, monkeypatch, record_property
 ):
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
     host = gate_host(family)
@@ -208,7 +211,7 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(
             tag="1",
         )
     ]
-    async with _client(family) as client:
+    async with _client(family, transport) as client:
         model_name = client.model
         seed = await client.acall(_render(family, events, instructions, "phase=seed"), tools=[TOOL])
         _report_usage(family, "seed", seed)
@@ -268,7 +271,7 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(
         dict(message) for message in replay_messages[:-1]
     ]
     assert warm_messages[-1] != replay_messages[-1]
-    async with _client(family) as client:
+    async with _client(family, transport) as client:
         resumed = await client.acall(replay_messages, tools=[TOOL])
         _report_usage(family, "resumed", resumed)
 
@@ -325,6 +328,18 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(
         )
     )
     assert resumed.usage.cached_input_tokens > 0, "provider reported no cache hit after resume"
+    _GATE_SESSIONS[(family, transport)] = database
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport", ["litellm", "direct"], ids=["anthropic-openai-litellm", "anthropic-openai-direct"]
+)
+async def test_saved_turn_switches_provider_in_gate(transport, monkeypatch):
+    database = _GATE_SESSIONS.get(("anthropic", transport))
+    if database is None:
+        pytest.skip("The Anthropic resume seed must pass earlier in this invocation")
+    await _check_provider_switch("anthropic", "openai", database, monkeypatch, transport=transport)
 
 
 @pytest.mark.asyncio
@@ -342,7 +357,9 @@ async def test_saved_turn_switches_provider_without_private_state(source, target
     await _check_provider_switch(source, target, database, monkeypatch)
 
 
-async def _check_provider_switch(source, target, database, monkeypatch, *, require_private=True):
+async def _check_provider_switch(
+    source, target, database, monkeypatch, *, require_private=True, transport="litellm"
+):
     with SQLiteStorageManager(database) as storage:
         events = list(storage.event_backend.all_events())
     response = next(event for event in events if isinstance(event, LLMResponse))
@@ -388,7 +405,7 @@ async def _check_provider_switch(source, target, database, monkeypatch, *, requi
         "The verification tool has completed. Reply only OK.",
         "phase=model-switched",
     )
-    async with _client(target) as client:
+    async with _client(target, transport) as client:
         result = await client.acall(messages, tools=[TOOL])
     assert len(requests) == 1
     _report_usage(f"{source}->{target}", "switched_after_resume", result)
