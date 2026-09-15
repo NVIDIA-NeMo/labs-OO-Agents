@@ -1233,7 +1233,7 @@ class UnifiedLLM(ABC):
 
     def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
         mapping = self.cache_breakpoint
-        if mapping == "auto":
+        if mapping == "auto" and not responses:
             mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
         return apply_cache_policy(messages, mapping, responses=responses, instructions=instructions)
 
@@ -1791,6 +1791,10 @@ class CompletionClient(UnifiedLLM):
         if "tools" not in api_params:
             api_params.pop("tool_choice", None)
             api_params.pop("parallel_tool_calls", None)
+        elif api_params.get("tool_choice") == "auto":
+            # Auto is the default with tools; sending it alongside parallel=False
+            # can create conflicting tool-choice settings in compatible servers.
+            api_params.pop("tool_choice")
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -1877,6 +1881,10 @@ class CompletionClient(UnifiedLLM):
         if "tools" not in api_params:
             api_params.pop("tool_choice", None)
             api_params.pop("parallel_tool_calls", None)
+        elif api_params.get("tool_choice") == "auto":
+            # Auto is the default with tools; sending it alongside parallel=False
+            # can create conflicting tool-choice settings in compatible servers.
+            api_params.pop("tool_choice")
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -2017,7 +2025,7 @@ class ResponsesClient(UnifiedLLM):
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        cache_breakpoint: Literal["openai"] | None = None,
+        cache_breakpoint: Literal["auto", "openai"] | None = "auto",
         **config,
     ):
         """
@@ -2040,17 +2048,17 @@ class ResponsesClient(UnifiedLLM):
                          settings. Applied only to THIS client's requests (its
                          own httpx client is passed to litellm per call). No
                          global state and no monkey-patching of httpx.
-            cache_breakpoint: Set to ``"openai"`` to map the cached renderer's
-                stable-prefix boundary to a Responses explicit breakpoint.
-                Opt in only on a route supporting the explicit wire fields.
-                Default ``None`` leaves provider-default caching unchanged.
+            cache_breakpoint: Default ``"auto"`` maps a rendered boundary with
+                eligible stable input to a Responses explicit breakpoint.
+                Without a usable boundary, leaves provider-default caching unchanged.
+                ``None`` disables NOOA markers, not the provider's implicit cache.
                 Anthropic cache mapping is supported by CompletionClient only.
                 With ``"openai"`` and no eligible stable block, warns and keeps
                 explicit mode without a breakpoint, avoiding all cache writes.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
-        if cache_breakpoint not in {None, "openai"}:
-            raise ValueError("ResponsesClient cache_breakpoint must be 'openai' or None")
+        if cache_breakpoint not in {None, "auto", "openai"}:
+            raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint

@@ -385,8 +385,8 @@ async def test_openai_marks_the_stable_prefix_before_dynamic_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_boundary_is_inert_without_capability_opt_in() -> None:
-    client = ResponsesClient(model="openai/gpt-5.6", api_key="test")
+async def test_boundary_is_inert_with_explicit_marker_opt_out() -> None:
+    client = ResponsesClient(model="openai/gpt-5.6", api_key="test", cache_breakpoint=None)
     try:
         with patch("litellm.aresponses", new_callable=AsyncMock) as request:
             request.return_value = _responses_output()

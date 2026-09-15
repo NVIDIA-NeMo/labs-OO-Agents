@@ -11,16 +11,20 @@ policies would make their interactions harder to test.
 
 ## Configuration
 
-- `cache_breakpoint="auto"` is the CompletionClient default. Recognized Anthropic routes get a
-  native `cache_control` breakpoint. Other routes use provider-default caching.
+- `cache_breakpoint="auto"` is the default for both clients; registry entries need
+  no cache setting. Completion clients mark recognized Anthropic routes with a
+  native `cache_control` breakpoint; other Chat routes use provider-default caching.
+  Responses clients enable explicit caching when a `CacheBoundary()` and eligible
+  stable input are present. Without them, they send no extra cache fields.
 - `cache_breakpoint="anthropic"` explicitly selects the Anthropic Chat mapping,
   including gateway aliases that cannot be recognized automatically.
-- `cache_breakpoint="openai"` opts a Responses client into explicit OpenAI
-  breakpoints. Use it only on routes supporting those wire fields; it is not
-  inferred from a model name.
+- `cache_breakpoint="openai"` forces the Responses explicit-cache policy, including
+  its leading-instructions fallback without a boundary. It is an override, not
+  required for normal use.
 - `cache_breakpoint=None` disables NOOA-generated cache markers, not the
-  provider's implicit cache. This is the ResponsesClient default; that client
-  accepts only `None` or `"openai"`, not the Anthropic Chat mapping.
+  provider's implicit cache. Use this opt-out for a Responses endpoint that does
+  not support explicit-cache fields. Responses clients do not accept the
+  Anthropic Chat mapping.
 
 Registry YAML accepts the same setting. Explicit mappings are tied to the client
 model: use a new client when switching models. The automatic mapping is resolved
@@ -42,8 +46,9 @@ Only UnifiedLLM interprets and removes the boundary before sending the request.
 NeMo Relay projects it to public metadata JSON at its serialization boundary,
 then restores the original object if that entry is unchanged. A raw dictionary
 with `nooa_cache_boundary` is rejected with instructions to use `CacheBoundary()`;
-there is only one accepted boundary type. Without a boundary, the policy marks
-only leading system/developer instructions, not arbitrary history.
+there is only one accepted boundary type. Without a boundary, Completion and
+forced explicit Responses policies mark only leading system/developer instructions,
+not arbitrary history. Automatic Responses adds no cache fields.
 
 ## Provider mapping
 
@@ -54,10 +59,11 @@ Responses marks the latest eligible input text, image, file or function result
 and enables explicit mode. Stable media must be inside the breakpoint rather
 than left after a preceding text block. If necessary,
 stable Responses instructions become an input-text block to carry that marker.
-If no eligible stable block exists, OpenAI explicit mode remains enabled with
+If no eligible stable block exists, forced OpenAI explicit mode remains enabled with
 no breakpoint and logs a warning: the request does not cache anything. This can
 happen with wholly dynamic input or stable history containing only unmarkable
 output blocks. It deliberately avoids implicit writes beyond the chosen boundary.
+Automatic Responses instead leaves provider-default caching unchanged in this case.
 Gemini receives no invented inline marker: this change uses its implicit cache,
 not a separately managed explicit cached-content resource.
 

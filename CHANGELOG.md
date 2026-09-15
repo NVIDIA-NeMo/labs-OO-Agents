@@ -14,6 +14,9 @@ to follow semantic versioning.
 - LLM tracing and journals now cover UnifiedLLM calls on either transport,
   including the viewer playground. Raw LiteLLM calls outside UnifiedLLM are
   no longer automatically instrumented.
+- Responses clients now honor the cached renderer's stable-prefix boundary by default,
+  without a cache setting in the model registry. Requests without a usable boundary
+  retain provider-default caching; `cache_breakpoint=None` opts out of NOOA markers.
 
 - Security: the sandbox parent no longer unpickles worker bytes. Brokered `self.*`
   arguments, `self.x = value` assignments, cell return values and `return_result`

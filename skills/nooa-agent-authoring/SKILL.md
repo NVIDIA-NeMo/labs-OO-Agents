@@ -71,11 +71,13 @@ means a framework control record, not a system/user/assistant message for the
 model. UnifiedLLM consumes the boundary before provider dispatch and maps it to
 the selected provider's cache settings; the metadata record itself never goes
 to the model. Direct callers can put `CacheBoundary()` in their history too.
-`cache_breakpoint="auto"` (CompletionClient default) marks recognized Anthropic
-routes and leaves other providers' caches implicit. A supported OpenAI Responses
-route can opt into `cache_breakpoint="openai"`; `None` disables NOOA markers and
-is the ResponsesClient default.
-Without a rendered boundary, direct callers cache only leading instructions.
+`cache_breakpoint="auto"` is the default for both clients; no registry cache
+setting is needed. Completion marks recognized Anthropic routes and leaves other
+Chat caches implicit. Responses uses explicit caching when a boundary and eligible
+stable input exist, otherwise provider-default caching. `None` opts out of NOOA
+markers, not the provider's implicit caching. Explicit `"openai"`/`"anthropic"`
+settings force a mapping. Without a boundary, Completion and forced explicit
+Responses policies cache only leading instructions; automatic Responses adds no fields.
 `cache_control_injection_points` is removed; see
 [stable-prefix caching](../../docs/stable-prefix-caching.md) for migration and
 direct-call examples.
