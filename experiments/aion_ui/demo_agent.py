@@ -24,9 +24,10 @@ MARKER = "# NOOA AionUi scripted spike artifact"
 class DemoLLM(FakeLLMClient):
     """Return one complete, fresh CodeAct execution per prompt."""
 
-    def __init__(self, *, blocking: bool = False) -> None:
+    def __init__(self, *, blocking: bool = False, execution_tree: bool = False) -> None:
         super().__init__()
         self._blocking = blocking
+        self._execution_tree = execution_tree
 
     async def acall(
         self,
@@ -43,6 +44,18 @@ class DemoLLM(FakeLLMClient):
             code = (
                 "self.message('Scripted cancellation demo: waiting until you stop this turn.')\n"
                 "await asyncio.Event().wait()"
+            )
+        elif self._execution_tree:
+            code = (
+                "from tree_demo import DemoWorkflow\n"
+                "from nooa.unifiedllm import FakeLLMClient\n"
+                "self.message('Scripted execution-tree demo — no live model call. '"
+                "'A nested verifier will catch one deliberate '"
+                "'failed check, then the workflow will write and execute a real Python file.')\n"
+                "workflow = DemoWorkflow(llm=FakeLLMClient())\n"
+                f"report = await workflow.run(self.shell, self.cwd, {self.call_count})\n"
+                "self.message(report)\n"
+                "return_result(RespondResult(kind='DONE', explanation=report))"
             )
         else:
             program = (
@@ -85,8 +98,18 @@ def main() -> None:
     parser.add_argument(
         "--blocking", action="store_true", help="First prompt waits for cancellation."
     )
+    parser.add_argument(
+        "--execution-tree",
+        action="store_true",
+        help="Emit nested method metadata and run the execution-tree demo.",
+    )
     args = parser.parse_args()
-    asyncio.run(serve(lambda: DemoLLM(blocking=args.blocking)))
+    asyncio.run(
+        serve(
+            lambda: DemoLLM(blocking=args.blocking, execution_tree=args.execution_tree),
+            execution_tree=args.execution_tree,
+        )
+    )
 
 
 if __name__ == "__main__":

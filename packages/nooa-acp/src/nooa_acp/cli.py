@@ -29,8 +29,17 @@ if TYPE_CHECKING:
     "--agent", "agent_spec", help="Shared coding agent class (module:Class or file.py:Class)."
 )
 @click.option("--legacy-agent", is_flag=True, help="Use the standard multi-tool coding agent.")
+@click.option(
+    "--execution-tree",
+    is_flag=True,
+    help="Expose nested NOOA method execution as ACP tool cards with tree metadata.",
+)
 def command(
-    model: str, client_type: str | None, agent_spec: str | None, legacy_agent: bool
+    model: str,
+    client_type: str | None,
+    agent_spec: str | None,
+    legacy_agent: bool,
+    execution_tree: bool,
 ) -> None:
     """Serve the NOOA coding agent over ACP on standard input/output."""
     from nooa.secrets import load_secrets_into_env
@@ -44,19 +53,16 @@ def command(
         overrides = {"api_key": nvidia_api_key} if nvidia_api_key else {}
         return get_llm_client(model, client_type=client_type, **overrides)
 
+    options = {}
+    if execution_tree:
+        options["execution_tree"] = True
     if agent_spec or legacy_agent:
         from nooa_cli.interactive.options import SessionOptions
 
-        asyncio.run(
-            serve(
-                llm_factory,
-                options_factory=lambda root: SessionOptions.load(
-                    root, agent_spec=agent_spec, legacy_agent=legacy_agent
-                ),
-            )
+        options["options_factory"] = lambda root: SessionOptions.load(
+            root, agent_spec=agent_spec, legacy_agent=legacy_agent
         )
-    else:
-        asyncio.run(serve(llm_factory))
+    asyncio.run(serve(llm_factory, **options))
 
 
 def main() -> None:

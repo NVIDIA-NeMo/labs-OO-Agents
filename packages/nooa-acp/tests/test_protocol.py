@@ -22,6 +22,7 @@ from acp.schema import (
     ToolCallProgress,
     ToolCallStart,
 )
+from nooa_acp.execution_tree import EXECUTION_META_KEY
 
 # Bounds a hang, not the expected duration. Spawning an interpreter and running
 # a turn takes well under a second here, but a loaded CI runner is a different
@@ -585,3 +586,40 @@ async def test_acp_subprocess_behavior_controls_do_not_call_the_llm(tmp_path, mo
             assert expected in text
             assert not any(isinstance(u, ToolCallStart) for _, u in client.updates)
     assert SessionStore(tmp_path / ".nooa" / "sessions").load_turns(session.session_id) == []
+
+
+async def test_execution_tree_metadata_survives_acp_stdio(tmp_path):
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    async with spawn_agent_process(
+        client,
+        sys.executable,
+        str(fixture),
+        "--execution-tree",
+        cwd=tmp_path,
+    ) as (connection, _process):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        response = await asyncio.wait_for(
+            connection.prompt(session.session_id, [text_block("run tree demo")]),
+            timeout=_HANG_TIMEOUT,
+        )
+    assert response.stop_reason == "end_turn"
+    starts = [update for _, update in client.updates if isinstance(update, ToolCallStart)]
+    nodes = {update.tool_call_id: update.field_meta[EXECUTION_META_KEY] for update in starts}
+    assert {node["nodeType"] for node in nodes.values()} == {"method", "python"}
+    assert all(node["spanId"] == span_id for span_id, node in nodes.items())
+    assert all(
+        node["parentSpanId"] is None or node["parentSpanId"] in nodes for node in nodes.values()
+    )
+    completions = [
+        update
+        for _, update in client.updates
+        if isinstance(update, ToolCallProgress) and update.status == "completed"
+    ]
+    assert {update.tool_call_id for update in completions} == set(nodes)
+    for update in completions:
+        serialized = update.model_dump(mode="json", by_alias=True, exclude_none=True)
+        node = serialized["_meta"][EXECUTION_META_KEY]
+        assert node["endedAtMs"] >= node["startedAtMs"]
+        assert node["parentSpanId"] == nodes[update.tool_call_id]["parentSpanId"]
