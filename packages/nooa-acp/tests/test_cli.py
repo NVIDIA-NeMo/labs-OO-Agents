@@ -16,8 +16,9 @@ def stubbed_serve(monkeypatch):
     """Capture the llm_factory the command builds instead of serving."""
     captured = {}
 
-    def fake_serve(llm_factory):
+    def fake_serve(llm_factory, **kwargs):
         captured["llm_factory"] = llm_factory
+        captured.update(kwargs)
         return "coroutine-placeholder"
 
     monkeypatch.setattr("nooa_acp.server.serve", fake_serve)
@@ -64,6 +65,16 @@ def test_explicit_flag_overrides_the_environment(monkeypatch, stubbed_serve):
     assert result.exit_code == 0, result.output
     stubbed_serve["llm_factory"]()
     assert requested["name"] == "anthropic/claude-sonnet-4-5"
+
+
+def test_execution_tree_is_an_explicit_opt_in(stubbed_serve):
+    runner = click.testing.CliRunner()
+    baseline = runner.invoke(command, ["--model", "fake-model"])
+    assert baseline.exit_code == 0, baseline.output
+    assert "execution_tree" not in stubbed_serve
+    enabled = runner.invoke(command, ["--model", "fake-model", "--execution-tree"])
+    assert enabled.exit_code == 0, enabled.output
+    assert stubbed_serve["execution_tree"] is True
 
 
 def _console_script() -> str:
