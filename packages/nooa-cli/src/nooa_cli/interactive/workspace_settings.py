@@ -3,26 +3,25 @@
 """Agent-facing workspace preferences for NOOA interactive hosts."""
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from nooa.skill import Skill
 
 
 class WorkspaceSettings(Skill):
-    """Manage saved defaults for NOOA TUI and ACP sessions in this workspace.
+    """Manage saved defaults for interactive sessions in this workspace.
 
     Preferences belong to this workspace's .nooa/settings.yaml. They apply to
     fresh agents in either client; other live agents retain their current state.
-    Named operations cover skills, memory, reflection, MCP startup, and model
-    defaults. Ordinary self.skills.load/activate remains session-local.
+    Named operations cover skills, MCP startup, and model defaults.
+    Ordinary self.skills.load/activate remains session-local.
     """
 
-    def __init__(self, options: Any, *, live_config: Any = None):
+    def __init__(self, options: Any):
         super().__init__()
         self._workspace = Path(options.working_dir).expanduser().resolve()
         self._agent_spec = options.agent_spec
         self._legacy_agent = options.legacy_agent
-        self._live_config = live_config if live_config is not None else options
 
     def _options(self):
         from .options import SessionOptions
@@ -55,28 +54,6 @@ class WorkspaceSettings(Skill):
         """
         await self._run_control("skills", ["deactivate", skill_id])
         return f"Forgot `{skill_id}` in {self._workspace / '.nooa' / 'settings.yaml'}."
-
-    async def configure_memory(self, scope: Literal["off", "session", "project"]) -> str:
-        """Apply and save this agent type's memory scope in this workspace.
-
-        Session memory uses each session's own sidecar database. Project memory
-        shares a store across workspace sessions. Other live agents retain their
-        current memory configuration. Disabling memory does not delete its data.
-        """
-        modes = {"off": "off", "session": "local", "project": "on"}
-        if scope not in modes:
-            raise ValueError("Memory scope must be off, session, or project")
-        return await self._run_control("memory", [modes[scope]])
-
-    async def configure_reflection(self, enabled: bool) -> str:
-        """Apply and save idle memory reflection for this agent type here.
-
-        Requires attached memory when enabling. Other live agents retain their
-        configuration. Use self.workspace_settings.configure_memory first.
-        """
-        if not isinstance(enabled, bool):
-            raise ValueError("enabled must be a boolean")
-        return await self._run_control("reflection", ["on" if enabled else "off"])
 
     def set_default_model(self, model: str) -> str:
         """Save a NOOA model alias or provider/model ID for future sessions.
@@ -146,33 +123,22 @@ class WorkspaceSettings(Skill):
         """Inspect effective saved defaults and current state without credentials.
 
         Saved values include layered configuration; explicit launch overrides may
-        supersede them. Memory/reflection preferences are scoped to this agent
-        type. MCP output contains names only, never connection secrets.
+        supersede them. MCP output contains names only, never connection secrets.
         """
-        from .memory import agent_memory_key
-
         options = self._options()
-        key = agent_memory_key(self._agent, options)
-        reflection = getattr(self._agent, "_reflection_runner", None)
         return {
             "workspace": str(self._workspace),
             "settings_file": str(self._workspace / ".nooa" / "settings.yaml"),
-            "agent_key": key,
             "saved": {
                 "active_skills": options.active_skills,
                 "inactive_skills": options.inactive_skills,
                 "skills_directories": [str(p) for p in options.skills_dirs],
-                "memory": options.memory_agents.get(key, options.memory),
-                "reflection": options.reflection_agents.get(key, options.reflection),
                 "default_model": options.default_model,
                 "mcp_servers": sorted(options.mcp_servers),
                 "mcp_auto_connect": options.mcp_auto_connect,
             },
             "current": {
                 "active_skills": self._agent.skills.activated(),
-                "memory_attached": hasattr(self._agent, "memory"),
-                "memory": self._live_config.memory_agents.get(key, self._live_config.memory),
-                "reflection_enabled": bool(reflection and reflection.enabled),
                 "model": getattr(getattr(self._agent, "_llm", None), "model", None),
                 "connected_mcp": self._agent.mcp.connected(),
                 "active_mcp_skills": [
@@ -189,36 +155,11 @@ class WorkspaceSettings(Skill):
 
     async def _run_control(self, name: str, args: list[str]) -> str:
         from .controls import CONTROL_TYPES, ControlMessage
-        from .memory import configure_session_memory
-
-        options = self._options()
-        behavior_fields = [
-            field
-            for field in type(options).model_fields
-            if field.startswith(("memory", "reflection"))
-        ]
-        # These controls act on the current agent. Defaults written by another
-        # session must not implicitly switch its memory store or reflection.
-        for field in behavior_fields:
-            value = getattr(self._live_config, field)
-            setattr(options, field, value.copy() if isinstance(value, dict) else value)
-
-        def configure_memory():
-            session = getattr(self._agent, "_session_manager", None)
-            configure_session_memory(
-                self._agent,
-                options,
-                agent_db=session.path if session is not None else None,
-                session_id=session.id if session is not None else None,
-            )
-            for field in behavior_fields:
-                setattr(self._live_config, field, getattr(options, field))
 
         control = CONTROL_TYPES[name](
             self._agent,
-            options,
+            self._options(),
             workspace=self._workspace,
-            configure_memory=configure_memory,
             command_registry=getattr(self._agent, "_command_registry", None),
         )
         result = await control.run(args)

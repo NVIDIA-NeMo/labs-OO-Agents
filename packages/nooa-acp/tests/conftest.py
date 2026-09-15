@@ -16,8 +16,7 @@ def _protocol_subprocess_environment(monkeypatch):
     original = acp.transports.default_environment
     root = Path(__file__).resolve().parents[3]
     sources = [root / "src"] + [
-        root / "packages" / package / "src"
-        for package in ("nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench")
+        root / "packages" / package / "src" for package in ("nooa-cli", "nooa-acp")
     ]
 
     def environment():

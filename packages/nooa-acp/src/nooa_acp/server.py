@@ -57,7 +57,6 @@ from nooa_cli.coding.factory import create_session_agent
 from nooa_cli.coding.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_cli.interactive.controls import behavior_commands
 from nooa_cli.interactive.local_turn_policy import LocalTurnPolicy
-from nooa_cli.interactive.memory import configure_session_memory
 from nooa_cli.interactive.options import (
     SessionOptions,
     configure_session_skills,
@@ -355,7 +354,7 @@ class CodingACPAdapter:
                         if requested in RESERVED_COMMAND_NAMES:
                             message = (
                                 f"NOOA /{requested} is not available through ACP yet. "
-                                "Available behavior controls: /skills, /memory, /reflection, /mcp. "
+                                "Available behavior controls: /skills, /mcp. "
                                 "Use native NOOA for the other agent controls."
                             )
                             session.bridge.publish(update_agent_message(text_block(message)))
@@ -469,8 +468,6 @@ class CodingACPAdapter:
         session = runtime.value
         async with session.cancel_lock:
             try:
-                if session.policy is not None:
-                    await session.policy.interrupt_reflection()
                 if await session.dispatcher.cancel():
                     await session.bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
                     await session.bridge.flush()
@@ -513,10 +510,6 @@ class CodingACPAdapter:
                         f"Session was created with agent {handle.info.agent!r}; "
                         f"resuming with {current!r} from the current host options."
                     )
-            try:
-                configure_session_memory(agent, options, agent_db=handle.path, session_id=handle.id)
-            except Exception as exc:
-                registration_warnings.append(f"Could not enable memory: {exc}")
             registration_warnings.extend(await connect_session_mcp(agent, options))
             for name, tool in mcp.items():
                 registry_name = f"mcp.{name}"
@@ -540,8 +533,6 @@ class CodingACPAdapter:
                 logger.debug("session %s: %s", handle.id, status)
 
             policy = LocalTurnPolicy(
-                agent,
-                dispatcher.runtime,
                 emit_output=emit_status,
             )
 
@@ -550,19 +541,14 @@ class CodingACPAdapter:
                 handle.storage.save_snapshot(current)
 
             dispatcher.runtime.set_dispatch_hooks(
-                on_before_handle=policy.before_handle,
                 on_after_handle=checkpoint,
             )
-
-            def configure_memory():
-                configure_session_memory(agent, options, agent_db=handle.path, session_id=handle.id)
 
             commands = CodingSlashCommandRegistry(agent, skills_dirs=options.skills_dirs)
             commands.set_controls(
                 behavior_commands(
                     agent,
                     options,
-                    configure_memory=configure_memory,
                     workspace=root,
                     command_registry=commands,
                 )

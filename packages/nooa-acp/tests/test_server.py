@@ -309,8 +309,6 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
         "diagnose",
         "mcp",
         "mcp-add",
-        "memory",
-        "reflection",
         "skill-status",
         "skills",
     ]
@@ -642,8 +640,6 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
         "later",
         "mcp",
         "mcp-add",
-        "memory",
-        "reflection",
         "skills",
     ]
     await adapter.close()
@@ -690,8 +686,6 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
     assert [command.name for command in advertised[0].available_commands] == [
         "mcp",
         "mcp-add",
-        "memory",
-        "reflection",
         "repair",
         "skills",
     ]
@@ -732,8 +726,6 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
         "diagnose",
         "mcp",
         "mcp-add",
-        "memory",
-        "reflection",
         "skill-status",
         "skills",
     ]
@@ -998,16 +990,12 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
         "alpha",
         "mcp",
         "mcp-add",
-        "memory",
-        "reflection",
         "skills",
     ]
     assert commands_by_session[beta_session.session_id] == [
         "beta",
         "mcp",
         "mcp-add",
-        "memory",
-        "reflection",
         "skills",
     ]
     messages = {

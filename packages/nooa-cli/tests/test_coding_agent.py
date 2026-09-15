@@ -94,7 +94,7 @@ async def test_installed_skill_commands_load_without_automatic_activation(tmp_pa
         await agent.close()
 
 
-async def test_installed_memory_skill_is_left_for_host_configuration(tmp_path, monkeypatch):
+async def test_installed_memory_skill_is_not_automatically_attached(tmp_path, monkeypatch):
     class InstalledMemory(Skill):
         pass
 

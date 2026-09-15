@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -28,16 +28,6 @@ class SessionOptions(BaseModel):
     mcp_file: Path = Path(".mcp.json")
     mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
     mcp_auto_connect: list[str] = Field(default_factory=list)
-    memory: Literal["off", "session", "project"] = "off"
-    memory_agents: dict[str, Literal["off", "session", "project"]] = Field(default_factory=dict)
-    memory_path: Path | None = None
-    memory_owner: str | None = None
-    memory_owner_agents: dict[str, str] = Field(default_factory=dict)
-    reflection: bool = False
-    reflection_agents: dict[str, bool] = Field(default_factory=dict)
-    reflection_generative: bool = True
-    reflection_debounce_s: float = 10.0
-    reflection_grace_s: float = 0.5
 
     @classmethod
     def load(cls, workspace: str | Path, **overrides: Any) -> SessionOptions:
@@ -63,9 +53,7 @@ async def connect_session_mcp(agent: Any, options: SessionOptions) -> list[str]:
     return warnings
 
 
-def configure_session_skills(
-    agent: Any, options: SessionOptions, *, live_config: Any = None
-) -> list[str]:
+def configure_session_skills(agent: Any, options: SessionOptions) -> list[str]:
     """Attach the same MCP registry and explicit skills before resume events.
 
     Return actionable warnings for either host to display. Discovering a skill
@@ -73,6 +61,14 @@ def configure_session_skills(
     """
     from nooa_cli.interactive.mcp_registry import MCPRegistry
     from nooa_cli.interactive.workspace_settings import WorkspaceSettings
+
+    # Older shared-host snapshots contain memory prompts even though the skill
+    # itself is excluded from snapshots. Drop those prompts when no custom agent
+    # has explicitly attached its own memory implementation.
+    if not hasattr(agent, "memory"):
+        for key in ("memory_system", "recalled_memories"):
+            if key in agent.context:
+                del agent.context[key]
 
     skills = getattr(agent, "skills", None)
     if skills is None:
@@ -89,7 +85,7 @@ def configure_session_skills(
         ),
     )
     skills.activate(["nemo.mcp"])
-    skills.register("nooa.workspace_settings", WorkspaceSettings(options, live_config=live_config))
+    skills.register("nooa.workspace_settings", WorkspaceSettings(options))
     skills.activate(["nooa.workspace_settings"])
     warnings: list[str] = []
     discover = getattr(skills, "discover_skills_dirs", None)

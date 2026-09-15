@@ -140,10 +140,9 @@ class CodingAgent(InteractiveAgent):
         # Installed ``nooa.skills`` entry points are part of the shared host
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
-        # Memory is host-configured because its scope, store and owner are
-        # session-specific; loading its default entry point would attach it
-        # even when the host has memory disabled. Also ignore the retired web
-        # publisher entry point in older installed package metadata.
+        # Memory integration is deferred; do not auto-load its entry point.
+        # Also ignore the retired web publisher entry point in older installed
+        # package metadata.
         loaded = set(self.skills.loaded())
         installed = []
         for name in self.skills.discovered():

@@ -177,9 +177,7 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
     assert [command.name for command in commands.available_commands] == [
         "mcp",
         "mcp-add",
-        "memory",
         "protocol-check",
-        "reflection",
         "skills",
     ]
     protocol_command = next(
@@ -546,13 +544,6 @@ async def test_acp_subprocess_behavior_controls_do_not_call_the_llm(tmp_path, mo
         await connection.initialize(PROTOCOL_VERSION)
         session = await connection.new_session(str(tmp_path))
         for prompt, expected in [
-            ("/memory local", "Memory local (this session only) enabled"),
-            ("/memory", "Memory: local (this session only)"),
-            ("/reflection on", "Idle reflection enabled"),
-            ("/reflection off", "Idle reflection disabled"),
-            ("/memory off", "Memory disabled"),
-            ("/memory invalid", "Usage: /memory"),
-            ("/reflection on", "Memory is not attached"),
             ("/skills list", "Skills"),
             ("/compact", "NOOA /compact is not available through ACP yet"),
         ]:

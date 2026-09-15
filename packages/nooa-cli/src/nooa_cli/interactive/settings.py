@@ -68,19 +68,6 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
                 values.setdefault(key, {}).update(value)
             else:
                 values[key] = deepcopy(value)
-    # Read historical per-agent keys at the configuration boundary. Explicit
-    # canonical values win when both spellings are present.
-    from nooa_cli.coding.identity import CODING_AGENT, EXPERIMENTAL_CODING_AGENT, LEGACY_AGENT_SPECS
-
-    for field in ("memory_agents", "memory_owner_agents", "reflection_agents"):
-        preferences = values.get(field)
-        if isinstance(preferences, dict):
-            for old, new in LEGACY_AGENT_SPECS.items():
-                if old in preferences:
-                    key = CODING_AGENT if new == EXPERIMENTAL_CODING_AGENT else new
-                    logger.warning("Migrating legacy %s agent key %r to %r", field, old, key)
-                    preferences.setdefault(key, preferences[old])
-                    del preferences[old]
     return SessionOptions(**values).model_dump(exclude_unset=True)
 
 
@@ -136,7 +123,7 @@ def write_settings_updates(
         canonical = canonical_setting_path(setting_path)
         if len(canonical) > 2 and canonical[0] == "coding":
             # A first nested canonical write must retain siblings that only
-            # exist under the legacy alias (e.g. another agent's memory mode).
+            # exist under the legacy alias (e.g. another MCP server definition).
             coding = data.get("coding")
             if not isinstance(coding, dict) or canonical[1] not in coding:
                 inherited = resolve_behavior_settings(data).get(canonical[1])

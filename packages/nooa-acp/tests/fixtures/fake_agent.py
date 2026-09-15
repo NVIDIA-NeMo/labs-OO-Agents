@@ -14,7 +14,6 @@ sys.path[:0] = [
     str(_ROOT / "src"),
     str(_ROOT / "packages" / "nooa-cli" / "src"),
     str(_ROOT / "packages" / "nooa-acp" / "src"),
-    str(_ROOT / "packages" / "nooa-memory" / "src"),
 ]
 
 from nooa_acp.server import serve  # noqa: E402

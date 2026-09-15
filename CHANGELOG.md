@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Shared TUI/ACP agents defer long-term memory and idle reflection. Their setup,
+  `/memory` and `/reflection` controls, and workspace-setting operations are
+  removed. Legacy preferences are ignored; existing memory databases are retained.
+  Durable sessions, history summarization, and skill/MCP preferences remain available.
 - Interactive agents now use `RespondReason.NEED_INPUT` in place of
   `GET_USER_INPUT`; legacy values produce a migration hint.
 - ACP defaults to the shared single-tool `ExperimentalCodingAgent`.

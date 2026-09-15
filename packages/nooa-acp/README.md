@@ -190,25 +190,22 @@ router. Command discovery is refreshed when loaded skills change.
 ### Saved workspace preferences
 
 The shared `SessionOptions` model resolves behavioral settings. Terminal
-presentation settings are outside this model. Both built-in agents use the
-`nooa_cli.coding.agent:CodingAgent` key for memory and reflection preferences;
-historical TUI agent keys are normalized when settings are read. Historical
-`TUIAgent` memory owners are migrated to `CodingAgent`, retaining session
-suffixes and archived records.
+presentation settings are outside this model.
 
 The agent's `self.workspace_settings` skill exposes named operations for
-remembering and forgetting skills and MCP definitions, configuring memory and
-reflection, and saving a default model. These write
+remembering and forgetting skills and MCP definitions and saving a default model.
+These write
 `<workspace>/.nooa/settings.yaml` and affect future agents in that workspace.
-Skill and memory changes also apply to the agent making the change. Other live
-agents keep their current state. Ordinary `self.skills.load()` and
+Skill changes also apply to the agent making the change. Other live agents keep
+their current state. Ordinary `self.skills.load()` and
 `self.skills.activate()` remain local to the live agent.
 
-Memory requires the optional `nooa[memory]` package. `/memory local` selects a
-session sidecar database; `/memory on` selects the workspace memory store.
-`/reflection on` enables idle reflection once memory is attached. These commands
-and `/skills` are advertised through ACP and use the same controls as the
-workspace settings skill.
+Memory and idle reflection integration are deferred. `/memory` and
+`/reflection` are not advertised, and workspace settings have no memory or
+reflection operations. Legacy preferences are ignored. Existing memory stores
+are retained; old memory prompts are dropped when resuming without a memory
+skill. Durable sessions, conversation history, Todos, and history summarization
+remain available. The standalone `nooa-memory` package is unchanged.
 
 Remembering an MCP definition preserves its exact-configuration approval
 requirement. The shared startup helper reconnects remembered servers; an

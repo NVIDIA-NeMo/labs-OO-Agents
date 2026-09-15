@@ -49,7 +49,7 @@ class CodingSlashCommand:
 # Shared behavior names stay reserved across hosts. Presentation-only commands
 # belong in each host's explicit `reserved` argument.
 RESERVED_COMMAND_NAMES = frozenset(
-    "help exit quit clear compact context edit connect model models skills memory memories reflection session resume restart jobs events todos mcp reasoning".split()
+    "help exit quit clear compact context edit connect model models skills session resume restart jobs events todos mcp reasoning".split()
 )
 
 

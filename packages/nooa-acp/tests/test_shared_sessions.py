@@ -3,6 +3,7 @@
 """Direct shared-API hosts and ACP preserve the same durable agent behavior."""
 
 import asyncio
+import builtins
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,7 +17,6 @@ from nooa_cli.coding.identity import CODING_AGENT, EXPERIMENTAL_CODING_AGENT
 from nooa_cli.coding.slash_commands import CodingSlashCommandRegistry
 from nooa_cli.interactive.controls import behavior_commands
 from nooa_cli.interactive.dispatcher import InteractiveSessionDispatcher
-from nooa_cli.interactive.memory import configure_session_memory
 from nooa_cli.interactive.options import (
     SessionOptions,
     configure_session_skills,
@@ -124,10 +124,6 @@ async def open_host(workspace, host, llm, session_id=None):
         agent._session_manager = handle
         configure_session_skills(agent, options)
 
-        def memory():
-            configure_session_memory(agent, options, agent_db=handle.path, session_id=handle.id)
-
-        memory()
         assert not await connect_session_mcp(agent, options)
         dispatcher = InteractiveSessionDispatcher(agent)
         dispatcher.runtime.set_user_message_accepted_callback(handle.record_user_message)
@@ -136,7 +132,6 @@ async def open_host(workspace, host, llm, session_id=None):
             behavior_commands(
                 agent,
                 options,
-                configure_memory=memory,
                 workspace=workspace,
                 command_registry=commands,
             )
@@ -227,28 +222,78 @@ async def test_agent_preferences_are_workspace_sticky_without_changing_other_liv
             await settings.remember_skill("nemo.libwriting")
             assert "nemo.libwriting" in source.agent.skills.activated()
             assert "nemo.libwriting" not in other.agent.skills.activated()
-            await settings.configure_memory("session")
-            await settings.configure_reflection(True)
-            assert settings.status()["current"]["reflection_enabled"]
-            assert settings.status()["agent_key"] == CODING_AGENT
-            assert not hasattr(other.agent, "memory")
             assert source.agent.llm.call_count == 0
             source.agent.mcp.register("saved", command="fixture-command", args=["--fixture"])
             settings.remember_mcp("saved", auto_connect=False)
             assert not source.agent.mcp._is_approved("saved")
             saved = SessionOptions.load(workspace)
-            assert saved.memory_agents[CODING_AGENT] == "session"
-            assert saved.reflection_agents[CODING_AGENT] is True
             assert "saved" in saved.mcp_servers
         async with open_host(workspace, other_host, parity_llm()) as fresh:
             assert "nemo.libwriting" in fresh.agent.skills.activated()
-            assert fresh.agent.workspace_settings.status()["current"]["reflection_enabled"]
-            assert fresh.agent.memory._mgr.store.path.endswith(f"{fresh.handle.id}-memory.db")
             await fresh.agent.workspace_settings.forget_skill("nemo.libwriting")
             fresh.agent.workspace_settings.forget_mcp("saved")
         assert "nemo.libwriting" in source.agent.skills.activated()
         assert "saved" not in SessionOptions.load(workspace).mcp_servers
         assert "nemo.libwriting" in SessionOptions.load(workspace).inactive_skills
+
+
+@pytest.mark.parametrize("source,target", [("direct", "acp"), ("acp", "direct")])
+async def test_memory_is_deferred_on_startup_and_resume(workspace, source, target, monkeypatch):
+    """Old settings/snapshots cannot reattach memory or require the optional package."""
+    settings_path = workspace / ".nooa/settings.yaml"
+    settings_text = """coding:
+  memory: project
+  memory_agents: malformed-old-value
+  reflection: true
+  reflection_agents: nooa_cli
+  summarization:
+    policy: none
+  active_skills: [nemo.methodwriting]
+"""
+    settings_path.write_text(settings_text)
+    memory_path = workspace / ".nooa/memory/memory.sqlite"
+    memory_path.parent.mkdir()
+    original_bytes = b"Existing memory data must not be opened, migrated, or deleted."
+    memory_path.write_bytes(original_bytes)
+    original_import = builtins.__import__
+
+    def no_memory_import(name, *args, **kwargs):
+        if name == "nooa_memory" or name.startswith("nooa_memory."):
+            raise AssertionError("Shared sessions must not import the optional memory package")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_memory_import)
+    async with open_host(workspace, source, parity_llm()) as first:
+        session_id = first.handle.id
+        assert not hasattr(first.agent, "memory")
+        assert not hasattr(first.agent, "_reflection_runner")
+        assert not getattr(first.agent, "_summarizers", [])
+        assert not hasattr(first.agent.workspace_settings, "configure_memory")
+        assert not hasattr(first.agent.workspace_settings, "configure_reflection")
+        names = {command.name for command in first.commands.commands()}
+        assert {"skills", "mcp"} <= names
+        assert not {"memory", "reflection"} & names
+        await first.submit("seed")
+        first.agent.context["memory_system"] = "Use self.memory.remember for long-term memory."
+        first.agent.context["recalled_memories"] = "Legacy recalled facts."
+        first.agent.context["user_note"] = "Keep this independent session note."
+
+    async with open_host(workspace, target, parity_llm(), session_id) as resumed:
+        assert not hasattr(resumed.agent, "memory")
+        assert not hasattr(resumed.agent, "_reflection_runner")
+        assert "memory_system" not in resumed.agent.context
+        assert "recalled_memories" not in resumed.agent.context
+        assert "Keep this independent" in str(resumed.agent.context["user_note"])
+        assert resumed.agent.vars["counter"] == 1
+        assert "nemo.methodwriting" in resumed.agent.skills.activated()
+        status = resumed.agent.workspace_settings.status()
+        assert "memory" not in status["saved"]
+        assert "reflection" not in status["saved"]
+        assert "memory_attached" not in status["current"]
+        await resumed.submit("continue")
+        assert resumed.agent.vars["counter"] == 2
+    assert memory_path.read_bytes() == original_bytes
+    assert settings_path.read_text() == settings_text
 
 
 def test_legacy_settings_are_normalized_at_the_boundary(workspace, caplog):
@@ -265,10 +310,10 @@ coding:
     'nooa_cli.coding.agent:CodingAgent': project
 """)
     options = SessionOptions.load(workspace)
-    assert options.memory_agents == {CODING_AGENT: "project"}
-    assert options.reflection_agents == {CODING_AGENT: True}
+    assert not hasattr(options, "memory_agents")
+    assert not hasattr(options, "reflection_agents")
     assert "Reading legacy tui settings" in caplog.text
-    assert "Migrating legacy memory_agents agent key" in caplog.text
+    assert "Ignoring unsupported coding setting 'memory_agents'" in caplog.text
     assert "Ignoring unsupported coding setting 'api_key'" in caplog.text
     assert "secret-value-must-not-be-logged" not in caplog.text
     assert not hasattr(options, "policy_config")
@@ -401,53 +446,6 @@ def test_agent_spec_warning_covers_all_layers_once_per_process(workspace, caplog
         )
     finally:
         _warn_ignored_agent_spec.cache_clear()
-
-
-async def test_legacy_memory_owners_preserve_session_identity(workspace):
-    from nooa_memory.schema import Memory, MemoryType
-    from nooa_memory.store import MemoryStore
-
-    path = workspace / ".nooa/memory/memory.sqlite"
-    path.parent.mkdir(parents=True)
-    store = MemoryStore(str(path))
-    owners = [
-        "TUIAgent",
-        "TUIAgent@12345678",
-        "TUIAgent@archived",
-        "AnotherAgent@12345678",
-        "",
-        "nooa_cli.tui.agent:TUIAgent",
-        "nooa_cli.tui.agent:TUIAgent@archived",
-    ]
-    records = []
-    try:
-        for owner in owners:
-            records.append(
-                store.add(
-                    Memory(
-                        type=MemoryType.INFO,
-                        content=owner or "shared",
-                        owner=owner,
-                        archived=owner.endswith("archived"),
-                    )
-                )
-            )
-    finally:
-        store.close()
-    (workspace / ".nooa/settings.yaml").write_text("coding:\n  memory: project\n")
-    for host in ("direct", "acp"):
-        async with open_host(workspace, host, parity_llm()) as session:
-            store = session.agent.memory._mgr.store
-            assert [store.owner_of(record.id) for record in records] == [
-                "CodingAgent",
-                "CodingAgent@12345678",
-                "CodingAgent@archived",
-                "AnotherAgent@12345678",
-                "",
-                "CodingAgent",
-                "CodingAgent@archived",
-            ]
-            assert len(store.all_memories(include_archived=True)) == len(records)
 
 
 async def test_resume_warns_when_host_selects_a_different_agent(workspace):

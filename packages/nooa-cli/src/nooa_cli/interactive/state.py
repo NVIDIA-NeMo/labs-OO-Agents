@@ -48,7 +48,6 @@ class AgentWorkspaceState:
     working_directory: str | None = None
     context_summary: str | None = None
     todo_summary: str | None = None
-    memory_summary: str | None = None
     cancellation: CancellationState = CancellationState.NONE
     jobs: tuple[AgentJobSummary, ...] = ()
 
@@ -82,10 +81,6 @@ class AgentState:
     @property
     def todo_summary(self) -> str | None:
         return self.workspace.todo_summary
-
-    @property
-    def memory_summary(self) -> str | None:
-        return self.workspace.memory_summary
 
 
 class UIScheduler(Protocol):

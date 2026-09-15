@@ -86,8 +86,7 @@ def _clean_env() -> dict[str, str]:
     env.pop("NOOA_MODEL", None)
     root = Path(__file__).resolve().parents[3]
     sources = [root / "src"] + [
-        root / "packages" / package / "src"
-        for package in ("nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench")
+        root / "packages" / package / "src" for package in ("nooa-cli", "nooa-acp")
     ]
     env["PYTHONPATH"] = os.pathsep.join(str(path) for path in sources)
     return env
