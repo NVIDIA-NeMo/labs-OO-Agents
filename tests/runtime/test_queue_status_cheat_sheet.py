@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 
 import pytest
@@ -31,6 +32,29 @@ def test_pending_queue_shows_public_reader_hint():
 
     assert "user_messages: 1 pending" in status
     assert "Hint: dequeue: await self.user_messages.get()" in status
+
+
+@pytest.mark.parametrize(
+    "name", ["class", "await", "quoted'name", "back\\slash", "line\nbreak", "safe_name"]
+)
+def test_channel_hints_are_valid_python_and_preserve_the_name(name):
+    qm = QueueManager()
+    qm.queue(name).put("pending")
+    hints = [line for line in qm.status().splitlines() if line.startswith("Hint:")]
+    cleanup_names = []
+    for hint in hints:
+        if hint.startswith("Hint: dequeue: "):
+            code = hint.removeprefix("Hint: dequeue: ")
+            compile(code, "<dequeue hint>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        else:
+            commands = hint.removeprefix("Hint: ").split(" | ")
+            for command in commands:
+                code = "self.queue_manager" + command if command.startswith(".") else command
+                tree = ast.parse(code)
+                call = tree.body[0].value
+                if call.func.attr == "remove_channel":
+                    cleanup_names.append(ast.literal_eval(call.args[0]))
+    assert cleanup_names == [name]
 
 
 def test_cheat_sheet_appears_with_extra_channels():

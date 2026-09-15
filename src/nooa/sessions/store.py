@@ -173,40 +173,40 @@ class SessionStore:
         check_same_thread: bool = True,
     ) -> SessionHandle:
         session_id = self._validate_id(session_id or str(uuid.uuid4()))
-        self.root.mkdir(parents=True, exist_ok=True)
-        path = self.path_for(session_id)
-        if path.exists():
-            raise FileExistsError(f"Session {session_id!r} already exists")
-
-        storage = SQLiteStorageManager(path, check_same_thread=check_same_thread)
-        events = EventManager(backend=storage.event_backend)
-        for event_type in SESSION_EVENT_TYPES:
-            events.register_event_type(event_type)
         started = SessionStarted(
             host=host,
             model=model,
             agent=agent,
             working_directory=working_directory,
         )
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.path_for(session_id)
+        if path.exists():
+            raise FileExistsError(f"Session {session_id!r} already exists")
+
+        storage = SQLiteStorageManager(path, check_same_thread=check_same_thread)
         try:
+            events = EventManager(backend=storage.event_backend)
+            for event_type in SESSION_EVENT_TYPES:
+                events.register_event_type(event_type)
             events.add(started)
+            timestamp = started.timestamp.timestamp()
+            return SessionHandle(
+                self,
+                storage,
+                SessionInfo(
+                    id=session_id,
+                    model=model,
+                    agent=agent,
+                    started_at=timestamp,
+                    last_active=timestamp,
+                    working_directory=working_directory,
+                    host=started.host,
+                ),
+            )
         except BaseException:
             storage.close()
             raise
-        timestamp = started.timestamp.timestamp()
-        return SessionHandle(
-            self,
-            storage,
-            SessionInfo(
-                id=session_id,
-                model=model,
-                agent=agent,
-                started_at=timestamp,
-                last_active=timestamp,
-                working_directory=working_directory,
-                host=started.host,
-            ),
-        )
 
     def open(self, session_id: str, *, check_same_thread: bool = True) -> SessionHandle:
         path = self.path_for(session_id)
@@ -214,7 +214,11 @@ class SessionStore:
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
         storage = SQLiteStorageManager(path, check_same_thread=check_same_thread)
-        return SessionHandle(self, storage, info)
+        try:
+            return SessionHandle(self, storage, info)
+        except BaseException:
+            storage.close()
+            raise
 
     def get(self, session_id: str) -> SessionInfo:
         path = self.path_for(session_id)
@@ -395,7 +399,7 @@ class SessionStore:
             return None
         try:
             raw = json.loads(data)
-        except (TypeError, json.JSONDecodeError):
+        except (TypeError, json.JSONDecodeError, UnicodeDecodeError):
             logger.debug("Skipping corrupt session event in %s", path, exc_info=True)
             return None
         return raw if isinstance(raw, dict) else None

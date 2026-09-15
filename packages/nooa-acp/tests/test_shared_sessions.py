@@ -405,6 +405,32 @@ async def test_remembered_mcp_reconnects_across_hosts_and_forget_stops_startup(
                 assert "saved_probe" not in fresh.agent.mcp.discovered()
 
 
+@pytest.mark.parametrize("name", ["mcp", "workspace_settings"])
+async def test_client_mcp_cannot_replace_shared_controls_or_settings(workspace, tmp_path, name):
+    import sys
+
+    from acp.schema import McpServerStdio
+
+    script = Path(__file__).parent / "fixtures" / "mcp_probe.py"
+    server = McpServerStdio(
+        name=name,
+        command=sys.executable,
+        args=[str(script), "--journal", str(tmp_path / "collision.jsonl")],
+        env=[],
+    )
+    adapter = CodingACPAdapter(parity_llm)
+    adapter.on_connect(RecordingClient())
+    try:
+        created = await adapter.new_session(str(workspace), mcp_servers=[server])
+        session = (await adapter._sessions.get(created.session_id)).value
+        assert any("not registered" in warning for warning in session.startup_warnings)
+        control = session.commands.get("mcp")
+        assert (await control._method("status")).success
+        assert session.agent.workspace_settings.status()["current"]["connected_mcp"] == []
+    finally:
+        await adapter.close()
+
+
 @pytest.mark.parametrize("host", ["direct", "acp"])
 async def test_project_settings_cannot_execute_an_agent_module(workspace, host, caplog):
     from nooa_cli.interactive.settings import _warn_ignored_agent_spec

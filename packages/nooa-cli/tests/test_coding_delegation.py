@@ -12,6 +12,19 @@ from nooa.interactive import SummarizationConfig
 from nooa.unifiedllm import FakeLLMClient
 
 
+class CloseTrackingLLM(FakeLLMClient):
+    """Fail subsequent calls if any owner closes this shared test client."""
+
+    close_count = 0
+
+    async def acall(self, messages, **kwargs):
+        assert self.close_count == 0, "controller client was closed by its worker"
+        return await super().acall(messages, **kwargs)
+
+    async def aclose(self):
+        self.close_count += 1
+
+
 @pytest.mark.parametrize("agent_type", [CodingAgent, ExperimentalCodingAgent])
 @pytest.mark.parametrize("policy", ["none", "token_budget"])
 async def test_delegate_preserves_installed_summarization(
@@ -20,7 +33,8 @@ async def test_delegate_preserves_installed_summarization(
     config = SummarizationConfig(
         policy=policy, max_tokens=12345, preserve_recent=3, target_chars=6789
     )
-    parent = agent_type(llm=FakeLLMClient(), cwd=tmp_path, summarization=config)
+    client = CloseTrackingLLM()
+    parent = agent_type(llm=client, cwd=tmp_path, summarization=config)
     inspected = []
 
     class InspectingWorker(parent._worker_type):
@@ -42,8 +56,12 @@ async def test_delegate_preserves_installed_summarization(
     try:
         assert await parent.delegate("inspect") == "worker report"
         assert inspected == ["inspect"]
+        assert client.close_count == 0
+        await parent.llm.acall([{"role": "user", "content": "continue after delegation"}])
+        assert client.call_count == 1
     finally:
         await parent.close()
+    assert client.close_count == 1
 
 
 @pytest.mark.parametrize("objective", ["", "   ", "\n"])

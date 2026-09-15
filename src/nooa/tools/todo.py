@@ -69,6 +69,15 @@ class Todo(BaseModel):
         description="Append-only chronological progress journal",
     )
 
+    @classmethod
+    def __restore_snapshot__(cls, data: dict[str, Any]) -> "Todo":
+        """Migrate stored task fields before generic snapshot filtering drops aliases."""
+        values = dict(data)
+        if values.get("status") == "blocked":
+            values["status"] = "open"
+        # model_validate honors the notes alias, with description taking precedence.
+        return cls.model_validate(values)
+
     @property
     @hidden
     def notes(self) -> str:
@@ -166,12 +175,11 @@ class TodoManager(Skill):
         self._todos.clear()
         self._order.clear()
         for raw in data.get("todos", []):
-            if isinstance(raw, dict):
-                raw = dict(raw)
-                raw["status"] = {"blocked": "open"}.get(
-                    raw.get("status"), raw.get("status", "open")
-                )
-            t = Todo.model_validate(raw)
+            t = (
+                Todo.__restore_snapshot__(raw)
+                if isinstance(raw, dict)
+                else Todo.model_validate(raw)
+            )
             self._todos[t.id] = t
             self._order.append(t.id)
         active_id = data.get("active_id")

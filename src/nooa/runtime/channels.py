@@ -18,6 +18,7 @@ registration + aggregation.
 
 import asyncio
 import inspect
+import keyword
 import logging
 import uuid
 from collections import deque
@@ -861,7 +862,12 @@ class QueueManager:
         pending_readers = [
             name
             for name, channel in self._channels.items()
-            if channel.mode == "queue" and not channel.is_empty() and name.isidentifier()
+            if (
+                channel.mode == "queue"
+                and not channel.is_empty()
+                and name.isidentifier()
+                and not keyword.iskeyword(name)
+            )
         ]
         if pending_readers:
             reads = " | ".join(f"await self.{name}.get()" for name in pending_readers)
@@ -904,7 +910,7 @@ class QueueManager:
             for n, ch in self._channels.items()
             if n != "user_messages" and (ch.mode != "queue" or not ch.is_empty())
         ]
-        cleanup_hints = [f".remove_channel('{n}')" for n in extra]
+        cleanup_hints = [f".remove_channel({n!r})" for n in extra]
         all_hints = cancel_hints + cleanup_hints
         if all_hints:
             hints = " | ".join(all_hints)

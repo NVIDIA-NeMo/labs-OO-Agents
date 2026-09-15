@@ -75,7 +75,9 @@ class CodingAgent(InteractiveAgent):
     # take one over, which would remove the tool while the model is still told
     # it has it.
 
-    __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "libs", "skills"})
+    __protected_skill_attrs__ = frozenset(
+        {"shell", "repo", "todo", "libs", "skills", "mcp", "workspace_settings"}
+    )
 
     cwd: Annotated[Path, nosnapshot]
     # Host-driven input channels. These live here rather than on

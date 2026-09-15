@@ -13,11 +13,50 @@ import threading
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 import nooa.sessions.store as store_module
 from nooa.interactive import AgentMessage
 from nooa.sessions import InvalidSessionIdError, SessionNotFoundError, SessionStarted, SessionStore
 from nooa.storage import SessionAlreadyActiveError
+
+
+@pytest.mark.parametrize("field", ["model", "agent", "working_directory", "host"])
+def test_invalid_create_metadata_does_not_acquire_ownership(tmp_path, field):
+    store = SessionStore(tmp_path)
+    with pytest.raises(ValidationError):
+        store.create(session_id="invalid", **{field: None})
+    assert not store.path_for("invalid").exists()
+    with store.create(session_id="invalid") as handle:
+        assert handle.id == "invalid"
+
+
+@pytest.mark.parametrize("operation", ["create", "open"])
+def test_failed_handle_construction_releases_ownership(tmp_path, monkeypatch, operation):
+    store = SessionStore(tmp_path)
+    if operation == "open":
+        store.create(session_id="retry").close()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("handle construction failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "SessionHandle", fail)
+        with pytest.raises(RuntimeError, match="handle construction failed"):
+            getattr(store, operation)(session_id="retry")
+    with store.open("retry") as handle:
+        assert handle.id == "retry"
+
+
+def test_invalid_utf8_session_does_not_hide_healthy_sessions(tmp_path):
+    store = SessionStore(tmp_path)
+    for name in ("corrupt", "healthy"):
+        store.create(session_id=name).close()
+    with sqlite3.connect(store.path_for("corrupt")) as connection:
+        connection.execute("UPDATE events SET data = ?", (b"\xff",))
+    assert [info.id for info in store.list()] == ["healthy"]
+    with pytest.raises(SessionNotFoundError):
+        store.open("corrupt")
 
 
 def test_create_record_title_list_and_resume(tmp_path):

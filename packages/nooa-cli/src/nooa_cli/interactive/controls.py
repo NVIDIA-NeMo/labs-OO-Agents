@@ -314,6 +314,7 @@ class MCPControl(BehaviorControl):
         registry = getattr(self.agent, "mcp", None)
         if not isinstance(registry, MCPRegistry):
             return ControlResult.err("This agent has no MCP registry.")
+        registry.refresh_settings()
         if not args or args[0] == "status":
             rows = []
             for name in registry.discovered():

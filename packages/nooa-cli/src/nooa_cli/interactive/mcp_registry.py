@@ -139,7 +139,8 @@ class MCPRegistry(Skill):
       person has to open the consent URL, approve, and let the callback return.
       The interactive host surfaces the URL and collects the pasted code/callback in a masked
       in-app prompt, but the agent cannot approve on the user's behalf. Prefer
-      letting the human drive ``/mcp connect <name>`` so a single flow runs
+      letting the human drive ``/mcp approve <name>`` and confirm the displayed
+      configuration so a single flow runs
       start-to-finish — OAuth codes are single-use, and a half-finished
       agent-driven flow burns the code (causing a confusing 401 on retry).
     - **Be present for the browser handoff.** ``oauth_open_browser`` (default
@@ -207,7 +208,7 @@ class MCPRegistry(Skill):
             "environment placeholder in `headers` for a static API key, or `oauth_client_id` "
             "for a pre-provisioned OAuth client. Never write a secret value into project "
             "config. Don't set `oauth_manual` unless the server requires OOB.\n"
-            "3. Tell the user to run `/mcp connect <name>` to review the exact config, then "
+            "3. Tell the user to run `/mcp approve <name>` to review the exact config, then "
             "personally run the displayed `/mcp approve <name> <code>` command. The agent "
             "must not approve MCP config. Explain browser consent / masked code entry if the "
             "server needs OAuth.\n"
@@ -493,6 +494,7 @@ class MCPRegistry(Skill):
                 f"approval boundary: {names}. Register a new server definition instead."
             )
 
+        self.refresh_settings()
         matched = self._match(patterns, set(self.discovered()))
         newly: list[str] = []
         for name in sorted(matched):
@@ -519,7 +521,7 @@ class MCPRegistry(Skill):
             self._pending.add(name)
             worker: asyncio.Task[Any] | None = None
             try:
-                # Outer to_thread keeps the prompt_toolkit UI loop painting during
+                # Outer to_thread keeps the host event loop responsive during
                 # OAuth waits (see !373). The OAuth wait itself is bounded by a
                 # SINGLE authoritative timeout owned by the OAuth layer: the local
                 # callback server polls every 1s and exits on it, so there is no
@@ -559,6 +561,22 @@ class MCPRegistry(Skill):
             finally:
                 if worker is None or worker.done():
                     self._pending.discard(name)
+            # Settings and approvals may change while discovery/OAuth awaits.
+            # A discovered tool holds configuration, not a persistent transport.
+            self.refresh_settings()
+            try:
+                current = self._approval_request(name)
+            except ValueError:
+                current = None
+            if (
+                current is None
+                or current.fingerprint != request.fingerprint
+                or not self._approval_store.is_approved(current)
+            ):
+                raise RuntimeError(
+                    f"MCP server {name!r} configuration or approval changed during connection. "
+                    "Review and approve the current configuration before reconnecting."
+                )
             self._attach(name, tool)
             newly.append(name)
         if activate and newly:
