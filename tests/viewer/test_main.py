@@ -247,6 +247,7 @@ def test_dns_search_domain_qualified_name_is_accepted(client, monkeypatch):
     from a DNS search domain, so `<host>.<domain>` must match on the prefix.
     """
     monkeypatch.delenv("NOOA_VIEWER_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setattr(main_module, "_OWN_HOSTNAME", "test-host")
     qualified = f"{main_module._OWN_HOSTNAME}.corp.example.com"
     assert client.get("/api/version", headers={"Host": qualified, **_BROWSER}).status_code == 200
     assert (
