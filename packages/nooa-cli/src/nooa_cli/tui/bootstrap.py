@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import logging
+import sys
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -142,6 +144,22 @@ async def bootstrap(
     agent: Agent | None = None,
 ) -> BootstrapResult:
     """Create the coding agent and its shared durable session."""
+    # The runtime's agent_call middleware coverage diagnostic targets runtime
+    # developers: it fires once per session for synchronous agent methods that
+    # no registered guard can wrap. In the native TUI those helpers (spawn,
+    # session titling, status, delegation labels) are benign, so silence the
+    # diagnostic for TUI users. Installed here — at bootstrap, not at module
+    # import — so non-TUI entrypoints that import helpers from this module
+    # (e.g. headless) keep the diagnostic visible. Developers who explicitly
+    # run with warnings-as-errors (``-W error``) still see it: the filter is
+    # only installed when no error-style warning option is active, and the
+    # emitter deliberately lets the promoted exception propagate.
+    if not any(option.startswith("error") for option in sys.warnoptions):
+        warnings.filterwarnings(
+            "ignore",
+            message=r"agent_call middleware is registered",
+            category=RuntimeWarning,
+        )
     if agent is not None:
         return BootstrapResult(
             config=config,
