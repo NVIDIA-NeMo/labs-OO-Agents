@@ -149,6 +149,7 @@ llm = get_llm_client("claude-haiku-4-5")                                        
 llm = get_llm_client("gpt-5-mini")                                                  # OpenAI    (after `export OPENAI_API_KEY=...`)
 llm = get_llm_client("ollama_chat/qwen3:1.7b", api_base="http://localhost:11434")   # Ollama    (no key)
 llm = get_llm_client("hosted_vllm/Qwen/Qwen3-1.7B", api_base="http://localhost:8000/v1")  # vLLM (no key)
+llm = get_llm_client("oci/meta.llama-3.3-70b-instruct", oci_region="us-chicago-1", oci_compartment_id="ocid1.compartment...")  # OCI Generative AI (after `export OCI_*` credentials)
 ```
 
 ### 2. Your first agent
