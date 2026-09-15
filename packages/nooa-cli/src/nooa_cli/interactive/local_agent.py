@@ -14,6 +14,7 @@ import logging
 import threading
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future as ConcurrentFuture
+from contextvars import Context, copy_context
 from dataclasses import replace
 from typing import Any
 
@@ -232,7 +233,12 @@ class LocalAgentRunner:
         dispatcher_exit: type[BaseException] | None = None,
         on_cancelled: Callable[[], None] | None = None,
         bind_callbacks: bool = True,
+        handle_context: Callable[[], Context] | None = None,
     ) -> None:
+        # Optional host instrumentation belongs to each handle invocation,
+        # never to the persistent dispatcher task's first request context.
+        self._handle_context = handle_context
+        self._dispatcher_context = copy_context() if handle_context is not None else None
         self._agent = agent
         self._queue_manager = agent.queue_manager
         self._previous_notify_callback = getattr(self._queue_manager, "_notify_callback", None)
@@ -527,7 +533,12 @@ class LocalAgentRunner:
         ):
             return
         if self._loop is None:
-            self._task = asyncio.ensure_future(self._dispatch(start_with_race=start_with_race))
+            self._task = asyncio.create_task(
+                self._dispatch(start_with_race=start_with_race),
+                context=self._dispatcher_context.copy()
+                if self._dispatcher_context is not None
+                else None,
+            )
             self._source_task = self._task
         else:
 
@@ -538,7 +549,12 @@ class LocalAgentRunner:
                 finally:
                     self._source_task = None
 
-            self._source_future = asyncio.run_coroutine_threadsafe(run_dispatcher(), self._loop)
+            if self._dispatcher_context is None:
+                self._source_future = asyncio.run_coroutine_threadsafe(run_dispatcher(), self._loop)
+            else:
+                self._source_future = self._dispatcher_context.copy().run(
+                    asyncio.run_coroutine_threadsafe, run_dispatcher(), self._loop
+                )
             self._task = asyncio.wrap_future(self._source_future)
         self._task.add_done_callback(self._on_done)
         self._changed()
@@ -650,7 +666,16 @@ class LocalAgentRunner:
                     value = self._on_before_handle(self._agent)
                     if value is not None:
                         await value
-                result = await self._agent.handle(notification)
+                if self._handle_context is None:
+                    result = await self._agent.handle(notification)
+                else:
+
+                    async def handle(events):
+                        return await self._agent.handle(events)
+
+                    result = await asyncio.create_task(
+                        handle(notification), context=self._handle_context()
+                    )
             except BaseException as exc:
                 if self._dispatcher_exit is not None and isinstance(exc, self._dispatcher_exit):
                     return

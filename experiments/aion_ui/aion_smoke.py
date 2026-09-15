@@ -8,6 +8,7 @@ import argparse
 import json
 import time
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -79,8 +80,88 @@ def verify_turn(rows: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def verify_tree_turn(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Verify genuine nested calls and the deliberately recovered failed check."""
+    cards = [
+        {**row["content"]["update"], "_meta": row["content"]["_meta"]}
+        for row in rows
+        if row["type"] == "acp_tool_call"
+    ]
+    assert cards, "No execution cards were persisted"
+    nodes = [card["_meta"]["nooa.dev/execution"] for card in cards]
+    by_id = {node["spanId"]: node for node in nodes}
+    assert len(by_id) == len(cards), "Execution IDs must be unique within a turn"
+    assert len({node["runId"] for node in nodes}) == 1
+    for card, node in zip(cards, nodes, strict=True):
+        assert node["spanId"] == card["tool_call_id"]
+        assert node["version"] == 1
+        assert node["endedAtMs"] >= node["startedAtMs"]
+        visited = {node["spanId"]}
+        # AionCore's SQLite json_patch removes null-valued parent fields.
+        parent = node.get("parentSpanId")
+        while parent is not None:
+            assert parent in by_id, f"Missing parent: {parent}"
+            assert parent not in visited, f"Cycle involving {parent}"
+            visited.add(parent)
+            parent = by_id[parent].get("parentSpanId")
+    failures = [card for card in cards if card["status"] == "failed"]
+    assert len(failures) == 1, failures
+    assert failures[0]["_meta"]["nooa.dev/execution"]["name"] == "DemoVerifier.check_total"
+    assert "Expected 11, got 10" in json.dumps(failures[0]), failures[0]
+    assert all(
+        row["type"] == "acp_tool_call"
+        and row["content"]["update"]["tool_call_id"] == failures[0]["tool_call_id"]
+        for row in rows
+        if row.get("status") == "error"
+    ), "Only the deliberately failed check may report an error"
+    assert all(card["status"] in {"completed", "failed"} for card in cards)
+    for name in (
+        "DemoWorkflow.run",
+        "DemoWorkflow.write_program",
+        "DemoWorkflow.run_program",
+        "DemoVerifier.verify",
+    ):
+        assert any(node["name"] == name for node in nodes), name
+    kinds = Counter(node["nodeType"] for node in nodes)
+    assert kinds["file"] == 1 and kinds["terminal"] == 1 and kinds["python"] == 1, kinds
+    file_node = next(node for node in nodes if node["nodeType"] == "file")
+    assert by_id[file_node["parentSpanId"]]["name"] == "DemoWorkflow.write_program"
+    terminal_node = next(node for node in nodes if node["nodeType"] == "terminal")
+    assert by_id[terminal_node["parentSpanId"]]["name"] == "DemoWorkflow.run_program"
+    terminal = next(card for card in cards if card["tool_call_id"] == terminal_node["spanId"])
+    assert terminal["raw_output"]["exit_code"] == 0
+    assert terminal["raw_output"]["timed_out"] is False
+    assert any(
+        item.get("type") == "content"
+        and item.get("content", {}).get("text", "").strip() == "NOOA_EXECUTION_TREE_OK"
+        for item in terminal["content"]
+    ), terminal
+    edit = next(card for card in cards if card["tool_call_id"] == file_node["spanId"])
+    assert any(
+        item.get("type") == "diff"
+        and "# NOOA AionUi execution-tree demo artifact" in item.get("new_text", "")
+        for item in edit["content"]
+    ), edit
+    assert any(
+        "deliberate failed check was recovered" in row.get("content", {}).get("content", "")
+        for row in rows
+        if row["type"] == "text"
+    )
+    return {
+        "execution_nodes": len(nodes),
+        "completed_tool_cards": len(cards) - len(failures),
+        "expected_failed_method_cards": len(failures),
+        "file_diffs": kinds["file"],
+    }
+
+
 def run_turn(
-    base: str, conversation_id: str, content: str, run_dir: Path, index: int
+    base: str,
+    conversation_id: str,
+    content: str,
+    run_dir: Path,
+    index: int,
+    verify: Callable[[list[dict[str, Any]]], dict[str, int]] = verify_turn,
 ) -> dict[str, Any]:
     previous_ids = {row["id"] for row in messages(base, conversation_id)}
     started = time.monotonic()
@@ -93,12 +174,12 @@ def run_turn(
         rows = messages(base, conversation_id)
         current = [row for row in rows if row["id"] not in previous_ids]
         errors = [row for row in current if row.get("status") == "error"]
-        if errors:
+        if errors and verify is verify_turn:
             (run_dir / f"turn-{index}-messages.json").write_text(json.dumps(rows, indent=2) + "\n")
             raise AssertionError(errors)
         if current and detail["runtime"]["state"] == "idle":
             (run_dir / f"turn-{index}-messages.json").write_text(json.dumps(rows, indent=2) + "\n")
-            counts = verify_turn(current)
+            counts = verify(current)
             return {
                 **counts,
                 "turn_id": accepted["turn_id"],
@@ -112,19 +193,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", default="http://127.0.0.1:25812")
     parser.add_argument("--ui", default="http://127.0.0.1:25811")
+    parser.add_argument("--execution-tree", action="store_true")
     args = parser.parse_args()
     started = time.monotonic()
     run_dir = ROOT / "tmp" / "aion-ui-spike" / f"aion-run-{uuid4().hex[:12]}"
     workspace = run_dir / "workspace"
     workspace.mkdir(parents=True)
     env = {"NEMO_OO_USER_DIR": str(run_dir / "user-config"), "TMPDIR": str(run_dir)}
+    agent_args = ["--demo", "--execution-tree"] if args.execution_tree else ["--demo"]
+    verify = verify_tree_turn if args.execution_tree else verify_turn
     probe = request(
         args.backend,
         "POST",
         "/api/agents/custom/try-connect",
         {
             "command": str(LAUNCHER),
-            "acp_args": ["--demo"],
+            "acp_args": agent_args,
             "env": env,
         },
     )
@@ -134,10 +218,10 @@ def main() -> None:
         "POST",
         "/api/agents/custom",
         {
-            "name": "NOOA scripted spike",
+            "name": "NOOA execution tree" if args.execution_tree else "NOOA scripted spike",
             "command": str(LAUNCHER),
             "icon": "🧪",
-            "args": ["--demo"],
+            "args": agent_args,
             "env": [{"name": name, "value": value} for name, value in env.items()],
         },
     )
@@ -147,7 +231,11 @@ def main() -> None:
         "/api/conversations",
         {
             "type": "acp",
-            "name": "NOOA × AionUi — scripted tool demo",
+            "name": (
+                "NOOA execution tree — nested methods and recovery"
+                if args.execution_tree
+                else "NOOA × AionUi — scripted tool demo"
+            ),
             "extra": {
                 "agent_id": agent["id"],
                 "backend": "custom",
@@ -163,17 +251,23 @@ def main() -> None:
         json.dumps({"conversation_id": conversation_id, "url": url, "run_directory": str(run_dir)}),
         flush=True,
     )
-    turns = [run_turn(args.backend, conversation_id, "Run the scripted NOOA demo.", run_dir, 1)]
-    artifact = workspace / "nooa_aion_demo.py"
+    turns = [
+        run_turn(args.backend, conversation_id, "Run the scripted NOOA demo.", run_dir, 1, verify)
+    ]
+    artifact = workspace / ("nooa_tree_demo.py" if args.execution_tree else "nooa_aion_demo.py")
     assert "DEMO_TURN = 1" in artifact.read_text()
-    turns.append(run_turn(args.backend, conversation_id, "Run it a second time.", run_dir, 2))
+    turns.append(
+        run_turn(args.backend, conversation_id, "Run it a second time.", run_dir, 2, verify)
+    )
     assert "DEMO_TURN = 2" in artifact.read_text()
     before_restart = request(args.backend, "GET", f"/api/conversations/{conversation_id}")
     restarted = request(
         args.backend, "POST", f"/api/conversations/{conversation_id}/runtime/restart"
     )
     turns.append(
-        run_turn(args.backend, conversation_id, "Continue after runtime restart.", run_dir, 3)
+        run_turn(
+            args.backend, conversation_id, "Continue after runtime restart.", run_dir, 3, verify
+        )
     )
     assert "DEMO_TURN = 1" in artifact.read_text(), (
         "Scripted provider counter should reset after process restart"
@@ -188,6 +282,7 @@ def main() -> None:
         "result": "passed",
         "scope": "AionCore REST → NOOA ACP → real CodeAct/file/shell tools; scripted provider",
         "live_llm_calls": 0,
+        "execution_tree": args.execution_tree,
         "agent_id": agent["id"],
         "conversation_id": conversation_id,
         "conversation_url": url,
