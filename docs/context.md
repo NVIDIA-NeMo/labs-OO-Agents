@@ -2,7 +2,7 @@
 
 ## Goal
 
-Use one pattern for context produced by agents, skills, and future components. One agent view creates the complete ordered model context and may explicitly compose other views. The default view is a readable reference implementation. Rendering adds no content policy.
+Use one pattern for context produced by agents, skills, and future components. One agent view creates the complete ordered model context and may explicitly compose other views. The default view is a readable reference implementation. Rendering adds no context sources or placement policy.
 
 ## Contract
 
@@ -31,7 +31,7 @@ class ContextView[Owner](Protocol):
 
 `Block.content` is materialized; `metadata` carries optional rendering and budget hints. Events remain typed. `CacheBoundary` is a structural marker: it has no content or token cost and is not evictable. In the default view, `metadata.static` controls prefix placement independently of evaluation timing.
 
-The runtime assembles the selected view for every LLM request and collects it into a `tuple[ContextItem, ...]`; membership and order then remain fixed through rendering. No additional assembled-context type is needed.
+The runtime assembles the selected view for every LLM request and collects it into a `tuple[ContextItem, ...]`. Rendering preserves that item order except when expanding an atomic tool-call replay group. No additional assembled-context type is needed.
 
 `CurrentCall` is the immutable per-request view of an invocation. Its invocation identity and method inputs stay stable; mutable manager and scoped selections are captured again for each request. Views may read the resolved strategy, event query, `model`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
 
@@ -86,7 +86,7 @@ Iterative views must explicitly include the task, model outputs, and execution f
 
 ## Defaults
 
-`DefaultAgentView` lives in its own ordinary module and contains the complete default policy:
+`DefaultAgentView` lives in its own ordinary module and contains the complete default policy. In abbreviated form:
 
 ```python
 class DefaultAgentView(ContextView[Agent]):
@@ -129,8 +129,8 @@ class DefaultSkillView(ContextView[Skill]):
             yield Block(
                 key=key,
                 content=context_text(value, call=call),
-                role=USER,
-                metadata={"expr": expression, "source_dynamic": True},
+                role=Role.USER,
+                metadata=BlockMetadata(expr=expression, source_dynamic=True),
             )
 ```
 
@@ -148,7 +148,7 @@ Model-specific prompt content remains view policy, not formatter policy. A custo
 resolve view
     -> view assembles ContextItem items
     -> tuple[ContextItem, ...]
-    -> ContextRenderer
+    -> render_context
     -> ProviderFormatter
     -> UnifiedLLM
 ```
@@ -157,7 +157,7 @@ resolve view
 - A nested view owns the content and local order of its contribution.
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
 - The renderer expands items in place and emits no boundary text. A canonical assistant tool-call turn and its linked results form one atomic replay group; a boundary cannot split it.
-- The provider formatter preserves neutral cache positions while adapting message shape. UnifiedLLM maps only view-emitted boundaries to provider annotations, or removes them when unsupported. Without a boundary, NOOA emits no explicit `cache_control` annotation.
+- Provider formatting preserves a cache marker when its output can carry one and otherwise removes it. UnifiedLLM maps explicit boundaries to provider annotations or removes them when unsupported. Without a boundary, NOOA emits no explicit `cache_control` annotation.
 - The selected agent view owns cache placement. The default adds at most one boundary after visible history and before trailing context; custom views receive none implicitly.
 - Provider-managed automatic caching and transport-routing hints such as `prompt_cache_key` are independent of explicit cache breakpoints.
 - Bounded serialization is formatting; recovery for missing data or other invented content belongs to event production or view policy.
@@ -172,4 +172,4 @@ These are the default application's context APIs, not requirements of `ContextVi
 
 Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` no longer chooses placement; and `render_context(context_limit=...)` reports the limit but leaves eviction to the view.
 
-`DefaultAgentView` and its helpers use only public agent, call, manager, strategy, and event interfaces. `ActorRuntime` only creates `CurrentCall`, resolves and collects the view, renders it, and calls the LLM.
+`DefaultAgentView` and its helpers use only public agent, call, manager, strategy, and event interfaces. `ActorRuntime` supplies call facts and budget support, resolves and collects the view, renders it, and handles transport and observability; it does not assemble context content.
