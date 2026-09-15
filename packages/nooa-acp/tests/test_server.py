@@ -1177,6 +1177,38 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     await replay_adapter.close()
 
 
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_close_checkpoints_state_when_cancelling_work_fails(tmp_path, failure):
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+    session.agent.vars["checkpoint_probe"] = "last unsaved value"
+    cancel_work = session.dispatcher.runtime.cancel_work
+    attempts = 0
+
+    async def fail_first_cancel():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise failure("cancel-work failure")
+        await cancel_work()
+
+    with patch.object(session.dispatcher.runtime, "cancel_work", side_effect=fail_first_cancel):
+        with pytest.raises(failure):
+            await adapter.close_session(created.session_id)
+
+    # Loading through a fresh adapter checks both the final durable checkpoint
+    # and release of ownership despite the cleanup error.
+    resumed_adapter = CodingACPAdapter(_completed_llm)
+    resumed_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    await resumed_adapter.load_session(str(tmp_path), created.session_id)
+    resumed = await _session(resumed_adapter, created.session_id)
+    assert resumed.agent.vars["checkpoint_probe"] == "last unsaved value"
+    await resumed_adapter.close()
+    await adapter.close()
+
+
 async def test_resume_pagination_skips_open_and_empty_sessions_before_slicing(
     tmp_path, monkeypatch
 ):

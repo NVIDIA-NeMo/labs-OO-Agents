@@ -122,8 +122,10 @@ class _ACPSession:
                 if self.policy is not None:
                     await self.policy.shutdown()
             finally:
-                await self.dispatcher.runtime.cancel_work()
-                self.handle.storage.save_snapshot(self.agent)
+                try:
+                    await self.dispatcher.runtime.cancel_work()
+                finally:
+                    self.handle.storage.save_snapshot(self.agent)
         finally:
             await self._close_resources()
 
