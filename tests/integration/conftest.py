@@ -79,6 +79,19 @@ def auto_reset_tracing_state():
 
 
 @pytest.fixture
+def isolated_gate_tracing(auto_reset_tracing_state, monkeypatch):
+    """Do not discover a viewer or export live gate prompts/replies externally."""
+    import nooa.tracing as tracing
+
+    # Unsetting OTLP_ENDPOINT alone still probes the default local viewer.
+    monkeypatch.setattr(tracing, "_default_exporters", lambda: [])
+    tracing.enable_tracing(exporters=[])
+    # OTel's process-global provider can outlive the module reset. Reconfigure
+    # explicitly to remove processors retained from an earlier test as well.
+    tracing.enable_tracing(exporters=[])
+
+
+@pytest.fixture
 def mock_model_client(monkeypatch):
     """Real UnifiedLLM/SDK dispatch with only the model's HTTP pool mocked."""
     import httpx

@@ -31,6 +31,7 @@ from tests.integration._release_gate import gate_cases, gate_client, gate_host
 
 pytestmark = [
     pytest.mark.integration,
+    pytest.mark.usefixtures("isolated_gate_tracing"),
     pytest.mark.skipif(
         os.getenv("NOOA_RUN_OPEN_MODEL_REPLAY") != "1",
         reason="set NOOA_RUN_OPEN_MODEL_REPLAY=1 to spend inference tokens",
@@ -43,6 +44,39 @@ FAMILIES = ("deepseek", "kimi", "glm", "qwen")
 def lookup(key: str) -> int:
     """Look up the offset needed to finish the comparison."""
     return 0
+
+
+def seed_messages(family: str) -> list[dict[str, str]]:
+    task = (
+        "Is 17 times 19 less than 18 squared plus offset? First call lookup with "
+        "key=offset; do not answer until the tool returns. Then give the difference."
+    )
+    if family == "glm":
+        # The lookup key must require computation BEFORE the tool call. A fixed
+        # key lets the model legitimately call the tool without any reasoning.
+        task = (
+            "Schedule four jobs on one worker starting at time 0, with no gaps. "
+            "Job durations are A=3, B=2, C=4, D=1; weights are A=3, B=6, C=2, D=4. "
+            "A must precede C and B must precede D. Minimize the sum of each job's "
+            "weight times its completion time. Work out the optimal order before "
+            "calling lookup: its key must be the four job letters in that order. "
+            "Do not give the final answer until the tool returns. Then report the "
+            "minimum weighted completion cost plus the returned offset."
+        )
+    return [
+        {"role": "system", "content": "Use the lookup tool when asked. Think briefly."},
+        {"role": "user", "content": task},
+        {"role": "user", "content": "Live context: phase=before lookup."},
+    ]
+
+
+def readable_seed_reasoning(seed: LLMResponse) -> str:
+    raw = getattr(seed.raw_response.choices[0].message, "reasoning_content", None)
+    assert isinstance(raw, str) and raw.strip(), (
+        "seed reply returned no nonempty reasoning_content; readable reasoning "
+        f"replay cannot be tested (finish_reason={seed.finish_reason})"
+    )
+    return raw
 
 
 @pytest.mark.asyncio
@@ -85,17 +119,7 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
         return response
 
     monkeypatch.setattr(httpx.AsyncClient, "send", capture)
-    messages = [
-        {"role": "system", "content": "Use the lookup tool when asked. Think briefly."},
-        {
-            "role": "user",
-            "content": (
-                "Is 17 times 19 less than 18 squared plus offset? First call lookup with "
-                "key=offset; do not answer until the tool returns. Then give the difference."
-            ),
-        },
-        {"role": "user", "content": "Live context: phase=before lookup."},
-    ]
+    messages = seed_messages(family)
     options = {
         "transport": transport,
         "max_tokens": 1536,
@@ -119,8 +143,7 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
         ),
         flush=True,
     )
-    raw = seed.raw_response.choices[0].message.reasoning_content
-    assert isinstance(raw, str) and raw, "route returned no readable reasoning"
+    raw = readable_seed_reasoning(seed)
     assert seed.tool_calls and seed.finish_reason != "length"
     database = tmp_path / "session.db"
     with SQLiteStorageManager(database) as storage:

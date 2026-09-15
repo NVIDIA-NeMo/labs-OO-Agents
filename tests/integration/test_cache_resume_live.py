@@ -43,6 +43,7 @@ from tests.integration._release_gate import gate_cases, gate_client, gate_host
 _GATE_SESSIONS = {}
 
 pytestmark = [
+    pytest.mark.usefixtures("isolated_gate_tracing"),
     pytest.mark.integration,
     pytest.mark.skipif(
         os.getenv("NOOA_RUN_CACHE_RESUME_LIVE") != "1",

@@ -28,6 +28,7 @@ from nooa.unifiedllm import HttpConfig, RetryConfig
 from tests.integration._release_gate import gate_cases, gate_client
 
 pytestmark = [
+    pytest.mark.usefixtures("isolated_gate_tracing"),
     pytest.mark.integration,
     pytest.mark.skipif(
         os.getenv("NOOA_RUN_SUMMARIZER_E2E") != "1",
