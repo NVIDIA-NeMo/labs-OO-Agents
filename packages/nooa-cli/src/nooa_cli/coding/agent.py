@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
-from nooa import Context, hidden, strategy
+from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
@@ -24,8 +24,16 @@ from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import SkillWriting, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
-from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
+
+with hidden:
+    from nooa_cli.coding.instructions import (
+        ResolvedInstructionStack,
+        render_agent_instructions,
+        render_developer_overlay,
+        render_instruction_profile,
+        resolve_instruction_stack,
+    )
 
 if TYPE_CHECKING:
     from nooa.runtime.channels import Channel
@@ -69,6 +77,9 @@ class CodingAgent(InteractiveAgent):
     skills: Annotated[SkillRegistry, nosnapshot]
     _base_shell: Annotated[ShellTools, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
+    _instruction_profile_override: Annotated[str | None, hidden, nosnapshot]
+    _developer_instruction_config: Annotated[Path | None, hidden, nosnapshot]
+    instruction_stack: Annotated[ResolvedInstructionStack, hidden, nosnapshot]
 
     def __init__(
         self,
@@ -78,6 +89,8 @@ class CodingAgent(InteractiveAgent):
         summarization: SummarizationConfig | None = None,
         skills_dirs: list[Path] | None = None,
         libs_dir: Path | None = None,
+        instruction_profile: str | None = None,
+        developer_instruction_config: str | Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(llm=llm, **kwargs)
@@ -86,6 +99,12 @@ class CodingAgent(InteractiveAgent):
         self._system_messages_in = self.queue_manager.queue("system_messages")
         self.system_messages = self._system_messages_in.reader
         self.cwd = Path(cwd).resolve()
+        self._instruction_profile_override = instruction_profile
+        self._developer_instruction_config = (
+            Path(developer_instruction_config).expanduser().resolve()
+            if developer_instruction_config is not None
+            else None
+        )
         self._base_shell = ShellTools(cwd=str(self.cwd))
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
@@ -133,10 +152,64 @@ class CodingAgent(InteractiveAgent):
         instructions = render_agent_instructions(self.cwd)
         if instructions:
             self.context["repository_instructions"] = Context(instructions, prefix=True)
+        self._refresh_instruction_stack()
         spec(self, "context", hidden=False)
         spec(self, "events", hidden=False)
 
         install_summarizer(summarization or SummarizationConfig(), self)
+
+    @hidden
+    @no_trace
+    def set_llm(self, llm: UnifiedLLM) -> None:
+        """Replace the LLM and refresh model-derived instruction policy."""
+        stack = resolve_instruction_stack(
+            self.cwd,
+            model=llm.model,
+            explicit_profile=self._instruction_profile_override,
+            developer_config=self._developer_instruction_config,
+        )
+        super().set_llm(llm)
+        self._apply_instruction_stack(stack)
+
+    @hidden
+    @no_trace
+    def set_instruction_profile(self, profile: str | None) -> None:
+        """Set or clear a host-selected instruction profile override."""
+        stack = resolve_instruction_stack(
+            self.cwd,
+            model=self.llm.model,
+            explicit_profile=profile,
+            developer_config=self._developer_instruction_config,
+        )
+        self._instruction_profile_override = profile
+        self._apply_instruction_stack(stack)
+
+    @hidden
+    @no_trace
+    def _refresh_instruction_stack(self) -> None:
+        self._apply_instruction_stack(
+            resolve_instruction_stack(
+                self.cwd,
+                model=self.llm.model,
+                explicit_profile=self._instruction_profile_override,
+                developer_config=self._developer_instruction_config,
+            )
+        )
+
+    @hidden
+    @no_trace
+    def _apply_instruction_stack(self, stack: ResolvedInstructionStack) -> None:
+        self.instruction_stack = stack
+        # Reinsert both optional layers together so their order remains stable
+        # if a config or model change causes an absent layer to appear later.
+        self.context.pop("developer_instructions", None)
+        self.context.pop("instruction_profile", None)
+        developer = render_developer_overlay(stack.developer)
+        if developer:
+            self.context["developer_instructions"] = Context(developer, prefix=True)
+        overlay = render_instruction_profile(stack.profile)
+        if overlay:
+            self.context["instruction_profile"] = Context(overlay, prefix=True)
 
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""

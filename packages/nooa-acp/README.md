@@ -177,6 +177,69 @@ Loaded `@slash_command` methods are advertised through ACP and matching
 `/command arguments` prompts are dispatched through the shared typed command
 router. Command discovery is refreshed when loaded skills change.
 
+Model-aware instruction profiles are a new harness feature introduced by NOOA,
+not an existing ACP or cross-harness convention. We are proposing the mechanism
+for adoption by other coding-agent harnesses, and the name, config location,
+and exchange format remain open. See the full
+[proposal](../../docs/proposals/model-aware-instruction-profiles.md) for the
+motivation, portable semantic contract, current NOOA behavior, proposed private
+developer overlay, and open questions. The developer overlay is implemented by
+the shared coding agent used by ACP.
+
+In NOOA, repository `AGENTS.md` files remain common instructions. A workspace
+can append a model-aware instruction overlay through `.nooa/settings.yaml`:
+
+```yaml
+instructions:
+  models:
+    "openai/gpt-6-astra":
+      - .nooa/models/gpt-6-astra.md
+    "openai/gpt-5.6-*":
+      - .nooa/models/gpt-5.6.md
+```
+
+Exact model keys win over globs. When several globs match, the one with the
+most literal characters wins, with lexical order as the tie-breaker. Named
+profiles allow a host to select instruction policy separately from model
+identity:
+
+```yaml
+instructions:
+  profiles:
+    concise:
+      - .nooa/profiles/concise.md
+  models:
+    "openai/gpt-6-astra": concise
+```
+
+`CodingAgent(..., instruction_profile="concise")` makes that selection
+explicit. The resolved repository files, profile, matching pattern, and overlay
+files are available through `agent.instruction_stack` and its `format_debug()`
+method.
+
+Private developer instructions live outside the repository in
+`~/.config/nooa/developer-instructions.yaml`:
+
+```yaml
+repositories:
+  "/Users/ryan/code/project":
+    - instructions/project-workflow.md
+  "/Users/ryan/.codex/worktrees/*/labs-OO-Agents":
+    - instructions/nooa-workflow.md
+```
+
+Selectors match the resolved Git worktree root. Exact paths win over globs;
+overlapping globs use the same specificity and lexical tie-break rules as model
+patterns. Relative instruction paths resolve from the private configuration
+file's directory. The developer layer is inserted after repository
+`AGENTS.md` files and before the model profile. A repository-local file with
+the same name is not loaded.
+
+The proposal's
+[worked example](../../docs/proposals/model-aware-instruction-profiles.md#worked-example-one-repository-one-developer-two-models)
+shows realistic contents for all three layers and compares the effective GPT-5.6
+and Astra instruction stacks.
+
 The current adapter accepts text and resource-link prompts plus stdio, HTTP,
 and SSE MCP servers forwarded by an ACP client. ACP-transport MCP proxies,
 additional workspace directories, images, and embedded resources are not
