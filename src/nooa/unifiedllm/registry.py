@@ -338,8 +338,6 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         # Responses API without YAML — pass client_type directly
         llm = get_llm_client("openai/gpt-5.3-codex", client_type="responses")
     """
-    from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig
-
     ensure_loaded()
 
     # Snapshot the alias's config under the lock so a concurrent
@@ -349,6 +347,21 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     # happens after release.
     with _registry_lock:
         config = dict(MODELS.get(name, {}))
+
+    return client_from_config(name, config, client_type=client_type, **overrides)
+
+
+def client_from_config(
+    name: str, config: dict[str, Any], *, client_type: str | None = None, **overrides
+) -> UnifiedLLM:
+    """Build a client from a registry entry without registering or saving it.
+
+    Model lookup and onboarding share this construction path so a checked
+    entry has the same defaults and routing when an agent loads it later.
+    """
+    from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig
+
+    config = dict(config)
 
     if config:
         model = config.get("model_name", name)

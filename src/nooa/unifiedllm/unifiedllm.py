@@ -2063,6 +2063,26 @@ class ReasoningCompletionClient(CompletionClient):
 
 
 class ResponsesClient(UnifiedLLM):
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Translate the shared reply cap once, respecting call and level overrides."""
+        config = super()._prepare_call_config(overrides)
+        names = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
+        selected = names & overrides.keys()
+        if not selected:
+            level = overrides.get("reasoning_level", self.reasoning_level)
+            patch = self._reasoning_config.settings(level) if level is not None else {}
+            selected = names & patch.keys()
+        if not selected:
+            selected = names & config.keys()
+        if len(selected) > 1:
+            raise ValueError("Set only one reply limit: max_tokens or max_output_tokens")
+        if selected:
+            value = config[next(iter(selected))]
+            for name in names:
+                config.pop(name, None)
+            config["max_output_tokens"] = value
+        return config
+
     def __init__(
         self,
         model: str,

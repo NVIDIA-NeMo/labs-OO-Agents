@@ -61,6 +61,28 @@ Inspect or refresh entries with
 `from nooa.unifiedllm.registry import reload_registry; configs = reload_registry()`.
 To load a specific file instead of discovery, pass its `Path` to `reload_registry`.
 
+For a new endpoint, `uv run nooa connect` warns up front and then makes bounded
+paid checks automatically. Use it only when the user has authorized those calls.
+Omit the model argument to select from
+the endpoint's model list. It writes the user `llm_config.yaml`, warning before
+replacing an existing alias; `--output` selects another file. Supply an environment
+variable name for the key; never put credentials in the entry. Probe acceptance
+does not prove the model obeyed a reasoning setting. TUI integrations use the
+same `nooa.connect.discover` / `check_interfaces` / `plan` / `run` / `write` library; see
+[model onboarding](../../docs/model-connect.md). `--no-probe` makes no generation
+calls. `--yes` skips save/overwrite confirmations, not a requirement for paid
+calls; do not use it to overwrite an alias without the user's authorization.
+
+**No-cost/manual setup:** when the user does not want API calls, follow
+[manual model configuration](../../docs/model-configuration.md). Use the model ID,
+endpoint and API format the user supplies or the provider documents; preserve
+other aliases, reference the key by environment-variable name, and leave unknown
+capabilities unset. Validate with `reload_registry(Path(...))` only; do not call
+`acall`, run a probe or infer success from loading YAML. Alternatively supply all
+connection fields to Connect with `--no-probe --no-catalogue` and an explicit
+model ID, so it does not fetch models or metadata either. Report that the file
+loads locally and that the endpoint and credentials remain untested.
+
 Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 
 **Caching:** the cached renderer inserts a `CacheBoundary()` block before live

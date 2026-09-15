@@ -332,6 +332,9 @@ def prepare_chat_messages(
 def add_encrypted_reasoning_include(api_params: dict[str, Any], scope: str | None) -> None:
     """Request OpenAI encrypted reasoning only on endpoints known to support it."""
     configured = api_params.get("include")
+    if configured == []:
+        api_params.pop("include", None)
+        return  # Explicit opt-out, including on native OpenAI/Azure endpoints.
     include = list(configured) if isinstance(configured, (list, tuple, set)) else []
     if configured is not None and not isinstance(configured, (list, tuple, set)):
         include.append(configured)

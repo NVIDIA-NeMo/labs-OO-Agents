@@ -117,4 +117,12 @@ def apply_reasoning_level(
     if isinstance(extra, Mapping) and patch.keys() & extra.keys():
         params["extra_body"] = {key: value for key, value in extra.items() if key not in patch}
     params.update(patch)
+    # Reply-limit aliases are one setting, even when the destination API names
+    # it differently. A level's cap replaces inherited defaults as a unit.
+    caps = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
+    if caps & patch.keys():
+        if (caps - patch.keys()) & overrides.keys():
+            raise ValueError("reasoning_level conflicts with explicit reply-limit alias")
+        for key in caps - patch.keys():
+            params.pop(key, None)
     return params
