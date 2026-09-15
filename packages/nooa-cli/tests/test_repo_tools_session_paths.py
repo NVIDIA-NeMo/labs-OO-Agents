@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 from nooa_cli.tools.repo_tools import RepoTools
 
+from nooa.tools.shell_tools import ShellTools
+
 
 class FakeSession:
     """A scripted session over an in-memory filesystem.
@@ -114,6 +116,81 @@ FS = {
     "/app/mod.py": "def handler():\n    pass\n\n\nclass Widget:\n    def run(self):\n        pass\n",
     "/app/caller.py": "from mod import handler\n\nhandler()\n",
 }
+
+
+async def test_empty_session_file_has_no_symbols_or_error():
+    repo = RepoTools(root="/app", session=FakeSession({"/app/empty.py": ""}))
+    result = await repo.symbols("empty.py")
+    assert result.matches == []
+    assert result.lines == []
+    assert result.total_matches == 0
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "disappeared"])
+async def test_session_file_failure_is_reported_without_unpaired_symbols(failure):
+    class FailingSession(FakeSession):
+        async def run(self, command, timeout=30):
+            result = await super().run(command, timeout=timeout)
+            if command.startswith("test -f") and failure == "disappeared":
+                self.fs.clear()
+            if command.startswith("base64") and failure == "unreadable":
+                return "", "permission denied", 1
+            return result
+
+    repo = RepoTools(root="/app", session=FailingSession(dict(FS)))
+    result = await repo.symbols("mod.py")
+    assert result.matches == []
+    assert result.total_matches == 0
+    assert "Error:" in result.text
+
+
+@pytest.mark.parametrize("operation", ["file", "map", "search", "refs"])
+async def test_session_anchors_cannot_edit_same_named_host_file(operation, tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    host_file = root / "mod.py"
+    target = tmp_path / "target.py"
+    target.write_text("def handler():\n    pass\nhandler()\n")
+    host_file.symlink_to(target)
+    fs = {str(host_file): target.read_text()}
+    repo = RepoTools(root=root, session=FakeSession(fs))
+    if operation == "file":
+        result = await repo.symbols("mod.py")
+    elif operation == "map":
+        result = await repo.symbols(".")
+    elif operation == "search":
+        result = await repo.symbols(".", query="handler")
+    else:
+        result = await repo.refs("handler")
+    assert result.matches
+    shell = ShellTools(cwd=str(root))
+    original = target.read_text()
+    try:
+        for match in result.matches:
+            assert not match.editable
+            assert match.resolved_path == str(host_file)
+            sliced = match[match.start : match.end]
+            assert not sliced.editable
+            with pytest.raises(ValueError, match="originating session"):
+                await shell.replace(sliced, "must not be written")
+        assert target.read_text() == original
+        assert fs[str(host_file)] == original
+    finally:
+        await shell.close()
+
+
+async def test_host_repo_anchor_remains_editable(tmp_path):
+    path = tmp_path / "mod.py"
+    path.write_text("def handler():\n    pass\n")
+    repo = RepoTools(root=tmp_path)
+    result = await repo.symbols("mod.py")
+    assert result[0].editable
+    shell = ShellTools(cwd=str(tmp_path))
+    try:
+        await shell.replace(result[0], "def renamed():")
+        assert path.read_text() == "def renamed():\n    pass\n"
+    finally:
+        await shell.close()
 
 
 @pytest.mark.asyncio

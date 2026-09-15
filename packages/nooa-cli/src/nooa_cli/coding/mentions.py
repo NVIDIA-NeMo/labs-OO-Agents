@@ -37,6 +37,8 @@ def expand_mentions(text: str, *, base_dir: str | Path | None = None) -> str:
         # filename that legitimately ends in such a char still resolves.
         stripped = raw.rstrip(_TRAILING_PUNCT)
         for candidate in (raw, stripped):
+            if not candidate.strip("./"):
+                continue
             p = Path(os.path.expanduser(candidate))
             resolved = p if p.is_absolute() or resolved_base is None else resolved_base / p
             if resolved.exists():

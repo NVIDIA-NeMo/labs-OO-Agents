@@ -3,8 +3,8 @@
 """RepoTools — code navigation that returns ShellTools Match anchors.
 
 Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
-``RepoResult``: printable lines plus editable ``Match`` objects for
-``self.shell.replace(result[i], new_text)``.
+``RepoResult``: printable lines plus ``Match`` objects. Host anchors support
+``self.shell.replace(result[i], new_text)``; session anchors are read-only.
 """
 
 import base64
@@ -75,9 +75,12 @@ class FileMapResult:
         list[Match],
         spec(description="ShellTools-compatible anchors for each symbol line"),
     ] = field(default_factory=list)
+    diagnostic: str | None = None
 
     @property
     def text(self) -> str:
+        if self.diagnostic is not None:
+            return self.diagnostic
         if not self.symbols:
             return f"[{self.path}] ({self.language}) — no symbols found"
         header = f"[{self.path}] ({self.language}, {len(self.symbols)} symbols)"
@@ -167,7 +170,7 @@ class RepoResult(BaseModel):
     lines: list[str] = Field(description="Display lines: file:line: context")
     matches: list[Match] = Field(
         default_factory=list,
-        description="ShellTools-compatible anchors; pass an item to self.shell.replace()",
+        description="Match anchors; only editable=True anchors support self.shell.replace()",
     )
     total_matches: int = Field(default=0, description="Total matches found")
     truncated: bool = Field(default=False, description="True if results were capped")
@@ -317,11 +320,15 @@ def _line_match(path: Path, line_no: int) -> Match | None:
     return Match(str(path), line_no, line_no, lines[line_no - 1], resolved_path=path)
 
 
-def _line_match_from_lines(path: Path, line_no: int, lines: list[str]) -> Match | None:
+def _line_match_from_lines(
+    path: Path, line_no: int, lines: list[str], *, editable: bool = True
+) -> Match | None:
     """Build a ``Match`` from already-read lines (e.g. session-fetched content)."""
     if not (1 <= line_no <= len(lines)):
         return None
-    return Match(str(path), line_no, line_no, lines[line_no - 1], resolved_path=path)
+    return Match(
+        str(path), line_no, line_no, lines[line_no - 1], resolved_path=path, editable=editable
+    )
 
 
 def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Match]]:
@@ -334,7 +341,7 @@ def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Matc
 
 
 def _symbol_anchor_pairs_from_lines(
-    path: Path, symbols: list[str], lines: list[str]
+    path: Path, symbols: list[str], lines: list[str], *, editable: bool = True
 ) -> list[tuple[str, Match]]:
     """Pair formatted symbol lines with anchors built from pre-read content."""
     pairs: list[tuple[str, Match]] = []
@@ -357,6 +364,7 @@ def _symbol_anchor_pairs_from_lines(
                         line_no,
                         lines[line_no - 1],
                         resolved_path=path,
+                        editable=editable,
                     ),
                 )
             )
@@ -472,9 +480,13 @@ class RepoTools(Skill):
         symbols(path=".", query="")  — definitions / file or repo overview
         refs(name, path=".")         — references/usages, excluding definitions
 
-    Results print like search output and index/iterate as editable matches::
+    Results print like search output and index/iterate as matches. Host anchors
+    support replacement::
         r = await self.repo.symbols("src/", query="Handler")
         await self.shell.replace(r[0], new_code)
+
+    With a wired session, anchors are read-only (``editable=False``). Edit through
+    that session's shell commands; host file helpers cannot identify its filesystem.
     """
 
     __nosnapshot__ = True
@@ -485,7 +497,7 @@ class RepoTools(Skill):
         session: BashSession | None = None,
         require_tree_sitter: bool = False,
     ) -> None:
-        self._root = Path(root).resolve()
+        self._root = Path(root).absolute() if session is not None else Path(root).resolve()
         self._session = session  # shared session with ShellTools (optional)
         self._has_rg: bool | None = None  # lazy-checked
         if not _tree_sitter_available():
@@ -518,8 +530,8 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find definitions under a file or directory.
 
-        Returns printable lines plus editable ``Match`` anchors; use
-        ``await self.shell.replace(result[0], new_text)`` to edit a hit.
+        Returns printable lines plus ``Match`` anchors. Host anchors support
+        ``self.shell.replace``; session anchors are read-only (``editable=False``).
         """
         resolved = self._resolve(path)
         if not await self._path_exists(resolved):
@@ -536,6 +548,8 @@ class RepoTools(Skill):
 
         if await self._path_is_file(resolved):
             file_result = await self._filemap(path, max_symbols=max_results if not query else 500)
+            if file_result.diagnostic is not None:
+                return RepoResult(query=path, lines=[file_result.diagnostic])
             pairs = [
                 (symbol, anchor)
                 for symbol, anchor in zip(file_result.symbols, file_result.anchors, strict=True)
@@ -578,8 +592,8 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
-        Returns printable lines plus editable ``Match`` anchors; use
-        ``await self.shell.replace(result[0], new_text)`` to edit a hit.
+        Returns printable lines plus ``Match`` anchors. Host anchors support
+        ``self.shell.replace``; session anchors are read-only (``editable=False``).
         """
         resolved = self._resolve(path)
         if not await self._path_exists(resolved):
@@ -645,7 +659,7 @@ class RepoTools(Skill):
             stdout, _, code = await self._session.run(
                 f"base64 < {shlex.quote(str(resolved))}", timeout=30
             )
-            if code != 0 or not stdout.strip():
+            if code != 0:
                 return None
             try:
                 return base64.b64decode(stdout.strip())
@@ -690,7 +704,7 @@ class RepoTools(Skill):
             lines = cache[fpath]
         if lines is None:
             return None
-        return _line_match_from_lines(fpath, line_no, lines)
+        return _line_match_from_lines(fpath, line_no, lines, editable=self._session is None)
 
     async def _check_rg(self) -> bool:
         """Check if rg (ripgrep) is available, caching the result."""
@@ -732,7 +746,7 @@ class RepoTools(Skill):
                 "filemap:file_not_found", f"File not found: {path}", path
             )
             return FileMapResult(
-                path=path, language="unknown", symbols=[f"Error: {path} not found"]
+                path=path, language="unknown", symbols=[], diagnostic=f"Error: {path} not found"
             )
 
         lang = _detect_lang(resolved)
@@ -744,13 +758,15 @@ class RepoTools(Skill):
                 "filemap:read_failed", f"Could not read: {path}", path
             )
             return FileMapResult(
-                path=path, language=lang, symbols=[f"Error: could not read {path}"]
+                path=path, language=lang, symbols=[], diagnostic=f"Error: could not read {path}"
             )
         symbols = _extract_symbols(resolved, lang, max_symbols=max_symbols, source=source)
         truncated = len(symbols) >= max_symbols
 
         lines = source.decode("utf-8", errors="replace").splitlines(keepends=True)
-        symbol_anchor_pairs = _symbol_anchor_pairs_from_lines(resolved, symbols, lines)
+        symbol_anchor_pairs = _symbol_anchor_pairs_from_lines(
+            resolved, symbols, lines, editable=self._session is None
+        )
         return FileMapResult(
             path=path,
             language=lang,
@@ -850,7 +866,9 @@ class RepoTools(Skill):
                 continue
             symbols = _extract_symbols(fpath, lang, max_symbols=max_symbols_per_file, source=source)
             lines = source.decode("utf-8", errors="replace").splitlines(keepends=True)
-            symbol_anchor_pairs = _symbol_anchor_pairs_from_lines(fpath, symbols, lines)
+            symbol_anchor_pairs = _symbol_anchor_pairs_from_lines(
+                fpath, symbols, lines, editable=self._session is None
+            )
             if symbol_anchor_pairs:
                 sections.append(f"\n{rel}:")
                 sections.extend(symbol for symbol, _ in symbol_anchor_pairs)

@@ -37,6 +37,26 @@ from nooa.trace_explorer.explorer import (
 class TestPythonCellViewerParity:
     """The experimental Python tool renders like legacy execute_python."""
 
+    @pytest.mark.asyncio
+    async def test_missing_call_id_does_not_borrow_neighbor_tool_name(self):
+        neighbor = LLMTurn(
+            session_id="abcdef",
+            messages=[],
+            response="",
+            model="test-model",
+            tool_calls=[ToolCall("python_cell", '{"code": "unrelated()"}', "call_1")],
+        )
+        execution = ExecutionTurn("legacy()", "", None, None)
+        session = AgentSession(
+            session_id="abcdef",
+            agent_name="TestAgent",
+            method_name="answer",
+            parent_session_id=None,
+            turns=[neighbor, execution],
+        )
+        rendered = await TraceExplorer([session], "trace.jsonl").get_turn("abcdef", 1)
+        assert '<tool_call name="execute_python">' in rendered
+
     @pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
     def test_extracts_prefill_inputs(self, tool_name):
         content = f"""<{tool_name} tool_call_id="prefill_1">

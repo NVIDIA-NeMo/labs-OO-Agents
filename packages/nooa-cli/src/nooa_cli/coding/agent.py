@@ -171,7 +171,8 @@ class CodingAgent(InteractiveAgent):
         spec(self, "context", hidden=False)
         spec(self, "events", hidden=False)
 
-        install_summarizer(summarization or SummarizationConfig(), self)
+        self._summarization = summarization or SummarizationConfig()
+        install_summarizer(self._summarization, self)
 
     def _coding_state_context(self) -> str:
         """Describe coding-specific state without exposing stored values."""
@@ -221,6 +222,7 @@ class CodingAgent(InteractiveAgent):
         worker = self._worker_type(
             llm=self.llm,
             cwd=self.shell.cwd,
+            summarization=self._summarization,
             init_command=getattr(self, "_worker_init_command", None),
             **({"todo": worker_todos} if worker_todos is not None else {}),
         )
@@ -255,7 +257,8 @@ class CodingAgent(InteractiveAgent):
     @staticmethod
     def _delegation_label(objective: str, label: str | None = None, max_length: int = 80) -> str:
         """Return a concise display label without discarding the full objective."""
-        source = label if label is not None else objective.splitlines()[0]
+        lines = objective.splitlines()
+        source = label if label is not None else (lines[0] if lines else "")
         compact = " ".join(source.split())
         if label is None:
             first_sentence, separator, _rest = compact.partition(".")

@@ -3881,11 +3881,6 @@ class TraceExplorer:
         # correlated LLM turn is available; legacy traces fall back to execute_python.
         if turn.code:
             tool_name = "execute_python"
-            if not turn.tool_call_id and context_llm_turn:
-                matching_call = next(
-                    (tc for tc in context_llm_turn.tool_calls if _is_python_tool(tc.function_name)),
-                    None,
-                )
             if matching_call is not None:
                 tool_name = matching_call.function_name
             id_attr = f' id="{turn.tool_call_id}"' if turn.tool_call_id else ""
