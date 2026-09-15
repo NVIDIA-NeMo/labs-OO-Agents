@@ -115,7 +115,6 @@ def _client(family):
             include=["reasoning.encrypted_content"],
             store=False,
             max_output_tokens=1024,
-            cache_breakpoint="openai",
         )
     if family == "anthropic":
         config["api_base"] = "https://inference-api.nvidia.com"
@@ -124,7 +123,6 @@ def _client(family):
             max_tokens=2048,
             thinking={"type": "adaptive"},
             output_config={"effort": "high"},
-            cache_breakpoint="anthropic",
         )
     return CompletionClient(**config, max_tokens=2048)
 

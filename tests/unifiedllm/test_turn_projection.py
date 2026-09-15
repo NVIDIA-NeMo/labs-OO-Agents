@@ -396,10 +396,14 @@ async def test_mocked_dispatch_resume_and_changing_live_suffix(monkeypatch, tmp_
             await invoke(ctx.messages)
         assert captured[-2][:-1] == captured[-1][:-1]
         assert captured[-2][-1] != captured[-1][-1]
-        assert captured[-1][:-1] == output_items() + [
+        expected = output_items() + [
             {"type": "function_call_output", "call_id": call_id, "output": "done"}
             for call_id in ("call_1", "call_2")
         ]
+        expected[-1]["output"] = [
+            {"type": "input_text", "text": "done", "prompt_cache_breakpoint": {"mode": "explicit"}}
+        ]
+        assert captured[-1][:-1] == expected
         assert "live 2" in captured[-1][-1]["content"]
     finally:
         await client.aclose()
@@ -532,7 +536,16 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
         assert len(calibrated) == 1
         assert calibrated[0] is sent[0]
         assert all(isinstance(message, dict) for message in sent[0])
-        assert sent[0][-1] == {"role": "user", "content": "go"}
+        assert sent[0][-1] == {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "go",
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                }
+            ],
+        }
     finally:
         await client.aclose()
 

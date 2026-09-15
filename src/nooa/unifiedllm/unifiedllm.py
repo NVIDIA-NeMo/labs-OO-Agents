@@ -36,6 +36,7 @@ from nooa.unifiedllm.cache_policy import (
 from . import replay_state, response_parts
 from .errors import EmptyContentError
 from .http_config import HttpConfig
+from .reasoning import ReasoningConfig, apply_reasoning_level
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
 
@@ -1151,8 +1152,24 @@ class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
     cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
 
-    def __init__(self, model: str, **config):
+    def __init__(
+        self,
+        model: str,
+        *,
+        reasoning_levels: dict[str, dict[str, Any]] | None = None,
+        reasoning_default: str | None = None,
+        reasoning_level: str | None = None,
+        **config,
+    ):
         reject_legacy_cache_config(config)
+        # Freeze prevents field assignment, not mutations inside nested Any
+        # settings. Detach this small configuration once, never the history.
+        self._reasoning_config = ReasoningConfig(
+            levels=reasoning_levels, default=reasoning_default
+        ).model_copy(deep=True)
+        if reasoning_level is not None:
+            self._reasoning_config.settings(reasoning_level)
+        self.reasoning_level = reasoning_level
         self.model = model
         self.config = config
         self._registry_config = None
@@ -1160,6 +1177,22 @@ class UnifiedLLM(ABC):
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
+
+    @property
+    def reasoning_levels(self) -> tuple[str, ...] | None:
+        """Selectable levels; None means unknown, () means unsupported."""
+        levels = self._reasoning_config.levels
+        return None if levels is None else tuple(levels)
+
+    @property
+    def reasoning_default(self) -> str | None:
+        """Documented route default; not a request override."""
+        return self._reasoning_config.default
+
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        return apply_reasoning_level(
+            self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
+        )
 
     def _effective_model(self, call_config: dict[str, Any]) -> str:
         """Return the model this individual request will actually dispatch."""
@@ -1226,7 +1259,7 @@ class UnifiedLLM(ABC):
 
     def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
         mapping = self.cache_breakpoint
-        if mapping == "auto":
+        if mapping == "auto" and not responses:
             mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
         return apply_cache_policy(messages, mapping, responses=responses, instructions=instructions)
 
@@ -1758,7 +1791,7 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
@@ -1772,8 +1805,7 @@ class CompletionClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            **self.config,
-            **kwargs,
+            **call_config,
             "messages": prepared_messages,
         }
 
@@ -1847,7 +1879,7 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
@@ -1861,8 +1893,7 @@ class CompletionClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            **self.config,
-            **kwargs,
+            **call_config,
             "messages": prepared_messages,
         }
 
@@ -2029,7 +2060,7 @@ class ResponsesClient(UnifiedLLM):
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        cache_breakpoint: Literal["openai"] | None = None,
+        cache_breakpoint: Literal["auto", "openai"] | None = "auto",
         **config,
     ):
         """
@@ -2052,17 +2083,17 @@ class ResponsesClient(UnifiedLLM):
                          settings. Applied only to THIS client's requests (its
                          own httpx client is passed to litellm per call). No
                          global state and no monkey-patching of httpx.
-            cache_breakpoint: Set to ``"openai"`` to map the cached renderer's
-                stable-prefix boundary to a Responses explicit breakpoint.
-                Opt in only on a route supporting the explicit wire fields.
-                Default ``None`` leaves provider-default caching unchanged.
+            cache_breakpoint: Default ``"auto"`` maps a rendered boundary with
+                eligible stable input to a Responses explicit breakpoint.
+                Without a usable boundary, leaves provider-default caching unchanged.
+                ``None`` disables NOOA markers, not the provider's implicit cache.
                 Anthropic cache mapping is supported by CompletionClient only.
                 With ``"openai"`` and no eligible stable block, warns and keeps
                 explicit mode without a breakpoint, avoiding all cache writes.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
-        if cache_breakpoint not in {None, "openai"}:
-            raise ValueError("ResponsesClient cache_breakpoint must be 'openai' or None")
+        if cache_breakpoint not in {None, "auto", "openai"}:
+            raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
         super().__init__(model, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
@@ -2111,7 +2142,7 @@ class ResponsesClient(UnifiedLLM):
         Accepts public message dictionaries and LLMResponse objects. Stored turns
         are projected here; only leading system messages become `instructions`.
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
@@ -2123,8 +2154,7 @@ class ResponsesClient(UnifiedLLM):
         api_params = {
             "model": self.model,
             "truncation": "disabled",
-            **self.config,
-            **kwargs,
+            **call_config,
             "input": input_messages,
         }
         if openai_explicit:
@@ -2187,7 +2217,7 @@ class ResponsesClient(UnifiedLLM):
         Accepts public message dictionaries and LLMResponse objects. Stored turns
         are projected here; only leading system messages become `instructions`.
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
@@ -2199,8 +2229,7 @@ class ResponsesClient(UnifiedLLM):
         api_params = {
             "model": self.model,
             "truncation": "disabled",
-            **self.config,
-            **kwargs,
+            **call_config,
             "input": input_messages,
         }
         if openai_explicit:

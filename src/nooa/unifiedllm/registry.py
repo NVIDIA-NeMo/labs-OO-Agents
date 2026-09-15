@@ -386,6 +386,9 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "max_tokens",
         "reasoning",
         "reasoning_effort",
+        "reasoning_levels",
+        "reasoning_default",
+        "reasoning_level",
         "allowed_openai_params",
         "additional_drop_params",
         "extra_body",
@@ -411,6 +414,27 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
                 "Ignoring model %r retry_config: expected mapping, false, or null; got %s.",
                 name,
                 type(retry_config).__name__,
+            )
+
+    # An alias's declared levels describe its route, not any replacement client.
+    # Discard inherited selections/defaults as well; explicit declarations below
+    # belong to the replacement route and are validated by its constructor.
+    if config and (
+        overrides.get("model", model) != model
+        or any(
+            key in overrides and overrides[key] != config.get(key)
+            for key in ("api_base", "base_url", "custom_llm_provider")
+        )
+        or (client_type is not None and client_type != config.get("client_type", "completion"))
+        or overrides.get("client") is not None
+    ):
+        for key in ("reasoning_levels", "reasoning_default", "reasoning_level"):
+            params.pop(key, None)
+        if "reasoning_levels" in config:
+            logger.warning(
+                "Route overridden for %r; inherited reasoning choices were cleared. "
+                "Declare reasoning_levels explicitly for the replacement route.",
+                name,
             )
 
     params.update(overrides)

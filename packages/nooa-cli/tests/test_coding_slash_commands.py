@@ -241,14 +241,32 @@ async def test_native_and_shared_python_invocation_preserve_quoted_arguments(tmp
 
 
 @pytest.mark.parametrize("raw_args", ["", 'add "two words"'])
-async def test_string_args_annotation_preserves_raw_input(tmp_path, raw_args):
-    class StringArgsSkill(Skill):
-        @slash_command("raw-input", output_to_agent=False)
-        def raw_input(self, args: "str"):
-            return args
-
+@pytest.mark.parametrize(
+    "postponed,annotation",
+    [
+        (False, "str"),
+        (False, '"str"'),
+        (True, "str"),
+        (True, '"str"'),
+        (True, "'str'"),
+    ],
+)
+async def test_string_args_annotation_preserves_raw_input(
+    tmp_path, raw_args, postponed, annotation
+):
+    """All direct and postponed spellings of str preserve the exact input."""
+    source = "from __future__ import annotations\n" if postponed else ""
+    source += (
+        "class StringArgsSkill(Skill):\n"
+        "    @slash_command('raw-input', output_to_agent=False)\n"
+        f"    def raw_input(self, args: {annotation}):\n"
+        '        """Return the raw command argument unchanged."""\n'
+        "        return args\n"
+    )
+    namespace = {"__name__": __name__, "Skill": Skill, "slash_command": slash_command}
+    exec(compile(source, "<raw-args-skill>", "exec", dont_inherit=True), namespace)
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
-    agent.skills.register("test.raw", StringArgsSkill())
+    agent.skills.register("test.raw", namespace["StringArgsSkill"]())
     registry = CodingSlashCommandRegistry(agent)
     try:
         result = await registry.invoke("raw-input", raw_args)

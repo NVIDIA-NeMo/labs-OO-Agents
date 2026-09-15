@@ -18,13 +18,16 @@ into a picklable :class:`ResultDTO` and reconstructs a faithful
 from __future__ import annotations
 
 import pickle
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.errors.formatting import _diagnostic_budget, _hard_bound_text
 from nooa.runtime.sandbox.errors import CellSerializationError, SandboxExecutionError
+from nooa.runtime.sandbox.wire import HINT, Codec
+
+_CODEC = Codec()  # encode-only; decoding needs the agent's types (see executor)
 
 # ``TruncatingStringIO`` adds a human-readable envelope around retained
 # head/tail content. Sandbox IPC has a fixed safety ceiling independent of a
@@ -124,6 +127,48 @@ class ResultDTO:
     defined_method_names: list[str] = field(default_factory=list)
 
 
+_DTO_FIELDS = {
+    "stdout": str,
+    "stderr": str,
+    "returned_value": bytes,
+    "has_return": bool,
+    "explicit_return": bool,
+    "images": list,
+    "wrapper_line_offset": int,
+    "defined_method_names": list,
+}
+
+
+def dto_to_wire(dto: ResultDTO) -> dict[str, Any]:
+    """The DTO crosses the pipe as a plain dict; only its payload bytes are opaque."""
+    return asdict(dto)
+
+
+def dto_from_wire(data: Any) -> ResultDTO:
+    """Rebuild a :class:`ResultDTO` sent by the untrusted worker, checking field types."""
+    try:
+        data = dict(data)
+        error, signal = data.pop("error", None), data.pop("signal", None)
+        dto = ResultDTO(
+            error=None if error is None else ErrorDTO(**error),
+            signal=None if signal is None else SignalDTO(**signal),
+            **data,
+        )
+        ok = all(isinstance(getattr(dto, k), t) for k, t in _DTO_FIELDS.items())
+        ok = ok and all(isinstance(i, dict) for i in dto.images)
+        ok = ok and all(isinstance(n, str) for n in dto.defined_method_names)
+        ok = ok and (dto.error is None or all(isinstance(v, str) for v in vars(dto.error).values()))
+        ok = ok and (dto.signal is None or isinstance(dto.signal.result, bytes))
+        # Exactly one outcome, as result_to_dto produces.
+        ok = ok and (dto.error is not None) + (dto.signal is not None) + dto.has_return <= 1
+        ok = ok and (dto.has_return or not dto.explicit_return)
+    except Exception as exc:  # noqa: BLE001 - any shape error is a protocol violation
+        raise CellSerializationError(f"sandbox worker sent a malformed result ({exc})") from exc
+    if not ok:
+        raise CellSerializationError("sandbox worker sent a malformed result")
+    return dto
+
+
 def result_to_dto(
     result: Any,
     *,
@@ -191,37 +236,31 @@ def result_to_dto(
         return dto
 
     if result.signal is not None:
-        payload = getattr(result.signal, "result", None)
         try:
-            pickled_payload = pickle.dumps(payload)
+            dto.signal = SignalDTO(result=_CODEC.dumps(getattr(result.signal, "result", None)))
         except BaseException:
             dto.error = ErrorDTO(
                 type_name="CellSerializationError",
                 message=(
-                    "return_result(...) was called with a value that is not picklable and "
-                    "cannot cross the sandbox boundary. Return a JSON/pickle-safe value "
-                    "(numbers, str, list, dict, ndarray) instead."
+                    "return_result(...) was called with a value that cannot cross the "
+                    f"sandbox boundary. {HINT}"
                 ),
             )
-        else:
-            dto.signal = SignalDTO(result=pickled_payload)
         return dto
 
     rv = result.returned_value
     if rv is not _NO_RETURN:
         try:
-            pickled_return = pickle.dumps(rv)
+            dto.returned_value = _CODEC.dumps(rv)
         except BaseException:
             dto.error = ErrorDTO(
                 type_name="CellSerializationError",
                 message=(
-                    f"Return value of type {type(rv).__name__!r} is not picklable and "
-                    "cannot cross the sandbox boundary. Keep it in the namespace and "
-                    "return a JSON/pickle-safe summary instead."
+                    f"Return value of type {type(rv).__name__!r} cannot cross the sandbox "
+                    f"boundary. Keep it in the namespace and return a summary instead. {HINT}"
                 ),
             )
         else:
-            dto.returned_value = pickled_return
             dto.has_return = True
             dto.explicit_return = bool(result.explicit_return)
     return dto
@@ -263,12 +302,12 @@ def _reconstruct_error(err: ErrorDTO) -> Exception:
     )
 
 
-def dto_to_result(dto: ResultDTO, *, signal_factory: Any = None) -> Any:
+def dto_to_result(dto: ResultDTO, *, signal_factory: Any = None, codec: Codec | None = None) -> Any:
     """Reconstruct a parent-side ``ExecutionResult`` from a :class:`ResultDTO`.
 
     ``signal_factory(payload) -> ExecutionSignal`` rebuilds the ``return_result``
-    signal from its marshaled payload (supplied by the caller that owns the
-    concrete signal type).
+    signal from its payload. ``codec`` decodes the worker's payload bytes and
+    carries the agent's declared data types; without it only value types decode.
     """
     from nooa.events import _NO_RETURN, ExecutionResult
 
@@ -276,16 +315,17 @@ def dto_to_result(dto: ResultDTO, *, signal_factory: Any = None) -> Any:
     if dto.error is not None:
         error = _reconstruct_error(dto.error)
 
+    codec = codec or _CODEC
     signal = None
     returned_value: Any = _NO_RETURN
     try:
         if dto.signal is not None and signal_factory is not None:
-            signal = signal_factory(pickle.loads(dto.signal.result))
+            signal = signal_factory(codec.loads(dto.signal.result))
         if dto.has_return:
-            returned_value = pickle.loads(dto.returned_value)
-    except BaseException:
+            returned_value = codec.loads(dto.returned_value)
+    except Exception as exc:  # noqa: BLE001 - refused or corrupt payload
         error = CellSerializationError(
-            "A sandbox result could not be deserialized across the process boundary."
+            f"A sandbox result could not cross the process boundary: {exc}. {HINT}"
         )
         signal = None
         returned_value = _NO_RETURN

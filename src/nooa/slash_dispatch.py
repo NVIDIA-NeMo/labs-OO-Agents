@@ -70,7 +70,7 @@ def parse_typed_args(method: Any, raw_args: str) -> dict[str, Any]:
     # Backward compat: single `args: str` parameter
     if len(params) == 1 and params[0].name == "args":
         ann = params[0].annotation
-        if ann is inspect.Parameter.empty or ann is str or ann == "str":
+        if ann is inspect.Parameter.empty or ann is str or ann in ("str", "'str'", '"str"'):
             return {"args": raw_args}
 
     # Parse with shlex

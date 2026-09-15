@@ -29,12 +29,12 @@ context object and *nxt* calls the rest of the chain.
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nooa.agent import Agent
 from nooa.events import ExecutionResult
 from nooa.runtime.actor import ActorRuntime
-from nooa.unifiedllm import CacheBoundary, LLMResponse
+from nooa.unifiedllm import CacheBoundary, LLMResponse, UnifiedLLM
 
 # Sentinel indicating that ``AgentCallContext.result`` has not been set yet.
 # Distinguishes "middleware never ran the inner handler" from "method returned None".
@@ -126,6 +126,10 @@ class LLMCallContext(BaseModel):
                 (tools, output_model, etc.).  Middleware may add / remove keys.
         agent: The agent instance that owns the runtime.
         runtime: The ``ActorRuntime`` instance.
+        client: Effective client for this call, including method-level overrides.
+                Read-only: route overrides belong in params, not a replacement client.
+        filtered_history: An event query restricted the rendered history. Consumers
+                          must not treat this request as the complete event archive.
         response: ``None`` on the way *in*; set to the ``LLMResponse`` by the
                   innermost handler on the way *out*.
     """
@@ -136,6 +140,8 @@ class LLMCallContext(BaseModel):
     params: dict[str, Any] = {}
     agent: Agent | None = None
     runtime: ActorRuntime | None = None
+    client: UnifiedLLM | None = Field(default=None, frozen=True)
+    filtered_history: bool = False
     response: LLMResponse | None = None
 
 

@@ -19,7 +19,7 @@ import nooa.mcp.oauth as oauth
 @pytest.fixture(autouse=True)
 def _clear_remote_runtime_signals(monkeypatch):
     """Keep host runtime markers from leaking into browser-detection tests."""
-    for name in ("SANDBOX_VM_ID", "SBX_NO_DISPLAY", "SSH_CONNECTION"):
+    for name in ("SANDBOX_VM_ID", "SBX_NO_DISPLAY", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
         monkeypatch.delenv(name, raising=False)
 
 

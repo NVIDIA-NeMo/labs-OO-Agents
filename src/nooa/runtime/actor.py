@@ -955,6 +955,16 @@ class ActorRuntime:
                     params=params,
                     agent=self.agent,
                     runtime=self,
+                    client=llm_client,
+                    filtered_history=any(
+                        query is not None
+                        for query in (
+                            self.agent.event_manager.get_event_query(),
+                            _scoped_events_var.get(),
+                            _decorator_events_var.get(),
+                            self.agent.event_query,
+                        )
+                    ),
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
@@ -974,9 +984,10 @@ class ActorRuntime:
                     _mw_strategy_tag = (
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
                     )
-                    call_params.setdefault(
+                    ctx.params.setdefault(
                         "prompt_cache_key", f"{self.agent._agent_id}-{_mw_strategy_tag}"
                     )
+                    call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
                     ctx.response = await llm_client.acall(
                         ctx.messages,
                         output_model=om,
