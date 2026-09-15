@@ -12,6 +12,16 @@ import pytest
 
 from nooa.context_blocks.formatter import ResponsesProviderFormatter
 from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
+from nooa.unifiedllm import ResponsesClient
+
+
+def _project_rendered(messages):
+    # Formatters retain logical turns; native wire expansion is the client job.
+    with ResponsesClient(model="openai/gpt-5.6") as client:
+        wire, instructions = client._transform_messages(
+            ResponsesProviderFormatter().format(messages)
+        )
+    return ([{"role": "system", "content": instructions}] if instructions else []) + wire
 
 
 class TestResponsesProviderFormatter:
@@ -21,8 +31,7 @@ class TestResponsesProviderFormatter:
         messages = [
             RenderedMessage(role=Role.USER, content="Hello"),
         ]
-        formatter = ResponsesProviderFormatter()
-        result = formatter.format(messages)
+        result = _project_rendered(messages)
 
         assert result == [{"role": "user", "content": "Hello"}]
 
@@ -32,8 +41,7 @@ class TestResponsesProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="You are helpful."),
             RenderedMessage(role=Role.USER, content="Hi"),
         ]
-        formatter = ResponsesProviderFormatter()
-        result = formatter.format(messages)
+        result = _project_rendered(messages)
 
         assert result == [
             {"role": "system", "content": "You are helpful."},
@@ -52,8 +60,7 @@ class TestResponsesProviderFormatter:
                 ),
             ),
         ]
-        formatter = ResponsesProviderFormatter()
-        result = formatter.format(messages)
+        result = _project_rendered(messages)
 
         assert result == [
             {
@@ -64,13 +71,43 @@ class TestResponsesProviderFormatter:
             }
         ]
 
+    def test_stateful_tool_batch_remains_valid_public_responses_input(self):
+        """Replay metadata must not replace public items with a private wrapper key."""
+        result = _project_rendered(
+            [
+                RenderedMessage(
+                    role=Role.ASSISTANT,
+                    content="I will run it.",
+                    tool_calls=(
+                        ToolCallInfo(
+                            id="call_123",
+                            name="execute_python",
+                            arguments={"code": "print(1)"},
+                        ),
+                    ),
+                )
+            ]
+        )
+
+        assert result == [
+            {"role": "assistant", "content": "I will run it."},
+            {
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "execute_python",
+                "arguments": json.dumps({"code": "print(1)"}),
+            },
+        ]
+        assert all("role" in item or "type" in item for item in result)
+        assert "_batch" not in json.dumps(result)
+        assert "provider-only" not in json.dumps(result)
+
     def test_tool_result_format(self):
         """Tool results become function_call_output items."""
         messages = [
             RenderedMessage(role=Role.TOOL, content="status: complete", tool_call_id="call_123"),
         ]
-        formatter = ResponsesProviderFormatter()
-        result = formatter.format(messages)
+        result = _project_rendered(messages)
 
         assert result == [
             {
@@ -94,8 +131,7 @@ class TestResponsesProviderFormatter:
             RenderedMessage(role=Role.TOOL, content="4", tool_call_id="tc_1"),
             RenderedMessage(role=Role.USER, content="Now multiply by 3"),
         ]
-        formatter = ResponsesProviderFormatter()
-        result = formatter.format(messages)
+        result = _project_rendered(messages)
 
         assert result == [
             {"role": "system", "content": "You are a coding assistant."},
@@ -116,8 +152,7 @@ class TestResponsesProviderFormatter:
             RenderedMessage(role=Role.METADATA, content="meta"),
             RenderedMessage(role=Role.USER, content="visible"),
         ]
-        formatter = ResponsesProviderFormatter()
-        result = formatter.format(messages)
+        result = _project_rendered(messages)
 
         assert result == [{"role": "user", "content": "visible"}]
 

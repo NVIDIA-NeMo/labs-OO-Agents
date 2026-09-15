@@ -12,6 +12,35 @@ import pytest
 from nooa.unifiedllm.http_logging import enable_http_request_logging
 
 
+def test_opaque_reasoning_state_is_redacted_from_http_debug_payloads(
+    tmp_path, secret_header_server
+) -> None:
+    payload = {
+        "input": [
+            {"encrypted_content": "provider-secret"},
+            {"type": "thinking", "thinking": "visible", "signature": "anthropic-secret"},
+            {"type": "redacted_thinking", "data": "anthropic-redacted"},
+            {"thought_signature": "gemini-secret"},
+            {"_nooa_llm_state": {"payload": {"items": ["opaque"]}}},
+        ]
+    }
+
+    disable = enable_http_request_logging(output_dir=tmp_path, verbose=False)
+    try:
+        httpx.post(f"http://127.0.0.1:{secret_header_server.server_port}/llm", json=payload)
+    finally:
+        disable()
+    redacted = json.loads(next(tmp_path.glob("request_*.json")).read_text())
+
+    assert redacted["input"] == [
+        {"encrypted_content": "[REDACTED]"},
+        {"type": "thinking", "thinking": "visible", "signature": "[REDACTED]"},
+        {"type": "redacted_thinking", "data": "[REDACTED]"},
+        {"thought_signature": "[REDACTED]"},
+        {"_nooa_llm_state": "[REDACTED]"},
+    ]
+
+
 class _SecretHeaderHandler(BaseHTTPRequestHandler):
     status_code = 500
 

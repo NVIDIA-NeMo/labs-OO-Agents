@@ -41,7 +41,7 @@ from nooa.events import (
 )
 from nooa.runtime.event_backend import InMemoryBackend
 from nooa.storage.sqlite import SQLiteEventBackend
-from nooa.unifiedllm import ToolCall
+from nooa.unifiedllm import AssistantReasoning, AssistantText, ToolCall
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -234,8 +234,12 @@ def test_event_roundtrip_via_all_events(backend, tag, event, expected_type, expe
     "event",
     [
         LLMResponse(
-            content="done",
-            tool_calls=(
+            parts=(
+                AssistantReasoning(
+                    text="Check the inputs before running the tool.",
+                    native={"opaque": {"provider": "state"}},
+                ),
+                AssistantText(text="done"),
                 ToolCall(
                     id="call-state",
                     name="execute_python",
@@ -243,8 +247,6 @@ def test_event_roundtrip_via_all_events(backend, tag, event, expected_type, expe
                 ),
             ),
             finish_reason="tool_calls",
-            reasoning="Check the inputs before running the tool.",
-            llm_state={"opaque": {"provider": "state"}},
             usage={
                 "input_tokens": 100,
                 "output_tokens": 20,
@@ -273,7 +275,7 @@ def test_assistant_turn_ir_survives_backend_roundtrip(backend, event):
         assert restored.tool_calls == event.tool_calls
         assert restored.finish_reason == event.finish_reason
         assert restored.reasoning == event.reasoning
-        assert restored.llm_state == event.llm_state
+        assert restored.parts == event.parts
         assert restored.usage == event.usage
         assert restored.model_name == event.model_name
         assert restored.generation_id == event.generation_id

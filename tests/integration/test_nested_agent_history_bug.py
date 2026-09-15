@@ -20,7 +20,7 @@ import pytest
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.strategies.codeact import CodeActStrategy
-from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+from nooa.unifiedllm import CacheBoundary, FakeLLMClient, LLMResponse, ToolCall
 
 
 def _resp(content: str = "", tool_calls: list | None = None) -> LLMResponse:
@@ -172,8 +172,10 @@ class TestNestedAgentHistoryBug:
         outer_suffix = from_outer_call(outer_followup_prompt)
         # Dynamic context is deliberately a recomputed trailing suffix, so
         # compare only the stable history before it.
-        if inner_prefix[-1].get("content", "").startswith("<context>"):
-            inner_prefix = inner_prefix[:-1]
+        assert inner_prefix[-1]["role"] == "user"
+        assert inner_prefix[-1]["content"].startswith("<context>")
+        assert inner_prefix[-2] == CacheBoundary()
+        inner_prefix = inner_prefix[:-2]
         assert outer_suffix[: len(inner_prefix)] == inner_prefix
 
         receipt = next(

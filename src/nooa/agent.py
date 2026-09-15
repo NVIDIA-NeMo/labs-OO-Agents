@@ -272,6 +272,16 @@ class Agent(metaclass=AgentMeta):
 
     @no_trace
     @hidden
+    async def aclose(self) -> None:
+        """Await registered background cleanup before the owner closes shared resources.
+
+        The agent does not own its LLM client or storage; callers close those
+        after this method returns. Components register with event_manager.on_close.
+        """
+        await self.event_manager.aclose()
+
+    @no_trace
+    @hidden
     def _apply_context_dict(self, blocks: "dict[str, str | DynamicContext | None]") -> None:
         """Apply a dict of context block overrides.
 

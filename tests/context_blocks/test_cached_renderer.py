@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the cached renderer (static-prefix / events / dynamic-suffix)."""
 
+import json
+
 from nooa.context_blocks.events import (
     AssistantEvent,
     ToolCallEvent,
@@ -12,9 +14,16 @@ from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     OpenAIProviderFormatter,
 )
-from nooa.context_blocks.models import BlockMetadata, DynamicContext, ResolvedBlock, Role
+from nooa.context_blocks.models import (
+    BlockMetadata,
+    DynamicContext,
+    ResolvedBlock,
+    Role,
+)
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.events import LLMResponse
+from nooa.unifiedllm import CacheBoundary
 
 
 def _static_block(key: str, content: str, expr: str | None = None) -> ResolvedBlock:
@@ -31,7 +40,7 @@ def _dynamic_block(key: str, content: str, expr: str | None = None) -> ResolvedB
         key=key,
         content=content,
         role=Role.SYSTEM,
-        metadata=BlockMetadata(expr=expr, static=False, user_block=True),
+        metadata=BlockMetadata(expr=expr, static=False, user_block=True, source_dynamic=bool(expr)),
     )
 
 
@@ -80,11 +89,11 @@ class TestCachedBlockFormatterPartition:
                 _dynamic_block("state", "T"),
             ]
         )
-        assert len(messages) == 2
+        assert len(messages) == 3
         sys_msg = messages[0]
-        assert sys_msg.index("<sys>") < sys_msg.index("<self_doc>") if False else True  # sanity
         assert sys_msg.content.index("<sys>") < sys_msg.content.index("<self_doc>")
-        user_msg = messages[1]
+        assert isinstance(messages[1].replay_message, CacheBoundary)
+        user_msg = messages[2]
         assert user_msg.content.index("<plan>") < user_msg.content.index("<state>")
 
 
@@ -108,12 +117,14 @@ class TestCachedRendererEndToEndOpenAI:
             block_formatter=CachedBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        assert len(result) == 2
+        assert len(result) == 3
+        assert result[1] == CacheBoundary()
         assert result[0]["role"] == "system"
         assert "<sys>" in result[0]["content"]
-        assert result[1]["role"] == "user"
-        assert "<context>" in result[1]["content"]
-        assert "<plan" in result[1]["content"]
+        assert result[-1]["role"] == "user"
+        assert "<context>" in result[-1]["content"]
+        assert "<plan" in result[-1]["content"]
+        assert "expr=" in result[-1]["content"]
 
     def test_volatile_appended_after_trailing_user_event(self):
         """Dynamic ``<context>`` is its own user message — never merged into a
@@ -139,14 +150,14 @@ class TestCachedRendererEndToEndOpenAI:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
-        assert roles == ["system", "user", "user"]
+        assert roles == ["system", "user", "metadata", "user"]
         # The user-event message is preserved verbatim — no context envelope.
         event_content = result[1]["content"]
         assert "<context>" not in event_content
         assert "<plan>" not in event_content
         assert "hi" in event_content
         # The trailing user message holds only the context envelope.
-        context_content = result[2]["content"]
+        context_content = result[-1]["content"]
         assert context_content.startswith("<context>")
         assert context_content.endswith("</context>")
         assert "<plan>" in context_content
@@ -220,6 +231,61 @@ class TestCachedRendererEndToEndOpenAI:
         # And specifically: no context envelope leaked into the user-event msg.
         assert "<context>" not in msg1["content"]
 
+    def test_opaque_state_is_appended_without_changing_cacheable_prefix(self):
+        user_event = UserEvent(content="please solve the task", tag="1")
+        user_block = ResolvedBlock(
+            key="event_1",
+            content=user_event.content,
+            role=Role.USER,
+            metadata=BlockMetadata(tag="1"),
+            event=user_event,
+        )
+        first = render_context(
+            [
+                _static_block("sys", "stable instructions"),
+                user_block,
+                _dynamic_block("live_state", "version one"),
+            ],
+            block_formatter=CachedBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        from nooa.llm_types import AssistantReasoning, AssistantText
+
+        turn = LLMResponse(
+            parts=(
+                AssistantReasoning(native={"encrypted_content": "opaque"}),
+                AssistantText(text="answer"),
+            ),
+            replay_scope="responses:openai:test",
+            tag="2",
+        )
+        second = render_context(
+            [
+                _static_block("sys", "stable instructions"),
+                user_block,
+                ResolvedBlock(
+                    key="event_2",
+                    content=turn.content,
+                    role=Role.ASSISTANT,
+                    metadata=BlockMetadata(tag="2"),
+                    event=turn,
+                ),
+                _dynamic_block("live_state", "version two"),
+            ],
+            block_formatter=CachedBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        # The last two entries are the boundary metadata and changing live state;
+        # compare every history message before them, including the latest user.
+        assert first[-2] == CacheBoundary()
+        assert first[:-2] == second[: len(first) - 2]
+        assert first[-1] != second[-1]
+        assert second[2] is turn
+        assert "native" not in json.dumps([dict(message) for message in second])
+        assert "version two" in second[-1]["content"]
+
     def test_volatile_appended_after_assistant(self):
         asst_event = AssistantEvent(content="done")
         asst_event.tag = "2"
@@ -240,8 +306,8 @@ class TestCachedRendererEndToEndOpenAI:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
-        assert roles == ["system", "assistant", "user"]
-        assert "<context>" in result[2]["content"]
+        assert roles == ["system", "assistant", "metadata", "user"]
+        assert "<context>" in result[-1]["content"]
 
     def test_no_volatile_no_trailing_message(self):
         result = render_context(
@@ -271,5 +337,5 @@ class TestCachedRendererEndToEndAnthropic:
         assert "system" in result and "messages" in result
         assert "<sys>" in result["system"]
         assert len(result["messages"]) == 1
-        assert result["messages"][0]["role"] == "user"
-        assert "<context>" in result["messages"][0]["content"]
+        assert result["messages"][-1]["role"] == "user"
+        assert "<context>" in result["messages"][-1]["content"]

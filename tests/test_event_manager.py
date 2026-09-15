@@ -2,11 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for EventManager clean API."""
 
+import re
+
 import pytest
 
 from nooa.events import Error, Feedback, LLMResponse, Task
 from nooa.runtime.event_backend import InMemoryBackend, _tag_max_num
 from nooa.runtime.event_manager import EventManager
+
+
+@pytest.mark.parametrize("text", ["hello", "line one\nline two", "'quoted'"])
+def test_regex_search_preserves_scalar_text(text):
+    class _SearchableTask(Task):
+        def searchable_fields(self):
+            return {"prompt": self.prompt}
+
+    manager = EventManager()
+    event = _SearchableTask(prompt=text)
+    manager.add(event)
+    assert manager._get_searchable_text(event) == text
+    assert manager.filter(query="^" + re.escape(text) + "$", regex=True) == [event]
 
 
 def _format_events_for_test(events: list, *, last_n: int | None = None) -> list[dict]:

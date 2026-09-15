@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from nooa import strategy
+from nooa.llm_types import AssistantReasoning, AssistantText
 from nooa.runtime.event_manager import EventManager
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
@@ -43,10 +44,12 @@ def test_durable_response_excludes_ephemeral_views() -> None:
     """Persistence keeps replay/telemetry data, not provider or parsed objects."""
     response = LLMResponse(
         raw_response=object(),
-        content='{"value":42}',
+        parts=(
+            AssistantText(text='{"value":42}'),
+            AssistantReasoning(text="plain reasoning", native={"opaque": "provider-state"}),
+        ),
+        replay_scope="responses:openai:test",
         parsed={"value": 42},
-        reasoning="plain reasoning",
-        llm_state={"opaque": "provider-state"},
         usage={"input_tokens": 12, "cached_input_tokens": 8},
     )
 
@@ -55,9 +58,9 @@ def test_durable_response_excludes_ephemeral_views() -> None:
     assert "raw_response" not in durable
     assert "parsed" not in durable
     assert "assistant_message" not in type(response).model_fields
-    assert durable["content"] == '{"value":42}'
-    assert durable["reasoning"] == "plain reasoning"
-    assert durable["llm_state"] == {"opaque": "provider-state"}
+    assert durable["parts"][0]["text"] == '{"value":42}'
+    assert durable["parts"][1]["text"] == "plain reasoning"
+    assert durable["parts"][1]["native"] == {"opaque": "provider-state"}
     assert durable["usage"]["cached_input_tokens"] == 8
 
 
@@ -69,8 +72,11 @@ def test_none_content_normalizes_to_empty_public_text() -> None:
 def test_opaque_state_is_not_searchable() -> None:
     manager = EventManager()
     response = LLMResponse(
-        content="public answer",
-        llm_state={"encrypted_content": "provider-secret"},
+        parts=(
+            AssistantText(text="public answer"),
+            AssistantReasoning(native={"encrypted_content": "provider-secret"}),
+        ),
+        replay_scope="responses:openai:test",
     )
     manager.add(response)
 
