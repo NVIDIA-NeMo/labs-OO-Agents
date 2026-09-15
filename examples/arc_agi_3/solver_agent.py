@@ -195,7 +195,6 @@ _CELL_BANNED_ATTRS = frozenset(
         # host escape tools (network + host FS; no legitimate use for a grid solver)
         "shell",
         "repo",
-        "pyp",
         "web",
         "mcp",
         "libwriting",
@@ -238,9 +237,7 @@ def _scan_cell(code: str) -> str | None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in _CELL_BANNED_ATTRS:
             return (
-                f"self.{node.attr}"
-                if node.attr in ("shell", "repo", "pyp", "web", "mcp")
-                else node.attr
+                f"self.{node.attr}" if node.attr in ("shell", "repo", "web", "mcp") else node.attr
             )
         if isinstance(node, ast.Name) and node.id in _CELL_BANNED_NAMES:
             return node.id
