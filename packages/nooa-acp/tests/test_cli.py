@@ -68,6 +68,16 @@ def test_explicit_flag_overrides_the_environment(monkeypatch, stubbed_serve):
     assert requested["name"] == "anthropic/claude-sonnet-4-5"
 
 
+def test_execution_tree_is_an_explicit_opt_in(stubbed_serve):
+    runner = click.testing.CliRunner()
+    baseline = runner.invoke(command, ["--model", "fake-model"])
+    assert baseline.exit_code == 0, baseline.output
+    assert "execution_tree" not in stubbed_serve
+    enabled = runner.invoke(command, ["--model", "fake-model", "--execution-tree"])
+    assert enabled.exit_code == 0, enabled.output
+    assert stubbed_serve["execution_tree"] is True
+
+
 def _console_script() -> str:
     """Locate the installed ``nooa-acp`` console script.
 
@@ -132,3 +142,20 @@ def test_console_script_requires_a_model():
 
     assert result.returncode == 2
     assert "--model" in result.stderr
+
+
+@pytest.mark.parametrize("selection", [["--legacy-agent"], ["--agent", "example:Agent"]])
+def test_execution_tree_preserves_explicit_agent_selection(
+    stubbed_serve, tmp_path, monkeypatch, selection
+):
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / ".nooa"))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    result = click.testing.CliRunner().invoke(
+        command, ["--model", "fixture/model", "--execution-tree", *selection]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubbed_serve["execution_tree"] is True
+    options = stubbed_serve["options_factory"](tmp_path)
+    assert options.legacy_agent is (selection == ["--legacy-agent"])
+    assert options.agent_spec == ("example:Agent" if selection[0] == "--agent" else None)

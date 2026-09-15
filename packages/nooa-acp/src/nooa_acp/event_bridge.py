@@ -5,6 +5,7 @@
 import asyncio
 import logging
 import re
+import threading
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ from acp.schema import (
     Cost,
     SessionInfoUpdate,
     ToolCallLocation,
+    ToolCallProgress,
+    ToolCallStart,
     UsageUpdate,
 )
 from nooa_cli.coding import (
@@ -41,6 +44,7 @@ from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
 from nooa.sessions import SessionHandle, SessionTitleUpdated
+from nooa_acp.execution_tree import ACPExecutionTree
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
 # the logging default sends them.
@@ -74,7 +78,9 @@ def _python_content(code: str, output: str | None = None) -> list[ContentToolCal
 
 
 class ACPEventBridge:
-    def __init__(self, agent: CodingAgent, client: Client, session_id: str) -> None:
+    def __init__(
+        self, agent: CodingAgent, client: Client, session_id: str, *, execution_tree: bool = False
+    ) -> None:
         self.agent = agent
         self.client = client
         self.session_id = session_id
@@ -88,21 +94,51 @@ class ACPEventBridge:
         self._python_source: dict[str, str] = {}
         self._terminal_output: dict[str, str] = {}
         self._cost_usd = 0.0
-        self._unsubscribers: list[Callable[[], None]] = [
-            agent.event_manager.on("AgentMessage", self._on_agent_message),
-            agent.event_manager.on("ToolCallEvent", self._on_tool_call),
-            agent.event_manager.on("PythonOutput", self._on_python_output),
-            agent.event_manager.on("LLMResponse", self._on_llm_response),
-            agent.event_manager.on("FileEdit", self._on_file_edit),
-            agent.event_manager.on("TerminalCommandStarted", self._on_terminal_started),
-            agent.event_manager.on("TerminalCommandOutput", self._on_terminal_output),
-            agent.event_manager.on("TerminalCommandFinished", self._on_terminal_finished),
-        ]
+        self._loop = asyncio.get_running_loop()
+        self._loop_thread = threading.get_ident()
+        self._observed_managers: set[Any] = set()
+        self._unsubscribers: list[Callable[[], None]] = []
+        self.execution_tree = (
+            ACPExecutionTree(self.publish, self._observe_agent) if execution_tree else None
+        )
+        self._observe_agent(agent)
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
+
+    def _observe_agent(self, agent: Any) -> None:
+        manager = agent.event_manager
+        if manager in self._observed_managers:
+            return
+        self._observed_managers.add(manager)
+        handlers = {
+            "AgentMessage": self._on_agent_message,
+            "ToolCallEvent": self._on_tool_call,
+            "PythonOutput": self._on_python_output,
+            "LLMResponse": self._on_llm_response,
+            "FileEdit": self._on_file_edit,
+            "TerminalCommandStarted": self._on_terminal_started,
+            "TerminalCommandOutput": self._on_terminal_output,
+            "TerminalCommandFinished": self._on_terminal_finished,
+        }
+        for name, handler in handlers.items():
+
+            def route(event: EventBase, handler: Callable[[EventBase], None] = handler) -> None:
+                # A child agent may also be used by another live session. Only
+                # its originating dispatch context can publish into this tree.
+                if agent is self.agent or (self.execution_tree and self.execution_tree.active):
+                    handler(event)
+
+            self._unsubscribers.append(manager.on(name, route))
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
-            self._queue.put_nowait(update)
+            if self.execution_tree is not None and isinstance(
+                update, ToolCallStart | ToolCallProgress
+            ):
+                self.execution_tree.decorate(update)
+            if threading.get_ident() == self._loop_thread:
+                self._queue.put_nowait(update)
+            else:
+                self._loop.call_soon_threadsafe(self._queue.put_nowait, update)
 
     def publish(self, update: Any) -> None:
         """Queue a host-originated session update on the ordered ACP stream."""
@@ -145,11 +181,16 @@ class ACPEventBridge:
         code = event.arguments.get("code", "")
         if not isinstance(code, str):
             code = repr(code)
-        self._open_tools.add(event.tool_call_id)
-        self._python_source[event.tool_call_id] = code
+        tool_call_id = (
+            self.execution_tree.start_python(event.tool_call_id, str(event.id))
+            if self.execution_tree is not None
+            else event.tool_call_id
+        )
+        self._open_tools.add(tool_call_id)
+        self._python_source[tool_call_id] = code
         self._enqueue(
             start_tool_call(
-                event.tool_call_id,
+                tool_call_id,
                 "Running Python",
                 # Zed 1.14 treats every ``execute`` tool as a terminal card.
                 # A plain-content execute card has neither a terminal nor an
@@ -162,10 +203,17 @@ class ACPEventBridge:
         )
 
     def _on_python_output(self, event: EventBase) -> None:
-        if not isinstance(event, PythonOutput) or event.tool_call_id not in self._open_tools:
+        if not isinstance(event, PythonOutput):
             return
-        self._open_tools.discard(event.tool_call_id)
-        code = self._python_source.pop(event.tool_call_id, "")
+        tool_call_id = (
+            self.execution_tree.python_id(event.tool_call_id)
+            if self.execution_tree is not None
+            else event.tool_call_id
+        )
+        if tool_call_id is None or tool_call_id not in self._open_tools:
+            return
+        self._open_tools.discard(tool_call_id)
+        code = self._python_source.pop(tool_call_id, "")
         parts = [
             part.rstrip() for part in (event.stdout, event.stderr, event.error) if part.strip()
         ]
@@ -182,7 +230,7 @@ class ACPEventBridge:
         )
         self._enqueue(
             update_tool_call(
-                event.tool_call_id,
+                tool_call_id,
                 title="Python failed" if status == "failed" else "Ran Python",
                 status=status,
                 content=_python_content(code, output),
@@ -404,12 +452,16 @@ class ACPEventBridge:
         self._open_tools.clear()
         self._python_source.clear()
         self._terminal_output.clear()
+        if self.execution_tree is not None:
+            self.execution_tree.fail_open_methods(reason)
 
     async def close(self) -> None:
         if self._closed:
             return
         for unsubscribe in self._unsubscribers:
             unsubscribe()
+        self._unsubscribers.clear()
+        self._observed_managers.clear()
         # A turn that ended before its PythonOutput — an exception escaping the
         # strategy, say — leaves cards in_progress and their source retained.
         # fail_open_tools is otherwise only reached from session/cancel, so this
@@ -419,6 +471,8 @@ class ACPEventBridge:
         with suppress(Exception):
             await self.flush()
         self._closed = True
+        if self.execution_tree is not None:
+            self.execution_tree.close()
         self._queue.put_nowait(_STOP)
         with suppress(BaseException):
             await self._pump_task

@@ -286,7 +286,7 @@ this run's restricted backend; the Python custom agent does not require it.
 | Approvals | NOOA currently makes no ACP permission requests; Aion's dialog cannot gate these tools |
 | Models / modes | Model selected at launch; no NOOA ACP model or permission-mode picker |
 | Attachments | NOOA accepts text and resource links; Aion sends ordinary attachments as `[[AION_FILES]]` path text. This still needs an application test. No NOOA image/audio support is advertised. |
-| NOOA-specific views | Nested method traces and context inspection remain in NOOA's trace viewer |
+| NOOA-specific views | Optional method tree with the paired Aion fork below; deeper context inspection remains in NOOA's trace viewer |
 | Other Agent classes | Factory and `--agent` selection exist; arbitrary agents still need the interactive host contract |
 
 The permission and isolation limits are properties of the current NOOA
@@ -319,6 +319,108 @@ Two presentation details were checked against the actual custom-agent path:
   to NOOA's event bridge. This does not affect the demonstrated tool-separated
   messages.
 
+## Optional execution tree with the AionUi fork
+
+The stock setup above remains the default. This branch additionally supports
+the paired [ryana/aion execution-tree branch](https://github.com/ryana/aion/tree/codex/nooa-execution-tree).
+It shows **real nested NOOA method calls**, including calls into other agents,
+with Python execution, file edits, and terminal commands beneath their owning
+methods. A failed child remains visible when its parent handles the error.
+
+![Nested NOOA methods and a recovered failed check](screenshots/execution-tree.png)
+
+### Run the paired branches
+
+Prepare the NOOA branch and environment:
+
+```bash
+git clone --branch codex/aion-execution-tree --single-branch \
+  https://github.com/NVIDIA-NeMo/labs-OO-Agents.git nooa
+cd nooa
+uv sync --frozen --extra acp
+```
+
+In the [application stack recipe](#reproduce-the-aion-application-stack),
+replace the stock AionUi clone/checkout/build with:
+
+```bash
+SPIKE_ROOT="$PWD/tmp/aion-ui-spike"
+mkdir -p "$SPIKE_ROOT"
+git clone --branch codex/nooa-execution-tree --single-branch \
+  https://github.com/ryana/aion.git "$SPIKE_ROOT/AionUi"
+(cd "$SPIKE_ROOT/AionUi" && bun install --frozen-lockfile && bun run package)
+```
+
+Keep the recipe's stock **AionCore v0.2.2** download and start commands. Only
+the frontend needs the Aion fork; the Rust backend needs no patch. The tested
+recipe uses macOS Apple Silicon, Bun, and Node 22.14.0.
+
+Register the absolute path to `experiments/aion_ui/launch.sh` as a custom agent
+with arguments **`--demo --execution-tree`**. Choose a scratch workspace and send
+any text. Expand the tree, then select the failed `DemoVerifier.check_total`
+call to see its deliberate `Expected 11, got 10` error. The next check passes;
+the workflow writes and executes `nooa_tree_demo.py` and verifies its output.
+These are scripted model responses driving real agent methods and tools.
+
+For a live model, use **`--model YOUR_MODEL_OR_ALIAS --execution-tree`**, with
+the same model environment/configuration as the stock setup. Omitting the
+flag keeps the existing flat ACP presentation. Ordinary ACP clients can also
+display the opt-in stream as flat tool cards.
+
+Run the application smoke against the running test instance:
+
+```bash
+uv run --no-sync python experiments/aion_ui/aion_smoke.py --execution-tree
+uv run --no-sync pytest packages/nooa-acp/tests
+```
+
+### Contract and measured validation
+
+The adapter uses NOOA instrumentation hooks and composes with existing tracing.
+It adds a versioned `nooa.dev/execution` object inside ACP tool-call `_meta`:
+run/span/parent IDs, node type, name, optional agent class, and timestamps.
+This is an optional extension, not standard ACP subagent sessions. The
+[ACP package documentation](../../packages/nooa-acp/README.md#optional-execution-trees)
+describes the fields and the
+[Aion guide](https://github.com/ryana/aion/blob/codex/nooa-execution-tree/docs/guides/nooa-execution-tree.md)
+includes a wire example and renderer behavior.
+
+Current shared-agent restack validation on 2026-09-16 used the real ACP stdio
+transport and scripted tree demo for **4 completed turns across 3 processes**.
+The two ordinary prompts on one persistent runner had distinct run IDs; process
+restart/replay and cancellation followed by successful reuse also passed. Each
+completed turn contained **13 execution nodes: 12 completed calls and one
+deliberately failed child**. Checks verified parent links, absence of cycles,
+terminal stdout/exit status, file diff content, and generated artifacts. The
+additional shared-agent method explains the node-count change from the original
+application run below. No AionCore/browser/live-model check was rerun.
+
+Historical validation on 2026-09-15, before the shared-agent restack:
+
+- **90 passed, 3 pre-existing expected failures** in the ACP package suite.
+  Includes nested generated agents, duplicate provider tool IDs, parallel
+  methods/sessions, cancellation/reuse, generator resumption, hook composition,
+  and a real stdio metadata round trip.
+- Actual stock AionCore: **3 completed turns, 36 execution nodes, 3 diffs**,
+  with exactly one deliberately failed child per turn and successful parents.
+  Verified the terminal's actual stdout and zero exit code independently of
+  the Python source. The same ACP session resumed after runtime restart.
+  Application smoke elapsed time: **10.255 s**.
+- Browser interaction and saved-history validation are recorded with the
+  screenshots. Root metadata survives AionCore's persisted JSON merge: its
+  null parent field becomes absent, which the renderer accepts as a root.
+- The Aion fork's focused suite covers graph ordering, missing/cyclic parents,
+  collapse/expand, compact-history details, error recovery, and structured
+  terminal results. See the Aion PR for full frontend checks.
+
+Execution metadata does not automatically export method arguments, return
+values, or agent context. Existing tool content and bounded method errors
+remain inspectable. Aion persists the tree in its own conversation history;
+NOOA's `session/load` still replays user/assistant text only, so a fresh client
+cannot reconstruct historical trees from NOOA alone. This does not add
+permission hooks or model selection. Custom interactive agents use the existing
+agent factory; arbitrary agents still need the shared host contract.
+
 ## Follow-up
 
 1. Package the custom-agent configuration and document model/credential setup.
@@ -328,8 +430,8 @@ Two presentation details were checked against the actual custom-agent path:
    chat experience.
 4. If the goal is a UI for any NOOA agent, extend the existing factory's supported
    host contract for prompts, messages, cancellation, and durable state beyond
-   interactive agents. Keep the framework's method traces in its existing viewer
-   until there is a specific reason to project them into Aion.
+   interactive agents. The optional execution tree projects method relationships;
+   NOOA's trace viewer remains the place for deeper context inspection.
 
 ## Screenshot
 

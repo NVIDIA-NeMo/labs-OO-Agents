@@ -5,8 +5,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
+from contextvars import Context
 from typing import Any
 
 from nooa.interactive import RespondResult
@@ -21,9 +22,14 @@ class InteractiveSessionDispatcher:
     observation, background wake and lifecycle implementation.
     """
 
-    def __init__(self, agent: Any) -> None:
+    def __init__(self, agent: Any, *, handle_context: Callable[[], Context] | None = None) -> None:
         self.agent = agent
-        self.runtime = LocalAgentRunner(agent, emit_text=lambda text: None, agent_id=str(id(agent)))
+        self.runtime = LocalAgentRunner(
+            agent,
+            emit_text=lambda text: None,
+            agent_id=str(id(agent)),
+            handle_context=handle_context,
+        )
         self._active_task: asyncio.Task[Any] | None = None
         self._cancel_requested = False
         self._cancelling = False

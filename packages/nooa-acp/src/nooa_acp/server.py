@@ -149,8 +149,10 @@ class CodingACPAdapter:
         llm_factory: Callable[[], UnifiedLLM],
         *,
         options_factory: Callable[[Path], SessionOptions] | None = None,
+        execution_tree: bool = False,
     ) -> None:
         self._llm_factory = llm_factory
+        self._execution_tree = execution_tree
         self._options_factory = options_factory or SessionOptions.load
         self._client: Client | None = None
         self._sessions: SessionRuntimePool[_ACPSession] = SessionRuntimePool()
@@ -525,9 +527,11 @@ class CodingACPAdapter:
                     # connect path already offers for an unreachable server —
                     # instead of failing session/new with an opaque error.
                     registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
-            dispatcher = InteractiveSessionDispatcher(agent)
+            bridge = ACPEventBridge(
+                agent, self._client, handle.id, execution_tree=self._execution_tree
+            )
+            dispatcher = InteractiveSessionDispatcher(agent, execution_tree=bridge.execution_tree)
             dispatcher.runtime.set_user_message_accepted_callback(handle.record_user_message)
-            bridge = ACPEventBridge(agent, self._client, handle.id)
             bridge.watch_session(handle)
 
             async def emit_status(status: Any) -> None:
@@ -759,8 +763,11 @@ async def serve(
     llm_factory: Callable[[], UnifiedLLM],
     *,
     options_factory: Callable[[Path], SessionOptions] | None = None,
+    execution_tree: bool = False,
 ) -> None:
-    adapter = CodingACPAdapter(llm_factory, options_factory=options_factory)
+    adapter = CodingACPAdapter(
+        llm_factory, options_factory=options_factory, execution_tree=execution_tree
+    )
     mcp_trace = MCPHandoffTrace.from_env()
     # ACP clients may terminate their subprocess instead of closing stdin.
     # Let normal teardown save snapshots and release shared-filesystem claims.
