@@ -3,6 +3,7 @@
 """Integration tests: middleware wired through ActorRuntime.generate / execute_code."""
 
 import warnings
+from typing import Any
 
 import pytest
 
@@ -1366,3 +1367,229 @@ class TestAgentCallBypassWarningDelivery:
             # Second call must raise again — the first was never delivered.
             with pytest.raises(RuntimeWarning):
                 agent.helper()
+
+
+# ---------------------------------------------------------------------------
+# agent_call_sync middleware (issue #299)
+# ---------------------------------------------------------------------------
+
+
+def _sync_passthrough(ctx: Any, call_next: Any) -> Any:
+    return call_next(ctx)
+
+
+class TestSyncAgentCallMiddleware:
+    """agent_call_sync gives sync agent methods a real enforcement hook.
+
+    These tests verify that:
+    - A sync blocking guard can prevent a side effect.
+    - A sync passthrough guard fires and forwards the call.
+    - The middleware can inspect arguments and mutate the result.
+    - Multiple layers compose in registration order.
+    - Registering agent_call_sync suppresses the agent_call bypass warning.
+    - agent_call middleware (async) is NOT applied to sync methods even when
+      agent_call_sync is present (the two chains are independent).
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_middleware_blocks_side_effect(self):
+        """A blocking sync guard prevents a sync method's side effect."""
+        seen: list[str] = []
+
+        def deny(ctx: Any, call_next: Any) -> Any:
+            seen.append(ctx.method_name)
+            if ctx.method_name == "charge_card":
+                raise PermissionError("charge_card blocked")
+            return call_next(ctx)
+
+        class PaymentAgent(Agent, llm=_TEST_LLM):
+            def __init__(self) -> None:
+                super().__init__()
+                self.charges: list[int] = []
+
+            def charge_card(self, amount: int) -> str:
+                """Record a simulated card charge."""
+                self.charges.append(amount)
+                return f"receipt-{amount}"
+
+        agent = PaymentAgent()
+        agent.event_manager.intercept("agent_call_sync", deny)
+
+        with pytest.raises(PermissionError, match="charge_card blocked"):
+            agent.charge_card(100)
+
+        # Guard ran and the side effect was blocked.
+        assert seen == ["charge_card"]
+        assert agent.charges == []
+
+    @pytest.mark.asyncio
+    async def test_sync_middleware_passthrough_fires_and_returns_result(self):
+        """A passthrough sync guard fires and forwards the return value."""
+        seen: list[str] = []
+
+        def spy(ctx: Any, call_next: Any) -> Any:
+            seen.append(ctx.method_name)
+            return call_next(ctx)
+
+        class A(Agent, llm=_TEST_LLM):
+            def greet(self, name: str) -> str:
+                """Return a greeting."""
+                return f"hello {name}"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call_sync", spy)
+
+        result = agent.greet("world")
+
+        assert result == "hello world"
+        assert seen == ["greet"]
+
+    @pytest.mark.asyncio
+    async def test_sync_middleware_sees_args_and_result(self):
+        """Middleware can read args on the way in and the result on the way out."""
+        captured_args: list[tuple] = []
+        captured_results: list[Any] = []
+
+        def inspector(ctx: Any, call_next: Any) -> Any:
+            captured_args.append(ctx.args)
+            out = call_next(ctx)
+            captured_results.append(out.result)
+            return out
+
+        class A(Agent, llm=_TEST_LLM):
+            def add(self, x: int, y: int) -> int:
+                """Return the sum."""
+                return x + y
+
+        agent = A()
+        agent.event_manager.intercept("agent_call_sync", inspector)
+
+        assert agent.add(3, 4) == 7
+        assert captured_args == [(3, 4)]
+        assert captured_results == [7]
+
+    @pytest.mark.asyncio
+    async def test_sync_middleware_short_circuit(self):
+        """Middleware can short-circuit execution by setting ctx.result."""
+        executed = False
+
+        def gate(ctx: Any, call_next: Any) -> Any:
+            ctx.result = "short-circuited"
+            return ctx
+
+        class A(Agent, llm=_TEST_LLM):
+            def work(self) -> str:
+                """Should never execute when gated."""
+                nonlocal executed
+                executed = True
+                return "real result"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call_sync", gate)
+
+        result = agent.work()
+
+        assert result == "short-circuited"
+        assert not executed
+
+    @pytest.mark.asyncio
+    async def test_sync_middleware_composes_in_registration_order(self):
+        """Multiple layers apply outermost-first (registration order)."""
+        log: list[str] = []
+
+        def first(ctx: Any, call_next: Any) -> Any:
+            log.append("first-in")
+            out = call_next(ctx)
+            log.append("first-out")
+            return out
+
+        def second(ctx: Any, call_next: Any) -> Any:
+            log.append("second-in")
+            out = call_next(ctx)
+            log.append("second-out")
+            return out
+
+        class A(Agent, llm=_TEST_LLM):
+            def noop(self) -> str:
+                """Do nothing."""
+                log.append("core")
+                return "ok"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call_sync", first)
+        agent.event_manager.intercept("agent_call_sync", second)
+
+        assert agent.noop() == "ok"
+        assert log == ["first-in", "second-in", "core", "second-out", "first-out"]
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_agent_call_sync_registered(self):
+        """Registering agent_call_sync suppresses the agent_call bypass warning."""
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+        # Register both kinds — the sync gap is intentionally closed.
+        agent.event_manager.intercept("agent_call", _passthrough)
+        agent.event_manager.intercept("agent_call_sync", _sync_passthrough)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert agent.helper() == "ok"
+
+    @pytest.mark.asyncio
+    async def test_async_agent_call_still_not_applied_to_sync_methods(self):
+        """agent_call (async) does not wrap sync methods even when agent_call_sync is present."""
+        async_seen: list[str] = []
+
+        async def async_spy(ctx: Any, nxt: Any) -> Any:
+            async_seen.append(ctx.method_name)
+            return await nxt(ctx)
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """Sync method — only agent_call_sync applies."""
+                return "ok"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", async_spy)
+        agent.event_manager.intercept("agent_call_sync", _sync_passthrough)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert agent.helper() == "ok"
+
+        # async agent_call middleware never fired for the sync method.
+        assert async_seen == []
+
+    @pytest.mark.asyncio
+    async def test_sync_middleware_unsubscribe_removes_guard(self):
+        """The unsubscribe handle returned by intercept() removes the guard."""
+        blocked = False
+
+        def deny(ctx: Any, call_next: Any) -> Any:
+            nonlocal blocked
+            blocked = True
+            raise PermissionError("blocked")
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """A plain sync helper."""
+                return "ok"
+
+        agent = A()
+        unsubscribe = agent.event_manager.intercept("agent_call_sync", deny)
+
+        with pytest.raises(PermissionError):
+            agent.helper()
+        assert blocked
+
+        # Remove the guard — subsequent calls go through unimpeded.
+        unsubscribe()
+        blocked = False
+        result = agent.helper()
+        assert result == "ok"
+        assert not blocked
