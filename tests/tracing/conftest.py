@@ -63,6 +63,10 @@ def reset_tracing_module_state():
     # let a stale callback keep firing against a recorder that has since
     # been torn down.  Mirrors ``tests/integration/conftest.py``; the
     # ``test_conftest_reset.py`` meta-test pins the contract.
+    from nooa.tracing import _llm_hooks
+
+    _llm_hooks.callbacks.clear()
+
     with contextlib.suppress(ImportError):
         import litellm
 

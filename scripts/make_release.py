@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -326,6 +327,131 @@ def tool_versions(image_digest: str | None) -> dict[str, str]:
             else "unavailable"
         )
     return versions
+
+
+def provider_checks(
+    artifact_dir: Path,
+    manifest: ReleaseManifest | None = None,
+    *,
+    internal_wheel: Path | None = None,
+) -> None:
+    """Check replay and cache behavior on the candidate before creating a draft.
+
+    Use the existing opt-in provider tests, not the much larger integration suite.
+    Their model routes and credentials come from registry aliases installed with
+    a bundled-config package, so a runner without that package fails this gate
+    (the cases skip, and skips are rejected below).
+    The supplied alias wheel is loaded in uv's temporary environment, since the
+    locked project sync removes packages outside the lockfile. Local callers may
+    omit it when their registry aliases are otherwise available.
+    Twenty cases make at most 48 capped calls without retries. A fresh report
+    directory and exact case identities prevent stale or skipped evidence from
+    satisfying the gate. Session databases and reports stay in private artifacts.
+    """
+    # Credentials are not this runner's concern: each ``release-gate-<family>``
+    # registry alias names its own credential variable, and the private
+    # controller provides it. A missing credential fails the cases, which the
+    # count below rejects before any draft is created.
+    env = os.environ.copy()
+    if "NOOA_LLM_TRANSPORT" in env:
+        die("Unset NOOA_LLM_TRANSPORT: the release gate explicitly checks both transports")
+    env.update(
+        NOOA_RUN_OPEN_MODEL_REPLAY="1", NOOA_RUN_CACHE_RESUME_LIVE="1", NOOA_RUN_SUMMARIZER_E2E="1"
+    )
+    env.pop(
+        "NOOA_TEST_OMITTED_REASONING", None
+    )  # Optional A/B calls are outside the release budget.
+    env.pop("OTLP_ENDPOINT", None)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="provider-validation-", dir=artifact_dir))
+    report = directory / "results.xml"
+    evidence = {"outcome": "running", "report": str(report), "expected_cases": 20}
+    if manifest:
+        manifest.update(provider_validation=evidence)
+    step("Provider replay and cache checks (both transports; 48 capped provider requests)")
+    try:
+        run(
+            [
+                "uv",
+                "run",
+                "--frozen",
+                *(["--with", str(internal_wheel)] if internal_wheel else []),
+                "pytest",
+                "-q",
+                "-m",
+                "integration",
+                "--reruns",
+                "0",
+                "--tb=no",
+                "-o",
+                "junit_family=xunit1",
+                "--junitxml",
+                str(report),
+                "--basetemp",
+                str(directory / "sessions"),
+                "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume",
+                "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume",
+                "tests/integration/test_summarizer_live.py::test_installed_summarizer_applies_before_next_turn",
+                "tests/integration/test_cache_resume_live.py::test_saved_turn_switches_provider_in_gate",
+            ],
+            env=env,
+            timeout=2400,
+            capture=False,
+        )
+        cases = ET.parse(report).findall(".//testcase")
+        expected = (
+            {
+                (
+                    "tests.integration.test_cache_resume_live",
+                    f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}-{transport}]",
+                )
+                for family in ("openai", "anthropic", "gemini")
+                for transport in ("litellm", "direct")
+            }
+            | {
+                (
+                    "tests.integration.test_open_model_tool_reasoning_live",
+                    f"test_open_model_tool_reasoning_after_sqlite_resume[{family}-{transport}]",
+                )
+                for family in ("deepseek", "kimi", "glm", "qwen")
+                for transport in ("litellm", "direct")
+            }
+            | {
+                (
+                    "tests.integration.test_summarizer_live",
+                    f"test_installed_summarizer_applies_before_next_turn[{family}-{transport}]",
+                )
+                for family in ("openai", "anthropic")
+                for transport in ("litellm", "direct")
+            }
+            | {
+                (
+                    "tests.integration.test_cache_resume_live",
+                    f"test_saved_turn_switches_provider_in_gate[anthropic-openai-{transport}]",
+                )
+                for transport in ("litellm", "direct")
+            }
+        )
+        actual = {(case.get("classname"), case.get("name")) for case in cases}
+        if (
+            len(cases) != len(expected)
+            or actual != expected
+            or any(
+                case.find(status) is not None
+                for case in cases
+                for status in ("skipped", "failure", "error")
+            )
+        ):
+            die(
+                "Provider validation requires the twenty expected transport-labelled cases to pass exactly once; no skips. Check the alias package if cases were skipped (use --internal-wheel)."
+            )
+    except (ReleaseError, OSError, ET.ParseError) as exc:
+        if manifest:
+            manifest.update(provider_validation={**evidence, "outcome": "failed"})
+        die(f"Provider validation failed; inspect private evidence in {directory}: {exc}")
+    if manifest:
+        manifest.update(provider_validation={**evidence, "outcome": "passed"})
+    ok("all twenty provider cases passed on both transports")
 
 
 # ---------------------------------------------------------------------------
@@ -1554,6 +1680,7 @@ def _write_job_summary(artifact_dir: Path, manifest: ReleaseManifest) -> None:
         f"- Candidate: `{data.get('candidate_sha', '')}`",
         f"- Previous: `{data.get('previous_release_tag', '')}`",
         f"- Capability hard gate: **{cap.get('hard_gate_outcome', 'not run')}**",
+        f"- Provider replay/cache gate: **{data.get('provider_validation', {}).get('outcome', 'not run')}**",
     ]
     if data.get("github_draft_url"):
         lines.append(f"- GitHub draft: {data['github_draft_url']}")
@@ -1592,8 +1719,6 @@ def ci_main(args: argparse.Namespace) -> int:
         die("an unmerged candidate can never create a draft")
     if args.checks_only and args.create_draft:
         die("--checks-only can never be combined with --create-draft")
-    if not os.getenv("NVIDIA_INTERNAL_API_KEY"):
-        die("NVIDIA_INTERNAL_API_KEY is required for the live capability gate")
     if not unmerged_candidate and not os.getenv("GH_TOKEN"):
         die("GH_TOKEN is required in CI to inspect and reconcile release state")
     validate_https_url(args.pipeline_url, "pipeline URL")
@@ -1666,6 +1791,8 @@ def ci_main(args: argparse.Namespace) -> int:
         build_and_smoke(args.tag, head_sha, manifest)
         distributions = _copy_distributions(artifact_dir)
         manifest.update(distributions=distributions)
+
+        provider_checks(artifact_dir, manifest, internal_wheel=internal_wheel)
 
         manifest.update(capability={"hard_gate_outcome": "running"})
         try:
@@ -1756,13 +1883,7 @@ def ci_main(args: argparse.Namespace) -> int:
 
 
 def local_main(args: argparse.Namespace) -> int:
-    if (
-        args.create_draft
-        or args.candidate_sha
-        or args.candidate_ref
-        or args.internal_wheel
-        or args.artifact_dir
-    ):
+    if args.create_draft or args.candidate_sha or args.candidate_ref or args.artifact_dir:
         die("CI-only arguments require --ci")
 
     models = args.models.split(",") if args.models else GATE_MODELS
@@ -1773,6 +1894,7 @@ def local_main(args: argparse.Namespace) -> int:
     head_sha, prev_tag, _prev_sha, existing = preflight(args.tag, args.allow_dirty)
     fast_checks()
     build_and_smoke(args.tag, head_sha)
+    provider_checks(REPORT_PATH.parent, internal_wheel=args.internal_wheel)
 
     report = ""
     if args.skip_capability:

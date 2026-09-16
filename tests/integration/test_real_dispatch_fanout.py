@@ -1,21 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Real-dispatch test: two journal exporters -> both receivers get every call.
-
-T2 and T4 drive ``MessageJournalCallback`` by hand because litellm's
-``mock_response`` shortcut bypasses the callback chain.  That sidestepped
-the bug we're trying to guard against -- "litellm only delivers
-``log_success_event`` to one of two same-class callbacks".  This test
-plugs into litellm's ``custom_provider_map`` instead, which routes
-``acompletion`` through the *full* callback chain without any network
-call, then asserts both running HTTP recorders saw the journal POSTs.
-
-The backends are minimal HTTP recorders rather than real
-``HeadlessOtlpBackend``s because two of those in the same process
-clobber each other's ``otlp_store`` module state.  All we need is to
-verify that the journal exporter posts to *both* of them; the receiver-
-side persistence and reconstruction is covered by T5.
-"""
+"""Two journal exporters receive the same UnifiedLLM call through SDK dispatch."""
 
 from __future__ import annotations
 
@@ -29,31 +14,7 @@ import pytest
 
 
 class _Recorder:
-    """Tiny localhost HTTP server that records every POST body it sees,
-    *and* answers OpenAI-shape ``/chat/completions`` so litellm can dispatch
-    a real (network-roundtripping) call against it.
-
-    The OpenAI shim is what makes this work as a fan-out test fixture:
-    ``litellm.acompletion(model="openai/x", api_base=<recorder>)`` fires
-    the full callback chain on the way in (``log_pre_api_call``) and out
-    (``log_success_event``), unlike ``mock_response`` or
-    ``custom_provider_map`` which short-circuit it.
-    """
-
-    _CHAT_RESPONSE = {
-        "id": "resp-fanout",
-        "object": "chat.completion",
-        "created": 0,
-        "model": "fanout-stub",
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {"role": "assistant", "content": "fixed reply"},
-            }
-        ],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
+    """Local HTTP receiver recording the journal's actual POST bodies."""
 
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict | list]] = []
@@ -78,17 +39,6 @@ class _Recorder:
                     parsed = body
                 with recorder._lock:
                     recorder.posts.append((self.path, parsed))
-
-                # OpenAI completions shim so litellm thinks it talked to
-                # a real provider.
-                if self.path.endswith("/chat/completions"):
-                    body_out = json.dumps(_Recorder._CHAT_RESPONSE).encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body_out)))
-                    self.end_headers()
-                    self.wfile.write(body_out)
-                    return
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -135,42 +85,15 @@ def two_recorders():
         b.stop()
 
 
-@pytest.fixture
-def llm_endpoint():
-    """Spin up a third recorder that *also* serves OpenAI ``/chat/completions``,
-    used as litellm's ``api_base``.  Distinct from the journal recorders
-    so we don't conflate "the LLM call" with "the journal POSTs"."""
-    rec = _Recorder()
-    base = rec.start()
-    try:
-        yield rec, base
-    finally:
-        rec.stop()
-
-
-def test_real_dispatch_fans_out_to_both_recorders(two_recorders, llm_endpoint):
-    """Drive a real ``litellm.completion`` with two ``JournalExporter``s
-    pointed at two recorders.  Both must receive a ``/v1/journal/calls``
-    POST with the same call_id.  This is the test that guards against
-    the original 'litellm only delivers log_success_event to one of two
-    same-class callbacks' bug -- prior tests papered over it by driving
-    the callbacks in a Python ``for`` loop, which can't possibly fail.
-
-    Uses sync ``completion`` rather than ``acompletion`` because the
-    installed litellm version reliably fires the callback chain on the
-    sync path; the async path has timing/registration quirks that
-    aren't worth working around for this integration test.  The
-    fan-out fix lives entirely in :class:`MessageJournalCallback`'s
-    destination list, which is shared between sync and async paths.
-    """
-    import litellm
+@pytest.mark.parametrize("transport", ["litellm", "direct"])
+def test_real_dispatch_fans_out_to_both_recorders(two_recorders, mock_model_client, transport):
+    """SDK dispatch fans out one journal record to both receivers."""
 
     from nooa.tracing import enable_tracing, exporters, set_session
 
     rec_a, rec_b = two_recorders
     base_a = f"http://127.0.0.1:{rec_a.port}"
     base_b = f"http://127.0.0.1:{rec_b.port}"
-    _llm_rec, llm_base = llm_endpoint
 
     enable_tracing(
         exporters=[
@@ -181,13 +104,9 @@ def test_real_dispatch_fans_out_to_both_recorders(two_recorders, llm_endpoint):
 
     set_session("real-dispatch-fanout")
 
-    response = litellm.completion(
-        model="openai/gpt-fanout",
-        messages=[{"role": "user", "content": "hello fanout"}],
-        api_base=f"{llm_base}/v1",
-        api_key="not-real",
-    )
-    assert response.choices[0].message.content == "fixed reply"
+    with mock_model_client("fixed reply", transport) as client:
+        response = client.call([{"role": "user", "content": "hello fanout"}])
+    assert response.content == "fixed reply"
 
     # force_flush() joins in-flight POST daemon threads, but the daemon
     # only returns *after the recorder has accepted the body*; the
@@ -231,19 +150,17 @@ def test_real_dispatch_fans_out_to_both_recorders(two_recorders, llm_endpoint):
 
 
 @pytest.mark.asyncio
-async def test_real_dispatch_async_fans_out_to_both_recorders(two_recorders, llm_endpoint):
-    """Same fan-out invariant on the async path.  litellm's async success
-    handler is a deferred task on the running loop, so the test must
-    ``await`` after the call to give the loop time to run it -- a
-    subtle gotcha that masked async dispatch as "broken" earlier."""
-    import litellm
+@pytest.mark.parametrize("transport", ["litellm", "direct"])
+async def test_real_dispatch_async_fans_out_to_both_recorders(
+    two_recorders, mock_model_client, transport
+):
+    """The asynchronous client has the same fan-out contract."""
 
     from nooa.tracing import enable_tracing, exporters, set_session
 
     rec_a, rec_b = two_recorders
     base_a = f"http://127.0.0.1:{rec_a.port}"
     base_b = f"http://127.0.0.1:{rec_b.port}"
-    _llm_rec, llm_base = llm_endpoint
 
     enable_tracing(
         exporters=[
@@ -253,36 +170,18 @@ async def test_real_dispatch_async_fans_out_to_both_recorders(two_recorders, llm
     )
     set_session("async-real-dispatch-fanout")
 
-    response = await litellm.acompletion(
-        model="openai/gpt-fanout",
-        messages=[{"role": "user", "content": "hello async fanout"}],
-        api_base=f"{llm_base}/v1",
-        api_key="not-real",
-    )
-    assert response.choices[0].message.content == "fixed reply"
+    async with mock_model_client("fixed reply", transport) as client:
+        response = await client.acall([{"role": "user", "content": "hello async fanout"}])
+    assert response.content == "fixed reply"
 
-    # Yield to the loop so litellm's async success task can run; then
-    # force_flush joins the journal POST daemon threads as in the sync
-    # case.  Without the await-sleep, ``asyncio.run`` would tear down
-    # the loop before the deferred success task fires, and the test
-    # would observe an empty recorder for entirely uninteresting
-    # event-loop reasons.
     import asyncio
-
-    await asyncio.sleep(0.1)
 
     from nooa.tracing import _provider
 
     assert _provider is not None
     _provider.force_flush()
 
-    # Filter by session_id: prior tests in the same pytest run use
-    # ``mock_response``, which schedules a deferred async-success log
-    # task on the running loop.  ``asyncio.run`` tears down their loop
-    # before the task fires, so it queues into *this* test's loop and
-    # POSTs against our recorders with the prior test's session_id.
-    # Counting only posts whose body matches our session is the only
-    # robust way to avoid that test-pollution interaction.
+    # Background journal delivery can finish after the model call returns.
     sid = "async-real-dispatch-fanout"
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:

@@ -20,10 +20,10 @@ def _spans(body: dict):
 
 @pytest.mark.asyncio
 async def test_journal_file_is_stripped_and_import_reconstructs_messages(tmp_path: Path):
-    pytest.importorskip("openinference.instrumentation.litellm")
     import litellm
     from opentelemetry import trace as otel_trace
 
+    from nooa.tracing import _llm_hooks as journal
     from nooa.tracing import enable_tracing, exporters, flush_traces, set_session
     from nooa.tracing._context_sideband import JournalPayload, set_journal_payload
 
@@ -40,7 +40,7 @@ async def test_journal_file_is_stripped_and_import_reconstructs_messages(tmp_pat
     )
     callback = next(
         callback
-        for callback in litellm.callbacks
+        for callback in journal.callbacks
         if type(callback).__name__ == "FileMessageJournalCallback"
     )
     kwargs = {"litellm_call_id": "portable-call", "model": "gpt-3.5-turbo"}
@@ -155,8 +155,7 @@ def test_harbor_import_posts_journal_with_trial_session(monkeypatch, tmp_path: P
 
 @pytest.mark.parametrize("file_first", [False, True])
 def test_http_and_file_journal_callbacks_coexist_in_either_order(tmp_path: Path, file_first: bool):
-    import litellm
-
+    from nooa.tracing import _llm_hooks as journal
     from nooa.tracing import exporters
     from nooa.tracing._litellm_journal import (
         FileMessageJournalCallback,
@@ -171,8 +170,8 @@ def test_http_and_file_journal_callbacks_coexist_in_either_order(tmp_path: Path,
         factories.reverse()
     created = [factory() for factory in factories]
     try:
-        assert sum(type(cb) is MessageJournalCallback for cb in litellm.callbacks) == 1
-        assert sum(type(cb) is FileMessageJournalCallback for cb in litellm.callbacks) == 1
+        assert sum(type(cb) is MessageJournalCallback for cb in journal.callbacks) == 1
+        assert sum(type(cb) is FileMessageJournalCallback for cb in journal.callbacks) == 1
     finally:
         for exporter in reversed(created):
             exporter.shutdown()

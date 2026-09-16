@@ -51,6 +51,10 @@ def _reset_tracing_module_state() -> None:
     # ``_async_success_callback`` / etc on the first call -- those copies
     # outlive the original list and would let a stale callback keep firing
     # against a recorder that has since been torn down.
+    from nooa.tracing import _llm_hooks
+
+    _llm_hooks.callbacks.clear()
+
     with contextlib.suppress(ImportError):
         import litellm
 
@@ -72,3 +76,59 @@ def auto_reset_tracing_state():
     _reset_tracing_module_state()
     yield
     _reset_tracing_module_state()
+
+
+@pytest.fixture
+def isolated_gate_tracing(auto_reset_tracing_state, monkeypatch):
+    """Do not discover a viewer or export live gate prompts/replies externally."""
+    import nooa.tracing as tracing
+
+    # Unsetting OTLP_ENDPOINT alone still probes the default local viewer.
+    monkeypatch.setattr(tracing, "_default_exporters", lambda: [])
+    tracing.enable_tracing(exporters=[])
+    # OTel's process-global provider can outlive the module reset. Reconfigure
+    # explicitly to remove processors retained from an earlier test as well.
+    tracing.enable_tracing(exporters=[])
+
+
+@pytest.fixture
+def mock_model_client(monkeypatch):
+    """Real UnifiedLLM/SDK dispatch with only the model's HTTP pool mocked."""
+    import httpx
+
+    from nooa.unifiedllm import CompletionClient
+    from nooa.unifiedllm.direct import DirectTransport
+    from nooa.unifiedllm.unifiedllm import _ClientHttp
+
+    def make(reply, transport="direct"):
+        def respond(request):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "test",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": reply},
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                },
+            )
+
+        mock = httpx.MockTransport(respond)
+        monkeypatch.setattr(
+            DirectTransport, "_http_settings", staticmethod(lambda config: {"transport": mock})
+        )
+        monkeypatch.setattr(
+            _ClientHttp, "_httpx_hardening", staticmethod(lambda: {"transport": mock})
+        )
+        return CompletionClient(
+            "openai/test", transport=transport, api_key="test", api_base="https://models.example/v1"
+        )
+
+    return make
