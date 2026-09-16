@@ -64,12 +64,52 @@ def test_uninstall_removes_all_hooks(agent):
 
 
 def test_disabled_install_is_inert(agent):
+    """Disabled installation does not register hooks or enable agent-facing memory tools."""
     mgr = MemoryManager.install(agent, config=MemoryConfig(enabled=False, path=":memory:"))
     assert mgr._unsubs == []
     assert len(agent.event_manager._middleware["agent_call"]) == 0
 
 
+def test_disabled_install_does_not_create_database(agent, tmp_path):
+    """Installing and uninstalling an unused disabled manager leaves the filesystem alone."""
+    path = tmp_path / "unused" / "memory.sqlite"
+    mgr = MemoryManager.install(agent, config=MemoryConfig(enabled=False, path=str(path)))
+    try:
+        assert not path.parent.exists()
+    finally:
+        mgr.uninstall()
+    assert not path.parent.exists()
+
+
+def test_disabled_install_does_not_construct_embedder(agent, monkeypatch):
+    """An unused disabled manager never needs to construct an embedding backend."""
+
+    def unexpected_embedder(config):
+        """Fail immediately if disabled installation tries to initialize embedding resources."""
+        pytest.fail("disabled installation constructed an embedder")
+
+    monkeypatch.setattr("nooa_memory.manager.get_embedder", unexpected_embedder)
+    mgr = MemoryManager.install(agent, config=MemoryConfig(enabled=False, path=":memory:"))
+    mgr.uninstall()
+
+
+def test_disabled_manager_explicit_use_initializes_resources_once(agent, tmp_path):
+    """Direct manager operations lazily reuse resources without enabling agent-facing hooks."""
+    path = tmp_path / "memory.sqlite"
+    mgr = MemoryManager.install(agent, config=MemoryConfig(enabled=False, path=str(path)))
+    try:
+        mid = mgr.remember("explicit manager operation")
+        assert path.exists()
+        store = mgr.store
+        assert mgr.store is store
+        assert store.get(mid).content == "explicit manager operation"
+        assert mgr._unsubs == []
+    finally:
+        mgr.uninstall()
+
+
 def test_install_replaces_existing_manager_without_leaking_hooks(agent):
+    """Replacing a manager unregisters the previous hooks before installing new ones."""
     first = _install(agent)
     second = _install(agent)
 
