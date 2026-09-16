@@ -9,14 +9,23 @@ evaluation, no class — just a pure function.
 
 import pytest
 
+from nooa import Block, CacheBoundary
+from nooa.context_blocks.events import ToolCallEvent, ToolResult
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     MarkdownBlockFormatter,
     OpenAIProviderFormatter,
     XMLBlockFormatter,
 )
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+from nooa.context_blocks.models import (
+    BlockMetadata,
+    ResolvedBlock,
+    Role,
+)
 from nooa.context_blocks.renderer import render_context
+from nooa.events import LLMResponse
+from nooa.unifiedllm import ToolCall
 
 
 class TestRenderContextBasic:
@@ -36,6 +45,203 @@ class TestRenderContextBasic:
         ).output
 
         assert result == []
+
+    def test_boundary_splits_messages_without_adding_content(self):
+        result = render_context(
+            [
+                Block(key="first", content="first", role=Role.USER),
+                CacheBoundary(),
+                Block(key="second", content="second", role=Role.USER),
+            ],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        assert len(result) == 3
+        assert result[1] == CacheBoundary()
+        rendered = "".join(
+            message["content"] for message in result if not isinstance(message, CacheBoundary)
+        )
+        assert "first" in rendered and "second" in rendered
+
+    def test_boundary_after_system_only_context_is_preserved(self):
+        result = render_context(
+            [Block(key="system", content="system"), CacheBoundary()],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        assert len(result) == 2
+        assert result[0]["role"] == "system"
+        assert result[1] == CacheBoundary()
+
+    def test_leading_and_consecutive_boundaries_are_noops(self):
+        result = render_context(
+            [CacheBoundary(), CacheBoundary(), Block(key="only", content="only")],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        assert len(result) == 1
+        assert result[0]["role"] == "system"
+
+    def test_boundary_after_tool_event_marks_complete_result(self):
+        event = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="execute_python",
+            arguments={"code": "1 + 1"},
+            result=ToolResult(tool_call_id="tc_1", content="2"),
+        )
+        result = render_context(
+            [event, CacheBoundary()],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        assert [message["role"] for message in result] == ["assistant", "tool", "metadata"]
+        assert result[-1] == CacheBoundary()
+
+    def test_boundary_prevents_plain_formatter_cross_segment_merge(self):
+        from nooa.events import PythonOutput, ResultStatus
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        event = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="execute_python",
+            arguments={"code": "print(2)"},
+            result=ToolResult(tool_call_id="tc_1", content="status: complete"),
+        )
+        output = PythonOutput(
+            tool_call_id="tc_1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="2",
+        )
+        result = render_context(
+            [event, CacheBoundary(), output],
+            block_formatter=PlainCodeActBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        assert [message["role"] for message in result] == [
+            "assistant",
+            "tool",
+            "metadata",
+            "user",
+        ]
+        assert result[2] == CacheBoundary()
+        assert "2" in result[3]["content"]
+
+    def test_plain_formatter_rejects_context_inside_event_history(self):
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        with pytest.raises(UnsupportedContextLayout, match="inserted inside event history"):
+            render_context(
+                [
+                    ToolCallEvent(
+                        tool_call_id="tc_1",
+                        name="run",
+                        arguments={},
+                        result=ToolResult(tool_call_id="tc_1", content="ok"),
+                    ),
+                    Block(key="interleaved", content="unsafe"),
+                ],
+                block_formatter=PlainCodeActBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
+
+    def test_plain_formatter_preserves_unmatched_python_output_position(self):
+        from nooa.events import PythonOutput, ResultStatus, Task
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        output = PythonOutput(
+            tool_call_id="unmatched",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="earlier",
+        )
+        result = render_context(
+            [output, Task(prompt="later")],
+            block_formatter=PlainCodeActBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        assert [message["role"] for message in result] == ["user", "user"]
+        assert "earlier" in result[0]["content"]
+        assert "later" in result[1]["content"]
+
+    def test_plain_formatter_rejects_system_block_after_user_block(self):
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        with pytest.raises(UnsupportedContextLayout, match="system block"):
+            render_context(
+                [
+                    Block(key="user", content="first", role=Role.USER),
+                    Block(key="system", content="late", role=Role.SYSTEM),
+                ],
+                block_formatter=PlainCodeActBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
+
+    def test_boundary_cannot_split_canonical_tool_replay(self):
+        response = LLMResponse(
+            content="",
+            tool_calls=(ToolCall(id="tc_1", name="run", arguments="{}"),),
+            finish_reason="tool_calls",
+        )
+        execution = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="run",
+            arguments={},
+            llm_response_id=response.id,
+            result=ToolResult(tool_call_id="tc_1", content="ok"),
+        )
+        with pytest.raises(UnsupportedContextLayout, match="splits tool execution"):
+            render_context(
+                [response, CacheBoundary(), execution],
+                block_formatter=XMLBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
+
+    def test_incomplete_tool_event_is_rejected(self):
+        event = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="execute_python",
+            arguments={"code": "1 + 1"},
+            result=None,
+        )
+        with pytest.raises(UnsupportedContextLayout, match="has no result"):
+            render_context(
+                [event],
+                block_formatter=XMLBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
+
+    def test_incomplete_resolved_tool_event_cannot_use_python_output_as_result(self):
+        from nooa.events import PythonOutput, ResultStatus
+        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
+
+        event = ToolCallEvent(
+            tool_call_id="tc_1",
+            name="execute_python",
+            arguments={"code": "print(2)"},
+            result=None,
+        )
+        orphan = ResolvedBlock(key="tool", content="", event=event, role=Role.ASSISTANT)
+        output = ResolvedBlock(
+            key="output",
+            content="",
+            event=PythonOutput(
+                tool_call_id="tc_1",
+                execution_status=ResultStatus.COMPLETE,
+                execution_count=1,
+                stdout="2",
+            ),
+            role=Role.USER,
+        )
+        with pytest.raises(UnsupportedContextLayout, match="has no result"):
+            render_context(
+                [orphan, output],
+                block_formatter=PlainCodeActBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
 
     def test_render_single_system_block(self):
         """render_context() formats a single system block."""
@@ -123,9 +329,9 @@ class TestRenderContextBasic:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        assert len(result) == 3  # system + user + assistant
-        assert result[2]["role"] == "assistant"
-        assert "Hello!" in result[2]["content"]
+        assert len(result) == 2
+        assert result[1]["role"] == "assistant"
+        assert "Hello!" in result[1]["content"]
 
 
 class TestRenderContextTruncation:
@@ -243,13 +449,12 @@ class TestRenderContextToolCalls:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        # System + assistant (tool_calls) + tool (result)
-        assert len(result) == 3
-        assert result[1]["role"] == "assistant"
-        assert "tool_calls" in result[1]
-        assert result[1]["tool_calls"][0]["function"]["name"] == "search"
-        assert result[2]["role"] == "tool"
-        assert result[2]["content"] == "Found it"
+        assert len(result) == 2
+        assert result[0]["role"] == "assistant"
+        assert "tool_calls" in result[0]
+        assert result[0]["tool_calls"][0]["function"]["name"] == "search"
+        assert result[1]["role"] == "tool"
+        assert result[1]["content"] == "Found it"
 
 
 class TestRenderContextNoMutation:
@@ -542,7 +747,7 @@ class TestRenderContextEventSerialization:
         ).output
 
         # Content must appear in the user message
-        user_msg = result[1]
+        user_msg = result[0]
         assert user_msg["role"] == "user"
         assert "Hello world" in user_msg["content"]
 
@@ -571,7 +776,7 @@ class TestRenderContextEventSerialization:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        user_msg = result[1]
+        user_msg = result[0]
         # Content was serialized (not empty)
         assert "UserEvent" in user_msg["content"] or long_content in user_msg["content"]
         # No legacy wrapper
@@ -600,7 +805,7 @@ class TestRenderContextEventSerialization:
         ).output
 
         # Tool call should appear as assistant tool_calls message, not as a user message
-        msgs = result[1:]
+        msgs = result
         assert any(m["role"] == "assistant" and "tool_calls" in m for m in msgs)
 
     def test_block_with_no_event_preserves_existing_content(self):
@@ -617,24 +822,23 @@ class TestRenderContextEventSerialization:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
-        user_msg = result[1]
+        user_msg = result[0]
         assert user_msg["role"] == "user"
         assert "pre-existing content" in user_msg["content"]
 
 
 class TestCountTokens:
-    """Tests for count_tokens parameter in render_context()."""
+    """Rendering accepts legacy budget arguments but applies no policy."""
 
-    def test_raises_if_context_limit_set_without_counter(self):
-        """ValueError when context_limit set but no count_tokens."""
-        with pytest.raises(ValueError, match="max_context_tokens requires a token counter"):
-            render_context(
-                [],
-                block_formatter=XMLBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
-                context_limit=10_000,
-                count_tokens=None,
-            )
+    def test_accepts_context_limit_without_counter(self):
+        result = render_context(
+            [],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+            context_limit=10_000,
+            count_tokens=None,
+        )
+        assert result.output == []
 
     def test_accepts_none_counter_when_no_token_limits(self):
         """No error when context_limit is not set."""
@@ -646,8 +850,7 @@ class TestCountTokens:
         ).output
         assert result is not None
 
-    def test_uses_count_tokens_for_context_limit(self):
-        """count_tokens is called when context_limit is set."""
+    def test_does_not_use_count_tokens_for_context_limit(self):
         call_count = []
 
         def counter(s: str) -> int:
@@ -662,4 +865,4 @@ class TestCountTokens:
             context_limit=10_000,
             count_tokens=counter,
         )
-        assert len(call_count) > 0
+        assert call_count == []

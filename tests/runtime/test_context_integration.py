@@ -298,9 +298,9 @@ class TestContextManager:
             pass
 
         agent = TestAgent()
-        # system_prompt is now in both protected_keys and _blocks
+        # The default view owns the declaration; the manager reserves its key.
         assert "system_prompt" in agent.context_manager.protected_keys
-        assert "system_prompt" in agent.context_manager._blocks
+        assert "system_prompt" not in agent.context_manager._blocks
         with pytest.raises(ProtectedBlockError):
             del agent.context_manager["system_prompt"]
 
@@ -342,9 +342,9 @@ class TestContextManager:
             pass
 
         agent = TestAgent()
-        # system_prompt is now in both protected_keys and _blocks
+        # The default view owns the declaration; the manager reserves its key.
         assert "system_prompt" in agent.context_manager.protected_keys
-        assert "system_prompt" in agent.context_manager._blocks
+        assert "system_prompt" not in agent.context_manager._blocks
         with pytest.raises(ProtectedBlockError):
             agent.context_manager.pop("system_prompt")
 

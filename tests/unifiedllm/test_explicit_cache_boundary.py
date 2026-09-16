@@ -4,6 +4,7 @@
 
 import json
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -11,6 +12,7 @@ import litellm
 import pytest
 
 from nooa.context_blocks.events import UserEvent
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     OpenAIProviderFormatter,
@@ -50,10 +52,11 @@ def _render_result(dynamic: str) -> RenderResult:
             metadata=BlockMetadata(tag="1"),
             event=event,
         ),
+        CacheBoundary(),
         ResolvedBlock(
             key="live_state",
             content=dynamic,
-            role=Role.SYSTEM,
+            role=Role.USER,
             metadata=BlockMetadata(static=False, user_block=True),
         ),
     ]
@@ -565,6 +568,45 @@ async def test_anthropic_breakpoint_survives_user_message_coalescing() -> None:
     assert bodies[1]["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert "state-b" in bodies[1]["messages"][0]["content"][0]["text"]
     assert "cache_control" not in bodies[1]["messages"][0]["content"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_breakpoint", [None, "anthropic"])
+async def test_anthropic_rejects_late_system_context_before_transport(
+    cache_breakpoint: Literal["anthropic"] | None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("invalid Anthropic context reached the HTTP transport")
+
+    client = CompletionClient(
+        model="anthropic/claude-sonnet-4-5",
+        api_key="test",
+        api_base="https://example.test",
+        cache_breakpoint=cache_breakpoint,
+    )
+    assert client._http is not None
+    await client._http.httpx_async.aclose()
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    client._http.httpx_async = transport
+    client._http.async_client.client = transport
+    messages = [
+        {"role": "user", "content": "stable user context"},
+        CacheBoundary(),
+        {"role": "system", "content": "volatile system context"},
+    ]
+    try:
+        with pytest.raises(
+            UnsupportedContextLayout,
+            match="all system context before conversation messages",
+        ):
+            await client.acall(messages)
+    finally:
+        await client.aclose()
+
+    assert requests == []
 
 
 @pytest.mark.asyncio

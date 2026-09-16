@@ -63,8 +63,8 @@ To load a specific file instead of discovery, pass its `Path` to `reload_registr
 
 Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 
-**Caching:** the cached renderer inserts a `CacheBoundary()` block before live
-context. This UnifiedLLM type passes through the formatter in the message list,
+**Caching:** the default context view inserts a `CacheBoundary()` before live
+context. This UnifiedLLM type passes through the renderer and formatter,
 like `LLMResponse`; consumers do not translate its contents. Its public JSON
 view is `{"role": "metadata", "nooa_cache_boundary": true}`. Here `metadata`
 means a framework control record, not a system/user/assistant message for the
@@ -72,12 +72,11 @@ model. UnifiedLLM consumes the boundary before provider dispatch and maps it to
 the selected provider's cache settings; the metadata record itself never goes
 to the model. Direct callers can put `CacheBoundary()` in their history too.
 `cache_breakpoint="auto"` is the default for both clients; no registry cache
-setting is needed. Completion marks recognized Anthropic routes and leaves other
-Chat caches implicit. Responses uses explicit caching when a boundary and eligible
+setting is needed. Completion marks recognized Anthropic routes only when a boundary
+is present and leaves other Chat caches implicit. Responses uses explicit caching when a boundary and eligible
 stable input exist, otherwise provider-default caching. `None` opts out of NOOA
 markers, not the provider's implicit caching. Explicit `"openai"`/`"anthropic"`
-settings force a mapping. Without a boundary, Completion and forced explicit
-Responses policies cache only leading instructions; automatic Responses adds no fields.
+settings force a mapping. Without a boundary, NOOA adds no cache fields.
 `cache_control_injection_points` is removed; see
 [stable-prefix caching](../../docs/stable-prefix-caching.md) for migration and
 direct-call examples.

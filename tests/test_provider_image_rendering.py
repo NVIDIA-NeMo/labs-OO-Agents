@@ -59,9 +59,8 @@ class TestOpenAIProviderFormatterImages:
     def test_no_images_plain_content(self):
         block = _make_python_output_block(stdout="hello", images=[])
         result = _render_openai([block])
-        # System + 1 user message
-        assert len(result) == 2
-        msg = result[1]
+        assert len(result) == 1
+        msg = result[0]
         assert msg["role"] == "user"
         assert isinstance(msg["content"], str)
 
@@ -69,7 +68,7 @@ class TestOpenAIProviderFormatterImages:
         image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
         block = _make_python_output_block(stdout="analyzed", images=[image_block])
         result = _render_openai([block])
-        msg = result[1]
+        msg = result[0]
         assert isinstance(msg["content"], list)
         assert msg["content"][0]["type"] == "text"
         assert "analyzed" in msg["content"][0]["text"]
@@ -82,7 +81,7 @@ class TestOpenAIProviderFormatterImages:
         ]
         block = _make_python_output_block(images=images)
         result = _render_openai([block])
-        msg = result[1]
+        msg = result[0]
         assert isinstance(msg["content"], list)
         assert len(msg["content"]) == 3  # text + 2 images
 

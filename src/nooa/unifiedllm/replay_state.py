@@ -286,7 +286,7 @@ def responses_reasoning_text(output: list[Any]) -> str | None:
 
 def prepare_chat_messages(
     messages: list[LLMResponse | dict[str, Any] | CacheBoundary], scope: str | None
-) -> list[dict | CacheBoundary]:
+) -> list[dict[str, Any] | CacheBoundary]:
     """Project stored turns; retain explicit fields in caller-written dictionaries.
 
     Portable reasoning demotion belongs to LLMResponse projection. A raw

@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import ResponsesProviderFormatter
 from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.unifiedllm import ResponsesClient
@@ -146,15 +147,14 @@ class TestResponsesProviderFormatter:
             {"role": "user", "content": "Now multiply by 3"},
         ]
 
-    def test_skips_metadata_and_runtime_event_roles(self):
+    def test_rejects_unrepresentable_metadata_and_runtime_event_roles(self):
         messages = [
             RenderedMessage(role=Role.RUNTIME_EVENT, content="internal"),
             RenderedMessage(role=Role.METADATA, content="meta"),
             RenderedMessage(role=Role.USER, content="visible"),
         ]
-        result = _project_rendered(messages)
-
-        assert result == [{"role": "user", "content": "visible"}]
+        with pytest.raises(UnsupportedContextLayout):
+            _project_rendered(messages)
 
 
 class TestResponsesClientTransformMessages:

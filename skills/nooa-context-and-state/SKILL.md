@@ -71,9 +71,8 @@ stable content in the prefix: changing a prefix block invalidates cache reuse
 for that block and everything after it. Keep live or frequently changing blocks
 in the volatile suffix so the stable prefix remains reusable.
 
-The cached renderer automatically marks where that volatile suffix begins.
-This keeps live system context in its original position when UnifiedLLM builds
-provider requests; it does not enable a provider-specific cache policy.
+The default context view marks where that volatile suffix begins. UnifiedLLM
+maps this boundary to provider-specific cache metadata when supported.
 
 Per-method overrides via `ScopedContext`:
 

@@ -145,10 +145,11 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
             )
             for event in events
         ],
+        CacheBoundary(),
         ResolvedBlock(
             key="live_state",
             content=live_state,
-            role=Role.SYSTEM,
+            role=Role.USER,
             metadata=BlockMetadata(static=False, user_block=True),
         ),
     ]

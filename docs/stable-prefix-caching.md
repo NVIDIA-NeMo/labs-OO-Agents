@@ -18,9 +18,8 @@ policies would make their interactions harder to test.
   stable input are present. Without them, they send no extra cache fields.
 - `cache_breakpoint="anthropic"` explicitly selects the Anthropic Chat mapping,
   including gateway aliases that cannot be recognized automatically.
-- `cache_breakpoint="openai"` forces the Responses explicit-cache policy, including
-  its leading-instructions fallback without a boundary. It is an override, not
-  required for normal use.
+- `cache_breakpoint="openai"` forces the Responses explicit-cache policy when a
+  boundary is present. It is an override, not required for normal use.
 - `cache_breakpoint=None` disables NOOA-generated cache markers, not the
   provider's implicit cache. Use this opt-out for a Responses endpoint that does
   not support explicit-cache fields. Responses clients do not accept the
@@ -31,9 +30,9 @@ model: use a new client when switching models. The automatic mapping is resolved
 against the effective per-call model.
 
 `CacheBoundary` belongs to the UnifiedLLM interface, alongside `LLMResponse`.
-The cached renderer inserts it immediately before live context; the formatter
-and middleware pass the same object through unchanged. Direct callers use it
-in their message list too:
+The default context view inserts it immediately before live context; the renderer,
+formatter, and middleware pass the same object through unchanged. Direct callers
+use it in their message list too:
 
 ```python
 from nooa.unifiedllm import CacheBoundary
@@ -46,9 +45,8 @@ Only UnifiedLLM interprets and removes the boundary before sending the request.
 NeMo Relay projects it to public metadata JSON at its serialization boundary,
 then restores the original object if that entry is unchanged. A raw dictionary
 with `nooa_cache_boundary` is rejected with instructions to use `CacheBoundary()`;
-there is only one accepted boundary type. Without a boundary, Completion and
-forced explicit Responses policies mark only leading system/developer instructions,
-not arbitrary history. Automatic Responses adds no cache fields.
+there is only one accepted boundary type. Without a boundary, NOOA adds no cache
+fields.
 
 ## Provider mapping
 
@@ -94,7 +92,7 @@ the framework setting must never become a provider request field.
 1. `unifiedllm/cache_policy.py` owns the single policy. It consumes the boundary
    and changes only the final marker target's containers; unrelated messages
    and large strings are shared.
-   `CacheBoundary` is a small, immutable UnifiedLLM input type. The cached renderer
+   `CacheBoundary` is a small, immutable UnifiedLLM input type. The default view
    places it before live context using the same pass-through path as assistant
    responses. The formatter does not translate it or know what it means;
    ordinary messages carry no cache flag and are not edited.

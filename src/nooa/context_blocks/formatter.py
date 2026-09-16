@@ -21,7 +21,7 @@ This split keeps the "format" axis (XML / Markdown / Plain) orthogonal to the
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeGuard
 
@@ -31,15 +31,38 @@ if TYPE_CHECKING:
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ToolCallEvent
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.models import (
     RenderedMessage,
     ResolvedBlock,
     Role,
     ToolCallInfo,
 )
-from nooa.llm_types import assistant_message
+from nooa.llm_types import CacheBoundary, assistant_message
 
 logger = logging.getLogger(__name__)
+
+
+def validate_anthropic_message_order(
+    messages: Sequence[Any],
+) -> None:
+    """Reject layouts Anthropic would reorder by hoisting system messages."""
+    saw_non_system = False
+    for message in messages:
+        if isinstance(message, CacheBoundary) or isinstance(
+            getattr(message, "replay_message", None), CacheBoundary
+        ):
+            continue
+        role = message.get("role") if isinstance(message, Mapping) else message.role
+        if isinstance(role, Role):
+            role = role.value
+        if role == Role.SYSTEM.value:
+            if saw_non_system:
+                raise UnsupportedContextLayout(
+                    "Anthropic requires all system context before conversation messages"
+                )
+        else:
+            saw_non_system = True
 
 
 def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
@@ -283,7 +306,8 @@ def _event_block_to_messages(
     # Non-tool event
     content = (
         wrap_content(block)
-        if wrap_content is not None and (block.metadata.expr or block.metadata.tag)
+        if wrap_content is not None
+        and (block.event is None or block.metadata.expr or block.metadata.tag)
         else (block.content or "")
     )
     images = getattr(block.event, "images", None) if block.event is not None else None
@@ -313,6 +337,24 @@ def _event_blocks_to_messages(
     remain independently renderable. Linked executions are only projected as
     part of a complete canonical response/result batch.
     """
+    return [
+        message
+        for projection in _event_block_projections(blocks, wrap_content=wrap_content)
+        for message in projection
+    ]
+
+
+def _event_block_projections(
+    blocks: list[ResolvedBlock],
+    *,
+    wrap_content: "Callable[[ResolvedBlock], str] | None",
+) -> list[list[RenderedMessage]]:
+    """Project each input position, keeping canonical tool batches atomic.
+
+    A replayable ``LLMResponse`` expands at its own position to the assistant
+    call batch followed by all linked results. Linked execution sidecars then
+    project to an empty list at their stored positions.
+    """
     replayable_turn_ids = {
         block.event.id
         for block in blocks
@@ -328,7 +370,7 @@ def _event_blocks_to_messages(
         ):
             executions.setdefault(event.llm_response_id, {})[event.tool_call_id] = event
 
-    messages: list[RenderedMessage] = []
+    projections: list[list[RenderedMessage]] = []
     for block in blocks:
         event = block.event
         if _is_llm_response(event) and event.replay_tool_calls:
@@ -345,8 +387,9 @@ def _event_blocks_to_messages(
                     "omitting the assistant tool-call turn from replay.",
                     event.id,
                 )
+                projections.append([])
                 continue
-            messages.append(
+            projection = [
                 RenderedMessage(
                     role=Role.ASSISTANT,
                     content=block.content,
@@ -357,19 +400,21 @@ def _event_blocks_to_messages(
                     ),
                     replay_message=event,
                 )
-            )
+            ]
             for call in event.replay_tool_calls:
-                messages.append(_tool_result_message(by_call_id[call.id]))
+                projection.append(_tool_result_message(by_call_id[call.id]))
+            projections.append(projection)
             continue
 
         # A linked execution is not an independent assistant turn. If its
         # source response was filtered out (or its batch is incomplete), fail
         # closed instead of fabricating provider history from the sidecar.
         if isinstance(event, ToolCallEvent) and event.llm_response_id is not None:
+            projections.append([])
             continue
 
-        messages.extend(_event_block_to_messages(block, wrap_content=wrap_content))
-    return messages
+        projections.append(_event_block_to_messages(block, wrap_content=wrap_content))
+    return projections
 
 
 def _build_messages(
@@ -381,38 +426,46 @@ def _build_messages(
 ) -> list[RenderedMessage]:
     """Common BlockFormatter.format() body used by XML and Markdown variants.
 
-    Always emits a SYSTEM message (empty content if no SYSTEM blocks) unless the
-    input is completely empty. This matches the old renderer's behavior of
-    always including a system slot for providers that expect one.
-
-    The SYSTEM message is emitted with block-aware ``parts`` so the journal
-    publisher can separate each block's content for dedup/hashing.
+    Preserves input positions. Adjacent materialized blocks with the same role
+    coalesce into one block-aware message. Canonical assistant tool-call turns
+    expand atomically at the source response position.
     """
     if not blocks:
         return []
 
     from nooa.context_blocks.models import BlockPart, TextPart
 
-    system_blocks = [b for b in blocks if b.role == Role.SYSTEM]
-    event_blocks = [b for b in blocks if b.role != Role.SYSTEM]
+    projections = _event_block_projections(blocks, wrap_content=wrap_message)
+    messages: list[RenderedMessage] = []
+    pending_blocks: list[ResolvedBlock] = []
 
-    system_rendered = [wrap_system(b) for b in system_blocks]
-    system_content = system_separator.join(system_rendered)
-
-    system_parts: list[TextPart | BlockPart] = []
-    for i, (block, rendered) in enumerate(zip(system_blocks, system_rendered, strict=True)):
-        if i > 0:
-            system_parts.append(TextPart(text=system_separator))
-        system_parts.append(BlockPart(key=block.key, content=rendered))
-
-    messages: list[RenderedMessage] = [
-        RenderedMessage(
-            role=Role.SYSTEM,
-            content=system_content,
-            parts=system_parts if system_parts else None,
+    def flush_blocks() -> None:
+        if not pending_blocks:
+            return
+        rendered = [wrap_system(block) for block in pending_blocks]
+        parts: list[TextPart | BlockPart] = []
+        for i, (block, content) in enumerate(zip(pending_blocks, rendered, strict=True)):
+            if i:
+                parts.append(TextPart(text=system_separator))
+            parts.append(BlockPart(key=block.key, content=content))
+        messages.append(
+            RenderedMessage(
+                role=pending_blocks[0].role,
+                content=system_separator.join(rendered),
+                parts=parts,
+            )
         )
-    ]
-    messages.extend(_event_blocks_to_messages(event_blocks, wrap_content=wrap_message))
+        pending_blocks.clear()
+
+    for block, projection in zip(blocks, projections, strict=True):
+        if block.event is None:
+            if pending_blocks and pending_blocks[0].role != block.role:
+                flush_blocks()
+            pending_blocks.append(block)
+            continue
+        flush_blocks()
+        messages.extend(projection)
+    flush_blocks()
     return messages
 
 
@@ -548,6 +601,10 @@ class OpenAIProviderFormatter(ProviderFormatter):
                         msg.content, msg.tool_calls, reasoning=msg.reasoning
                     )
                 )
+            elif msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
+                raise UnsupportedContextLayout(
+                    f"OpenAI cannot represent context role {msg.role.value!r}"
+                )
             elif msg.tool_calls:
                 out.append(
                     assistant_message(
@@ -567,8 +624,6 @@ class OpenAIProviderFormatter(ProviderFormatter):
             elif msg.role is Role.ASSISTANT:
                 out.append(assistant_message(msg.content, reasoning=msg.reasoning))
             else:
-                if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
-                    continue
                 out.append(
                     _with_reasoning(
                         {"role": msg.role.value, "content": msg.content or ""},
@@ -582,9 +637,18 @@ class AnthropicProviderFormatter(ProviderFormatter):
     """Export portable Anthropic-native messages, without private replay or cache metadata."""
 
     def format(self, messages: list[RenderedMessage]) -> dict:
+        validate_anthropic_message_order(messages)
         system_parts: list[str] = []
         out: list[dict] = []
         for msg in messages:
+            if isinstance(msg.replay_message, CacheBoundary):
+                # This formatter produces a complete Anthropic-native payload,
+                # so UnifiedLLM cannot map the neutral boundary downstream.
+                continue
+            if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
+                raise UnsupportedContextLayout(
+                    f"Anthropic cannot represent context role {msg.role.value!r}"
+                )
             if msg.role == Role.SYSTEM:
                 if msg.content:
                     system_parts.append(msg.content)
@@ -639,8 +703,6 @@ class AnthropicProviderFormatter(ProviderFormatter):
                 content_parts.extend(msg.images)
                 out.append({"role": role.value, "content": content_parts})
             else:
-                if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
-                    continue
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
                 out.append(
                     _with_reasoning(
@@ -648,7 +710,6 @@ class AnthropicProviderFormatter(ProviderFormatter):
                         msg.reasoning,
                     )
                 )
-
         return {"system": "\n\n".join(system_parts), "messages": out}
 
 

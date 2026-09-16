@@ -78,6 +78,7 @@ def _get_agent_cls(module_name: str) -> type:
     from nooa.runtime.actor import ActorRuntime
     from nooa.runtime.context_manager import ContextManager
     from nooa.runtime.event_manager import EventManager
+    from nooa.runtime.events import EventsApi
 
     class _StandaloneAgent:
         """Minimal agent stub: no framework blocks, fresh state per call."""
@@ -90,12 +91,17 @@ def _get_agent_cls(module_name: str) -> type:
             self._truncation = TruncationConfig()
             self.render_config = RenderConfig()
             self.event_manager = EventManager()
+            self.events = EventsApi(self)
             self.context_manager = ContextManager()
             self.runtime = ActorRuntime(self)
             # Used by ActorRuntime to default prompt_cache_key per agent.
             # The wrapper passes a deterministic id derived from the
             # decorated function's identity so repeated calls share a shard.
             self._agent_id = agent_id
+
+        def active_skills(self) -> tuple[Any, ...]:
+            """Match the Agent context-view interface; standalone calls have no skills."""
+            return ()
 
     cls = type("_StandaloneAgent", (_StandaloneAgent,), {})
     # Setting __module__ makes inspect.getmodule(cls) return the function's module,
@@ -144,6 +150,7 @@ def _make_adapter(func: Callable[..., Any], strategy: Any = None) -> Callable[..
     adapted._plan_strategy = strategy or getattr(func, "_plan_strategy", None)  # type: ignore[attr-defined]
     adapted._strategy_context = getattr(func, "_strategy_context", None)  # type: ignore[attr-defined]
     adapted._strategy_events = getattr(func, "_strategy_events", None)  # type: ignore[attr-defined]
+    adapted._strategy_context_view = getattr(func, "_strategy_context_view", None)  # type: ignore[attr-defined]
     adapted._needs_generation = True  # type: ignore[attr-defined]
     adapted._agent_decorator = "auto"  # type: ignore[attr-defined]
 

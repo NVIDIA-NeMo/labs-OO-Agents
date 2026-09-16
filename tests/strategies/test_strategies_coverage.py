@@ -1662,7 +1662,7 @@ class TestFormatSingleErrorNamedResultField:
 class TestPlainProviderFormatterFormat:
     """Tests for PlainCodeActBlockFormatter.format() covering key branches."""
 
-    def test_runtime_event_skipped(self):
+    def test_runtime_event_order_is_preserved_for_provider_validation(self):
         from nooa.context_blocks import ResolvedBlock
         from nooa.context_blocks.models import Role
 
@@ -1670,8 +1670,9 @@ class TestPlainProviderFormatterFormat:
         rb = ResolvedBlock(key="runtime", content="", role=Role.RUNTIME_EVENT, event=None)
         sys_block = ResolvedBlock(key="sys", content="System", role=Role.SYSTEM)
         messages = formatter.format([sys_block, rb])
-        assert len(messages) == 1
+        assert len(messages) == 2
         assert messages[0].role == Role.SYSTEM
+        assert messages[1].role == Role.RUNTIME_EVENT
 
     def test_tool_call_event_with_result_no_python_output(self):
         from nooa.context_blocks import ResolvedBlock, ToolCallEvent, ToolResult
@@ -1711,7 +1712,8 @@ class TestPlainProviderFormatterFormat:
         messages = formatter.format([rb])
         user_msgs = [m for m in messages if m.role == Role.USER]
         assert len(user_msgs) == 1
-        assert user_msgs[0].content == "block content text"
+        assert "<text>" in user_msgs[0].content
+        assert "block content text" in user_msgs[0].content
 
     def test_block_with_no_event_and_no_content(self):
         from nooa.context_blocks import ResolvedBlock
@@ -1722,7 +1724,7 @@ class TestPlainProviderFormatterFormat:
         messages = formatter.format([rb])
         user_msgs = [m for m in messages if m.role == Role.USER]
         assert len(user_msgs) == 1
-        assert user_msgs[0].content == ""
+        assert user_msgs[0].content == "<empty>\n\n</empty>"
 
     def test_tool_call_with_python_output_uses_plain_content(self):
         from nooa.context_blocks import ResolvedBlock, ToolCallEvent

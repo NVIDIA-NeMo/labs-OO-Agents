@@ -5,7 +5,7 @@
 Features:
 - Dynamic: Marker for blocks that are re-evaluated each LLM turn
 - ResolvedBlock: Pre-resolved block ready for rendering (no eval needed)
-- render_context: Dead simple render function (partition by role, format, truncate)
+- render_context: Expands and serializes assembled items in place
 - Pluggable formatters: XML, Markdown for blocks; OpenAI, Anthropic for providers
 - Typed event models for conversation history
 """
@@ -26,6 +26,7 @@ from nooa.context_blocks.exceptions import (
     BlockSyntaxError,
     DynamicNotResolvedError,
     ProtectedBlockError,
+    UnsupportedContextLayout,
 )
 from nooa.context_blocks.formatter import (
     FORMAT_MARKDOWN,
@@ -105,4 +106,5 @@ __all__ = [
     "BlockSyntaxError",
     "DynamicNotResolvedError",
     "ProtectedBlockError",
+    "UnsupportedContextLayout",
 ]

@@ -125,7 +125,7 @@ def apply_cache_policy(
     responses: bool,
     instructions: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, bool]:
-    """Consume one boundary; direct callers default to their leading instructions."""
+    """Consume one boundary and map it to provider-specific cache metadata."""
     clean = []
     boundary = None
     for message in messages:
@@ -136,28 +136,20 @@ def apply_cache_policy(
             continue
         reject_boundary_dict(message)
         clean.append(message)
-    if mapping is None:
+    if mapping == "anthropic" and responses:
+        raise ValueError("The Anthropic cache mapping requires CompletionClient")
+    if mapping == "openai" and not responses:
+        raise ValueError("The OpenAI explicit cache mapping requires ResponsesClient")
+    if mapping is None or boundary is None:
         return clean, instructions, False
     automatic = mapping == "auto"
-    if automatic and boundary is None:
-        return clean, instructions, False
-    if boundary is None:
-        boundary = 0
-        for message in clean:
-            if message.get("role") not in {"system", "developer"}:
-                break
-            boundary += 1
     if mapping == "anthropic":
-        if responses:
-            raise ValueError("The Anthropic cache mapping requires CompletionClient")
         for i in range(boundary - 1, -1, -1):
             marked = _mark_anthropic(clean[i])
             if marked is not None:
                 clean[i] = marked
                 break
         return clean, instructions, False
-    if not responses:
-        raise ValueError("The OpenAI explicit cache mapping requires ResponsesClient")
     marked = _mark_responses_cache_breakpoint(clean, boundary)
     if not marked and instructions:
         content, marked = _mark_responses_content(instructions)

@@ -1074,7 +1074,7 @@ class TestAsyncSafety:
 
 
 # =============================================================================
-# runtime/context_builder.py
+# default_context_view.py
 # =============================================================================
 
 
@@ -1082,20 +1082,18 @@ class TestContextBuilderNoneValue:
     """cm[key] = None suppresses the block (disabled_keys mechanism)."""
 
     async def test_none_value_suppresses_block(self):
-        from nooa.runtime.context_builder import _phase_persistent_blocks
+        from nooa.default_context_view import materialize_manager_blocks
         from nooa.runtime.context_manager import ContextManager
+        from nooa.strategies.current_call import CurrentCall
 
         cm = ContextManager()
         cm["my_key"] = "visible"
         cm["my_key"] = None  # suppress via new unified semantics
 
-        async def _resolve(key: str, value: Any) -> str | None:
-            return str(value) if value is not None else None
-
-        blocks, cache = await _phase_persistent_blocks(
-            blocks=[],
-            context_manager=cm,
-            resolve_fn=_resolve,
+        blocks = await materialize_manager_blocks(
+            cm,
+            object(),
+            CurrentCall(id="1", method_name="run", decorator="plan"),
         )
 
         # Block is suppressed (disabled), not rendered
@@ -1386,43 +1384,43 @@ class TestErrorFormattingNoUserFramesSimple:
                 assert "all in framework code" in result
 
 
-class TestContextBuilderResolveNoneContent:
-    """_apply_overrides resolve_fn returns None → content = "None" (line 85)."""
+class TestDefaultContextViewNoneContent:
+    """Resolved expression values remain materialized strings."""
 
     async def test_resolve_fn_none_produces_string_none(self):
-        """Line 85: content = 'None' when resolve_fn returns None for non-None value."""
-        from nooa.runtime.context_builder import _apply_overrides
+        from nooa import Agent, DynamicContext
+        from nooa.default_context_view import apply_block_overrides
+        from nooa.strategies.current_call import CurrentCall
 
-        async def _resolve(key: str, value: Any) -> str | None:
-            # Returns None — content should become "None"
-            return None
+        class Example(Agent, llm=object()):
+            pass
 
-        result = await _apply_overrides(
-            blocks=[],
-            overrides={"my_key": "some_static_value"},
-            resolve_fn=_resolve,
+        agent = Example()
+        call = CurrentCall(id="1", method_name="run", decorator="plan", agent=agent)
+        result = await apply_block_overrides(
+            (),
+            {"my_key": DynamicContext("None")},
+            agent=agent,
+            call=call,
             static_expr=lambda key: f'context["{key}"]',
         )
-        # content should be "None" since resolve returned None
         assert len(result) == 1
         assert result[0].content == "None"
 
     async def test_protected_block_static_meta(self):
         """Protected static block gets expr=f'self.context["{key}"]' meta and user_block=False."""
-        from nooa.runtime.context_builder import _phase_persistent_blocks
+        from nooa.default_context_view import materialize_manager_blocks
         from nooa.runtime.context_manager import ContextManager
-
-        async def _resolve(key: str, value: Any) -> str | None:
-            return "some content"
+        from nooa.strategies.current_call import CurrentCall
 
         # Create a context manager with a static protected block
         cm = ContextManager()
         cm.set_static_protected("my_key", "static value")
 
-        result, _ = await _phase_persistent_blocks(
-            blocks=[],
-            context_manager=cm,
-            resolve_fn=_resolve,
+        result = await materialize_manager_blocks(
+            cm,
+            object(),
+            CurrentCall(id="1", method_name="run", decorator="plan"),
         )
         assert len(result) == 1
         assert result[0].key == "my_key"

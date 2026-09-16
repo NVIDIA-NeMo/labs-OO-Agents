@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, get_type_hints
 from uuid import uuid4
 
+from nooa.config.truncation_config import FormatConfig
 from nooa.ellipsis_detection import get_pre_ellipsis_code
 
 if TYPE_CHECKING:
@@ -36,6 +37,12 @@ class CurrentCall:
         is_async: Whether the method is async (for proper def/async def in prompts).
         return_type: Return type annotation (optional, for prefill/error hints).
         pre_ellipsis_code: Setup code before `...` marker (optional, for prefill).
+        agent: Active owner for component context views.
+        strategy: Resolved strategy for this generation.
+        event_query: Resolved event filter visible to context views.
+        model: Resolved model name, without client configuration or credentials.
+        context_window: Resolved model input window.
+        context_budget: Context-block budget for this model call.
 
     Example:
         call = CurrentCall(
@@ -71,6 +78,25 @@ class CurrentCall:
     # avoids re-parsing the stringified signature (which can't reliably split on
     # commas inside Annotated[...]/defaults).
     param_names: list[str] | None = None
+    # Resolved per-request facts for views, not client/provider configuration.
+    # Runtime owners are excluded from repr/comparison so this remains an
+    # immutable invocation snapshot.
+    agent: Any | None = field(default=None, repr=False, compare=False)
+    strategy: Any | None = field(default=None, repr=False, compare=False)
+    event_query: Any | None = field(default=None, repr=False, compare=False)
+    model: str | None = None
+    context_window: int | None = None
+    context_budget: int | None = None
+    # Assembly support captured by the runtime. These fields carry no client
+    # object or credentials and are excluded from the public representation.
+    _context_format: "FormatConfig | None" = field(default=None, repr=False, compare=False)
+    _context_token_counter: Callable[[str], int] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _method: Any | None = field(default=None, repr=False, compare=False)
+    _decorator_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    _scoped_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    _context_call_id: str | None = field(default=None, repr=False, compare=False)
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""
@@ -81,6 +107,36 @@ class CurrentCall:
         if not isinstance(other, CurrentCall):
             return NotImplemented
         return self.id == other.id
+
+    @property
+    def context_format(self) -> "FormatConfig | None":
+        """Structural formatting limits for materialized context values."""
+        return self._context_format
+
+    @property
+    def context_token_counter(self) -> Callable[[str], int] | None:
+        """Token counter selected for this invocation, when available."""
+        return self._context_token_counter
+
+    @property
+    def method(self) -> Any | None:
+        """Method being generated."""
+        return self._method
+
+    @property
+    def decorator_context(self) -> dict[str, Any] | None:
+        """Merged inherited and method-level context overrides."""
+        return self._decorator_context
+
+    @property
+    def scoped_context(self) -> dict[str, Any] | None:
+        """Overrides active through ``ScopedContext`` for this invocation."""
+        return self._scoped_context
+
+    @property
+    def invocation_id(self) -> str:
+        """Stable call ID used for event selection even if a strategy changes ``id``."""
+        return self._context_call_id or self.id
 
     def bound_parameters(self) -> dict[str, Any]:
         """Return effective parameter name → value, each input represented exactly once.

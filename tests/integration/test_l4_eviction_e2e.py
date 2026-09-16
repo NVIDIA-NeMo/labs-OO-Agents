@@ -14,9 +14,11 @@ from nooa.context_blocks import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
 from nooa.context_blocks.renderer import render_context
+from nooa.context_view import Block, apply_context_budget
 from nooa.events import PythonOutput
 from nooa.runtime.actor import _current_llm_var
 from nooa.runtime.harness_metrics import harness_metrics_session
+from nooa.strategies.current_call import CurrentCall
 from nooa.unifiedllm import FakeLLMClient
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -71,6 +73,41 @@ def _count_words(s: str) -> int:
     return len(s.split())
 
 
+def _render_default(blocks, limit):
+    items = tuple(
+        Block(
+            key=block.key,
+            content=block.content,
+            role=block.role,
+            metadata=block.metadata,
+        )
+        for block in blocks
+    )
+    evictable = tuple(
+        block
+        for user_only in (True, False)
+        for block in reversed(items)
+        if not block.metadata.static and block.metadata.user_block is user_only
+    )
+    call = CurrentCall(
+        id="test",
+        method_name="test",
+        decorator="plan",
+        context_budget=limit,
+        _context_token_counter=_count_words,
+    )
+    budgeted = apply_context_budget(items, call=call, evictable=evictable)
+    dropped = sum(block.metadata.truncated for block in budgeted)
+    return render_context(
+        budgeted,
+        block_formatter=XMLBlockFormatter(),
+        provider_formatter=OpenAIProviderFormatter(),
+        context_limit=limit,
+        count_tokens=_count_words,
+        context_blocks_dropped=dropped,
+    )
+
+
 # ── Context Block EVICTION ───────────────────────────────────────────────
 
 
@@ -94,13 +131,7 @@ class TestContextBlockEviction:
             ),
         ]
 
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=50,
-            count_tokens=_count_words,
-        )
+        result = _render_default(blocks, 50)
 
         assert result.stats.context_blocks_dropped > 0
         # EVICTED marker present in output
@@ -118,13 +149,7 @@ class TestContextBlockEviction:
             ),
         ]
 
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=50,
-            count_tokens=_count_words,
-        )
+        result = _render_default(blocks, 50)
 
         assert result.stats.context_blocks_dropped == 0
 
@@ -141,13 +166,7 @@ class TestContextBlockEviction:
             for i in range(5)
         ]
 
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=100,
-            count_tokens=_count_words,
-        )
+        result = _render_default(blocks, 100)
 
         assert result.stats.context_blocks_dropped >= 3
         # Oldest blocks survive (eviction removes from end)
@@ -173,13 +192,7 @@ class TestContextBlockEviction:
         ]
 
         with harness_metrics_session() as hm:
-            result = render_context(
-                blocks,
-                block_formatter=XMLBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
-                context_limit=200,
-                count_tokens=_count_words,
-            )
+            result = _render_default(blocks, 200)
             # Evictions are reported via stats ...
             assert result.stats.context_blocks_dropped > 0
             # ... but the leaf library must NOT mutate the runtime metric.

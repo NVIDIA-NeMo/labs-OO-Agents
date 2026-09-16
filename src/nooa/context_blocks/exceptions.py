@@ -9,6 +9,10 @@ class BlockError(Exception):
     pass
 
 
+class UnsupportedContextLayout(BlockError):
+    """Raised when a provider cannot preserve an assembled context layout."""
+
+
 class BlockSyntaxError(BlockError):
     """Raised when a DynamicContext expression contains invalid Python syntax.
 

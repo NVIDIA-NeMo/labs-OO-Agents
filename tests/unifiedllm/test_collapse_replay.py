@@ -9,7 +9,7 @@ import pytest
 from litellm.types.utils import Choices, Message, ModelResponse
 
 from nooa import Agent, Context
-from nooa.context_blocks.events import ToolCallEvent, ToolResult
+from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult
 from nooa.llm_types import LLMResponse
 from nooa.runtime.actor import _current_llm_var, _current_method_var
 from nooa.storage.sqlite import SQLiteStorageManager
@@ -100,9 +100,9 @@ async def test_collapse_keeps_only_complete_active_native_turns(
     prepare = agent.runtime._prepare_context
 
     async def observe_context(*args, **kwargs):
-        blocks = await prepare(*args, **kwargs)
-        rendered_events.update((b.event.id, b.event) for b in blocks if b.event is not None)
-        return blocks
+        items = await prepare(*args, **kwargs)
+        rendered_events.update((item.id, item) for item in items if isinstance(item, EventBase))
+        return items
 
     monkeypatch.setattr(agent.runtime, "_prepare_context", observe_context)
     dispatch = client.acall

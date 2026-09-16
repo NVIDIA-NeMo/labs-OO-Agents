@@ -10,7 +10,9 @@ blocks) and returns ``list[RenderedMessage]``. ProviderFormatter.format() takes
 import pytest
 from pydantic import ValidationError
 
+from nooa import CacheBoundary
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     AnthropicProviderFormatter,
     MarkdownBlockFormatter,
@@ -185,20 +187,19 @@ class TestXMLBlockFormatter:
         )
 
         assert [message.role for message in messages] == [
-            Role.SYSTEM,
             Role.ASSISTANT,
             Role.TOOL,
             Role.TOOL,
             Role.USER,
             Role.USER,
         ]
-        assert [call.id for call in messages[1].tool_calls] == ["call_1", "call_2"]
-        assert [call.arguments for call in messages[1].tool_calls] == [
+        assert [call.id for call in messages[0].tool_calls] == ["call_1", "call_2"]
+        assert [call.arguments for call in messages[0].tool_calls] == [
             '{"code":"first()"}',
             '{"code":"second()"}',
         ]
-        assert messages[1].content == "I will run both."
-        assert [message.tool_call_id for message in messages[2:4]] == ["call_1", "call_2"]
+        assert messages[0].content == "I will run both."
+        assert [message.tool_call_id for message in messages[1:3]] == ["call_1", "call_2"]
 
     def test_incomplete_linked_call_batch_is_omitted(self):
         turn = LLMResponse(
@@ -224,7 +225,7 @@ class TestXMLBlockFormatter:
             ]
         )
 
-        assert [message.role for message in messages] == [Role.SYSTEM]
+        assert messages == []
 
     def test_linked_execution_without_source_turn_is_not_rendered(self):
         call = _tool_call_block(
@@ -237,7 +238,7 @@ class TestXMLBlockFormatter:
 
         messages = XMLBlockFormatter().format([call])
 
-        assert [message.role for message in messages] == [Role.SYSTEM]
+        assert messages == []
 
     @pytest.mark.parametrize(
         ("finish_reason", "arguments", "content"),
@@ -357,7 +358,7 @@ class TestXMLBlockFormatter:
             ]
         )
 
-        assert [message.role for message in messages] == [Role.SYSTEM]
+        assert messages == []
 
 
 class TestMarkdownBlockFormatter:
@@ -444,6 +445,30 @@ class TestOpenAIProviderFormatter:
         assert len(result) == 2
         assert result[1] == {"role": "user", "content": "Hello"}
 
+    def test_boundary_is_preserved_on_exact_wire_message(self):
+        messages = [
+            RenderedMessage(role=Role.USER, content="first"),
+            RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()),
+            RenderedMessage(role=Role.USER, content="second"),
+        ]
+        result = OpenAIProviderFormatter().format(messages)
+        assert result == [
+            {"role": "user", "content": "first"},
+            CacheBoundary(),
+            {"role": "user", "content": "second"},
+        ]
+
+    def test_multimodal_message_is_preserved(self):
+        messages = [
+            RenderedMessage(
+                role=Role.USER,
+                content="caption",
+                images=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}],
+            )
+        ]
+        result = OpenAIProviderFormatter().format(messages)
+        assert result[0]["content"][0] == {"type": "text", "text": "caption"}
+
     def test_assistant_message(self):
         messages = [
             RenderedMessage(role=Role.SYSTEM, content="System"),
@@ -510,22 +535,21 @@ class TestOpenAIProviderFormatter:
                 tool_call=ToolCallInfo(id="old", name="old", arguments={}),
             )
 
-    def test_runtime_event_skipped(self):
+    def test_runtime_event_rejected(self):
         messages = [
             RenderedMessage(role=Role.USER, content="Hello"),
             RenderedMessage(role=Role.RUNTIME_EVENT, content="internal"),
         ]
-        result = OpenAIProviderFormatter().format(messages)
-        roles = [m["role"] for m in result]
-        assert "runtime_event" not in roles and roles == ["user"]
+        with pytest.raises(UnsupportedContextLayout, match="runtime_event"):
+            OpenAIProviderFormatter().format(messages)
 
-    def test_metadata_skipped(self):
+    def test_metadata_rejected(self):
         messages = [
             RenderedMessage(role=Role.USER, content="Hello"),
             RenderedMessage(role=Role.METADATA, content="session-start"),
         ]
-        result = OpenAIProviderFormatter().format(messages)
-        assert [m["role"] for m in result] == ["user"]
+        with pytest.raises(UnsupportedContextLayout, match="metadata"):
+            OpenAIProviderFormatter().format(messages)
 
 
 class TestAnthropicProviderFormatter:
@@ -588,14 +612,24 @@ class TestAnthropicProviderFormatter:
         result = AnthropicProviderFormatter().format(messages)
         assert result["messages"][0]["role"] == "user"
 
-    def test_metadata_skipped(self):
+    def test_metadata_rejected(self):
         messages = [
             RenderedMessage(role=Role.USER, content="Hello"),
             RenderedMessage(role=Role.METADATA, content="session-start"),
         ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert len(result["messages"]) == 1
-        assert result["messages"][0]["role"] == "user"
+        with pytest.raises(UnsupportedContextLayout, match="metadata"):
+            AnthropicProviderFormatter().format(messages)
+
+    def test_cache_boundary_is_removed_from_native_payload(self):
+        messages = [
+            RenderedMessage(role=Role.SYSTEM, content="stable"),
+            RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()),
+            RenderedMessage(role=Role.USER, content="live"),
+        ]
+        assert AnthropicProviderFormatter().format(messages) == {
+            "system": "stable",
+            "messages": [{"role": "user", "content": "live"}],
+        }
 
 
 class TestEndToEndPipelines:
@@ -621,7 +655,7 @@ class TestEndToEndPipelines:
         messages = MarkdownBlockFormatter().format(blocks)
         result = AnthropicProviderFormatter().format(messages)
         assert "# Persona" in result["system"]
-        assert result["messages"][0]["content"] == "Hello"
+        assert result["messages"][0]["content"] == "# Msg\n\nHello"
 
     def test_legacy_reasoning_items_fail_closed_without_provider_gate(self):
         """Removed opaque legacy fields are ignored and cannot be emitted."""
@@ -656,6 +690,17 @@ class TestEndToEndPipelines:
             if item.get("type") == "function_call"
         )
         assert responses_input[function_call_index + 1]["type"] == "function_call_output"
+
+    def test_responses_boundary_follows_complete_tool_expansion(self):
+        messages = [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                tool_calls=(ToolCallInfo(id="tc", name="run", arguments={}),),
+            ),
+            RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()),
+        ]
+        result = ResponsesProviderFormatter().format(messages)
+        assert result[-1] == CacheBoundary()
 
 
 class TestBlockFormatterFormatEvent:

@@ -52,13 +52,12 @@ class TestResponsesClientInit:
     """ResponsesClient ctor mirrors CompletionClient and keeps args out of self.config."""
 
     def test_retry_config_stored_not_leaked(self):
-        """retry_config / http_config / cache_control are not forwarded to litellm."""
+        """retry_config and http_config are not forwarded to litellm."""
         client = ResponsesClient(model="test-model", retry_config=FAST_RETRY)
         assert client.retry_config is FAST_RETRY
         # Must NOT leak into self.config (would be passed to litellm.responses()).
         assert "retry_config" not in client.config
         assert "http_config" not in client.config
-        assert "cache_control_injection_points" not in client.config
 
     def test_retry_config_defaults_enabled(self):
         """Endpoint retries are enabled by default."""

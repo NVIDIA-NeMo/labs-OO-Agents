@@ -93,9 +93,13 @@ def blocks(response, state="live 1"):
             result=ToolResult(tool_call_id=call.id, content="done"),
         )
         result.append(ResolvedBlock(key=call.id, content="", role=Role.ASSISTANT, event=event))
+    result.append(CacheBoundary())
     result.append(
         ResolvedBlock(
-            key="live", content=state, metadata=BlockMetadata(user_block=True, static=False)
+            key="live",
+            content=state,
+            role=Role.USER,
+            metadata=BlockMetadata(user_block=True, static=False),
         )
     )
     return result

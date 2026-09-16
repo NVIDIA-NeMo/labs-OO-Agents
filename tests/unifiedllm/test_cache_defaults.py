@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Default registry clients must honor the default renderer's cache boundary."""
+"""Default registry clients must honor an explicitly rendered cache boundary."""
 
 import copy
 import json
@@ -89,6 +89,7 @@ async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchro
                 role=Role.SYSTEM,
                 metadata=BlockMetadata(static=True),
             ),
+            CacheBoundary(),
             ResolvedBlock(
                 key="live",
                 content="Volatile suffix",
@@ -130,8 +131,7 @@ async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchro
         marked = body["input"][0]["content"][-1]
         assert "Stable instructions" in marked["text"]
         assert marked["prompt_cache_breakpoint"] == {"mode": "explicit"}
-    # Completion's existing no-boundary behavior marks only leading instructions.
-    assert ('"cache_control"' in encoded) is (style == "anthropic" and mode != "disabled")
+    assert ('"cache_control"' in encoded) is (style == "anthropic" and mode == "default")
     assert "Volatile suffix" in encoded
 
 

@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Render pre-resolved context blocks into provider-specific output.
+"""Render assembled context items into provider-specific output.
 
 Pipeline:
 
-1. Partition blocks by role for truncation.
-2. Pre-serialize non-tool event content so it can be measured and trimmed.
-3. Apply block-level and total-budget truncation.
-4. Hand the full ordered list of blocks to ``block_formatter`` — it produces a
+1. Expand each item in place into an internal resolved block.
+2. Serialize non-tool events in place.
+3. Hand the ordered list of blocks to ``block_formatter`` — it produces a
    neutral ``list[RenderedMessage]`` covering system + events + any extra
    trailing messages the formatter chooses to emit.
 5. Hand the neutral list to ``provider_formatter`` to reshape into the
@@ -17,13 +16,14 @@ Pipeline:
 serialization produce new :class:`ResolvedBlock` instances via ``model_copy()``.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
 
-from nooa.context_blocks.events import ToolCallEvent
+from nooa.context_blocks.events import EventBase, ToolCallEvent
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     FORMAT_PLAIN,
     FORMAT_XML,
@@ -33,6 +33,7 @@ from nooa.context_blocks.formatter import (
     _xml_message_content,
 )
 from nooa.context_blocks.models import (
+    BlockMetadata,
     ContextWindowStats,
     RenderedMessage,
     ResolvedBlock,
@@ -77,65 +78,8 @@ def format_message_content(block: ResolvedBlock, format_type: str) -> str:
     return _markdown_message_content(block)
 
 
-def _apply_context_total_limit(
-    blocks: list[ResolvedBlock],
-    total_limit: int,
-    count_fn: Callable[[str], int],
-) -> tuple[list[ResolvedBlock], int]:
-    """Mark over-budget context blocks as EVICTED in-place.
-
-    Two-pass strategy: select user blocks (``self.context``) from the end first,
-    then remaining blocks from the end until the total fits. Selected blocks
-    keep their original key/position and render an EVICTED label with per-block
-    size stats.
-    """
-    total = sum(count_fn(b.content) for b in blocks)
-    if total <= total_limit:
-        return blocks, 0
-
-    to_evict: set[int] = set()
-    evicted_sizes: dict[int, int] = {}
-
-    for i in range(len(blocks) - 1, -1, -1):
-        if total <= total_limit:
-            break
-        if blocks[i].metadata.user_block and not blocks[i].metadata.static:
-            size = count_fn(blocks[i].content)
-            total -= size
-            to_evict.add(i)
-            evicted_sizes[i] = size
-
-    if total > total_limit:
-        for i in range(len(blocks) - 1, -1, -1):
-            if total <= total_limit:
-                break
-            if i not in to_evict and not blocks[i].metadata.static:
-                size = count_fn(blocks[i].content)
-                total -= size
-                to_evict.add(i)
-                evicted_sizes[i] = size
-
-    rendered: list[ResolvedBlock] = []
-    for i, block in enumerate(blocks):
-        if i not in to_evict:
-            rendered.append(block)
-            continue
-        size = evicted_sizes.get(i, count_fn(block.content))
-        msg = f"EVICTED: over context budget (block_tokens={size:,})"
-        rendered.append(
-            block.model_copy(
-                update={
-                    "content": msg,
-                    "metadata": block.metadata.model_copy(update={"truncated": True}),
-                }
-            )
-        )
-
-    return rendered, len(to_evict)
-
-
 def render_context(
-    blocks: list[ResolvedBlock],
+    blocks: Sequence[Any],
     *,
     block_formatter: BlockFormatter,
     provider_formatter: ProviderFormatter,
@@ -145,12 +89,11 @@ def render_context(
     event_format_resolver: Callable[[Any], "FormatConfig | None"] | None = None,
     model_context_window: int | None = None,
     reserved_output_tokens: int | None = None,
+    context_blocks_dropped: int = 0,
 ) -> RenderResult:
     """Render resolved blocks into provider-specific output with utilization stats.
 
-    Never mutates input blocks. Per-block head/tail truncation has been removed
-    — content passes through verbatim. Context blocks over budget are marked
-    EVICTED in place.
+    Never mutates or reorders input items. Budget policy belongs to the view.
 
     ``event_format`` carries the default structural bounds (max_string /
     max_length / max_depth) for event-field rendering at trajectory build time.
@@ -158,22 +101,57 @@ def render_context(
     which lets method-level ``@strategy(truncation=...)`` affect events from
     that method without re-rendering the rest of the context under that config.
     """
-    if count_tokens is None and context_limit is not None:
-        raise ValueError(
-            "max_context_tokens requires a token counter. "
-            "Pass count_tokens=llm.count_tokens to render_context()."
-        )
+    from nooa.context_view import Block, CacheBoundary
+    from nooa.llm_types import LLMResponse
 
-    count_fn: Callable[[str], int] = count_tokens if count_tokens is not None else len
+    resolved: list[ResolvedBlock] = []
+    segments: list[tuple[list[ResolvedBlock], bool]] = []
+    segment: list[ResolvedBlock] = []
+    segment_index = 0
+    response_segments: dict[str, int] = {}
+    linked_execution_segments: list[tuple[str, str, int]] = []
+    for item in blocks:
+        if isinstance(item, CacheBoundary):
+            if segment:
+                segments.append((segment, True))
+                segment = []
+            segment_index += 1
+            continue
+        if isinstance(item, ResolvedBlock):
+            block = item
+        elif isinstance(item, Block):
+            block = ResolvedBlock(
+                key=item.key,
+                content=item.content,
+                role=item.role,
+                metadata=item.metadata or BlockMetadata(),
+            )
+        elif isinstance(item, EventBase):
+            tag = item.tag if item.tag is not None else item.id
+            block = ResolvedBlock(
+                key=f"event_{tag}",
+                content="",
+                role=getattr(item, "_role", Role.USER),
+                metadata=BlockMetadata(expr=f'self.events["{tag}"]', tag=tag),
+                event=item,
+            )
+        else:
+            raise TypeError(
+                f"Expected Block, EventBase, or CacheBoundary, got {type(item).__name__}"
+            )
 
-    # Partition for truncation only.
-    system_blocks = [b for b in blocks if b.role == Role.SYSTEM]
-    message_blocks = [b for b in blocks if b.role != Role.SYSTEM]
+        if isinstance(block.event, LLMResponse):
+            response_segments[block.event.id] = segment_index
+        elif isinstance(block.event, ToolCallEvent) and block.event.llm_response_id is not None:
+            linked_execution_segments.append(
+                (block.event.tool_call_id, block.event.llm_response_id, segment_index)
+            )
 
-    # Pre-serialize non-tool events so their content can be measured.
-    # ToolCallEvents stay at content="" — the BlockFormatter handles them structurally.
-    serialized_messages: list[ResolvedBlock] = []
-    for block in message_blocks:
+        if isinstance(block.event, ToolCallEvent) and block.event.result is None:
+            raise UnsupportedContextLayout(
+                f"ToolCallEvent {block.event.tool_call_id!r} has no result"
+            )
+
         if block.event is not None and not isinstance(block.event, ToolCallEvent):
             resolved_event_format = (
                 event_format_resolver(block.event)
@@ -182,31 +160,33 @@ def render_context(
             )
             content = block_formatter.format_event(block.event, event_format=resolved_event_format)
             block = block.model_copy(update={"content": content})
-        serialized_messages.append(block)
-    message_blocks = serialized_messages
+        resolved.append(block)
+        segment.append(block)
 
-    # Total-context eviction: mark over-budget blocks EVICTED in place.
-    # The eviction count is reported to the caller via
-    # ``ContextWindowStats.context_blocks_dropped`` (below). The runtime owns
-    # its ``HarnessMetrics`` singleton and increments
-    # ``context_limits_blocks_evicted`` from that value — this leaf library
-    # never reaches into the runtime's metrics (see issue #330).
-    context_blocks_dropped = 0
-    if context_limit is not None:
-        system_blocks, context_blocks_dropped = _apply_context_total_limit(
-            system_blocks, context_limit, count_fn
-        )
+    if segment:
+        segments.append((segment, False))
+
+    for tool_call_id, response_id, execution_segment in linked_execution_segments:
+        response_segment = response_segments.get(response_id)
+        if response_segment is not None and response_segment != execution_segment:
+            raise UnsupportedContextLayout(
+                f"CacheBoundary splits tool execution {tool_call_id!r} from its "
+                "canonical LLMResponse"
+            )
+
+    context_blocks = [block for block in resolved if block.event is None]
+    event_blocks = [block for block in resolved if block.event is not None]
 
     # Stats — structural only. Token figures are NOT estimated here; the
     # runtime writes the provider-reported prompt_tokens back after the call.
     # We record raw character sizes (post-eviction) so the provider total can
     # later be attributed across context blocks vs. events by character share.
     stats = ContextWindowStats(
-        context_blocks_count=len(system_blocks),
-        events_count=len(message_blocks),
+        context_blocks_count=len(context_blocks),
+        events_count=len(event_blocks),
         prompt_tokens=None,
-        context_blocks_chars=sum(len(b.content) for b in system_blocks),
-        events_chars=sum(len(b.content) for b in message_blocks),
+        context_blocks_chars=sum(len(b.content) for b in context_blocks),
+        events_chars=sum(len(b.content) for b in event_blocks),
         max_context_tokens=context_limit,
         model_context_window=model_context_window,
         context_blocks_dropped=context_blocks_dropped,
@@ -215,7 +195,17 @@ def render_context(
     )
 
     # Neutral message list → provider wire format.
-    messages = block_formatter.format([*system_blocks, *message_blocks])
+    messages: list[RenderedMessage] = []
+    for segment, boundary_after in segments:
+        rendered = block_formatter.format(segment)
+        if boundary_after:
+            if not rendered:
+                raise UnsupportedContextLayout(
+                    f"{type(block_formatter).__name__} emitted no message before CacheBoundary"
+                )
+        messages.extend(rendered)
+        if boundary_after:
+            messages.append(RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()))
     output = provider_formatter.format(messages)
     return RenderResult(
         output=output,
