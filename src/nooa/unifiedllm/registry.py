@@ -34,6 +34,9 @@ YAML schema::
         api_base: https://my-gateway.example.com/v1
         api_key_env: MY_API_KEY
         context_window: 128000               # optional
+        concurrency_group: shared-inference  # optional, process-local admission group
+        max_in_flight: 16                    # optional, async provider attempts
+        queue_timeout: 30.0                  # optional, seconds before dispatch
         temperature: 0.0                     # optional
         top_p: 1.0                           # optional
         max_tokens: 4096                     # optional
@@ -380,6 +383,7 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     # Copy model-specific defaults from config (overrides win).  Keep LiteLLM
     # pass-through controls here too: OpenAI-compatible gateways drop unknown
     # params unless aliases explicitly whitelist them.
+    injected_admission = overrides.get("admission_controller") is not None
     for key in (
         "temperature",
         "top_p",
@@ -395,7 +399,16 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "store",
         "include",
         "cache_breakpoint",
+        "concurrency_group",
+        "max_in_flight",
+        "queue_timeout",
     ):
+        if injected_admission and key in (
+            "concurrency_group",
+            "max_in_flight",
+            "queue_timeout",
+        ):
+            continue
         if key in config and key not in overrides:
             params[key] = config[key]
 
