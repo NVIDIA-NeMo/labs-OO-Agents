@@ -6,6 +6,7 @@ import pytest
 
 import nooa
 from nooa import Agent, CodeActStrategy, PromptData, strategy
+from nooa.config.truncation_config import FormatConfig, TruncationConfig
 from nooa.prompts import (
     _get_prefill,
     _get_task_prompt,
@@ -323,6 +324,60 @@ class TestBuildPromptDataRuntime:
         data = await build_prompt_data(agent.with_pre_ellipsis, 5)
         assert data.pre_ellipsis is not None
         assert "value * 2" in data.pre_ellipsis
+
+    @pytest.mark.asyncio
+    async def test_method_truncation_override_used_for_codeact_prefill(self):
+        class MethodOverrideAgent(Agent, llm=_LLM):
+            @strategy(
+                CodeActStrategy(),
+                truncation=TruncationConfig(prefill_format=FormatConfig(max_string=90_000)),
+            )
+            async def analyze(self, data: str) -> str:
+                """Analyze the data."""
+                ...
+
+        data = await build_prompt_data(MethodOverrideAgent().analyze, "hello")
+        assert data.inspect_prefill is not None
+        assert "max_string=90000" in data.inspect_prefill
+
+    @pytest.mark.asyncio
+    async def test_method_truncation_override_used_for_pure_python_prefill(self):
+        class MethodOverrideAgent(Agent, llm=_LLM):
+            @strategy(
+                PurePythonStrategy(),
+                truncation=TruncationConfig(prefill_format=FormatConfig(max_string=91_000)),
+            )
+            async def analyze(self, data: str) -> str:
+                """Analyze the data."""
+                ...
+
+        data = await build_prompt_data(MethodOverrideAgent().analyze, "hello")
+        assert data.inspect_prefill is not None
+        assert "max_string=91000" in data.inspect_prefill
+
+    @pytest.mark.asyncio
+    async def test_class_and_instance_truncation_layers_used_for_prefill(self):
+        class LayeredAgent(
+            Agent,
+            llm=_LLM,
+            truncation=TruncationConfig(prefill_format=FormatConfig(max_string=321)),
+        ):
+            async def analyze(self, data: str) -> str:
+                """Analyze the data."""
+                ...
+
+        class_data = await build_prompt_data(LayeredAgent().analyze, "hello")
+        instance_data = await build_prompt_data(
+            LayeredAgent(
+                truncation=TruncationConfig(prefill_format=FormatConfig(max_string=654))
+            ).analyze,
+            "hello",
+        )
+
+        assert class_data.inspect_prefill is not None
+        assert instance_data.inspect_prefill is not None
+        assert "max_string=321" in class_data.inspect_prefill
+        assert "max_string=654" in instance_data.inspect_prefill
 
 
 class TestPrintPromptRuntime:
