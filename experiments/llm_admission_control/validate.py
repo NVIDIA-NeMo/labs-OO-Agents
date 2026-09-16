@@ -287,9 +287,12 @@ def _process_worker(
     api_base: str,
     process_id: int,
     start_event: Any,
+    ready_event: Any,
     result_queue: Any,
 ) -> None:
-    start_event.wait(timeout=10)
+    ready_event.set()
+    if not start_event.wait(timeout=10):
+        raise TimeoutError("Parent did not release the child-process start gate")
     result_queue.put(_process_batch_result(api_base, process_id))
 
 
@@ -300,17 +303,28 @@ def _process_batch_result(api_base: str, process_id: int) -> int:
 def _multi_process_topology(state: GatewayState, api_base: str) -> Result:
     context = multiprocessing.get_context("spawn")
     start_event = context.Event()
+    ready_events = [context.Event() for _ in range(2)]
     result_queue = context.Queue()
     processes = [
         context.Process(
             target=_process_worker,
-            args=(api_base, process_id, start_event, result_queue),
+            args=(api_base, process_id, start_event, ready_events[process_id], result_queue),
         )
         for process_id in range(2)
     ]
     started = time.perf_counter()
     for process in processes:
         process.start()
+    if not all(ready.wait(timeout=10) for ready in ready_events):
+        start_event.set()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            process.join(timeout=2)
+        result_queue.close()
+        result_queue.join_thread()
+        raise RuntimeError("Child processes did not reach the start gate")
     start_event.set()
     for process in processes:
         process.join(timeout=20)

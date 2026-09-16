@@ -438,7 +438,12 @@ class BrokerAdmissionController:
         try:
             pooled = self._take_idle_connection(loop)
             if pooled is None:
-                reader, writer = await asyncio.open_connection(self.config.host, self.config.port)
+                remaining = self._remaining_timeout(started)
+                connection = asyncio.open_connection(self.config.host, self.config.port)
+                if remaining is None:
+                    reader, writer = await connection
+                else:
+                    reader, writer = await asyncio.wait_for(connection, remaining)
             else:
                 reader, writer = pooled.reader, pooled.writer
             request = {
@@ -505,12 +510,19 @@ class BrokerAdmissionController:
                 await self._close_writer(writer)
 
     async def _readline(self, reader: asyncio.StreamReader, started: float) -> bytes:
-        if self.queue_timeout is None:
+        remaining = self._remaining_timeout(started)
+        if remaining is None:
             return await reader.readline()
+        return await asyncio.wait_for(reader.readline(), remaining)
+
+    def _remaining_timeout(self, started: float) -> float | None:
+        """Return the queue deadline remainder or raise when it has elapsed."""
+        if self.queue_timeout is None:
+            return None
         remaining = self.queue_timeout - (time.perf_counter() - started)
         if remaining <= 0:
             raise TimeoutError
-        return await asyncio.wait_for(reader.readline(), remaining)
+        return remaining
 
     def _observe(
         self,

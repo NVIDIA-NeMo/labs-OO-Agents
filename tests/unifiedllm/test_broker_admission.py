@@ -162,6 +162,30 @@ async def test_broker_queue_timeout_removes_waiter_before_provider_dispatch():
 
 
 @pytest.mark.asyncio
+async def test_broker_queue_timeout_bounds_connection_establishment(monkeypatch):
+    async def stalled_connection(*_args: Any, **_kwargs: Any):
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(asyncio, "open_connection", stalled_connection)
+    config = BrokerAdmissionConfig(
+        host="192.0.2.1",
+        port=443,
+        auth_token="test-token",  # noqa: S106 -- inert test credential
+        group="connect-timeout",
+        max_in_flight=1,
+        max_calls=None,
+        queue_timeout=0.01,
+    )
+    observations: list[dict[str, Any]] = []
+
+    with pytest.raises(AdmissionTimeoutError):
+        await asyncio.wait_for(config.controller().acquire(observations.append), timeout=1)
+
+    assert observations[0]["outcome"] == "timeout"
+
+
+@pytest.mark.asyncio
 async def test_broker_queued_cancellation_removes_waiter_and_preserves_capacity():
     with AdmissionBroker(max_in_flight=1, group="cancel-test") as broker:
         controller = broker.controller()

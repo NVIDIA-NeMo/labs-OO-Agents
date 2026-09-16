@@ -269,12 +269,14 @@ async def test_cancellation_storm_removes_waiters_immediately():
     group = _get_or_create_group(policy.identity, policy.display_name or "", None)
     assert group is not None
     assert group.queued == 1_000
+    assert group._queued == 1_000
 
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
     assert group.queued == 0
+    assert group._queued == 0
     assert not group._waiters
     first.release()
 

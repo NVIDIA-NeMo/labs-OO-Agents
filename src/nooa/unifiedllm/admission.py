@@ -113,6 +113,7 @@ class _AdmissionGroup:
         self.max_in_flight = max_in_flight
         self._lock = threading.Lock()
         self._active = 0
+        self._queued = 0
         self._waiters: deque[_Waiter] = deque()
 
     @property
@@ -126,7 +127,7 @@ class _AdmissionGroup:
             return self._queued_count_locked()
 
     def _queued_count_locked(self) -> int:
-        return sum(waiter.state == "queued" for waiter in self._waiters)
+        return self._queued
 
     async def acquire(
         self,
@@ -149,6 +150,7 @@ class _AdmissionGroup:
                 queue_depth = self._queued_count_locked() + 1
                 waiter = _Waiter(loop, future, started, queue_depth)
                 self._waiters.append(waiter)
+                self._queued += 1
 
         if immediate:
             observer(self._observation("immediate", False, 0.0, queue_depth))
@@ -207,6 +209,7 @@ class _AdmissionGroup:
         with self._lock:
             if waiter.state == "queued":
                 waiter.state = "cancelled"
+                self._queued -= 1
                 # Do not retain cancelled/expired waiters behind a long-lived
                 # provider call.  ``remove`` is bounded by the queue length and
                 # keeps cancellation storms from becoming a memory backlog.
@@ -234,6 +237,7 @@ class _AdmissionGroup:
                 if waiter.state != "queued":
                     continue
                 waiter.state = "granted"
+                self._queued -= 1
                 # The active slot transfers to the waiter, so _active does not
                 # change. Delivery happens on the waiter's own event loop.
                 try:
