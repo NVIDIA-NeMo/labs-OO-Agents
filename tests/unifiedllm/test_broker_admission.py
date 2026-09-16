@@ -260,13 +260,15 @@ async def test_invalid_external_capability_is_rejected_without_consuming_capacit
             broker.controller_config(queue_timeout=1),
             auth_token="not-the-broker-token",  # noqa: S106 -- deliberately invalid test token
         )
+        observations: list[dict[str, Any]] = []
         with pytest.raises(AdmissionUnavailableError, match="credentials"):
-            await invalid.controller().acquire(lambda _detail: None)
+            await invalid.controller().acquire(observations.append)
         snapshot = broker.snapshot()
 
     assert snapshot.active == 0
     assert snapshot.queued == 0
     assert snapshot.admitted_calls == 0
+    assert [item["outcome"] for item in observations] == ["unavailable"]
 
 
 @pytest.mark.asyncio
@@ -274,7 +276,8 @@ async def test_broker_shutdown_fails_active_and_queued_clients_without_hanging()
     broker = AdmissionBroker(max_in_flight=1, group="owner-disappeared").start()
     controller = broker.controller(queue_timeout=5)
     holder = await controller.acquire(lambda _detail: None)
-    waiting = asyncio.create_task(controller.acquire(lambda _detail: None))
+    observations: list[dict[str, Any]] = []
+    waiting = asyncio.create_task(controller.acquire(observations.append))
     snapshot = await _wait_for_snapshot(broker, lambda current: current.queued == 1)
     assert snapshot.active == 1
     assert snapshot.queued == 1
@@ -283,6 +286,7 @@ async def test_broker_shutdown_fails_active_and_queued_clients_without_hanging()
     with pytest.raises(AdmissionUnavailableError, match="closed before granting"):
         await asyncio.wait_for(waiting, timeout=1)
     holder.release()  # idempotent even though the owner already closed the lease
+    assert [item["outcome"] for item in observations] == ["unavailable"]
 
 
 @pytest.mark.asyncio
@@ -290,9 +294,12 @@ async def test_stale_connection_fails_closed_after_broker_shutdown():
     broker = AdmissionBroker(max_in_flight=1, group="stale-config").start()
     stale = broker.controller_config(queue_timeout=0.5)
     broker.close()
+    observations: list[dict[str, Any]] = []
 
     with pytest.raises(AdmissionUnavailableError, match="unavailable"):
-        await stale.controller().acquire(lambda _detail: None)
+        await stale.controller().acquire(observations.append)
+
+    assert [item["outcome"] for item in observations] == ["unavailable"]
 
 
 @pytest.mark.asyncio

@@ -635,3 +635,22 @@ def test_call_cap_rejection_records_harness_metric():
     attrs = harness.to_span_attributes()
     assert attrs["harness.llm_queue.call_cap_rejections"] == 1
     assert attrs.get("harness.llm_queue.admissions", 0) == 0
+
+
+def test_unavailable_admission_records_harness_metric():
+    harness = HarnessMetrics()
+
+    harness.record_llm_queue(
+        {
+            "group": "application-run",
+            "outcome": "unavailable",
+            "queued": False,
+            "wait_s": 0.01,
+            "queue_depth": 0,
+            "max_in_flight": 4,
+        }
+    )
+
+    attrs = harness.to_span_attributes()
+    assert attrs["harness.llm_queue.unavailable_errors"] == 1
+    assert attrs.get("harness.llm_queue.admissions", 0) == 0

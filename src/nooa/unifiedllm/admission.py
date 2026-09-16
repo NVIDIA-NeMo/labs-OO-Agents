@@ -30,6 +30,7 @@ AdmissionOutcome = Literal[
     "call_cap",
     "timeout",
     "cancelled",
+    "unavailable",
 ]
 AdmissionObserver = Callable[[dict[str, Any]], None]
 

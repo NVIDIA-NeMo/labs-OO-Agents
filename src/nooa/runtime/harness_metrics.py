@@ -162,6 +162,7 @@ class HarnessMetrics(BaseModel):
     llm_queue_call_cap_rejections: int = 0
     llm_queue_timeouts: int = 0
     llm_queue_cancellations: int = 0
+    llm_queue_unavailable_errors: int = 0
     llm_queue_max_depth: int = 0
     llm_queue_wait: TimingStat = Field(default_factory=TimingStat)
 
@@ -340,6 +341,8 @@ class HarnessMetrics(BaseModel):
             self.llm_queue_timeouts += 1
         elif outcome == "cancelled":
             self.llm_queue_cancellations += 1
+        elif outcome == "unavailable":
+            self.llm_queue_unavailable_errors += 1
 
         if detail.get("queued") is True:
             self.llm_queue_queued += 1
@@ -852,6 +855,12 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Admission cancellations",
         "LLM Admission",
         lambda m: m.llm_queue_cancellations,
+    ),
+    SchemaEntry(
+        "harness.llm_queue.unavailable_errors",
+        "Admission unavailable errors",
+        "LLM Admission",
+        lambda m: m.llm_queue_unavailable_errors,
     ),
     SchemaEntry(
         "harness.llm_queue.max_depth",

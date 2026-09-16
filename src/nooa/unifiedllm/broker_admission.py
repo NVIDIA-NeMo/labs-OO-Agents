@@ -29,6 +29,7 @@ from typing import Any, Literal
 from nooa.unifiedllm.admission import (
     AdmissionCallCapError,
     AdmissionObserver,
+    AdmissionOutcome,
     AdmissionTimeoutError,
     AdmissionUnavailableError,
     _named_group_identity,
@@ -500,8 +501,10 @@ class BrokerAdmissionController:
         except AdmissionCallCapError:
             raise
         except AdmissionUnavailableError:
+            self._observe(observer, "unavailable", {}, started)
             raise
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            self._observe(observer, "unavailable", {}, started)
             raise AdmissionUnavailableError(
                 f"Admission broker unavailable at {self.config.host}:{self.config.port}"
             ) from error
@@ -527,7 +530,7 @@ class BrokerAdmissionController:
     def _observe(
         self,
         observer: AdmissionObserver,
-        outcome: str,
+        outcome: AdmissionOutcome,
         response: dict[str, Any],
         started: float,
     ) -> None:
