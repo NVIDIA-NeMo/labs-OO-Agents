@@ -65,14 +65,14 @@ class DemoLLM(FakeLLMClient):
                 "assert 'NOOA_AION_ASSERTION_PASSED' in result.stdout, repr(result)\n"
                 "self.message('Verified: the demo program printed `NOOA_AION_ASSERTION_PASSED` '"
                 "'and exited successfully. This used scripted responses and real NOOA tools.')\n"
-                "return_result(RespondReason.DONE, explanation='Wrote and executed demo assertion')"
+                "return_result(RespondResult(kind='DONE', explanation='Wrote and executed demo assertion'))"
             )
         return LLMResponse(
             content="",
             tool_calls=[
                 ToolCall(
                     id=f"demo-{uuid4()}",
-                    name="execute_python",
+                    name="python_cell",
                     arguments=json.dumps({"code": code}),
                 )
             ],

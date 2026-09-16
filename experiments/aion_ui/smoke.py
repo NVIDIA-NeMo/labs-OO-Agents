@@ -8,6 +8,7 @@ import asyncio
 import json
 import time
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -31,15 +32,35 @@ class RecordingClient:
     def __init__(self) -> None:
         self.updates: list[Any] = []
         self.tool_started = asyncio.Event()
+        self.updated = asyncio.Event()
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         del session_id, kwargs
         self.updates.append(update)
+        self.updated.set()
         if isinstance(update, ToolCallStart):
             self.tool_started.set()
 
+    async def wait_for_updates(self, predicate: Callable[[], bool]) -> None:
+        """Wait for the SDK's notification worker to finish the expected updates."""
+        async with asyncio.timeout(5):
+            while not predicate():
+                self.updated.clear()
+                await self.updated.wait()
 
-def check_turn(updates: list[Any]) -> dict[str, int]:
+
+async def check_turn(client: RecordingClient, before: int) -> dict[str, int]:
+    await client.wait_for_updates(
+        lambda: (
+            sum(isinstance(update, AgentMessageChunk) for update in client.updates[before:]) >= 2
+            and sum(
+                isinstance(update, ToolCallProgress) and update.status == "completed"
+                for update in client.updates[before:]
+            )
+            >= 2
+        )
+    )
+    updates = client.updates[before:]
     starts = [update for update in updates if isinstance(update, ToolCallStart)]
     kinds = Counter(update.kind for update in starts)
     assert kinds == {"other": 1, "edit": 1, "execute": 1}, kinds
@@ -94,10 +115,15 @@ async def main() -> None:
                 before = len(client.updates)
                 response = await connection.prompt(session.session_id, [text_block(text)])
                 assert response.stop_reason == "end_turn", response
-                turn_counts.append(check_turn(client.updates[before:]))
+                turn_counts.append(await check_turn(client, before))
+            artifact = workspace / "nooa_aion_demo.py"
+            assert artifact.read_text().startswith("# NOOA AionUi scripted spike artifact\n")
+            assert "DEMO_TURN = 2" in artifact.read_text()
+            listed = await connection.list_sessions(cwd=str(workspace))
+            assert session.session_id not in {item.session_id for item in listed.sessions}
+            await connection.close_session(session.session_id)
             listed = await connection.list_sessions(cwd=str(workspace))
             assert session.session_id in {item.session_id for item in listed.sessions}
-            await connection.close_session(session.session_id)
 
     replay_client = RecordingClient()
     async with asyncio.timeout(TIMEOUT):
@@ -111,6 +137,12 @@ async def main() -> None:
         ) as (connection, _process):
             await connection.initialize(PROTOCOL_VERSION)
             await connection.load_session(cwd=str(workspace), session_id=session.session_id)
+            await replay_client.wait_for_updates(
+                lambda: (
+                    sum(isinstance(update, AgentMessageChunk) for update in replay_client.updates)
+                    >= 4
+                )
+            )
             replay_users = sum(
                 isinstance(update, UserMessageChunk) for update in replay_client.updates
             )
@@ -123,7 +155,8 @@ async def main() -> None:
                 session.session_id, [text_block("Continue after restart.")]
             )
             assert response.stop_reason == "end_turn", response
-            turn_counts.append(check_turn(replay_client.updates[before:]))
+            turn_counts.append(await check_turn(replay_client, before))
+            assert "DEMO_TURN = 1" in artifact.read_text()
 
     cancel_workspace = run_dir / "cancel-workspace"
     cancel_workspace.mkdir()
@@ -155,20 +188,23 @@ async def main() -> None:
                     await asyncio.gather(pending, return_exceptions=True)
             assert response.stop_reason == "cancelled", response
             assert not (cancel_workspace / "nooa_aion_demo.py").exists()
-            assert any(
-                isinstance(update, ToolCallProgress) and update.status == "failed"
-                for update in cancel_client.updates
+            await cancel_client.wait_for_updates(
+                lambda: any(
+                    isinstance(update, ToolCallProgress) and update.status == "failed"
+                    for update in cancel_client.updates
+                )
             )
             before = len(cancel_client.updates)
             response = await connection.prompt(
                 cancel_session.session_id, [text_block("Run after cancellation.")]
             )
             assert response.stop_reason == "end_turn", response
-            turn_counts.append(check_turn(cancel_client.updates[before:]))
+            turn_counts.append(await check_turn(cancel_client, before))
+            assert "DEMO_TURN = 2" in (cancel_workspace / "nooa_aion_demo.py").read_text()
 
     summary = {
         "result": "passed",
-        "scope": "Real NOOA CodingAgent and tools over ACP stdio; scripted provider; Aion renderer not exercised",
+        "scope": "Real NOOA ExperimentalCodingAgent and tools over ACP stdio; scripted provider; Aion renderer not exercised",
         "live_llm_calls": 0,
         "completed_turns": len(turn_counts),
         "turn_activity": turn_counts,
