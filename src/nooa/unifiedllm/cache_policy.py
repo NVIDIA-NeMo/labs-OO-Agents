@@ -120,7 +120,7 @@ def reject_boundary_dict(message: Mapping[str, Any]) -> None:
 
 def apply_cache_policy(
     messages: list[dict[str, Any] | CacheBoundary],
-    mapping: Literal["anthropic", "openai"] | None,
+    mapping: Literal["auto", "anthropic", "openai"] | None,
     *,
     responses: bool,
     instructions: str | None = None,
@@ -137,6 +137,9 @@ def apply_cache_policy(
         reject_boundary_dict(message)
         clean.append(message)
     if mapping is None:
+        return clean, instructions, False
+    automatic = mapping == "auto"
+    if automatic and boundary is None:
         return clean, instructions, False
     if boundary is None:
         boundary = 0
@@ -160,7 +163,7 @@ def apply_cache_policy(
         content, marked = _mark_responses_content(instructions)
         clean.insert(0, {"role": "system", "content": content})
         instructions = None
-    if not marked:
+    if not marked and not automatic:
         logger.warning(
             "OpenAI explicit cache policy found no eligible stable block; this request "
             "will not use prompt caching. Add stable instructions or place "
@@ -168,4 +171,4 @@ def apply_cache_policy(
         )
     # No eligible stable input: explicit mode deliberately avoids caching a
     # changing suffix. Never invent an empty text block just to host a marker.
-    return clean, instructions, True
+    return clean, instructions, marked or not automatic

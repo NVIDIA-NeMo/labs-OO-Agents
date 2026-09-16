@@ -198,7 +198,6 @@ async def test_installed_summarizer_applies_before_next_turn(family, monkeypatch
         alias,
         **limit,
         num_retries=0,
-        cache_breakpoint=family,
         retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
         http_config=HttpConfig(read_timeout=120),
     ) as client:

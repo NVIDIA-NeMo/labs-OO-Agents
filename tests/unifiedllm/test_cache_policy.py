@@ -156,9 +156,9 @@ def test_no_stable_prefix_never_marks_dynamic_content(mapping, caplog):
     assert ("no eligible stable block" in caplog.text) is (mapping == "openai")
 
 
-@pytest.mark.parametrize("mapping", ["auto", "anthropic"])
+@pytest.mark.parametrize("mapping", ["anthropic"])
 def test_responses_rejects_chat_cache_mappings(mapping):
-    with pytest.raises(ValueError, match="must be 'openai' or None"):
+    with pytest.raises(ValueError, match="must be 'auto', 'openai', or None"):
         ResponsesClient("anthropic/claude-sonnet-4-5", cache_breakpoint=mapping)
 
 
