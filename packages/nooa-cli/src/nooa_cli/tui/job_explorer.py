@@ -34,6 +34,7 @@ class JobExplorerRow:
     queued: int
     values: list[Any]
     search_text: str
+    daemon: bool = False
 
 
 def build_job_rows(snapshots: Iterable[JobProjection] | None) -> list[JobExplorerRow]:
@@ -47,6 +48,7 @@ def build_job_rows(snapshots: Iterable[JobProjection] | None) -> list[JobExplore
             snapshot.name,
             snapshot.label,
             str(snapshot.state),
+            "daemon:yes" if snapshot.daemon else "daemon:no",
             *[str(value) for value in values[-20:]],
         ]
         rows.append(
@@ -59,6 +61,7 @@ def build_job_rows(snapshots: Iterable[JobProjection] | None) -> list[JobExplore
                 queued=snapshot.queued,
                 values=values,
                 search_text="\n".join(search_parts),
+                daemon=snapshot.daemon,
             )
         )
     return rows
@@ -68,7 +71,7 @@ class JobExplorerView(ExplorerView):
     """In-app subview for browsing background jobs."""
 
     item_name = "job"
-    list_heading = "  st channel              state      output"
+    list_heading = "  job ID       channel          state      daemon  output"
 
     def __init__(self, snapshots: Iterable[JobProjection]) -> None:
         rows = build_job_rows(snapshots)
@@ -97,7 +100,7 @@ class JobExplorerView(ExplorerView):
         display_id = row.job_id if len(row.job_id) <= 12 else f"{row.job_id[:11]}…"
         line = (
             f"{state_icon} {display_id:<12} {row.channel:<16} {row.state:<10} "
-            f"delivered={row.delivered:<6} queued={row.queued}"
+            f"{'yes' if row.daemon else 'no':<7} delivered={row.delivered:<6} queued={row.queued}"
         )
         if row.label != row.channel:
             line += f"  ({row.label})"
@@ -110,6 +113,7 @@ class JobExplorerView(ExplorerView):
             f"Channel: {row.channel}",
             f"Label: {row.label}",
             f"State: {row.state}",
+            f"Daemon: {'yes' if row.daemon else 'no'}",
             f"Delivered: {row.delivered}  Queued: {row.queued}",
             "",
         ]

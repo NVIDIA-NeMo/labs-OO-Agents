@@ -835,3 +835,50 @@ async def test_daemon_job_does_not_block_quiescence_but_queued_output_does() -> 
 
     await runner.shutdown()
     assert daemon.state == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("daemon", [False, True])
+async def test_wait_displays_running_jobs_including_daemons(daemon: bool) -> None:
+    release_output = asyncio.Event()
+    waiting = asyncio.Event()
+    received = asyncio.Event()
+    rendered: list[str] = []
+
+    async def producer():
+        await release_output.wait()
+        yield "job-output"
+        await asyncio.Event().wait()
+
+    class WaitingAgent(AgentStub):
+        async def handle(self, notification):
+            self.notifications.append(notification)
+            if "user_messages" in notification:
+                self.queue_manager.queue("work")
+                self.queue_manager.spawn(
+                    producer(), channel="work", label="test job", daemon=daemon
+                )
+            if "job-output" in notification.get("work", []):
+                received.set()
+            return SimpleNamespace(kind="WAIT", explanation="")
+
+    def emit(text: str) -> None:
+        rendered.append(text)
+        if "Waiting for" in text:
+            waiting.set()
+
+    agent = WaitingAgent()
+    runner = LocalAgentRunner(agent, emit_text=emit, agent_id="wait-jobs")
+    try:
+        assert runner.submit("start job")
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        label = "test job (daemon)" if daemon else "test job"
+        assert f"Waiting for 1 running job(s): {label}\n" in rendered
+        assert runner.state.workspace.jobs[0].daemon is daemon
+        # Visibility must not make infrastructure block idle/restart detection.
+        assert runner.is_quiescent is daemon
+        release_output.set()
+        await asyncio.wait_for(received.wait(), timeout=1)
+        assert "Received output from test job\n" in rendered
+    finally:
+        await runner.shutdown()
