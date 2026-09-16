@@ -65,28 +65,15 @@ def live_viewer():
 
 
 @pytest.mark.asyncio
-async def test_file_save_equals_viewer_download(live_viewer, monkeypatch):
+async def test_file_save_equals_viewer_download(live_viewer, mock_model_client):
     """One LLM call -> file via jsonl exporter + viewer via journal exporter.
     The downloaded OTLP from the viewer must contain the same span attributes
     (including ``llm.input_messages.*`` / ``llm.output_messages.*``) as the
     saved file.
 
-    LiteLLM's ``mock_response`` shortcut bypasses ``litellm.callbacks``, so
-    we wrap the call in a dedicated OTel span and fire the journal
-    callbacks ourselves.  We pin the callback's recorded span_id to *our*
-    wrapping span (instead of letting the LiteLLM instrumentor's nested
-    span win) by patching ``_current_span_id`` for the duration of the
-    test -- in production litellm would dispatch the callback inside the
-    instrumentor's span and the same wiring would happen.
+    The SDK's HTTP response is mocked; UnifiedLLM creates the span and
+    journal records itself. Both exporters and the viewer use real storage.
     """
-    pytest.importorskip(
-        "openinference.instrumentation.litellm",
-        reason="needed for LLM span message attrs",
-    )
-    import litellm
-    from opentelemetry import trace as otel_trace
-
-    from nooa.tracing._litellm_journal import MessageJournalCallback
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Both sinks active simultaneously: file + journal-to-viewer.
@@ -103,55 +90,8 @@ async def test_file_save_equals_viewer_download(live_viewer, monkeypatch):
             {"role": "system", "content": "be terse"},
             {"role": "user", "content": "T2_INPUT_MARKER hello?"},
         ]
-        kwargs = {"litellm_call_id": "t2-call-1", "model": "gpt-3.5-turbo"}
-
-        # Wrap the call in our own LLM span and pin the callback's
-        # span_id capture to it.  The OpenInference instrumentor wraps
-        # acompletion in its own span as well; in production the callback
-        # runs inside that span and the wiring is automatic, but with
-        # mock_response we have to stand in for that path manually.
-        tracer = otel_trace.get_tracer(__name__)
-        outer_span_id_hex: str  # captured below for the post-call assertion
-        with tracer.start_as_current_span("acompletion") as span:
-            span.set_attribute("openinference.span.kind", "LLM")
-            span_ctx = span.get_span_context()
-            outer_span_id_hex = format(span_ctx.span_id, "016x")
-
-            monkeypatch.setattr(
-                MessageJournalCallback,
-                "_current_span_id",
-                staticmethod(lambda: outer_span_id_hex),
-            )
-
-            for cb in litellm.callbacks:
-                if isinstance(cb, MessageJournalCallback):
-                    cb.log_pre_api_call(model="gpt-3.5-turbo", messages=messages, kwargs=kwargs)
-
-            response = await litellm.acompletion(
-                model="gpt-3.5-turbo",
-                messages=messages,
-                mock_response="T2_OUTPUT_MARKER hi",
-            )
-
-            # Stamp the message attrs on the wrapping span -- the
-            # OpenInference instrumentor would do this automatically for a
-            # real call.  We do it explicitly here so the file output
-            # matches what production produces.
-            for i, m in enumerate(messages):
-                span.set_attribute(f"llm.input_messages.{i}.message.role", m["role"])
-                span.set_attribute(f"llm.input_messages.{i}.message.content", m["content"])
-            out = response.choices[0].message
-            span.set_attribute("llm.output_messages.0.message.role", out.role)
-            span.set_attribute("llm.output_messages.0.message.content", out.content or "")
-
-            for cb in litellm.callbacks:
-                if isinstance(cb, MessageJournalCallback):
-                    cb.log_success_event(
-                        kwargs=kwargs,
-                        response_obj=response,
-                        start_time=0.0,
-                        end_time=1.0,
-                    )
+        async with mock_model_client("T2_OUTPUT_MARKER hi") as client:
+            await client.acall(messages)
 
         from nooa.tracing import _provider
 
@@ -201,21 +141,12 @@ async def test_file_save_equals_viewer_download(live_viewer, monkeypatch):
             viewer_text = r.read().decode()
         viewer_spans = _gather_otlp_from_jsonl(viewer_text)
 
-        # The user-facing invariant is "the LLM span I called the model on
-        # has the same message attrs in the file and in the viewer
-        # download."  In production a real call is wrapped by exactly one
-        # OpenInference instrumentor span per call, so this is unambiguous.
-        # Here we use the wrapping span we explicitly created (its id is
-        # ``outer_span_id_hex``) — the LiteLLM instrumentor also creates
-        # a nested span as a side effect, but it isn't where the user's
-        # message attrs live, so we skip it.
+        # Compare actual UnifiedLLM spans, not hand-stamped stand-in spans.
         file_flat_by_id = {s["spanId"]: s for s in file_spans_flat if s.get("spanId")}
-        common_ids = {outer_span_id_hex} & set(file_spans) & set(viewer_spans)
-        assert common_ids, (
-            f"outer LLM span {outer_span_id_hex!r} missing from one side.\n"
-            f"file ids:   {sorted(file_spans)}\n"
-            f"viewer ids: {sorted(viewer_spans)}"
-        )
+        llm_ids = {s["spanId"] for s in file_spans_flat if s.get("name") == "llm.call"}
+        assert len(llm_ids) == 1
+        common_ids = llm_ids & set(viewer_spans)
+        assert common_ids == llm_ids
 
         for sid in sorted(common_ids):
             file_attrs = file_flat_by_id[sid]["attributes"]

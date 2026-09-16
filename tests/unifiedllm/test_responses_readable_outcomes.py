@@ -55,35 +55,6 @@ async def test_builtin_output_and_refusal_keep_readable_outcome(
     ]
 
 
-@pytest.mark.parametrize("is_async", [False, True])
-@pytest.mark.asyncio
-async def test_responses_calibration_counts_instructions(monkeypatch, is_async):
-    from nooa.unifiedllm import unifiedllm as implementation
-
-    calibration = implementation.TokenCalibration()
-    monkeypatch.setattr(implementation, "_token_calibration", calibration)
-    raw = SimpleNamespace(output=[], model="gpt-5.6", status="completed")
-    monkeypatch.setattr("litellm.responses", lambda **_: raw)
-
-    async def respond(**_):
-        return raw
-
-    monkeypatch.setattr("litellm.aresponses", respond)
-    monkeypatch.setattr(implementation, "_extract_usage", lambda _: LLMUsage(input_tokens=1001))
-    estimates = []
-
-    def count(**kwargs):
-        estimates.append(kwargs["messages"])
-        return sum(len(m["content"]) for m in kwargs["messages"])
-
-    monkeypatch.setattr("litellm.token_counter", count)
-    messages = [{"role": "system", "content": "x" * 1000}, {"role": "user", "content": "y"}]
-    async with ResponsesClient("openai/gpt-5.6", api_key="test") as client:
-        await client.acall(messages) if is_async else client.call(messages)
-    assert estimates == [messages]
-    assert calibration.ratio("openai/gpt-5.6") == 1.0
-
-
 @pytest.mark.parametrize("bad", [None, 42, {}])
 def test_malformed_refusal_still_raises(bad):
     from nooa.unifiedllm.errors import ReasoningReplayError

@@ -24,9 +24,11 @@ from nooa.context_blocks.events import UserEvent
 from nooa.events import Summary
 from nooa.strategies import CodeActStrategy
 from nooa.strategies.codeact import return_text_as_result
-from nooa.unifiedllm import HttpConfig, RetryConfig, registry
+from nooa.unifiedllm import HttpConfig, RetryConfig
+from tests.integration._release_gate import gate_cases, gate_client
 
 pytestmark = [
+    pytest.mark.usefixtures("isolated_gate_tracing"),
     pytest.mark.integration,
     pytest.mark.skipif(
         os.getenv("NOOA_RUN_SUMMARIZER_E2E") != "1",
@@ -186,16 +188,13 @@ async def exercise_summarization(client, family, monkeypatch):
         await parent.aclose()
 
 
-@pytest.mark.parametrize("family", ["openai", "anthropic"])
-async def test_installed_summarizer_applies_before_next_turn(family, monkeypatch):
+@pytest.mark.parametrize("family,transport", gate_cases(["openai", "anthropic"]))
+async def test_installed_summarizer_applies_before_next_turn(family, transport, monkeypatch):
     """Require a generated, applied summary and a successful continuation on real providers."""
-    registry.ensure_loaded()
-    alias = f"release-gate-{family}"
-    if alias not in registry.MODELS:
-        pytest.skip(f"registry alias {alias!r} is not installed")
     limit = {"max_output_tokens": 2048} if family == "openai" else {"max_tokens": 2048}
-    async with registry.get_llm_client(
-        alias,
+    async with gate_client(
+        family,
+        transport=transport,
         **limit,
         num_retries=0,
         retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),

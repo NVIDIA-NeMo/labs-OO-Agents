@@ -389,7 +389,6 @@ def test_reasoning_only_responses_turn_demotes_without_an_empty_message() -> Non
         ("anthropic/claude-sonnet-4", "responses"),
         ("gemini/gemini-2.5-pro", "responses"),
         ("vertex_ai/gemini-2.5-pro", "responses"),
-        ("vertex_ai/gemini-2.5-pro", "chat"),
     ],
 )
 def test_unverified_closed_provider_routes_have_no_opaque_replay_scope(

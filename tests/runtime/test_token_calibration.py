@@ -24,11 +24,6 @@ class _CalibratingFakeLLM(FakeLLMClient):
     def context_window(self):
         return self._cw
 
-    def count_tokens(self, text: str) -> int:
-        import litellm
-
-        return litellm.token_counter(model="anthropic/claude-3-5-sonnet-20240620", text=text)
-
 
 def _mk_calibrating_llm(context_window: int = 200_000):
     """Create a FakeLLM with a configurable context window."""

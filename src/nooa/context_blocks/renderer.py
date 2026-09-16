@@ -161,7 +161,7 @@ def render_context(
     if count_tokens is None and context_limit is not None:
         raise ValueError(
             "max_context_tokens requires a token counter. "
-            "Pass count_tokens=llm.count_tokens to render_context()."
+            "Pass an application-provided count_tokens callable to render_context()."
         )
 
     count_fn: Callable[[str], int] = count_tokens if count_tokens is not None else len

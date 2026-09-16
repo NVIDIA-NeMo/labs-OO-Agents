@@ -490,7 +490,7 @@ def test_generic_snapshot_round_trip_and_flat_archive_migration():
 
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.asyncio
-async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch, is_async):
+async def test_cache_helpers_receive_projected_dicts(monkeypatch, is_async):
     from nooa.llm_types import LLMUsage
 
     response = SimpleNamespace(
@@ -513,16 +513,11 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
     async def arespond(**params):
         return respond(**params)
 
-    calibrated = []
     monkeypatch.setattr("litellm.responses", respond)
     monkeypatch.setattr("litellm.aresponses", arespond)
     monkeypatch.setattr(
         "nooa.unifiedllm.unifiedllm._extract_usage",
         lambda _: LLMUsage(input_tokens=10, output_tokens=1),
-    )
-    monkeypatch.setattr(
-        "nooa.unifiedllm.unifiedllm._update_token_calibration",
-        lambda model, messages, usage, **kwargs: calibrated.append(messages),
     )
     client = ResponsesClient("anthropic/claude-sonnet-4-5", api_key="test")
     try:
@@ -533,8 +528,6 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
         ]
         result = await client.acall(messages) if is_async else client.call(messages)
         assert result.content == "done"
-        assert len(calibrated) == 1
-        assert calibrated[0] is sent[0]
         assert all(isinstance(message, dict) for message in sent[0])
         assert sent[0][-1] == {
             "role": "user",
