@@ -155,20 +155,20 @@ def test_token_usage_updates_restores_and_clears_on_session_change():
     session.agent = SimpleNamespace(event_manager=em)
     session._app = SimpleNamespace(invalidate=Mock())
     session._restore_token_usage()
-    assert session._token_usage_display == "total ↑ 300 ↓ 30 cache 50%"
+    assert session._token_usage_display == "total ↑ 300 ↓ 30 ↻ 50%"
 
     unsubscribe = em.on("LLMResponse", session._on_llm_response)
     try:
         em.add(LLMResponse(usage=LLMUsage(input_tokens=400, output_tokens=30)))
-        assert session._token_usage_display == "total ↑ 700 ↓ 60 cache 21%"
+        assert session._token_usage_display == "total ↑ 700 ↓ 60 ↻ 21%"
         em.add(LLMResponse())
-        assert session._token_usage_display == "total ↑ 700 ↓ 60 cache 21%"
+        assert session._token_usage_display == "total ↑ 700 ↓ 60 ↻ 21%"
         session._restore_token_usage()
-        assert session._token_usage_display == "total ↑ 700 ↓ 60 cache 21%"
+        assert session._token_usage_display == "total ↑ 700 ↓ 60 ↻ 21%"
         assert latest.usage.input_tokens == 200
         session.agent.event_manager = EventManager()
         session._restore_token_usage()
-        assert session._token_usage_display == "total ↑ — ↓ — cache —"
+        assert session._token_usage_display == "total ↑ — ↓ — ↻ —"
         assert session._app.invalidate.called
     finally:
         unsubscribe()
@@ -200,10 +200,10 @@ def test_token_totals_restore_from_reopened_session_storage(tmp_path):
         session.agent = SimpleNamespace(event_manager=EventManager(backend=reopened.event_backend))
         session._app = SimpleNamespace(invalidate=Mock())
         session._restore_token_usage()
-        assert session._token_usage_display == "total ↑ 400 ↓ 30 cache 50%"
+        assert session._token_usage_display == "total ↑ 400 ↓ 30 ↻ 50%"
         session._app.invalidate.assert_called_once()
         session.agent.event_manager = EventManager()
         session._restore_token_usage()
-        assert session._token_usage_display == "total ↑ — ↓ — cache —"
+        assert session._token_usage_display == "total ↑ — ↓ — ↻ —"
     finally:
         reopened.close()
