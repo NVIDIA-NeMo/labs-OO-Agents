@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from nooa.config.summarizer_config import MethodSummarizerConfig, TokenBudgetConfig
     from nooa.events import AfterTurn, EventBase
     from nooa.runtime.event_manager import EventManager
+    from nooa.unifiedllm import UnifiedLLM
 
 
 class SummarizationAgent(Agent):
@@ -105,7 +106,7 @@ class SummarizationAgent(Agent):
 
         Args:
             agent: Agent to attach to. The summarizer:
-                   - Inherits LLM from agent (unless explicitly overridden)
+                   - Follows the parent's current LLM (unless explicitly overridden)
                    - Attaches to agent's event manager automatically
             **kwargs: Passed to constructor (use config= on subclasses)
 
@@ -133,11 +134,12 @@ class SummarizationAgent(Agent):
 
         Args:
             agent: Parent agent to attach to. The summarizer:
-                   - Inherits LLM from agent (unless explicitly overridden)
+                   - Follows the parent's current LLM (unless explicitly overridden)
                    - Attaches to agent's event manager automatically
             **kwargs: Passed through to Agent.__init__ (e.g. llm=)
         """
-        # Inherit LLM from parent agent unless explicitly provided
+        # Default summaries follow later parent model switches as well.
+        self._inherits_parent_llm = "llm" not in kwargs
         kwargs.setdefault("llm", agent.llm)
         self.target_event_manager = agent.event_manager
         self._target_agent = agent
@@ -165,6 +167,19 @@ class SummarizationAgent(Agent):
 
         # Install event subscriptions
         self._install()
+
+    @hidden
+    @no_trace
+    def set_llm(self, llm: "UnifiedLLM") -> None:
+        """Select a fixed summary client, opting out of parent model switches."""
+        super().set_llm(llm)
+        self._inherits_parent_llm = False
+
+    @hidden
+    @no_trace
+    def _summary_llm(self) -> "UnifiedLLM":
+        """Resolve the client for standalone summaries and their input budget."""
+        return self._target_agent.llm if self._inherits_parent_llm else self.llm
 
     @hidden
     @no_trace
@@ -295,7 +310,9 @@ class SummarizationAgent(Agent):
     # The source document is rendered explicitly by _render_range_to_markdown().
     # Do not use a method-level unbounded TruncationConfig here: that would also
     # re-render unrelated context events in this generation with unbounded event_format.
-    @strategy(PredictStrategy(PredictConfig(max_param_chars=None)))
+    @strategy(
+        PredictStrategy(PredictConfig(max_param_chars=None)), llm=lambda self: self._summary_llm()
+    )
     async def summarize(self, history_markdown: str, target_chars: int) -> str:
         """Summarize the `history_markdown` parameter into approximately {target_chars} characters.
 
@@ -526,7 +543,7 @@ class SummarizationAgent(Agent):
         Prefer the summarizer LLM's ``count_tokens``; fall back to the shared
         char-approximate counter so the cap still applies when no counter is set.
         """
-        llm = getattr(self, "_llm", None)
+        llm = self._summary_llm()
         counter = getattr(llm, "count_tokens", None)
         if callable(counter):
             return counter
@@ -544,8 +561,7 @@ class SummarizationAgent(Agent):
         target_chars) and the completion. ``None`` (no cap) when the model
         window can't be determined — never wipe the input on a misconfig; the
         API error path is still the backstop."""
-        llm = getattr(self, "_llm", None)
-        return context_budget(llm, percent=0.7, fallback=None)
+        return context_budget(self._summary_llm(), percent=0.7, fallback=None)
 
 
 # =============================================================================

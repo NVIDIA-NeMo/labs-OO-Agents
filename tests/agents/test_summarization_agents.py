@@ -489,6 +489,46 @@ class TestAgentSummarizerIntegration:
         assert summarizer._llm is summarizer_llm
         assert summarizer._llm is not fake_llm
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("summarizer_cls", [TokenBudgetSummarizer, MethodSummarizer])
+    async def test_summary_follows_parent_model_switches(
+        self, test_agent, fake_llm, summarizer_cls
+    ):
+        summarizer = summarizer_cls.install(test_agent)
+        try:
+            for summary, window in [("First summary", 4000), ("Second summary", 8000)]:
+                replacement = FakeLLMClient(scripted_responses=[_resp(f'{{"value": "{summary}"}}')])
+                replacement._context_window = window
+                test_agent.set_llm(replacement)
+
+                assert await summarizer.summarize("History to compact", 100) == summary
+                assert replacement.call_count == 1
+                assert fake_llm.call_count == 0
+                assert summarizer._input_token_budget() == int(window * 0.7)
+                assert summarizer._input_token_counter().__self__ is replacement
+        finally:
+            await test_agent.aclose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("override", ["constructor", "same_as_parent", "setter"])
+    async def test_summary_preserves_explicit_model(self, test_agent, override):
+        chosen = FakeLLMClient(scripted_responses=[_resp('{"value": "Explicit summary"}')])
+        if override == "same_as_parent":
+            test_agent.set_llm(chosen)
+        if override == "setter":
+            summarizer = MethodSummarizer.install(test_agent)
+            summarizer.set_llm(chosen)
+        else:
+            summarizer = MethodSummarizer.install(test_agent, llm=chosen)
+        replacement = FakeLLMClient()
+        test_agent.set_llm(replacement)
+        try:
+            assert await summarizer.summarize("History to compact", 100) == "Explicit summary"
+            assert chosen.call_count == 1
+            assert replacement.call_count == 0
+        finally:
+            await test_agent.aclose()
+
     def test_agent_standalone_without_summarizer(self, fake_llm):
         """Agent works fine without summarizer - they're decoupled."""
 
