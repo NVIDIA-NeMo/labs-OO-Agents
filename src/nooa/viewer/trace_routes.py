@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, ToolCall
 from nooa.unifiedllm.registry import resolve_api_key_from_config
 
 from . import otlp_store
@@ -580,7 +581,9 @@ def _sandbox_tools(python_tool_name: str = "execute_python"):
     ]
 
 
-def normalize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def normalize_messages_for_api(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any] | LLMResponse]:
     """Transform messages to the format expected by OpenAI/litellm API."""
     normalized = []
     for msg in messages:
@@ -619,7 +622,39 @@ def normalize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str,
         if msg.get("tool_call_id"):
             new_msg["tool_call_id"] = msg["tool_call_id"]
 
-        normalized.append(new_msg)
+        # Journal/editor input is portable history, not an authenticated source
+        # of provider replay state. Retain readable thinking through the normal
+        # LLMResponse projection, never reuse captured/redacted signatures.
+        blocks = content if isinstance(content, list) else []
+        if new_msg["role"] == "assistant" and any(
+            b.get("type") in {"thinking", "redacted_thinking", "tool_use"} for b in blocks
+        ):
+            parts = []
+            for block in blocks:
+                kind = block.get("type")
+                if kind == "thinking":
+                    parts.append(AssistantReasoning(text=block.get("thinking", "")))
+                elif kind == "text":
+                    parts.append(AssistantText(text=block.get("text", "")))
+                elif kind == "tool_use":
+                    parts.append(
+                        ToolCall(
+                            id=block["id"], name=block["name"], arguments=json.dumps(block["input"])
+                        )
+                    )
+                elif kind != "redacted_thinking":
+                    raise ValueError("Unsupported captured assistant block")
+            for call in new_msg.get("tool_calls", []):
+                parts.append(
+                    ToolCall(
+                        id=call["id"],
+                        name=call["function"]["name"],
+                        arguments=call["function"]["arguments"],
+                    )
+                )
+            normalized.append(LLMResponse(parts=tuple(parts)))
+        else:
+            normalized.append(new_msg)
 
     return normalized
 
@@ -639,9 +674,7 @@ async def run_inference(request: InferenceRequest):
             "max_tokens": request.max_tokens,
         }
 
-        has_tool_calls = any(
-            msg.get("tool_calls") for msg in normalized_messages if isinstance(msg, dict)
-        )
+        has_tool_calls = any(msg.get("tool_calls") for msg in normalized_messages)
         if has_tool_calls:
             tools = _sandbox_tools()
             if any(
@@ -688,5 +721,7 @@ async def run_inference(request: InferenceRequest):
             },
             "model": request.model,
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid playground message format") from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}") from e

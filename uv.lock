@@ -1523,7 +1523,7 @@ requires-dist = [
     { name = "nooa-bench", marker = "extra == 'bench'", editable = "packages/nooa-bench" },
     { name = "nooa-cli", marker = "extra == 'cli'", editable = "packages/nooa-cli" },
     { name = "nooa-memory", marker = "extra == 'memory'", editable = "packages/nooa-memory" },
-    { name = "openai", specifier = "==2.44.0" },
+    { name = "openai", specifier = ">=2.44.0,<3" },
     { name = "openinference-instrumentation", marker = "extra == 'tracing'", specifier = ">=0.1.42" },
     { name = "openinference-semantic-conventions", specifier = ">=0.1.9" },
     { name = "openinference-semantic-conventions", marker = "extra == 'tracing'", specifier = ">=0.1.9" },

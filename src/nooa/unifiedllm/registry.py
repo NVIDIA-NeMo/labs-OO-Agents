@@ -435,7 +435,7 @@ def client_from_config(
     # An alias's declared levels describe its route, not any replacement client.
     # Discard inherited selections/defaults as well; explicit declarations below
     # belong to the replacement route and are validated by its constructor.
-    if config and (
+    route_overridden = bool(config) and (
         overrides.get("model", model) != model
         or any(
             key in overrides and overrides[key] != config.get(key)
@@ -443,8 +443,15 @@ def client_from_config(
         )
         or (client_type is not None and client_type != config.get("client_type", "completion"))
         or overrides.get("client") is not None
-    ):
-        for key in ("reasoning_levels", "reasoning_default", "reasoning_level"):
+    )
+    if route_overridden:
+        for key in (
+            "reasoning_levels",
+            "reasoning_default",
+            "reasoning_level",
+            "api_style",
+            "replay_vendor",
+        ):
             params.pop(key, None)
         if "reasoning_levels" in config:
             logger.warning(
@@ -458,5 +465,5 @@ def client_from_config(
     # Select client class: explicit param > YAML config > default
     client_type = client_type or config.get("client_type", "completion")
     client = ResponsesClient(**params) if client_type == "responses" else CompletionClient(**params)
-    client._registry_config = config  # For context_window lookup
+    client._registry_config = {} if route_overridden else config  # For context_window lookup
     return client

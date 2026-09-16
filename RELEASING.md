@@ -120,6 +120,11 @@ before drafting advisory results, and still blocks the capability floor. Use it
 only for recovery, record the evidence separately, and publish only through the
 GitHub draft UI.
 
+Local fallback runs the provider replay/cache gate when `--internal-wheel` is
+supplied. Without that private alias package it warns and records the missing
+provider evidence in the draft notes; it does not claim a provider-gate pass.
+The private CI path always requires the wheel and all provider checks.
+
 ## Trusted Publishing setup
 
 Each project needs a publisher configured for owner `NVIDIA-NeMo`, repository

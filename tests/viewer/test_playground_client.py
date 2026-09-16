@@ -96,3 +96,61 @@ async def test_playground_custom_endpoint_preserves_wire_model(
     assert body["messages"] == [{"role": "user", "content": "question"}]
     assert result["response"]["content"] == "answer"
     assert result["usage"]["total_tokens"] == 5
+
+
+@pytest.mark.parametrize("transport", ["litellm", "direct"])
+async def test_playground_captured_thinking_is_portable_not_native(monkeypatch, transport):
+    from nooa.viewer import trace_routes
+
+    monkeypatch.setenv("NOOA_LLM_TRANSPORT", transport)
+    monkeypatch.setattr(
+        trace_routes, "get_model_config", lambda model: {"endpoint": "https://custom.example/v1"}
+    )
+    monkeypatch.setattr(trace_routes, "resolve_api_key_from_config", lambda *a, **kw: "test")
+    bodies = []
+
+    async def respond(self, request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "reply",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
+    result = await trace_routes.run_inference(
+        trace_routes.InferenceRequest(
+            model="test",
+            messages=[
+                {"role": "user", "content": "question"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "readable thought",
+                            "signature": "must-not-replay",
+                        },
+                        {"type": "text", "text": "answer"},
+                    ],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+        )
+    )
+    assert result["status"] == "success"
+    serialized = json.dumps(bodies)
+    assert "readable thought" in serialized and "answer" in serialized
+    assert "must-not-replay" not in serialized
+    assert "signature" not in serialized

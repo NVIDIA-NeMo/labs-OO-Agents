@@ -97,7 +97,17 @@ def capture_request(request):
         invocation = {
             k: v
             for k, v in body.items()
-            if k not in {"messages", "input", "system", "instructions", "tools"}
+            if k
+            not in {
+                "messages",
+                "input",
+                "system",
+                "instructions",
+                "tools",
+                "contents",
+                "system_instruction",
+                "systemInstruction",
+            }
         }
         span.set_attribute(
             "llm.invocation_parameters", json.dumps(invocation, ensure_ascii=False, sort_keys=True)
@@ -135,6 +145,12 @@ def _call(model):
 
             def finish(response):
                 try:
+                    if not metadata.get("input_recorded"):
+                        span.set_attribute("llm.input.capture", "unavailable")
+                        logger.warning(
+                            "LLM wire input was not captured; this adapter bypassed the owned HTTP hook. "
+                            "The span and journal cannot verify the request body."
+                        )
                     public, _ = scrub_value(response.public_message())
                     span.set_attribute("output.value", json.dumps(public, ensure_ascii=False))
                     span.set_attribute("output.mime_type", "application/json")
@@ -153,7 +169,8 @@ def _call(model):
                             "completion_details.reasoning": usage.reasoning_tokens,
                         }.items():
                             span.set_attribute("llm.token_count." + name, value)
-                        span.set_attribute("llm.cost.total", usage.cost_usd)
+                        if "cost_usd" in usage.model_fields_set:
+                            span.set_attribute("llm.cost.total", usage.cost_usd)
                     _notify(
                         "log_success_event",
                         metadata,

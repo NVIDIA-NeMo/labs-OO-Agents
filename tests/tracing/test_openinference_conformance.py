@@ -418,11 +418,8 @@ async def test_llm_span_conformance(monkeypatch):
             if tok in attrs:
                 assert isinstance(attrs[tok], int), f"{tok} must be int, got {attrs[tok]!r}"
 
-        # This response reports no price; the existing usage type defaults to zero.
-        total_cost = attrs.get(SpanAttributes.LLM_COST_TOTAL)
-        assert isinstance(total_cost, (int, float)) and total_cost == 0, (
-            f"Expected the unknown-cost default; got {total_cost!r}"
-        )
+        # Missing price is unknown, not evidence that this call was free.
+        assert SpanAttributes.LLM_COST_TOTAL not in attrs
 
         # Input/output messages present.
         assert any(k.startswith(SpanAttributes.LLM_INPUT_MESSAGES) for k in attrs), (

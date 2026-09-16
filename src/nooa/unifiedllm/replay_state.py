@@ -134,6 +134,10 @@ def replay_scope(
         )
         return None
     provider = params.get("replay_vendor") or provider
+    if provider in {"bedrock", "vertex_ai"}:
+        # Their native envelopes are not supported by our capture adapters.
+        # Keep portable reasoning instead of claiming opaque replay support.
+        return None
     if api_style == "responses" and provider not in {"openai", "azure"}:
         return None
 

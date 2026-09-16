@@ -31,8 +31,8 @@ dependencies = [
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
     "msgpack>=1.2.1",
-    # Private structured-output schema helper: upgrades require wire-contract tests.
-    "openai==2.44.0",
+    # Keep patch/minor security updates available; wire contracts cover SDK upgrades.
+    "openai>=2.44.0,<3",
     "anthropic>=0.84.0",
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",

@@ -135,7 +135,9 @@ class _ClientHttp:
     still succeeds, it just doesn't get this client's custom pool/timeout.
     """
 
-    def __init__(self, model: str, config: dict[str, Any], http_config: HttpConfig):
+    def __init__(
+        self, model: str, config: dict[str, Any], http_config: HttpConfig, *, asynchronous=None
+    ):
         import httpx
 
         self.http_config = http_config
@@ -154,15 +156,21 @@ class _ClientHttp:
         # The per-client httpx clients. These are what carry this client's
         # connection-pool limits (incl. max_keepalive_connections) + timeouts.
         # transport is left as httpx's default so ``limits`` actually applies.
-        self.httpx_async: httpx.AsyncClient = httpx.AsyncClient(
-            limits=self.limits, timeout=self._timeout, **hardening
+        self.httpx_async = (
+            httpx.AsyncClient(limits=self.limits, timeout=self._timeout, **hardening)
+            if asynchronous is not False
+            else None
         )
-        self.httpx_sync: httpx.Client = httpx.Client(
-            limits=self.limits, timeout=self._timeout, **hardening
+        self.httpx_sync = (
+            httpx.Client(limits=self.limits, timeout=self._timeout, **hardening)
+            if asynchronous is not True
+            else None
         )
 
-        self.httpx_sync.event_hooks["request"].append(capture_request)
-        self.httpx_async.event_hooks["request"].append(capture_async_request)
+        if self.httpx_sync is not None:
+            self.httpx_sync.event_hooks["request"].append(capture_request)
+        if self.httpx_async is not None:
+            self.httpx_async.event_hooks["request"].append(capture_async_request)
 
         # litellm wrappers, filled in by _build_* below.
         self.async_client: Any = None
@@ -204,20 +212,22 @@ class _ClientHttp:
         # AsyncHTTPHandler eagerly creates an httpx.AsyncClient in __init__.
         # Build the wrapper object directly so there is no throwaway async client
         # to leak before replacing it with this _ClientHttp's managed client.
-        async_handler = AsyncHTTPHandler.__new__(AsyncHTTPHandler)
-        async_handler.timeout = self._timeout
-        async_handler.event_hooks = None
-        async_handler.client = self.httpx_async
-        async_handler.client_alias = None
-        self.async_client = async_handler
+        if self.httpx_async is not None:
+            async_handler = AsyncHTTPHandler.__new__(AsyncHTTPHandler)
+            async_handler.timeout = self._timeout
+            async_handler.event_hooks = None
+            async_handler.client = self.httpx_async
+            async_handler.client_alias = None
+            self.async_client = async_handler
 
-        sync_handler = HTTPHandler(timeout=self._timeout)
-        try:
-            sync_handler.client.close()  # close the throwaway sync client
-        except Exception:  # noqa: BLE001
-            pass
-        sync_handler.client = self.httpx_sync
-        self.sync_client = sync_handler
+        if self.httpx_sync is not None:
+            sync_handler = HTTPHandler(timeout=self._timeout)
+            try:
+                sync_handler.client.close()  # close the throwaway sync client
+            except Exception:  # noqa: BLE001
+                pass
+            sync_handler.client = self.httpx_sync
+            self.sync_client = sync_handler
 
     def _build_completion_wrappers(self, model: str, config: dict[str, Any]) -> None:
         """Pick the right litellm client type for a Chat Completions provider."""
@@ -262,9 +272,19 @@ class _ClientHttp:
         try:
             from openai import AsyncOpenAI, OpenAI
 
-            self.async_client = AsyncOpenAI(http_client=self.httpx_async, **common)
-            self.sync_client = OpenAI(http_client=self.httpx_sync, **common)
-            self._openai_clients = [self.async_client, self.sync_client]
+            self.async_client = (
+                AsyncOpenAI(http_client=self.httpx_async, **common)
+                if self.httpx_async is not None
+                else None
+            )
+            self.sync_client = (
+                OpenAI(http_client=self.httpx_sync, **common)
+                if self.httpx_sync is not None
+                else None
+            )
+            self._openai_clients = [
+                c for c in (self.async_client, self.sync_client) if c is not None
+            ]
         except Exception as e:  # noqa: BLE001
             # e.g. no API key resolvable — fall back to litellm's own client so
             # auth/behaviour is preserved (this client just loses its custom pool).
@@ -277,8 +297,10 @@ class _ClientHttp:
             self.sync_client = None
 
     @classmethod
-    def for_completion(cls, model: str, config: dict[str, Any], http_config: HttpConfig):
-        inst = cls(model, config, http_config)
+    def for_completion(
+        cls, model: str, config: dict[str, Any], http_config: HttpConfig, *, asynchronous=None
+    ):
+        inst = cls(model, config, http_config, asynchronous=asynchronous)
         inst._build_completion_wrappers(model, config)
         return inst
 
@@ -303,7 +325,8 @@ class _ClientHttp:
                 except Exception:  # noqa: BLE001
                     pass
         try:
-            self.httpx_sync.close()
+            if self.httpx_sync is not None:
+                self.httpx_sync.close()
         except Exception:  # noqa: BLE001
             pass
 
@@ -320,7 +343,8 @@ class _ClientHttp:
                 except Exception:  # noqa: BLE001
                     pass
             try:
-                await self.httpx_async.aclose()
+                if self.httpx_async is not None:
+                    await self.httpx_async.aclose()
             except Exception:  # noqa: BLE001
                 pass
         self.close()
@@ -1052,7 +1076,7 @@ class UnifiedLLM(ABC):
     ):
         import os
 
-        transport = os.environ.get("NOOA_LLM_TRANSPORT", transport)
+        transport = os.environ.get("NOOA_LLM_TRANSPORT") or transport
         if transport not in {"litellm", "direct"}:
             raise ValueError("transport must be 'litellm' or 'direct'")
         self.transport = transport
@@ -1124,7 +1148,9 @@ class UnifiedLLM(ABC):
         if "client" in params:
             return _collect_sync(litellm.completion(**params))
         # Overrides need fresh bound wrappers, not the constructor's URL/key.
-        temporary = _ClientHttp.for_completion(params["model"], params, self._http_config)
+        temporary = _ClientHttp.for_completion(
+            params["model"], params, self._http_config, asynchronous=False
+        )
         try:
             call = dict(params)
             if temporary.sync_client is not None:
@@ -1143,14 +1169,27 @@ class UnifiedLLM(ABC):
         params = preserve_readable_reasoning(params)
         if "client" in params:
             return await _collect_async(await _litellm_acompletion(params))
-        temporary = _ClientHttp.for_completion(params["model"], params, self._http_config)
+        temporary = _ClientHttp.for_completion(
+            params["model"], params, self._http_config, asynchronous=True
+        )
+
+        async def dispatch_and_close():
+            try:
+                call = dict(params)
+                if temporary.async_client is not None:
+                    call["client"] = temporary.async_client
+                return await _collect_async(await _litellm_acompletion(call))
+            finally:
+                await temporary.aclose()
+
+        # Ownership follows the shielded provider operation, not the cancelled
+        # caller. Return cancellation promptly but drain before closing its pool.
+        task = asyncio.create_task(dispatch_and_close())
         try:
-            call = dict(params)
-            if temporary.async_client is not None:
-                call["client"] = temporary.async_client
-            return await _collect_async(await _litellm_acompletion(call))
-        finally:
-            await temporary.aclose()
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(_consume_litellm_acompletion_result)
+            raise
 
     @property
     def reasoning_levels(self) -> tuple[str, ...] | None:
@@ -1282,14 +1321,17 @@ class UnifiedLLM(ABC):
     def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
         mapping = self.cache_breakpoint
         if mapping == "auto" and not responses:
-            if self.api_style is not None:
-                anthropic = self.api_style == "anthropic"
-            elif self.replay_vendor is not None:
-                anthropic = self.replay_vendor == "anthropic"
-            else:
-                anthropic = _is_anthropic_model(model or self.model)
-            mapping = "anthropic" if anthropic else None
+            mapping = "anthropic" if self._is_anthropic_route(model or self.model) else None
         return apply_cache_policy(messages, mapping, responses=responses, instructions=instructions)
+
+    def _is_anthropic_route(self, model: str) -> bool:
+        # Cache/tool requirements also apply to Anthropic behind a Chat gateway.
+        # api_style describes the interface; "chat" must not negate that policy.
+        if _is_anthropic_model(model):
+            return True
+        if self._direct is not None:
+            return self._direct.api_style == "anthropic" or self.replay_vendor == "anthropic"
+        return False
 
     def get_model_info(self) -> "Any":
         """Get model metadata from litellm registry.
@@ -1298,8 +1340,6 @@ class UnifiedLLM(ABC):
             Dict with model info (max_input_tokens, max_output_tokens, etc.)
             or None if model is not in litellm's registry.
         """
-        if self.transport == "direct":
-            return self._registry_config
         try:
             return litellm.get_model_info(self.model)
         except Exception:
@@ -1552,6 +1592,15 @@ def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, LLMUsag
     if hasattr(raw_response, "choices") and raw_response.choices:
         msg = raw_response.choices[0].message
         reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
+        if not reasoning:
+            reasoning = (
+                "\n".join(
+                    block["thinking"]
+                    for block in (getattr(msg, "thinking_blocks", None) or [])
+                    if isinstance(block, dict) and isinstance(block.get("thinking"), str)
+                )
+                or None
+            )
 
     return reasoning, _extract_usage(raw_response)
 
@@ -1835,7 +1884,9 @@ class CompletionClient(UnifiedLLM):
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and _needs_dummy_tool(effective_model)
+            and (
+                _needs_dummy_tool(effective_model) or self._is_anthropic_route(effective_model)
+            )
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -1925,7 +1976,9 @@ class CompletionClient(UnifiedLLM):
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and _needs_dummy_tool(effective_model)
+            and (
+                _needs_dummy_tool(effective_model) or self._is_anthropic_route(effective_model)
+            )
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
