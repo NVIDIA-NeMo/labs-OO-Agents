@@ -10,6 +10,7 @@ pin the core contract the ARC-AGI-3 example and other hosts rely on.
 import pytest
 from pydantic import ValidationError
 
+from nooa.agentdoc import doc
 from nooa.interactive import (
     AgentMessage,
     AgentVars,
@@ -57,6 +58,31 @@ def test_persistent_vars_proxy(agent):
     with pytest.raises(AttributeError):
         _ = agent.v.cursor
     assert isinstance(agent.v, AgentVars)
+    assert type(agent.v).__name__ == "PersistentVars"
+
+
+def test_persistent_vars_inspection_and_cleanup_api(agent):
+    agent.v.cursor = 3
+    agent.v.plan = "draft"
+
+    assert agent.v.keys() == ["cursor", "plan"]
+    assert agent.v.items() == [("cursor", 3), ("plan", "draft")]
+    assert agent.v.get("cursor") == 3
+    assert agent.v.get("missing", "fallback") == "fallback"
+
+    rendered = doc(type(agent.v))
+    assert rendered.startswith("class PersistentVars:")
+    assert "Choose the scope deliberately:" in rendered
+    assert 'self.v.user_name = "Ada"' in rendered
+    assert "``self.v``" in rendered
+    assert "``todo.v``" in rendered
+    assert "def keys(self) -> list[str]" in rendered
+    assert "def items(self) -> list[tuple[str, Any]]" in rendered
+    assert "def get(self, key: str, default: Any = None) -> Any" in rendered
+    assert "def clear(self) -> None" in rendered
+
+    agent.v.clear()
+    assert agent.v.keys() == []
 
 
 def test_message_records_event_and_renders(agent):
@@ -69,11 +95,46 @@ def test_message_records_event_and_renders(agent):
     assert events[0].content == "**hi**"
 
 
+def test_rename_session_uses_shared_session_handle(agent, tmp_path):
+    from nooa.sessions import SessionStore
+
+    with SessionStore(tmp_path).create() as handle:
+        agent._session_manager = handle
+        assert agent.rename_session('  "Debug   input"  ') == "Debug input"
+        assert handle.info.title == "Debug input"
+        assert handle.info.title_is_user_set is False
+
+
+def test_rename_session_preserves_user_selected_title(agent, tmp_path):
+    from nooa.sessions import SessionStore
+
+    with SessionStore(tmp_path).create() as handle:
+        handle.set_title("My chosen title", user_set=True)
+        agent._session_manager = handle
+        assert agent.rename_session("Automatic title") == "My chosen title"
+        assert handle.info.title == "My chosen title"
+
+
+def test_rename_session_is_model_visible_but_request_helper_is_hidden(agent):
+    rendered = str(doc(agent))
+    assert "rename_session" in rendered
+    assert "request_session_title" not in rendered
+
+
+def test_session_title_request_is_not_a_core_agent_concern(agent):
+    assert not hasattr(agent, "request_session_title")
+
+
 def test_respond_result_requires_explanation():
     result = RespondResult(kind=RespondReason.DONE, explanation="did the thing")
     assert result.kind is RespondReason.DONE
     with pytest.raises(ValidationError):
         RespondResult(kind=RespondReason.DONE, explanation="   ")
+
+
+def test_respond_result_rejects_removed_get_user_input_reason():
+    with pytest.raises(ValidationError, match="use RespondReason.NEED_INPUT"):
+        RespondResult(kind="GET_USER_INPUT", explanation="legacy reason")
 
 
 def test_install_summarizer_none_policy_is_noop(agent):
@@ -86,3 +147,20 @@ def test_install_summarizer_attaches(agent):
     summarizers = getattr(agent, "_summarizers", [])
     assert len(summarizers) == 1
     assert summarizers[0].config.max_tokens == 50_000
+
+
+async def test_web_publisher_is_not_installed_or_restored(monkeypatch):
+    from nooa import Context
+    from nooa.sessions import SessionResumed
+
+    monkeypatch.setenv("NEMO_OO_RICH_URL", "http://localhost:9999")
+    agent = _Host(llm=FakeLLMClient())
+    try:
+        assert not hasattr(agent, "web")
+        assert "web" not in agent.context
+        assert "WebPublisher" not in doc(agent)
+        agent.context["web"] = Context("WebPublisher: call self.web.plot(fig)", prefix=True)
+        agent.event_manager.add(SessionResumed(session_id="old-session", restored=True))
+        assert "web" not in agent.context
+    finally:
+        await agent.llm.aclose()

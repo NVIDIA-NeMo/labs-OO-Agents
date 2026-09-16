@@ -20,6 +20,40 @@ from nooa.runtime.channels import Channel, QueueManager
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_cancelled_shutdown_retains_jobs_until_cleanup_finishes():
+    qm = QueueManager()
+    qm.queue("jobs")
+    started = [asyncio.Event(), asyncio.Event()]
+    cleaning = [asyncio.Event(), asyncio.Event()]
+    release = asyncio.Event()
+
+    async def work(index):
+        started[index].set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning[index].set()
+            await release.wait()
+
+    handles = [qm.spawn(work(i), channel="jobs") for i in range(2)]
+    await asyncio.gather(*(event.wait() for event in started))
+    shutdown = asyncio.create_task(qm.shutdown())
+    try:
+        await asyncio.wait_for(cleaning[0].wait(), timeout=2)
+        shutdown.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown
+        assert qm.handles() == handles
+        await asyncio.wait_for(cleaning[1].wait(), timeout=2)
+        assert all(not handle._task.done() for handle in handles)
+    finally:
+        release.set()
+        await qm.shutdown()
+    assert not qm.handles()
+    assert all(handle._task.done() for handle in handles)
+
+
 def test_drain_returns_items_fifo_and_empties():
     q: Channel[str] = Channel("q", "queue")
     q.put("a")
@@ -102,6 +136,48 @@ async def test_running_handles_filters_by_state():
     await qm.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_daemon_spawn_is_flagged_and_excluded_from_work_handles():
+    """Daemon spawns stay in running_handles() but not running_work_handles()."""
+    qm = QueueManager()
+    qm.queue("mesh")
+    qm.queue("jobs")
+
+    async def _forever() -> None:
+        await asyncio.Event().wait()
+
+    async def _quick() -> str:
+        return "done"
+
+    h_daemon = qm.spawn(_forever(), channel="mesh", daemon=True, label="inbox pump")
+    h_work = qm.spawn(_forever(), channel="jobs")
+    h_done = qm.spawn(_quick(), channel="jobs")
+    # Wait for _quick's terminal state instead of a fixed sleep: the quick
+    # job must actually finish before "not in work" can be asserted.
+    for _ in range(1000):
+        if h_done.state != "running":
+            break
+        await asyncio.sleep(0.001)
+    assert h_done.state != "running"
+
+    assert h_daemon.daemon is True
+    assert h_work.daemon is False
+    assert h_done.daemon is False
+
+    assert h_daemon in qm.running_handles()
+    assert h_work in qm.running_handles()
+
+    work = qm.running_work_handles()
+    assert h_work in work
+    assert h_daemon not in work
+    assert h_done not in work
+
+    await qm.shutdown()
+
+    assert h_daemon.state == "cancelled"
+    assert h_work.state == "cancelled"
+
+
 # ---------------------------------------------------------------------------
 # QueueManager.set_notify_callback
 # ---------------------------------------------------------------------------
@@ -137,6 +213,21 @@ async def test_notify_callback_fires_after_internal_wakeup():
     assert result == [("q", "item")]
     # put() fired the callback in addition to waking race().
     assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_notify_callback_failure_does_not_break_channel_put(caplog):
+    qm = QueueManager()
+    q = qm.queue("q")
+
+    def fail() -> None:
+        raise RuntimeError("host is shutting down")
+
+    qm.set_notify_callback(fail)
+    q.put("delivered")
+
+    assert await q.reader.get() == "delivered"
+    assert "QueueManager notify callback failed" in caplog.text
 
 
 def test_notify_callback_none_clears():
