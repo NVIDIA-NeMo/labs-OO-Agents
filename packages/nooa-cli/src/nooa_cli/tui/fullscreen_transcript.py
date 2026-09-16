@@ -1,0 +1,1330 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Renderer-owned transcript state for the alternate-screen TUI."""
+
+from __future__ import annotations
+
+import re
+from bisect import bisect_left, bisect_right
+from collections import OrderedDict
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from unicodedata import normalize
+
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.formatted_text import ANSI, FormattedText, to_formatted_text
+from rich.cells import split_graphemes
+from wcwidth import wcswidth
+
+from .copyable_markdown import visible_code_line
+from .terminal_safety import (
+    _hyperlink_spans_from_safe_ansi,
+    project_prompt_toolkit_ansi,
+    sanitize_transcript_ansi,
+    strip_safe_ansi,
+)
+
+_MAX_PROJECTED_WIDTHS = 2
+_COPY_LINK_RE = re.compile(r"\x1b\]8;[^\x07\x1b\r\n]*;([^\x07\x1b\r\n]*)(?:\x07|\x1b\\)")
+_SGR_RE = re.compile(r"\x1b\[[0-9:;]*m")
+_COPY_URI_PREFIX = "nooa-copy://"
+_CODE_SOURCE_URI_PREFIX = "nooa-code-source://"
+
+
+@dataclass(frozen=True, slots=True)
+class ViewportAnchor:
+    """A unique source location plus semantic position in one retained record."""
+
+    record_id: int
+    source_offset: int
+    semantic_offset: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ViewportState:
+    """Whether new output is followed or a logical source location is pinned."""
+
+    follows_tail: bool = True
+    anchor: ViewportAnchor | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchMatch:
+    """One literal search occurrence in record-local plain-text coordinates."""
+
+    record_id: int
+    start: int
+    stop: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectionHit:
+    """Record-relative text interval occupied by one clicked terminal cell."""
+
+    record_id: int
+    before: int
+    after: int
+
+
+@dataclass(frozen=True, slots=True)
+class _CodeSourceMap:
+    display_start: int
+    display_stop: int
+    source_start: int
+    source_stop: int
+
+
+@dataclass(frozen=True, slots=True)
+class _CodeSelectionRegion:
+    display_start: int
+    display_stop: int
+    source: str
+    mappings: tuple[_CodeSourceMap, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Record:
+    record_id: int
+    ansi: str
+    plain: str
+    has_separator: bool = False
+    hyperlinks: tuple[tuple[int, int, str], ...] = ()
+    copy_regions: tuple[tuple[int, int, str], ...] = ()
+    code_selection_regions: tuple[_CodeSelectionRegion, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectedRow:
+    anchor: ViewportAnchor
+    fragments: tuple[tuple[str, str], ...]
+    source_spans: tuple[tuple[int, int], ...] = ()
+    hyperlinks: tuple[tuple[int, int, str], ...] = ()
+
+
+class FullscreenTranscriptModel:
+    """Ordered transcript plus bounded, incremental visual-row projections."""
+
+    def __init__(
+        self,
+        *,
+        show_trailing_blank: bool | Callable[[], bool] = True,
+        align_short_content_bottom: bool = True,
+    ) -> None:
+        self._show_trailing_blank = show_trailing_blank
+        self._align_short_content_bottom = align_short_content_bottom
+        self._records: list[_Record] = []
+        self._projectable_record_count = 0
+        self._next_record_id = 0
+        self._viewport = ViewportState()
+        self._projection_cache: OrderedDict[int, list[_ProjectedRow]] = OrderedDict()
+        self._projection_index_cache: OrderedDict[int, dict[int, tuple[list[int], list[int]]]] = (
+            OrderedDict()
+        )
+        self._formatted_cache: OrderedDict[tuple[int, int, int, int, int], FormattedText] = (
+            OrderedDict()
+        )
+        self._ends_newline = False
+        self._selection_anchor: _SelectionHit | None = None
+        self._selection_active: _SelectionHit | None = None
+        self._search_query = ""
+        self._search_matches: tuple[_SearchMatch, ...] = ()
+        self._search_cursor = 0
+        self._record_index_cache: tuple[dict[int, _Record], dict[int, int]] | None = None
+
+    @property
+    def text(self) -> str:
+        """ANSI-free logical text, primarily for assertions and export."""
+        return "".join(record.plain for record in self._records)
+
+    @property
+    def viewport(self) -> ViewportState:
+        return self._viewport
+
+    def formatted_text(
+        self,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        render_counter: int = 0,
+    ) -> FormattedText:
+        """Return safe rows, optionally virtualized to the visible viewport."""
+        if width is None:
+            width = max(1, *(max(0, wcswidth(line)) for line in self.text.split("\n")))
+        width = max(1, width)
+        rows = self._display_rows(width)
+        top = 0
+        top_padding = 0
+        if height is not None:
+            height = max(1, height)
+            history_fits = len(rows) <= height
+            top = 0 if history_fits else self.top_row(width=width, height=height)
+            rows = rows[top : top + height]
+            if history_fits and self._align_short_content_bottom:
+                # Transcript histories belong next to the bottom chrome; other
+                # consumers can opt into conventional top-aligned documents.
+                top_padding = height - len(rows)
+        hyperlink_marker = render_counter & 1
+        key = (width, top, len(rows), top_padding, hyperlink_marker)
+        cached = self._formatted_cache.get(key)
+        if cached is not None:
+            self._formatted_cache.move_to_end(key)
+            return cached
+        result = self._format_rows(
+            rows,
+            top_padding=top_padding,
+            hyperlink_marker=hyperlink_marker,
+        )
+        self._formatted_cache[key] = result
+        # Each geometry has two alternating hyperlink-marker variants.
+        while len(self._formatted_cache) > 2 * _MAX_PROJECTED_WIDTHS:
+            self._formatted_cache.popitem(last=False)
+        return result
+
+    @property
+    def search_position(self) -> tuple[int, int]:
+        """Return the one-based current match index and total match count."""
+        if not self._search_matches:
+            return 0, 0
+        return self._search_cursor + 1, len(self._search_matches)
+
+    def set_search(self, query: str, *, width: int, height: int) -> None:
+        """Highlight literal matches and reveal the first occurrence."""
+        normalized = query.strip().casefold()
+        if normalized == self._search_query:
+            return
+        self._search_query = normalized
+        # Deduplicate repeated terms ("alpha alpha") so match counts and
+        # navigation visits reflect distinct occurrences.
+        terms = list(dict.fromkeys(term for term in normalized.split() if term))
+        matches: list[_SearchMatch] = []
+        if terms:
+            for record in self._records:
+                folded_parts: list[str] = []
+                source: list[int] = []
+                for index, char in enumerate(record.plain):
+                    folded = char.casefold()
+                    folded_parts.append(folded)
+                    source.extend([index] * len(folded))
+                folded_text = "".join(folded_parts)
+                record_matches: list[_SearchMatch] = []
+                # Word-AND search highlights every term occurrence, matching
+                # the list filtering contract; each occurrence is its own
+                # navigation stop.
+                for term in terms:
+                    cursor = 0
+                    while (found := folded_text.find(term, cursor)) >= 0:
+                        stop = found + len(term)
+                        record_matches.append(
+                            _SearchMatch(record.record_id, source[found], source[stop - 1] + 1)
+                        )
+                        cursor = stop
+                record_matches.sort(key=lambda match: (match.start, match.stop))
+                matches.extend(record_matches)
+        self._search_matches = tuple(matches)
+        self._search_cursor = 0
+        if matches:
+            self._reveal_search_match(width=width, height=height)
+        else:
+            self.jump_to_tail()
+        self._formatted_cache.clear()
+
+    def move_search_match(self, delta: int, *, width: int, height: int) -> bool:
+        """Cycle transcript matches and reveal the selected occurrence."""
+        if not self._search_matches or not delta:
+            return False
+        self._search_cursor = (self._search_cursor + delta) % len(self._search_matches)
+        self._reveal_search_match(width=width, height=height)
+        self._formatted_cache.clear()
+        return True
+
+    def _reveal_search_match(self, *, width: int, height: int) -> None:
+        if not self._search_matches:
+            return
+        match = self._search_matches[self._search_cursor]
+        rows = self._display_rows(max(1, width))
+        for index, row in enumerate(rows):
+            if row.anchor.record_id != match.record_id:
+                continue
+            if any(start < match.stop and stop > match.start for start, stop in row.source_spans):
+                # Center the match vertically when context exists above it,
+                # so the reveal shows before/after context instead of pinning
+                # the match to the pane's first row. Early matches clamp to
+                # the content start.
+                top = max(0, index - max(1, height) // 2)
+                self._viewport = ViewportState(False, rows[top].anchor)
+                return
+
+    def cursor_position(self, *, width: int, height: int = 1) -> Point:
+        """Expose a cursor within the virtualized visible transcript."""
+        rows = self._display_rows(width)
+        if not rows:
+            return Point(x=0, y=0)
+        top = self.top_row(width=width, height=height)
+        visible = rows[top : top + max(1, height)]
+        if self._viewport.follows_tail:
+            top_padding = (
+                max(0, max(1, height) - len(visible)) if self._align_short_content_bottom else 0
+            )
+            return Point(
+                x=self._row_text_length(visible[-1]),
+                y=top_padding + len(visible) - 1,
+            )
+        return Point(x=0, y=0)
+
+    def top_row(self, *, width: int, height: int) -> int:
+        """Return the exact first visual row for the current viewport."""
+        rows = self._display_rows(width)
+        if not rows:
+            return 0
+        if self._viewport.follows_tail or self._viewport.anchor is None:
+            return max(0, len(rows) - max(1, height))
+        index = self._row_index_for_anchor(width, rows, self._viewport.anchor)
+        if index is None:
+            self.jump_to_tail()
+            return max(0, len(rows) - max(1, height))
+        return index
+
+    def scroll_visual_lines(self, delta: int, *, width: int, height: int) -> None:
+        """Move the top visual row; positive deltas move toward the tail."""
+        rows = self._display_rows(width)
+        if not rows:
+            self.jump_to_tail()
+            return
+        current = self.top_row(width=width, height=height)
+        tail_top = max(0, len(rows) - max(1, height))
+        target = max(0, min(tail_top, current + delta))
+        if target >= tail_top:
+            self.jump_to_tail()
+        else:
+            self._viewport = ViewportState(False, rows[target].anchor)
+        self._formatted_cache.clear()
+
+    def jump_to_start(self, *, width: int) -> None:
+        rows = self._display_rows(width)
+        if rows:
+            self._viewport = ViewportState(False, rows[0].anchor)
+            self._formatted_cache.clear()
+
+    def jump_to_tail(self) -> None:
+        self._viewport = ViewportState()
+        self._formatted_cache.clear()
+
+    def begin_selection(self, *, x: int, y: int, width: int, height: int) -> None:
+        """Start a logical selection at one visible transcript cell."""
+        hit = self._selection_hit(x=x, y=y, width=width, height=height)
+        self._selection_anchor = hit
+        self._selection_active = hit
+        self._formatted_cache.clear()
+
+    def update_selection(self, *, x: int, y: int, width: int, height: int) -> None:
+        """Extend the current selection to one visible transcript cell."""
+        if self._selection_anchor is None:
+            return
+        self._selection_active = self._selection_hit(x=x, y=y, width=width, height=height)
+        self._formatted_cache.clear()
+
+    def hyperlink_at(self, *, x: int, y: int, width: int, height: int) -> str | None:
+        """Return the safe OSC-8 target under one visible transcript cell."""
+        hit = self._selection_hit(x=x, y=y, width=width, height=height, clamp=False)
+        if hit is None:
+            return None
+        records, _bases = self._record_indexes()
+        record = records.get(hit.record_id)
+        if record is None:
+            return None
+        for start, stop, target in record.hyperlinks:
+            # Rendering promotes any hyperlink overlap to the whole displayed
+            # grapheme. Use the same rule for hit-testing when an OSC-8
+            # boundary falls between a base character and combining mark.
+            if start < hit.after and stop > hit.before:
+                return target
+            if start >= hit.after:
+                break
+        return None
+
+    def clear_selection(self) -> None:
+        """Discard renderer-owned selection without changing the viewport."""
+        self._selection_anchor = None
+        self._selection_active = None
+        self._formatted_cache.clear()
+
+    def selected_text(self) -> str:
+        """Return exact ANSI-free logical text covered by the selection."""
+        if self._selection_anchor is None or self._selection_active is None:
+            return ""
+        selected = self._selection_bounds()
+        if selected is None:
+            return ""
+        start, stop = selected
+        pieces: list[str] = []
+        offset = 0
+        for record in self._records:
+            record_stop = offset + len(record.plain)
+            if record_stop > start and offset < stop:
+                pieces.append(
+                    self._selected_record_text(
+                        record,
+                        max(0, start - offset),
+                        min(len(record.plain), stop - offset),
+                    )
+                )
+            if record_stop >= stop:
+                break
+            offset = record_stop
+        return "".join(pieces)
+
+    @staticmethod
+    def _selected_record_text(record: _Record, start: int, stop: int) -> str:
+        """Project a visual selection back to semantic Markdown source."""
+        pieces: list[str] = []
+        cursor = start
+        for region in record.code_selection_regions:
+            if region.display_stop <= start:
+                continue
+            if region.display_start >= stop:
+                break
+            plain_stop = min(stop, region.display_start)
+            if cursor < plain_stop:
+                pieces.append(record.plain[cursor:plain_stop])
+            overlap_start = max(start, region.display_start)
+            overlap_stop = min(stop, region.display_stop)
+            mappings = [
+                mapping
+                for mapping in region.mappings
+                if mapping.display_start < overlap_stop and mapping.display_stop > overlap_start
+            ]
+            if mappings:
+                source_start = (
+                    0
+                    if overlap_start <= region.mappings[0].display_start
+                    else mappings[0].source_start
+                )
+                source_stop = mappings[-1].source_stop
+                pieces.append(region.source[source_start:source_stop])
+                if (
+                    overlap_stop >= region.display_stop
+                    and stop > region.display_stop
+                    and not region.source.endswith("\n")
+                    and record.plain[region.display_stop :].startswith("\n")
+                ):
+                    pieces.append("\n")
+            cursor = max(cursor, region.display_stop)
+        if cursor < stop:
+            pieces.append(record.plain[cursor:stop])
+        return "".join(pieces)
+
+    def copy_action_at(self, *, x: int, y: int, width: int, height: int) -> str | None:
+        """Return the exact code payload behind a visible Copy label."""
+        hit = self._selection_hit(x=x, y=y, width=width, height=height, clamp=False)
+        if hit is None:
+            return None
+        records, _bases = self._record_indexes()
+        record = records.get(hit.record_id)
+        if record is None:
+            return None
+        for start, stop, payload in record.copy_regions:
+            if start <= hit.before < stop:
+                return payload
+        return None
+
+    @staticmethod
+    def _copy_regions(
+        ansi: str, copy_actions: dict[str, str] | None
+    ) -> tuple[tuple[int, int, str], ...]:
+        """Map authorized custom OSC-8 links to ANSI-free record offsets."""
+        if not copy_actions:
+            return ()
+        regions: list[tuple[int, int, str]] = []
+        active: tuple[int, str] | None = None
+        plain_offset = 0
+        cursor = 0
+        while cursor < len(ansi):
+            sgr = _SGR_RE.match(ansi, cursor)
+            if sgr is not None:
+                cursor = sgr.end()
+                continue
+            link = _COPY_LINK_RE.match(ansi, cursor)
+            if link is not None:
+                uri = link.group(1)
+                if uri.startswith(_COPY_URI_PREFIX):
+                    action_id = uri[len(_COPY_URI_PREFIX) :]
+                    payload = copy_actions.get(action_id)
+                    if payload is not None:
+                        active = (plain_offset, payload)
+                elif not uri and active is not None:
+                    start, payload = active
+                    if plain_offset > start:
+                        regions.append((start, plain_offset, payload))
+                    active = None
+                cursor = link.end()
+                continue
+            plain_offset += 1
+            cursor += 1
+        if active is not None:
+            start, payload = active
+            if plain_offset > start:
+                regions.append((start, plain_offset, payload))
+        return tuple(regions)
+
+    @classmethod
+    def _code_selection_regions(
+        cls, ansi: str, plain: str, copy_actions: dict[str, str] | None
+    ) -> tuple[_CodeSelectionRegion, ...]:
+        """Map decorated code cells back to their exact Markdown source."""
+        if not copy_actions:
+            return ()
+        linked: dict[str, list[tuple[int, int, int]]] = {}
+        labels: dict[str, list[tuple[int, int]]] = {}
+        active: tuple[str, int | None, int] | None = None
+        plain_offset = 0
+        cursor = 0
+        while cursor < len(ansi):
+            sgr = _SGR_RE.match(ansi, cursor)
+            if sgr is not None:
+                cursor = sgr.end()
+                continue
+            link = _COPY_LINK_RE.match(ansi, cursor)
+            if link is not None:
+                if active is not None:
+                    action_id, line_number, start = active
+                    if plain_offset > start:
+                        if line_number is None:
+                            labels.setdefault(action_id, []).append((start, plain_offset))
+                        else:
+                            linked.setdefault(action_id, []).append(
+                                (start, plain_offset, line_number)
+                            )
+                uri = link.group(1)
+                active = None
+                if uri.startswith(_COPY_URI_PREFIX):
+                    action_id = uri[len(_COPY_URI_PREFIX) :]
+                    if action_id in copy_actions:
+                        active = (action_id, None, plain_offset)
+                elif uri.startswith(_CODE_SOURCE_URI_PREFIX):
+                    target = uri[len(_CODE_SOURCE_URI_PREFIX) :]
+                    action_id, separator, line = target.rpartition("/")
+                    if separator and action_id in copy_actions:
+                        try:
+                            active = (action_id, int(line), plain_offset)
+                        except ValueError:
+                            pass
+                cursor = link.end()
+                continue
+            plain_offset += 1
+            cursor += 1
+
+        regions: list[_CodeSelectionRegion] = []
+        for action_id, payload in copy_actions.items():
+            source_ranges = linked.get(action_id, [])
+            label_ranges = labels.get(action_id, [])
+            if not source_ranges or not label_ranges:
+                continue
+            payload_lines = payload.split("\n")
+            line_offsets: list[int] = []
+            source_offset = 0
+            for line_number, line in enumerate(payload_lines):
+                line_offsets.append(source_offset)
+                source_offset += len(line)
+                if line_number + 1 < len(payload_lines):
+                    source_offset += 1
+
+            mappings: list[_CodeSourceMap] = []
+            rendered_offsets: dict[int, int] = {}
+            for display_start, display_stop, line_number in source_ranges:
+                if line_number >= len(payload_lines):
+                    continue
+                source_line = payload_lines[line_number]
+                _rendered_line, source_map = visible_code_line(source_line)
+                expanded_to_source = list(source_map)
+                if not source_line:
+                    # CopyableMarkdown paints one linked placeholder cell for
+                    # an otherwise unstyleable empty source row. It represents
+                    # that row's newline, or the preceding newline for the
+                    # terminal empty component of a newline-terminated payload.
+                    newline_offset = (
+                        line_offsets[line_number]
+                        if line_number + 1 < len(payload_lines)
+                        else max(0, line_offsets[line_number] - 1)
+                    )
+                    expanded_to_source.append((newline_offset, newline_offset + 1))
+                    line_base = 0
+                else:
+                    line_base = line_offsets[line_number]
+                rendered_offset = rendered_offsets.get(line_number, 0)
+                for display_offset in range(display_start, display_stop):
+                    if rendered_offset >= len(expanded_to_source):
+                        break
+                    before, after = expanded_to_source[rendered_offset]
+                    mappings.append(
+                        _CodeSourceMap(
+                            display_offset,
+                            display_offset + 1,
+                            line_base + before,
+                            line_base + after,
+                        )
+                    )
+                    rendered_offset += 1
+                rendered_offsets[line_number] = rendered_offset
+            if not mappings:
+                continue
+
+            # The generated Copy link occupies Syntax's top padding row;
+            # Syntax retains one bottom padding row after the source. Keep both
+            # decorations inside the semantic region so dragging across the
+            # complete panel still projects to exact source text.
+            display_start = plain.rfind("\n", 0, label_ranges[0][0]) + 1
+            last_line_end = plain.find("\n", mappings[-1].display_stop)
+            if last_line_end < 0:
+                display_stop = len(plain)
+            else:
+                bottom_end = plain.find("\n", last_line_end + 1)
+                display_stop = len(plain) if bottom_end < 0 else bottom_end + 1
+            regions.append(
+                _CodeSelectionRegion(display_start, display_stop, payload, tuple(mappings))
+            )
+        return tuple(sorted(regions, key=lambda region: region.display_start))
+
+    def _selection_hit(
+        self,
+        *,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        clamp: bool = True,
+    ) -> _SelectionHit | None:
+        width = max(1, width)
+        height = max(1, height)
+        rows = self._display_rows(width)
+        top = self.top_row(width=width, height=height)
+        top_padding = (
+            max(0, height - len(rows))
+            if self._align_short_content_bottom and len(rows) <= height
+            else 0
+        )
+        visual_y = max(0, min(height - 1, y))
+        if visual_y < top_padding:
+            return None
+        row_index = max(0, min(len(rows) - 1, top + visual_y - top_padding))
+        row = rows[row_index]
+
+        display = self._row_text(row)
+        display_spans = self._grapheme_spans([("", char) for char in display])
+        records, bases = self._record_indexes()
+        record = records.get(row.anchor.record_id)
+        if record is None:
+            return None
+        if not display_spans or not row.source_spans:
+            if not clamp:
+                return None
+            insertion = min(
+                len(record.plain), self._character_offset(record, row.anchor.source_offset)
+            )
+            return _SelectionHit(record.record_id, insertion, insertion)
+
+        cell = max(0, x)
+        occupied = 0
+        total_cells = sum(max(1, cells) for _start, _stop, cells in display_spans)
+        if not clamp and cell >= total_cells:
+            return None
+        selected = len(display_spans) - 1
+        for index, (_start, _stop, cells) in enumerate(display_spans):
+            next_occupied = occupied + max(1, cells)
+            if cell < next_occupied:
+                selected = index
+                break
+            occupied = next_occupied
+        selected = min(selected, len(row.source_spans) - 1)
+        start, stop = row.source_spans[selected]
+        return _SelectionHit(record.record_id, start, stop)
+
+    def append(
+        self,
+        source: str,
+        *,
+        record_id: int | None = None,
+        copy_actions: dict[str, str] | None = None,
+    ) -> None:
+        safe = sanitize_transcript_ansi(source)
+        plain = strip_safe_ansi(safe)
+        first_record = not self._records
+        had_projectable_content = self._projectable_record_count > 0
+        separator = "" if first_record or self._ends_newline else "\n"
+        if record_id is None:
+            record_id = self._next_record_id
+            self._next_record_id += 1
+        else:
+            self._next_record_id = max(self._next_record_id, record_id + 1)
+        record_ansi = separator + safe
+        record = _Record(
+            record_id,
+            record_ansi,
+            separator + plain,
+            bool(separator),
+            _hyperlink_spans_from_safe_ansi(record_ansi),
+            self._copy_regions(record_ansi, copy_actions),
+            self._code_selection_regions(record_ansi, separator + plain, copy_actions),
+        )
+        prior_ends_newline = self._ends_newline
+        self._records.append(record)
+        if record.plain:
+            self._projectable_record_count += 1
+        self._record_index_cache = None
+        # Joining is defined by the retained record, including its separator.
+        # An empty/ANSI-only source after unterminated text therefore completes
+        # that line and must affect the next append exactly as replace() does.
+        self._ends_newline = record.plain.endswith("\n") if record.plain else prior_ends_newline
+
+        # An empty projection contains one synthetic display row. It is not a
+        # retained record and must never be extended into the first real one.
+        if first_record or (not had_projectable_content and bool(record.plain)):
+            # The empty model exposes one synthetic row that is not retained
+            # history. If navigation pinned that row, the first projectable
+            # append must resume tail-following rather than retain an anchor
+            # that cannot exist in the rebuilt projection.
+            if not had_projectable_content and not self._viewport.follows_tail:
+                self.jump_to_tail()
+            self._clear_caches()
+
+        # Existing width projections are updated from only the appended record.
+        # Drop the synthetic trailing row first; the new record supplies it.
+        for width, rows in list(self._projection_cache.items()):
+            index = self._projection_index_cache.get(width)
+            if prior_ends_newline and rows and not self._row_text(rows[-1]):
+                removed_index = len(rows) - 1
+                removed = rows.pop()
+                if index is not None:
+                    self._remove_index_row(index, removed, removed_index)
+            appended = self._project_record(record, width)
+            if separator and appended and not self._row_text(appended[0]):
+                # The separator terminates the preceding row; projecting the
+                # record independently must not create another blank row.
+                appended.pop(0)
+            start = len(rows)
+            rows.extend(appended)
+            if self._ends_newline:
+                rows.append(self._empty_tail_row(record))
+            if index is not None:
+                self._extend_index(index, rows, start)
+        self._formatted_cache.clear()
+
+    def prepend(
+        self,
+        source: str,
+        *,
+        record_id: int | None = None,
+        copy_actions: dict[str, str] | None = None,
+    ) -> None:
+        """Insert older history without moving anchors in retained newer records."""
+        safe = sanitize_transcript_ansi(source)
+        plain = strip_safe_ansi(safe)
+        if self._records and plain and not plain.endswith("\n"):
+            # The logical join belongs to the new older record; this leaves
+            # the existing first record and all of its viewport anchors intact.
+            safe += "\n"
+            plain += "\n"
+        if record_id is None:
+            record_id = self._next_record_id
+        else:
+            self._next_record_id = max(self._next_record_id, record_id + 1)
+        record = _Record(
+            record_id,
+            safe,
+            plain,
+            False,
+            _hyperlink_spans_from_safe_ansi(safe),
+            self._copy_regions(safe, copy_actions),
+            self._code_selection_regions(safe, plain, copy_actions),
+        )
+        was_empty = not self._records
+        self._records.insert(0, record)
+        if record.plain:
+            self._projectable_record_count += 1
+        self._record_index_cache = None
+        if was_empty:
+            self._ends_newline = record.plain.endswith("\n")
+            self._clear_caches()
+            return
+
+        for width, rows in list(self._projection_cache.items()):
+            rows[0:0] = self._project_record(record, width)
+        # Prefix insertion shifts cached row numbers. Rebuild anchor indexes
+        # lazily if an explicit viewport later asks for one.
+        self._projection_index_cache.clear()
+        self._formatted_cache.clear()
+
+    def replace(
+        self,
+        sources: list[str],
+        *,
+        record_ids: list[int] | None = None,
+        copy_actions: list[dict[str, str]] | None = None,
+    ) -> None:
+        """Reproject semantic records while preserving explicit record identity."""
+        if record_ids is not None and len(record_ids) != len(sources):
+            raise ValueError("record_ids must have one item per source")
+        if copy_actions is not None and len(copy_actions) != len(sources):
+            raise ValueError("copy_actions must have one item per source")
+        old_anchor = self._viewport.anchor
+        old_records = {record.record_id: record for record in self._records}
+        available: dict[str, list[int]] = {}
+        for record in self._records:
+            available.setdefault(record.plain.lstrip("\n"), []).append(record.record_id)
+        rebuilt: list[_Record] = []
+        accumulated_plain = ""
+        for index, source in enumerate(sources):
+            safe = sanitize_transcript_ansi(source)
+            plain = strip_safe_ansi(safe)
+            separator = "" if index == 0 or accumulated_plain.endswith("\n") else "\n"
+            if record_ids is not None:
+                record_id = record_ids[index]
+            else:
+                matches = available.get(plain)
+                record_id = matches.pop(0) if matches else self._next_record_id
+                if not matches and record_id == self._next_record_id:
+                    self._next_record_id += 1
+            self._next_record_id = max(self._next_record_id, record_id + 1)
+            record_ansi = separator + safe
+            actions = None if copy_actions is None else copy_actions[index]
+            rebuilt.append(
+                _Record(
+                    record_id,
+                    record_ansi,
+                    separator + plain,
+                    bool(separator),
+                    _hyperlink_spans_from_safe_ansi(record_ansi),
+                    self._copy_regions(record_ansi, actions),
+                    self._code_selection_regions(record_ansi, separator + plain, actions),
+                )
+            )
+            accumulated_plain += separator + plain
+        self._records = rebuilt
+        self._projectable_record_count = sum(bool(record.plain) for record in rebuilt)
+        self._record_index_cache = None
+        self._ends_newline = accumulated_plain.endswith("\n")
+        self.clear_selection()
+        self._clear_caches()
+        if old_anchor is not None:
+            replacement = next(
+                (record for record in rebuilt if record.record_id == old_anchor.record_id),
+                None,
+            )
+            old_record = old_records.get(old_anchor.record_id)
+            if replacement is None or old_record is None:
+                # The empty model exposes one synthetic display row whose
+                # record id is not retained identity. Never transfer that
+                # anchor to a first real record with the same id.
+                self.jump_to_tail()
+            elif old_record.plain != replacement.plain:
+                source_offset = self._source_offset_for_semantic(
+                    replacement.plain,
+                    old_anchor.semantic_offset,
+                    fallback=old_anchor.source_offset,
+                )
+                self._viewport = ViewportState(
+                    False,
+                    ViewportAnchor(
+                        old_anchor.record_id,
+                        source_offset,
+                        old_anchor.semantic_offset,
+                    ),
+                )
+
+    def clear(self) -> None:
+        self._records.clear()
+        self._projectable_record_count = 0
+        self._record_index_cache = None
+        self._ends_newline = False
+        self.clear_selection()
+        self.jump_to_tail()
+        self._clear_caches()
+
+    def evict_prefix(self, count: int) -> None:
+        """Evict oldest records and repair retained joining semantics."""
+        count = max(0, min(count, len(self._records)))
+        if not count:
+            return
+        old_anchor = self._viewport.anchor
+        evicted = self._records[:count]
+        del self._records[:count]
+        self._projectable_record_count -= sum(bool(record.plain) for record in evicted)
+        stripped_record_id: int | None = None
+        if self._records and self._records[0].has_separator:
+            first = self._records[0]
+            stripped_record_id = first.record_id
+            record_ansi = first.ansi[1:]
+            self._records[0] = _Record(
+                first.record_id,
+                record_ansi,
+                first.plain[1:],
+                False,
+                _hyperlink_spans_from_safe_ansi(record_ansi),
+                tuple(
+                    (max(0, start - 1), max(0, stop - 1), payload)
+                    for start, stop, payload in first.copy_regions
+                    if stop > 1
+                ),
+                tuple(
+                    _CodeSelectionRegion(
+                        max(0, region.display_start - 1),
+                        max(0, region.display_stop - 1),
+                        region.source,
+                        tuple(
+                            _CodeSourceMap(
+                                max(0, mapping.display_start - 1),
+                                max(0, mapping.display_stop - 1),
+                                mapping.source_start,
+                                mapping.source_stop,
+                            )
+                            for mapping in region.mappings
+                            if mapping.display_stop > 1
+                        ),
+                    )
+                    for region in first.code_selection_regions
+                    if region.display_stop > 1
+                ),
+            )
+            # Selection endpoints are record-local character offsets. Removing
+            # the synthetic joining newline must not move a selection that is
+            # wholly contained in the surviving record.
+            self._selection_anchor = self._shift_hit_after_prefix_strip(
+                self._selection_anchor, stripped_record_id
+            )
+            self._selection_active = self._shift_hit_after_prefix_strip(
+                self._selection_active, stripped_record_id
+            )
+        retained_ids = {record.record_id for record in self._records}
+        self._record_index_cache = None
+        self._ends_newline = bool(self._records and self._records[-1].plain.endswith("\n"))
+        if (
+            self._selection_anchor is not None
+            and self._selection_active is not None
+            and (
+                self._selection_anchor.record_id not in retained_ids
+                or self._selection_active.record_id not in retained_ids
+            )
+        ):
+            self._selection_anchor = self._selection_active = None
+        self._clear_caches()
+        if old_anchor is not None and old_anchor.record_id in retained_ids:
+            self._viewport = ViewportState(False, old_anchor)
+        else:
+            self.jump_to_tail()
+
+    @staticmethod
+    def _shift_hit_after_prefix_strip(
+        hit: _SelectionHit | None, record_id: int
+    ) -> _SelectionHit | None:
+        if hit is None or hit.record_id != record_id:
+            return hit
+        return _SelectionHit(
+            hit.record_id,
+            max(0, hit.before - 1),
+            max(0, hit.after - 1),
+        )
+
+    def _clear_caches(self) -> None:
+        self._projection_cache.clear()
+        self._projection_index_cache.clear()
+        self._formatted_cache.clear()
+
+    def _display_rows(self, width: int) -> Sequence[_ProjectedRow]:
+        """Return viewport rows, optionally omitting the synthetic final blank."""
+        rows = self._projection(width)
+        show_trailing_blank = self._show_trailing_blank
+        if callable(show_trailing_blank):
+            show_trailing_blank = show_trailing_blank()
+        if (
+            not show_trailing_blank
+            and self._viewport.follows_tail
+            and self._records
+            and self._ends_newline
+            and len(rows) > 1
+        ):
+            return rows[:-1]
+        return rows
+
+    def _projection(self, width: int) -> list[_ProjectedRow]:
+        width = max(1, width)
+        cached = self._projection_cache.get(width)
+        if cached is not None:
+            self._projection_cache.move_to_end(width)
+            return cached
+        rows: list[_ProjectedRow] = []
+        previous_ended_newline = True
+        for record_index, record in enumerate(self._records):
+            projected = self._project_record(record, width)
+            if (
+                projected
+                and not self._row_text(projected[0])
+                and (not previous_ended_newline or (record_index > 0 and not rows))
+            ):
+                projected.pop(0)
+            rows.extend(projected)
+            if record.plain:
+                previous_ended_newline = record.plain.endswith("\n")
+        if self._records and self._ends_newline:
+            rows.append(self._empty_tail_row(self._records[-1]))
+        if not rows:
+            rows.append(_ProjectedRow(ViewportAnchor(0, 0), (("", ""),)))
+        result = rows
+        self._projection_cache[width] = result
+        while len(self._projection_cache) > _MAX_PROJECTED_WIDTHS:
+            evicted_width, _ = self._projection_cache.popitem(last=False)
+            self._projection_index_cache.pop(evicted_width, None)
+        return result
+
+    @classmethod
+    def _project_record(cls, record: _Record, width: int) -> list[_ProjectedRow]:
+        # A semantically empty/ANSI-only record contributes no cells. Any
+        # separator required by joining is retained in ``record.plain`` and is
+        # projected normally (for example ``"\n"`` after unterminated text).
+        if not record.plain:
+            return []
+        safe = project_prompt_toolkit_ansi(record.ansi)
+        fragments = list(to_formatted_text(ANSI(safe)))
+        styled_chars: list[tuple[str, str]] = []
+        for style, text, *_ in fragments:
+            styled_chars.extend((style, char) for char in text)
+
+        rows: list[_ProjectedRow] = []
+        row: list[tuple[tuple[str, str], ...]] = []
+        row_source_spans: list[tuple[int, int]] = []
+        row_widths: list[int] = []
+        row_cells = 0
+        source_offset = 0
+        semantic_offset = 0
+        row_source_offset = 0
+        row_semantic_offset = 0
+
+        def emit_row(stop: int | None = None) -> None:
+            """Emit a row prefix and retain any suffix for the next row."""
+            nonlocal row, row_source_spans, row_widths, row_cells
+            nonlocal row_source_offset, row_semantic_offset
+            if stop is None:
+                stop = len(row_source_spans)
+            rows.append(
+                _ProjectedRow(
+                    ViewportAnchor(record.record_id, row_source_offset, row_semantic_offset),
+                    tuple(fragment for cluster in row[:stop] for fragment in cluster),
+                    tuple(row_source_spans[:stop]),
+                    record.hyperlinks,
+                )
+            )
+            emitted_spans = row_source_spans[:stop]
+            row_source_offset += len(emitted_spans)
+            row_semantic_offset += sum(
+                1 for start, stop_ in emitted_spans if not record.plain[start:stop_].isspace()
+            )
+            row = row[stop:]
+            row_source_spans = row_source_spans[stop:]
+            row_widths = row_widths[stop:]
+            row_cells = sum(row_widths)
+
+        def word_break() -> int | None:
+            """Return a natural break after the last whitespace in this row."""
+            for index in range(len(row) - 1, -1, -1):
+                if "".join(char for _style, char in row[index]).isspace():
+                    # Keep the delimiter in the preceding visual row. This
+                    # preserves exact copy semantics without indenting the
+                    # continuation by a source separator.
+                    return index + 1
+            return None
+
+        for start, stop, cells in cls._grapheme_spans(styled_chars):
+            cluster = styled_chars[start:stop]
+            cluster_text = "".join(char for _, char in cluster)
+            if cluster_text == "\n":
+                emit_row()
+                source_offset += 1
+                row_source_offset = source_offset
+                row_semantic_offset = semantic_offset
+                continue
+            # Keep valid extended graphemes intact. The transcript window
+            # installs each cluster as one screen atom with this terminal-cell
+            # width, avoiding prompt_toolkit's code-point width accounting for
+            # flags, ZWJ emoji, modifiers, and keycaps. NFC is still useful for
+            # canonically composable text. Only a cluster physically wider
+            # than the entire viewport gets a viewport-local fallback; source
+            # text and exports remain unchanged.
+            normalized = normalize("NFC", cluster_text)
+            if len(normalized) == 1:
+                cluster = [(cluster[0][0] if cluster else "", normalized)]
+                cluster_text = normalized
+            cells = min(max(cells, 0), width)
+
+            while row and cells and row_cells + cells > width:
+                # Prefer a semantic word boundary. If this row has no
+                # whitespace (a URL, identifier, or other long token), fold at
+                # the grapheme boundary as the lossless fallback.
+                natural_break = word_break()
+                emit_row(natural_break)
+            row.append(tuple(cluster))
+            row_source_spans.append((start, stop))
+            row_widths.append(cells)
+            row_cells += cells
+            source_offset += 1
+            if not cluster_text.isspace():
+                semantic_offset += 1
+        if row or not rows or (styled_chars and styled_chars[-1][1] != "\n"):
+            emit_row()
+        return rows
+
+    @staticmethod
+    def _grapheme_spans(chars: list[tuple[str, str]]) -> list[tuple[int, int, int]]:
+        """Return terminal grapheme spans without allowing spans across newlines."""
+        text = "".join(char for _, char in chars)
+        spans: list[tuple[int, int, int]] = []
+        offset = 0
+        lines = text.split("\n")
+        for line_index, line in enumerate(lines):
+            rich_spans, _ = split_graphemes(line)
+            index = 0
+            while index < len(rich_spans):
+                start, stop, cells = rich_spans[index]
+                # Rich intentionally treats regional indicators separately.
+                # Terminal wrapping needs a flag pair to remain one cluster.
+                if index + 1 < len(rich_spans):
+                    next_start, next_stop, next_cells = rich_spans[index + 1]
+                    first = line[start:stop]
+                    second = line[next_start:next_stop]
+                    if FullscreenTranscriptModel._is_regional(
+                        first
+                    ) and FullscreenTranscriptModel._is_regional(second):
+                        stop = next_stop
+                        cells += next_cells
+                        index += 1
+                spans.append((offset + start, offset + stop, cells))
+                index += 1
+            offset += len(line)
+            if line_index + 1 < len(lines):
+                spans.append((offset, offset + 1, 0))
+                offset += 1
+        return spans
+
+    @staticmethod
+    def _is_regional(value: str) -> bool:
+        return len(value) == 1 and 0x1F1E6 <= ord(value) <= 0x1F1FF
+
+    @classmethod
+    def _empty_tail_row(cls, record: _Record) -> _ProjectedRow:
+        # Use exactly the newline-aware span accounting from ``_project_record``.
+        # Rich's public splitter can merge consecutive newlines into one span,
+        # which would make this final synthetic anchor non-monotonic and break
+        # the bisected per-record projection index.
+        chars = [("", char) for char in record.plain]
+        spans = cls._grapheme_spans(chars)
+        semantic_length = sum(
+            1 for start, stop, _cells in spans if not record.plain[start:stop].isspace()
+        )
+        return _ProjectedRow(
+            ViewportAnchor(record.record_id, len(spans), semantic_length),
+            (("", ""),),
+        )
+
+    def _format_rows(
+        self,
+        rows: Sequence[_ProjectedRow],
+        *,
+        top_padding: int = 0,
+        hyperlink_marker: int = 0,
+    ) -> FormattedText:
+        fragments: list[tuple[str, str]] = []
+        for _ in range(top_padding):
+            fragments.append(("", "\n"))
+        selected = self._selection_bounds()
+        current_search = self._search_matches[self._search_cursor] if self._search_matches else None
+        search_by_record: dict[int, tuple[list[int], list[_SearchMatch]]] = {}
+        for match in self._search_matches:
+            starts, matches = search_by_record.setdefault(match.record_id, ([], []))
+            starts.append(match.start)
+            matches.append(match)
+        records, record_bases = self._record_indexes()
+        has_hyperlinks = any(row.hyperlinks for row in rows)
+        for index, row in enumerate(rows):
+            if index:
+                fragments.append(("", "\n"))
+            record = records.get(row.anchor.record_id)
+            if record is None or not row.source_spans:
+                fragments.extend(row.fragments)
+                continue
+            display_chars = [(style, char) for style, text in row.fragments for char in text]
+            display_spans = self._grapheme_spans(display_chars)
+            base = record_bases[record.record_id]
+            link_index = 0
+            record_search = search_by_record.get(record.record_id)
+            search_index = 0
+            if record_search and row.source_spans:
+                search_index = max(0, bisect_left(record_search[0], row.source_spans[0][0]) - 1)
+            for offset, (start, stop, _cells) in enumerate(display_spans):
+                highlighted = False
+                search_match = False
+                current_match = False
+                link: str | None = None
+                if offset < len(row.source_spans):
+                    source_start, source_stop = row.source_spans[offset]
+                    if selected is not None:
+                        highlighted = (
+                            base + source_start < selected[1] and base + source_stop > selected[0]
+                        )
+                    if record_search:
+                        _starts, record_matches = record_search
+                        while (
+                            search_index < len(record_matches)
+                            and record_matches[search_index].stop <= source_start
+                        ):
+                            search_index += 1
+                        if search_index < len(record_matches):
+                            match = record_matches[search_index]
+                            if match.start < source_stop and match.stop > source_start:
+                                search_match = True
+                                current_match = match == current_search
+                    while (
+                        link_index < len(row.hyperlinks)
+                        and row.hyperlinks[link_index][1] <= source_start
+                    ):
+                        link_index += 1
+                    if link_index < len(row.hyperlinks):
+                        link_start, link_stop, target = row.hyperlinks[link_index]
+                        if link_start < source_stop and link_stop > source_start:
+                            link = target
+                if has_hyperlinks:
+                    sequence = f"\x1b]8;;{link}\x1b\\" if link is not None else "\x1b]8;;\x1b\\"
+                    fragments.append(("[ZeroWidthEscape]", sequence))
+                for style, char in display_chars[start:stop]:
+                    if link is not None:
+                        # Alternating the bounded marker each frame forces OSC-8
+                        # cells to repaint when only their target changes.
+                        style = (f"{style} class:native-hyperlink-{hyperlink_marker}").strip()
+                    if search_match:
+                        search_style = (
+                            "class:transcript-search-current"
+                            if current_match
+                            else "class:transcript-search-match"
+                        )
+                        style = f"{style} {search_style}".strip()
+                    if highlighted:
+                        style = f"{style} class:selected".strip()
+                    fragments.append((style, char))
+        return FormattedText(fragments or [("", "")])
+
+    @classmethod
+    def _character_offset(cls, record: _Record, source_offset: int) -> int:
+        """Map a grapheme offset to a record-local character offset."""
+        if source_offset <= 0:
+            return 0
+        spans = cls._grapheme_spans([("", char) for char in record.plain])
+        if source_offset >= len(spans):
+            return len(record.plain)
+        return spans[source_offset][0]
+
+    def _selection_bounds(self) -> tuple[int, int] | None:
+        if self._selection_anchor is None or self._selection_active is None:
+            return None
+        _records, bases = self._record_indexes()
+        anchor_base = bases.get(self._selection_anchor.record_id)
+        active_base = bases.get(self._selection_active.record_id)
+        if anchor_base is None or active_base is None:
+            return None
+        anchor_before = anchor_base + self._selection_anchor.before
+        active_before = active_base + self._selection_active.before
+        anchor_after = anchor_base + self._selection_anchor.after
+        active_after = active_base + self._selection_active.after
+        return min(anchor_before, active_before), max(anchor_after, active_after)
+
+    def _record_indexes(self) -> tuple[dict[int, _Record], dict[int, int]]:
+        """Return cached identity and logical-offset indexes for retained records."""
+        if self._record_index_cache is not None:
+            return self._record_index_cache
+        records: dict[int, _Record] = {}
+        bases: dict[int, int] = {}
+        offset = 0
+        for record in self._records:
+            records[record.record_id] = record
+            bases[record.record_id] = offset
+            offset += len(record.plain)
+        self._record_index_cache = (records, bases)
+        return self._record_index_cache
+
+    def _row_index_for_anchor(
+        self,
+        width: int,
+        rows: Sequence[_ProjectedRow],
+        anchor: ViewportAnchor,
+    ) -> int | None:
+        index = self._projection_index_cache.get(width)
+        if index is None:
+            index = {}
+            self._extend_index(index, rows, 0)
+            self._projection_index_cache[width] = index
+            while len(self._projection_index_cache) > _MAX_PROJECTED_WIDTHS:
+                self._projection_index_cache.popitem(last=False)
+        else:
+            self._projection_index_cache.move_to_end(width)
+        record_rows = index.get(anchor.record_id)
+        if record_rows is None:
+            return None
+        offsets, indices = record_rows
+        position = bisect_right(offsets, anchor.source_offset) - 1
+        return indices[max(0, position)]
+
+    @staticmethod
+    def _extend_index(
+        index: dict[int, tuple[list[int], list[int]]],
+        rows: Sequence[_ProjectedRow],
+        start: int,
+    ) -> None:
+        for row_index in range(start, len(rows)):
+            anchor = rows[row_index].anchor
+            offsets, indices = index.setdefault(anchor.record_id, ([], []))
+            offsets.append(anchor.source_offset)
+            indices.append(row_index)
+
+    @staticmethod
+    def _remove_index_row(
+        index: dict[int, tuple[list[int], list[int]]],
+        row: _ProjectedRow,
+        row_index: int,
+    ) -> None:
+        record_rows = index.get(row.anchor.record_id)
+        if record_rows is None:
+            return
+        offsets, indices = record_rows
+        if indices and indices[-1] == row_index:
+            offsets.pop()
+            indices.pop()
+        if not indices:
+            index.pop(row.anchor.record_id, None)
+
+    @classmethod
+    def _source_offset_for_semantic(
+        cls,
+        text: str,
+        semantic_offset: int,
+        *,
+        fallback: int,
+    ) -> int:
+        # Remapping must use the exact source coordinate system used by
+        # ``_project_record``. In particular, regional indicators are merged
+        # into one flag grapheme and newlines remain distinct spans.
+        spans = cls._grapheme_spans([("", char) for char in text])
+        if semantic_offset <= 0:
+            # Preserve a distinct leading-whitespace/blank-row location when
+            # there is no semantic token available as a stronger landmark.
+            return min(max(0, fallback), len(spans))
+        semantic = 0
+        for source, (start, stop, _cells) in enumerate(spans):
+            if text[start:stop].isspace():
+                continue
+            if semantic >= semantic_offset:
+                return source
+            semantic += 1
+        return len(spans)
+
+    @staticmethod
+    def _row_text(row: _ProjectedRow) -> str:
+        return "".join(text for _, text in row.fragments)
+
+    @staticmethod
+    def _row_text_length(row: _ProjectedRow) -> int:
+        return sum(len(text) for _, text in row.fragments)
