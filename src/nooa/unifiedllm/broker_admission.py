@@ -41,6 +41,7 @@ from nooa.unifiedllm.admission import (
 _PROTOCOL_VERSION = 1
 _MAX_MESSAGE_BYTES = 16 * 1024
 _IDLE_CONNECTION_SECONDS = 1.0
+_WRITER_CLOSE_TIMEOUT_SECONDS = 0.5
 
 
 def _validated_loopback_host(host: str) -> str:
@@ -54,6 +55,11 @@ def _validated_loopback_host(host: str) -> str:
     if not address.is_loopback:
         raise ValueError("host must be a numeric loopback IP address")
     return host
+
+
+def _socket_family(host: str) -> socket.AddressFamily:
+    """Return the socket family for a validated numeric IP address."""
+    return socket.AF_INET6 if ipaddress.ip_address(host).version == 6 else socket.AF_INET
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +263,7 @@ class _AdmissionBrokerServer:
             self._handle,
             self.host,
             self.port,
-            family=socket.AF_INET,
+            family=_socket_family(self.host),
             backlog=2048,
             limit=_MAX_MESSAGE_BYTES + 1,
         )
@@ -330,7 +336,7 @@ class _AdmissionBrokerServer:
             # the handler has returned its lease, so do not let transport teardown hold the
             # server's shutdown gather indefinitely.
             with contextlib.suppress(Exception, asyncio.CancelledError):
-                await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
+                await asyncio.wait_for(writer.wait_closed(), timeout=_WRITER_CLOSE_TIMEOUT_SECONDS)
 
     async def _wait_for_outcome(
         self,
@@ -458,7 +464,11 @@ class BrokerAdmissionController:
             pooled = self._take_idle_connection(loop)
             if pooled is None:
                 remaining = self._remaining_timeout(started)
-                connection = asyncio.open_connection(self.config.host, self.config.port)
+                connection = asyncio.open_connection(
+                    self.config.host,
+                    self.config.port,
+                    family=_socket_family(self.config.host),
+                )
                 if remaining is None:
                     reader, writer = await connection
                 else:
@@ -472,7 +482,7 @@ class BrokerAdmissionController:
                 "ticket": uuid.uuid4().hex,
             }
             writer.write(json.dumps(request).encode() + b"\n")
-            await writer.drain()
+            await self._drain(writer, started)
             first = await self._readline(reader, started)
             if not first:
                 raise AdmissionUnavailableError("Admission broker closed before granting a lease")
@@ -490,7 +500,7 @@ class BrokerAdmissionController:
                 raise AdmissionUnavailableError(f"Unexpected admission broker response: {status!r}")
 
             writer.write(b'{"status":"accept"}\n')
-            await writer.drain()
+            await self._drain(writer, started)
             second = await self._readline(reader, started)
             if not second or json.loads(second).get("status") != "ready":
                 raise AdmissionUnavailableError("Admission broker did not confirm the lease")
@@ -536,6 +546,13 @@ class BrokerAdmissionController:
             return await reader.readline()
         return await asyncio.wait_for(reader.readline(), remaining)
 
+    async def _drain(self, writer: asyncio.StreamWriter, started: float) -> None:
+        remaining = self._remaining_timeout(started)
+        if remaining is None:
+            await writer.drain()
+        else:
+            await asyncio.wait_for(writer.drain(), remaining)
+
     def _remaining_timeout(self, started: float) -> float | None:
         """Return the queue deadline remainder or raise when it has elapsed."""
         if self.queue_timeout is None:
@@ -570,8 +587,8 @@ class BrokerAdmissionController:
     @staticmethod
     async def _close_writer(writer: asyncio.StreamWriter) -> None:
         writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.wait_for(writer.wait_closed(), timeout=_WRITER_CLOSE_TIMEOUT_SECONDS)
 
     def close(self) -> None:
         """Close this controller's idle connections; active permits close when released."""
@@ -703,13 +720,14 @@ class AdmissionBroker:
         self.group = validated_group
         self.host = _validated_loopback_host(host)
         self.port = port
-        self._auth_token = secrets.token_urlsafe(32)
+        self._auth_token: str | None = None
         self._server: _AdmissionBrokerServer | None = None
 
     def start(self) -> AdmissionBroker:
         """Bind the broker and start its background server thread."""
         if self._server is not None:
             return self
+        auth_token = secrets.token_urlsafe(32)
         server = _AdmissionBrokerServer(
             (self.host, self.port),
             state=_BrokerState(
@@ -717,22 +735,24 @@ class AdmissionBroker:
                 max_in_flight=self.max_in_flight,
                 max_calls=self.max_calls,
             ),
-            auth_token=self._auth_token,
+            auth_token=auth_token,
         )
         server.start()
+        self._auth_token = auth_token
         self._server = server
         return self
 
     def controller_config(self, *, queue_timeout: float | None = None) -> BrokerAdmissionConfig:
         """Return serializable settings for child-process controllers."""
-        if self._server is None:
+        auth_token = self._auth_token
+        if self._server is None or auth_token is None:
             raise RuntimeError("AdmissionBroker.start() must be called first")
         host = str(self._server.server_address[0])
         port = int(self._server.server_address[1])
         return BrokerAdmissionConfig(
             host=host,
             port=port,
-            auth_token=self._auth_token,
+            auth_token=auth_token,
             group=self.group,
             max_in_flight=self.max_in_flight,
             max_calls=self.max_calls,
@@ -755,6 +775,7 @@ class AdmissionBroker:
         if server is None:
             return
         self._server = None
+        self._auth_token = None
         server.close()
 
     def __enter__(self) -> AdmissionBroker:

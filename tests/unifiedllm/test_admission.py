@@ -231,6 +231,41 @@ async def test_waiters_are_admitted_fifo():
 
 
 @pytest.mark.asyncio
+async def test_observer_failure_returns_immediate_and_queued_capacity():
+    policy = _policy(1, group="observer-failure")
+
+    def fail_observation(_detail: dict[str, Any]) -> None:
+        raise RuntimeError("observer failed")
+
+    with pytest.raises(RuntimeError, match="observer failed"):
+        await policy.acquire(fail_observation)
+
+    assert policy.identity is not None
+    group = _get_or_create_group(policy.identity, policy.display_name or "", None)
+    assert group is not None
+    assert group.active == 0
+
+    holder = await policy.acquire(lambda _detail: None)
+    assert holder is not None
+    waiting = asyncio.create_task(policy.acquire(fail_observation))
+    for _ in range(100):
+        if group.queued == 1:
+            break
+        await asyncio.sleep(0)
+    assert group.queued == 1
+
+    holder.release()
+    with pytest.raises(RuntimeError, match="observer failed"):
+        await asyncio.wait_for(waiting, timeout=1)
+
+    assert group.active == 0
+    assert group.queued == 0
+    probe = await asyncio.wait_for(policy.acquire(lambda _detail: None), timeout=1)
+    assert probe is not None
+    probe.release()
+
+
+@pytest.mark.asyncio
 async def test_queued_cancellation_does_not_dispatch_or_leak_capacity():
     policy = _policy(1)
     first = await policy.acquire(lambda _detail: None)

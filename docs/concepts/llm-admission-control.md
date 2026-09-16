@@ -90,11 +90,14 @@ successful-response counter.
 The broker binds only to a numeric loopback address (`127.0.0.0/8` or `::1`)
 and grants FIFO, connection-scoped leases. It does not provide TLS, so both the
 broker and its serializable controller configuration reject non-loopback hosts.
-A queued timeout or cancellation closes the connection before provider
-dispatch. If a child exits while holding a lease, its closed connection returns
-the concurrency slot. The application must keep the parent broker alive for the
-entire run. Start children with Python's `spawn` or `forkserver` context; do not
-start the broker's background thread and then create children with `fork`.
+The queue deadline covers connection setup, protocol writes, and waiting for a
+lease. A timeout or cancellation before admission closes the connection without
+provider dispatch. If a child exits while holding a lease, its closed connection
+returns the concurrency slot. The application must keep the parent broker alive
+for the entire run. Restarting the same broker object creates a fresh bearer
+token, so configurations from an earlier broker lifetime fail closed. Start
+children with Python's `spawn` or `forkserver` context; do not start the broker's
+background thread and then create children with `fork`.
 
 A controller reuses a bounded number of idle connections so a long run does not
 consume one ephemeral TCP port per provider attempt. Idle connections expire
@@ -110,8 +113,9 @@ construction rejects mixing an injected controller with `max_in_flight`,
 
 Configured attempts add an `llm.queue` event to the active trace span with the
 group, outcome, queued flag, wait duration, queue depth, and limit. Generation
-harness metrics aggregate admissions, queued attempts, timeouts, cancellations,
-maximum depth, and wait-time statistics.
+harness metrics aggregate admissions, queued attempts, call-cap rejections,
+timeouts, cancellations, unavailable-controller errors, maximum depth, and
+wait-time statistics.
 
 ## Scope boundaries
 

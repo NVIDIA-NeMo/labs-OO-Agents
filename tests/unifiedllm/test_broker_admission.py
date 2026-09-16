@@ -8,6 +8,7 @@ import asyncio
 import multiprocessing
 import os
 import queue
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -37,6 +38,20 @@ async def _wait_for_snapshot(
         await asyncio.sleep(0.005)
         snapshot = broker.snapshot()
     return snapshot
+
+
+def _ipv6_loopback_available() -> bool:
+    """Return whether this host can bind a TCP socket on IPv6 loopback."""
+    if not socket.has_ipv6:
+        return False
+    probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        probe.bind(("::1", 0))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
 
 
 def _join_spawned_processes(processes: list[Any], *, timeout: float = 60) -> None:
@@ -129,6 +144,23 @@ def test_broker_accepts_numeric_loopback_hosts(host: str):
     assert config.host == host
 
 
+@pytest.mark.skipif(not _ipv6_loopback_available(), reason="IPv6 loopback is unavailable")
+@pytest.mark.asyncio
+async def test_ipv6_loopback_broker_starts_and_serves_controller():
+    observations: list[dict[str, Any]] = []
+    with AdmissionBroker(max_in_flight=1, group="ipv6-test", host="::1") as broker:
+        config = broker.controller_config(queue_timeout=1)
+        controller = config.controller()
+        permit = await asyncio.wait_for(controller.acquire(observations.append), timeout=2)
+        permit.release()
+        snapshot = await _wait_for_snapshot(broker, lambda current: current.active == 0)
+        controller.close()
+
+    assert config.host == "::1"
+    assert observations[0]["outcome"] == "immediate"
+    assert snapshot.admitted_calls == 1
+
+
 @pytest.mark.parametrize(
     "host",
     ["0.0.0.0", "192.0.2.1", "::", "2001:db8::1", "localhost", "", None, 1234],
@@ -218,6 +250,47 @@ async def test_broker_queue_timeout_bounds_connection_establishment(monkeypatch)
     with pytest.raises(AdmissionTimeoutError):
         await asyncio.wait_for(config.controller().acquire(observations.append), timeout=1)
 
+    assert observations[0]["outcome"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_broker_queue_timeout_bounds_handshake_writes_and_cleanup(monkeypatch):
+    class StalledWriter:
+        closed = False
+
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            await asyncio.Event().wait()
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            await asyncio.Event().wait()
+
+    writer = StalledWriter()
+
+    async def stalled_connection(*_args: Any, **_kwargs: Any):
+        return asyncio.StreamReader(), writer
+
+    monkeypatch.setattr(asyncio, "open_connection", stalled_connection)
+    config = BrokerAdmissionConfig(
+        host="127.0.0.1",
+        port=443,
+        auth_token="test-token",  # noqa: S106 -- inert test credential
+        group="write-timeout",
+        max_in_flight=1,
+        max_calls=None,
+        queue_timeout=0.01,
+    )
+    observations: list[dict[str, Any]] = []
+
+    with pytest.raises(AdmissionTimeoutError):
+        await asyncio.wait_for(config.controller().acquire(observations.append), timeout=1)
+
+    assert writer.closed
     assert observations[0]["outcome"] == "timeout"
 
 
@@ -358,6 +431,50 @@ async def test_broker_owner_can_restart_and_publish_a_fresh_connection():
 
     assert snapshot.admitted_calls == 1
     assert snapshot.peak_active == 1
+
+
+@pytest.mark.asyncio
+async def test_broker_restart_rotates_credentials_at_the_same_address():
+    broker = AdmissionBroker(max_in_flight=1, group="credential-rotation").start()
+    stale = broker.controller_config(queue_timeout=1)
+    broker.close()
+
+    broker.port = stale.port
+    broker.start()
+    try:
+        fresh = broker.controller_config(queue_timeout=1)
+        observations: list[dict[str, Any]] = []
+        with pytest.raises(AdmissionUnavailableError, match="credentials"):
+            await stale.controller().acquire(observations.append)
+
+        permit = await fresh.controller().acquire(lambda _detail: None)
+        permit.release()
+        snapshot = await _wait_for_snapshot(broker, lambda current: current.active == 0)
+    finally:
+        broker.close()
+
+    assert stale.port == fresh.port
+    assert stale.auth_token != fresh.auth_token
+    assert observations[0]["outcome"] == "unavailable"
+    assert snapshot.admitted_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_broker_observer_failure_returns_the_confirmed_lease():
+    def fail_observation(_detail: dict[str, Any]) -> None:
+        raise RuntimeError("observer failed")
+
+    with AdmissionBroker(max_in_flight=1, group="observer-failure") as broker:
+        controller = broker.controller(queue_timeout=1)
+        with pytest.raises(RuntimeError, match="observer failed"):
+            await controller.acquire(fail_observation)
+
+        snapshot = await _wait_for_snapshot(broker, lambda current: current.active == 0)
+        probe = await asyncio.wait_for(controller.acquire(lambda _detail: None), timeout=1)
+        probe.release()
+        controller.close()
+
+    assert snapshot.active == 0
 
 
 @pytest.mark.asyncio

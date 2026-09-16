@@ -154,8 +154,10 @@ class _AdmissionGroup:
                 self._queued += 1
 
         if immediate:
-            observer(self._observation("immediate", False, 0.0, queue_depth))
-            return _Permit(self)
+            return self._permit_with_observation(
+                observer,
+                self._observation("immediate", False, 0.0, queue_depth),
+            )
 
         assert waiter is not None
         try:
@@ -186,8 +188,24 @@ class _AdmissionGroup:
             waiter.state = "acquired"
 
         wait_s = time.perf_counter() - started
-        observer(self._observation("admitted_after_wait", True, wait_s, waiter.queue_depth))
-        return _Permit(self)
+        return self._permit_with_observation(
+            observer,
+            self._observation("admitted_after_wait", True, wait_s, waiter.queue_depth),
+        )
+
+    def _permit_with_observation(
+        self,
+        observer: AdmissionObserver,
+        observation: dict[str, Any],
+    ) -> _Permit:
+        """Return a permit without leaking its slot if observation fails."""
+        permit = _Permit(self)
+        try:
+            observer(observation)
+        except BaseException:
+            permit.release()
+            raise
+        return permit
 
     def _observation(
         self,
