@@ -1021,6 +1021,21 @@ class TestStartupLockCheck:
             blocker.close()
 
 
+class TestSchemaConnectionLifecycle:
+    """``init_db`` must not leak the schema connection it replaces."""
+
+    def test_reinit_closes_the_previous_schema_connection(self, tmp_path, monkeypatch):
+        """A second init_db() at a new path closes the first connection."""
+        first = store._db
+        monkeypatch.setattr(store, "DB_PATH", tmp_path / "second.db")
+
+        store.init_db()
+
+        assert store._db is not first
+        with pytest.raises(sqlite3.ProgrammingError):
+            first.execute("SELECT 1")
+
+
 class TestExistingSessionEvalEnrichment:
     def test_existing_default_session_can_be_grouped_into_eval_experiment(self):
         store.ingest(_make_body(session_id="trial-1", experiment="default"))
