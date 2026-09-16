@@ -112,6 +112,42 @@ def test_broker_rejects_invalid_call_cap(value: Any):
         AdmissionBroker(max_in_flight=1, max_calls=value)
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.42.0.9", "::1"])
+def test_broker_accepts_numeric_loopback_hosts(host: str):
+    broker = AdmissionBroker(max_in_flight=1, host=host)
+    config = BrokerAdmissionConfig(
+        host=host,
+        port=1,
+        auth_token="test-token",  # noqa: S106 -- inert test credential
+        group="loopback-test",
+        max_in_flight=1,
+        max_calls=None,
+        queue_timeout=None,
+    )
+
+    assert broker.host == host
+    assert config.host == host
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["0.0.0.0", "192.0.2.1", "::", "2001:db8::1", "localhost", "", None, 1234],
+)
+def test_broker_rejects_non_loopback_or_non_numeric_hosts(host: Any):
+    with pytest.raises(ValueError, match="numeric loopback"):
+        AdmissionBroker(max_in_flight=1, host=host)
+    with pytest.raises(ValueError, match="numeric loopback"):
+        BrokerAdmissionConfig(
+            host=host,
+            port=1,
+            auth_token="test-token",  # noqa: S106 -- inert test credential
+            group="loopback-test",
+            max_in_flight=1,
+            max_calls=None,
+            queue_timeout=None,
+        )
+
+
 @pytest.mark.asyncio
 async def test_broker_queues_and_admits_in_fifo_order():
     with AdmissionBroker(max_in_flight=1, group="fifo-test") as broker:
@@ -169,7 +205,7 @@ async def test_broker_queue_timeout_bounds_connection_establishment(monkeypatch)
 
     monkeypatch.setattr(asyncio, "open_connection", stalled_connection)
     config = BrokerAdmissionConfig(
-        host="192.0.2.1",
+        host="127.0.0.1",
         port=443,
         auth_token="test-token",  # noqa: S106 -- inert test credential
         group="connect-timeout",

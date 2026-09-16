@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import ipaddress
 import json
 import secrets
 import socket
@@ -42,6 +43,19 @@ _MAX_MESSAGE_BYTES = 16 * 1024
 _IDLE_CONNECTION_SECONDS = 1.0
 
 
+def _validated_loopback_host(host: str) -> str:
+    """Return a numeric loopback host or reject cleartext off-host transport."""
+    if not isinstance(host, str):
+        raise ValueError("host must be a numeric loopback IP address")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as error:
+        raise ValueError("host must be a numeric loopback IP address") from error
+    if not address.is_loopback:
+        raise ValueError("host must be a numeric loopback IP address")
+    return host
+
+
 @dataclass(frozen=True, slots=True)
 class BrokerAdmissionConfig:
     """Serializable connection settings passed from a parent to its children."""
@@ -53,6 +67,10 @@ class BrokerAdmissionConfig:
     max_in_flight: int
     max_calls: int | None
     queue_timeout: float | None
+
+    def __post_init__(self) -> None:
+        """Prevent controller credentials from being sent over a non-loopback socket."""
+        _validated_loopback_host(self.host)
 
     def controller(self) -> BrokerAdmissionController:
         """Create an independent controller client for the current process."""
@@ -683,7 +701,7 @@ class AdmissionBroker:
         self.max_in_flight = limit
         self.max_calls = max_calls
         self.group = validated_group
-        self.host = host
+        self.host = _validated_loopback_host(host)
         self.port = port
         self._auth_token = secrets.token_urlsafe(32)
         self._server: _AdmissionBrokerServer | None = None

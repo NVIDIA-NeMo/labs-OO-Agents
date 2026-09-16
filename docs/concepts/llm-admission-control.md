@@ -87,8 +87,10 @@ allows at most 100 provider attempts for the lifetime of that broker. It counts
 attempts, including retries, once the broker confirms a lease; it is not a
 successful-response counter.
 
-The broker binds to loopback by default and grants FIFO, connection-scoped
-leases. A queued timeout or cancellation closes the connection before provider
+The broker binds only to a numeric loopback address (`127.0.0.0/8` or `::1`)
+and grants FIFO, connection-scoped leases. It does not provide TLS, so both the
+broker and its serializable controller configuration reject non-loopback hosts.
+A queued timeout or cancellation closes the connection before provider
 dispatch. If a child exits while holding a lease, its closed connection returns
 the concurrency slot. The application must keep the parent broker alive for the
 entire run. Start children with Python's `spawn` or `forkserver` context; do not
