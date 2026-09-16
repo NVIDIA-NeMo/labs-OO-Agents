@@ -1203,7 +1203,13 @@ def _populate_session_turns_from_generation(
         span_name = span["name"]
         span_attrs = span.get("attributes", {})
 
-        if span_name == "acompletion":
+        if span_attrs.get("openinference.span.kind") == "LLM" or span_name in {
+            "llm.call",
+            "acompletion",
+            "completion",
+            "aresponses",
+            "responses",
+        }:
             parent_id = span.get("parent_span_id")
             while parent_id:
                 parent_span = span_index.get(parent_id)
