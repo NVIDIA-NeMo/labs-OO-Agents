@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict
 from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.models import BlockMetadata
 from nooa.context_blocks.roles import Role
-from nooa.events import LLMResponse
 from nooa.llm_types import CacheBoundary
 
 if TYPE_CHECKING:
@@ -62,13 +61,7 @@ def select_context_events(events: Any, *, call: "CurrentCall") -> tuple[EventBas
         event
         for event in selected
         if getattr(event, "_role", Role.USER) not in (Role.RUNTIME_EVENT, Role.METADATA)
-        and not (
-            isinstance(event, LLMResponse)
-            and not event.content.strip()
-            and not event.tool_calls
-            and not getattr(event, "llm_state", None)
-            and not getattr(event, "reasoning", None)
-        )
+        and not event.is_empty
     )
 
 

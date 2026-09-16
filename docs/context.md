@@ -104,7 +104,10 @@ class DefaultAgentView(ContextView[Agent]):
         prefix, trailing = partition_blocks(blocks)
 
         items = [*prefix, *skill_items, *visible_events(agent, call)]
-        if items:
+        boundaries = sum(isinstance(item, CacheBoundary) for item in items)
+        if boundaries > 1:
+            raise ValueError("multiple cache boundaries")
+        if items and boundaries == 0:
             items.append(CacheBoundary())
         items.extend(trailing)
         evictable = [*reversed(user_blocks(trailing)), *reversed(framework_blocks(trailing))]
@@ -158,7 +161,7 @@ resolve view
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
 - The renderer expands items in place and emits no boundary text. A canonical assistant tool-call turn and its linked results form one atomic replay group; a boundary cannot split it.
 - Provider formatting preserves a cache marker when its output can carry one and otherwise removes it. UnifiedLLM maps explicit boundaries to provider annotations or removes them when unsupported. Without a boundary, NOOA emits no explicit `cache_control` annotation.
-- The selected agent view owns cache placement. The default adds at most one boundary after visible history and before trailing context; custom views receive none implicitly.
+- The selected agent view owns cache placement. The default preserves one boundary contributed by a skill, rejects multiple, or adds one after visible history and before trailing context; custom agent views receive none implicitly.
 - Provider-managed automatic caching and transport-routing hints such as `prompt_cache_key` are independent of explicit cache breakpoints.
 - Bounded serialization is formatting; recovery for missing data or other invented content belongs to event production or view policy.
 - Downstream stages preserve view order, except for declared atomic replay groups, or raise `UnsupportedContextLayout`; they do not resolve, evict, repair, or invent content.
