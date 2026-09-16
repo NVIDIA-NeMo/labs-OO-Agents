@@ -1,6 +1,7 @@
 import type { TraceEvent } from '@/api/types';
 import type { PluginProps } from './registry';
 import { CodeBox } from '@/components/shared/CodeBox';
+import { parseTruncatedJson } from '@/utils/truncatedJson';
 
 function formatDuration(ns: number): string {
   if (ns <= 0) return '';
@@ -77,6 +78,16 @@ function getCallKwargs(attrs: Record<string, unknown>): Record<string, unknown> 
 function buildCallString(attrs: Record<string, unknown>, truncate = true): string | null {
   const method = (attrs['agent.method'] ?? attrs['method.name']) as string | undefined;
   if (!method) return null;
+
+  const truncated = parseTruncatedJson(attrs['input.value']);
+  if (truncated) {
+    if (truncate) return `${method}(<trace input truncated>)`;
+    return (
+      `${method}(<trace input truncated at ${truncated.limitChars} characters>)` +
+      `\n\n# Serialized input prefix (${truncated.previewChars} characters):\n` +
+      truncated.preview
+    );
+  }
 
   const argParts: string[] = [];
   const maxLen = truncate ? 40 : Infinity;

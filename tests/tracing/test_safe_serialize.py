@@ -1,8 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for _safe_serialize — bounded span attribute serialization."""
+"""Tests for bounded span attribute serialization."""
+
+import json
+
+from pydantic import BaseModel
 
 from nooa.tracing._hooks_impl import OpenInferenceHooks
+from nooa.tracing._limited_writer import LimitedWriter
 
 
 class TestSafeSerialize:
@@ -97,3 +102,62 @@ class TestSafeSerialize:
         serialized = OpenInferenceHooks._safe_serialize(result_obj)
         assert "hello" in serialized
         assert "42" in serialized
+
+
+class TestSafeJsonValue:
+    """Streaming JSON keeps small values exact and stops oversized traversal."""
+
+    def test_small_pydantic_input_preserves_existing_representation(self):
+        class Animal(BaseModel):
+            name: str
+
+        value = {"args": (Animal(name="Fido"),), "kwargs": {}}
+        expected = json.dumps(
+            value,
+            default=lambda item: OpenInferenceHooks._safe_serialize(item, 50_000),
+        )
+
+        assert OpenInferenceHooks._safe_json_value(value) == expected
+
+    def test_overflow_stops_before_formatting_every_custom_object(self):
+        class Counted:
+            repr_calls = 0
+
+            def __repr__(self):
+                type(self).repr_calls += 1
+                return "Counted()"
+
+        value = {"args": ([Counted() for _ in range(5_000)],), "kwargs": {}}
+
+        serialized = OpenInferenceHooks._safe_json_value(value, max_chars=1_000)
+        parsed = json.loads(serialized)
+
+        assert parsed["$nooa"]["kind"] == "truncated-json"
+        assert len(serialized) <= 1_000
+        assert Counted.repr_calls < 100
+
+    def test_oversized_scalar_is_encoded_in_bounded_chunks(self, monkeypatch):
+        chunk_lengths: list[int] = []
+        original_write = LimitedWriter.write
+
+        def recording_write(writer: LimitedWriter, value: str) -> int:
+            chunk_lengths.append(len(value))
+            return original_write(writer, value)
+
+        monkeypatch.setattr(LimitedWriter, "write", recording_write)
+
+        serialized = OpenInferenceHooks._safe_json_value(
+            {"args": ("x" * (1024 * 1024),), "kwargs": {}}
+        )
+
+        assert json.loads(serialized)["$nooa"]["kind"] == "truncated-json"
+        assert max(chunk_lengths) <= 4096
+
+    def test_fallback_for_cycles_is_valid_and_bounded(self):
+        value: dict = {}
+        value["cycle"] = value
+
+        serialized = OpenInferenceHooks._safe_json_value(value, max_chars=1_000)
+
+        json.loads(serialized)
+        assert len(serialized) <= 1_000

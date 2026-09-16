@@ -22,6 +22,11 @@ from opentelemetry import trace
 from opentelemetry.trace import Span, Status, StatusCode
 
 from nooa.agentdoc import TruncatingStringIO, truncating_pformat
+from nooa.tracing._limited_writer import (
+    LimitedWriter,
+    SerializationLimitReached,
+    dump_json_bounded,
+)
 
 # Context variable for per-async-context active span tracking
 # This prevents context leakage during concurrent execution (e.g., parallel eval samples)
@@ -84,6 +89,7 @@ _ERROR_MESSAGE_LIMIT = 5_000
 _TRACE_MAX_DEPTH = 16  # prevent stack overflow on deeply nested objects
 _TRACE_MAX_LENGTH = 20  # keep trace attr serialization bounded on large containers
 _TRACE_MAX_STRING = 2_000  # avoid materializing multi-MB strings in trace attrs
+_TRACE_TRUNCATION_KIND = "truncated-json"
 
 
 def _error_message(exception: BaseException) -> str:
@@ -1028,41 +1034,80 @@ class OpenInferenceHooks:
         """Serialize ``obj`` to a **valid JSON** string for ``input.value`` /
         ``output.value`` attributes tagged ``application/json``.
 
-        Non-JSON-serializable leaves fall back to their truncated pformat repr
-        (via ``_safe_serialize``) so the result is always valid JSON.
-
-        On overflow (encoded length > ``max_chars``) the **top-level dict structure
-        is preserved** — each value is re-serialized with a smaller budget — so a
-        ``{"args": …, "kwargs": …}`` / ``{"code": …}`` input still parses back to a
-        dict with those keys (readers like ``_io_json_field`` and the viewer extract
-        fields by key). Only a non-dict, or a dict that still overflows after
-        per-value bounding, collapses to a JSON string literal as a last resort.
+        Small values retain their exact historical representation, including the
+        pformat strings produced for Pydantic and other custom objects. Encoding is
+        streamed into :class:`LimitedWriter`, which aborts traversal immediately when
+        the trace budget is exhausted. Overflow becomes a valid JSON envelope carrying
+        the serialized prefix; computing a tail or exact original size would require
+        completing the expensive traversal this method exists to avoid.
         """
+        if max_chars <= 0:
+            raise ValueError(f"_safe_json_value max_chars must be > 0, got {max_chars}")
+
+        writer = LimitedWriter(max_chars)
         try:
-            encoded = json.dumps(
+            dump_json_bounded(
                 obj,
-                default=lambda o: OpenInferenceHooks._safe_serialize(o, max_chars),
+                writer,
+                default=lambda value: OpenInferenceHooks._safe_serialize(
+                    value, max(1, writer.remaining)
+                ),
             )
-            if len(encoded) <= max_chars:
-                return encoded
-            # Overflow: keep the top-level keys so field extraction still works,
-            # bounding each value rather than collapsing the whole object. The
-            # per-value budget leaves headroom for ``_safe_serialize``'s head+tail
-            # truncation (~2x the budget) plus JSON-escaping overhead.
-            if isinstance(obj, dict):
-                per_value = max(256, max_chars // (4 * max(1, len(obj))))
-                shaped = json.dumps(
-                    {
-                        str(k): OpenInferenceHooks._safe_serialize(v, per_value)
-                        for k, v in obj.items()
-                    }
-                )
-                if len(shaped) <= max_chars:
-                    return shaped
+            return writer.getvalue()
+        except SerializationLimitReached:
+            return OpenInferenceHooks._truncated_json_envelope(writer.getvalue(), max_chars)
         except Exception:
-            pass
-        # Last resort: a JSON string literal wrapping the bounded human-readable repr.
-        return json.dumps(OpenInferenceHooks._safe_serialize(obj, max_chars))
+            # Retain the historical best-effort behavior for cycles, invalid mapping
+            # keys, and custom encoders that fail for reasons other than size.
+            fallback = OpenInferenceHooks._safe_serialize(obj, max_chars)
+            fallback_writer = LimitedWriter(max_chars)
+            try:
+                dump_json_bounded(fallback, fallback_writer, default=lambda value: value)
+                return fallback_writer.getvalue()
+            except SerializationLimitReached:
+                return OpenInferenceHooks._truncated_json_envelope(
+                    fallback_writer.getvalue(), max_chars
+                )
+
+    @staticmethod
+    def _truncated_json_envelope(preview: str, max_chars: int) -> str:
+        """Wrap an incomplete JSON prefix in valid JSON within ``max_chars``.
+
+        JSON escaping can make the prefix larger when it becomes a string field.
+        Binary search only the already-bounded prefix to retain as much as fits; this
+        never revisits the original object graph.
+        """
+
+        def encode(prefix: str) -> str:
+            return json.dumps(
+                {
+                    "$nooa": {
+                        "kind": _TRACE_TRUNCATION_KIND,
+                        "limit_chars": max_chars,
+                        "preview_chars": len(prefix),
+                    },
+                    "preview": prefix,
+                }
+            )
+
+        empty = encode("")
+        if len(empty) > max_chars:
+            # Internal callers use a 50 K budget. Keep tiny custom budgets valid JSON
+            # even when there is not enough room for the descriptive envelope.
+            return "null" if max_chars >= len("null") else "0"
+
+        low = 0
+        high = len(preview)
+        best = empty
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = encode(preview[:middle])
+            if len(candidate) <= max_chars:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        return best
 
     @staticmethod
     def _set_tool_call_attrs(

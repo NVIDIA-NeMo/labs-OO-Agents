@@ -144,22 +144,24 @@ def _attr(span, key):
 # ---------------------------------------------------------------------------
 
 
-def test_safe_json_value_preserves_dict_keys_on_overflow():
-    """Even when the serialized input exceeds the cap, the top-level keys survive
-    so readers can still extract ``args``/``kwargs``/``code`` by key (the value is
-    application/json-tagged, so it must parse back to a dict)."""
+def test_safe_json_value_returns_valid_bounded_envelope_on_overflow():
+    """Oversized JSON stops early and remains valid, bounded JSON for the wire."""
     from nooa.tracing._hooks_impl import OpenInferenceHooks
 
     big = {"args": ["x" * 200_000], "kwargs": {"k": "y" * 200_000}}
     out = OpenInferenceHooks._safe_json_value(big, max_chars=50_000)
-    parsed = json.loads(out)  # must be valid JSON
-    assert isinstance(parsed, dict), f"overflow output should stay a dict, got {type(parsed)}"
-    assert set(parsed) == {"args", "kwargs"}
-    assert len(out) <= 50_000  # bounded
+    parsed = json.loads(out)
+    assert parsed["$nooa"] == {
+        "kind": "truncated-json",
+        "limit_chars": 50_000,
+        "preview_chars": len(parsed["preview"]),
+    }
+    assert parsed["preview"].startswith('{"args": ["')
+    assert len(out) <= 50_000
 
-    # The common code shape also round-trips by key.
+    # The common code shape uses the same valid truncation envelope.
     code_out = OpenInferenceHooks._safe_json_value({"code": "z" * 200_000}, max_chars=50_000)
-    assert "code" in json.loads(code_out)
+    assert json.loads(code_out)["$nooa"]["kind"] == "truncated-json"
 
 
 # ---------------------------------------------------------------------------
