@@ -459,14 +459,23 @@ async def test_broker_restart_rotates_credentials_at_the_same_address():
     assert snapshot.admitted_calls == 1
 
 
+@pytest.mark.parametrize(
+    "error_type",
+    [RuntimeError, TimeoutError, OSError, asyncio.CancelledError],
+)
 @pytest.mark.asyncio
-async def test_broker_observer_failure_returns_the_confirmed_lease():
-    def fail_observation(_detail: dict[str, Any]) -> None:
-        raise RuntimeError("observer failed")
+async def test_broker_observer_failure_is_not_translated_or_reobserved(
+    error_type: type[BaseException],
+):
+    observations: list[dict[str, Any]] = []
+
+    def fail_observation(detail: dict[str, Any]) -> None:
+        observations.append(detail)
+        raise error_type("observer failed")
 
     with AdmissionBroker(max_in_flight=1, group="observer-failure") as broker:
         controller = broker.controller(queue_timeout=1)
-        with pytest.raises(RuntimeError, match="observer failed"):
+        with pytest.raises(error_type, match="observer failed"):
             await controller.acquire(fail_observation)
 
         snapshot = await _wait_for_snapshot(broker, lambda current: current.active == 0)
@@ -475,6 +484,29 @@ async def test_broker_observer_failure_returns_the_confirmed_lease():
         controller.close()
 
     assert snapshot.active == 0
+    assert [item["outcome"] for item in observations] == ["immediate"]
+
+
+@pytest.mark.asyncio
+async def test_call_cap_observer_failure_is_not_reclassified():
+    observations: list[dict[str, Any]] = []
+
+    def fail_observation(detail: dict[str, Any]) -> None:
+        observations.append(detail)
+        raise OSError("observer failed")
+
+    with AdmissionBroker(max_in_flight=1, max_calls=1, group="cap-observer-failure") as broker:
+        controller = broker.controller(queue_timeout=1)
+        permit = await controller.acquire(lambda _detail: None)
+        permit.release()
+
+        with pytest.raises(OSError, match="observer failed"):
+            await controller.acquire(fail_observation)
+        snapshot = await _wait_for_snapshot(broker, lambda current: current.active == 0)
+        controller.close()
+
+    assert snapshot.admitted_calls == 1
+    assert [item["outcome"] for item in observations] == ["call_cap"]
 
 
 @pytest.mark.asyncio

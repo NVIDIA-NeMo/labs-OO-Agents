@@ -460,82 +460,94 @@ class BrokerAdmissionController:
         loop = asyncio.get_running_loop()
         writer: asyncio.StreamWriter | None = None
         leased = False
+        response: dict[str, Any] = {}
         try:
-            pooled = self._take_idle_connection(loop)
-            if pooled is None:
-                remaining = self._remaining_timeout(started)
-                connection = asyncio.open_connection(
-                    self.config.host,
-                    self.config.port,
-                    family=_socket_family(self.config.host),
-                )
-                if remaining is None:
-                    reader, writer = await connection
+            try:
+                pooled = self._take_idle_connection(loop)
+                if pooled is None:
+                    remaining = self._remaining_timeout(started)
+                    connection = asyncio.open_connection(
+                        self.config.host,
+                        self.config.port,
+                        family=_socket_family(self.config.host),
+                    )
+                    if remaining is None:
+                        reader, writer = await connection
+                    else:
+                        reader, writer = await asyncio.wait_for(connection, remaining)
                 else:
-                    reader, writer = await asyncio.wait_for(connection, remaining)
-            else:
-                reader, writer = pooled.reader, pooled.writer
-            request = {
-                "version": _PROTOCOL_VERSION,
-                "auth_token": self.config.auth_token,
-                "group": self.config.group,
-                "ticket": uuid.uuid4().hex,
-            }
-            writer.write(json.dumps(request).encode() + b"\n")
-            await self._drain(writer, started)
-            first = await self._readline(reader, started)
-            if not first:
-                raise AdmissionUnavailableError("Admission broker closed before granting a lease")
-            response = json.loads(first)
-            status = response.get("status")
-            if status == "call_cap":
-                self._observe(observer, "call_cap", response, started)
-                raise AdmissionCallCapError(
-                    f"LLM admission call cap reached for group {self.config.group!r} "
-                    f"(max_calls={self.config.max_calls})"
+                    reader, writer = pooled.reader, pooled.writer
+                request = {
+                    "version": _PROTOCOL_VERSION,
+                    "auth_token": self.config.auth_token,
+                    "group": self.config.group,
+                    "ticket": uuid.uuid4().hex,
+                }
+                writer.write(json.dumps(request).encode() + b"\n")
+                await self._drain(writer, started)
+                first = await self._readline(reader, started)
+                if not first:
+                    raise AdmissionUnavailableError(
+                        "Admission broker closed before granting a lease"
+                    )
+                response = json.loads(first)
+                status = response.get("status")
+                if status == "call_cap":
+                    raise AdmissionCallCapError(
+                        f"LLM admission call cap reached for group {self.config.group!r} "
+                        f"(max_calls={self.config.max_calls})"
+                    )
+                if status == "unauthorized":
+                    raise AdmissionUnavailableError(
+                        "Admission broker rejected the client credentials"
+                    )
+                if status != "offered":
+                    raise AdmissionUnavailableError(
+                        f"Unexpected admission broker response: {status!r}"
+                    )
+
+                writer.write(b'{"status":"accept"}\n')
+                await self._drain(writer, started)
+                second = await self._readline(reader, started)
+                if not second or json.loads(second).get("status") != "ready":
+                    raise AdmissionUnavailableError("Admission broker did not confirm the lease")
+
+                outcome: Literal["immediate", "admitted_after_wait"] = (
+                    "admitted_after_wait" if response.get("queued") else "immediate"
                 )
-            if status == "unauthorized":
-                raise AdmissionUnavailableError("Admission broker rejected the client credentials")
-            if status != "offered":
-                raise AdmissionUnavailableError(f"Unexpected admission broker response: {status!r}")
+            except TimeoutError as error:
+                self._observe(observer, "timeout", {}, started)
+                timeout_label = (
+                    f"{self.queue_timeout:g}s"
+                    if self.queue_timeout is not None
+                    else "the admission deadline"
+                )
+                raise AdmissionTimeoutError(
+                    f"Timed out after {timeout_label} waiting for LLM admission "
+                    f"group {self.config.group!r} "
+                    f"(max_in_flight={self.config.max_in_flight})"
+                ) from error
+            except asyncio.CancelledError:
+                self._observe(observer, "cancelled", {}, started)
+                raise
+            except AdmissionCallCapError:
+                self._observe(observer, "call_cap", response, started)
+                raise
+            except AdmissionUnavailableError:
+                self._observe(observer, "unavailable", {}, started)
+                raise
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                self._observe(observer, "unavailable", {}, started)
+                raise AdmissionUnavailableError(
+                    f"Admission broker unavailable at {self.config.host}:{self.config.port}"
+                ) from error
 
-            writer.write(b'{"status":"accept"}\n')
-            await self._drain(writer, started)
-            second = await self._readline(reader, started)
-            if not second or json.loads(second).get("status") != "ready":
-                raise AdmissionUnavailableError("Admission broker did not confirm the lease")
-
-            outcome: Literal["immediate", "admitted_after_wait"] = (
-                "admitted_after_wait" if response.get("queued") else "immediate"
-            )
+            # Keep observer code outside the protocol exception handlers. User-supplied
+            # observers must propagate their own exception unchanged and still trigger
+            # the unleased-writer cleanup below.
             self._observe(observer, outcome, response, started)
             leased = True
             return _BrokerAdmissionPermit(reader, writer, self, loop)
-        except TimeoutError as error:
-            self._observe(observer, "timeout", {}, started)
-            timeout_label = (
-                f"{self.queue_timeout:g}s"
-                if self.queue_timeout is not None
-                else "the admission deadline"
-            )
-            raise AdmissionTimeoutError(
-                f"Timed out after {timeout_label} waiting for LLM admission "
-                f"group {self.config.group!r} "
-                f"(max_in_flight={self.config.max_in_flight})"
-            ) from error
-        except asyncio.CancelledError:
-            self._observe(observer, "cancelled", {}, started)
-            raise
-        except AdmissionCallCapError:
-            raise
-        except AdmissionUnavailableError:
-            self._observe(observer, "unavailable", {}, started)
-            raise
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
-            self._observe(observer, "unavailable", {}, started)
-            raise AdmissionUnavailableError(
-                f"Admission broker unavailable at {self.config.host}:{self.config.port}"
-            ) from error
         finally:
             if writer is not None and not leased:
                 await self._close_writer(writer)
