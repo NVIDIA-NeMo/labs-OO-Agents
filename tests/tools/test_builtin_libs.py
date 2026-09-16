@@ -30,7 +30,7 @@ def test_method_writing_lib_has_library_docstring():
     docstring = MethodWriting.__doc__ or ""
     assert "@strategy(PredictStrategy())" in docstring
     assert "asyncio.gather" in docstring
-    assert "doc(self.methodwriting)" in docstring
+    assert "doc(self.methodwriting)" not in docstring
     assert re.search(r"\{\{[A-Za-z_][A-Za-z0-9_]*\}\}", docstring) is None
 
 
@@ -45,17 +45,18 @@ def test_builtin_libs_are_skills():
     assert issubclass(MethodWriting, Skill)
 
 
-def test_codeact_strategy_instructions_no_longer_has_decomposition():
+def test_codeact_delegation_guidance_lives_in_v2_tool():
     from nooa.strategies.codeact import CodeActStrategy
     from nooa.strategies.codeact_v2 import CodeActV2
 
     src = inspect.getsource(CodeActStrategy.strategy_instructions)
     assert "Task decomposition" not in src
 
-    experimental = CodeActV2()
-    tool_description = experimental._build_execute_python_tool().description
-    assert "@strategy(PredictStrategy())" not in tool_description
-    assert "asyncio.gather" not in tool_description
+    strategy = CodeActV2()
+    tool_description = strategy._build_execute_python_tool().description
+    assert "@strategy(PredictStrategy())" in tool_description
+    assert "asyncio.gather" in tool_description
+    assert "doc(self.delegate)" in tool_description
     assert "plain-text replies do not execute work" in tool_description
     assert "return_result(value)" in tool_description
 
