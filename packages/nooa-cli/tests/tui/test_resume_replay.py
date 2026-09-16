@@ -1,0 +1,382 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for session resume replay truncation and batch rendering."""
+
+import json
+import re
+import sqlite3
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from nooa_cli.tui.output import HistoryReplay, HistoryTurn
+from nooa_cli.tui.session_manager import (
+    RESUME_MAX_TURNS,
+    build_resume_outputs,
+)
+
+
+def _make_session_db(turns: list[tuple[str, str]], rich_events: list[dict] | None = None) -> Path:
+    """Create a temp session DB with the given turns and optional rich events."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    db_path = Path(tmp.name)
+    tmp.close()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE events (event_type TEXT, data TEXT, insertion_order INTEGER)")
+    order = 0
+    for role, content in turns:
+        if role == "user":
+            conn.execute(
+                "INSERT INTO events VALUES (?, ?, ?)",
+                ("TUIUserInput", json.dumps({"text": content}), order),
+            )
+        elif role == "agent":
+            conn.execute(
+                "INSERT INTO events VALUES (?, ?, ?)",
+                ("TUIAgentMessage", json.dumps({"content": content}), order),
+            )
+        elif role == "rich":
+            conn.execute(
+                "INSERT INTO events VALUES (?, ?, ?)",
+                ("RichOutput", json.dumps({"payload": {"kind": "plot", "data": content}}), order),
+            )
+        order += 1
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+class TestTruncation:
+    """Tests for turn truncation in build_resume_outputs."""
+
+    def test_no_truncation_when_under_limit(self):
+        """Sessions with fewer turns than max_turns are not truncated."""
+        turns = [("user", f"msg {i}") for i in range(5)]
+        db = _make_session_db(turns)
+        outputs = build_resume_outputs(db, "abc12345", max_turns=10)
+        replays = [o for o in outputs if isinstance(o, HistoryReplay)]
+        total = sum(len(r.turns) for r in replays)
+        assert total == 5
+        assert replays[0].omitted_count == 0
+
+    def test_truncation_keeps_last_n_turns(self):
+        """Only the last max_turns turns are kept."""
+        turns = [("user", f"msg {i}") for i in range(50)]
+        db = _make_session_db(turns)
+        outputs = build_resume_outputs(db, "abc12345", max_turns=10)
+        replays = [o for o in outputs if isinstance(o, HistoryReplay)]
+        total = sum(len(r.turns) for r in replays)
+        assert total == 10
+        # Should show last 10 messages
+        all_turns = [t for r in replays for t in r.turns]
+        assert all_turns[0].content == "msg 40"
+        assert all_turns[-1].content == "msg 49"
+
+    def test_omitted_count_in_header(self):
+        """The first HistoryReplay reports how many turns were omitted."""
+        turns = [("user", f"msg {i}") for i in range(30)]
+        db = _make_session_db(turns)
+        outputs = build_resume_outputs(db, "abc12345", max_turns=10)
+        replays = [o for o in outputs if isinstance(o, HistoryReplay)]
+        assert replays[0].omitted_count == 20
+
+    def test_truncation_disabled_with_zero(self):
+        """max_turns=0 disables truncation."""
+        turns = [("user", f"msg {i}") for i in range(50)]
+        db = _make_session_db(turns)
+        outputs = build_resume_outputs(db, "abc12345", max_turns=0)
+        replays = [o for o in outputs if isinstance(o, HistoryReplay)]
+        total = sum(len(r.turns) for r in replays)
+        assert total == 50
+
+    def test_default_max_turns(self):
+        """Default truncation uses RESUME_MAX_TURNS."""
+        turns = [("user", f"msg {i}") for i in range(50)]
+        db = _make_session_db(turns)
+        outputs = build_resume_outputs(db, "abc12345")
+        replays = [o for o in outputs if isinstance(o, HistoryReplay)]
+        total = sum(len(r.turns) for r in replays)
+        assert total == RESUME_MAX_TURNS
+
+    def test_legacy_rich_events_do_not_interrupt_conversation_replay(self):
+        db = _make_session_db(
+            [
+                ("rich", "old plot"),
+                ("user", "hello"),
+                ("rich", "another old plot"),
+                ("agent", "response"),
+                ("rich", "final old plot"),
+            ]
+        )
+        outputs = build_resume_outputs(db, "abc12345")
+        assert len(outputs) == 1
+        assert isinstance(outputs[0], HistoryReplay)
+        assert [(turn.role, turn.content) for turn in outputs[0].turns] == [
+            ("user", "hello"),
+            ("agent", "response"),
+        ]
+        assert outputs[0].show_header and outputs[0].show_footer
+
+
+class TestBatchRendering:
+    """Tests for batch rendering in TerminalFrontend._render_history_replay."""
+
+    def test_single_write_to_terminal(self):
+        """History replay writes to terminal file in one call, not per-turn."""
+        from nooa_cli.tui.frontend import TerminalFrontend
+
+        # Create a mock console
+        mock_file = MagicMock(spec=["write", "flush"])
+        mock_console = MagicMock()
+        mock_console.console.width = 80
+        mock_console.console.file = mock_file
+
+        frontend = TerminalFrontend.__new__(TerminalFrontend)
+        frontend._console = mock_console
+
+        replay = HistoryReplay(
+            turns=[
+                HistoryTurn(role="user", content="hello"),
+                HistoryTurn(role="agent", content="world"),
+                HistoryTurn(role="user", content="bye"),
+            ],
+            session_id="abc123",
+            show_header=True,
+            show_footer=True,
+        )
+
+        frontend._render_history_replay(replay)
+
+        # Should write once (batch) + flush once
+        assert mock_file.write.call_count == 1
+        assert mock_file.flush.call_count == 1
+        # The single write should contain content from all turns
+        written = mock_file.write.call_args[0][0]
+        assert "hello" in written
+        assert "world" in written
+        assert "bye" in written
+
+    def test_resumed_user_message_highlight_spans_every_wrapped_row(self):
+        from nooa_cli.tui.frontend import render_history_replay_to_ansi
+        from nooa_cli.tui.terminal_safety import strip_safe_ansi
+        from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+        from rich.cells import cell_len
+
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="user", content="first line\nhello wide 世界 this wraps")],
+            session_id="highlight",
+            show_header=False,
+            show_footer=False,
+        )
+
+        rendered = render_history_replay_to_ansi(replay, 20)
+        message_rows = [line for line in strip_safe_ansi(rendered).splitlines() if line]
+
+        from nooa_cli.tui.theme import COLORS
+        from nooa_cli.tui.user_message import render_user_bar
+
+        assert rendered.startswith(render_user_bar(replay.turns[0].content, 20, COLORS))
+        assert len(message_rows) > 2
+        assert all(cell_len(line) == 20 for line in message_rows)
+        assert all(
+            "bg:" in style for style, text, *_ in to_formatted_text(ANSI(rendered)) if text != "\n"
+        )
+        assert rendered == render_user_bar(replay.turns[0].content, 20, COLORS)
+
+    def test_resumed_agent_prose_has_no_render_width_whitespace(self):
+        from nooa_cli.tui.frontend import render_history_replay_to_ansi
+        from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+        message = (
+            "A long assistant response should remain one logical line without "
+            "padding spaces or renderer-inserted newlines when it is resumed."
+        )
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="agent", content=message)],
+            session_id="copy",
+            show_header=False,
+            show_footer=False,
+        )
+
+        rendered = strip_safe_ansi(render_history_replay_to_ansi(replay, 20))
+
+        assert rendered == f"OO:\n{message}\n\n"
+
+    def test_history_renderer_keeps_agent_text_semantic_at_narrow_width(self):
+        from nooa_cli.tui.frontend import render_history_replay_to_ansi
+        from nooa_cli.tui.terminal_safety import strip_safe_ansi
+
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="agent", content="abcdefghij")],
+            session_id="narrow",
+            show_header=False,
+            show_footer=False,
+        )
+
+        rendered = strip_safe_ansi(render_history_replay_to_ansi(replay, 3))
+
+        assert rendered == "OO:\nabcdefghij\n\n"
+
+    def test_history_replay_on_emit_stream_keeps_semantic_replay_callback(self):
+        """Live TUI rendering stores resumed HistoryReplay as a reflowable block."""
+        from nooa_cli.tui.frontend import TerminalFrontend
+        from nooa_cli.tui.session import _EmitStream
+
+        emitted = []
+        current_width = 80
+
+        def emit(text: str, replay=None):
+            emitted.append((text, replay))
+
+        stream = _EmitStream(emit, replay_width=lambda: current_width)
+        mock_console = MagicMock()
+        mock_console.console.width = 120
+        mock_console.console.file = stream
+
+        frontend = TerminalFrontend.__new__(TerminalFrontend)
+        frontend._console = mock_console
+
+        replay = HistoryReplay(
+            turns=[
+                HistoryTurn(
+                    role="agent",
+                    content="This is a resumed markdown paragraph that should wrap differently.",
+                )
+            ],
+            session_id="abc123",
+            show_header=True,
+            show_footer=True,
+        )
+
+        frontend._render_history_replay(replay)
+
+        assert len(emitted) == 1
+        rendered, replay_callback = emitted[0]
+        assert "abc123" in rendered
+        assert callable(replay_callback)
+        current_width = 24
+        rerendered = replay_callback()
+        assert rerendered != rendered
+        assert "abc123" in rerendered
+        assert len(rerendered.splitlines()[0]) < len(rendered.splitlines()[0])
+
+    def test_fullscreen_resumed_code_retains_copy_metadata(self):
+        from nooa_cli.tui.frontend import TerminalFrontend
+        from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+        from nooa_cli.tui.session import _EmitStream
+
+        emitted = []
+        current_width = 60
+
+        def emit(text: str, **kwargs):
+            emitted.append((text, kwargs))
+
+        stream = _EmitStream(
+            emit,
+            replay_width=lambda: current_width,
+            supports_code_copy_actions=True,
+        )
+        mock_console = MagicMock()
+        mock_console.console.width = 120
+        mock_console.console.file = stream
+        frontend = TerminalFrontend.__new__(TerminalFrontend)
+        frontend._console = mock_console
+        source = "\tif ready:\n\t\tprint('resumed')  "
+        replay = HistoryReplay(
+            turns=[
+                HistoryTurn(
+                    role="agent",
+                    content=f"Before\n\n```python\n{source}\n```\n\nAfter",
+                )
+            ],
+            session_id="resumed-copy",
+            show_header=False,
+            show_footer=False,
+        )
+
+        frontend._render_history_replay(replay)
+
+        assert len(emitted) == 1
+        rendered, kwargs = emitted[0]
+        assert "Copy" in rendered
+        assert list(kwargs["code_copy_actions"].values()) == [source]
+        assert callable(kwargs["replay"])
+
+        model = FullscreenTranscriptModel()
+        model.append(rendered, copy_actions=kwargs["code_copy_actions"])
+        lines = "".join(
+            fragment[1] for fragment in model.formatted_text(width=60, height=30)
+        ).splitlines()
+        header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+        after_y = next(index for index, line in enumerate(lines) if "After" in line)
+        model.begin_selection(x=0, y=header_y, width=60, height=30)
+        model.update_selection(x=59, y=after_y - 1, width=60, height=30)
+        assert model.selected_text() == source
+
+        current_width = 42
+        rerendered = kwargs["replay"]()
+        resized = FullscreenTranscriptModel()
+        resized.append(rerendered, copy_actions=kwargs["code_copy_actions"])
+        lines = "".join(
+            fragment[1] for fragment in resized.formatted_text(width=42, height=30)
+        ).splitlines()
+        header_y = next(index for index, line in enumerate(lines) if "Copy" in line)
+        after_y = next(index for index, line in enumerate(lines) if "After" in line)
+        resized.begin_selection(x=0, y=header_y, width=42, height=30)
+        resized.update_selection(x=41, y=after_y - 1, width=42, height=30)
+        assert resized.selected_text() == source
+
+    def test_fullscreen_resumed_code_uses_live_syntax_theme(self):
+        from nooa_cli.tui.config import DisplayMode
+        from nooa_cli.tui.copyable_markdown import CopyableMarkdown
+        from nooa_cli.tui.frontend import _HistoryReplayRenderer
+        from nooa_cli.tui.session import Session
+
+        markup = "```python\ndef greet(name: str) -> str:\n    return name\n```"
+        replay = HistoryReplay(
+            turns=[HistoryTurn(role="agent", content=markup)],
+            session_id="resumed-theme",
+            show_header=False,
+            show_footer=False,
+        )
+        resumed = _HistoryReplayRenderer(replay, copyable=True).render(80)
+
+        class FakeApp:
+            display_mode = DisplayMode.FULLSCREEN
+
+            @staticmethod
+            def transcript_columns() -> int:
+                return 80
+
+        session = Session.__new__(Session)
+        session._app = FakeApp()
+        live = session._render_to_ansi(CopyableMarkdown(markup))
+
+        def syntax_style(rendered: str, token: str) -> str:
+            match = re.search(rf"\x1b\[([0-9;]+)m{token}", rendered)
+            assert match is not None
+            return match.group(1)
+
+        # Replay must use the same color system/theme as live output rather
+        # than Rich's basic-color fallback for a StringIO-backed console.
+        assert syntax_style(resumed, "def") == syntax_style(live, "def")
+        assert syntax_style(resumed, "greet") == syntax_style(live, "greet")
+
+    def test_emit_stream_preserves_order_when_semantic_block_appears_inside_hold(self):
+        """A semantic HistoryReplay inside batch_render must not jump ahead of buffered text."""
+        from nooa_cli.tui.session import _EmitStream
+
+        emitted = []
+
+        def emit(text: str, replay=None):
+            emitted.append((text, replay))
+
+        stream = _EmitStream(emit)
+        with stream.hold():
+            stream.write("before")
+            stream.emit_with_replay("history", lambda: "history-reflowed")
+            stream.write("after")
+
+        assert [text for text, _ in emitted] == ["before", "history", "after"]
+        assert emitted[1][1]() == "history-reflowed"

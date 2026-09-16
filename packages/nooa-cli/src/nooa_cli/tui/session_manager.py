@@ -1,0 +1,248 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""TUI presentation adapter for the shared durable session store."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
+
+from nooa.sessions import SessionHandle, SessionInfo, SessionStore
+from nooa.storage.sqlite import is_sqlite_database_active
+from nooa_cli.interactive.session_paths import session_directory
+
+SESSIONS_DIR = session_directory()
+
+
+def _make_trace_session_name(session_id: str) -> str:
+    """Build a trace name correlated with the durable session UUID."""
+    return f"tui-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-{session_id[:8]}"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionMeta:
+    """Compatibility view used by the TUI's session tables."""
+
+    id: str
+    model: str
+    agent: str
+    started_at: float
+    last_active: float
+    turn_count: int = 0
+    working_dir: str = ""
+    name: str | None = None
+    user_named: bool = False
+
+    @classmethod
+    def from_info(cls, info: SessionInfo) -> SessionMeta:
+        return cls(
+            id=info.id,
+            model=info.model,
+            agent=info.agent,
+            started_at=info.started_at,
+            last_active=info.last_active,
+            turn_count=info.turn_count,
+            working_dir=info.working_directory,
+            name=info.title,
+            user_named=info.title_is_user_set,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Turn:
+    role: Literal["user", "agent"]
+    content: str
+    ts: float
+
+
+class SessionManager:
+    """TUI-facing view of one :class:`nooa.sessions.SessionHandle`.
+
+    The adapter deliberately contains no persistence implementation. Both the
+    native TUI and protocol hosts read and write the same session event schema.
+    """
+
+    def __init__(self, handle: SessionHandle) -> None:
+        self._handle = handle
+        self._storage = handle.storage
+        self.agent_cls = handle.info.agent
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        model: str = "",
+        agent_cls: str = "CodingAgent",
+        working_dir: str = "",
+        session_id: str | None = None,
+    ) -> SessionManager:
+        handle = SessionStore(SESSIONS_DIR).create(
+            model=model,
+            agent=agent_cls,
+            working_directory=(
+                str(Path(working_dir).expanduser().resolve()) if working_dir else ""
+            ),
+            host="tui",
+            session_id=session_id,
+            check_same_thread=False,
+        )
+        return cls(handle)
+
+    @classmethod
+    def open(cls, session_id: str) -> SessionManager:
+        return cls(SessionStore(SESSIONS_DIR).open(session_id, check_same_thread=False))
+
+    @property
+    def info(self) -> SessionInfo:
+        """Expose the canonical metadata used by shared title behavior."""
+        return self._handle.info
+
+    def set_title(self, title: str, *, user_set: bool = False) -> None:
+        """Apply shared automatic or explicit title updates to this session."""
+        self._handle.set_title(title, user_set=user_set)
+
+    @property
+    def session_id(self) -> str:
+        return self._handle.id
+
+    @property
+    def model(self) -> str:
+        return self._handle.info.model
+
+    @property
+    def working_dir(self) -> str:
+        return self._handle.info.working_directory
+
+    @property
+    def agent_db_path(self) -> Path:
+        return self._handle.path
+
+    @property
+    def name(self) -> str | None:
+        return self._handle.info.title
+
+    @property
+    def user_named(self) -> bool:
+        return self._handle.info.title_is_user_set
+
+    @property
+    def turns(self) -> list[Turn]:
+        return self.load_turns(self.session_id)
+
+    def rename(self, name: str, user_named: bool = False) -> None:
+        self.set_title(name, user_set=user_named)
+
+    def update_agent_cls(self, agent_cls: str) -> None:
+        # Agent class is immutable start metadata. This local value is retained
+        # only so a newly created session can inherit the active custom class.
+        self.agent_cls = agent_cls
+
+    def record_user(self, text: str):
+        return self._handle.record_user_message(text)
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def as_markdown(self) -> str:
+        lines = [f"# Session {self.session_id[:8]}\n"]
+        for turn in self.turns:
+            prefix = "**You:**" if turn.role == "user" else "**NOOA:**"
+            lines.append(f"{prefix}\n\n{turn.content}\n")
+        return "\n---\n\n".join(lines)
+
+    @classmethod
+    def list_sessions(cls, limit: int | None = 20) -> list[SessionMeta]:
+        return [
+            SessionMeta.from_info(info) for info in SessionStore(SESSIONS_DIR).list(limit=limit)
+        ]
+
+    @classmethod
+    def _read_meta(cls, path: Path) -> SessionMeta | None:
+        try:
+            return SessionMeta.from_info(SessionStore(path.parent).get(path.stem))
+        except (OSError, ValueError):
+            return None
+
+    @classmethod
+    def load_turns(cls, session_id: str) -> list[Turn]:
+        return [
+            Turn(role=turn.role, content=turn.content, ts=turn.timestamp)
+            for turn in SessionStore(SESSIONS_DIR).load_turns(session_id)
+        ]
+
+    @classmethod
+    def recent_turns(cls, session_id: str, *, limit: int = 12) -> list[Turn]:
+        """Return a bounded tail of the conversation for resume previews."""
+        return [
+            Turn(role=turn.role, content=turn.content, ts=turn.timestamp)
+            for turn in SessionStore(SESSIONS_DIR).load_recent_turns(session_id, limit=limit)
+        ]
+
+    @classmethod
+    def is_active(cls, session_id: str) -> bool:
+        return is_sqlite_database_active(SessionStore(SESSIONS_DIR).path_for(session_id))
+
+    @classmethod
+    def find_by_prefix(cls, prefix: str) -> list[str]:
+        return SessionStore(SESSIONS_DIR).find_by_prefix(prefix)
+
+    @classmethod
+    def delete_session(cls, session_id: str) -> bool:
+        deleted = SessionStore(SESSIONS_DIR).delete(session_id)
+        return deleted
+
+
+# Keep startup replay bounded for very long sessions.
+RESUME_MAX_TURNS = 20
+
+
+def build_resume_outputs(
+    session_db_path: Path,
+    session_id: str,
+    *,
+    max_turns: int | None = None,
+) -> list:
+    """Build bounded conversation replay output."""
+    from .output import HistoryReplay, HistoryTurn
+
+    if max_turns is None:
+        max_turns = RESUME_MAX_TURNS
+
+    try:
+        connection = sqlite3.connect(str(session_db_path))
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT event_type, data FROM events ORDER BY insertion_order"
+        ).fetchall()
+        connection.close()
+    except (OSError, sqlite3.Error):
+        rows = []
+
+    pending: list[HistoryTurn] = []
+    for row in rows:
+        try:
+            raw = json.loads(row["data"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        event_type = row["event_type"]
+        if event_type in {"SessionUserMessage", "TUIUserInput"}:
+            content = raw.get("content", raw.get("text", ""))
+            if content:
+                pending.append(HistoryTurn(role="user", content=str(content)))
+        elif event_type in {"AgentMessage", "TUIAgentMessage"} and raw.get("content"):
+            pending.append(HistoryTurn(role="agent", content=str(raw["content"])))
+    omitted = max(0, len(pending) - max_turns) if max_turns else 0
+    pending = pending[omitted:]
+    if not pending:
+        return []
+    return [
+        HistoryReplay(
+            turns=pending,
+            session_id=session_id[:8],
+            omitted_count=omitted,
+        )
+    ]

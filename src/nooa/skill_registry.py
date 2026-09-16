@@ -487,13 +487,9 @@ class SkillRegistry(Skill):
                 if attr_name.startswith("_") or attr_name in _RESERVED_ATTRS:
                     logger.warning("Refusing to load skill with reserved name %s", attr_name)
                     continue
-                held_by = self._protected_conflict(name, attr_name, skill)
-                if held_by is not None:
+                if conflict := self._protected_conflict(name, attr_name, skill):
                     logger.warning(
-                        "Refusing to load skill %s as '%s': %s",
-                        name,
-                        attr_name,
-                        held_by,
+                        "Refusing to load skill %s as '%s': %s", name, attr_name, conflict
                     )
                     continue
                 if hasattr(self._agent, attr_name) and attr_name not in set(
@@ -875,7 +871,9 @@ class SkillRegistry(Skill):
                 return result
 
             previous_name = source.module_name
-            previous_module = self._python_modules.pop(previous_name, None)
+            previous_module = (
+                self._python_modules.pop(previous_name, None) if previous_name is not None else None
+            )
             if previous_name is not None and sys.modules.get(previous_name) is previous_module:
                 sys.modules.pop(previous_name, None)
             self._python_modules[module_name] = sys.modules[module_name]
