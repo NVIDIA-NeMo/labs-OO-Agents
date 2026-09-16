@@ -1,0 +1,380 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Configuration loading for the NOOA TUI.
+
+Hydra-like config: structured Pydantic models with Config.load(**overrides).
+
+Resolution order (last wins):
+    1. Model defaults
+    2. Layered ``settings.yaml`` (user → project → ``NEMO_OO_SETTINGS``),
+       loaded via :mod:`nooa_cli.tui.settings`
+    3. Keyword overrides from CLI args (_OVERRIDES map)
+
+Usage:
+    # From the Click command
+    config = Config.load(model="gpt-4o", working_dir="/tmp")
+
+    # Programmatic
+    config = Config.load()
+"""
+
+import logging
+from enum import StrEnum
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
+
+if TYPE_CHECKING:
+    from nooa.unifiedllm import CompletionClient
+
+
+# Default model — direct litellm-supported name. Override via config or --model.
+DEFAULT_MODEL = "claude-opus-4-8"
+
+logger = logging.getLogger(__name__)
+
+
+class DisplayMode(StrEnum):
+    """Restart-only terminal ownership mode for the TUI."""
+
+    NATIVE_REPLAY = "native-replay"
+    NATIVE = "native"
+    FULLSCREEN = "fullscreen"
+
+
+# SummarizationConfig moved to core with the interactive-agent base;
+# re-exported here so existing ``nooa_cli.tui.config`` imports keep working.
+from nooa.interactive import SummarizationConfig as SummarizationConfig  # noqa: E402
+
+
+class AgentConfig(BaseModel):
+    """Configuration for the TUI agent's behavior."""
+
+    # History summarization settings
+    summarization: SummarizationConfig = Field(default_factory=SummarizationConfig)
+
+    # Working directory for bash commands. Stored as a string (downstream
+    # always str()s it); a Path is accepted and coerced for ergonomics.
+    working_dir: str = "."
+
+    @field_validator("working_dir", mode="before")
+    @classmethod
+    def _coerce_working_dir(cls, v: object) -> object:
+        return str(v) if isinstance(v, Path) else v
+
+
+class TUIConfig(BaseModel):
+    """Configuration for the TUI presentation layer."""
+
+    # MCP servers.  Inline ``mcp_servers`` in settings.yaml is the preferred single-file
+    # configuration; ``mcp_file`` remains as a compatibility bridge for VS Code / Claude
+    # style .mcp.json files.
+    mcp_file: Path = Path(".mcp.json")
+    mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    mcp_auto_connect: list[str] = Field(default_factory=list)
+
+    # Directories to search for skills and user-invocable commands.
+    # Includes both project-local and user-global Claude/Cursor conventions.
+    skills_dirs: list[Path] = Field(
+        default_factory=lambda: [
+            Path(".agents/skills"),
+            Path(".cursor/skills"),
+            Path(".claude/skills"),
+            Path(".claude/commands"),
+            Path.home() / ".agents" / "skills",
+            Path.home() / ".claude" / "skills",
+            Path.home() / ".claude" / "commands",
+        ]
+    )
+    # Extra roots explicitly added with ``/skills add``. Unlike
+    # ``skills_dirs`` (the computed runtime search path), these are persisted.
+    additional_skills_dirs: list[Path] = Field(default_factory=list)
+    # Skills explicitly activated with ``/skills activate``. Persisting this
+    # separately from discovery lets lifecycle skills attach before the resume
+    # event on the next process start.
+    active_skills: list[str] = Field(default_factory=list)
+    # Skills explicitly deactivated with ``/skills deactivate``. This negative
+    # override is needed for skills that an agent activates in its constructor.
+    inactive_skills: list[str] = Field(default_factory=list)
+
+    # Default LLM model (from unifiedllm registry)
+    default_model: str = DEFAULT_MODEL
+
+    # Trace output directory (None = OTLP auto-probe only; --trace writes files)
+    trace_dir: Path | None = None
+
+    # Color theme selected by ``/theme`` and restored on the next launch.
+    theme: str = "mocha"
+
+    @field_validator("theme")
+    @classmethod
+    def _validate_theme(cls, value: str) -> str:
+        from .theme import THEMES, reload_themes
+
+        name = str(value).lower()
+        if name not in THEMES:
+            reload_themes()
+        if name not in THEMES:
+            raise ValueError(f"Unknown theme {value!r}. Choose from: {', '.join(THEMES)}")
+        return name
+
+    # Vi keybindings in prompt_toolkit input
+    vi_mode: bool = False
+
+    # Custom agent spec: "module.path:ClassName" or "./file.py:ClassName"
+    agent_spec: str | None = None
+
+    # Show agent Python code execution panels (off by default)
+    show_python: bool = False
+
+    # Show bounded unified diffs for semantic file-edit events.
+    show_diffs: bool = True
+
+    # Restart-only terminal ownership mode. ``None`` preserves compatibility
+    # with an explicitly configured deprecated ``full_screen`` setting;
+    # otherwise fullscreen is the default.
+    display_mode: DisplayMode | None = None
+
+    # Deprecated compatibility setting: true means native-replay; false means
+    # native. Explicit ``display_mode`` always wins.
+    full_screen: bool = True
+    _display_mode_warning_emitted: bool = PrivateAttr(default=False)
+
+    # Ordered, structured toolbar providers. Third-party packages can register
+    # additional providers through the ``nooa_cli.tui.toolbar_items`` group.
+    toolbar_items: list[str] = Field(
+        default_factory=lambda: ["time", "model", "tokens", "context", "session"]
+    )
+
+    # Dev-time update watcher: periodically compare the checked-out revision
+    # of the running code to the revision this process started from and show
+    # an "update available — call /restart" status notice when they differ.
+    # Completely opt-in (observe-only, never restarts); intended for
+    # development checkouts that move underneath long-lived TUIs.
+    update_watch: bool = False
+    update_watch_interval_s: float = Field(default=30.0, ge=1.0)
+
+
+def resolve_display_mode(config: TUIConfig) -> DisplayMode:
+    """Resolve one restart-only display mode while preserving old settings.
+
+    An explicit ``display_mode`` has priority over the deprecated
+    ``full_screen`` boolean. With neither explicitly configured, the
+    application-owned alternate-screen renderer is the default.
+    """
+    explicit_mode = "display_mode" in config.model_fields_set and config.display_mode is not None
+    explicit_legacy = "full_screen" in config.model_fields_set
+
+    if explicit_mode:
+        mode = DisplayMode(config.display_mode)
+    elif explicit_legacy:
+        mode = DisplayMode.NATIVE_REPLAY if config.full_screen else DisplayMode.NATIVE
+    else:
+        mode = DisplayMode.FULLSCREEN
+
+    if explicit_legacy and not config._display_mode_warning_emitted:
+        legacy_mode = DisplayMode.NATIVE_REPLAY if config.full_screen else DisplayMode.NATIVE
+        if explicit_mode and legacy_mode is not mode:
+            logger.warning(
+                "tui.full_screen is deprecated and conflicts with tui.display_mode; "
+                "display_mode=%s wins",
+                mode.value,
+            )
+            config._display_mode_warning_emitted = True
+        else:
+            logger.warning(
+                "tui.full_screen is deprecated; use tui.display_mode=%s instead",
+                mode.value,
+            )
+            config._display_mode_warning_emitted = True
+
+    return mode
+
+
+class Config(BaseModel):
+    """Top-level configuration. Single source of truth.
+
+    Usage:
+        config = Config.load(model="gpt-4o") # programmatic
+        config = Config.load()               # pure defaults + env
+    """
+
+    tui: TUIConfig = Field(default_factory=TUIConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
+
+    # Runtime flags (not persisted)
+    no_splash: bool = False
+    no_trace: bool = False
+    legacy_agent: bool = False
+    # Explicit registry YAMLs supplied by the host. These are appended after
+    # the discovered chain, so a command-line path has highest precedence.
+    llm_config_paths: list[Path] = Field(default_factory=list)
+
+    # ── Declarative mapping: kwarg name → dotted config path ──────────
+    # Tuple form: (path, transform_fn) for type coercion.
+    # String form: path only, value passed through as-is.
+    _OVERRIDES: ClassVar[dict] = {
+        "model": "tui.default_model",
+        "mcp_file": ("tui.mcp_file", Path),
+        "mcp_servers": "tui.mcp_servers",
+        "mcp_auto_connect": (
+            "tui.mcp_auto_connect",
+            lambda v: [str(item) for item in v] if isinstance(v, (list, tuple, set)) else [str(v)],
+        ),
+        "llm_config": (
+            "llm_config_paths",
+            lambda v: [Path(item) for item in v],
+        ),
+        "trace": ("tui.trace_dir", Path),
+        "context_limit": "agent.summarization.max_tokens",
+        "working_dir": "agent.working_dir",
+        "no_splash": "no_splash",
+        "no_trace": "no_trace",
+        "legacy_agent": "legacy_agent",
+        "vi": "tui.vi_mode",
+        "agent": "tui.agent_spec",
+        "python": "tui.show_python",
+        "display_mode": ("tui.display_mode", DisplayMode),
+        "full_screen": "tui.full_screen",
+        "update_watch": "tui.update_watch",
+        "update_watch_interval_s": "tui.update_watch_interval_s",
+    }
+
+    # Boolean CLI flags: False means absent and must not overwrite settings.
+    _FLAG_OVERRIDES: ClassVar[set[str]] = {
+        "no_splash",
+        "no_trace",
+        "legacy_agent",
+        "vi",
+        "python",
+        "full_screen",
+        "update_watch",
+    }
+
+    @classmethod
+    def load(cls, **overrides) -> "Config":
+        """Build config: defaults → config file → overrides.
+
+        Config file: layered ``settings.yaml`` (user → project →
+        ``NEMO_OO_SETTINGS``), discovered through the shared layered-config
+        helper. Accepts any keyword argument matching _OVERRIDES keys.
+        Unknown keys are silently ignored so CLI adapters can pass their
+        complete option mappings directly.
+        """
+        from .settings import load_settings
+
+        # Layers 1-2: dataclass defaults, then layered settings.yaml.
+        # The CLI scopes the project directory before loading; retain explicit
+        # NEMO_OO_PROJECT_DIR overrides for both reads and command writes.
+        cfg = load_settings(cls())
+
+        # Layer 3: explicit overrides (highest priority)
+        for key, target in cls._OVERRIDES.items():
+            val = overrides.get(key)
+            if val is None:
+                continue
+            # False flag defaults mean "not provided" and must not overwrite
+            # layered settings.
+            if isinstance(val, bool) and not val and key in cls._FLAG_OVERRIDES:
+                continue
+            _set_nested(cfg, *_unpack_target(target, val))
+
+        # ── Special-case overrides ────────────────────────────────────
+        # --no-trace clears trace_dir
+        if overrides.get("no_trace"):
+            cfg.tui.trace_dir = None
+
+        # Explicit skill directories take precedence over conventional paths.
+        explicit: list[Path] = []
+
+        extra_skills = overrides.get("skills_dir")
+        if extra_skills:
+            # Accept a single str/Path OR a list/tuple of them. The bare
+            # fallback ``list(x)`` would iterate *characters* when given a
+            # lone string, producing nonsense paths.
+            if isinstance(extra_skills, (str, Path)):
+                dirs: list = [extra_skills]
+            elif isinstance(extra_skills, (list, tuple)):
+                dirs = list(extra_skills)
+            else:
+                dirs = list(extra_skills)  # last-resort: any other iterable
+            for d in dirs:
+                p = Path(d)
+                if p not in explicit:
+                    explicit.append(p)
+
+        persisted = [Path(d) for d in cfg.tui.additional_skills_dirs]
+        ordered = explicit + persisted + cfg.tui.skills_dirs
+        root = Path(cfg.agent.working_dir).expanduser().resolve()
+        resolved = [
+            (d.expanduser() if d.expanduser().is_absolute() else root / d.expanduser()).resolve()
+            for d in ordered
+        ]
+        # Resolve against the session workspace before filtering absent roots.
+        cfg.tui.skills_dirs = [d for d in dict.fromkeys(resolved) if d.is_dir()]
+
+        return cfg
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+
+def _unpack_target(target, value):
+    """Unpack a target spec into (path, transformed_value)."""
+    if isinstance(target, tuple):
+        path, transform = target
+        return path, transform(value)
+    return target, value
+
+
+def _set_nested(obj, path: str, value):
+    """Set a dotted attribute path on a nested config model."""
+    parts = path.split(".")
+    for part in parts[:-1]:
+        obj = getattr(obj, part)
+    setattr(obj, parts[-1], value)
+
+
+# ── LLM helpers ───────────────────────────────────────────────────────────
+
+
+class UnresolvedModelError(ValueError):
+    """The model is neither a loaded alias nor provider-routable by LiteLLM."""
+
+    def __init__(self, model: str):
+        super().__init__(model)
+        self.model = model
+
+
+def get_llm_for_model(model_name: str) -> "CompletionClient":
+    """Build a client after validating aliases/provider routing without noisy output."""
+    from nooa.unifiedllm import MODELS, CompletionClient, get_llm_client
+
+    if model_name in MODELS:
+        return get_llm_client(model_name)
+
+    from .health_check import _detect_provider
+
+    if _detect_provider(model_name) is None:
+        raise UnresolvedModelError(model_name)
+    return CompletionClient(model=model_name)
+
+
+def get_llm(config: TUIConfig | Config) -> "CompletionClient":
+    """Get the LLM client based on configuration.
+
+    Accepts either a TUIConfig or the top-level Config.
+    """
+    tui = config.tui if isinstance(config, Config) else config
+    return get_llm_for_model(tui.default_model)
+
+
+def list_models() -> list[str]:
+    """List available models from the unifiedllm registry."""
+    from nooa.unifiedllm import MODELS
+
+    return sorted(MODELS.keys())
+
+
+from nooa_cli.coding.factory import load_agent_class as load_agent_class  # noqa: E402

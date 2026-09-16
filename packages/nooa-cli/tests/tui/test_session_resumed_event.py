@@ -1,0 +1,245 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""SessionResumed is emitted after agent reconstitution."""
+
+import pytest
+from nooa_cli.tui.bootstrap import bootstrap
+from nooa_cli.tui.config import Config
+
+from nooa.sessions import SessionResumed
+
+
+def test_event_is_runtime_role_and_fields():
+    e = SessionResumed(session_id="abc", restored=True)
+    assert e.session_id == "abc"
+    assert e.restored is True
+    # Runtime events never enter conversation/LLM context.
+    from nooa.context_blocks.models import Role
+
+    assert type(e)._role is Role.RUNTIME_EVENT
+
+
+def test_event_keeps_legacy_handler_alias():
+    assert SessionResumed.handler_aliases == ("TuiSessionResumed",)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_emits_event_to_subscribers_on_fresh_session(tmp_path, monkeypatch):
+    """SessionResumed is a runtime event (emit-only) — observe it via on().
+
+    Runtime events are never recorded/queryable, so a skill must subscribe with
+    event_manager.on("SessionResumed", handler) — which is exactly how
+    agent_mesh will auto-reconnect. We assert the handler fires once with the
+    right payload.
+
+    Because bootstrap() emits during construction (before we can subscribe), we
+    re-emit through the same manager to exercise the subscriber path the skills
+    use, and separately assert bootstrap reached the emit (no exception, agent
+    built with a session_id).
+    """
+    from nooa_cli.tui import session_manager as session_manager_module
+
+    monkeypatch.setattr(session_manager_module, "SESSIONS_DIR", tmp_path)
+
+    result = await bootstrap(Config())
+    agent = result.agent
+    assert result.session_id is not None
+
+    seen = []
+    agent.event_manager.register_event_type(SessionResumed)
+    agent.event_manager.on("SessionResumed", lambda e: seen.append(e))
+
+    agent.event_manager.add(SessionResumed(session_id=result.session_id, restored=False))
+
+    assert len(seen) == 1
+    assert seen[0].restored is False
+    assert seen[0].session_id == result.session_id
+    await agent.close()
+    result.session_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_on_handler_receives_event():
+    """A subscriber registered before emit receives the event (the skill path)."""
+    from nooa import Agent
+    from nooa.unifiedllm import FakeLLMClient
+
+    class _A(Agent, llm=FakeLLMClient()):
+        pass
+
+    agent = _A()
+    agent.event_manager.register_event_type(SessionResumed)
+    got = []
+    agent.event_manager.on("SessionResumed", lambda e: got.append((e.session_id, e.restored)))
+    agent.event_manager.add(SessionResumed(session_id="sess-1", restored=True))
+    assert got == [("sess-1", True)]
+
+
+@pytest.mark.asyncio
+async def test_active_session_warning_preserves_recovery_instructions(tmp_path, monkeypatch):
+    """Startup tells users how to reclaim an orphaned cross-sandbox claim."""
+    from nooa_cli.tui import session_manager as session_manager_module
+
+    monkeypatch.setattr(session_manager_module, "SESSIONS_DIR", tmp_path)
+    original = await bootstrap(Config())
+    session_id = original.session_id
+    await original.agent.close()
+    original.session_manager.close()
+    claim_path = tmp_path / f"{session_id}.active"
+    claim_path.mkdir()
+    (claim_path / "owner-orphan.json").write_text('{"pid": 123}')
+
+    fallback = await bootstrap(Config(), resume_session_id=session_id)
+    try:
+        warnings = [output.content for output in fallback.messages]
+        assert any(str(claim_path) in warning for warning in warnings)
+        assert any("remove" in warning and "Starting new" in warning for warning in warnings)
+        assert not fallback.resumed
+    finally:
+        await fallback.agent.close()
+        fallback.session_manager.close()
+        (claim_path / "owner-orphan.json").unlink()
+        claim_path.rmdir()
+
+
+@pytest.mark.asyncio
+async def test_resume_without_snapshot_emits_restored_false(tmp_path, monkeypatch):
+    """-c on a session with no snapshot must emit restored=False, not True.
+
+    The emit now happens in build_registry() (after skills attach), so we drive
+    that path and capture the event it emits via a real subscriber.
+    """
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui import session_manager as session_manager_module
+    from nooa_cli.tui.bootstrap import build_registry
+
+    monkeypatch.setattr(session_manager_module, "SESSIONS_DIR", tmp_path)
+
+    # Fresh session first (resumable id, zero snapshots), then resume it:
+    # bootstrap restores nothing -> build_registry must emit restored=False.
+    first = await bootstrap(Config())
+    sid = first.session_id
+    await first.agent.close()
+    first.session_manager.close()
+
+    resumed = await bootstrap(Config(), resume_session_id=sid)
+    assert resumed.restored is False  # no snapshot was applied
+
+    captured: list = []
+    resumed.agent.event_manager.register_event_type(SessionResumed)
+    resumed.agent.event_manager.on("SessionResumed", lambda e: captured.append(e))
+
+    build_registry(resumed, MagicMock())
+
+    assert len(captured) == 1, f"expected one resume emit, got {captured!r}"
+    assert captured[0].restored is False
+    await resumed.agent.close()
+    resumed.session_manager.close()
+
+
+def test_configured_skills_activate_before_session_resumed_event(tmp_path) -> None:
+    """Resume hooks exist only when configured skills attach before the event."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.bootstrap import BootstrapResult, build_registry
+
+    config = Config()
+    config.agent.working_dir = str(tmp_path)
+    skill_root = tmp_path / "configured-skills"
+    skill_root.mkdir()
+    config.tui.skills_dirs = [skill_root]
+    config.tui.active_skills = ["nvzurich.agent_mesh"]
+    agent = MagicMock()
+    agent.skills.discovered.return_value = ["nvzurich.agent_mesh"]
+    agent.skills.activated.return_value = ["nvzurich.agent_mesh"]
+    result = BootstrapResult(
+        config=config,
+        agent=agent,
+        session_manager=None,
+        tracing_enabled=False,
+        resumed=True,
+        restored=True,
+        session_id="session-1",
+    )
+
+    def record_event(_event):
+        agent.skills.activate.assert_any_call(["nvzurich.agent_mesh"])
+
+    agent.event_manager.add.side_effect = record_event
+    build_registry(result, SimpleNamespace())
+
+    agent.skills.discover_skills_dirs.assert_called_once()
+    discovered_roots = agent.skills.discover_skills_dirs.call_args.args[0]
+    assert discovered_roots[0] == skill_root
+    assert all(root.is_absolute() and root.is_dir() for root in discovered_roots)
+    agent.skills.activate.assert_any_call(["nvzurich.agent_mesh"])
+    agent.event_manager.add.assert_called_once()
+
+
+def test_failed_configured_skill_activation_warns_before_session_resumed() -> None:
+    """A registry load failure must not be reported as a successful restore."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.bootstrap import BootstrapResult, build_registry
+
+    config = Config()
+    config.tui.active_skills = ["local.broken"]
+    agent = MagicMock()
+    agent.skills.discovered.return_value = ["local.broken"]
+    agent.skills.activated.return_value = []
+    result = BootstrapResult(
+        config=config,
+        agent=agent,
+        session_manager=None,
+        tracing_enabled=False,
+        resumed=True,
+        restored=True,
+        session_id="session-1",
+    )
+
+    build_registry(result, SimpleNamespace())
+
+    agent.skills.activate.assert_any_call(["local.broken"])
+    assert [output.content for output in result.messages] == [
+        "Could not activate skill local.broken"
+    ]
+    agent.event_manager.add.assert_called_once()
+
+
+def test_configured_deactivation_happens_before_session_resumed_event() -> None:
+    """A constructor-default skill stays inactive when a session starts."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nooa_cli.tui.bootstrap import BootstrapResult, build_registry
+
+    config = Config()
+    config.tui.inactive_skills = ["nemo.repo"]
+    agent = MagicMock()
+    active = {"nemo.repo"}
+    agent.skills.discovered.return_value = ["nemo.repo"]
+    agent.skills.activated.side_effect = lambda: sorted(active)
+    agent.skills.deactivate.side_effect = lambda names: active.difference_update(names)
+    result = BootstrapResult(
+        config=config,
+        agent=agent,
+        session_manager=None,
+        tracing_enabled=False,
+        resumed=False,
+        restored=False,
+        session_id="session-1",
+    )
+
+    def record_event(_event):
+        agent.skills.deactivate.assert_called_once_with(["nemo.repo"])
+
+    agent.event_manager.add.side_effect = record_event
+    build_registry(result, SimpleNamespace())
+
+    agent.skills.discover_skills_dirs.assert_not_called()
+    agent.skills.deactivate.assert_called_once_with(["nemo.repo"])
+    agent.event_manager.add.assert_called_once()
+    assert result.messages == []
