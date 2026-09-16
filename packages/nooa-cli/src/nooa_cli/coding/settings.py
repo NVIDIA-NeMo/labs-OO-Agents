@@ -50,8 +50,16 @@ def load_coding_skills_dirs(
     )
 
     configured: list[str | Path] = []
-    configured.extend(_setting_paths(settings, "coding"))
-    configured.extend(_setting_paths(settings, "tui"))
+    coding = settings.get("coding")
+    section = (
+        "coding" if isinstance(coding, Mapping) and "additional_skills_dirs" in coding else "tui"
+    )
+    if section == "tui" and isinstance(settings.get("tui"), Mapping):
+        if "additional_skills_dirs" in settings["tui"]:
+            logger.warning(
+                "Reading legacy tui.additional_skills_dirs; use coding.additional_skills_dirs"
+            )
+    configured.extend(_setting_paths(settings, section))
     # A workspace's old config.toml is still a workspace layer. Do not let an
     # unrelated user-level settings.yaml silently suppress it. A modern
     # workspace settings file supersedes the legacy file, and an explicit
@@ -130,6 +138,10 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
     if not isinstance(tui, Mapping):
         return []
     value = tui.get("libs_dirs")
+    if isinstance(value, (str, list)):
+        logger.warning(
+            "Reading legacy config.toml tui.libs_dirs; use settings.yaml coding.additional_skills_dirs"
+        )
     if isinstance(value, str):
         return [value]
     if not isinstance(value, list):
