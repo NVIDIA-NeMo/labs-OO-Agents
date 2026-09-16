@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         LLMCallContext,
         LLMCallMiddleware,
         LLMCallNext,
+        SyncAgentCallNext,
     )
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ def _make_next(
     mw_fn: Callable[..., Awaitable[Any]],
     next_fn: Callable[..., Awaitable[Any]],
 ) -> Callable[..., Awaitable[Any]]:
-    """Build one layer of the middleware chain.
+    """Build one layer of the async middleware chain.
 
     Standalone function so each call gets its own closure scope.
     """
@@ -92,6 +93,27 @@ def _make_next(
             raise RuntimeError(
                 "Middleware returned None. Middleware must return the context "
                 "object (return await nxt(ctx), or set ctx.result and return ctx)."
+            )
+        return result
+
+    return _next
+
+
+def _make_sync_next(
+    mw_fn: Callable[..., Any],
+    next_fn: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Build one layer of the synchronous middleware chain.
+
+    Standalone function so each call gets its own closure scope.
+    """
+
+    def _next(ctx: Any) -> Any:
+        result = mw_fn(ctx, next_fn)
+        if result is None:
+            raise RuntimeError(
+                "Sync middleware returned None. Middleware must return the context "
+                "object (return call_next(ctx), or set ctx.result and return ctx)."
             )
         return result
 
@@ -140,6 +162,7 @@ class EventManager:
         # (middleware.py imports Agent which imports runtime/__init__ which imports us).
         self._middleware: dict[str, list[Any]] = {
             "agent_call": [],
+            "agent_call_sync": [],
             "llm_call": [],
             "execute_python": [],
         }
@@ -376,7 +399,8 @@ class EventManager:
 
         Execution order::
 
-            agent_call middleware        ← auth, rate limiting (traced async only)
+            agent_call middleware        ← auth, rate limiting (traced async)
+            agent_call_sync middleware   ← auth, rate limiting (traced sync)
               → llm_call middleware      ← per-call guardrails
                 → acall()
               → execute_python middleware ← per-exec guardrails
@@ -386,24 +410,27 @@ class EventManager:
 
         Registration order = execution order.  First registered = outermost.
 
+        ``agent_call_sync`` uses a **synchronous** middleware signature —
+        ``def guard(ctx, call_next) -> ctx`` — so no event loop is required and
+        the sync calling convention of the wrapped method is preserved.
+
         .. warning::
-           ``agent_call`` middleware only wraps async agent methods that the
-           metaclass instruments. Sync (``def``) methods, ``@no_trace`` methods
-           the metaclass leaves unwrapped, ``staticmethod`` / ``classmethod``,
-           and methods inherited from non-Agent bases all execute outside it,
-           so a guard registered here will not block them — including when
-           generated CodeAct Python calls them. (A ``@no_trace`` method that is
-           generated or carries ``@strategy`` keeps its async wrapper and stays
-           covered.) Declare such a capability as a traced ``async def`` method
-           to bring it under middleware, or enforce the policy inside the
-           method body. With ``agent_call`` middleware registered, a
-           ``RuntimeWarning`` names the uncovered methods the first time a
-           covered method runs, and each traced sync method warns on its own
-           first call. See :class:`~nooa.runtime.middleware.AgentCallContext`.
+           ``agent_call`` wraps only traced async methods. ``agent_call_sync``
+           wraps only traced sync (``def``) methods. ``@no_trace`` methods left
+           unwrapped by the metaclass, ``staticmethod`` / ``classmethod``, and
+           methods inherited from non-Agent bases execute outside both chains.
+           (A ``@no_trace`` method that is generated or carries ``@strategy``
+           keeps its async wrapper and stays under ``agent_call``.) With
+           ``agent_call`` registered but no ``agent_call_sync``, a
+           ``RuntimeWarning`` is emitted the first time a sync method runs to
+           surface the coverage gap.
 
         Args:
-            kind: ``"agent_call"``, ``"llm_call"``, or ``"execute_python"``.
-            fn: Async middleware ``(ctx, nxt) -> ctx``.
+            kind: ``"agent_call"``, ``"agent_call_sync"``, ``"llm_call"``, or
+                ``"execute_python"``.
+            fn: Async middleware ``(ctx, nxt) -> ctx`` for ``agent_call``,
+                ``llm_call``, and ``execute_python``.  **Sync** middleware
+                ``(ctx, call_next) -> ctx`` for ``agent_call_sync``.
 
         Returns:
             Unsubscribe callable.
@@ -429,7 +456,7 @@ class EventManager:
         ctx: "AgentCallContext | LLMCallContext | ExecutePythonContext",
         core: "AgentCallNext | LLMCallNext | ExecutePythonNext",
     ) -> "AgentCallContext | LLMCallContext | ExecutePythonContext":
-        """Execute middleware chain for *kind*, finishing with *core*.
+        """Execute async middleware chain for *kind*, finishing with *core*.
 
         When no middleware is registered, calls *core* directly (zero overhead).
         """
@@ -442,6 +469,29 @@ class EventManager:
             current = _make_next(fn, current)
 
         return await current(ctx)  # type: ignore[arg-type]
+
+    def run_sync_middleware(
+        self,
+        kind: str,
+        ctx: "AgentCallContext",
+        core: "SyncAgentCallNext",
+    ) -> "AgentCallContext":
+        """Execute synchronous middleware chain for *kind*, finishing with *core*.
+
+        Used by ``agent_call_sync`` to wrap traced synchronous agent methods
+        without requiring an event loop or changing the sync calling convention.
+
+        When no middleware is registered, calls *core* directly (zero overhead).
+        """
+        entries = self._middleware.get(kind)
+        if not entries:
+            return core(ctx)
+
+        current: SyncAgentCallNext = core
+        for fn in reversed(list(entries)):
+            current = _make_sync_next(fn, current)
+
+        return current(ctx)
 
     # === Query Methods ===
 
