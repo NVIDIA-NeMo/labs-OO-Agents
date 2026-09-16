@@ -1,6 +1,6 @@
 # nooa-cli
 
-CLI for [nemo-oo-agents](https://github.com/NVIDIA-NeMo/labs-OO-Agents). Ships the `nooa` command with subcommands for running evaluations, browsing traces, and managing config.
+CLI for [nemo-oo-agents](https://github.com/NVIDIA-NeMo/labs-OO-Agents). Ships the `nooa` command, including the native coding-agent TUI.
 
 ## Install
 
@@ -17,9 +17,11 @@ uv add "nooa-cli[datascience]"
 
 ```bash
 nooa --help
-nooa start-dev        # launch the trace viewer
-nooa eval ...         # eval pipeline runner
-nooa traces ...       # inspect/manage trace files
+nooa start-dev            # launch the trace viewer
+nooa eval ...             # eval pipeline runner
+nooa traces ...           # inspect/manage trace files
+nooa run "inspect this"   # one non-interactive coding-agent turn
+nooa tui                  # interactive coding agent
 ```
 
 Install the separate `nooa-acp` package to add the `nooa acp` plugin command and
@@ -32,6 +34,240 @@ export NVIDIA_API_KEY=nvapi-...
 uv run nooa-acp
 ```
 
+
+## Headless coding-agent runs
+
+Use `nooa run` in scripts and CI without launching a terminal UI:
+
+```bash
+nooa run "Fix the failing tests"
+printf '%s' "Summarize this repository" | nooa run -
+nooa run --format json "Review the current diff"
+nooa run --format jsonl "Run the test suite" > events.jsonl
+```
+
+A positional prompt and piped stdin may be combined; stdin is appended as
+additional context. Text mode writes only agent messages to stdout and writes
+the resumable session ID to stderr. `--format json` emits one result document
+with `schema_version`, `session_id`, `run_id`, `status`, ordered `messages`,
+`explanation`, `usage`, and `error` fields. Durable runs expose both a resumable
+`session_id` and per-invocation `run_id`; ephemeral runs leave `session_id` null.
+`--format jsonl` streams one versioned object per line with `type`, `timestamp`,
+`session_id`, and `run_id`; event types include
+`session.started`, `turn.started`, `agent.message`, `usage.updated`, and exactly
+one terminal `turn.completed`, `turn.blocked`, `turn.cancelled`, or
+`turn.failed`. Use `-o/--output PATH` to also write the final agent response to
+a file, and `--quiet` to suppress session diagnostics on stderr.
+
+Runs are durable by default:
+
+```bash
+nooa run --continue "Now update the docs"       # latest session in this workspace
+nooa run --resume 7d3a91c2 "Try the other fix"  # unique session ID prefix
+nooa run --ephemeral "One-off review"            # no session database
+```
+
+`--continue` is scoped to the selected `--working-dir`. An ambiguous or missing
+`--resume` prefix is an error rather than silently creating a new session.
+
+Headless execution never waits for terminal input. An agent request for human
+input, or an MCP server that still requires approval, emits the available
+message/result and exits with status 3 so automation can resume the saved
+session later. Exit 0 means completed, 1 means runtime failure, 2 means invalid
+CLI usage, and 130 means interrupted.
+
+> **Security:** headless shell and file tools currently have the same authority
+> as the TUI within the selected workspace. Run untrusted tasks inside a
+> container or another real isolation boundary. `nooa run` intentionally does
+> not advertise a sandbox flag until NOOA can enforce one centrally.
+
+## TUI configuration
+
+### Connect a model
+
+Start the TUI and run `/connect` — it guides you through picking a model and
+stores your credentials for you.
+
+```bash
+nooa tui
+```
+
+```text
+/connect https://api.anthropic.com          # Anthropic (Claude)
+/connect https://api.openai.com/v1           # OpenAI
+/connect http://localhost:11434              # Local Ollama
+/connect http://localhost:8000/v1            # Local vLLM
+/connect https://inference-api.nvidia.com/v1 # NVIDIA inference API
+```
+
+Give it a URL and `/connect` figures out the rest: it fetches the available
+models, prompts for an API key if the backend needs one, saves an alias to your
+project, and switches to the model you pick. Rerun `/connect` on the same URL
+any time to update the saved alias.
+
+### Editing saved config
+
+Everything `/connect` writes lives under your project's `.nooa/` folder:
+
+- `.nooa/llm_config.yaml` — saved model aliases
+- `.nooa/secrets.yaml` — API keys keyed by env-var name
+- `.nooa/settings.yaml` — TUI preferences and default model
+
+Edit any of them from inside the TUI with `/edit .nooa/<file>`, or open them in
+your usual editor. Changes to `settings.yaml` and `llm_config.yaml` are picked
+up on the next launch.
+
+Agent Skills are discovered from installed `nooa.skills` entry points and from
+conventional `.agents/skills`, `.claude/skills`, and `.cursor/skills`
+directories. Discovered workflow skills are loaded but remain model-inactive
+until `/skills activate <id>` or explicit invocation. Operations marked with
+`@slash_command` still appear as TUI slash commands. This is the extension path
+for project-specific workflows; they are not hard-coded into the terminal host.
+
+### Extending the coding agent
+
+The default `nooa_cli.coding.CodingAgent` is shared infrastructure for
+interactive hosts. An internal package can subclass it and select the subclass
+without forking the TUI:
+
+```python
+from nooa_cli.coding import CodingAgent
+
+
+class InternalCodingAgent(CodingAgent):
+    pass
+```
+
+```bash
+nooa tui --agent internal_agents:InternalCodingAgent
+```
+
+The TUI uses the single-tool CodeAct agent by default. To temporarily use the
+legacy multi-tool agent instead:
+
+```bash
+nooa tui --legacy-agent
+```
+
+Custom agents remain available through ``--agent MODULE:CLASS``; this option
+cannot be combined with ``--legacy-agent``.
+
+Private or organization-specific model registries stay outside this package.
+Place the registry at `.nooa/llm_config.yaml` for automatic project-local
+discovery, or pass a downloaded file explicitly:
+
+```bash
+nooa tui --llm-config /path/to/llm_config.yaml
+```
+
+Explicit paths have highest precedence. Run `nooa config show` to inspect the
+registry layers that were discovered.
+
+The TUI passes `llm`, durable `storage`, `cwd`, and `skills_dirs` when those
+parameters are declared by the custom class. Installed Python skills should be
+published through the `nooa.skills` entry-point group. Toolbar extensions can
+similarly publish named providers through `nooa_cli.tui.toolbar_items`; users
+select their order with `/toolbar set <item> ...`.
+
+The default toolbar includes `tokens`: `total ↑ 12.3k ↓ 456 cache 80%` shows
+cumulative input and output tokens from the session's recorded LLM responses.
+Cache percentage is total cached input divided by total input, not an average
+of call percentages; cache writes do not count as hits. Totals update after
+each response, restore from recorded history on resume, and reset for a new
+session. Responses without usage leave known totals unchanged; a dash means
+no usage has been reported. Separate worker histories are not included.
+If you have a saved toolbar layout,
+use `/toolbar reset` to adopt the new default, or add `tokens` with `/toolbar set`.
+
+Native and ACP agents have a `self.workspace_settings` skill for workspace
+preferences. Ask the agent to remember a Python skill for future sessions:
+
+```python
+await self.workspace_settings.remember_skill("your.skill", directory="/path/to/skills")
+await self.workspace_settings.forget_skill("your.skill")
+```
+
+`remember_skill` activates the skill and saves its ID (and optional discovery directory)
+in the workspace's `.nooa/settings.yaml`. `forget_skill` deactivates it and disables
+automatic activation there. Both reuse `/skills` operations; other live sessions
+retain their state. Package installation and ordinary session-local
+`self.skills.load/activate` are unchanged.
+
+The same skill also exposes `remember_mcp(name, auto_connect=True)`,
+`forget_mcp(name)`, `set_default_model(model)`, and `status()`. Register a NOOA
+MCP definition with `self.mcp.register` before remembering it. Persistence does
+not connect or approve a server. Status separates saved defaults from live
+state and omits MCP credentials. An explicit model launch override still wins;
+the current ACP CLI requires such an override.
+
+Long-term memory and idle reflection are deferred in the shared native/ACP agent.
+Legacy settings for these features are ignored and existing memory databases are
+left intact. Durable session history, summarization, and skill/MCP preferences
+remain available.
+
+### Themes
+
+Use `/theme` for installed themes, `/theme gallery` for the on-demand Tinted
+catalog, `/theme update` to refresh it, or `/theme <id>` to switch directly.
+Custom Base16/Base24 YAML themes
+can be installed in `~/.config/nooa/themes/` or `<project>/.nooa/themes/`. See
+[`docs/themes.md`](docs/themes.md) for the schema, semantic color roles, and
+validation rules.
+
+### MCP servers
+
+Use the TUI commands for the common lifecycle:
+
+```text
+/mcp list
+/mcp add docs https://docs.example.com/mcp
+/mcp approve docs
+/mcp approve docs <confirmation-code>
+/mcp connect docs
+/mcp disconnect docs
+/mcp remove docs
+```
+
+`/mcp add` writes an HTTP URL or a single stdio command to the project
+`.nooa/settings.yaml`. Configuration is discovery, not trust: the TUI shows a
+secret-safe fingerprint review and requires the user to repeat its confirmation
+code before any transport or local process starts. Any configuration change
+invalidates that approval. Environment placeholders are resolved only after
+approval. `/mcp remove` removes inline project servers and revokes their stored
+approvals without disturbing sibling settings. Servers sourced from an external
+`.mcp.json` must be removed from that file.
+
+For a richer server definition—stdio arguments, environment mappings, headers,
+or OAuth settings—use `/mcp-add <the details you have>`. That user-invocable
+skill asks the coding agent to edit the same project settings without embedding
+secret values, then directs you back through the user-owned review and approval
+flow. Removal is always `/mcp remove <name>` (or an edit to the source
+`.mcp.json` for externally defined servers).
+
+For stdio arguments, environment variables, headers, or OAuth options, use the
+full settings form:
+
+```yaml
+tui:
+  mcp_servers:
+    local-tools:
+      command: uvx
+      args: [my-mcp-server]
+      env:
+        LOG_LEVEL: info
+    hosted-tools:
+      url: https://tools.example.com/mcp
+      transport: streamable-http
+      oauth_client_id: my-client-id
+      oauth_scope: "tools.read tools.write"
+```
+
+Keep secret values in the host environment and use literal `${VAR}` placeholders
+in repository config. First-time OAuth consent remains a human browser step;
+manual codes are collected in a masked in-app prompt. Cached credentials are
+reused by later `/mcp connect` calls after the exact server definition remains
+approved.
+
 See the main repo [README](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/README.md) for the framework documentation.
 
 ## Interactive coding sessions
@@ -41,3 +277,13 @@ conversation replay shared by CLI hosts such as the native TUI and ACP. The
 process running an agent owns the writable session handle; other hosts attach
 through their transport or use read-only discovery. Generic event and SQLite
 storage primitives remain in the core `nooa` package.
+
+## Development fleet restarts
+
+A running TUI publishes a private runtime record under
+`${NOOA_TUI_RUNTIME_DIR:-~/.nooa/run/tui}`. On POSIX systems, `SIGUSR1` requests a
+graceful restart: the TUI stops through its normal teardown path, saves its agent
+snapshot, releases the session database, and re-execs the same command with the
+current session ID. The optional `nooa-dev-fleet` package in `nemo-oo-skills` uses
+this contract for branch notifications and coordinated multi-TUI restarts. Do not
+use `SIGKILL`; it bypasses snapshot and session cleanup.

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import inspect
+import re
 
 from nooa.runtime.context import ContextApi
 from nooa.runtime.events import EventsApi
@@ -26,6 +27,11 @@ def test_events_api_has_library_docstring():
 
 def test_method_writing_lib_has_library_docstring():
     _check_library_docstring(MethodWriting)
+    docstring = MethodWriting.__doc__ or ""
+    assert "@strategy(PredictStrategy())" in docstring
+    assert "asyncio.gather" in docstring
+    assert "doc(self.methodwriting)" in docstring
+    assert re.search(r"\{\{[A-Za-z_][A-Za-z0-9_]*\}\}", docstring) is None
 
 
 def test_method_writing_lib_is_instantiable():
@@ -41,9 +47,17 @@ def test_builtin_libs_are_skills():
 
 def test_codeact_strategy_instructions_no_longer_has_decomposition():
     from nooa.strategies.codeact import CodeActStrategy
+    from nooa.strategies.codeact_experimental import CodeActExperimental
 
     src = inspect.getsource(CodeActStrategy.strategy_instructions)
     assert "Task decomposition" not in src
+
+    experimental = CodeActExperimental()
+    tool_description = experimental._build_execute_python_tool().description
+    assert "@strategy(PredictStrategy())" not in tool_description
+    assert "asyncio.gather" not in tool_description
+    assert "plain-text replies do not execute work" in tool_description
+    assert "return_result(value)" in tool_description
 
 
 def test_context_api_not_in_protected_blocks():
