@@ -375,8 +375,7 @@ class OpenInferenceHooks:
 
         This is an orchestration step (one strategy "turn"), NOT the provider
         call itself — it carries no ``llm.*`` attributes. The real ``LLM`` span
-        is the nested ``litellm.acompletion`` span emitted by
-        ``openinference-instrumentation-litellm``. Marking this ``CHAIN`` (rather
+        is the nested ``llm.call`` span emitted by UnifiedLLM. Marking this ``CHAIN`` (rather
         than ``LLM``) keeps OpenInference backends from expecting
         ``llm.model_name`` / ``llm.input_messages`` here.
         """
@@ -403,7 +402,7 @@ class OpenInferenceHooks:
         )
 
         # Set OpenInference attributes. CHAIN (not LLM) — the nested
-        # litellm.acompletion span is the real LLM call.
+        # UnifiedLLM span is the real LLM call.
         span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, SpanKind.CHAIN)
         span.set_attribute(VIEWER_PLUGIN_ATTR, ViewerPlugin.GENERATION)
         span.set_attribute("agent.name", agent_name)
@@ -427,7 +426,7 @@ class OpenInferenceHooks:
         # Track span
         _get_active_spans()[generation_id] = span
 
-        # CRITICAL: Attach span to context so litellm instrumentor sees it
+        # Attach the span so UnifiedLLM calls inherit the generation parent.
         token = context.attach(trace.set_span_in_context(span))
 
         return {

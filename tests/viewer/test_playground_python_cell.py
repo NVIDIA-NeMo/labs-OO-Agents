@@ -40,5 +40,5 @@ async def test_playground_declares_historical_python_tool(monkeypatch, tool_name
     tools = {tool["function"]["name"]: tool["function"] for tool in captured["tools"]}
     assert tools[tool_name]["parameters"]["required"] == ["code"]
     assert "python_cell" not in {
-        tool["function"]["name"] for tool in trace_routes.DEFAULT_SANDBOX_TOOLS
+        tool.name for tool in trace_routes._sandbox_tools()
     }

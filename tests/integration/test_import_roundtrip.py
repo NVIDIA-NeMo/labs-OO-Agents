@@ -11,7 +11,7 @@ The user-visible invariant is:
 
 This test pins exactly that round-trip:
 
-  1.  enable_tracing(file + journal-to-viewer-A) -> one litellm.acompletion
+  1.  enable_tracing(file + journal-to-viewer-A) -> one UnifiedLLM call
       -> the file on disk has full messages on its LLM span (T1 covers
       that file is complete).
   2.  Spin up an *empty* viewer-B.
@@ -19,12 +19,6 @@ This test pins exactly that round-trip:
   4.  ``GET /api/trace/export?session_id=...`` from viewer-B.
   5.  Compare span-by-span with the original file: same span ids, same
       ``llm.input_messages.*`` / ``llm.output_messages.*``.
-
-Today this fails for any session that originated from the journal-wire
-path (because viewer-A's download is broken -- T2/T5).  But for files
-written directly by ``exporters.jsonl``, this round-trip should work
-end-to-end with no special handling, because the file already has full
-messages on spans.
 
 This test stays focused on the file -> import -> download edge so it
 exercises ``import-traces`` plumbing specifically, not the full journal
@@ -140,11 +134,9 @@ def test_import_reports_viewer_ingest_failure(fresh_viewer, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_save_then_import_then_download_preserves_messages(fresh_viewer):
+async def test_save_then_import_then_download_preserves_messages(fresh_viewer, mock_model_client):
     """A JSONL written by the file exporter, then re-imported into a fresh
     viewer, must round-trip its full message content."""
-    pytest.importorskip("openinference.instrumentation.litellm")
-    import litellm
 
     from nooa.tracing import enable_tracing, exporters, set_session
 
@@ -155,14 +147,13 @@ async def test_save_then_import_then_download_preserves_messages(fresh_viewer):
         session_id = "t6-roundtrip"
         set_session(session_id)
 
-        await litellm.acompletion(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "be terse"},
-                {"role": "user", "content": "T6_INPUT what is 2+2?"},
-            ],
-            mock_response="T6_OUTPUT 4",
-        )
+        async with mock_model_client("T6_OUTPUT 4") as client:
+            await client.acall(
+                [
+                    {"role": "system", "content": "be terse"},
+                    {"role": "user", "content": "T6_INPUT what is 2+2?"},
+                ]
+            )
 
         from nooa.tracing import _provider
 

@@ -408,6 +408,9 @@ def client_from_config(
         "store",
         "include",
         "cache_breakpoint",
+        "transport",
+        "api_style",
+        "replay_vendor",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]
