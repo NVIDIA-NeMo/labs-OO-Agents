@@ -237,6 +237,56 @@ async def test_skill_class_and_instance_view_resolution():
     assert keys.index("skill_class") < keys.index("skill_instance") < items.index(event)
 
 
+async def test_default_view_preserves_one_skill_boundary_end_to_end():
+    from nooa.strategies import PredictStrategy
+    from nooa.unifiedllm import FakeLLMClient
+
+    class BoundaryView:
+        async def assemble(self, owner, call):
+            yield Block(key="skill_policy", content="skill policy")
+            yield CacheBoundary()
+
+    class BoundarySkill(Skill, context_view=BoundaryView()):
+        pass
+
+    client = FakeLLMClient.simple_message('"ok"')
+
+    class Example(Agent, llm=client):
+        skill = BoundarySkill()
+
+        @strategy(PredictStrategy())
+        async def run(self) -> str:
+            """Return ok."""
+            ...
+
+    agent = Example()
+    items = await agent.runtime._prepare_context(Example.run)
+    assert sum(isinstance(item, CacheBoundary) for item in items) == 1
+    assert items.index(CacheBoundary()) > next(
+        i for i, item in enumerate(items) if getattr(item, "key", None) == "skill_policy"
+    )
+    assert await agent.run() == "ok"
+
+
+async def test_default_view_rejects_multiple_skill_boundaries_during_assembly():
+    class BoundaryView:
+        async def assemble(self, owner, call):
+            yield Block(key="skill_policy", content="skill policy")
+            yield CacheBoundary()
+            yield CacheBoundary()
+
+    class BoundarySkill(Skill, context_view=BoundaryView()):
+        pass
+
+    class Example(Agent, llm=object()):
+        skill = BoundarySkill()
+
+        async def run(self): ...
+
+    with pytest.raises(ValueError, match="more than one cache boundary from skill views"):
+        await Example().runtime._prepare_context(Example.run)
+
+
 async def test_hidden_skill_contributes_nothing():
     class DeclaredSkill(Skill):
         context_block = ("hidden_skill", "'secret'")
@@ -501,6 +551,39 @@ def test_event_helper_uses_active_history_and_filters_non_model_events():
         for event in selected
         if isinstance(event, Task)
     )
+
+
+def test_event_helper_preserves_native_only_assistant_replay():
+    from nooa.unifiedllm import AssistantReasoning
+
+    class Example(Agent, llm=object()):
+        pass
+
+    native = {
+        "type": "reasoning",
+        "id": "rs_1",
+        "encrypted_content": "opaque",
+        "summary": [],
+    }
+    response = LLMResponse(
+        parts=(AssistantReasoning(native=native),),
+        replay_scope="responses:openai:test",
+    )
+    agent = Example()
+    agent.event_manager.add(response)
+
+    call = CurrentCall(id="next", method_name="run", decorator="plan")
+    selected = select_context_events(agent.events, call=call)
+    assert selected == (response,)
+
+    rendered = render_context(
+        selected,
+        block_formatter=XMLBlockFormatter(),
+        provider_formatter=OpenAIProviderFormatter(),
+    ).output
+    assert rendered == [response]
+    assert rendered[0] is response
+    assert rendered[0].parts[0].native["encrypted_content"] == "opaque"
 
 
 async def test_default_view_boundary_with_empty_history_and_no_trailing_context():

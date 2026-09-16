@@ -441,7 +441,12 @@ class DefaultAgentView(ContextView["Agent"]):
 
         items: list[ContextItem] = [*prefix, *custom_skill_items]
         items.extend(visible_events(owner, call))
-        if items:
+        boundary_count = sum(isinstance(item, CacheBoundary) for item in items)
+        if boundary_count > 1:
+            raise ValueError(
+                "DefaultAgentView composed more than one cache boundary from skill views"
+            )
+        if items and boundary_count == 0:
             items.append(CacheBoundary())
         items.extend(trailing)
 
