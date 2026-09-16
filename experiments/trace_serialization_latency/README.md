@@ -27,6 +27,11 @@ It also runs the complete `before_agent_call` hook in an asyncio task while a 10
 heartbeat is scheduled. The largest heartbeat delay measures how long unrelated agent
 work can be prevented from running.
 
+A third case uses one large string scalar. This detects a distinct property of the
+standard-library encoder: `json.dump()` normally materializes a complete encoded string
+token before passing it to a file-like writer, so a bounded writer alone cannot prevent
+latency and a temporary allocation proportional to that scalar.
+
 A second case models the relevant shape from Gaia's workaround: a list of Pydantic
 candidate entities, each containing nested trials with large outputs and metadata. The
 same candidate and trial are deliberately shared so the input consumes modest memory;
@@ -59,6 +64,13 @@ variants:
 uv run python experiments/trace_serialization_latency/reproduce.py \
   --sizes-mib 8 --event-loop-mib 8 --entity-counts 5000 \
   --serializers hook-before
+```
+
+Run the isolated single-string benchmark (one fresh process per size so RSS growth is
+comparable):
+
+```bash
+uv run python experiments/trace_serialization_latency/scalar.py
 ```
 
 The script does not enable exporters, write traces, or call an LLM. This isolates the
@@ -99,3 +111,20 @@ After replacing the encode-then-truncate path with bounded streaming, the same t
 limit. A 1.03 MiB native-JSON input completed in 0.0018 s, and its full hook delayed a
 10 ms asyncio heartbeat by at most 0.0023 s. The fix therefore avoids traversing the
 unrecorded remainder while preserving the prior JSON representation for inputs that fit.
+
+The single-scalar review case was measured separately before and after fragmenting JSON
+string encoding. RSS growth is measured after constructing the source string, so it
+captures only serialization's temporary allocation:
+
+| String scalar | Writer-only latency | Writer-only RSS growth | Fragmented latency | Fragmented RSS growth |
+|---:|---:|---:|---:|---:|
+| 1 MiB | 0.0037 s | 2.0 MiB | 0.0016 s | ≤0.5 MiB |
+| 16 MiB | 0.0398 s | 32.2 MiB | 0.0016 s | ≤0.5 MiB |
+| 64 MiB | 0.1947 s | 128.0 MiB | 0.0016 s | ≤0.5 MiB |
+| 256 MiB | 0.7127 s | 512.0 MiB | 0.0017 s | ≤0.5 MiB |
+
+The small cases confirm that ordinary JSON encoding is fast. The larger cases establish
+that the remaining behavior is still material for tracing: a 256 MiB argument delays the
+agent by more than 700 ms and temporarily allocates twice the source size merely to retain
+a 50,000-character prefix. Fragment encoding makes both costs depend on the trace limit
+instead of the discarded string tail.

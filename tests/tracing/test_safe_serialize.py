@@ -7,6 +7,7 @@ import json
 from pydantic import BaseModel
 
 from nooa.tracing._hooks_impl import OpenInferenceHooks
+from nooa.tracing._limited_writer import LimitedWriter
 
 
 class TestSafeSerialize:
@@ -134,6 +135,23 @@ class TestSafeJsonValue:
         assert parsed["$nooa"]["kind"] == "truncated-json"
         assert len(serialized) <= 1_000
         assert Counted.repr_calls < 100
+
+    def test_oversized_scalar_is_encoded_in_bounded_chunks(self, monkeypatch):
+        chunk_lengths: list[int] = []
+        original_write = LimitedWriter.write
+
+        def recording_write(writer: LimitedWriter, value: str) -> int:
+            chunk_lengths.append(len(value))
+            return original_write(writer, value)
+
+        monkeypatch.setattr(LimitedWriter, "write", recording_write)
+
+        serialized = OpenInferenceHooks._safe_json_value(
+            {"args": ("x" * (1024 * 1024),), "kwargs": {}}
+        )
+
+        assert json.loads(serialized)["$nooa"]["kind"] == "truncated-json"
+        assert max(chunk_lengths) <= 4096
 
     def test_fallback_for_cycles_is_valid_and_bounded(self):
         value: dict = {}

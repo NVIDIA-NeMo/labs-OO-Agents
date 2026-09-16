@@ -22,7 +22,11 @@ from opentelemetry import trace
 from opentelemetry.trace import Span, Status, StatusCode
 
 from nooa.agentdoc import TruncatingStringIO, truncating_pformat
-from nooa.tracing._limited_writer import LimitedWriter, SerializationLimitReached
+from nooa.tracing._limited_writer import (
+    LimitedWriter,
+    SerializationLimitReached,
+    dump_json_bounded,
+)
 
 # Context variable for per-async-context active span tracking
 # This prevents context leakage during concurrent execution (e.g., parallel eval samples)
@@ -1042,7 +1046,7 @@ class OpenInferenceHooks:
 
         writer = LimitedWriter(max_chars)
         try:
-            json.dump(
+            dump_json_bounded(
                 obj,
                 writer,
                 default=lambda value: OpenInferenceHooks._safe_serialize(
@@ -1058,7 +1062,7 @@ class OpenInferenceHooks:
             fallback = OpenInferenceHooks._safe_serialize(obj, max_chars)
             fallback_writer = LimitedWriter(max_chars)
             try:
-                json.dump(fallback, fallback_writer)
+                dump_json_bounded(fallback, fallback_writer, default=lambda value: value)
                 return fallback_writer.getvalue()
             except SerializationLimitReached:
                 return OpenInferenceHooks._truncated_json_envelope(
