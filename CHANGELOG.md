@@ -100,9 +100,9 @@ to follow semantic versioning.
   endpoints retain their existing spelling. No new model-entry setting is needed.
 - Direct transports add mandatory `anthropic`, `opentelemetry-api`,
   `opentelemetry-sdk` and `openinference-semantic-conventions` dependencies;
-  remove `openinference-instrumentation-litellm`. Pin `openai==2.44.0` because
-  structured output currently uses its private schema helper; upgrades require
-  re-running the wire-contract tests. ResponsesClient now emits `token_usage`.
+  remove `openinference-instrumentation-litellm`. Require `openai>=2.44.0,<3`
+  with the tested version in the lockfile; upgrades require re-running the
+  structured-output wire contracts. ResponsesClient now emits `token_usage`.
 - Preserve readable reasoning as portable assistant text on legacy adapters
   that strip Chat extension fields (including Mistral); compatible routes
   continue to send the separate `reasoning_content` field.

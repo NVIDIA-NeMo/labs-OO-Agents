@@ -29,7 +29,6 @@ from .http_config import HttpConfig
 _PREFIXES = {
     "openai",
     "anthropic",
-    "azure",
     "deepseek",
     "nvidia_nim",
     "openrouter",
@@ -195,11 +194,12 @@ def anthropic_request(params: dict) -> dict:
                 )
             system.extend(content)
             continue
-        if content:
-            if messages and messages[-1]["role"] == role:
-                messages[-1]["content"].extend(content)
-            else:
-                messages.append({"role": role, "content": content})
+        if not content:
+            raise ValueError(f"Anthropic message[{index}]: empty {role} turn is unsupported")
+        if messages and messages[-1]["role"] == role:
+            messages[-1]["content"].extend(content)
+        else:
+            messages.append({"role": role, "content": content})
     result["messages"] = messages
     if system:
         result["system"] = system
@@ -339,6 +339,7 @@ class DirectTransport:
         ):
             raise ValueError("replay_vendor must be a nonempty lowercase provider name")
         self.replay_vendor = replay_vendor
+        self.model = model
         self.route(model, config)
         settings = self._http_settings(http_config)
         self.httpx_sync = httpx.Client(**settings)
@@ -365,6 +366,20 @@ class DirectTransport:
 
     def route(self, model, params):
         prefix, separator, rest = model.partition("/")
+        endpoint = params.get("base_url") or params.get("api_base")
+        hostname = urlsplit(endpoint or "").hostname or ""
+        if (separator and prefix == "azure") or hostname.endswith(
+            (".openai.azure.com", ".cognitiveservices.azure.com")
+        ):
+            raise ValueError(
+                "Native Azure routes are unsupported by direct transport; use transport='litellm'. "
+                "For an OpenAI-compatible gateway use openai/<wire-model> with api_base."
+            )
+        if model != self.model and separator and prefix in _PREFIXES:
+            if (prefix == "anthropic") != (self.api_style == "anthropic"):
+                raise ValueError(
+                    "A per-call model override cannot change api_style; construct a new client for the replacement route"
+                )
         recognized = bool(separator and prefix in _PREFIXES)
         wire_model = rest if recognized else model
         vendor = self.replay_vendor or (
@@ -374,11 +389,7 @@ class DirectTransport:
             raise ValueError(
                 "direct transport uses api_style, replay_vendor and api_base, not client/custom_llm_provider"
             )
-        if (
-            recognized
-            and prefix not in {"openai", "anthropic"}
-            and not (params.get("api_base") or params.get("base_url"))
-        ):
+        if separator and prefix not in {"openai", "anthropic"} and not endpoint:
             raise ValueError(
                 "This direct route requires api_base; SDKs do not resolve provider aliases"
             )
@@ -395,7 +406,7 @@ class DirectTransport:
             raise ValueError(
                 "direct transport does not silently drop fields; remove additional_drop_params"
             )
-        if body.get("num_retries", 0) != 0:
+        if body.get("num_retries") not in (None, 0):
             raise ValueError("Use retry_config for direct transport retries, not num_retries")
         body.pop("num_retries", None)
         model, _ = self.route(body.pop("model"), body)

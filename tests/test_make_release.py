@@ -1066,3 +1066,12 @@ def test_existing_publication_workflow_still_uses_published_release_trigger():
     assert "types: [published]" in workflow
     assert "workflow_dispatch:" in workflow
     assert "if: github.event_name == 'release'" in workflow
+
+
+def test_emergency_local_without_private_wheel_does_not_require_provider_aliases(mr, monkeypatch):
+    args = mr._parser().parse_args(["v1.2.3", "--skip-capability", "--checks-only"])
+    monkeypatch.setattr(mr, "preflight", lambda *a: ("a" * 40, "v1.2.2", "b" * 40, None))
+    monkeypatch.setattr(mr, "fast_checks", lambda: None)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *a: None)
+    monkeypatch.setattr(mr, "provider_checks", lambda *a, **kw: pytest.fail("paid provider gate"))
+    assert mr.local_main(args) == 0

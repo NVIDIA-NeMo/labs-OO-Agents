@@ -81,7 +81,8 @@ def test_gate_never_discovers_or_registers_exporters(isolated_gate_tracing, monk
     else:
         monkeypatch.setenv("OTLP_ENDPOINT", endpoint)
     monkeypatch.setattr(tracing, "probe_otlp_endpoint", lambda *_: pytest.fail("viewer probe"))
-    assert tracing._default_exporters() == []
+    # Exercise startup after isolation, not the fixture's stubbed return value.
+    monkeypatch.setattr(tracing, "_default_exporters", lambda: pytest.fail("exporter discovery"))
     tracing.enable_tracing()  # Same no-argument path used by Agent startup.
     with tracing._provider.get_tracer("gate-test").start_as_current_span("gate-test"):
         pass

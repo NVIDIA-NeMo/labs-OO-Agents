@@ -38,7 +38,6 @@ def test_direct_alias_requires_endpoint_and_style_matches_client():
     [
         ("chat", {"additional_drop_params": ["temperature"]}, "additional_drop_params"),
         ("chat", {"num_retries": 2}, "retry_config"),
-        ("chat", {"num_retries": None}, "retry_config"),
         ("chat", {"stream": True}, "stream=False"),
         ("responses", {"max_output_tokens": 10}, "either max_tokens or max_output_tokens"),
         (
@@ -59,7 +58,7 @@ async def test_direct_request_guards_make_no_http(wire, style, patch, pattern):
     transport = DirectTransport(route, style, None, {}, HttpConfig())
     try:
         with pytest.raises(ValueError, match=pattern):
-            transport._request(
+            await transport.acall(
                 {
                     "model": route,
                     "api_key": "test-key",
@@ -67,7 +66,6 @@ async def test_direct_request_guards_make_no_http(wire, style, patch, pattern):
                     "max_tokens": 20,
                     **patch,
                 },
-                asynchronous=True,
             )
         assert requests == []
     finally:

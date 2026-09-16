@@ -29,13 +29,21 @@ Messages, with `client_type: completion`). If `api_style` is omitted, the
 `anthropic/` routing prefix selects Messages; otherwise the client class selects
 Chat or Responses. This compatibility default does not infer model capabilities.
 
-The routing prefixes `openai/`, `anthropic/`, `azure/`, `deepseek/`,
+The routing prefixes `openai/`, `anthropic/`, `deepseek/`,
 `nvidia_nim/`, `openrouter/`, `hosted_vllm/`, `together_ai/`, `xai/`, and
 `gemini/` are removed before sending the model name. All except `openai/` and
 `anthropic/` require an explicit server URL. Other names, including names with
-slashes, are sent verbatim. They do not select a provider: without `api_base`,
-the selected SDK uses its default endpoint. Set the URL explicitly for custom
-servers; native Bedrock and Vertex routing prefixes are not supported.
+slashes, are sent verbatim. Slash names without an `openai/` or `anthropic/`
+prefix require an explicit `api_base`: an unknown provider must not silently
+send a request to OpenAI. Native Azure, Bedrock and Vertex protocols are not
+implemented; use LiteLLM for those. Azure prefixes/native Azure endpoints are
+rejected before dispatch. A compatible gateway can use an explicit
+`openai/<wire-model>` route and URL.
+
+The interface is fixed for the lifetime of a client. Cross-format per-call
+model switches are rejected; construct a new client instead. Replacing an
+alias's route through `get_llm_client` clears inherited format/replay metadata
+and reasoning choices, while preserving the selected transport.
 
 For a temporary soak run, `NOOA_LLM_TRANSPORT=direct uv run ...` selects the
 direct path for clients in that process. Set it to `litellm` to compare the
@@ -81,8 +89,9 @@ reasoning. `replay_vendor` can declare the vendor of native state explicitly.
 Readable `reasoning_content` stays a separate field on direct Chat and legacy
 OpenAI-compatible routes, including OpenRouter, NIM and vLLM. On other legacy
 adapters (for example Mistral), readable reasoning is folded into portable
-assistant text before the adapter can strip it. Native Anthropic, Gemini,
-Vertex and Bedrock keep their existing signed-state handling; this fallback
+assistant text before the adapter can strip it. Native Anthropic and Gemini
+keep their existing signed-state handling. Native Vertex and Bedrock use
+portable reasoning until their opaque formats are supported; this fallback
 never converts signatures or encrypted state into text.
 Unknown opaque formats are dropped with a warning.
 Editing a stored turn or switching to an incompatible model still drops its
@@ -91,8 +100,9 @@ private fields and retains readable text.
 Reasoning settings come from the registry, not a new model-name mapping.
 Cache configuration follows the shared clients' `cache_breakpoint` policy.
 Both clients default to `auto`; `None` disables NOOA's explicit markers. Native
-Anthropic auto selection respects a declared API style/vendor before the legacy
-model-name compatibility fallback.
+Anthropic auto selection preserves the legacy model-route policy (including
+Anthropic behind Chat gateways). Direct native Messages also enables it for
+bare model names; `api_style: chat` never disables an Anthropic cache marker.
 An endpoint accepting a request does not establish that it used the
 reasoning setting or served a cache hit; inspect reported usage during soaking.
 
@@ -104,16 +114,21 @@ and native reasoning state are redacted. Journal errors are logged without
 failing or repeating the provider call. Tracing no longer instruments unrelated
 raw `litellm.completion` calls made outside UnifiedLLM.
 
-Legacy model/URL/key overrides construct temporary bound HTTP wrappers and close
-them after dispatch, keeping the request hook attached without reusing the wrong
-credentials. Handler-backed vLLM, DeepSeek and Gemini routes use the handler
+Legacy model/URL/key overrides construct temporary bound HTTP wrappers using
+only the sync or async pool needed for that call. A cancelled async caller
+returns promptly; the outstanding provider task closes its pool when it finishes.
+This keeps the hook attached without reusing the wrong credentials or closing a
+pool while it is in use. Handler-backed vLLM, DeepSeek and Gemini routes use the handler
 wrapper, and Gemini `contents` are included in journal input. Providers that do
 not accept a supplied HTTP client can still bypass the hook; complete wire capture
-is not promised for arbitrary third-party LiteLLM adapters.
+is not promised for arbitrary third-party LiteLLM adapters. Successful calls
+without observed input emit a warning and `llm.input.capture=unavailable`; they
+do not claim that a client-side guess is the wire request.
 
 The LiteLLM tracing instrumentor, its monkeypatch, token calibration and
 `UnifiedLLM.count_tokens` are removed. No tokenizer replaces them. Direct
-clients use the registry's context window; the existing summarizer character
+clients use the registry's context window with the same model-metadata fallback
+as legacy clients; the existing summarizer character
 estimate and actor usage-based sizing remain. Unknown costs are not calculated
 from a model table on the direct path.
 LiteLLM may estimate Anthropic's reasoning-token breakdown; the direct path
@@ -146,12 +161,14 @@ is unchanged. The following shared changes apply to both transports:
   invocation attributes describe the actual request, not pre-translation kwargs.
   Journal input follows wire messages; Anthropic input usage includes cache reads
   and writes. Consumers relying on old span names, message indices, or cost-breakdown
-  attributes need updating. Unknown cost remains zero in the current usage type.
+  attributes need updating. Unknown cost remains zero in the current usage type
+  for compatibility, but the `llm.cost.total` span attribute is omitted unless
+  a cost was actually supplied (including an explicitly reported zero).
 
 `api_style` remains supported so existing registry/Connect entries do not break
 and native format selection need not depend on a model-name heuristic.
 `replay_vendor` is validated consistently before either transport is constructed.
-The prefix rules above remain unchanged to preserve saved replay scopes; an
+The retained compatibility prefixes preserve saved replay scopes; an
 OpenRouter model whose literal name starts with a recognized prefix must retain
 the outer routing prefix (for example `openai/deepseek/deepseek-chat`).
 
@@ -184,9 +201,9 @@ also omits `prompt_cache_key`, which its API does not accept. Other provider
 fields go through the SDK's `extra_body` without translation. Image `detail`
 has no Anthropic equivalent and is omitted during image conversion.
 
-OpenAI is pinned to 2.44.0 because structured-output conversion uses its private
-schema helper. An SDK upgrade must rerun the structured-output and wire tests;
-the pin avoids silently depending on a changing private interface.
+OpenAI supports `>=2.44.0,<3`, allowing security updates without a NOOA release.
+The lockfile records the tested version. Structured-output conversion uses the
+SDK's schema helper, so SDK upgrades must rerun structured-output/wire tests.
 
 No live soak result is claimed by these offline tests. Live release checks
 must use configured `release-gate-*` aliases; endpoints, credentials and

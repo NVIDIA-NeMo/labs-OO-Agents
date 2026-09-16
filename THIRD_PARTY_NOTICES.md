@@ -31,10 +31,15 @@ Attribution Statements: NVIDIA includes `msgpack` under the Apache License 2.0 f
 License Text(https://spdx.org/licenses/Apache-2.0.html)
 Source/Homepage: https://github.com/msgpack/msgpack-python
 
-openinference-instrumentation-litellm - Apache License 2.0
-Attribution Statements: NVIDIA includes `openinference-instrumentation-litellm` under the Apache License 2.0 for use with NVIDIA OO Agents.
+openai - Apache License 2.0
+Attribution Statements: NVIDIA includes `openai` under the Apache License 2.0 for use with NVIDIA OO Agents.
 License Text(https://spdx.org/licenses/Apache-2.0.html)
-Source/Homepage: https://github.com/Arize-ai/openinference
+Source/Homepage: https://github.com/openai/openai-python
+
+anthropic - MIT License
+Attribution Statements: NVIDIA includes `anthropic` under the MIT License for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/MIT.html)
+Source/Homepage: https://github.com/anthropics/anthropic-sdk-python
 
 pydantic - MIT License
 Attribution Statements: NVIDIA includes `pydantic` under the MIT License for use with NVIDIA OO Agents.

@@ -1894,7 +1894,10 @@ def local_main(args: argparse.Namespace) -> int:
     head_sha, prev_tag, _prev_sha, existing = preflight(args.tag, args.allow_dirty)
     fast_checks()
     build_and_smoke(args.tag, head_sha)
-    provider_checks(REPORT_PATH.parent, internal_wheel=args.internal_wheel)
+    if args.internal_wheel is not None:
+        provider_checks(REPORT_PATH.parent, internal_wheel=args.internal_wheel)
+    else:
+        warn("local fallback without --internal-wheel: provider replay/cache checks NOT RUN")
 
     report = ""
     if args.skip_capability:
@@ -1941,6 +1944,8 @@ def local_main(args: argparse.Namespace) -> int:
         ],
         capability_gate_ran=not args.skip_capability,
     )
+    if args.internal_wheel is None:
+        notes += "\nProvider replay/cache checks were not run: local emergency fallback without the private alias wheel.\n"
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
         fh.write(notes)
         notes_path = Path(fh.name)

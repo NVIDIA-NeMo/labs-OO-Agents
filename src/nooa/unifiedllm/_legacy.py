@@ -45,20 +45,23 @@ def preserve_readable_reasoning(params):
         for m in messages
     ):
         return params
-    _, provider, _, _ = litellm.get_llm_provider(
-        model=params["model"],
-        custom_llm_provider=params.get("custom_llm_provider"),
-        api_base=params.get("api_base") or params.get("base_url"),
-        api_key=params.get("api_key"),
-    )
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=params["model"],
+            custom_llm_provider=params.get("custom_llm_provider"),
+            api_base=params.get("api_base") or params.get("base_url"),
+            api_key=params.get("api_key"),
+        )
+    except Exception:
+        # Serialization must not replace the provider's own resolution/error
+        # path. Unknown routes already use portable history projection.
+        return params
     if provider in set(litellm.openai_compatible_providers) | {
         "openai",
         "azure",
         "openrouter",
         "anthropic",
         "gemini",
-        "vertex_ai",
-        "bedrock",
     }:
         return params
     result = dict(params)

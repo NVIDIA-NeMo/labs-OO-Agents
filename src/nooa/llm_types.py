@@ -210,7 +210,11 @@ class LLMUsage(BaseModel):
                 or 0
             ),
             total_tokens=int(first(value, "total_tokens") or input_tokens + output_tokens),
-            cost_usd=float(first(value, "cost_usd", "cost") or 0.0),
+            **(
+                {"cost_usd": float(first(value, "cost_usd", "cost"))}
+                if first(value, "cost_usd", "cost") is not None
+                else {}
+            ),
         )
 
 
