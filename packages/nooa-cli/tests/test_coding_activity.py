@@ -236,10 +236,12 @@ async def test_run_stream_forwards_and_records_bounded_stdin(tmp_path):
     shell, events = _observed_shell(tmp_path)
     payload = "line\n" * 10_000
     try:
-        streamed = [event async for event in shell.run_stream("cat", stdin=payload, timeout=5.0)]
+        # Verify the complete input without depending on an unbounded output stream.
+        streamed = [event async for event in shell.run_stream("wc -c", stdin=payload, timeout=5.0)]
     finally:
         await shell.close()
-    assert "".join(event.text for event in streamed if event.kind == "stdout") == payload
+    count = "".join(event.text for event in streamed if event.kind == "stdout")
+    assert int(count) == len(payload.encode())
     started = next(event for event in events if isinstance(event, TerminalCommandStarted))
     finished = next(event for event in events if isinstance(event, TerminalCommandFinished))
     assert started.stdin is not None
