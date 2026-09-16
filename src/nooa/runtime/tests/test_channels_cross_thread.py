@@ -56,9 +56,11 @@ class ProducerHelper:
             self._bg_ready.wait(timeout=2.0)
 
     def _run_bg(self) -> None:
-        asyncio.set_event_loop(self._bg_loop)
+        loop = self._bg_loop
+        assert loop is not None
+        asyncio.set_event_loop(loop)
         self._bg_ready.set()
-        self._bg_loop.run_forever()
+        loop.run_forever()
 
     def call(self, fn: Callable[[], Any]) -> None:
         """Execute fn() — either inline (same_loop) or on the bg thread."""
@@ -515,8 +517,8 @@ async def test_waiter_cancelled_after_cross_thread_put_item_not_lost(mode: str):
     bg_thread.join(timeout=1.0)
 
 
-async def test_status_reflects_pending_items(producer: ProducerHelper, mode: str):
-    """Channel.status() shows pending count and preview."""
+async def test_status_reflects_pending_items_without_payloads(producer: ProducerHelper, mode: str):
+    """Channel.status() reports queue depth without exposing payloads."""
     ch = Channel[str]("test", "queue")
     assert ch.status() == ""
 
@@ -524,9 +526,8 @@ async def test_status_reflects_pending_items(producer: ProducerHelper, mode: str
     producer.call(lambda: ch.put("world"))
     await asyncio.sleep(0.05)
 
-    status = ch.status()
-    assert "test: 2 pending" in status
-    assert "hello" in status
+    assert ch.status() == "test: 2 pending"
+    assert ch.snapshot() == ["hello", "world"]
 
 
 async def test_queue_manager_status_composite(producer: ProducerHelper, mode: str):
