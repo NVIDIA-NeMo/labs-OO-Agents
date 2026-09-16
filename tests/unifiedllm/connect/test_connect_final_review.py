@@ -101,8 +101,8 @@ async def test_each_probe_sends_configured_cap_through_runtime(monkeypatch, styl
     for record in result.entry["provenance"]["probes"].values():
         assert record["settings_sent"] is True
         assert record["tested_reply_tokens"] == record["configured_reply_tokens"]
-        assert record["transport"] == "litellm"  # This runtime predates direct SDK support.
-    assert result.entry["transport"] == "direct"  # Saved preference is forward-compatible.
+        assert record["transport"] == "direct"  # Probes now use the saved SDK transport.
+    assert result.entry["transport"] == "direct"
 
 
 async def test_insufficient_budget_never_substitutes_smaller_cap(monkeypatch):

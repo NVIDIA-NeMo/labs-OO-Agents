@@ -165,18 +165,30 @@ async def test_auto_cap_uses_effective_endpoint_per_call(wire, asynchronous, mon
 
 
 @pytest.mark.parametrize(
-    "patch,pattern",
+    "patch",
     [
-        ({"max_completion_tokens": 10}, "either max_tokens or max_completion_tokens"),
-        ({"extra_body": {"max_completion_tokens": 10}}, "not in extra_body"),
+        {"max_tokens": 20, "max_completion_tokens": 10},
+        {"max_tokens": 20, "extra_body": {"max_completion_tokens": 10}},
     ],
 )
-async def test_conflicting_cap_never_reaches_http(wire, patch, pattern):
+async def test_conflicting_cap_never_reaches_http(wire, patch):
     bodies, _ = wire
     async with client("direct", "openai/deployment") as llm:
-        with pytest.raises(ValueError, match=pattern):
+        with pytest.raises(ValueError, match="only one reply token limit field"):
             await call(llm, True, **patch)
     assert bodies == []
+
+
+@pytest.mark.parametrize(
+    "patch", [{"max_completion_tokens": 10}, {"extra_body": {"max_completion_tokens": 10}}]
+)
+async def test_call_cap_replaces_inherited_alias_on_direct_wire(wire, patch):
+    bodies, _ = wire
+    async with client("direct", "openai/deployment") as llm:
+        await call(llm, True, **patch)
+    assert len(bodies) == 1
+    assert bodies[0]["max_completion_tokens"] == 10
+    assert "max_tokens" not in bodies[0]
 
 
 @pytest.mark.parametrize("transport", ["direct", "litellm"])

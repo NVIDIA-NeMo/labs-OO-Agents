@@ -4,6 +4,7 @@
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -413,6 +414,15 @@ async def test_budget_template_cannot_raise_approved_output_cap(monkeypatch):
         reasoning_levels={
             "high": {"thinking": {"type": "enabled", "budget_tokens": 4096}, "max_tokens": 5120}
         }
+    )
+    # The configured level is normally budgeted in full. Simulate approval
+    # for a smaller probe so the guard, rather than transport rejection, is tested.
+    proposal = replace(
+        proposal,
+        probes=tuple(
+            replace(probe, token_estimate=1000) if probe.name == "level:high" else probe
+            for probe in proposal.probes
+        ),
     )
     result = await connect.run(proposal, approved="all")
     assert len(bodies) == 2
