@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -51,25 +52,35 @@ from nooa_cli.coding import (
     CodingAgent,
     CodingSlashCommand,
     CodingSlashCommandRegistry,
-    load_coding_skills_dirs,
 )
-from nooa_cli.sessions import (
-    InvalidSessionIdError,
-    SessionHandle,
-    SessionNotFoundError,
-    SessionStore,
+from nooa_cli.coding.factory import create_session_agent
+from nooa_cli.coding.slash_commands import RESERVED_COMMAND_NAMES
+from nooa_cli.interactive.controls import behavior_commands
+from nooa_cli.interactive.local_turn_policy import LocalTurnPolicy
+from nooa_cli.interactive.options import (
+    SessionOptions,
+    configure_session_skills,
+    connect_session_mcp,
 )
+from nooa_cli.interactive.session_paths import session_directory
 
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
-from nooa.slash_dispatch import CoercionError
-from nooa.unifiedllm import UnifiedLLM
-from nooa_acp._runtime import (
+from nooa.sessions import (
+    InvalidSessionIdError,
     SessionBusyError,
+    SessionHandle,
+    SessionNotFoundError,
+    SessionResumed,
     SessionRuntime,
     SessionRuntimeClosedError,
     SessionRuntimePool,
+    SessionStore,
 )
+from nooa.slash_dispatch import CoercionError
+from nooa.storage.sqlite import SessionAlreadyActiveError, is_sqlite_database_active
+from nooa.unifiedllm import UnifiedLLM
+from nooa_acp._mcp_trace import MCPHandoffTrace
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
 from nooa_acp.event_bridge import ACPEventBridge
 
@@ -92,6 +103,10 @@ class _ACPSession:
     cancel_complete: asyncio.Event = field(default_factory=asyncio.Event)
     notification_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     commands_sent_on_prompt: bool = False
+    restored: bool = False
+    policy: LocalTurnPolicy | None = None
+    # ACP requests must not interleave with the transcript replay on load.
+    ready: bool = False
 
     def __post_init__(self) -> None:
         self.cancel_complete.set()
@@ -102,6 +117,20 @@ class _ACPSession:
         if self.notification_tasks:
             await asyncio.gather(*self.notification_tasks, return_exceptions=True)
         self.notification_tasks.clear()
+        try:
+            try:
+                if self.policy is not None:
+                    await self.policy.shutdown()
+            finally:
+                try:
+                    await self.dispatcher.runtime.cancel_work()
+                finally:
+                    self.handle.storage.save_snapshot(self.agent)
+        finally:
+            await self._close_resources()
+
+    async def _close_resources(self) -> None:
+        """Release every resource even if a checkpoint or earlier close fails."""
         try:
             await self.bridge.close()
         finally:
@@ -115,8 +144,14 @@ class _ACPSession:
 
 
 class CodingACPAdapter:
-    def __init__(self, llm_factory: Callable[[], UnifiedLLM]) -> None:
+    def __init__(
+        self,
+        llm_factory: Callable[[], UnifiedLLM],
+        *,
+        options_factory: Callable[[Path], SessionOptions] | None = None,
+    ) -> None:
         self._llm_factory = llm_factory
+        self._options_factory = options_factory or SessionOptions.load
         self._client: Client | None = None
         self._sessions: SessionRuntimePool[_ACPSession] = SessionRuntimePool()
 
@@ -168,24 +203,29 @@ class CodingACPAdapter:
     ) -> NewSessionResponse:
         del kwargs
         root = self._validate_workspace(cwd, additional_directories)
+        options = self._options_factory(root)
         llm = self._llm_factory()
         try:
             handle = self._store(root).create(
                 model=llm.model,
-                agent="CodingAgent",
+                agent=options.agent_spec
+                or ("CodingAgent" if options.legacy_agent else "ExperimentalCodingAgent"),
                 working_directory=str(root),
-                origin="acp",
+                host="acp",
                 check_same_thread=False,
             )
         except BaseException:
             await llm.aclose()
             raise
         try:
-            runtime = await self._create_runtime(handle, root, mcp_servers, llm=llm)
+            runtime = await self._create_runtime(
+                handle, root, mcp_servers, llm=llm, options=options
+            )
         except BaseException:
             handle.close()
             self._store(root).delete(handle.id)
             raise
+        runtime.value.ready = True
         self._defer_bootstrap_updates(runtime.value)
         return NewSessionResponse(session_id=handle.id)
 
@@ -203,20 +243,30 @@ class CodingACPAdapter:
             handle = self._store(root).open(session_id, check_same_thread=False)
         except (InvalidSessionIdError, SessionNotFoundError):
             raise RequestError.resource_not_found(session_id) from None
+        except SessionAlreadyActiveError as exc:
+            # Clients may display only error.message, without error.data.
+            raise RequestError(
+                -32600,
+                f"Session {session_id[:8]!r} is already open. "
+                "Close it in the other client or tab, then try resuming again.",
+                {"sessionId": session_id, "reason": str(exc)},
+            ) from None
         runtime: SessionRuntime[_ACPSession] | None = None
         try:
-            runtime = await self._create_runtime(handle, root, mcp_servers, available=False)
+            runtime = await self._create_runtime(handle, root, mcp_servers, restore=True)
             # After the replay, never during it: replay writes straight to the
             # client while the bridge pump drains bootstrap updates, so every
             # await here would otherwise let a commands update or an MCP warning
             # land in the middle of the restored conversation.
             await self._replay_session(handle)
-            await self._sessions.publish(session_id)
+            if runtime.is_closed:
+                raise RequestError.resource_not_found(session_id)
+            runtime.value.ready = True
             self._defer_bootstrap_updates(runtime.value)
         except BaseException:
             if runtime is not None:
                 with suppress(KeyError):
-                    await self._sessions.remove(session_id, include_unavailable=True)
+                    await self._sessions.remove(session_id)
             else:
                 handle.close()
             raise
@@ -239,13 +289,32 @@ class CodingACPAdapter:
         if offset < 0:
             raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"})
 
-        found = self._store(root).list(limit=offset + _SESSION_PAGE_SIZE + 1)
+        store = self._store(root)
+        # ACP has no standard field for disabling a busy entry in the picker.
+        # Like native resume, omit startup-only sessions with no conversation.
+        # Filter before pagination so excluded sessions cannot hide later results.
+        # The load-time lock still handles sessions opened after this check.
+        found = [
+            info
+            for info in store.list(limit=None)
+            if info.turn_count > 0 and not is_sqlite_database_active(store.path_for(info.id))
+        ]
         page = found[offset : offset + _SESSION_PAGE_SIZE]
         sessions = [
             ACPSessionInfo(
                 session_id=info.id,
-                cwd=info.working_directory or str(root),
-                title=info.title,
+                # Older native sessions persisted CLI values such as "." or
+                # "../workspace". ACP requires an absolute cwd for every list
+                # entry. Their workspace is the store's requested scope; using
+                # the server process cwd would resolve relative paths twice.
+                cwd=(
+                    info.working_directory
+                    if Path(info.working_directory).is_absolute()
+                    else str(root)
+                ),
+                # Old ACP sessions never requested an automatic title. Give
+                # pickers a nonempty label without rewriting durable metadata.
+                title=info.title or f"Untitled session [{info.id[:8]}]",
                 updated_at=datetime.fromtimestamp(info.last_active, UTC).isoformat(),
             )
             for info in page
@@ -255,6 +324,7 @@ class CodingACPAdapter:
 
     async def close_session(self, session_id: str, **kwargs: Any) -> CloseSessionResponse:
         del kwargs
+        await self._get_runtime(session_id)
         try:
             await self._sessions.remove(session_id)
         except KeyError:
@@ -268,7 +338,6 @@ class CodingACPAdapter:
         try:
             async with runtime.turn():
                 session = runtime.value
-                session.handle.record_user_message(text)
                 session.cancel_complete.clear()
                 try:
                     if not session.commands_sent_on_prompt:
@@ -278,9 +347,31 @@ class CodingACPAdapter:
                         session.commands_sent_on_prompt = True
                     slash = self._slash_invocation(session.commands, text)
                     if slash is None:
+                        stripped = text.strip()
+                        requested = (
+                            stripped[1:].split(maxsplit=1)[0].lower()
+                            if stripped.startswith("/") and stripped[1:].strip()
+                            else ""
+                        )
+                        if requested in RESERVED_COMMAND_NAMES:
+                            message = (
+                                f"NOOA /{requested} is not available through ACP yet. "
+                                "Available behavior controls: /skills, /mcp. "
+                                "Use native NOOA for the other agent controls."
+                            )
+                            session.bridge.publish(update_agent_message(text_block(message)))
+                            await session.bridge.flush()
+                            return PromptResponse(stop_reason="end_turn")
                         result = await session.dispatcher.submit(text)
                     else:
                         name, raw_args = slash
+                        command = session.commands.get(name)
+                        if (
+                            command is not None
+                            and command._method is not None
+                            and not command.is_control
+                        ):
+                            session.handle.record_user_message(text)
                         try:
                             submission = await session.dispatcher.invoke_slash(
                                 session.commands,
@@ -324,7 +415,13 @@ class CodingACPAdapter:
                             slash_result, result = submission
                             if not slash_result.output_to_agent:
                                 message = str(slash_result)
-                                if message:
+                                if command is not None and command.is_control:
+                                    if message:
+                                        session.bridge.publish(
+                                            update_agent_message(text_block(message))
+                                        )
+                                    session.handle.storage.save_snapshot(session.agent)
+                                elif message:
                                     session.agent.message(message)
                                 await session.bridge.flush()
                                 return PromptResponse(stop_reason="end_turn")
@@ -386,7 +483,8 @@ class CodingACPAdapter:
         mcp_servers: list[Any] | None,
         *,
         llm: UnifiedLLM | None = None,
-        available: bool = True,
+        options: SessionOptions | None = None,
+        restore: bool = False,
     ) -> SessionRuntime[_ACPSession]:
         llm = llm or self._llm_factory()
         if self._client is None:
@@ -394,20 +492,27 @@ class CodingACPAdapter:
             raise RequestError.internal_error({"reason": "ACP client is not connected"})
         agent: CodingAgent | None = None
         commands: CodingSlashCommandRegistry | None = None
+        dispatcher: InteractiveSessionDispatcher | None = None
+        bridge: ACPEventBridge | None = None
         value: _ACPSession | None = None
         try:
+            options = options or self._options_factory(root)
             mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers)
-            agent = CodingAgent(
-                llm=llm,
-                cwd=root,
-                storage=handle.storage,
-                # Same anchoring as the session store above: one ACP process
-                # serves many workspaces, so project-local paths follow the
-                # session's workspace rather than the process.
-                libs_dir=root / ".nooa" / "libs",
-                skills_dirs=load_coding_skills_dirs(root),
-            )
-            registration_warnings: list[str] = []
+            agent = create_session_agent(llm=llm, storage=handle.storage, options=options)
+            restored = handle.storage.restore_latest_snapshot(agent) if restore else False
+            agent._session_manager = handle
+            registration_warnings = configure_session_skills(agent, options)
+            if restore and handle.info.agent:
+                from nooa_cli.coding.identity import canonical_agent_spec
+
+                saved = canonical_agent_spec(handle.info.agent)
+                current = f"{type(agent).__module__}:{type(agent).__qualname__}"
+                if saved not in {current, type(agent).__name__, options.agent_spec}:
+                    registration_warnings.append(
+                        f"Session was created with agent {handle.info.agent!r}; "
+                        f"resuming with {current!r} from the current host options."
+                    )
+            registration_warnings.extend(await connect_session_mcp(agent, options))
             for name, tool in mcp.items():
                 registry_name = f"mcp.{name}"
                 try:
@@ -421,8 +526,35 @@ class CodingACPAdapter:
                     # instead of failing session/new with an opaque error.
                     registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
             dispatcher = InteractiveSessionDispatcher(agent)
+            dispatcher.runtime.set_user_message_accepted_callback(handle.record_user_message)
             bridge = ACPEventBridge(agent, self._client, handle.id)
-            commands = CodingSlashCommandRegistry(agent)
+            bridge.watch_session(handle)
+
+            async def emit_status(status: Any) -> None:
+                # ACP stop reasons represent normal turn completion.
+                logger.debug("session %s: %s", handle.id, status)
+
+            policy = LocalTurnPolicy(
+                emit_output=emit_status,
+            )
+
+            async def checkpoint(current: Any, result: Any) -> None:
+                await policy.after_handle(current, result)
+                handle.storage.save_snapshot(current)
+
+            dispatcher.runtime.set_dispatch_hooks(
+                on_after_handle=checkpoint,
+            )
+
+            commands = CodingSlashCommandRegistry(agent, skills_dirs=options.skills_dirs)
+            commands.set_controls(
+                behavior_commands(
+                    agent,
+                    options,
+                    workspace=root,
+                    command_registry=commands,
+                )
+            )
             value = _ACPSession(
                 handle,
                 agent,
@@ -430,12 +562,14 @@ class CodingACPAdapter:
                 bridge,
                 commands,
                 startup_warnings=(*mcp_warnings, *registration_warnings),
+                restored=restored,
+                policy=policy,
             )
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
             try:
-                runtime = await self._sessions.add(handle.id, value, available=available)
+                runtime = await self._sessions.add(handle.id, value)
                 return runtime
             except ValueError:
                 raise RequestError.invalid_request(
@@ -445,9 +579,18 @@ class CodingACPAdapter:
             if value is not None:
                 await value.close()
             elif agent is not None:
-                if commands is not None:
-                    commands.close()
-                await agent.close()
+                try:
+                    if bridge is not None:
+                        await bridge.close()
+                finally:
+                    try:
+                        if commands is not None:
+                            commands.close()
+                    finally:
+                        if dispatcher is not None:
+                            await dispatcher.close()
+                        else:
+                            await agent.close()
             else:
                 await llm.aclose()
             raise
@@ -500,9 +643,12 @@ class CodingACPAdapter:
 
     async def _get_runtime(self, session_id: str) -> SessionRuntime[_ACPSession]:
         try:
-            return await self._sessions.get(session_id)
+            runtime = await self._sessions.get(session_id)
         except KeyError:
             raise RequestError.resource_not_found(session_id) from None
+        if not runtime.value.ready:
+            raise RequestError.resource_not_found(session_id)
+        return runtime
 
     @staticmethod
     def _defer_bootstrap_updates(session: _ACPSession) -> None:
@@ -510,6 +656,9 @@ class CodingACPAdapter:
 
         async def _publish() -> None:
             await asyncio.sleep(0)
+            session.agent.event_manager.add(
+                SessionResumed(session_id=session.handle.id, restored=session.restored)
+            )
             session.bridge.publish_best_effort(
                 _available_commands_update(session.commands.commands())
             )
@@ -518,7 +667,7 @@ class CodingACPAdapter:
                 session.bridge.publish_best_effort(
                     update_agent_message(
                         text_block(
-                            "NOOA started without one or more MCP servers. The session is still "
+                            "NOOA started with configuration warnings. The session is still "
                             f"usable.\n\n{details}"
                         )
                     )
@@ -567,7 +716,7 @@ class CodingACPAdapter:
 
     @staticmethod
     def _store(root: Path) -> SessionStore:
-        return SessionStore(root / ".nooa" / "sessions")
+        return SessionStore(session_directory(root))
 
     @staticmethod
     def _prompt_text(prompt: list[Any]) -> str:
@@ -606,17 +755,53 @@ class CodingACPAdapter:
         await self._sessions.close()
 
 
-async def serve(llm_factory: Callable[[], UnifiedLLM]) -> None:
-    adapter = CodingACPAdapter(llm_factory)
+async def serve(
+    llm_factory: Callable[[], UnifiedLLM],
+    *,
+    options_factory: Callable[[Path], SessionOptions] | None = None,
+) -> None:
+    adapter = CodingACPAdapter(llm_factory, options_factory=options_factory)
+    mcp_trace = MCPHandoffTrace.from_env()
+    # ACP clients may terminate their subprocess instead of closing stdin.
+    # Let normal teardown save snapshots and release shared-filesystem claims.
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    terminating = False
+
+    def terminate() -> None:
+        nonlocal terminating
+        if not terminating and task is not None:
+            terminating = True
+            task.cancel()
+
+    signal_installed = False
+    try:
+        loop.add_signal_handler(signal.SIGTERM, terminate)
+        signal_installed = True
+    except (NotImplementedError, RuntimeError):
+        pass  # Non-Unix event loops or an embedded server outside the main thread.
     try:
         # session/close is registered by the router as unstable. initialize()
         # advertises the close capability, so without this flag the agent
         # promises a method that answers "method not found", and a client can
         # never release a session. session/list is stable and unaffected.
-        await run_agent(cast(Agent, adapter), use_unstable_protocol=True)
+        await run_agent(
+            cast(Agent, adapter),
+            use_unstable_protocol=True,
+            observers=[mcp_trace] if mcp_trace is not None else [],
+        )
+    except asyncio.CancelledError:
+        if not terminating:
+            raise
     finally:
-        with suppress(Exception):
-            await adapter.close()
+        try:
+            with suppress(Exception):
+                await adapter.close()
+        finally:
+            if signal_installed:
+                loop.remove_signal_handler(signal.SIGTERM)
+                signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def _available_commands_update(commands: tuple[CodingSlashCommand, ...]):
