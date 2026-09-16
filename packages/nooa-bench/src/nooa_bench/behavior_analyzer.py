@@ -189,18 +189,17 @@ def analyze_events(
         if not isinstance(event, dict):
             continue
         event_type = _event_type(event)
+        metadata = event.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        framework_execution = event.get("synthetic", metadata.get("synthetic")) or event.get(
+            "prefill", metadata.get("prefill")
+        )
         if event_type == "ToolCallEvent":
             if not isinstance(event.get("name"), str):
                 continue
-            metadata = event.get("metadata")
-            metadata = metadata if isinstance(metadata, dict) else {}
             if event.get("name") == "return_result":
                 signals["completion_calls"] += 1
-            if (
-                event.get("name") not in {"execute_python", "python_cell"}
-                or event.get("synthetic", metadata.get("synthetic"))
-                or event.get("prefill", metadata.get("prefill"))
-            ):
+            if event.get("name") not in {"execute_python", "python_cell"} or framework_execution:
                 continue
             arguments = event.get("arguments") or {}
             if not isinstance(arguments, dict):
@@ -212,6 +211,8 @@ def analyze_events(
             for name, count in _analyze_code(code).items():
                 signals[name] += count
         elif event_type == "PythonOutput":
+            if framework_execution:
+                continue
             signals["execution_attempts"] += 1
             status = str(event.get("execution_status", "")).lower()
             is_error = status.endswith("error")

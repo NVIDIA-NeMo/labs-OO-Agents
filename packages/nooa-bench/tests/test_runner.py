@@ -2,10 +2,68 @@
 # SPDX-License-Identifier: Apache-2.0
 """Lifecycle tests for the benchmark runner."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from nooa_bench import runner
+
+
+@pytest.mark.parametrize("agent_async", [False, True])
+@pytest.mark.parametrize("client_async", [False, True])
+@pytest.mark.parametrize(
+    "outcome", ["success", "failure", "execution_error", "write_error", "cancelled"]
+)
+async def test_cleanup_failures_preserve_the_original_outcome(
+    monkeypatch, caplog, agent_async, client_async, outcome
+):
+    calls = []
+    original_error = (
+        asyncio.CancelledError("benchmark cancelled")
+        if outcome == "cancelled"
+        else OSError("original benchmark failure")
+    )
+
+    def fail_close(label, asynchronous):
+        def fail():
+            calls.append(label)
+            raise RuntimeError(f"{label} cleanup broke")
+
+        async def async_fail():
+            fail()
+
+        return async_fail if asynchronous else fail
+
+    client = SimpleNamespace(aclose=fail_close("llm", client_async))
+
+    class FakeAgent:
+        def __init__(self, llm):
+            self.close = fail_close("agent", agent_async)
+
+        async def _run_evaluation(self, task_input):
+            if outcome in {"execution_error", "cancelled"}:
+                raise original_error
+            return {"success": outcome != "failure", "response": "done"}
+
+    def write_result(*args):
+        if outcome == "write_error":
+            raise original_error
+
+    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: client)
+    monkeypatch.setattr(runner, "_import_agent_class", lambda name: FakeAgent)
+    monkeypatch.setattr(runner, "_write_result", write_result)
+    for name in ("_write_trajectory", "_write_behavior_report", "_write_answer"):
+        monkeypatch.setattr(runner, name, lambda *args: None)
+
+    if outcome.endswith("error") or outcome == "cancelled":
+        with pytest.raises(type(original_error)) as caught:
+            await runner._run("task", "model", "bench", None)
+        assert caught.value is original_error
+    else:
+        assert await runner._run("task", "model", "bench", None) == (outcome == "failure")
+    assert calls == ["agent", "llm"]
+    assert "Agent cleanup failed" in caplog.text
+    assert "Model client cleanup failed" in caplog.text
 
 
 @pytest.mark.asyncio

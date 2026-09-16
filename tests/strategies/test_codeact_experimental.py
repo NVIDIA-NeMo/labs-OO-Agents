@@ -277,6 +277,77 @@ async def test_python_cell_context_lists_static_module_capabilities():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("block_math", [False, True])
+async def test_python_cell_context_includes_imported_symbols_and_respects_visibility(
+    monkeypatch, block_math
+):
+    import sys
+
+    from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RestrictionsConfig
+
+    parent = ModuleType("parent_capability_agent")
+    leaf = ModuleType("leaf_capability_agent")
+    monkeypatch.setitem(sys.modules, parent.__name__, parent)
+    monkeypatch.setitem(sys.modules, leaf.__name__, leaf)
+    exec("from math import floor as root, trunc as inherited\nclass Parent: pass", vars(parent))
+    exec(
+        "from parent_capability_agent import Parent\n"
+        "from math import sqrt as root\n"
+        "from decimal import Decimal as Number\n"
+        "from subprocess import run as launch\n"
+        "from typing import Annotated\n"
+        "from nooa import hidden\n"
+        "secret: Annotated[object, hidden] = root\n"
+        "class Leaf(Parent): pass\n",
+        vars(leaf),
+    )
+    blocked = DEFAULT_BLOCKED_MODULES | ({"math"} if block_math else set())
+    strategy_instance = CodeActExperimental(
+        config=CodeActConfig(restrictions=RestrictionsConfig(blocked_modules=blocked))
+    )
+    agent = leaf.Leaf()
+    runtime = type("Runtime", (), {"agent": agent})()
+    rendered = await strategy_instance.python_cell_context(runtime)
+    assert "`Number` → `decimal.Decimal`" in rendered
+    assert "launch" not in rendered
+    assert "secret" not in rendered
+    assert "math.floor" not in rendered
+    if block_math:
+        assert "math.sqrt" not in rendered
+        assert "math.trunc" not in rendered
+    else:
+        assert "`root` → `math.sqrt`" in rendered
+        assert "`inherited` → `math.trunc`" in rendered
+
+
+@pytest.mark.asyncio
+async def test_imported_capability_is_advertised_and_executes_without_generic_context(monkeypatch):
+    import sys
+
+    module = ModuleType("imported_capability_agent")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(
+        "from math import sqrt as root\n"
+        "from nooa import Agent, strategy\n"
+        "from nooa.config import CodeActConfig\n"
+        "from nooa.strategies.codeact_experimental import CodeActExperimental\n"
+        "class ImportedAgent(Agent):\n"
+        "    @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)), "
+        "context={'execution_context': None})\n"
+        "    async def answer(self) -> float:\n"
+        "        ...\n",
+        vars(module),
+    )
+    llm = FakeLLMClient(scripted_responses=[_response("return_result(root(81))")])
+    agent = module.ImportedAgent(llm=llm)
+    try:
+        assert await agent.answer() == 9.0
+        assert "`root` → `math.sqrt`" in str(llm.last_messages)
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_python_cell_state_summarizes_initial_state():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return_result(question)")])
 

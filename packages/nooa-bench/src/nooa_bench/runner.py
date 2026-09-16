@@ -303,12 +303,19 @@ async def _run(
                 close_result = close()
                 if inspect.isawaitable(close_result):
                     await close_result
+        except Exception:
+            # Cleanup must not replace the benchmark result or its original error.
+            # Cancellation still propagates, with client cleanup guaranteed below.
+            logger.warning("Agent cleanup failed", exc_info=True)
         finally:
-            aclose = getattr(llm_client, "aclose", None)
-            if callable(aclose):
-                close_result = aclose()
-                if inspect.isawaitable(close_result):
-                    await close_result
+            try:
+                aclose = getattr(llm_client, "aclose", None)
+                if callable(aclose):
+                    close_result = aclose()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+            except Exception:
+                logger.warning("Model client cleanup failed", exc_info=True)
 
 
 @click.command()

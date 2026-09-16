@@ -75,7 +75,7 @@ class CodeActExperimental(CodeActStrategy):
         ]
 
     async def python_cell_context(self, runtime: RuntimeServices) -> str:
-        """Render static module capabilities available in generated Python cells."""
+        """Render visible modules and callables from the shared execution namespace."""
         agent_module = inspect.getmodule(type(runtime.agent))
         if agent_module is None:
             return ""
@@ -83,26 +83,30 @@ class CodeActExperimental(CodeActStrategy):
         from nooa.runtime.restrictions import is_from_blocked_module
 
         context = self._extract_module_context(agent_module, agent=runtime.agent)
-        modules = sorted(
-            (name, value.__name__)
-            for name, value in context.items()
-            if isinstance(value, ModuleType)
-            and not is_from_blocked_module(value, self.config.restrictions.blocked_modules)
-        )
-        if not modules:
-            return ""
+        modules: list[tuple[str, str]] = []
+        callables: list[tuple[str, str]] = []
+        for name, value in context.items():
+            if is_from_blocked_module(value, self.config.restrictions.blocked_modules):
+                continue
+            if isinstance(value, ModuleType):
+                modules.append((name, value.__name__))
+            elif callable(value):
+                origin = getattr(value, "__module__", type(value).__module__)
+                qualified_name = getattr(value, "__qualname__", type(value).__qualname__)
+                callables.append((name, f"{origin}.{qualified_name}"))
 
-        labels = ", ".join(
-            f"`{name}`" if name == module_name else f"`{name}` → `{module_name}`"
-            for name, module_name in modules
-        )
+        lines = []
+        for kind, capabilities in (("Module", modules), ("Callable/type", callables)):
+            if capabilities:
+                labels = ", ".join(
+                    f"`{name}`" if name == origin else f"`{name}` → `{origin}`"
+                    for name, origin in sorted(capabilities)
+                )
+                lines.append(f"{kind} capabilities already in scope: {labels}.")
+        if not lines:
+            return ""
         return "\n".join(
-            (
-                "## Python cell context",
-                "",
-                f"Module capabilities already in scope: {labels}.",
-                "Use them directly; do not re-import them.",
-            )
+            ["## Python cell context", "", *lines, "Use them directly; do not re-import them."]
         )
 
     @staticmethod

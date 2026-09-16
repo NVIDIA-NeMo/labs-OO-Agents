@@ -281,6 +281,7 @@ def test_real_export_preserves_only_metric_classification_metadata(tmp_path, mon
     from types import SimpleNamespace
 
     from nooa.context_blocks import ToolCallEvent
+    from nooa.events import PythonOutput, ResultStatus
 
     events = [
         ToolCallEvent(
@@ -299,6 +300,16 @@ def test_real_export_preserves_only_metric_classification_metadata(tmp_path, mon
             tool_call_id="model", name="python_cell", arguments={"code": "self.todo.status()"}
         ),
     ]
+    for index, metadata in enumerate(({"prefill": True}, {"synthetic": True}, {}, {})):
+        events.append(
+            PythonOutput(
+                tool_call_id=str(index),
+                execution_count=index + 1,
+                execution_status=ResultStatus.COMPLETE if index == 3 else ResultStatus.ERROR,
+                error="[E301] [PATH_NOT_FOUND]" if metadata else "",
+                metadata=metadata,
+            )
+        )
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
     runner._write_trajectory(SimpleNamespace(event_manager=dict(enumerate(events))))
     raw = (tmp_path / "trajectory.json").read_text()
@@ -306,6 +317,27 @@ def test_real_export_preserves_only_metric_classification_metadata(tmp_path, mon
     report = analyze_trajectory(tmp_path / "trajectory.json")
     assert report.signals["python_cells"] == 1
     assert report.rates["self_reference_rate"] == 1.0
+    assert report.signals["execution_attempts"] == 2
+    assert report.signals["execution_errors"] == 1
+    assert report.rates["execution_error_rate"] == 0.5
+    assert report.signals["restricted_code_errors"] == 0
+    assert report.signals["path_resolution_errors"] == 0
+
+
+@pytest.mark.parametrize("flag", ["prefill", "synthetic"])
+def test_output_classification_uses_metadata_fallback_and_explicit_flag_precedence(flag):
+    output = {"event_type": "PythonOutput", "execution_status": "error"}
+    report = analyze_events(
+        [
+            {**output, "metadata": {flag: True}},
+            {**output, flag: True, "metadata": {flag: False}},
+            {**output, flag: False, "metadata": {flag: True}},
+            {"event_type": "ToolCallEvent", "name": "return_result", "synthetic": True},
+        ]
+    )
+    assert report.signals["execution_attempts"] == 1
+    assert report.signals["execution_errors"] == 1
+    assert report.signals["completion_calls"] == 1
 
 
 @pytest.mark.parametrize("output", ["E501 line too long", "route E101 to bus", "PATH_TO_FILE=/x"])
