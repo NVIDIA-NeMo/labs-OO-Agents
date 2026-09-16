@@ -95,10 +95,12 @@ async def test_experimental_tui_agent_uses_only_python_cell(tmp_path):
             == 1
         )
         assert "<python_cell_context" in system_prompt
-        assert "Module capabilities already in scope:" in system_prompt
-        assert "`json`" in system_prompt
-        assert "`np` → `numpy`" in system_prompt
-        assert "`pd` → `pandas`" in system_prompt
+        assert (
+            "# Already in scope inside python_cell(); state persists across cells." in system_prompt
+        )
+        assert "import json" in system_prompt
+        assert "import numpy as np" in system_prompt
+        assert "import pandas as pd" in system_prompt
         rendered_context = "\n".join(
             str(message.get("content", "")) for message in llm.last_messages
         )
