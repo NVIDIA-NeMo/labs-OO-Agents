@@ -37,6 +37,55 @@ from nooa.trace_explorer.explorer import (
 class TestPythonCellViewerParity:
     """The experimental Python tool renders like legacy execute_python."""
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
+    @pytest.mark.parametrize("code", [[1], {"bad": "value"}, None, 7])
+    async def test_non_string_code_is_rendered_without_crashing(self, tool_name, code):
+        call = ToolCall(tool_name, json.dumps({"code": code}), "call_1")
+        llm = LLMTurn(
+            session_id="abcdef",
+            messages=[LLMMessage(role="assistant", content="", tool_calls=[call])],
+            response="",
+            model="test-model",
+            tool_calls=[call],
+        )
+        session = AgentSession(
+            session_id="abcdef",
+            agent_name="TestAgent",
+            method_name="answer",
+            parent_session_id=None,
+            turns=[llm, ExecutionTurn("pass", "", None, None, tool_call_id="call_1")],
+        )
+        trace = TraceExplorer([session], "trace.jsonl")
+        assert await trace.get_session("abcdef", concise=True)
+        for output in (
+            await trace.get_session("abcdef", concise=False),
+            await trace.get_turn("abcdef", 0),
+            await trace.get_turn("abcdef", 1),
+        ):
+            assert "code" in output
+            assert tool_name in output
+
+    @pytest.mark.asyncio
+    async def test_missing_call_id_does_not_borrow_neighbor_tool_name(self):
+        neighbor = LLMTurn(
+            session_id="abcdef",
+            messages=[],
+            response="",
+            model="test-model",
+            tool_calls=[ToolCall("python_cell", '{"code": "unrelated()"}', "call_1")],
+        )
+        execution = ExecutionTurn("legacy()", "", None, None)
+        session = AgentSession(
+            session_id="abcdef",
+            agent_name="TestAgent",
+            method_name="answer",
+            parent_session_id=None,
+            turns=[neighbor, execution],
+        )
+        rendered = await TraceExplorer([session], "trace.jsonl").get_turn("abcdef", 1)
+        assert '<tool_call name="execute_python">' in rendered
+
     @pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
     def test_extracts_prefill_inputs(self, tool_name):
         content = f"""<{tool_name} tool_call_id="prefill_1">

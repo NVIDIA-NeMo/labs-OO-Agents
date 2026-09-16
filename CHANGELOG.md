@@ -31,6 +31,30 @@ to follow semantic versioning.
 - Responses clients now honor the cached renderer's stable-prefix boundary by default,
   without a cache setting in the model registry. Requests without a usable boundary
   retain provider-default caching; `cache_breakpoint=None` opts out of NOOA markers.
+- Shared TUI/ACP agents defer long-term memory and idle reflection. Their setup,
+  `/memory` and `/reflection` controls, and workspace-setting operations are
+  removed. Legacy preferences are ignored; existing memory databases are retained.
+  Durable sessions, history summarization, and skill/MCP preferences remain available.
+- Interactive agents now use `RespondReason.NEED_INPUT` in place of
+  `GET_USER_INPUT`; legacy values produce a migration hint.
+- ACP defaults to the shared single-tool `ExperimentalCodingAgent`.
+  Use `nooa-acp --legacy-agent` for the multi-tool `CodingAgent`.
+- Shared interactive hosts expose `/mcp status`, `/mcp approve NAME [CODE]`,
+  and `/mcp revoke NAME`. Approval applies to the exact server configuration
+  and persists across sessions; remembering a server does not approve it.
+- `coding.agent_spec` and `tui.agent_spec` are ignored in every settings layer,
+  including user-level and project-level files, with one warning per process.
+  Select custom agents explicitly with the host's `--agent` option or a
+  `SessionOptions` override.
+- `JobHandle.cancel()` waits for an existing cancellation to unwind without
+  interrupting cleanup with another cancellation request. Jobs that suppress
+  cancellation and resume work must call `Task.uncancel()` to accept a later
+  request; cancellation remains cooperative.
+- Interactive agents no longer auto-attach the web publisher from
+  `NEMO_OO_RICH_URL`.
+- File-backed SQLite state uses a cross-namespace `.active` ownership claim.
+  After a crash, verify that the former owner has stopped before removing the
+  stale claim; clean shutdown removes it automatically.
 
 - Security: the sandbox parent no longer unpickles worker bytes. Brokered `self.*`
   arguments, `self.x = value` assignments, cell return values and `return_result`

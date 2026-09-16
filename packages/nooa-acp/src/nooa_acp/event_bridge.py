@@ -21,7 +21,13 @@ from acp import (
     update_tool_call,
 )
 from acp.interfaces import Client
-from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
+from acp.schema import (
+    ContentToolCallContent,
+    Cost,
+    SessionInfoUpdate,
+    ToolCallLocation,
+    UsageUpdate,
+)
 from nooa_cli.coding import (
     CodingAgent,
     FileEdit,
@@ -34,6 +40,7 @@ from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
+from nooa.sessions import SessionHandle, SessionTitleUpdated
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
 # the logging default sends them.
@@ -105,6 +112,20 @@ class ACPEventBridge:
         """Queue bootstrap metadata without poisoning the live event stream."""
         self._enqueue(_BestEffortUpdate(update))
 
+    def watch_session(self, handle: SessionHandle) -> None:
+        """Forward durable metadata changes from the session's event manager."""
+
+        def on_title(event: SessionTitleUpdated) -> None:
+            self._enqueue(
+                SessionInfoUpdate(
+                    session_update="session_info_update",
+                    title=event.title,
+                    updated_at=event.timestamp.isoformat(),
+                )
+            )
+
+        self._unsubscribers.append(handle.events.on("SessionTitleUpdated", on_title))
+
     def _on_agent_message(self, event: EventBase) -> None:
         if not isinstance(event, AgentMessage):
             return
@@ -113,7 +134,7 @@ class ACPEventBridge:
     def _on_tool_call(self, event: EventBase) -> None:
         if (
             not isinstance(event, ToolCallEvent)
-            or event.name != "execute_python"
+            or event.name not in {"execute_python", "python_cell"}
             or event.metadata.get("prefill") is True
             # codeact manufactures an execute_python call to carry a prose-only
             # reply. Nothing ran, so showing it as a Python card would present
