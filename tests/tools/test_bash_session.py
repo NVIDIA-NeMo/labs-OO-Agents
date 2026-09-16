@@ -4,6 +4,7 @@
 
 import pytest
 
+from nooa.errors import NemoOOAgentsRuntimeError
 from nooa.tools._bash_session import BashSession
 
 
@@ -99,3 +100,33 @@ class TestBashSession:
         await session.run(f"echo 'test content' > {tmp_path}/test.txt")
         out, _, _ = await session.run(f"cat {tmp_path}/test.txt")
         assert "test content" in out
+
+
+class TestBashSessionWindowsGuard:
+    """Regression tests for issue #110: a clear, actionable error on native
+    Windows instead of FileNotFoundError / AssertionError leaking from
+    asyncio.create_subprocess_exec."""
+
+    async def test_start_raises_clear_error_on_win32(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("nooa.tools._bash_session.sys.platform", "win32")
+        s = BashSession(cwd=tmp_path)
+
+        with pytest.raises(NemoOOAgentsRuntimeError, match="native Windows"):
+            await s.start()
+
+        assert s._started is False
+        assert s._process is None
+
+    async def test_start_guard_does_not_leak_the_control_pipe(self, tmp_path, monkeypatch):
+        """The win32 guard fires before os.pipe() is opened, so there is
+        nothing to close in the except branch and no fd leak to worry about."""
+        monkeypatch.setattr("nooa.tools._bash_session.sys.platform", "win32")
+        s = BashSession(cwd=tmp_path)
+
+        with pytest.raises(NemoOOAgentsRuntimeError):
+            await s.start()
+
+        # A second attempt raises the same clear error rather than some
+        # different failure from partially-initialized state.
+        with pytest.raises(NemoOOAgentsRuntimeError):
+            await s.start()
