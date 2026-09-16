@@ -126,7 +126,7 @@ def _call(model):
     metadata = {"model": model, "litellm_call_id": str(uuid4())}
     with _tracer().start_as_current_span(
         "llm.call",
-        attributes={"openinference.span.kind": "LLM"},
+        attributes={"openinference.span.kind": "LLM", "nooa.viewer.plugin": "llm_call"},
         record_exception=False,
         set_status_on_exception=False,
     ) as span:
