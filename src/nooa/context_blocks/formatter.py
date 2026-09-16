@@ -21,7 +21,7 @@ This split keeps the "format" axis (XML / Markdown / Plain) orthogonal to the
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeGuard
 
@@ -41,6 +41,28 @@ from nooa.context_blocks.models import (
 from nooa.llm_types import CacheBoundary, assistant_message
 
 logger = logging.getLogger(__name__)
+
+
+def validate_anthropic_message_order(
+    messages: Sequence[Any],
+) -> None:
+    """Reject layouts Anthropic would reorder by hoisting system messages."""
+    saw_non_system = False
+    for message in messages:
+        if isinstance(message, CacheBoundary) or isinstance(
+            getattr(message, "replay_message", None), CacheBoundary
+        ):
+            continue
+        role = message.get("role") if isinstance(message, Mapping) else message.role
+        if isinstance(role, Role):
+            role = role.value
+        if role == Role.SYSTEM.value:
+            if saw_non_system:
+                raise UnsupportedContextLayout(
+                    "Anthropic requires all system context before conversation messages"
+                )
+        else:
+            saw_non_system = True
 
 
 def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
@@ -615,9 +637,9 @@ class AnthropicProviderFormatter(ProviderFormatter):
     """Export portable Anthropic-native messages, without private replay or cache metadata."""
 
     def format(self, messages: list[RenderedMessage]) -> dict:
+        validate_anthropic_message_order(messages)
         system_parts: list[str] = []
         out: list[dict] = []
-        saw_non_system = False
         for msg in messages:
             if isinstance(msg.replay_message, CacheBoundary):
                 # This formatter produces a complete Anthropic-native payload,
@@ -628,15 +650,10 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     f"Anthropic cannot represent context role {msg.role.value!r}"
                 )
             if msg.role == Role.SYSTEM:
-                if saw_non_system:
-                    raise UnsupportedContextLayout(
-                        "Anthropic requires all system context before conversation messages"
-                    )
                 if msg.content:
                     system_parts.append(msg.content)
                 continue
 
-            saw_non_system = True
             if msg.role is Role.ASSISTANT and msg.reasoning:
                 msg = msg.model_copy(
                     update={
