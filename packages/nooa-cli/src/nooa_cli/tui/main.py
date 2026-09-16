@@ -1,0 +1,252 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Main entry point for the NOOA TUI (terminal frontend).
+
+Thin wrapper around the shared bootstrap.  Creates a ``TerminalFrontend``,
+calls ``bootstrap()``, wires them together, and runs the session.
+
+The ``main()`` coroutine keeps its original signature so that callers like
+``examples/tools_agent_tui/example.py`` continue to work unchanged::
+
+    await main(config=config, agent=agent)
+"""
+
+import asyncio
+import logging
+import sys
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from nooa import Agent
+
+    from .config import Config
+
+
+async def _exit_when_restart_requested(
+    session: Any,
+    restart_event: asyncio.Event,
+    *,
+    on_ready: Callable[[], None],
+) -> None:
+    """Exit only after pre-request work has settled naturally.
+
+    A drain failure must not leave input blocked forever or make the
+    restart signal permanently dead: the waiter is supervised, the
+    failure is surfaced in the transcript, the drain latch is released,
+    and the waiter re-arms so a later signal can latch a fresh drain.
+    """
+    while True:
+        await restart_event.wait()
+        try:
+            await session.wait_restart_ready()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("graceful-restart drain failed; resuming input")
+            app = getattr(session, "_app", None)
+            emit_block = getattr(app, "emit_block", None)
+            if callable(emit_block):
+                try:
+                    emit_block(
+                        "\x1b[33mRestart drain failed; input restored. "
+                        "Send the restart signal again to retry.\x1b[0m\n"
+                    )
+                except Exception:
+                    pass
+            # Clear before releasing: a set-then-clear could drop a signal
+            # that latched a fresh drain between the two statements, while a
+            # clear-then-set can only ever produce one extra (harmless) retry.
+            restart_event.clear()
+            release = getattr(session, "release_restart_request", None)
+            if callable(release):
+                try:
+                    release()
+                except Exception:
+                    pass
+            elif callable(getattr(app, "end_input_drain", None)):
+                try:
+                    app.end_input_drain()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            continue
+        on_ready()
+        session._app.exit()
+        return
+
+
+def _prepare_splash(config, frontend) -> list:
+    """Route fullscreen splash output through the app; print native splash now."""
+    if config.no_splash:
+        return []
+
+    from .config import DisplayMode, resolve_display_mode
+    from .output import SplashScreen
+    from .splash import show_splash
+
+    if resolve_display_mode(config.tui) is DisplayMode.FULLSCREEN:
+        return [SplashScreen()]
+    show_splash(frontend.raw_console)
+    return []
+
+
+async def main(
+    config: "Config | None" = None,
+    agent: "Agent | None" = None,
+    continue_last: bool = False,
+    resume_session_id: str | None = None,
+) -> None:
+    """Main entry point for the TUI.
+
+    Args:
+        config: Optional Config instance. If None, load layered defaults.
+        agent: Optional NOOA agent. If None, the default single-tool coding agent,
+               legacy agent, or custom class selected by ``config`` is created.
+               Custom hosts must implement the InteractiveAgent queue contract.
+        resume_session_id: Explicit session ID (or prefix) to resume.
+    """
+    from .bootstrap import bootstrap, build_registry, build_session, build_startup_info
+    from .config import Config
+    from .frontend import TerminalFrontend
+    from .output import TextOutput
+    from .session_manager import SESSIONS_DIR, build_resume_outputs
+
+    if config is None:
+        config = Config.load()
+
+    # Terminal-specific: create frontend and splash screen
+    frontend = TerminalFrontend(config)
+    _splash_outputs = _prepare_splash(config, frontend)
+
+    # Shared bootstrap: tracing, LLM, storage, agent, session manager
+    result = await bootstrap(
+        config,
+        continue_last=continue_last,
+        resume_session_id=resume_session_id,
+        agent=agent,
+    )
+
+    _startup_info = build_startup_info(result)
+    _initial_outputs = [*_splash_outputs, *result.messages, _startup_info]
+
+    # Show resumed session history. Terminal text/markdown outputs are deferred
+    # until Session.run(), after the frontend
+    # console is redirected through TUIApplication.emit_block; that makes them
+    # part of fullscreen resize replay instead of one-off pre-app writes.
+    if result.resumed and result.session_id is not None:
+        _db_path = SESSIONS_DIR / f"{result.session_id}.db"
+        _resume_outputs = build_resume_outputs(_db_path, result.session_id)
+        if _resume_outputs:
+            _initial_outputs.extend(_resume_outputs)
+            _initial_outputs.append(
+                TextOutput(f"Session {result.session_id[:8]} resumed.", "status")
+            )
+        else:
+            _initial_outputs.append(TextOutput("No previous session with turns found.", "info"))
+    elif continue_last:
+        _initial_outputs.append(TextOutput("No previous session with turns found.", "info"))
+
+    # Wire frontend → registry → session
+    registry = build_registry(result, frontend)
+    registry.startup_info = _startup_info
+    frontend.init_input(registry)  # terminal-specific: prompt_toolkit completions
+    session = build_session(result, frontend, registry, initial_outputs=_initial_outputs)
+
+    runtime_registration = None
+    restart_requested = False
+    restart_ready = False
+    restart_task = None
+
+    if result.session_id is not None:
+        from .runtime_registration import TUIRuntimeRegistration
+
+        try:
+            candidate = TUIRuntimeRegistration(
+                session_id=result.session_id,
+                working_dir=config.agent.working_dir,
+            )
+        except (OSError, ValueError):
+            candidate = None
+        restart_event = asyncio.Event()
+
+        def _request_restart() -> None:
+            """Latch a restart request and stop admitting new user work."""
+            nonlocal restart_requested
+            restart_requested = True
+            session.request_restart_when_idle()
+            restart_event.set()
+
+        if candidate is not None and candidate.install_restart_signal(
+            asyncio.get_running_loop(), _request_restart
+        ):
+            try:
+                candidate.publish()
+            except OSError:
+                candidate.close()
+            else:
+                runtime_registration = candidate
+
+                def _restart_in_flight() -> bool:
+                    """Whether a graceful-restart drain is already latched."""
+                    return bool(getattr(session, "_restart_pending", False))
+
+                # The dev-time update UX (in-process /restart plus the
+                # observe-only update watch) is fully opt-in via
+                # tui.update_watch — default off, dev checkouts only.
+                if getattr(config.tui, "update_watch", False):
+                    registry.request_restart = _request_restart
+                    registry.restart_in_flight = _restart_in_flight
+                    # Baseline revision for the observe-only update notice.
+                    session._startup_source_revision = candidate.source_revision
+                else:
+                    registry.restart_unavailable_reason = (
+                        "tui.update_watch is off (enable with --update-watch "
+                        "or tui.update_watch in settings); the external "
+                        "SIGUSR1 restart path still works."
+                    )
+
+                def _update_runtime_session(session_id: str) -> None:
+                    """Keep restart metadata aligned with in-process session changes."""
+                    try:
+                        candidate.update_session(session_id)
+                    except OSError:
+                        candidate.close()
+                        session._on_session_change = None
+
+                session._on_session_change = _update_runtime_session
+
+                def _mark_restart_ready() -> None:
+                    nonlocal restart_ready
+                    restart_ready = True
+
+                restart_task = asyncio.create_task(
+                    _exit_when_restart_requested(
+                        session, restart_event, on_ready=_mark_restart_ready
+                    ),
+                    name="tui-graceful-restart",
+                )
+
+    try:
+        await session.run()
+    finally:
+        if restart_task is not None and not restart_task.done():
+            restart_task.cancel()
+            try:
+                await restart_task
+            except asyncio.CancelledError:
+                pass
+        if runtime_registration is not None:
+            runtime_registration.close()
+
+    if restart_requested and restart_ready and runtime_registration is not None:
+        from .runtime_registration import reexec_tui
+
+        # Say so before the exec: the ordinary session teardown prints its
+        # goodbye + resume hint above, which alone reads like a plain quit.
+        sys.stderr.write(
+            "\x1b[2mRestarting: reloading this session on the current code "
+            "(pid stays with the process)...\x1b[0m\n"
+        )
+        reexec_tui(runtime_registration.restart_argv)

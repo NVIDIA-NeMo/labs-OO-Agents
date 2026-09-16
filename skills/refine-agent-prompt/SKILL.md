@@ -83,7 +83,7 @@ base classes (`BaseTUIAgent`, `Agent`), LLM client classes (`FakeLLMClient`, `ge
 internal config (`CodeActConfig`, `SummarizationConfig`, `AgentConfig`),
 pydantic internals (`BaseModel`, `Field`), private helpers (anything starting with `_`).
 
-**Fine to expose:** tool/skill classes the LLM uses (`ShellTools`, `WebPublisher`),
+**Fine to expose:** tool/skill classes the LLM uses (`ShellTools`, `TodoManager`),
 `pd`, `np`, `px`, `go`, `Path`, `json`, `math`, `re`.
 
 **Fix:** wrap the import in `with hidden:` at module level:
@@ -202,11 +202,6 @@ Check:
   to use it correctly in one shot, without needing follow-up calls?
 - Is any skill API already fully replicated in the task prompt? If so, that's waste —
   the skill docstring is the canonical source.
-
-**For `WebPublisher` / `self.web`**: the agent should be able to produce a working
-Plotly call on the first try. If it takes multiple LLM iterations, check whether the
-skill examples cover the user's data shape (long-form vs wide-form DataFrames,
-the right `px.*` function, axis mapping). Add more targeted examples to the skill docstring.
 
 ---
 
