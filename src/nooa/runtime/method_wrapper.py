@@ -493,8 +493,25 @@ def _is_agent_call_covered(func: Callable[..., Any]) -> bool:
     return getattr(func, "_agent_decorator", None) is not None and inspect.iscoroutinefunction(func)
 
 
-def _uncovered_agent_methods(cls: type) -> list[str]:
-    """User-defined callables on *cls* that ``agent_call`` middleware cannot wrap.
+def _is_agent_call_sync_covered(func: Callable[..., Any]) -> bool:
+    """Whether *func* is a sync agent method wrapped by the metaclass.
+
+    Returns ``True`` for plain ``def`` methods that :func:`create_sync_agent_method_wrapper`
+    has instrumented.  Combined with ``agent_call_sync`` registration, these methods are
+    covered — the sync middleware chain wraps their execution.
+
+    Sync generator methods and any callable not wrapped by the metaclass return ``False``.
+    """
+    return (
+        getattr(func, "_agent_decorator", None) is not None
+        and not inspect.iscoroutinefunction(func)
+        and inspect.isfunction(func)
+        and not inspect.isgeneratorfunction(func)
+    )
+
+
+def _uncovered_agent_methods(cls: type, *, has_sync_middleware: bool = False) -> list[str]:
+    """User-defined callables on *cls* that are outside ALL registered middleware chains.
 
     Walks the full MRO via ``dir()`` so inherited methods are included, and uses
     ``inspect.getattr_static`` to see ``staticmethod`` / ``classmethod``
@@ -504,11 +521,17 @@ def _uncovered_agent_methods(cls: type) -> list[str]:
     contributes a large amount of infrastructure that is not the caller's to fix,
     and listing it would bury the names that matter.
 
+    When *has_sync_middleware* is ``True``, sync agent methods wrapped by the
+    metaclass are considered covered by ``agent_call_sync`` and are omitted from
+    the returned list.
+
     Args:
         cls: The agent class to inspect.
+        has_sync_middleware: Pass ``True`` when ``agent_call_sync`` middleware is
+            registered so that instrumented sync methods are not reported as gaps.
 
     Returns:
-        Sorted method names, each outside ``agent_call`` middleware coverage.
+        Sorted method names, each outside every applicable middleware chain.
     """
     uncovered: list[str] = []
     for name in dir(cls):
@@ -528,8 +551,11 @@ def _uncovered_agent_methods(cls: type) -> list[str]:
         if module == "nooa" or module.startswith("nooa."):
             continue
 
-        if not _is_agent_call_covered(func):
-            uncovered.append(name)
+        if _is_agent_call_covered(func):
+            continue
+        if has_sync_middleware and _is_agent_call_sync_covered(func):
+            continue
+        uncovered.append(name)
 
     return sorted(uncovered)
 
@@ -556,9 +582,10 @@ def _warn_uncovered_agent_methods(agent: Any, event_manager: Any) -> None:
         # A sync method called before any covered entry point has already been
         # announced by the per-call path; listing it again here would report
         # the same method twice.
+        has_sync_mw = bool(event_manager._middleware.get("agent_call_sync"))
         uncovered = [
             name
-            for name in _uncovered_agent_methods(cls)
+            for name in _uncovered_agent_methods(cls, has_sync_middleware=has_sync_mw)
             if f"call:{cls.__qualname__}.{name}" not in reported
         ]
         if not uncovered:

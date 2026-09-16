@@ -1593,3 +1593,33 @@ class TestSyncAgentCallMiddleware:
         result = agent.helper()
         assert result == "ok"
         assert not blocked
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_both_hooks_registered_and_async_entry_runs(self):
+        """Regression for CodeRabbit finding: async entry must not warn when
+        agent_call_sync covers the sync methods on the same agent.
+
+        Before the fix, _uncovered_agent_methods always listed sync-wrapped
+        methods regardless of agent_call_sync registration, so the class-wide
+        scan emitted a RuntimeWarning (and broke -W error) the first time a
+        covered async method executed.
+        """
+
+        class A(Agent, llm=_TEST_LLM):
+            def helper(self) -> str:
+                """Sync capability — covered by agent_call_sync."""
+                return "ok"
+
+            async def entry(self) -> str:
+                """Async entry point — covered by agent_call."""
+                return "entry"
+
+        agent = A()
+        agent.event_manager.intercept("agent_call", _passthrough)
+        agent.event_manager.intercept("agent_call_sync", _sync_passthrough)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            # Both calls must succeed without raising a RuntimeWarning.
+            assert await agent.entry() == "entry"
+            assert agent.helper() == "ok"

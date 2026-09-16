@@ -15,7 +15,7 @@ import logging
 import re
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks import EventStatus
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         LLMCallContext,
         LLMCallMiddleware,
         LLMCallNext,
+        SyncAgentCallMiddleware,
         SyncAgentCallNext,
     )
 
@@ -346,10 +347,24 @@ class EventManager:
 
     # === Middleware (intercept) ===
 
+    @overload
+    def intercept(
+        self,
+        kind: Literal["agent_call_sync"],
+        fn: "SyncAgentCallMiddleware",
+    ) -> Callable[[], None]: ...
+
+    @overload
+    def intercept(
+        self,
+        kind: Literal["agent_call", "llm_call", "execute_python"],
+        fn: "AgentCallMiddleware | LLMCallMiddleware | ExecutePythonMiddleware",
+    ) -> Callable[[], None]: ...
+
     def intercept(
         self,
         kind: str,
-        fn: "AgentCallMiddleware | LLMCallMiddleware | ExecutePythonMiddleware",
+        fn: "AgentCallMiddleware | LLMCallMiddleware | ExecutePythonMiddleware | SyncAgentCallMiddleware",
     ) -> Callable[[], None]:
         """Register middleware that wraps a lifecycle operation.
 
