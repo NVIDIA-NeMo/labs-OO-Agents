@@ -9,8 +9,8 @@ to follow semantic versioning.
 - Direct Anthropic translates stop sequences and reports context exhaustion as
   truncation; unsupported paused turns raise a specific stop-reason error rather
   than a content-filter error. Direct native OpenAI Chat uses
-  `max_completion_tokens` for the canonical `max_tokens` budget; compatible
-  endpoints can declare `chat_max_tokens_field` without model-name heuristics.
+  `max_completion_tokens` for the existing `max_tokens` budget; compatible
+  endpoints retain their existing spelling. No new model-entry setting is needed.
 - Direct transports add mandatory `anthropic`, `opentelemetry-api`,
   `opentelemetry-sdk` and `openinference-semantic-conventions` dependencies;
   remove `openinference-instrumentation-litellm`. Pin `openai==2.44.0` because

@@ -14,6 +14,7 @@ import json
 import os
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel
@@ -22,7 +23,6 @@ from nooa.tracing._llm_hooks import capture_async_request, capture_request
 
 from .errors import UnsupportedStopReasonError
 from .http_config import HttpConfig
-from .request_params import chat_token_limit
 
 # These are routing prefixes, not a model catalogue. Other model ids, including
 # ids containing slashes, are sent verbatim. Nonstandard routes require a URL.
@@ -39,6 +39,26 @@ _PREFIXES = {
     "gemini",
 }
 _LEGACY_OPTIONS = {"drop_params", "allowed_openai_params", "additional_drop_params"}
+
+
+def _chat_token_limit(params: dict) -> dict:
+    """Translate the saved reply budget for native OpenAI, without model guesses."""
+    result = dict(params)
+    names = {"max_tokens", "max_completion_tokens"}
+    if len(names & result.keys()) > 1:
+        raise ValueError("Use either max_tokens or max_completion_tokens, not both")
+    extra = result.get("extra_body") or {}
+    if names & extra.keys():
+        raise ValueError("Chat reply limits belong at the top level, not in extra_body")
+    endpoint = (
+        result.get("base_url")
+        or result.get("api_base")
+        or os.getenv("OPENAI_BASE_URL")
+        or "https://api.openai.com/v1"
+    )
+    if "max_tokens" in result and urlsplit(endpoint).hostname == "api.openai.com":
+        result["max_completion_tokens"] = result.pop("max_tokens")
+    return result
 
 
 def _data_source(url):
@@ -309,30 +329,10 @@ class DirectTransport:
     sync_client = None
     async_client = None
 
-    def __init__(
-        self,
-        model,
-        api_style,
-        replay_vendor,
-        config,
-        http_config: HttpConfig,
-        *,
-        chat_max_tokens_field="auto",
-    ):
+    def __init__(self, model, api_style, replay_vendor, config, http_config: HttpConfig):
         if api_style not in {"chat", "responses", "anthropic"}:
             raise ValueError("api_style must be chat, responses, or anthropic")
-        if not isinstance(chat_max_tokens_field, str) or chat_max_tokens_field not in {
-            "auto",
-            "max_tokens",
-            "max_completion_tokens",
-        }:
-            raise ValueError(
-                "chat_max_tokens_field must be auto, max_tokens or max_completion_tokens"
-            )
-        if api_style != "chat" and chat_max_tokens_field != "auto":
-            raise ValueError("chat_max_tokens_field applies only to Chat requests")
         self.api_style = api_style
-        self.chat_max_tokens_field = chat_max_tokens_field
         if replay_vendor is not None and (
             not isinstance(replay_vendor, str)
             or not re.fullmatch(r"[a-z][a-z0-9_]*", replay_vendor)
@@ -390,7 +390,7 @@ class DirectTransport:
 
         body = dict(params)
         if self.api_style == "chat":
-            body = chat_token_limit(body, self.chat_max_tokens_field)
+            body = _chat_token_limit(body)
         if body.get("additional_drop_params"):
             raise ValueError(
                 "direct transport does not silently drop fields; remove additional_drop_params"

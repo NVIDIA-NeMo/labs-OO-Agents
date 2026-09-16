@@ -51,12 +51,10 @@ the other transport.
 Keep `max_tokens` as the saved reply budget. Direct Chat sends it as
 `max_completion_tokens` when the effective endpoint is `api.openai.com`, and as
 `max_tokens` on other endpoints. This uses the endpoint, not the model name.
-For a compatible server with different requirements, set the constructor/registry
-field `chat_max_tokens_field: max_completion_tokens` (or `max_tokens`). `auto` is
-the default. Explicit selection also chooses the input cap spelling passed to
-LiteLLM; its provider adapter still owns the final legacy translation. Responses
-and Anthropic do not accept this Chat-only setting. Per-call endpoint overrides
-are respected by direct `auto`; it does not probe or retry with another spelling.
+No new registry setting is required. Responses translates the same saved budget
+to `max_output_tokens`; Anthropic keeps `max_tokens`. LiteLLM's existing provider
+translation is unchanged. Direct Chat respects environment and per-call endpoint
+overrides; it does not probe or retry with another spelling.
 Supply only one cap field, at the top level rather than inside `extra_body`.
 
 Direct Anthropic translates Chat `stop` (a string or list) to `stop_sequences`.

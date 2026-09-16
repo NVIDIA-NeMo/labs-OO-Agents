@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig
+from nooa.unifiedllm import CompletionClient, RetryConfig
 from nooa.unifiedllm.errors import UnsupportedStopReasonError
 
 
@@ -136,24 +136,21 @@ async def test_unsupported_continuation_is_not_a_safety_error(wire, asynchronous
 @pytest.mark.parametrize("transport", ["litellm", "direct"])
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize(
-    "endpoint,field,expected",
+    "endpoint,expected",
     [
-        (None, "auto", "max_completion_tokens"),
-        ("https://models.example/v1", "auto", "max_tokens"),
-        ("https://models.example/v1", "max_completion_tokens", "max_completion_tokens"),
-        ("https://models.example/v1", "max_tokens", "max_tokens"),
+        (None, "max_completion_tokens"),
+        ("https://models.example/v1", "max_tokens"),
     ],
 )
-async def test_chat_cap_on_wire(wire, transport, asynchronous, endpoint, field, expected):
+async def test_chat_cap_on_wire(wire, transport, asynchronous, endpoint, expected):
     bodies, _ = wire
     model = "openai/o3" if endpoint is None else "openai/deployment"
-    async with client(transport, model, api_base=endpoint, chat_max_tokens_field=field) as llm:
+    async with client(transport, model, api_base=endpoint) as llm:
         await call(llm, asynchronous)
         assert llm.config["max_tokens"] == 32
     assert len(bodies) == 1
     assert bodies[0][expected] == 32
     assert len({"max_tokens", "max_completion_tokens"} & bodies[0].keys()) == 1
-    assert "chat_max_tokens_field" not in bodies[0]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -172,7 +169,6 @@ async def test_auto_cap_uses_effective_endpoint_per_call(wire, asynchronous, mon
     [
         ({"max_completion_tokens": 10}, "either max_tokens or max_completion_tokens"),
         ({"extra_body": {"max_completion_tokens": 10}}, "not in extra_body"),
-        ({"chat_max_tokens_field": "max_tokens"}, "client settings"),
     ],
 )
 async def test_conflicting_cap_never_reaches_http(wire, patch, pattern):
@@ -184,31 +180,26 @@ async def test_conflicting_cap_never_reaches_http(wire, patch, pattern):
 
 
 @pytest.mark.parametrize("transport", ["direct", "litellm"])
-@pytest.mark.parametrize("invalid", ["bad", None, []])
-def test_cap_setting_is_validated(transport, invalid):
-    with pytest.raises(ValueError, match="chat_max_tokens_field"):
-        client(transport, "openai/deployment", chat_max_tokens_field=invalid)
-    with pytest.raises(ValueError, match="only to Chat"):
-        client(transport, chat_max_tokens_field="max_completion_tokens")
-    with pytest.raises(ValueError, match="only to Chat"):
-        ResponsesClient(
-            "openai/test", transport=transport, api_key="test", chat_max_tokens_field="max_tokens"
-        )
-
-
-def test_registry_preserves_cap_mapping(monkeypatch):
+@pytest.mark.parametrize("native", [False, True])
+async def test_existing_registry_entry_supplies_reply_budget(wire, monkeypatch, transport, native):
     from nooa.unifiedllm import registry
 
     monkeypatch.setattr(registry, "ensure_loaded", lambda: None)
+    monkeypatch.setenv("TEST_CAP_API_KEY", "test")
     entry = {
-        "model_name": "openai/deployment",
-        "api_base": "https://models.example/v1",
-        "api_key": "test",
-        "transport": "direct",
+        "model_name": "openai/o3" if native else "openai/deployment",
+        "api_key_env": "TEST_CAP_API_KEY",
+        "transport": transport,
         "max_tokens": 32,
-        "chat_max_tokens_field": "max_completion_tokens",
+        "retry_config": False,
     }
+    if not native:
+        entry["api_base"] = "https://models.example/v1"
     monkeypatch.setattr(registry, "MODELS", {"test-cap": entry})
-    with registry.get_llm_client("test-cap") as llm:
-        assert llm.chat_max_tokens_field == "max_completion_tokens"
+    async with registry.get_llm_client("test-cap") as llm:
         assert llm.config["max_tokens"] == 32
+        await call(llm, True)
+    bodies, _ = wire
+    field = "max_completion_tokens" if native else "max_tokens"
+    assert bodies[0][field] == 32
+    assert len({"max_tokens", "max_completion_tokens"} & bodies[0].keys()) == 1

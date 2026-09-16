@@ -398,7 +398,6 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "transport",
         "api_style",
         "replay_vendor",
-        "chat_max_tokens_field",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]
