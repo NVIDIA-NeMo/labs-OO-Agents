@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
 from nooa_cli.interactive import AgentJobState, AgentJobSummary
 from nooa_cli.interactive.runtime import JobSnapshot
 from nooa_cli.tui.event_explorer import (
@@ -272,6 +273,18 @@ class TestJobExplorer:
         assert rows[0].state == "running"
         assert rows[0].queued == 4
         assert rows[0].values == ["first", "second"]
+
+    @pytest.mark.parametrize("daemon", [False, True])
+    def test_job_explorer_shows_daemon_flag(self, daemon):
+        snapshot = JobSnapshot("work", "test job", "running", 0, daemon=daemon)
+        row = build_job_rows([snapshot])[0]
+        view = JobExplorerView([snapshot])
+        label = "yes" if daemon else "no"
+
+        assert row.daemon is daemon
+        assert "daemon" in view.list_heading
+        assert label in view.format_row(row, 100).split()
+        assert f"Daemon: {label}" in view.detail_lines(row, 100)
 
     def test_job_explorer_ignores_unknown_actions(self):
         qm = MagicMock()

@@ -697,10 +697,10 @@ class LocalAgentRunner:
             with self._lifecycle_lock:
                 if self._foreground_started and str(result.kind) != "WAIT":
                     self._finish_foreground(result)
-            running_work = getattr(qm, "running_work_handles", None)
-            running = running_work() if running_work is not None else qm.running_handles()
+            # Daemons do not block quiescence, but remain visible while waiting.
+            running = qm.running_handles()
             if running:
-                labels = ", ".join(h.label for h in running)
+                labels = ", ".join(f"{h.label} (daemon)" if h.daemon else h.label for h in running)
                 self._present(f"Waiting for {len(running)} running job(s): {labels}\n")
             try:
                 items = await self._wait_for_input(qm.race())
@@ -788,6 +788,7 @@ class LocalAgentRunner:
                     queued=channel.qsize() if channel is not None else 0,
                     values=tuple(str(value) for value in handle.values),
                     job_id=handle.job_id,
+                    daemon=handle.daemon,
                 )
             )
         return tuple(snapshots)
