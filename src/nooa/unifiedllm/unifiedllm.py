@@ -9,7 +9,7 @@ import math
 import re
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1005,7 +1005,9 @@ def _needs_dummy_tool(model: str) -> bool:
     return model_lower.startswith(("anthropic/", "anthropic."))
 
 
-def _messages_have_tool_calls(messages: list[dict[str, Any] | LLMResponse | CacheBoundary]) -> bool:
+def _messages_have_tool_calls(
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
+) -> bool:
     """Return True if any message contains tool_call blocks."""
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -1086,7 +1088,7 @@ _token_calibration = TokenCalibration()
 
 def _update_token_calibration(
     model: str,
-    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
     usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
     *,
@@ -1111,29 +1113,33 @@ def _update_token_calibration(
     actual = usage.input_tokens
     if actual <= 0:
         return
+    calibration_messages = list(messages)
     # Responses lifts the leading system prompt out of input. It is still
     # billed input, so include it in the estimate without copying history.
     if instructions:
-        messages = [{"role": "system", "content": instructions}, *messages]
+        calibration_messages = [
+            {"role": "system", "content": instructions},
+            *calibration_messages,
+        ]
     # Calibration is best-effort: it must NEVER raise out of the (already paid)
     # response path. The whole estimate — primary AND fallback — is guarded.
     try:
         try:
-            estimated = litellm.token_counter(model=model, messages=messages)
+            estimated = litellm.token_counter(model=model, messages=calibration_messages)
             if tools:
                 # Count the full messages+tools payload the way the API bills it,
                 # then take the larger of the bare and with-tools counts
                 # (with_tools is normally >= bare; max only guards a tokenizer
                 # that returns less with tools attached).
                 with_tools = litellm.token_counter(
-                    model=model, messages=messages, tools=cast(Any, tools)
+                    model=model, messages=calibration_messages, tools=cast(Any, tools)
                 )
                 estimated = max(estimated, with_tools)
         except Exception:
             # token_counter can reject some message/tool shapes; fall back to the
             # per-message text sum rather than skip calibration entirely.
             estimated = 0
-            for msg in messages:
+            for msg in calibration_messages:
                 content = msg.get("content")
                 if isinstance(content, str):
                     estimated += litellm.token_counter(model=model, text=content)
@@ -1763,6 +1769,13 @@ class CompletionClient(UnifiedLLM):
             },
         }
 
+    def _validate_provider_layout(self, messages: Sequence[Any], effective_model: str) -> None:
+        """Reject message orders the selected provider cannot preserve."""
+        if self.cache_breakpoint == "anthropic" or _is_anthropic_model(effective_model):
+            from nooa.context_blocks.formatter import validate_anthropic_message_order
+
+            validate_anthropic_message_order(messages)
+
     def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""
         routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
@@ -1795,11 +1808,12 @@ class CompletionClient(UnifiedLLM):
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
-        messages = replay_state.prepare_chat_messages(messages, state_scope)
+        projected_messages = replay_state.prepare_chat_messages(messages, state_scope)
+        self._validate_provider_layout(projected_messages, effective_model)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
-            messages, responses=False, model=effective_model
+            projected_messages, responses=False, model=effective_model
         )
 
         api_params = {
@@ -1887,11 +1901,12 @@ class CompletionClient(UnifiedLLM):
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
-        messages = replay_state.prepare_chat_messages(messages, state_scope)
+        projected_messages = replay_state.prepare_chat_messages(messages, state_scope)
+        self._validate_provider_layout(projected_messages, effective_model)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
-            messages, responses=False, model=effective_model
+            projected_messages, responses=False, model=effective_model
         )
 
         api_params = {
