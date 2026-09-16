@@ -39,6 +39,7 @@ class AgentJobSummary:
     queued: int
     values: tuple[str, ...] = ()
     job_id: str = ""
+    daemon: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -29,7 +29,7 @@ class ToolbarContext:
     session_id: str | None = None
     session_title: str | None = None
     agent: Any = None
-    token_usage: str = "total ↑ — ↓ — cache —"
+    token_usage: str = "total ↑ — ↓ — ↻ —"
 
 
 class ToolbarRegistry:
@@ -119,7 +119,7 @@ def accumulate_token_usage(total: LLMUsage | None, usage: LLMUsage | None) -> LL
 def format_token_usage(usage: LLMUsage | None) -> str:
     """Show session totals and the fraction of total input read from cache."""
     if usage is None:
-        return "total ↑ — ↓ — cache —"
+        return "total ↑ — ↓ — ↻ —"
 
     def count(tokens: int) -> str:
         if tokens >= 1_000_000:
@@ -131,4 +131,4 @@ def format_token_usage(usage: LLMUsage | None) -> str:
     cached = (
         f"{usage.cached_input_tokens / usage.input_tokens:.0%}" if usage.input_tokens > 0 else "—"
     )
-    return f"total ↑ {count(usage.input_tokens)} ↓ {count(usage.output_tokens)} cache {cached}"
+    return f"total ↑ {count(usage.input_tokens)} ↓ {count(usage.output_tokens)} ↻ {cached}"
