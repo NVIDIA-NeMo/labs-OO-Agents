@@ -742,6 +742,11 @@ class TokenBudgetSummarizer(SummarizationAgent):
                 params = dict(request.params)
                 params.setdefault("output_model", None)
                 request.response = await request.client.acall(request.messages, **params)
+                # Notify usage/cost observers (e.g. ACPEventBridge) without
+                # recording this fork's response into the durable transcript
+                # or LLM context — it is a background compaction call, not a
+                # turn the agent or the client should see as conversation.
+                self.target_event_manager.add(request.response, record=False)
                 return request
 
             result = await self.target_event_manager.run_middleware("llm_call", ctx, dispatch)

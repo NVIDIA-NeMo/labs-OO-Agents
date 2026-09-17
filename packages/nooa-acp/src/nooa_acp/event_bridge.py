@@ -21,7 +21,7 @@ from acp import (
     update_tool_call,
 )
 from acp.interfaces import Client
-from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
+from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, Usage, UsageUpdate
 from nooa_cli.coding import (
     CodingAgent,
     FileEdit,
@@ -44,6 +44,19 @@ _STOP = object()
 # Bound on a rendered Out[n] value; large results belong in the agent's
 # context, not repeated in full inside a client tool card.
 _MAX_VALUE_CHARS = 10_000
+
+# Maps nooa.llm_types.LLMUsage field names to acp.schema.Usage kwarg names.
+# The single source of truth for both accumulating per-turn totals and
+# building the Usage object from them, so the two never drift apart.
+_TO_USAGE_KWARG = {
+    "input_tokens": "input_tokens",
+    "output_tokens": "output_tokens",
+    "reasoning_tokens": "thought_tokens",
+    "cached_input_tokens": "cached_read_tokens",
+    "cache_write_input_tokens": "cached_write_tokens",
+    "total_tokens": "total_tokens",
+}
+_TURN_USAGE_FIELDS = tuple(_TO_USAGE_KWARG)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +94,9 @@ class ACPEventBridge:
         self._python_source: dict[str, str] = {}
         self._terminal_output: dict[str, str] = {}
         self._cost_usd = 0.0
+        # Accumulated across LLM calls since the last take_turn_usage() call;
+        # reset on read so each ACP turn reports only its own usage.
+        self._turn_tokens: dict[str, int] = {}
         self._unsubscribers: list[Callable[[], None]] = [
             agent.event_manager.on("AgentMessage", self._on_agent_message),
             agent.event_manager.on("ToolCallEvent", self._on_tool_call),
@@ -261,6 +277,8 @@ class ACPEventBridge:
         if usage is None:
             return
         self._cost_usd += usage.cost_usd
+        for field in _TURN_USAGE_FIELDS:
+            self._turn_tokens[field] = self._turn_tokens.get(field, 0) + getattr(usage, field)
         context_window = getattr(self.agent.llm, "context_window", None)
         if context_window is None:
             return
@@ -272,6 +290,18 @@ class ACPEventBridge:
                 cost=Cost(amount=self._cost_usd, currency="USD"),
             )
         )
+
+    def take_turn_usage(self) -> Usage | None:
+        """Return and reset this turn's accumulated token usage.
+
+        Returns None when no LLM call has completed since the last call, so
+        early-return turns (e.g. an unrecognized slash command) correctly
+        report no usage rather than a stale or zeroed total.
+        """
+        tokens, self._turn_tokens = self._turn_tokens, {}
+        if not tokens:
+            return None
+        return Usage(**{_TO_USAGE_KWARG[field]: value for field, value in tokens.items()})
 
     def _stopped_error(self, cause: BaseException) -> RuntimeError:
         error = RuntimeError("ACP event bridge stopped")
