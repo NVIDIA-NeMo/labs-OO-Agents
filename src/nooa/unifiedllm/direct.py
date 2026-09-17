@@ -12,7 +12,6 @@ so registry-declared settings reach compatible servers unchanged.
 import inspect
 import json
 import os
-import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -326,18 +325,11 @@ class DirectTransport:
     only close/aclose below closes those pools. Errors never invoke LiteLLM.
     """
 
-    sync_client = None
-    async_client = None
-
     def __init__(self, model, api_style, replay_vendor, config, http_config: HttpConfig):
         if api_style not in {"chat", "responses", "anthropic"}:
             raise ValueError("api_style must be chat, responses, or anthropic")
         self.api_style = api_style
-        if replay_vendor is not None and (
-            not isinstance(replay_vendor, str)
-            or not re.fullmatch(r"[a-z][a-z0-9_]*", replay_vendor)
-        ):
-            raise ValueError("replay_vendor must be a nonempty lowercase provider name")
+        # UnifiedLLM validates replay_vendor once, before constructing either transport.
         self.replay_vendor = replay_vendor
         self.model = model
         self.route(model, config)

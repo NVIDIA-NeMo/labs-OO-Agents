@@ -135,9 +135,7 @@ class _ClientHttp:
     still succeeds, it just doesn't get this client's custom pool/timeout.
     """
 
-    def __init__(
-        self, model: str, config: dict[str, Any], http_config: HttpConfig, *, asynchronous=None
-    ):
+    def __init__(self, http_config: HttpConfig, *, asynchronous: bool | None = None):
         import httpx
 
         self.http_config = http_config
@@ -175,7 +173,6 @@ class _ClientHttp:
         # litellm wrappers, filled in by _build_* below.
         self.async_client: Any = None
         self.sync_client: Any = None
-        self._openai_clients: list[Any] = []
 
     @staticmethod
     def _httpx_hardening() -> dict[str, Any]:
@@ -282,9 +279,6 @@ class _ClientHttp:
                 if self.httpx_sync is not None
                 else None
             )
-            self._openai_clients = [
-                c for c in (self.async_client, self.sync_client) if c is not None
-            ]
         except Exception as e:  # noqa: BLE001
             # e.g. no API key resolvable — fall back to litellm's own client so
             # auth/behaviour is preserved (this client just loses its custom pool).
@@ -300,13 +294,13 @@ class _ClientHttp:
     def for_completion(
         cls, model: str, config: dict[str, Any], http_config: HttpConfig, *, asynchronous=None
     ):
-        inst = cls(model, config, http_config, asynchronous=asynchronous)
+        inst = cls(http_config, asynchronous=asynchronous)
         inst._build_completion_wrappers(model, config)
         return inst
 
     @classmethod
     def for_responses(cls, model: str, config: dict[str, Any], http_config: HttpConfig):
-        inst = cls(model, config, http_config)
+        inst = cls(http_config)
         # The Responses API always accepts the handler wrappers, regardless of
         # provider.
         inst._build_handler_wrappers()
@@ -317,13 +311,8 @@ class _ClientHttp:
         if self._sync_closed:
             return
         self._sync_closed = True
-        for oc in self._openai_clients:
-            close = getattr(oc, "close", None)
-            if close is not None and not inspect.iscoroutinefunction(close):
-                try:
-                    close()
-                except Exception:  # noqa: BLE001
-                    pass
+        # SDK/handler wrappers borrow these pools; closing a wrapper would close
+        # the same pool twice. The pool is the sole resource owner.
         try:
             if self.httpx_sync is not None:
                 self.httpx_sync.close()
@@ -334,14 +323,6 @@ class _ClientHttp:
         """Close both the sync and async HTTP resources owned by this client."""
         if not self._async_closed:
             self._async_closed = True
-            for oc in self._openai_clients:
-                close = getattr(oc, "close", None)
-                if close is None or not inspect.iscoroutinefunction(close):
-                    continue
-                try:
-                    await close()
-                except Exception:  # noqa: BLE001
-                    pass
             try:
                 if self.httpx_async is not None:
                     await self.httpx_async.aclose()
@@ -1166,24 +1147,26 @@ class UnifiedLLM(ABC):
             return await litellm.aresponses(**params)
         from ._legacy import preserve_readable_reasoning
 
-        params = preserve_readable_reasoning(params)
-        if "client" in params:
-            return await _collect_async(await _litellm_acompletion(params))
-        temporary = _ClientHttp.for_completion(
-            params["model"], params, self._http_config, asynchronous=True
-        )
-
         async def dispatch_and_close():
+            call = preserve_readable_reasoning(params)
+            temporary = None
             try:
-                call = dict(params)
-                if temporary.async_client is not None:
-                    call["client"] = temporary.async_client
-                return await _collect_async(await _litellm_acompletion(call))
+                if "client" not in call:
+                    temporary = _ClientHttp.for_completion(
+                        call["model"], call, self._http_config, asynchronous=True
+                    )
+                    call = dict(call)
+                    if temporary.async_client is not None:
+                        call["client"] = temporary.async_client
+                return await _collect_async(await litellm.acompletion(**call))
             finally:
-                await temporary.aclose()
+                if temporary is not None:
+                    await temporary.aclose()
 
-        # Ownership follows the shielded provider operation, not the cancelled
-        # caller. Return cancellation promptly but drain before closing its pool.
+        # One task owns dispatch, stream collection and temporary-pool cleanup.
+        # Shield LiteLLM's executor-to-coroutine handoff from cancellation too:
+        # interrupting it can leave the nested provider coroutine unawaited.
+        # The caller still receives cancellation immediately.
         task = asyncio.create_task(dispatch_and_close())
         try:
             return await asyncio.shield(task)
@@ -1473,28 +1456,6 @@ async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     if not isinstance(raw, litellm.ModelResponse):
         raise TypeError(f"Expected ModelResponse, got {type(raw)}")
     return raw
-
-
-async def _litellm_acompletion(api_params: dict[str, Any]) -> Any:
-    """Await LiteLLM without cancelling its nested provider coroutine.
-
-    LiteLLM runs sync ``completion()`` in an executor for async chat calls.
-    OpenAI-compatible providers return ``OpenAIChatCompletion.acompletion``
-    from that sync frame, then LiteLLM awaits it on the event loop. If a TUI
-    soft-cancel lands in that handoff window, Python can garbage-collect the
-    provider coroutine before it is awaited and print::
-
-        RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion' was never awaited
-
-    Shielding lets LiteLLM finish consuming that provider coroutine while the
-    caller still receives ``CancelledError`` immediately.
-    """
-    task = asyncio.create_task(litellm.acompletion(**api_params))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        task.add_done_callback(_consume_litellm_acompletion_result)
-        raise
 
 
 def _consume_litellm_acompletion_result(task: asyncio.Task[Any]) -> None:
@@ -1884,9 +1845,7 @@ class CompletionClient(UnifiedLLM):
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and (
-                _needs_dummy_tool(effective_model) or self._is_anthropic_route(effective_model)
-            )
+            and (_needs_dummy_tool(effective_model) or self._is_anthropic_route(effective_model))
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -1976,9 +1935,7 @@ class CompletionClient(UnifiedLLM):
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and (
-                _needs_dummy_tool(effective_model) or self._is_anthropic_route(effective_model)
-            )
+            and (_needs_dummy_tool(effective_model) or self._is_anthropic_route(effective_model))
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -2278,7 +2235,7 @@ class ResponsesClient(UnifiedLLM):
 
         http_client = self._http
         assert http_client is not None
-        if http_client.sync_client is not None:
+        if self._direct is None and http_client.sync_client is not None:
             api_params.setdefault("client", http_client.sync_client)
 
         def _make_call():
@@ -2348,7 +2305,7 @@ class ResponsesClient(UnifiedLLM):
 
         http_client = self._http
         assert http_client is not None
-        if http_client.async_client is not None:
+        if self._direct is None and http_client.async_client is not None:
             api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
