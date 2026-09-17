@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from nooa.tracing._hooks_impl import OpenInferenceHooks
+from nooa.tracing._trace_json import trace_fields
 
 MIB = 1024 * 1024
 
@@ -23,16 +23,16 @@ def measure(size_mib: int) -> dict[str, float | int | bool]:
     value = {"args": ("x" * (size_mib * MIB),), "kwargs": {}}
     rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     started = time.perf_counter()
-    serialized = OpenInferenceHooks._safe_json_value(value)
+    preview = trace_fields(args=value["args"], kwargs=value["kwargs"])
+    serialized = preview.text
     elapsed = time.perf_counter() - started
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    parsed = json.loads(serialized)
     return {
         "size_mib": size_mib,
         "elapsed_seconds": elapsed,
         "output_chars": len(serialized),
         "rss_growth_mib": (rss_after - rss_before) / 1024,
-        "truncated": parsed.get("$nooa", {}).get("kind") == "truncated-json",
+        "truncated": bool(preview.incomplete_paths),
     }
 
 

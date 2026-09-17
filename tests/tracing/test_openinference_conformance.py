@@ -140,28 +140,25 @@ def _attr(span, key):
 
 
 # ---------------------------------------------------------------------------
-# _safe_json_value structure preservation
+# Bounded preview structure preservation
 # ---------------------------------------------------------------------------
 
 
-def test_safe_json_value_returns_valid_bounded_envelope_on_overflow():
-    """Oversized JSON stops early and remains valid, bounded JSON for the wire."""
-    from nooa.tracing._hooks_impl import OpenInferenceHooks
+def test_bounded_preview_preserves_framework_fields_without_an_envelope():
+    """Oversized trace values remain ordinary, valid, bounded JSON."""
+    from nooa.tracing._trace_json import Limits, trace_fields
 
-    big = {"args": ["x" * 200_000], "kwargs": {"k": "y" * 200_000}}
-    out = OpenInferenceHooks._safe_json_value(big, max_chars=50_000)
-    parsed = json.loads(out)
-    assert parsed["$nooa"] == {
-        "kind": "truncated-json",
-        "limit_chars": 50_000,
-        "preview_chars": len(parsed["preview"]),
-    }
-    assert parsed["preview"].startswith('{"args": ["')
-    assert len(out) <= 50_000
-
-    # The common code shape uses the same valid truncation envelope.
-    code_out = OpenInferenceHooks._safe_json_value({"code": "z" * 200_000}, max_chars=50_000)
-    assert json.loads(code_out)["$nooa"]["kind"] == "truncated-json"
+    preview = trace_fields(
+        args=("x" * 200_000,),
+        kwargs={"k": "y" * 200_000},
+        limits=Limits(max_chars=50_000),
+    )
+    parsed = json.loads(preview.text)
+    assert set(parsed) == {"args", "kwargs"}
+    assert isinstance(parsed["args"], list)
+    assert isinstance(parsed["kwargs"], dict)
+    assert len(preview.text) <= 50_000
+    assert preview.incomplete_paths
 
 
 # ---------------------------------------------------------------------------
@@ -201,9 +198,11 @@ async def test_agent_method_span_is_agent_kind_with_io(framework_spans):
     assert "args" in parsed and "kwargs" in parsed
     assert _attr(span, SpanAttributes.INPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
 
-    # output.value present, text mime-typed.
+    # output.value is also ordinary JSON.
     assert _attr(span, SpanAttributes.OUTPUT_VALUE) is not None
-    assert _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.TEXT.value
+    json.loads(_attr(span, SpanAttributes.OUTPUT_VALUE))
+    assert _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
+    assert _attr(span, "nooa.output.preview.version") == 1
 
     # OI-only export: the legacy native I/O attrs are no longer
     # emitted — input.value/output.value are the single canonical representation.
@@ -227,6 +226,10 @@ async def test_generation_span_is_chain_not_llm(framework_spans):
         )
         # CHAIN output rendering.
         assert _attr(span, SpanAttributes.OUTPUT_VALUE) is not None
+        json.loads(_attr(span, SpanAttributes.OUTPUT_VALUE))
+        assert (
+            _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
+        )
 
     all_spans = [s for spans in by_name.values() for s in spans]
     llm_spans = [
@@ -252,17 +255,13 @@ async def test_code_execution_span_is_tool_with_io(framework_spans):
     assert "code" in json.loads(input_value), "code_execution input.value must be {'code': ...}"
     assert _attr(span, SpanAttributes.INPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
     assert _attr(span, SpanAttributes.OUTPUT_VALUE) is not None
-    # output.mime_type is JSON for an ExecutionResult (the value is JSON-encoded
-    # stdout/stderr/returned_value), else text/plain — both are valid spec values.
-    assert _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) in {
-        OpenInferenceMimeTypeValues.JSON.value,
-        OpenInferenceMimeTypeValues.TEXT.value,
-    }
+    assert _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
     # Tool-call identity: function name + JSON args + id (fallback to the
     # execution id when there is no model-provided tool-call id).
     assert _attr(span, ToolCallAttributes.TOOL_CALL_FUNCTION_NAME) == "python_executor"
     args_json = _attr(span, ToolCallAttributes.TOOL_CALL_FUNCTION_ARGUMENTS_JSON)
     assert "code" in json.loads(args_json), "tool_call.function.arguments must be valid JSON"
+    assert args_json == input_value
     assert _attr(span, ToolCallAttributes.TOOL_CALL_ID), "code_execution missing tool_call.id"
     assert _attr(span, SpanAttributes.TOOL_ID), "code_execution missing tool.id"
 
@@ -287,15 +286,20 @@ async def test_tool_spans_conformance_when_present(framework_spans):
         input_value = _attr(span, SpanAttributes.INPUT_VALUE)
         assert input_value is not None
         json.loads(input_value)  # must parse
+        assert _attr(span, SpanAttributes.INPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
         # Tool-call identity.
         assert _attr(span, ToolCallAttributes.TOOL_CALL_FUNCTION_NAME) is not None
         args_json = _attr(span, ToolCallAttributes.TOOL_CALL_FUNCTION_ARGUMENTS_JSON)
         assert args_json is not None
         json.loads(args_json)  # must be valid JSON
+        assert args_json == input_value
         assert _attr(span, ToolCallAttributes.TOOL_CALL_ID), "TOOL span missing tool_call.id"
         assert _attr(span, SpanAttributes.TOOL_ID), "TOOL span missing tool.id"
         # output.value present once the tool/method returns.
         assert _attr(span, SpanAttributes.OUTPUT_VALUE) is not None
+        assert (
+            _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
+        )
 
 
 @pytest.mark.asyncio

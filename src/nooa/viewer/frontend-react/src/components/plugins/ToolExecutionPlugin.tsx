@@ -1,5 +1,6 @@
 import type { PluginProps } from './registry';
 import { CodeBox } from '@/components/shared/CodeBox';
+import { previewIncomplete, traceValue } from '@/utils/tracePreview';
 
 function getToolName(attrs: Record<string, unknown>, eventType: string): string {
   const spanName = (attrs.span_name as string) || '';
@@ -13,15 +14,7 @@ function getToolName(attrs: Record<string, unknown>, eventType: string): string 
 
 function getToolResult(attrs: Record<string, unknown>): unknown {
   // OI-first: output.value; fall back to native tool.result.
-  const raw = attrs['output.value'] ?? attrs['tool.result'];
-  if (typeof raw === 'string') {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return raw;
-    }
-  }
-  return raw;
+  return traceValue(attrs, 'output', 'tool.result');
 }
 
 function hasError(attrs: Record<string, unknown>): boolean {
@@ -211,6 +204,10 @@ export function ToolExecutionPlugin({ event, viewState, rawJsonOpen, viewControl
   return (
     <div>
       {headerLine}
+
+      {(previewIncomplete(attrs, 'input') || previewIncomplete(attrs, 'output')) && (
+        <div className="text-xs text-amber-300 mb-2">Trace preview is incomplete</div>
+      )}
 
       {isError ? (
         <div className="mb-2">

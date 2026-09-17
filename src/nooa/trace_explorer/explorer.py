@@ -309,6 +309,21 @@ def _io_value(attrs: dict[str, Any], oi_key: str, *native_keys: str) -> Any:
     return None
 
 
+def _io_decoded_value(attrs: dict[str, Any], direction: str, *native_keys: str) -> Any:
+    """Decode canonical JSON I/O according to MIME, with legacy heuristics."""
+    oi_key = f"{direction}.value"
+    value = _io_value(attrs, oi_key, *native_keys)
+    if not isinstance(value, str):
+        return value
+    mime = attrs.get(f"{direction}.mime_type")
+    if mime == "application/json" or mime is None:
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return value
+
+
 def _io_json_field(
     attrs: dict[str, Any], oi_key: str, field_name: str, *native_keys: str, default: Any = None
 ) -> Any:
@@ -321,29 +336,10 @@ def _io_json_field(
     """
     raw = attrs.get(oi_key)
     if raw is not None:
-        try:
-            parsed = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(parsed, dict) and field_name in parsed:
-                return parsed[field_name]
-            if (
-                isinstance(parsed, dict)
-                and isinstance(parsed.get("$nooa"), dict)
-                and parsed["$nooa"].get("kind") == "truncated-json"
-                and isinstance(parsed.get("preview"), str)
-            ):
-                limit = parsed["$nooa"].get("limit_chars", "unknown")
-                preview = parsed["preview"]
-                message = (
-                    f"<trace input truncated at {limit} serialized characters>\n"
-                    f"Serialized JSON prefix:\n{preview}"
-                )
-                if field_name == "args":
-                    return [message]
-                if field_name == "kwargs":
-                    return {}
-                return message
-        except (json.JSONDecodeError, TypeError):
-            pass
+        direction = oi_key.split(".", 1)[0]
+        parsed = _io_decoded_value(attrs, direction)
+        if isinstance(parsed, dict) and field_name in parsed:
+            return parsed[field_name]
     for k in native_keys:
         v = attrs.get(k)
         if v is not None:
@@ -815,23 +811,25 @@ def _extract_tools(attrs: dict[str, Any]) -> list[ToolDefinition]:
     return tools
 
 
-def _parse_execution_result(result_str: str) -> tuple[str, Any, str | None]:
+def _parse_execution_result(result_value: Any) -> tuple[str, Any, str | None]:
     """Parse a JSON-encoded ExecutionResult.
 
     Returns:
         Tuple of (stdout, returned_value, error_message)
     """
-    if not result_str:
+    if not result_value:
         return "", None, None
 
-    try:
-        result = json.loads(result_str)
-        stdout = result.get("stdout", "")
-        returned = result.get("returned_value")
-        error = result.get("error")
-        return stdout, returned, error
-    except json.JSONDecodeError:
-        return result_str, None, None
+    if isinstance(result_value, dict):
+        return (
+            result_value.get("stdout", ""),
+            result_value.get("returned_value"),
+            result_value.get("error"),
+        )
+    if not isinstance(result_value, str):
+        return str(result_value), None, None
+
+    return result_value, None, None
 
 
 def _get_all_sessions(sessions: list[AgentSession]) -> list[AgentSession]:
@@ -916,7 +914,7 @@ def _parse_trace_from_spans(spans: list[dict[str, Any]]) -> list[AgentSession]:
         span_kwargs_raw = _io_json_field(
             attrs, "input.value", "kwargs", "agent.kwargs", default="{}"
         )
-        span_result_raw = _io_value(attrs, "output.value", "agent.result")
+        span_result_raw = _io_decoded_value(attrs, "output", "agent.result")
 
         try:
             span_args = (
@@ -932,13 +930,7 @@ def _parse_trace_from_spans(spans: list[dict[str, Any]]) -> list[AgentSession]:
         except (json.JSONDecodeError, TypeError):
             span_kwargs = {}
 
-        # Result might be JSON or plain string
         span_result = span_result_raw
-        if isinstance(span_result_raw, str):
-            try:
-                span_result = json.loads(span_result_raw)
-            except (json.JSONDecodeError, TypeError):
-                span_result = span_result_raw
 
         session = AgentSession(
             session_id=_short_id(span_id),
@@ -1063,7 +1055,9 @@ def _parse_trace_from_generation_spans(
             depth=0,
             start_time=start_time,
             end_time=end_time,
-            result=_io_value(final_span.get("attributes", {}), "output.value", "generation.result"),
+            result=_io_decoded_value(
+                final_span.get("attributes", {}), "output", "generation.result"
+            ),
             status=status,
             span_id=first_span.get("span_id", ""),  # Capture span_id for correlation
         )
@@ -1253,8 +1247,8 @@ def _populate_session_turns_from_generation(
         else:
             # OI-first: code-exec output is ``output.value`` (same JSON as the
             # legacy ``result`` attr); fall back to ``result`` for old traces.
-            result_str = _io_value(attrs, "output.value", "result") or ""
-            stdout, returned, error = _parse_execution_result(result_str)
+            result_value = _io_decoded_value(attrs, "output", "result") or ""
+            stdout, returned, error = _parse_execution_result(result_value)
             status_obj = span.get("status", {})
             error_msg = error or attrs.get("error.message") or status_obj.get("description")
             error_type = attrs.get("error.type")  # Capture error type (e.g., "_ReturnResultSignal")
@@ -3059,17 +3053,13 @@ class TraceExplorer:
                 span_start = span.get("start_time", 0)
                 if session.start_time <= span_start <= session.end_time:
                     # Found a return_result call within this session (OI-first)
-                    args = _io_value(span.get("attributes", {}), "input.value", "tool.arguments")
-                    if args:
-                        try:
-                            args_dict = json.loads(args)
-                            result = args_dict.get("result", "")
-                            if result:
-                                if len(result) > max_len:
-                                    return result[:max_len] + "..."
-                                return result
-                        except (json.JSONDecodeError, TypeError):
-                            pass
+                    args = _io_decoded_value(span.get("attributes", {}), "input", "tool.arguments")
+                    if isinstance(args, dict):
+                        result = args.get("result", "")
+                        if isinstance(result, str) and result:
+                            if len(result) > max_len:
+                                return result[:max_len] + "..."
+                            return result
 
         # Fallback: look at execution turns for errors or meaningful output
         for turn in reversed(session.turns):

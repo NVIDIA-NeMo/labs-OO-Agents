@@ -19,7 +19,9 @@ from typing import Any
 from opentelemetry.sdk.trace import TracerProvider
 from pydantic import BaseModel
 
+from nooa.agentdoc import truncating_pformat
 from nooa.tracing._hooks_impl import OpenInferenceHooks
+from nooa.tracing._trace_json import trace_fields
 
 MIB = 1024 * 1024
 CONTENT_BYTES = 1024
@@ -84,7 +86,7 @@ def make_entity_input(candidate_count: int) -> dict[str, Any]:
 
 def current_serializer(value: Any) -> str:
     """Production path used by before_agent_call and method/tool invocation hooks."""
-    return OpenInferenceHooks._safe_json_value(value)
+    return trace_fields(args=value["args"], kwargs=value["kwargs"]).text
 
 
 def hook_before_call(value: dict[str, Any]) -> str:
@@ -109,14 +111,17 @@ def hook_before_call(value: dict[str, Any]) -> str:
     return output
 
 
-def bounded_first_serializer(value: dict[str, Any]) -> str:
-    """Diagnostic comparison that bounds values before JSON encoding."""
-    per_value = 50_000 // (4 * max(1, len(value)))
+def legacy_serializer(value: dict[str, Any]) -> str:
+    """Recreate the removed custom-object fallback that caused the long stall."""
     return json.dumps(
-        {
-            str(key): OpenInferenceHooks._safe_serialize(item, per_value)
-            for key, item in value.items()
-        }
+        value,
+        default=lambda item: truncating_pformat(
+            item,
+            max_chars=50_000,
+            max_depth=8,
+            max_length=20,
+            max_string=2_000,
+        ),
     )
 
 
@@ -178,8 +183,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--serializers",
         nargs="+",
-        choices=("current", "hook-before", "bounded-first"),
-        default=("current", "hook-before", "bounded-first"),
+        choices=("current", "hook-before", "legacy"),
+        default=("current", "hook-before", "legacy"),
         help="Serializer variants to run (default: all)",
     )
     return parser.parse_args()
@@ -190,7 +195,7 @@ def main() -> None:
     serializers = {
         "current": current_serializer,
         "hook-before": hook_before_call,
-        "bounded-first": bounded_first_serializer,
+        "legacy": legacy_serializer,
     }
     selected_serializers = tuple((name, serializers[name]) for name in args.serializers)
     print("size_mib exact_json_mib serializer elapsed_s output_chars max_rss_mib")

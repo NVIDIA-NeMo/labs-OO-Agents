@@ -10,8 +10,8 @@ from nooa.context_blocks import MarkdownBlockFormatter, XMLBlockFormatter
 from nooa.events import PythonOutput, ResultStatus
 from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, ToolCall
 from nooa.runtime.event_manager import EventManager
-from nooa.tracing._hooks_impl import OpenInferenceHooks
 from nooa.tracing._secret_scrubber import scrub_value
+from nooa.tracing._trace_json import trace_json
 
 SECRET = "private-provider-state-12345"
 
@@ -37,11 +37,15 @@ def python_output(value):
 )
 def test_nested_display_keeps_public_text_only(wrap):
     value = wrap(response())
-    for rendered in (pformat(value), OpenInferenceHooks._safe_serialize(value)):
-        assert SECRET not in rendered
-        assert "readable answer" in rendered
-        assert "readable reasoning" in rendered
-        assert "public_tool" in rendered
+    rendered = pformat(value)
+    assert SECRET not in rendered
+    assert "readable answer" in rendered
+    assert "readable reasoning" in rendered
+    assert "public_tool" in rendered
+
+    # Trace previews use the narrower stored-field policy and honor repr=False,
+    # so framework event models may intentionally expose less than pformat().
+    assert SECRET not in trace_json(value).text
 
 
 @pytest.mark.parametrize("formatter", [MarkdownBlockFormatter, XMLBlockFormatter])

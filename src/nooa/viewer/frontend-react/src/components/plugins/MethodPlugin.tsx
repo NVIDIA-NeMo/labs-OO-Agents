@@ -1,7 +1,7 @@
 import type { TraceEvent } from '@/api/types';
 import type { PluginProps } from './registry';
 import { CodeBox } from '@/components/shared/CodeBox';
-import { parseTruncatedJson } from '@/utils/truncatedJson';
+import { previewIncomplete, traceValue } from '@/utils/tracePreview';
 
 function formatDuration(ns: number): string {
   if (ns <= 0) return '';
@@ -46,13 +46,8 @@ function attrWithFallback(attrs: Record<string, unknown>, agentKey: string, meth
 // OI-first: inputs are carried as input.value = {"args":[...],"kwargs":{...}}
 // on new traces; old traces use flat agent.args/method.args (JSON strings).
 function oiInput(attrs: Record<string, unknown>): { args?: unknown; kwargs?: unknown } | null {
-  const iv = attrs['input.value'];
-  if (iv === undefined) return null;
-  try {
-    return (typeof iv === 'string' ? JSON.parse(iv) : iv) as { args?: unknown; kwargs?: unknown };
-  } catch {
-    return null;
-  }
+  const value = traceValue(attrs, 'input');
+  return value && typeof value === 'object' ? (value as { args?: unknown; kwargs?: unknown }) : null;
 }
 
 function getCallArgs(attrs: Record<string, unknown>): unknown[] {
@@ -78,16 +73,6 @@ function getCallKwargs(attrs: Record<string, unknown>): Record<string, unknown> 
 function buildCallString(attrs: Record<string, unknown>, truncate = true): string | null {
   const method = (attrs['agent.method'] ?? attrs['method.name']) as string | undefined;
   if (!method) return null;
-
-  const truncated = parseTruncatedJson(attrs['input.value']);
-  if (truncated) {
-    if (truncate) return `${method}(<trace input truncated>)`;
-    return (
-      `${method}(<trace input truncated at ${truncated.limitChars} characters>)` +
-      `\n\n# Serialized input prefix (${truncated.previewChars} characters):\n` +
-      truncated.preview
-    );
-  }
 
   const argParts: string[] = [];
   const maxLen = truncate ? 40 : Infinity;
@@ -181,8 +166,7 @@ export function MethodPlugin({ event, viewState, rawJsonOpen, viewControls }: Pl
   const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : '';
 
   // OI-first: output.value; fall back to native agent.result/method.result.
-  const result =
-    ((attrs['output.value'] ?? attrs['agent.result'] ?? attrs['method.result']) as string) ?? null;
+  const result = traceValue(attrs, 'output', 'agent.result', 'method.result');
   const hasError = !!(attrs['error.message'] || statusCode === 'ERROR');
 
   if (viewState === 'collapsed') {
@@ -213,17 +197,8 @@ export function MethodPlugin({ event, viewState, rawJsonOpen, viewControls }: Pl
   const fullCall = buildCallString(attrs, false);
   const errorMessage = attrs['error.message'] as string | undefined;
 
-  let resultDisplay = result ?? '';
-  let resultLang = 'markdown';
-  if (result != null) {
-    try {
-      const parsed = JSON.parse(result);
-      resultDisplay = JSON.stringify(parsed, null, 2);
-      resultLang = 'json';
-    } catch {
-      resultDisplay = result;
-    }
-  }
+  const resultDisplay = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+  const resultLang = attrs['output.mime_type'] === 'application/json' ? 'json' : 'markdown';
 
   return (
     <div>
@@ -234,6 +209,10 @@ export function MethodPlugin({ event, viewState, rawJsonOpen, viewControls }: Pl
         <span className="ml-auto opacity-60">{timestamp}</span>
         {viewControls}
       </div>
+
+      {(previewIncomplete(attrs, 'input') || previewIncomplete(attrs, 'output')) && (
+        <div className="text-xs text-amber-300 mb-2">Trace preview is incomplete</div>
+      )}
 
       {fullCall && (
         <div className="p-3 bg-gray-900 rounded border-l-4 border-blue-700 mb-2">

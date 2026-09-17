@@ -1,6 +1,6 @@
 import type { PluginProps } from './registry';
 import { CodeBox } from '@/components/shared/CodeBox';
-import { parseTruncatedJson } from '@/utils/truncatedJson';
+import { previewIncomplete, traceValue } from '@/utils/tracePreview';
 
 function formatDuration(ns: number): string {
   if (ns <= 0) return '';
@@ -18,40 +18,19 @@ interface ParsedResult {
 // OI-first code extraction: new traces carry the executed code as
 // input.value = {"code": "..."} (application/json); old traces carry a flat `code`.
 function getExecCode(attrs: Record<string, unknown>): string {
-  const iv = attrs['input.value'];
-  const truncated = parseTruncatedJson(iv);
-  if (truncated) {
-    return (
-      `# Trace input truncated at ${truncated.limitChars} serialized characters.\n` +
-      `# Serialized JSON prefix (${truncated.previewChars} characters):\n` +
-      truncated.preview
-    );
-  }
-  if (typeof iv === 'string') {
-    try {
-      const o = JSON.parse(iv) as { code?: unknown };
-      if (typeof o?.code === 'string') return o.code;
-    } catch {
-      // not JSON
-    }
-  } else if (iv && typeof iv === 'object' && typeof (iv as { code?: unknown }).code === 'string') {
-    return (iv as { code: string }).code;
+  const value = traceValue(attrs, 'input');
+  if (value && typeof value === 'object' && typeof (value as { code?: unknown }).code === 'string') {
+    return (value as { code: string }).code;
   }
   return (attrs.code as string) || (attrs['code_execution.code'] as string) || '';
 }
 
 function parseResult(attrs: Record<string, unknown>): ParsedResult {
   // OI-first: output.value; fall back to native result attrs.
-  const raw = attrs['output.value'] ?? attrs.result ?? attrs['code_execution.result'];
+  const raw = traceValue(attrs, 'output', 'result', 'code_execution.result');
   let obj: Record<string, unknown> | null = null;
 
-  if (typeof raw === 'string') {
-    try {
-      obj = JSON.parse(raw);
-    } catch {
-      // not JSON
-    }
-  } else if (typeof raw === 'object' && raw !== null) {
+  if (typeof raw === 'object' && raw !== null) {
     obj = raw as Record<string, unknown>;
   }
 
@@ -131,6 +110,10 @@ export function CodeExecutionPlugin({ event, viewState, rawJsonOpen, viewControl
   return (
     <div>
       {headerLine}
+
+      {(previewIncomplete(attrs, 'input') || previewIncomplete(attrs, 'output')) && (
+        <div className="text-xs text-amber-300 mb-2">Trace preview is incomplete</div>
+      )}
 
       {definedMethods.length > 0 && (
         <>

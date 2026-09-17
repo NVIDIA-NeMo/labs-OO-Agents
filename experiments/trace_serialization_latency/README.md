@@ -17,11 +17,10 @@ asyncio event loop?
 The source object is deliberately much smaller than its JSON representation because
 the content string is shared. The script compares:
 
-- `current`: `OpenInferenceHooks._safe_json_value`, the production tracing path.
+- `current`: the bounded structural JSON preview used by production tracing.
 - `hook-before`: the complete `OpenInferenceHooks.before_agent_call` production hook.
-- `bounded-first`: formatting the two top-level values with the existing bounded
-  trace formatter before JSON encoding. This is a diagnostic comparison, not a
-  proposed wire format.
+- `legacy`: a local recreation of the removed custom-object fallback that repeatedly
+  rendered every Pydantic object before the outer encoder could stop.
 
 It also runs the complete `before_agent_call` hook in an asyncio task while a 10 ms
 heartbeat is scheduled. The largest heartbeat delay measures how long unrelated agent
@@ -106,11 +105,23 @@ reproduced a 57.2-second stall in the complete production hook. Gaia's entity co
 is effective because it bounds the collection before the production JSON encoder
 repeatedly formats every nested domain object.
 
-After replacing the encode-then-truncate path with bounded streaming, the same targeted
-5,000-position production hook completed in **0.0151 s** and stopped at the 50,000-character
-limit. A 1.03 MiB native-JSON input completed in 0.0018 s, and its full hook delayed a
-10 ms asyncio heartbeat by at most 0.0023 s. The fix therefore avoids traversing the
-unrecorded remainder while preserving the prior JSON representation for inputs that fit.
+The final implementation builds a bounded JSON-compatible preview tree and then uses
+ordinary `json.dumps`. It never runs arbitrary rendering hooks and stops inspecting the
+source after fixed character, node, and depth budgets. The tables above remain the
+historical motivation; rerun the experiment to compare the current hook with the local
+`legacy` recreation on the current machine.
+
+Final implementation measurements on 2026-09-17 with Python 3.13.3:
+
+| Case | Bounded codec | Full before hook | Trace value |
+|---:|---:|---:|---:|
+| 1.03 MiB expanded native JSON | 0.0008 s | 0.0009 s | 50,000 chars |
+| 5,000 repeated Pydantic candidates | 0.0003 s | 0.0004 s | 50,000 chars |
+
+During the native-JSON hook measurement, the 10 ms asyncio heartbeat was delayed by at
+most 0.0014 s. Isolated 1, 16, 64, and 256 MiB string inputs each took 0.0003 s after
+source allocation, produced exactly 50,000 characters, and showed no measurable peak-RSS
+growth from serialization.
 
 The single-scalar review case was measured separately before and after fragmenting JSON
 string encoding. RSS growth is measured after constructing the source string, so it
@@ -124,7 +135,6 @@ captures only serialization's temporary allocation:
 | 256 MiB | 0.7127 s | 512.0 MiB | 0.0017 s | ≤0.5 MiB |
 
 The small cases confirm that ordinary JSON encoding is fast. The larger cases establish
-that the remaining behavior is still material for tracing: a 256 MiB argument delays the
-agent by more than 700 ms and temporarily allocates twice the source size merely to retain
-a 50,000-character prefix. Fragment encoding makes both costs depend on the trace limit
-instead of the discarded string tail.
+that encoding a complete source scalar is still material when tracing retains only a
+small preview. The final codec copies and encodes only a fitting string prefix, so both
+costs depend on the trace limit instead of the discarded string tail.

@@ -1,6 +1,7 @@
 import type { PluginProps } from './registry';
 import { CodeBox } from '@/components/shared/CodeBox';
 import { ContextBlockRenderer } from '@/components/shared/ContextBlockRenderer';
+import { previewIncomplete, traceValue } from '@/utils/tracePreview';
 
 function formatDuration(ns: number): string {
   if (ns <= 0) return '';
@@ -37,16 +38,25 @@ function findHeroContent(attrs: Record<string, unknown>): {
     ['code', 'Code', 'python'],
     ['result', 'Result', 'json'],
     ['message', 'Message', 'markdown'],
-    // OI-first fallbacks: for OI-only traces the native attrs above
-    // are absent, so render the OpenInference-standard I/O values instead.
-    ['input.value', 'Input', 'markdown'],
-    ['output.value', 'Output', 'json'],
   ];
 
   for (const [attrKey, label, lang] of candidates) {
     const val = attrs[attrKey];
     if (typeof val === 'string' && val.length > 0) {
       return { attrKey, label, content: val, language: lang };
+    }
+  }
+
+  // OI-only spans: decode once according to MIME before display.
+  for (const direction of ['input', 'output'] as const) {
+    const value = traceValue(attrs, direction);
+    if (value !== undefined && value !== null && value !== '') {
+      return {
+        attrKey: `${direction}.value`,
+        label: direction === 'input' ? 'Input' : 'Output',
+        content: typeof value === 'string' ? value : JSON.stringify(value, null, 2),
+        language: attrs[`${direction}.mime_type`] === 'application/json' ? 'json' : 'markdown',
+      };
     }
   }
   return null;
@@ -106,6 +116,10 @@ export function SpanPlugin({ event, viewState, rawJsonOpen, viewControls }: Plug
           {viewControls}
         </div>
       </div>
+
+      {(previewIncomplete(attrs, 'input') || previewIncomplete(attrs, 'output')) && (
+        <div className="text-xs text-amber-300 mb-2">Trace preview is incomplete</div>
+      )}
 
       {hero && (
         <div className="mb-2">
