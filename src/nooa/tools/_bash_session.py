@@ -49,6 +49,13 @@ class BashSession:
     """
 
     def __init__(self, cwd: str | Path = ".", init_command: str | None = None) -> None:
+        import sys
+
+        if sys.platform == "win32":
+            raise RuntimeError(
+                "BashSession is only supported on Unix-like operating systems (Linux/macOS)."
+            )
+
         self._cwd = Path(cwd).resolve()
         # Optional shell snippet run once every time the session (re)starts —
         # before any user command — to set up the environment (e.g. activating a
@@ -72,7 +79,7 @@ class BashSession:
 
     def __del__(self) -> None:
         """Best-effort cleanup: kill the bash subprocess if still running."""
-        proc = self._process
+        proc = getattr(self, "_process", None)
         if proc is not None and proc.returncode is None:
             try:
                 # During interpreter shutdown, module globals (os, signal) may
