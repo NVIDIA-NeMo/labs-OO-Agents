@@ -45,6 +45,19 @@ _STOP = object()
 # context, not repeated in full inside a client tool card.
 _MAX_VALUE_CHARS = 10_000
 
+# Maps nooa.llm_types.LLMUsage field names to acp.schema.Usage kwarg names.
+# The single source of truth for both accumulating per-turn totals and
+# building the Usage object from them, so the two never drift apart.
+_TO_USAGE_KWARG = {
+    "input_tokens": "input_tokens",
+    "output_tokens": "output_tokens",
+    "reasoning_tokens": "thought_tokens",
+    "cached_input_tokens": "cached_read_tokens",
+    "cache_write_input_tokens": "cached_write_tokens",
+    "total_tokens": "total_tokens",
+}
+_TURN_USAGE_FIELDS = tuple(_TO_USAGE_KWARG)
+
 
 @dataclass(frozen=True, slots=True)
 class _BestEffortUpdate:
@@ -264,14 +277,7 @@ class ACPEventBridge:
         if usage is None:
             return
         self._cost_usd += usage.cost_usd
-        for field in (
-            "input_tokens",
-            "output_tokens",
-            "reasoning_tokens",
-            "cached_input_tokens",
-            "cache_write_input_tokens",
-            "total_tokens",
-        ):
+        for field in _TURN_USAGE_FIELDS:
             self._turn_tokens[field] = self._turn_tokens.get(field, 0) + getattr(usage, field)
         context_window = getattr(self.agent.llm, "context_window", None)
         if context_window is None:
@@ -295,14 +301,7 @@ class ACPEventBridge:
         tokens, self._turn_tokens = self._turn_tokens, {}
         if not tokens:
             return None
-        return Usage(
-            total_tokens=tokens["total_tokens"],
-            input_tokens=tokens["input_tokens"],
-            output_tokens=tokens["output_tokens"],
-            thought_tokens=tokens["reasoning_tokens"],
-            cached_read_tokens=tokens["cached_input_tokens"],
-            cached_write_tokens=tokens["cache_write_input_tokens"],
-        )
+        return Usage(**{_TO_USAGE_KWARG[field]: value for field, value in tokens.items()})
 
     def _stopped_error(self, cause: BaseException) -> RuntimeError:
         error = RuntimeError("ACP event bridge stopped")

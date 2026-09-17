@@ -268,95 +268,14 @@ class CodingACPAdapter:
         try:
             async with runtime.turn():
                 session = runtime.value
-                session.handle.record_user_message(text)
-                session.cancel_complete.clear()
                 try:
-                    if not session.commands_sent_on_prompt:
-                        session.bridge.publish(
-                            _available_commands_update(session.commands.commands())
-                        )
-                        session.commands_sent_on_prompt = True
-                    slash = self._slash_invocation(session.commands, text)
-                    if slash is None:
-                        result = await session.dispatcher.submit(text)
-                    else:
-                        name, raw_args = slash
-                        try:
-                            submission = await session.dispatcher.invoke_slash(
-                                session.commands,
-                                name,
-                                raw_args,
-                            )
-                        except CoercionError as exc:
-                            message = f"/{name}: {exc.message}"
-                            if exc.hint:
-                                message += f"\n\nUsage: `/{name} {exc.hint}`"
-                            session.agent.message(message)
-                            await session.bridge.flush()
-                            return PromptResponse(stop_reason="end_turn", usage=session.bridge.take_turn_usage())
-                        except GenerationError:
-                            # Subclasses Exception, so the catch-all below would
-                            # swallow it and lose the stop reason the outer
-                            # handler maps. Generation limits are the runtime's
-                            # to report, not a command failure.
-                            raise
-                        except Exception as exc:
-                            # Command bodies are third-party code from workspace
-                            # and installed skills. Letting one raise turns the
-                            # whole prompt into a JSON-RPC internal_error, and
-                            # the user's turn is already durably recorded — so
-                            # the session replays a question with no answer.
-                            # The same failure inside execute_python is caught by
-                            # the strategy and shown to the model; this path had
-                            # no equivalent.
-                            logger.warning(
-                                "Slash command /%s failed in session %s",
-                                name,
-                                session_id,
-                                exc_info=True,
-                            )
-                            session.agent.message(f"/{name} failed: {exc}")
-                            await session.bridge.flush()
-                            return PromptResponse(stop_reason="end_turn", usage=session.bridge.take_turn_usage())
-                        if submission is None:
-                            result = None
-                        else:
-                            slash_result, result = submission
-                            if not slash_result.output_to_agent:
-                                message = str(slash_result)
-                                if message:
-                                    session.agent.message(message)
-                                await session.bridge.flush()
-                                return PromptResponse(stop_reason="end_turn", usage=session.bridge.take_turn_usage())
-                except GenerationError as exc:
-                    # The strategy does not guarantee a PythonOutput for a call
-                    # it already announced, so a turn ending on a generation
-                    # limit can leave its card in_progress. Nothing else closes
-                    # it before session close, and a later cancel would retitle
-                    # this turn's stale card "Cancelled".
-                    await session.bridge.fail_open_tools("Did not finish.", title="Unfinished")
-                    await session.bridge.flush()
-                    message = str(exc)
-                    if message.startswith(
-                        "Empty response: the model used all available output tokens"
-                    ):
-                        return PromptResponse(stop_reason="max_tokens", usage=session.bridge.take_turn_usage())
-                    if message.startswith("Generation failed after ") and (
-                        "max_iterations=" in message or "max_retries=" in message
-                    ):
-                        return PromptResponse(stop_reason="max_turn_requests", usage=session.bridge.take_turn_usage())
-                    raise
-                if result is None:
-                    await session.cancel_complete.wait()
-                    # stop_reason and the tool card both carry the outcome, but
-                    # a collapsed card shows nothing and the turn just goes
-                    # quiet. Record it as a real message so the conversation —
-                    # and the durable transcript on resume — says what happened.
-                    session.agent.message("Stopped at your request.")
-                    await session.bridge.flush()
-                    return PromptResponse(stop_reason="cancelled", usage=session.bridge.take_turn_usage())
-                await session.bridge.flush()
-                return PromptResponse(stop_reason="end_turn", usage=session.bridge.take_turn_usage())
+                    stop_reason = await self._run_turn(session, session_id, text)
+                finally:
+                    # Unconditional: an uncaught exception must still clear this
+                    # turn's accumulated tokens, or they leak into whatever turn
+                    # reads take_turn_usage() next.
+                    usage = session.bridge.take_turn_usage()
+                return PromptResponse(stop_reason=stop_reason, usage=usage)
         except SessionBusyError:
             raise RequestError.invalid_request(
                 {"sessionId": session_id, "reason": "A prompt is already running"}
@@ -366,6 +285,99 @@ class CodingACPAdapter:
             # It is gone as far as the client is concerned, so say so rather
             # than letting this escape as an opaque internal error.
             raise RequestError.resource_not_found(session_id) from None
+
+    async def _run_turn(self, session: _ACPSession, session_id: str, text: str) -> str:
+        """Run one ACP turn and return its stop reason.
+
+        Never constructs a PromptResponse directly — prompt() attaches usage
+        to exactly one, built after this returns or raises, so every exit
+        path resets the turn's token accumulator exactly once.
+        """
+        session.handle.record_user_message(text)
+        session.cancel_complete.clear()
+        try:
+            if not session.commands_sent_on_prompt:
+                session.bridge.publish(_available_commands_update(session.commands.commands()))
+                session.commands_sent_on_prompt = True
+            slash = self._slash_invocation(session.commands, text)
+            if slash is None:
+                result = await session.dispatcher.submit(text)
+            else:
+                name, raw_args = slash
+                try:
+                    submission = await session.dispatcher.invoke_slash(
+                        session.commands,
+                        name,
+                        raw_args,
+                    )
+                except CoercionError as exc:
+                    message = f"/{name}: {exc.message}"
+                    if exc.hint:
+                        message += f"\n\nUsage: `/{name} {exc.hint}`"
+                    session.agent.message(message)
+                    await session.bridge.flush()
+                    return "end_turn"
+                except GenerationError:
+                    # Subclasses Exception, so the catch-all below would
+                    # swallow it and lose the stop reason the outer
+                    # handler maps. Generation limits are the runtime's
+                    # to report, not a command failure.
+                    raise
+                except Exception as exc:
+                    # Command bodies are third-party code from workspace
+                    # and installed skills. Letting one raise turns the
+                    # whole prompt into a JSON-RPC internal_error, and
+                    # the user's turn is already durably recorded — so
+                    # the session replays a question with no answer.
+                    # The same failure inside execute_python is caught by
+                    # the strategy and shown to the model; this path had
+                    # no equivalent.
+                    logger.warning(
+                        "Slash command /%s failed in session %s",
+                        name,
+                        session_id,
+                        exc_info=True,
+                    )
+                    session.agent.message(f"/{name} failed: {exc}")
+                    await session.bridge.flush()
+                    return "end_turn"
+                if submission is None:
+                    result = None
+                else:
+                    slash_result, result = submission
+                    if not slash_result.output_to_agent:
+                        message = str(slash_result)
+                        if message:
+                            session.agent.message(message)
+                        await session.bridge.flush()
+                        return "end_turn"
+        except GenerationError as exc:
+            # The strategy does not guarantee a PythonOutput for a call
+            # it already announced, so a turn ending on a generation
+            # limit can leave its card in_progress. Nothing else closes
+            # it before session close, and a later cancel would retitle
+            # this turn's stale card "Cancelled".
+            await session.bridge.fail_open_tools("Did not finish.", title="Unfinished")
+            await session.bridge.flush()
+            message = str(exc)
+            if message.startswith("Empty response: the model used all available output tokens"):
+                return "max_tokens"
+            if message.startswith("Generation failed after ") and (
+                "max_iterations=" in message or "max_retries=" in message
+            ):
+                return "max_turn_requests"
+            raise
+        if result is None:
+            await session.cancel_complete.wait()
+            # stop_reason and the tool card both carry the outcome, but
+            # a collapsed card shows nothing and the turn just goes
+            # quiet. Record it as a real message so the conversation —
+            # and the durable transcript on resume — says what happened.
+            session.agent.message("Stopped at your request.")
+            await session.bridge.flush()
+            return "cancelled"
+        await session.bridge.flush()
+        return "end_turn"
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         del kwargs

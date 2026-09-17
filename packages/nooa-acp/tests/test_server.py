@@ -30,7 +30,9 @@ from nooa_cli.commands import discover_commands
 
 from nooa.context_blocks.events import ToolCallEvent
 from nooa.errors import GenerationError
+from nooa.events import LLMResponse
 from nooa.interactive import RespondReason, RespondResult
+from nooa.llm_types import LLMUsage
 from nooa.skill import Skill, slash_command
 from nooa.slash_dispatch import SlashCommandResult
 from nooa.unifiedllm import FakeLLMClient
@@ -1318,6 +1320,38 @@ async def test_adapter_propagates_unrelated_generation_errors(tmp_path):
     ):
         await adapter.prompt(session.session_id, [text_block("do the work")])
 
+    await adapter.close()
+
+
+async def test_uncaught_exception_mid_turn_does_not_leak_tokens_into_next_turn(tmp_path):
+    """A turn that raises after an LLM call already succeeded must still
+    reset the per-turn token accumulator, or its tokens bleed into the next
+    turn's reported usage.
+    """
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    session = await adapter.new_session(str(tmp_path))
+    runtime = await _session(adapter, session.session_id)
+
+    async def submit_then_raise(text):
+        runtime.agent.event_manager.add(
+            LLMResponse(usage=LLMUsage(input_tokens=999, output_tokens=999, total_tokens=1998))
+        )
+        raise GenerationError("boom, not a recognized limit message")
+
+    with (
+        patch.object(runtime.dispatcher, "submit", side_effect=submit_then_raise),
+        pytest.raises(GenerationError, match="boom"),
+    ):
+        await adapter.prompt(session.session_id, [text_block("first")])
+
+    response = await adapter.prompt(session.session_id, [text_block("second")])
+
+    assert response.usage is not None
+    assert response.usage.input_tokens == 10
+    assert response.usage.output_tokens == 5
+    assert response.usage.total_tokens == 15
     await adapter.close()
 
 

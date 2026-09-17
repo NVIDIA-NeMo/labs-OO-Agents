@@ -102,6 +102,31 @@ async def test_fork_is_background_isolated_and_applied_only_at_boundary():
 
 
 @pytest.mark.asyncio
+async def test_fork_response_notifies_llm_response_subscribers_without_recording():
+    """Usage/cost observers (e.g. ACPEventBridge) must see the fork's real
+    token spend, but the fork is background compaction, not a conversation
+    turn — it must never enter the durable transcript or LLM context.
+    """
+    agent, summarizer, ctx = setup()
+    fork_response = LLMResponse(content="summary", usage=LLMUsage(input_tokens=40, output_tokens=10))
+    agent.llm.acall = AsyncMock(return_value=fork_response)
+    seen = []
+    agent.event_manager.on("LLMResponse", seen.append)
+
+    async def core(request):
+        request.response = response("parent answer")
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    assert summarizer._pending_task is not None
+    await summarizer._pending_task
+
+    assert seen == [fork_response]
+    assert agent.event_manager.keys() == ["1", "2", "3", "4"]
+    summarizer._uninstall()
+
+
+@pytest.mark.asyncio
 async def test_fork_runs_middleware_without_recursive_forks_or_parent_statistics():
     agent, summarizer, ctx = setup()
     agent.runtime._last_prompt_tokens_actual = 42
