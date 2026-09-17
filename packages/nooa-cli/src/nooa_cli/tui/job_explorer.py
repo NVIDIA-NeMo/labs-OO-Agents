@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Job explorer — browse and inspect background QueueManager jobs."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
+
+from nooa_cli.interactive.runtime import JobSnapshot
+from nooa_cli.interactive.state import AgentJobSummary
+
+from .explorer_base import (
+    ExplorerConfig,
+    ExplorerModel,
+    ExplorerView,
+    wrap_plain_line,
+)
+from .subapp import SubviewKeyResult
+
+type JobProjection = JobSnapshot | AgentJobSummary
+
+
+@dataclass
+class JobExplorerRow:
+    """One background job in the explorer list."""
+
+    job_id: str
+    channel: str
+    label: str
+    state: str
+    delivered: int
+    queued: int
+    values: list[Any]
+    search_text: str
+    daemon: bool = False
+
+
+def build_job_rows(snapshots: Iterable[JobProjection] | None) -> list[JobExplorerRow]:
+    """Build explorer rows from immutable local-runtime projections."""
+    rows: list[JobExplorerRow] = []
+    for snapshot in snapshots or ():
+        values = list(snapshot.values)
+        job_id = snapshot.job_id or snapshot.name
+        search_parts = [
+            job_id,
+            snapshot.name,
+            snapshot.label,
+            str(snapshot.state),
+            "daemon:yes" if snapshot.daemon else "daemon:no",
+            *[str(value) for value in values[-20:]],
+        ]
+        rows.append(
+            JobExplorerRow(
+                job_id=job_id,
+                channel=snapshot.name,
+                label=snapshot.label,
+                state=str(snapshot.state),
+                delivered=len(values),
+                queued=snapshot.queued,
+                values=values,
+                search_text="\n".join(search_parts),
+                daemon=snapshot.daemon,
+            )
+        )
+    return rows
+
+
+class JobExplorerView(ExplorerView):
+    """In-app subview for browsing background jobs."""
+
+    item_name = "job"
+    list_heading = "  job ID       channel          state      daemon  output"
+
+    def __init__(self, snapshots: Iterable[JobProjection]) -> None:
+        rows = build_job_rows(snapshots)
+        model = ExplorerModel(rows)
+        config = ExplorerConfig(title="Job Explorer", actions={})
+        super().__init__(model, config)
+        self.configure_row_options(
+            filters=(
+                ("all", "All", lambda _row: True),
+                ("running", "Running", lambda row: row.state == "running"),
+                ("finished", "Finished", lambda row: row.state != "running"),
+            ),
+            sorts=(
+                ("channel", "Channel", lambda row: row.channel.casefold(), False),
+                ("state", "State", lambda row: (row.state, row.channel.casefold()), False),
+            ),
+        )
+
+    def format_row(self, row: JobExplorerRow, width: int) -> str:
+        state_icon = {
+            "running": "⚡",
+            "done": "✓",
+            "failed": "✗",
+            "cancelled": "⊘",
+        }.get(row.state, "?")
+        display_id = row.job_id if len(row.job_id) <= 12 else f"{row.job_id[:11]}…"
+        line = (
+            f"{state_icon} {display_id:<12} {row.channel:<16} {row.state:<10} "
+            f"{'yes' if row.daemon else 'no':<7} delivered={row.delivered:<6} queued={row.queued}"
+        )
+        if row.label != row.channel:
+            line += f"  ({row.label})"
+        return line[:width]
+
+    def detail_lines(self, row: JobExplorerRow, width: int) -> list[str]:
+        width = max(int(width), 20)
+        lines: list[str] = [
+            f"Job ID: {row.job_id}",
+            f"Channel: {row.channel}",
+            f"Label: {row.label}",
+            f"State: {row.state}",
+            f"Daemon: {'yes' if row.daemon else 'no'}",
+            f"Delivered: {row.delivered}  Queued: {row.queued}",
+            "",
+        ]
+        if not row.values:
+            lines.append("(no buffered output)")
+        else:
+            lines.append(f"Output (last {min(len(row.values), 50)} of {len(row.values)}):")
+            lines.append("")
+            for val in row.values[-50:]:
+                for raw in str(val).splitlines() or [""]:
+                    lines.extend(wrap_plain_line(raw, width))
+        return lines
+
+    def handle_action(self, action: str, row: Any) -> SubviewKeyResult:
+        return "ignored"

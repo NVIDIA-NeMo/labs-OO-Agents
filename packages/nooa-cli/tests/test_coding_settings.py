@@ -228,3 +228,14 @@ def test_an_env_override_suppresses_a_legacy_only_workspace(tmp_path, monkeypatc
     (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
 
     assert load_coding_skills_dirs(workspace) == []
+
+
+@pytest.mark.parametrize("canonical", ["[]", "[shared]"])
+def test_canonical_skill_roots_replace_legacy_yaml_alias(tmp_path, monkeypatch, canonical):
+    for name in ("shared", "legacy", ".nooa"):
+        (tmp_path / name).mkdir()
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    (tmp_path / ".nooa" / "settings.yaml").write_text(
+        f"tui:\n  additional_skills_dirs: [legacy]\ncoding:\n  additional_skills_dirs: {canonical}\n"
+    )
+    assert load_coding_skills_dirs(tmp_path) == ([] if canonical == "[]" else [tmp_path / "shared"])

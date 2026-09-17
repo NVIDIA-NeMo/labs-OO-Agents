@@ -1618,9 +1618,11 @@ name = "nooa-cli"
 source = { editable = "packages/nooa-cli" }
 dependencies = [
     { name = "click" },
-    { name = "nooa" },
+    { name = "nooa", extra = ["mcp"] },
     { name = "prompt-toolkit" },
+    { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "rich" },
 ]
 
 [package.optional-dependencies]
@@ -1642,13 +1644,15 @@ datascience = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.1.0" },
-    { name = "nooa", editable = "." },
+    { name = "click", specifier = ">=8.2" },
+    { name = "nooa", extras = ["mcp"], editable = "." },
     { name = "numpy", marker = "extra == 'datascience'", specifier = ">=1.24.0" },
     { name = "pandas", marker = "extra == 'datascience'", specifier = ">=2.0.0" },
     { name = "plotly", marker = "extra == 'datascience'", specifier = ">=5.0.0" },
-    { name = "prompt-toolkit", specifier = ">=3.0.52" },
+    { name = "prompt-toolkit", specifier = ">=3.0.52,<3.1.0" },
+    { name = "pydantic", specifier = ">=2.5.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=14.3.3" },
     { name = "scikit-learn", marker = "extra == 'datascience'", specifier = ">=1.3.0" },
     { name = "scipy", marker = "extra == 'datascience'", specifier = ">=1.10.0" },
     { name = "tree-sitter", marker = "extra == 'ast'", specifier = ">=0.23.0" },

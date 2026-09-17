@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Structured and extensible terminal toolbar items."""
+
+from __future__ import annotations
+
+import datetime
+import logging
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from importlib.metadata import entry_points
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nooa.unifiedllm import LLMUsage
+
+logger = logging.getLogger(__name__)
+
+TOOLBAR_ENTRY_POINT = "nooa_cli.tui.toolbar_items"
+ToolbarProvider = Callable[["ToolbarContext"], str | None]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolbarContext:
+    model: str
+    working_directory: Path
+    context_usage: str
+    session_id: str | None = None
+    session_title: str | None = None
+    agent: Any = None
+    token_usage: str = "total ↑ — ↓ — ↻ —"
+
+
+class ToolbarRegistry:
+    """Named toolbar providers with optional package entry-point extensions."""
+
+    def __init__(self, *, load_plugins: bool = True) -> None:
+        self._providers: dict[str, ToolbarProvider] = {
+            "time": lambda _: datetime.datetime.now().strftime("%H:%M"),
+            "model": lambda context: _short_model_name(context.model),
+            "cwd": lambda context: context.working_directory.name or str(context.working_directory),
+            "context": lambda context: context.context_usage,
+            "tokens": lambda context: context.token_usage,
+            "session": _session_label,
+        }
+        if load_plugins:
+            self._load_plugins()
+
+    def register(self, name: str, provider: ToolbarProvider) -> None:
+        normalized = name.strip().lower()
+        if not normalized or any(character.isspace() for character in normalized):
+            raise ValueError(f"Invalid toolbar item name {name!r}")
+        self._providers[normalized] = provider
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._providers))
+
+    def render(self, names: Iterable[str], context: ToolbarContext) -> str:
+        values: list[str] = []
+        for name in names:
+            provider = self._providers.get(name)
+            if provider is None:
+                continue
+            try:
+                value = provider(context)
+            except Exception:
+                logger.debug("Toolbar item %r failed", name, exc_info=True)
+                continue
+            if value:
+                values.append(str(value))
+        return " · ".join(values)
+
+    def _load_plugins(self) -> None:
+        try:
+            plugins = entry_points(group=TOOLBAR_ENTRY_POINT)
+        except Exception:
+            logger.debug("Toolbar entry-point discovery failed", exc_info=True)
+            return
+        for plugin in plugins:
+            try:
+                self.register(plugin.name, plugin.load())
+            except Exception:
+                logger.warning(
+                    "Toolbar provider %r could not be loaded", plugin.name, exc_info=True
+                )
+
+
+def _short_model_name(model: str) -> str:
+    return model.split("/")[-1].replace("claude-", "")
+
+
+def _session_label(context: ToolbarContext) -> str:
+    short_id = (context.session_id or "")[:8]
+    if context.session_title and short_id:
+        return f"{context.session_title} [{short_id}]"
+    return f"[{short_id}]" if short_id else ""
+
+
+def accumulate_token_usage(total: LLMUsage | None, usage: LLMUsage | None) -> LLMUsage | None:
+    """Sum reported usage without changing persisted responses or losing known totals."""
+    if usage is None:
+        return total
+    if total is None:
+        return usage.model_copy()
+    from nooa.unifiedllm import LLMUsage
+
+    return LLMUsage(
+        input_tokens=total.input_tokens + usage.input_tokens,
+        output_tokens=total.output_tokens + usage.output_tokens,
+        cached_input_tokens=total.cached_input_tokens + usage.cached_input_tokens,
+        cache_write_input_tokens=total.cache_write_input_tokens + usage.cache_write_input_tokens,
+        reasoning_tokens=total.reasoning_tokens + usage.reasoning_tokens,
+        total_tokens=total.total_tokens + usage.total_tokens,
+        cost_usd=total.cost_usd + usage.cost_usd,
+    )
+
+
+def format_token_usage(usage: LLMUsage | None) -> str:
+    """Show session totals and the fraction of total input read from cache."""
+    if usage is None:
+        return "total ↑ — ↓ — ↻ —"
+
+    def count(tokens: int) -> str:
+        if tokens >= 1_000_000:
+            return f"{tokens / 1_000_000:.1f}m"
+        if tokens >= 1_000:
+            return f"{tokens / 1_000:.1f}k"
+        return str(tokens)
+
+    cached = (
+        f"{usage.cached_input_tokens / usage.input_tokens:.0%}" if usage.input_tokens > 0 else "—"
+    )
+    return f"total ↑ {count(usage.input_tokens)} ↓ {count(usage.output_tokens)} ↻ {cached}"

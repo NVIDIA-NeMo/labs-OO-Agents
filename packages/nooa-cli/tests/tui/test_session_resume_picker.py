@@ -1,0 +1,1747 @@
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from nooa_cli.tui.resume_picker import (
+    ResumePicker,
+    ResumePickerModel,
+    ResumePickerRow,
+    ResumePickerTurn,
+    _clip,
+    _row_fragments,
+    _semantic_preview_selection,
+)
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from rich.cells import cell_len
+
+from .resume_picker_snapshot import render_resume_picker
+
+
+def test_semantic_preview_selection_removes_user_and_agent_chrome() -> None:
+    rendered_selection = "▔▔▔▔▔▔▔▔\n ❯ hello world   \n   continued   \n▁▁▁▁▁▁▁▁\nOO:\nanswer text"
+
+    assert _semantic_preview_selection(rendered_selection) == (
+        "hello world\ncontinued\nanswer text"
+    )
+
+
+def test_semantic_preview_selection_preserves_partial_plain_text() -> None:
+    assert _semantic_preview_selection("partial OO: text") == "partial OO: text"
+
+
+def row(id: str, title: str, **kw) -> ResumePickerRow:
+    values = {
+        "model": "provider/model",
+        "agent": "Agent",
+        "working_directory": "/work",
+        "last_active": 1,
+        "turn_count": 3,
+        "turns": (
+            ResumePickerTurn("user", f"question for {id}"),
+            ResumePickerTurn("agent", f"answer for {id}"),
+        ),
+    }
+    values.update(kw)
+    return ResumePickerRow(id=id, title=title, **values)
+
+
+def test_model_searches_title_and_full_recent_conversation() -> None:
+    model = ResumePickerModel(
+        [
+            row("1", "alpha"),
+            row(
+                "2",
+                "resume feature",
+                turns=(
+                    ResumePickerTurn("user", "ordinary question"),
+                    ResumePickerTurn("agent", "answer contains deep needle"),
+                ),
+            ),
+            row("3", "ransom"),
+        ]
+    )
+    model.set_query("resume")
+    assert model.matches[0].row.title == "resume feature"
+    model.set_query("deep needle")
+    assert [match.row.id for match in model.matches] == ["2"]
+
+
+def test_resume_search_uses_word_and_semantics_like_explorers() -> None:
+    """Multi-word queries match scattered terms, like every explorer.
+
+    The old phrase matcher required the whole query contiguously; the shared
+    word-AND contract requires every term somewhere in the searched fields.
+    """
+    model = ResumePickerModel(
+        [
+            row(
+                "scattered",
+                "alpha in the title",
+                turns=(ResumePickerTurn("agent", "and beta in the reply"),),
+            ),
+            row(
+                "contiguous",
+                "unrelated title",
+                turns=(ResumePickerTurn("agent", "contains alpha beta together"),),
+            ),
+            row("neither", "nothing here"),
+        ]
+    )
+    model.set_query("alpha beta")
+
+    # Both rows match; the scattered row proves terms can hit different fields.
+    assert sorted(match.row.id for match in model.matches) == ["contiguous", "scattered"]
+    scattered = next(match for match in model.matches if match.row.id == "scattered")
+    assert scattered.positions, "cross-field match must carry highlight positions"
+
+
+def test_search_excludes_noncontiguous_and_hidden_metadata_matches() -> None:
+    model = ResumePickerModel(
+        [
+            row("hidden", "ordinary", working_directory="/work/grep-project"),
+            row("scattered", "g___r___e___p"),
+            row("visible", "grep results"),
+        ]
+    )
+
+    model.set_query("grep")
+
+    assert [match.row.id for match in model.matches] == ["visible"]
+    assert model.matches[0].field == "title"
+
+
+def test_filter_and_sort_reuse_cached_query_matches(monkeypatch) -> None:
+    import nooa_cli.tui.resume_picker as picker_module
+
+    model = ResumePickerModel([row("one", "needle"), row("two", "other", attached=True)])
+    model.set_query("needle")
+
+    def unexpected_match(terms: list[str], value: str):
+        raise AssertionError("filter/sort must not rescan transcript search fields")
+
+    monkeypatch.setattr(picker_module, "_term_hits", unexpected_match)
+    model.toggle_filter()
+    model.toggle_sort()
+    model.toggle_filter()
+
+
+@pytest.mark.asyncio
+async def test_resume_list_fills_its_pane_on_tall_terminals(monkeypatch) -> None:
+    """The session list grows with the terminal instead of capping at 5."""
+    from nooa_cli.tui import session_manager as sm
+
+    sessions = [
+        SimpleNamespace(
+            id=f"s{i:08d}",
+            name=f"Session {i}",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=1,
+            last_active=float(100 + i),
+            turn_count=1,
+        )
+        for i in range(12)
+    ]
+    # Patch through monkeypatch: bare classmethod assignments leaked the
+    # fake sessions into every later test (the memory-sidecars test then
+    # saw s00000001... sessions that were never cleaned up).
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="x")]),
+    )
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    async with TUIHarness(output=MutableRecordingOutput(100, 40), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        picker = harness.app._resume_picker
+        await harness.wait_for(lambda: picker.list_control.viewport[1] > 5)
+
+        screen = harness.app._app.renderer.last_rendered_screen
+        rows = [
+            "".join(line[x].char for x in sorted(line)).rstrip()
+            for _y, line in sorted(screen.data_buffer.items())
+        ]
+        # Sessions run from the header to the list separator: the pane holds
+        # more than the old five-row cap.
+        session_rows = [r for r in rows if "Session" in r and "✓" in r]
+        assert len(session_rows) > 5
+        await harness.press("escape")
+        await asyncio.wait_for(opened, 2)
+
+
+def test_home_and_end_route_through_shared_handle_key() -> None:
+    """Home/End jump the list through the shared dispatch, like explorers."""
+    from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    assert ResumePicker.handle_key is ExplorerBrowser.handle_key  # shared dispatch
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(6)], app)
+    assert picker.handle_key("end") == "handled"
+    assert picker.model.selected == 5
+    assert picker.handle_key("home") == "handled"
+    assert picker.model.selected == 0
+
+
+def test_home_and_end_jump_the_session_list() -> None:
+    """Home/End jump to the first/last session like every explorer."""
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(6)], app)
+
+    picker.model.jump_end()
+    assert picker.model.selected == 5
+    picker.model.jump_home()
+    assert picker.model.selected == 0
+    assert picker.model.list_offset == 0
+
+
+def test_state_filter_defaults_to_detached_and_cycles_all_states() -> None:
+    detached = row("detached", "Detached")
+    attached = row("attached", "Attached", attached=True, last_active=30)
+    model = ResumePickerModel([detached, attached])
+    assert [match.row.id for match in model.matches] == ["detached"]
+    assert "Filter: ✓ Not attached" in render_resume_picker(model, 80, 20)
+    model.toggle_filter()
+    assert [match.row.id for match in model.matches] == ["attached"]
+    assert "Filter: ✗ Attached" in render_resume_picker(model, 80, 20)
+    model.toggle_filter()
+    assert {match.row.id for match in model.matches} == {"detached", "attached"}
+    assert "Filter: ✓/✗ All" in render_resume_picker(model, 80, 20)
+
+
+def test_sort_labels_explain_updated_versus_created() -> None:
+    older_created = row("updated", "Recently active", last_active=30, created_at=1)
+    newer_created = row("created", "Recently created", last_active=20, created_at=10)
+    model = ResumePickerModel([older_created, newer_created])
+    assert [match.row.id for match in model.matches] == ["updated", "created"]
+    assert "Sort: Recent activity" in render_resume_picker(model, 80, 20)
+    model.toggle_sort()
+    assert [match.row.id for match in model.matches] == ["created", "updated"]
+    assert "Sort: Creation date" in render_resume_picker(model, 80, 20)
+
+
+def test_creation_date_sort_is_primary_with_a_search_query() -> None:
+    older_exact = row("old", "needle", last_active=30, created_at=1)
+    newer_weaker = row("new", "prefix needle", last_active=20, created_at=10)
+    model = ResumePickerModel([older_exact, newer_weaker])
+    model.set_query("needle")
+
+    assert [match.row.id for match in model.matches] == ["old", "new"]
+    model.toggle_sort()
+    assert [match.row.id for match in model.matches] == ["new", "old"]
+
+
+def test_rows_are_one_line_with_state_title_and_latest_agent_message() -> None:
+    model = ResumePickerModel(
+        [
+            row(
+                "attached",
+                "Important title",
+                attached=True,
+                turns=(ResumePickerTurn("agent", "a very long reply " * 20),),
+            )
+        ]
+    )
+    model.state_filter = "all"
+    model.set_query("")
+    frame = render_resume_picker(model, 80, 16).splitlines()
+    row_line = next(line for line in frame if "Important title" in line)
+    assert "✗" in row_line
+    assert "a very long reply" in row_line
+    assert sum("Important title" in line for line in frame) == 2  # row plus preview heading
+
+
+def test_selection_can_inspect_attached_but_cannot_resume_it() -> None:
+    model = ResumePickerModel([row("1", "active", attached=True), row("2", "other")])
+    model.state_filter = "all"
+    model.set_query("")
+    model.select(next(index for index, match in enumerate(model.matches) if match.row.id == "1"))
+    assert model.current.id == "1"
+    assert model.can_select is False
+    assert "✗  active" in render_resume_picker(model, 80, 20)
+    model.move(1)
+    assert model.current.id == "2"
+    assert model.can_select is True
+    assert "✓  other" in render_resume_picker(model, 80, 20)
+
+
+def test_resume_picker_specializes_shared_explorer_browser() -> None:
+    from nooa_cli.tui.fullscreen_browser import ExplorerBrowser
+
+    assert issubclass(ResumePicker, ExplorerBrowser)
+    assert ResumePicker.preview_selection is ExplorerBrowser.preview_selection
+    assert ResumePicker.focus_initial is ExplorerBrowser.focus_initial
+
+
+def test_tab_cycles_only_list_and_preview() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one")], app)
+    assert picker.active_control == "list"
+    picker.focus_next()
+    assert picker.active_control == "preview"
+    picker.focus_next()
+    assert picker.active_control == "list"
+    picker.focus_next(-1)
+    assert picker.active_control == "preview"
+
+
+def test_resume_picker_shows_copy_status_in_its_footer() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one")], app, selection_status=lambda: "Copied 12 characters")
+
+    assert picker._help_text() == "Copied 12 characters"
+
+
+def test_options_mode_selects_and_changes_filter_and_sort() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one")], app)
+    picker.toggle_options()
+    assert picker.option_cursor == 0  # Filter option row
+    picker.change_option()
+    assert picker.model.state_filter == "attached"
+    picker.move_option(1)
+    assert picker.option_cursor == 1  # Sort option row
+    picker.change_option()
+    assert picker.model.sort_updated is False
+    assert picker.close_options()
+    assert picker.option_cursor is None
+    assert picker.active_control == "list"
+
+
+def test_search_text_and_brackets_share_active_highlight() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one")], app)
+    picker.buffer.text = "needle"
+    label_style = picker._search_label()[0][0]
+    close_style = picker._search_close()[0][0]
+    assert "control-focused" in label_style
+    assert "control-focused" in close_style
+    assert picker.query_window.style() == "class:fullscreen-browser.control-focused"
+    picker.activate_control("preview")
+    assert "control-focused" not in picker._search_label()[0][0]
+    assert picker.query_window.style() == ""
+
+
+def test_only_selected_option_is_highlighted_in_options_mode() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one")], app)
+    assert "control-focused" not in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" not in picker.option_controls[1]._text()[0][0]
+    picker.toggle_options()
+    assert "control-focused" not in picker._search_label()[0][0]
+    assert "control-focused" not in picker._search_close()[0][0]
+    assert "control-focused" not in picker.query_window.style()
+    assert "control-focused" in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" not in picker.option_controls[1]._text()[0][0]
+    picker.move_option(1)
+    assert "control-focused" not in picker.option_controls[0]._text()[0][0]
+    assert "control-focused" in picker.option_controls[1]._text()[0][0]
+
+
+def test_active_rail_marks_only_current_area() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one")], app)
+    list_rail = picker._active_rail("list")[0][1].splitlines()
+    assert list_rail[0] == "▌"
+    assert len(list_rail) == 24
+    assert picker._active_rail("preview")[0][1].splitlines()[0] == "│"
+    picker.activate_control("preview")
+    assert picker._active_rail("preview")[0][1].splitlines()[0] == "▌"
+    assert picker._active_rail("list")[0][1].splitlines()[0] == "│"
+
+
+def test_preview_scroll_is_independent_and_selection_resets_to_tail() -> None:
+    """Preview scrolling lives on the transcript; moving rows resets it to the tail."""
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = tuple(ResumePickerTurn("user", f"message {index}") for index in range(12))
+    picker = ResumePicker([row("1", "one", turns=turns), row("2", "two", turns=turns)], app)
+    picker.preview_control.viewport = (60, 5)
+
+    transcript = picker._preview_model(60)
+    assert transcript is not None
+    picker.scroll_preview(-3)
+    top = transcript.top_row(width=60, height=5)
+    assert top > 0
+
+    selected = picker.model.selected
+    picker.move(1)
+    assert picker.model.selected != selected
+    # Preload and scroll the new row's transcript, then leave and return:
+    # the reset must act on the CACHED viewport, not just a fresh
+    # tail-positioned one (a first-time transcript trivially follows the tail).
+    transcript2 = picker._preview_model(60)
+    assert transcript2 is not None
+    picker.scroll_preview(-3)
+    assert transcript2.top_row(width=60, height=5) > 0
+    picker.move(-1)
+    picker.move(1)
+    # The cached row's preview resets to the tail.
+    assert transcript2.viewport.follows_tail is True
+
+
+def test_mouse_wheel_routes_to_list_and_preview_separately() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row(str(index), f"title {index}") for index in range(5)], app)
+    down = MouseEvent(Point(0, 0), MouseEventType.SCROLL_DOWN, MouseButton.NONE, frozenset())
+    picker.list_control.viewport = (80, 2)
+    picker.list_control.mouse_handler(down)
+    assert picker.model.selected == 0
+    assert picker.model.list_offset == 3
+    picker.preview_control.viewport = (30, 3)
+    transcript = picker._preview_model(30)
+    assert transcript is not None and transcript.viewport.follows_tail
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(0, 0), MouseEventType.SCROLL_UP, MouseButton.NONE, frozenset())
+    )
+    assert picker.model.selected == 0
+    assert transcript.viewport.follows_tail is False
+
+
+def test_mouse_click_maps_one_line_rows_to_session() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row(str(index), f"title {index}") for index in range(4)], app)
+    click = MouseEvent(Point(1, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    picker.list_control.mouse_handler(click)
+    assert picker.model.selected == 1
+
+
+def test_render_has_three_separated_areas_and_fixed_help() -> None:
+    model = ResumePickerModel([row("one", "Visible title")])
+    frame = render_resume_picker(model, 90, 24)
+    assert "Resume a previous session" in frame
+    assert "[Search:" in frame
+    assert "Sessions  ·  updated   state     title" not in frame  # layout-only heading
+    assert "Preview · Visible title" in frame
+    assert frame.count("─" * 90) == 3
+    assert "Esc cancel" in frame.splitlines()[2]
+
+
+def test_row_metadata_is_sanitized_without_breaking_two_line_layout() -> None:
+    model = ResumePickerModel(
+        [
+            row(
+                "unsafe",
+                "Title\nwith\x1b[31m controls",
+                turns=(ResumePickerTurn("agent", "Reply\rwith\x1b[2J controls"),),
+            )
+        ]
+    )
+    frame = render_resume_picker(model, 80, 20)
+    assert "\x1b" not in frame
+    assert "Title with controls" in frame
+    assert r"Reply\rwith\x1b[2J controls" in frame
+
+
+def test_clip_uses_terminal_cells_and_preserves_graphemes() -> None:
+    assert _clip("界界界", 5) == "界界…"
+    assert _clip("ééé", 3) == "ééé"
+    assert _clip("👩‍💻👩‍💻", 3) == "👩‍💻…"
+
+
+def test_header_columns_align_with_row_columns() -> None:
+    model = ResumePickerModel([row("one", "Aligned title")])
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker(model.rows, app)
+    header = "".join(text for _style, text in picker._list_header())
+    first = "".join(text for _style, text in _row_fragments(picker.model.matches[0], True, 80)[0])
+    assert header.index("updated") == 3
+    assert header.index("st") == first.index("✓")
+    assert cell_len(header[: header.index("title")]) == cell_len(
+        first[: first.index("Aligned title")]
+    )
+    assert cell_len(header[: header.index("last agent message")]) == cell_len(
+        first[: first.index("answer for one")]
+    )
+
+
+def test_query_terms_deduplicate_for_match_counts() -> None:
+    """Repeated query terms count occurrences once, not per repetition."""
+    from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+    model = FullscreenTranscriptModel(show_trailing_blank=False)
+    model.append("alpha one\nmid\nalpha two")
+    model.set_search("alpha alpha", width=30, height=4)
+
+    _position, total = model.search_position
+    assert total == 2  # not 4
+
+
+def test_row_highlights_every_occurrence_of_each_term() -> None:
+    """A term appearing twice in the best field highlights both positions."""
+    model = ResumePickerModel([row("1", "beta first and beta second")])
+    model.set_query("beta")
+
+    match = model.matches[0]
+    assert len(match.positions) >= 8  # both "beta" occurrences (4 cells each)
+
+
+def test_rows_rank_by_term_coverage_before_position() -> None:
+    """A row covering all terms in one field outranks a split-field row."""
+    model = ResumePickerModel(
+        [
+            # alpha lives in the title, beta in the conversation: no single
+            # field covers both terms.
+            row(
+                "split",
+                "alpha here",
+                turns=(ResumePickerTurn("agent", "beta answer"),),
+            ),
+            # Both terms in one conversation line.
+            row(
+                "together",
+                "also unrelated",
+                turns=(ResumePickerTurn("agent", "alpha beta in one line"),),
+            ),
+        ]
+    )
+    model.set_query("alpha beta")
+
+    assert [match.row.id for match in model.matches] == ["together", "split"]
+
+
+def test_row_shows_snippet_when_match_is_clipped_or_in_conversation() -> None:
+    """Listed rows must show *why* they matched.
+
+    The default preview column clips long newest-agent messages, and
+    conversation-field matches are never displayed at all — both left the
+    match count visible but the matches themselves invisible.
+    """
+    model = ResumePickerModel(
+        [
+            row(
+                "clipped",
+                "Clipped preview",
+                turns=(ResumePickerTurn("agent", "a" * 90 + " needle hidden past the clip"),),
+            ),
+            row(
+                "conversation",
+                "Conversation match",
+                turns=(
+                    ResumePickerTurn("user", "completely unrelated opening question"),
+                    ResumePickerTurn("agent", "needle appears much later in the conversation"),
+                ),
+            ),
+        ]
+    )
+    model.set_query("needle")
+
+    fragments = {
+        match.row.id: _row_fragments(match, selected=False, width=120)[0] for match in model.matches
+    }
+    joined = {rid: "".join(text for _style, text in frags) for rid, frags in fragments.items()}
+
+    # The matched text (with match styling) is visible on both rows.
+    for rid, row_fragments in fragments.items():
+        assert any("match" in str(style) for style, _t in row_fragments), rid
+    assert "needle" in joined["clipped"]
+    assert "needle" in joined["conversation"]
+
+
+def test_selection_marker_moves_before_viewport_scrolls() -> None:
+    model = ResumePickerModel([row(str(index), f"title {index}") for index in range(5)])
+    first = [
+        "".join(text for _style, text in line)
+        for _, match in model.visible(3)
+        for line in _row_fragments(match, match.row.id == model.current.id, 80)
+    ]
+    model.move(1)
+    second = [
+        "".join(text for _style, text in line)
+        for _, match in model.visible(3)
+        for line in _row_fragments(match, match.row.id == model.current.id, 80)
+    ]
+    assert first[0].startswith("❯")
+    assert second[0].startswith("  ")
+    assert second[1].startswith("❯")
+    assert model.list_offset == 0
+
+
+def test_live_preview_reports_empty_conversation() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("empty", "Empty", turns=())], app)
+    assert picker.preview_text(40, 5) == [
+        ("class:fullscreen-browser.empty", "No conversation preview")
+    ]
+
+
+def test_preview_uses_live_scrollback_visual_language() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("one", "One")], app)
+    plain = "".join(text for _style, text, *_ in picker.preview_text(40, 12))
+    assert "❯ question for one" in plain
+    assert "OO:" in plain
+    assert "You:" not in plain
+    assert "Agent:" not in plain
+
+
+def test_required_terminal_frames_have_truthful_floor() -> None:
+    model = ResumePickerModel([row("needle-id", "会議 👩‍💻 é session")])
+    for width, height in ((120, 30), (80, 24), (60, 20), (48, 13)):
+        frame = render_resume_picker(model, width, height)
+        assert "会議" in frame
+        assert len(frame.splitlines()) <= height
+    assert render_resume_picker(model, 47, 12).splitlines() == [
+        "Terminal too small",
+        "Need 48 x 13; now 47 x 12",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_resume_without_id_opens_dedicated_picker() -> None:
+    from nooa_cli.tui.commands import SessionCommand
+
+    frontend = MagicMock()
+    frontend.open_session_resume_dialog = AsyncMock(return_value=None)
+    cmd = SessionCommand(frontend, MagicMock(), MagicMock())
+    assert cmd.validate_args(["resume"]) == (True, None)
+    result = await cmd.execute(["resume"])
+    frontend.open_session_resume_dialog.assert_awaited_once()
+    assert result.success
+
+
+@pytest.mark.asyncio
+async def test_resume_alias_opens_the_same_picker() -> None:
+    from nooa_cli.tui.commands import ResumeCommand
+
+    frontend = MagicMock()
+    frontend.open_session_resume_dialog = AsyncMock(return_value=None)
+    cmd = ResumeCommand(frontend, MagicMock(), MagicMock())
+    assert cmd.validate_args([]) == (True, None)
+    result = await cmd.execute([])
+    frontend.open_session_resume_dialog.assert_awaited_once()
+    assert result.success
+
+
+def test_resume_commands_reject_extra_ids() -> None:
+    from nooa_cli.tui.commands import ResumeCommand, SessionCommand
+
+    frontend = MagicMock()
+    assert SessionCommand(frontend, MagicMock(), MagicMock()).validate_args(
+        ["resume", "one", "two"]
+    ) == (False, "Usage: /session resume [session_id]")
+    session = SessionCommand(frontend, MagicMock(), MagicMock())
+    assert session.validate_args(["list"]) == (False, "Unknown subcommand `list`")
+    assert "/session list" not in session.help_text()
+    assert ResumeCommand(frontend, MagicMock(), MagicMock()).validate_args(["one", "two"]) == (
+        False,
+        "Usage: /resume [session_id]",
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_picker_open_is_rejected_while_rows_load(monkeypatch) -> None:
+    import threading
+
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    loading = threading.Event()
+    release = threading.Event()
+
+    def slow_list(cls, limit=None):
+        loading.set()
+        release.wait(timeout=1)
+        return []
+
+    monkeypatch.setattr(sm.SessionManager, "list_sessions", classmethod(slow_list))
+    async with TUIHarness() as harness:
+        first = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await asyncio.to_thread(loading.wait, 1)
+        assert await harness.app.open_session_resume_dialog() is None
+        release.set()
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        await harness.press("escape")
+        assert await asyncio.wait_for(first, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_picker_excludes_empty_sessions(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    empty = SimpleNamespace(
+        id="empty",
+        name="empty",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        last_active=1,
+        turn_count=0,
+    )
+    resumable = SimpleNamespace(
+        id="resumable",
+        name="kept",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [empty, resumable])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value, limit=12: [
+                SimpleNamespace(role="user", content=f"question for {value}"),
+                SimpleNamespace(role="agent", content=f"preview for {value}"),
+            ]
+        ),
+    )
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        assert [item.id for item in harness.app._resume_picker.model.rows] == ["resumable"]
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_picker_f2_temporarily_restores_native_selection(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    session = SimpleNamespace(
+        id="resumable",
+        name="kept",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [session])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="copy")]),
+    )
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        assert bool(harness.app._app.mouse_support()) is True
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: not bool(harness.app._app.mouse_support()))
+
+        await harness.press("f2")
+        await harness.wait_for(lambda: bool(harness.app._app.mouse_support()))
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_filter_change_prepares_new_preview_without_blocking(monkeypatch) -> None:
+    import threading
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("attached", "attached", attached=True)], app)
+    picker.preview_control.viewport = (40, 5)
+    started = threading.Event()
+    release = threading.Event()
+
+    async def build_preview(selected, width, height, on_chunk=None):
+        from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+        started.set()
+        assert await asyncio.to_thread(release.wait, 1)
+        return FullscreenTranscriptModel(show_trailing_blank=False)
+
+    monkeypatch.setattr(ResumePicker, "_build_preview_progressively", staticmethod(build_preview))
+    # Change the filter through the shared option, as the UI does.
+    picker.view.options[0].move(1)
+
+    key = ("attached", 40)
+    assert key in picker._preview_tasks
+    assert key not in picker._preview_models
+    await asyncio.wait_for(asyncio.to_thread(started.wait), 1)
+    assert not picker._preview_tasks[key].done()
+    release.set()
+    await picker._preview_tasks[key]
+    assert key in picker._preview_models
+
+
+def test_preview_search_highlights_and_cycles_transcript_matches() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker(
+        [
+            row(
+                "1",
+                "one",
+                turns=(ResumePickerTurn("agent", "before needle middle needle after"),),
+            )
+        ],
+        app,
+    )
+    picker.preview_control.viewport = (12, 2)
+    picker.buffer.text = "needle"
+
+    fragments = picker.preview_text(12, 2)
+    assert picker.preview_search_position() == (1, 2)
+    assert any("transcript-search-current" in style for style, _text in fragments)
+    picker.activate_control("preview")
+    picker.navigate_vertical(1)
+    assert picker.preview_search_position() == (2, 2)
+    assert "match 2/2" in picker._preview_header()[0][1]
+    picker.navigate_vertical(-1)
+    assert picker.preview_search_position() == (1, 2)
+
+
+def test_preview_measurement_redraw_does_not_cancel_drag() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one", turns=(ResumePickerTurn("agent", "alpha beta"),))], app)
+    picker.preview_control.create_content(20, 3)
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+
+    # Focus changes invalidate the application after mouse-down. prompt_toolkit
+    # asks controls for their preferred height before the next mouse packet.
+    picker.preview_control.create_content(20, None)
+
+    assert picker.preview_control.viewport == (20, 3)
+    assert picker.preview_control.dragging
+
+
+def test_preview_mouse_drag_selects_and_copies() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    copied: list[str] = []
+    picker = ResumePicker(
+        [row("1", "one", turns=(ResumePickerTurn("agent", "alpha beta"),))],
+        app,
+        selection_copy_callback=copied.append,
+    )
+    picker.preview_control.create_content(20, 3)
+    down = MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    move = MouseEvent(Point(4, 1), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    up = MouseEvent(Point(4, 1), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+
+    picker.preview_control.mouse_handler(down)
+    picker.preview_control.mouse_handler(move)
+    picker.preview_control.mouse_handler(up)
+
+    assert copied
+    assert app.clipboard.set_text.call_args.args[0] == copied[0]
+    assert picker._preview_model(20).selected_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_real_prompt_toolkit_preview_drag_survives_redraw_between_packets(
+    monkeypatch,
+) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    session = SimpleNamespace(
+        id="session-1",
+        name="one",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        started_at=1,
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [session])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value, limit=12: [SimpleNamespace(role="agent", content="alpha beta gamma")]
+        ),
+    )
+
+    async with TUIHarness(output=MutableRecordingOutput(80, 24), full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        picker = harness.app._resume_picker
+        await harness.wait_for(lambda: picker.preview_control.viewport[1] >= 2)
+        width = picker.preview_control.viewport[0]
+        # The preview renders off-thread; wait for the model before dragging so
+        # the packets can never race the async preview preparation.
+        await harness.wait_for(lambda: picker._preview_model(width) is not None)
+
+        # Locate the screen row that actually shows the message text: the
+        # bottom-aligned preview can end with blank rows and pane origins
+        # shift with layout changes (e.g. upstream separator rows), so SGR
+        # rows must not be hardcoded.
+
+        def rendered_message_row():
+            # The session's LIST row also shows the newest agent message as a
+            # preview column, so take the LAST screen row containing the text —
+            # that is the conversation-preview pane's copy.
+            screen = harness.app._app.renderer.last_rendered_screen
+            if screen is None:
+                return None
+            found = []
+            for row_index, line in screen.data_buffer.items():
+                chars = "".join(line[column].char for column in sorted(line))
+                if "alpha beta gamma" in chars:
+                    found.append(row_index)
+            # A ready model may not have been painted yet. The list's copy
+            # alone is not evidence that the conversation pane is on screen.
+            return found[-1] if len(found) >= 2 else None
+
+        await harness.wait_for(lambda: rendered_message_row() is not None, timeout=5.0)
+        # SGR coordinates are one-based. Send each packet separately so the
+        # focus-changing mouse-down is followed by a real render measurement
+        # before the drag and release packets arrive.
+        down = rendered_message_row() + 1
+        harness._pipe.send_text(f"\x1b[<0;3;{down}M")
+        await harness.wait_for(lambda: picker.preview_control.dragging, timeout=5.0)
+        harness._pipe.send_text(f"\x1b[<32;12;{down}M")
+        await harness.wait_for(
+            lambda: bool(picker._preview_model(width).selected_text()), timeout=5.0
+        )
+        harness._pipe.send_text(f"\x1b[<0;12;{down}m")
+        await harness.wait_for(lambda: not picker.preview_control.dragging, timeout=5.0)
+
+        selected = harness.app._app.clipboard.get_data().text
+        assert selected
+        assert picker._preview_model(width).selected_text() == ""
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_f2_native_selection_cancels_edge_autoscroll() -> None:
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker(
+        [row("1", "one", turns=(ResumePickerTurn("agent", "\n".join(map(str, range(20)))),))],
+        app,
+    )
+    picker.preview_control.create_content(20, 3)
+    scrolls: list[tuple[str, int]] = []
+    picker.mouse_scroll = lambda pane, delta: scrolls.append((pane, delta))  # type: ignore[method-assign]
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(0, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    picker.preview_control.mouse_handler(
+        MouseEvent(Point(3, 2), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+
+    picker.toggle_native_selection()
+    assert picker.mouse_support is False
+    await asyncio.sleep(0.4)
+    assert scrolls == []
+
+
+@pytest.mark.asyncio
+async def test_real_prompt_toolkit_routes_search_navigation_and_cancel(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    sessions = [
+        SimpleNamespace(
+            id="session-1",
+            name="qjk",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=1,
+            last_active=2,
+            turn_count=1,
+        ),
+        SimpleNamespace(
+            id="session-2",
+            name="other",
+            model="m",
+            agent="A",
+            working_dir="/another/project",
+            started_at=3,
+            last_active=1,
+            turn_count=1,
+        ),
+    ]
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value, limit=12: [
+                SimpleNamespace(role="user", content=f"question for {value}"),
+                SimpleNamespace(role="agent", content=f"preview for {value}"),
+            ]
+        ),
+    )
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        await harness.type_keys("qjk")
+        await harness.wait_for(lambda: harness.app._resume_picker.model.query == "qjk")
+        picker = harness.app._resume_picker
+        assert [match.row.id for match in picker.model.matches] == ["session-1"]
+        await harness.press("tab")
+        await harness.wait_for(lambda: picker.active_control == "preview")
+        await harness.press("s-tab")
+        await harness.wait_for(lambda: picker.active_control == "list")
+        picker.buffer.text = ""
+        await harness.wait_for(lambda: picker.model.query == "")
+        await harness.press("c-o")
+        await harness.wait_for(lambda: picker.option_cursor == 0)
+        await harness.type_keys("x")
+        await harness.press("option-backspace")
+        await asyncio.sleep(0)
+        assert picker.model.query == ""
+        await harness.press("down")
+        await harness.wait_for(lambda: picker.model.state_filter == "attached")
+        assert picker.model.matches == []
+        await harness.press("down")
+        await harness.wait_for(lambda: picker.model.state_filter == "all")
+        assert {match.row.id for match in picker.model.matches} == {"session-1", "session-2"}
+        await harness.press("right")
+        await harness.wait_for(lambda: picker.option_cursor == 1)
+        await harness.type_keys(" ")
+        await harness.wait_for(lambda: not picker.model.sort_updated)
+        await harness.press("enter")
+        await harness.wait_for(lambda: picker.option_cursor is None)
+        assert [match.row.id for match in picker.model.matches] == ["session-2", "session-1"]
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_cancels_picker_while_options_are_open(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    sessions = [
+        SimpleNamespace(
+            id="session-1",
+            name="one",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=1,
+            last_active=2,
+            turn_count=1,
+        )
+    ]
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(lambda cls, value, limit=12: []),
+    )
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        await harness.press("c-o")
+        await harness.wait_for(lambda: harness.app._resume_picker.option_cursor == 0)
+        await harness.press("c-c")
+        assert await asyncio.wait_for(opened, 1) is None
+        assert harness.app._resume_picker is None
+
+
+@pytest.mark.asyncio
+async def test_option_backspace_edits_search_without_closing_picker(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    session = SimpleNamespace(
+        id="session-1",
+        name="alpha",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        started_at=1,
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [session])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(sm.SessionManager, "load_turns", classmethod(lambda cls, value: []))
+
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        await harness.type_keys("alpha beta")
+        await harness.press("option-backspace")
+        await harness.wait_for(lambda: harness.app._resume_picker.buffer.text == "alpha ")
+        assert harness.app._resume_picker is not None
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+async def test_enter_resumes_selected_session_from_preview(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import TUIHarness
+
+    session = SimpleNamespace(
+        id="session-1",
+        name="Session 1",
+        model="m",
+        agent="A",
+        working_dir=str(Path.cwd()),
+        started_at=1,
+        last_active=2,
+        turn_count=1,
+    )
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: [session])
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(lambda cls, value: [SimpleNamespace(role="agent", content="answer")]),
+    )
+    async with TUIHarness() as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        await harness.press("tab")
+        await harness.wait_for(
+            lambda: (
+                harness.app._resume_picker is not None
+                and harness.app._resume_picker.active_control == "preview"
+            )
+        )
+        await harness.press("enter")
+        assert await asyncio.wait_for(opened, 1) == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_full_application_selection_marker_moves_down_the_visible_list(monkeypatch) -> None:
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    sessions = [
+        SimpleNamespace(
+            id=f"session-{index}",
+            name=f"Session {index}",
+            model="m",
+            agent="A",
+            working_dir=str(Path.cwd()),
+            started_at=index,
+            last_active=100 - index,
+            turn_count=1,
+        )
+        for index in range(5)
+    ]
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value: [
+                SimpleNamespace(role="user", content=f"question for {value}"),
+                SimpleNamespace(role="agent", content=f"answer for {value}"),
+            ]
+        ),
+    )
+    output = MutableRecordingOutput(columns=80, rows=24)
+    async with TUIHarness(output=output, full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+
+        def marker_row() -> int | None:
+            screen = harness.app._app.renderer.last_rendered_screen
+            return next(
+                (
+                    y
+                    for y in range(24)
+                    if "❯" in "".join(screen.data_buffer[y][x].char for x in range(80))
+                    and "✓" in "".join(screen.data_buffer[y][x].char for x in range(80))
+                ),
+                None,
+            )
+
+        await harness.wait_for(lambda: harness.app._app.renderer.last_rendered_screen is not None)
+        await harness.wait_for(lambda: harness.app._resume_picker.active_control == "list")
+        await harness.wait_for(lambda: marker_row() is not None)
+        before = marker_row()
+        await harness.press("down")
+        await harness.wait_for(lambda: harness.app._resume_picker.model.selected == 1)
+        await harness.wait_for(lambda: (current := marker_row()) is not None and current > before)
+        assert marker_row() == before + 1
+        assert harness.app._resume_picker.model.list_offset == 0
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("width", "height", "usable"),
+    [(120, 30, True), (80, 24, True), (60, 20, True), (48, 13, True), (47, 12, False)],
+)
+async def test_full_application_screen_keeps_picker_help_visible(
+    monkeypatch, width: int, height: int, usable: bool
+) -> None:
+    """Capture the complete Application, including Float/Box/Frame allocation."""
+    from nooa_cli.tui import session_manager as sm
+
+    from .tui_app_harness import MutableRecordingOutput, TUIHarness
+
+    sessions = [
+        SimpleNamespace(
+            id=f"session-{index}",
+            name=f"Populated session {index:02d}",
+            model="provider/model",
+            agent="Agent",
+            working_dir=str(Path.cwd()),
+            started_at=1_700_000_000 + index,
+            last_active=1_700_000_100 + index,
+            turn_count=index + 1,
+        )
+        for index in range(20)
+    ]
+    monkeypatch.setattr(
+        sm.SessionManager, "list_sessions", classmethod(lambda cls, limit=None: sessions)
+    )
+    monkeypatch.setattr(sm.SessionManager, "is_active", classmethod(lambda cls, value: False))
+    monkeypatch.setattr(
+        sm.SessionManager,
+        "load_turns",
+        classmethod(
+            lambda cls, value, limit=12: [
+                SimpleNamespace(role="user", content=f"question for {value}"),
+                SimpleNamespace(role="agent", content=f"preview for {value}"),
+            ]
+        ),
+    )
+    output = MutableRecordingOutput(columns=width, rows=height)
+    async with TUIHarness(output=output, full_screen=True) as harness:
+        opened = asyncio.create_task(harness.app.open_session_resume_dialog())
+        await harness.wait_for(lambda: harness.app._resume_picker is not None)
+        if usable:
+            await harness.wait_for(
+                lambda: any(
+                    session_id == "session-19"
+                    for session_id, _width in harness.app._resume_picker._preview_models
+                )
+            )
+        harness.app._app.invalidate()
+
+        def rendered_lines() -> list[str]:
+            screen = harness.app._app.renderer.last_rendered_screen
+            if screen is None:
+                return []
+            return [
+                "".join(screen.data_buffer[y][x].char for x in range(width)).rstrip()
+                for y in range(height)
+            ]
+
+        if usable:
+            # The preview renders off-thread; wait until the prepared replay is
+            # actually on screen so a stale "Preparing…" frame can't be read.
+            await harness.wait_for(
+                lambda: any("preview for session-19" in line for line in rendered_lines()),
+                timeout=5.0,
+            )
+        else:
+            await harness.wait_for(
+                lambda: any("Terminal too small" in line for line in rendered_lines())
+            )
+        visible = rendered_lines()
+        if usable:
+            joined = "\n".join(visible)
+            assert "20 sessions" in joined
+            assert "Search" in joined
+            assert "Filter:" in joined and "✓" in joined
+            assert "Sort:" in joined
+            assert "Conversation preview" in joined
+            assert "Ctrl-O" in joined and "options" in joined
+            assert joined.count("─") >= width * 2
+            assert "preview for session-19" in joined
+            assert "❯" in joined and "y ago" in joined
+            assert any(("Enter" in line or "↵" in line) and "Esc" in line for line in visible)
+            assert all(len(line) <= width for line in visible)
+        else:
+            assert any("Terminal too small" in line for line in visible)
+        await harness.press("escape")
+        assert await asyncio.wait_for(opened, 1) is None
+
+
+# ---------------------------------------------------------------------------
+# Preview build performance: dwell, single-flight, cooperative cancellation
+# ---------------------------------------------------------------------------
+
+
+def test_fast_navigation_does_not_stack_preview_builds(monkeypatch) -> None:
+    """Fast up/down skips past rows without starting one preview build each."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    # Widen the dwell so a loaded test box cannot let an intermediate row's
+    # gate elapse mid-burst (asyncio.sleep is only a lower bound).
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0.5)
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(8)], app)
+    picker.preview_control.viewport = (40, 5)
+    built: list[str] = []
+
+    async def tracking_build(self, selected, width, height, on_chunk=None):
+        built.append(selected.id)
+        from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+        return FullscreenTranscriptModel(show_trailing_blank=False)
+
+    original = ResumePicker._build_preview_progressively
+    ResumePicker._build_preview_progressively = tracking_build
+    try:
+
+        async def run() -> None:
+            # Seven arrow-downs in well under the dwell delay: no build starts
+            # mid-burst, and every superseded task is cancelled.
+            for _ in range(7):
+                picker.handle_key("down")
+                await asyncio.sleep(0.01)
+            assert len(picker._preview_tasks) <= 1
+            await asyncio.sleep(0.2)  # dwell elapses for the row we stopped on
+            await asyncio.gather(*list(picker._preview_tasks.values()), return_exceptions=True)
+
+        asyncio.run(run())
+    finally:
+        ResumePicker._build_preview_progressively = original
+    # The dwell gate skipped every transiently-visited row; only the stop row built.
+    assert built == ["7"]
+    assert ("7", 40) in picker._preview_models
+
+
+def test_superseded_preview_builds_never_enter_the_cache() -> None:
+    """A co-operatively-cancelled build must not be cached."""
+    import asyncio
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one"), row("2", "two")], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def cancelling_build(self, selected, width, height, on_chunk=None):
+        # Simulate a superseded build: the cooperative event is set mid-build.
+        if self._preview_build_cancel is not None:
+            self._preview_build_cancel.set()
+        return None
+
+    original = ResumePicker._build_preview_progressively
+    ResumePicker._build_preview_progressively = cancelling_build
+    try:
+
+        async def run() -> None:
+            picker.handle_key("down")
+            await asyncio.sleep(0.2)
+            await asyncio.gather(*list(picker._preview_tasks.values()), return_exceptions=True)
+
+        asyncio.run(run())
+    finally:
+        ResumePicker._build_preview_progressively = original
+    assert ("2", 40) not in picker._preview_models
+
+
+def test_close_stops_in_flight_preview_build(monkeypatch) -> None:
+    """Escape cancels pending tasks and sets the cooperative build event."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0.02)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("1", "one")], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def run() -> None:
+        picker._prepare_current_preview()
+        await asyncio.sleep(0.05)  # past the dwell: a build event exists
+        event = picker._preview_build_cancel
+        assert event is not None and not event.is_set()
+        picker.close()
+        assert event.is_set()
+
+    asyncio.run(run())
+    assert not picker._preview_tasks
+
+
+def test_preview_cache_is_bounded_lru() -> None:
+    """Preview transcripts evict oldest-first, bounded to _PREVIEW_CACHE_MAX."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row(str(i), f"title {i}") for i in range(6)], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def run() -> None:
+        for _ in range(5):
+            picker.handle_key("down")
+            await asyncio.sleep(0.16)
+            await asyncio.gather(*list(picker._preview_tasks.values()), return_exceptions=True)
+
+    asyncio.run(run())
+    assert len(picker._preview_models) == rp._PREVIEW_CACHE_MAX
+    # Newest stays; the oldest visited rows evicted.
+    assert ("5", 40) in picker._preview_models
+    assert ("1", 40) not in picker._preview_models
+
+    # Revisiting a row refreshes its recency: the next insert evicts the
+    # true least-recently-used row (5) instead of the first-inserted one
+    # (2) — the difference between an LRU and a plain FIFO.
+    async def revisit() -> None:
+        # Back up through cached rows; each _preview_model call simulates the
+        # pane rendering that row, which is what refreshes LRU recency.
+        for _ in range(3):  # rows 4, 3, 2
+            picker.handle_key("up")
+            picker._preview_model(40)
+            await asyncio.sleep(0.02)
+        picker.handle_key("up")  # row 1: a fresh build inserts and must evict row 5
+        picker._preview_model(40)
+        await asyncio.sleep(0.2)
+        await asyncio.gather(*list(picker._preview_tasks.values()), return_exceptions=True)
+
+    asyncio.run(revisit())
+    assert ("2", 40) in picker._preview_models
+    assert ("1", 40) in picker._preview_models
+    assert ("5", 40) not in picker._preview_models
+
+
+def test_preview_builds_display_progressively(monkeypatch) -> None:
+    """The preview pane fills in per chunk instead of waiting for the build."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0.02)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = tuple(ResumePickerTurn("agent", f"turn {i}") for i in range(120))
+    picker = ResumePicker([row("1", "one", turns=turns)], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def run() -> None:
+        observed_counts: list[int] = []
+
+        async def build(self, selected, width, height, on_chunk=None):
+            from nooa_cli.tui.fullscreen_transcript import FullscreenTranscriptModel
+
+            transcript = FullscreenTranscriptModel(show_trailing_blank=False)
+            for index in range(3):
+                await asyncio.sleep(0.01)
+                transcript.append(f"chunk {index}\n")
+                if on_chunk is not None:
+                    on_chunk(transcript)
+            return transcript
+
+        monkeypatch.setattr(ResumePicker, "_build_preview_progressively", build)
+        picker._prepare_current_preview()
+        key = ("1", 40)
+        task = picker._preview_tasks[key]
+        # Sample the published transcript while the build is still running.
+        for _ in range(100):
+            cached = picker._preview_models.get(key)
+            if cached is not None and not task.done():
+                observed_counts.append(len(cached._records))
+            if task.done():
+                break
+            await asyncio.sleep(0.005)
+        await asyncio.gather(task, return_exceptions=True)
+        # Without progressive publishing, the first cached entry would only
+        # appear once the build finished (all three records at once).
+        assert 1 in observed_counts, f"no partial was visible mid-build: {observed_counts}"
+        assert len(picker._preview_models[key]._records) == 3
+
+    asyncio.run(run())
+
+
+def test_cancelled_chunked_build_returns_none_at_chunk_boundary(monkeypatch) -> None:
+    """The real chunk loop stops at a chunk boundary once the event is set."""
+    import threading
+
+    import nooa_cli.tui.resume_picker as rp
+
+    # Small chunks so several boundaries exist.
+    monkeypatch.setattr(rp, "_PREVIEW_BUILD_CHUNK_TURNS", 5)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = tuple(ResumePickerTurn("agent", f"turn {i}") for i in range(50))
+    picker = ResumePicker([row("1", "one", turns=turns)], app)
+
+    cancel = threading.Event()
+    picker._preview_build_cancel = cancel
+    # Cancel after the second chunk has rendered.
+    seen: list[int] = []
+
+    original_render = ResumePicker._render_preview_chunk
+
+    def render_and_cancel(turns_list, start, row_id, width):
+        seen.append(start)
+        if len(seen) == 2:
+            cancel.set()
+        return original_render(turns_list, start, row_id, width)
+
+    monkeypatch.setattr(ResumePicker, "_render_preview_chunk", staticmethod(render_and_cancel))
+    result = picker._build_preview_model(row("1", "one", turns=turns), 40, 5)
+    assert result is None
+    assert len(seen) == 2, f"build did not stop at a chunk boundary: {seen}"
+
+
+def test_progressive_preview_reveals_newest_chunk_first_without_scrolling(monkeypatch) -> None:
+    """Older chunks prepend above a stable visible tail."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_BUILD_CHUNK_TURNS", 2)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=40, rows=8)
+    turns = tuple(ResumePickerTurn("agent", f"turn {index}") for index in range(6))
+    selected = row("1", "one", turns=turns)
+    picker = ResumePicker([selected], app)
+    seen_text: list[str] = []
+    seen_visible: list[str] = []
+
+    async def run() -> None:
+        def on_chunk(transcript) -> None:
+            seen_text.append(transcript.text)
+            seen_visible.append(
+                "".join(text for _style, text in transcript.formatted_text(width=40, height=4))
+            )
+
+        transcript = await picker._build_preview_progressively(selected, 40, 4, on_chunk=on_chunk)
+        assert transcript is not None
+
+    asyncio.run(run())
+    assert len(seen_text) == 3
+    assert "turn 4" in seen_text[0] and "turn 5" in seen_text[0]
+    assert "turn 0" not in seen_text[0]
+    assert seen_text[-1].index("turn 0") < seen_text[-1].index("turn 4")
+    assert seen_visible == [seen_visible[0]] * len(seen_visible)
+
+
+def test_rapid_a_b_a_keeps_new_preview_task_tracked(monkeypatch) -> None:
+    """A cancelled old A task must not remove a newly scheduled A task."""
+    import asyncio
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 10.0)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    picker = ResumePicker([row("a", "A"), row("b", "B")], app)
+    picker.preview_control.viewport = (40, 5)
+
+    async def run() -> None:
+        key = ("a", 40)
+        picker._prepare_current_preview()
+        old_a = picker._preview_tasks[key]
+        picker.move(1)  # A -> B: cancel old A
+        picker.move(-1)  # B -> A: install a fresh A task under the same key
+        new_a = picker._preview_tasks[key]
+        assert new_a is not old_a
+
+        # Let cancelled A and B execute their finally blocks. Neither may pop
+        # the fresh A task that now owns the mapping.
+        await asyncio.sleep(0)
+        assert picker._preview_tasks.get(key) is new_a
+        assert not new_a.done()
+
+        picker.close()
+        await asyncio.gather(old_a, new_a, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_preview_workers_are_serialized_and_close_drains_them(monkeypatch) -> None:
+    """Superseded to_thread chunks never overlap or survive picker teardown."""
+    import threading
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = (ResumePickerTurn("agent", "preview"),)
+    picker = ResumePicker([row("a", "A", turns=turns), row("b", "B", turns=turns)], app)
+    picker.preview_control.viewport = (40, 5)
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    release_second = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    started: list[str] = []
+
+    def blocking_render(turns_list, start, row_id, width):
+        """Block each fake render so the test can observe worker overlap."""
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+            started.append(row_id)
+        try:
+            if row_id == "a":
+                first_started.set()
+                assert release_first.wait(2)
+            else:
+                second_started.set()
+                assert release_second.wait(2)
+            return f"{row_id}\n"
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(ResumePicker, "_render_preview_chunk", staticmethod(blocking_render))
+
+    picker._prepare_current_preview()
+    for _ in range(100):
+        if first_started.is_set():
+            break
+        await asyncio.sleep(0.005)
+    assert first_started.is_set()
+
+    picker.move(1)
+    await asyncio.sleep(0.05)
+    assert not second_started.is_set(), "replacement render overlapped the stale worker"
+    assert max_active == 1
+
+    release_first.set()
+    for _ in range(100):
+        if second_started.is_set():
+            break
+        await asyncio.sleep(0.005)
+    assert second_started.is_set()
+
+    picker.close()
+    closing = asyncio.create_task(picker.wait_closed())
+    await asyncio.sleep(0)
+    assert not closing.done(), "close forgot the active executor-backed task"
+    release_second.set()
+    await asyncio.wait_for(closing, 1)
+
+    assert max_active == 1
+    assert started == ["a", "b"]
+    assert not picker._all_preview_tasks
+
+
+@pytest.mark.asyncio
+async def test_close_drains_worker_after_preview_task_was_already_cancelled(monkeypatch) -> None:
+    """A second cancellation cannot orphan a superseded executor chunk."""
+    import threading
+
+    import nooa_cli.tui.resume_picker as rp
+
+    monkeypatch.setattr(rp, "_PREVIEW_DEBOUNCE_SECONDS", 0)
+    app = MagicMock()
+    app.output.get_size.return_value = SimpleNamespace(columns=80, rows=24)
+    turns = (ResumePickerTurn("agent", "preview"),)
+    picker = ResumePicker([row("a", "A", turns=turns), row("b", "B", turns=turns)], app)
+    picker.preview_control.viewport = (40, 5)
+
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+
+    def blocking_render(turns_list, start, row_id, width):
+        """Keep the fake worker alive across both outer-task cancellations."""
+        worker_started.set()
+        try:
+            assert release_worker.wait(2)
+            return f"{row_id}\n"
+        finally:
+            worker_finished.set()
+
+    monkeypatch.setattr(ResumePicker, "_render_preview_chunk", staticmethod(blocking_render))
+
+    picker._prepare_current_preview()
+    for _ in range(100):
+        if worker_started.is_set():
+            break
+        await asyncio.sleep(0.005)
+    assert worker_started.is_set()
+
+    picker.move(1)  # First cancellation: supersede A with B.
+    await asyncio.sleep(0)
+    picker.close()  # Second cancellation while A drains its worker.
+    closing = asyncio.create_task(picker.wait_closed())
+    await asyncio.sleep(0.05)
+    assert not closing.done()
+    assert not worker_finished.is_set()
+
+    release_worker.set()
+    await asyncio.wait_for(closing, 1)
+    assert worker_finished.is_set()
+    assert not picker._all_preview_tasks
+    assert not picker._preview_worker_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_close_yields_to_pending_preview_completion_callbacks():
+    from nooa_cli.tui.resume_picker import ResumePicker
+
+    picker = ResumePicker.__new__(ResumePicker)
+    completed = asyncio.get_running_loop().create_future()
+    completed.set_result(None)
+    picker._all_preview_tasks = {completed}
+    picker._preview_worker_tasks = set()
+    completed.add_done_callback(picker._all_preview_tasks.discard)
+
+    # Await directly: a separate task would run after the pending callback
+    # and conceal the synchronous gather loop that can freeze picker close.
+    await picker.wait_closed()
+    assert picker._all_preview_tasks == set()
