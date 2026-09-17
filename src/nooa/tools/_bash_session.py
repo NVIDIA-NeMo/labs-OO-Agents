@@ -19,9 +19,12 @@ import logging
 import os
 import secrets
 import signal
+import sys
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+
+from nooa.errors import NemoOOAgentsRuntimeError
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +155,13 @@ class BashSession:
         """Start the bash subprocess with a dedicated control fd."""
         if self._started:
             return
+
+        if sys.platform == "win32":
+            raise NemoOOAgentsRuntimeError(
+                "ShellTools requires a POSIX shell and its fd-3 control channel, "
+                "neither of which is available on native Windows. Run inside WSL, "
+                "or a Linux/macOS environment, instead."
+            )
 
         self._start_count += 1
         env = os.environ.copy()
