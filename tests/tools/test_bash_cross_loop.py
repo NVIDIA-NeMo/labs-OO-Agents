@@ -131,12 +131,14 @@ class TestCrossLoopLockContention:
         allow_command = asyncio.Event()
 
         async def start():
+            """Pause the simulated shell restart until the test allows it to finish."""
             session._started = True
             session._started_on_loop = asyncio.get_running_loop()
             restart_started.set()
             await allow_restart.wait()
 
         async def send_and_wait(_script, _sentinel, timeout):
+            """Signal command execution and wait until the test allows it to finish."""
             command_started.set()
             await allow_command.wait()
             return ["0", str(tmp_path)], "", "", False

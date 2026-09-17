@@ -49,6 +49,7 @@ class BashSession:
     """
 
     def __init__(self, cwd: str | Path = ".", init_command: str | None = None) -> None:
+        """Configure the working directory and optional command to run on each start."""
         self._cwd = Path(cwd).resolve()
         # Optional shell snippet run once every time the session (re)starts —
         # before any user command — to set up the environment (e.g. activating a

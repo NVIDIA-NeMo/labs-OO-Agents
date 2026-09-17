@@ -109,6 +109,7 @@ class TestLockLoopMismatch:
         """close() preserves the lock until the next loop adopts a fresh one."""
 
         async def start_and_close(session):
+            """Run a command, close the session, and return the preserved lock."""
             await session.run("echo first")
             original_lock = session._lock
             await session.close()
@@ -116,6 +117,7 @@ class TestLockLoopMismatch:
             return original_lock
 
         async def run_after_close(session):
+            """Restart the closed session and return its command output and exit code."""
             stdout, _, code = await session.run("echo second")
             return stdout.strip(), code
 
