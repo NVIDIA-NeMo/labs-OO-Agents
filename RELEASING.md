@@ -26,11 +26,14 @@ The strict gate performs:
 2. Builds all five wheels and source distributions under a temporary local tag,
    verifies their versions, and smoke-tests imports and `nooa --version` in a
    clean environment.
-3. Runs the full capability suite for the candidate and previous release, fresh
+3. Runs twenty bounded [provider replay/cache checks](docs/release-provider-validation.md)
+   on the candidate (48 capped provider requests across both transports, no retries), including SQLite resume
+   and changing trailing dynamic context. Missing or skipped results fail the gate.
+4. Runs the full capability suite for the candidate and previous release, fresh
    and back-to-back: four gate models, three runs, full data, no response cache.
-4. Writes private results, traces, distributions, checksums, a JSON manifest,
+5. Writes private results, traces, distributions, checksums, a JSON manifest,
    and sanitized public notes to the GitLab job artifacts.
-5. After every hard gate passes, creates or safely updates one GitHub **draft**
+6. After every hard gate passes, creates or safely updates one GitHub **draft**
    targeting the exact tested SHA.
 
 The candidate and baseline environments receive the same explicit
@@ -116,6 +119,11 @@ cannot publish it. It retains local compatibility for model aliases, prompts
 before drafting advisory results, and still blocks the capability floor. Use it
 only for recovery, record the evidence separately, and publish only through the
 GitHub draft UI.
+
+Local fallback runs the provider replay/cache gate when `--internal-wheel` is
+supplied. Without that private alias package it warns and records the missing
+provider evidence in the draft notes; it does not claim a provider-gate pass.
+The private CI path always requires the wheel and all provider checks.
 
 ## Trusted Publishing setup
 

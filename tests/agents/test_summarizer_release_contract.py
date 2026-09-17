@@ -13,8 +13,11 @@ from tests.integration.test_summarizer_live import exercise_summarization
 
 
 @pytest.mark.parametrize("family", ["openai", "anthropic"])
+@pytest.mark.parametrize("transport", ["litellm", "direct"])
 @pytest.mark.parametrize("broken", [None, "fork", "collapse", "facts"])
-async def test_release_scenario_detects_missing_summarization(family, broken, monkeypatch):
+async def test_release_scenario_detects_missing_summarization(
+    family, transport, broken, monkeypatch
+):
     """Exercise the same scenario through mocked HTTP, including negative controls."""
     calls = 0
 
@@ -71,7 +74,7 @@ async def test_release_scenario_detects_missing_summarization(family, broken, mo
     model = "openai/test" if family == "openai" else "anthropic/claude-sonnet-4-5"
     limit = {"max_output_tokens": 2048} if family == "openai" else {"max_tokens": 2048}
     async with cls(
-        model, api_key="test", api_base="https://provider.test", cache_breakpoint=family, **limit
+        model, transport=transport, api_key="test", api_base="https://provider.test", **limit
     ) as client:
         if broken:
             message = {

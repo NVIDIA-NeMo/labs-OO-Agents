@@ -467,7 +467,7 @@ def _phase_events(
         meta = BlockMetadata(expr=f'self.events["{tag}"]', tag=tag)
 
         # All events carry their raw object on block.event with content="".
-        # ToolCallEvents are handled by ProviderFormatter; other events are
+        # ToolCallEvents are assembled by to_messages; other events are
         # serialized at render time via block_formatter.format_event().
         new_blocks.append(
             ResolvedBlock(

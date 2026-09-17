@@ -307,7 +307,6 @@ class TestL4ContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
             context_limit=50,
             count_tokens=_count_tokens,
         )
@@ -327,7 +326,6 @@ class TestL4ContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
             context_limit=10,
             count_tokens=_count_tokens,
         )
@@ -359,7 +357,6 @@ class TestL4ContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
             context_limit=260,
             count_tokens=_count_tokens,
         )
@@ -391,7 +388,6 @@ class TestL4ContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
             context_limit=60,
             count_tokens=_count_tokens,
         )
@@ -432,7 +428,6 @@ class TestL4ContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
             context_limit=100,
             count_tokens=_count_tokens,
         )
@@ -466,7 +461,6 @@ class TestL4ContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
             context_limit=100,
             count_tokens=_count_tokens,
         )
@@ -492,7 +486,6 @@ class TestL4ContextBlockEviction:
         result = render_context(
             [system_block, event_block],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=_openai_formatter(),
             context_limit=10,
             count_tokens=_count_tokens,
         )
@@ -792,13 +785,3 @@ class TestCrossLayerPipeline:
 
         # Some events should have been archived
         assert active_after < active_before
-
-
-# ── Helper for provider formatter ────────────────────────────────────────
-
-
-def _openai_formatter():
-    """Return an OpenAI provider formatter."""
-    from nooa.context_blocks.formatter import OpenAIProviderFormatter
-
-    return OpenAIProviderFormatter()

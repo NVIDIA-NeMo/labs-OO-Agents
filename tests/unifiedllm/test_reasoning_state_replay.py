@@ -13,11 +13,7 @@ from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.utils import ModelResponse
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
-from nooa.context_blocks.formatter import (
-    OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
-    XMLBlockFormatter,
-)
+from nooa.context_blocks.formatter import XMLBlockFormatter, to_messages
 from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.llm_types import AssistantText, ToolCall
 from nooa.storage.sqlite import SQLiteEventBackend, _ensure_schema
@@ -136,12 +132,12 @@ def _response_blocks(response: LLMResponse) -> list[ResolvedBlock]:
 
 def _render_responses(response: LLMResponse) -> list[dict]:
     neutral = XMLBlockFormatter().format(_response_blocks(response))
-    return ResponsesProviderFormatter().format(neutral)
+    return to_messages(neutral)
 
 
 def _render_chat(response: LLMResponse) -> list[dict]:
     neutral = XMLBlockFormatter().format(_response_blocks(response))
-    return OpenAIProviderFormatter().format(neutral)
+    return to_messages(neutral)
 
 
 @pytest.mark.parametrize("call_id", ["same", ""])
@@ -162,7 +158,7 @@ def test_duplicate_ids_cannot_reuse_one_execution(call_id, archive, caplog):
         turn = LLMResponse.model_validate_json(turn.model_dump_json())
     # Only one execution exists for the two calls, including after archive load.
     neutral = XMLBlockFormatter().format(_response_blocks(turn)[:2])
-    wire = OpenAIProviderFormatter().format(neutral)
+    wire = to_messages(neutral)
     assert len(turn.tool_calls) == 2  # Preserve the original for investigation.
     assert not any(m.get("tool_calls") or m.get("role") == "tool" for m in wire)
     assert turn.content == "answer"  # The record survives, the invalid batch does not replay.

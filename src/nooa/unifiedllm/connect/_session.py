@@ -122,12 +122,11 @@ def _reasoning_values(response):
 
 async def session_steps(alias, entry, *, api_key, budget_tokens):
     """Three configured-cap turns, without retries; never execute model tools."""
-    from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
     from nooa.unifiedllm import CacheBoundary, RetryConfig, Tool
-    from nooa.unifiedllm.connect import ProbeUpdate, _include_rejected
+    from nooa.unifiedllm.connect import ProbeUpdate, _include_rejected, entry_api_style
     from nooa.unifiedllm.http_config import HttpConfig
     from nooa.unifiedllm.registry import client_from_config
 
@@ -170,11 +169,6 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         raise RuntimeError("Setup checks never execute model tools")
 
     formatter = CachedBlockFormatter()
-    provider = (
-        ResponsesProviderFormatter()
-        if entry["api_style"] == "responses"
-        else OpenAIProviderFormatter()
-    )
     # Non-repetitive lines give a reusable prefix without any user's private data.
     padding = "\n".join(
         f"Reference record {i:04d}: item {i * 17 + 3:06d} belongs to batch {i % 97:02d}."
@@ -204,20 +198,20 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             ),
         ],
         block_formatter=formatter,
-        provider_formatter=provider,
     ).output
     params = {
         "tools": [
             Tool(name="probe_tool", description="Record a computed value", callable=probe_tool)
         ],
-        "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens": reply_cap,
+        "max_output_tokens" if entry_api_style(entry) == "responses" else "max_tokens": reply_cap,
     }
     if level is not None:
         params["reasoning_level"] = level
         for key in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
             if key in settings:
                 params.pop(
-                    "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens", None
+                    "max_output_tokens" if entry_api_style(entry) == "responses" else "max_tokens",
+                    None,
                 )
     bodies = []
     successful_bodies = []
@@ -383,12 +377,12 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
 
         # Compare all provider fields; only the final user message may differ.
         left, right = deepcopy(successful_bodies[1]), deepcopy(successful_bodies[2])
-        key = "input" if entry["api_style"] == "responses" else "messages"
+        key = "input" if entry_api_style(entry) == "responses" else "messages"
         for body in (left, right):
             # Compare the input prefix independently from request control fields.
             for cap_key in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
                 body.pop(cap_key, None)
-            if entry["api_style"] == "anthropic":
+            if entry_api_style(entry) == "anthropic":
                 body[key][-1]["content"][-1]["text"] = "<volatile>"
             else:
                 body[key][-1]["content"] = "<volatile>"
@@ -409,7 +403,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             else "Cache markers were sent, but the server reported no reuse; retry later or check server support"
             if explicit
             else "No cache reuse reported on these continuations; provider caching can vary. The model connection still works"
-            if entry["api_style"] == "chat"
+            if entry_api_style(entry) == "chat"
             else "No cache markers or cache reads observed; check the runtime's cache defaults and server support"
         )
         yield ProbeUpdate(
@@ -418,7 +412,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 "outcome": "confirmed"
                 if substantial
                 else "warning"
-                if stable and (explicit or entry["api_style"] == "chat")
+                if stable and (explicit or entry_api_style(entry) == "chat")
                 else "not_confirmed",
                 "cached_input_tokens": cached,
                 "input_tokens": best["input_tokens"],

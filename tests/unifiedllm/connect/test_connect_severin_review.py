@@ -149,6 +149,7 @@ async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings
 
     def accepted_without_owned_pool(*args, **kwargs):
         client = real_factory(*args, **kwargs)
+        assert client.transport == "litellm"
         assert client._http.async_client is None
         # Simulate a successful legacy fallback; no request traverses our owned pool.
         client.acall = AsyncMock(return_value=LLMResponse(content="323"))
@@ -156,6 +157,7 @@ async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings
 
     monkeypatch.setattr(registry, "client_from_config", accepted_without_owned_pool)
     plan = connect.plan("model", "model", "chat", "http://localhost:8000/v1", "")
+    plan.entry["transport"] = "litellm"
     result = await connect.run(plan, approved="minimal")
     record = result.entry["provenance"]["probes"]["routing"]
     assert record["outcome"] == "not_confirmed"

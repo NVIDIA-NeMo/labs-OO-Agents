@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in NVIDIA Hub cache/reasoning checks across a real SQLite close/reopen.
+"""Opt-in live cache/reasoning checks across a real SQLite close/reopen.
 
-Run with NVIDIA_INFERENCE_API_KEY and NOOA_RUN_CACHE_RESUME_LIVE=1:
+Run with NOOA_RUN_CACHE_RESUME_LIVE=1 and the bundled-config package that defines the
+``release-gate-<family>`` registry aliases (see tests/integration/_release_gate.py):
     uv run pytest tests/integration/test_cache_resume_live.py -m integration -s
 
 Three calls per provider: obtain a signed tool turn, warm its stable prefix,
@@ -29,16 +30,19 @@ import pytest
 
 from nooa._immutable_json import json_containers
 from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult, UserEvent
-from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.storage import SQLiteStorageManager
-from nooa.unifiedllm import CacheBoundary, CompletionClient, LLMResponse, ResponsesClient, Tool
+from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.retry_config import RetryConfig
+from tests.integration._release_gate import gate_cases, gate_client, gate_host
+
+_GATE_SESSIONS = {}
 
 pytestmark = [
+    pytest.mark.usefixtures("isolated_gate_tracing"),
     pytest.mark.integration,
     pytest.mark.skipif(
         os.getenv("NOOA_RUN_CACHE_RESUME_LIVE") != "1",
@@ -46,11 +50,7 @@ pytestmark = [
     ),
 ]
 
-MODELS = {
-    "openai": "openai/openai/openai/gpt-5.6-sol",
-    "anthropic": "anthropic/azure/anthropic/claude-sonnet-5",
-    "gemini": "openai/gcp/google/gemini-3.1-pro-preview",
-}
+FAMILIES = ("openai", "anthropic", "gemini")
 
 
 def _execute_python(code: str) -> str:
@@ -99,17 +99,17 @@ def _report_usage(family, phase, response):
     )
 
 
-def _client(family):
+def _client(family, transport="litellm"):
+    """Route and credential come from the registry alias; behaviour stays here."""
     config = {
-        "model": MODELS[family],
-        "api_base": "https://inference-api.nvidia.com/v1",
-        "api_key": os.environ["NVIDIA_INFERENCE_API_KEY"],
+        "transport": transport,
         "http_config": HttpConfig(read_timeout=120),
         "num_retries": 0,
         "retry_config": RetryConfig(max_retries=0, rate_limit_extra_retries=0),
     }
     if family == "openai":
-        return ResponsesClient(
+        return gate_client(
+            family,
             **config,
             reasoning={"effort": "medium"},
             include=["reasoning.encrypted_content"],
@@ -117,14 +117,14 @@ def _client(family):
             max_output_tokens=1024,
         )
     if family == "anthropic":
-        config["api_base"] = "https://inference-api.nvidia.com"
-        return CompletionClient(
+        return gate_client(
+            family,
             **config,
             max_tokens=2048,
             thinking={"type": "adaptive"},
             output_config={"effort": "high"},
         )
-    return CompletionClient(**config, max_tokens=2048)
+    return gate_client(family, **config, max_tokens=2048)
 
 
 def _render(family, events, instructions, live_state, *, stable_image=False):
@@ -155,9 +155,6 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
     messages = render_context(
         blocks,
         block_formatter=CachedBlockFormatter(),
-        provider_formatter=(
-            ResponsesProviderFormatter() if family == "openai" else OpenAIProviderFormatter()
-        ),
     ).output
     if stable_image:
         # A fixed attachment after history must be inside the cache boundary,
@@ -180,14 +177,17 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", MODELS)
-async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path, monkeypatch):
+@pytest.mark.parametrize("family,transport", gate_cases(FAMILIES))
+async def test_reasoning_and_prompt_cache_survive_sqlite_resume(
+    family, transport, tmp_path, monkeypatch, record_property
+):
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
+    host = gate_host(family)
     requests = []
     original_send = httpx.AsyncClient.send
 
     async def capture_send(client, request, *args, **kwargs):
-        if request.url.host == "inference-api.nvidia.com" and request.method == "POST":
+        if request.url.host == host and request.method == "POST":
             requests.append(json.loads(request.content))
         return await original_send(client, request, *args, **kwargs)
 
@@ -208,7 +208,8 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
             tag="1",
         )
     ]
-    async with _client(family) as client:
+    async with _client(family, transport) as client:
+        model_name = client.model
         seed = await client.acall(_render(family, events, instructions, "phase=seed"), tools=[TOOL])
         _report_usage(family, "seed", seed)
         assert _secrets(seed), (
@@ -267,7 +268,7 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
         dict(message) for message in replay_messages[:-1]
     ]
     assert warm_messages[-1] != replay_messages[-1]
-    async with _client(family) as client:
+    async with _client(family, transport) as client:
         resumed = await client.acall(replay_messages, tools=[TOOL])
         _report_usage(family, "resumed", resumed)
 
@@ -308,11 +309,14 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
         assert response.finish_reason in {"stop", "tool_calls"}
         assert bool(response.tool_calls) is (response.finish_reason == "tool_calls")
     assert resumed.usage is not None
+    record_property("model", model_name)
+    for phase, response in (("seed", seed), ("warm", warm), ("resumed", resumed)):
+        record_property(f"{phase}_usage", response.usage.model_dump_json())
     print(
         json.dumps(
             {
                 "family": family,
-                "model": MODELS[family],
+                "model": model_name,
                 "sqlite_events_equal": True,
                 "stable_wire_equal": True,
                 "opaque_state_equal": True,
@@ -321,10 +325,22 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
         )
     )
     assert resumed.usage.cached_input_tokens > 0, "provider reported no cache hit after resume"
+    _GATE_SESSIONS[(family, transport)] = database
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source,target", [(s, t) for s in MODELS for t in MODELS if s != t])
+@pytest.mark.parametrize(
+    "transport", ["litellm", "direct"], ids=["anthropic-openai-litellm", "anthropic-openai-direct"]
+)
+async def test_saved_turn_switches_provider_in_gate(transport, monkeypatch):
+    database = _GATE_SESSIONS.get(("anthropic", transport))
+    if database is None:
+        pytest.skip("The Anthropic resume seed must pass earlier in this invocation")
+    await _check_provider_switch("anthropic", "openai", database, monkeypatch, transport=transport)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source,target", [(s, t) for s in FAMILIES for t in FAMILIES if s != t])
 async def test_saved_turn_switches_provider_without_private_state(source, target, monkeypatch):
     """Reuse the three saved live sessions; never send foreign state even during a test."""
     archive_root = os.getenv("NOOA_LIVE_ARCHIVE_ROOT")
@@ -332,13 +348,15 @@ async def test_saved_turn_switches_provider_without_private_state(source, target
         pytest.skip("set NOOA_LIVE_ARCHIVE_ROOT to the completed resume run's pytest directory")
     database = (
         Path(archive_root)
-        / f"test_reasoning_and_prompt_cach{list(MODELS).index(source)}"
+        / f"test_reasoning_and_prompt_cach{FAMILIES.index(source)}"
         / "session.db"
     )
     await _check_provider_switch(source, target, database, monkeypatch)
 
 
-async def _check_provider_switch(source, target, database, monkeypatch, *, require_private=True):
+async def _check_provider_switch(
+    source, target, database, monkeypatch, *, require_private=True, transport="litellm"
+):
     with SQLiteStorageManager(database) as storage:
         events = list(storage.event_backend.all_events())
     response = next(event for event in events if isinstance(event, LLMResponse))
@@ -360,8 +378,10 @@ async def _check_provider_switch(source, target, database, monkeypatch, *, requi
             for child in value:
                 yield from strings(child)
 
+    host = gate_host(target)
+
     async def guarded_send(client, request, *args, **kwargs):
-        if request.url.host == "inference-api.nvidia.com" and request.method == "POST":
+        if request.url.host == host and request.method == "POST":
             body = json.loads(request.content)
             encoded = json.dumps(body)
             # Enforce before the network call, not after a potential disclosure.
@@ -382,7 +402,7 @@ async def _check_provider_switch(source, target, database, monkeypatch, *, requi
         "The verification tool has completed. Reply only OK.",
         "phase=model-switched",
     )
-    async with _client(target) as client:
+    async with _client(target, transport) as client:
         result = await client.acall(messages, tools=[TOOL])
     assert len(requests) == 1
     _report_usage(f"{source}->{target}", "switched_after_resume", result)
@@ -441,17 +461,8 @@ async def test_readable_reasoning_survives_sqlite_and_provider_switch(tmp_path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "source,model",
-    [
-        ("nemotron", "openai/nvidia/nvidia/nemotron-3-ultra"),
-        ("qwen", "openai/nvidia/qwen/qwen3-5-397b-a17b"),
-        ("deepseek", "openai/nvidia/deepseek-ai/deepseek-v4-pro"),
-    ],
-)
-async def test_plain_reasoning_from_hub_models_survives_resume(
-    source, model, tmp_path, monkeypatch
-):
+@pytest.mark.parametrize("source", ["nemotron", "qwen", "deepseek"])
+async def test_plain_reasoning_from_open_models_survives_resume(source, tmp_path, monkeypatch):
     """Verify actual reasoning_content, not a synthetic thought or a provider summary."""
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
     events = [
@@ -460,15 +471,14 @@ async def test_plain_reasoning_from_hub_models_survives_resume(
             content="Is 17 times 19 smaller than 18 squared? Work it out briefly and give the difference.",
         )
     ]
-    async with CompletionClient(
-        model=model,
-        api_base="https://inference-api.nvidia.com/v1",
-        api_key=os.environ["NVIDIA_INFERENCE_API_KEY"],
+    async with gate_client(
+        source,
         max_tokens=1536,
         http_config=HttpConfig(read_timeout=120),
         num_retries=0,
         retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
     ) as client:
+        model = client.model
         seed = await client.acall(
             _render(source, events, "Solve the arithmetic problem concisely.", "phase=plain-seed")
         )
@@ -499,6 +509,6 @@ async def test_plain_reasoning_from_hub_models_survives_resume(
         ),
         flush=True,
     )
-    for target in MODELS:
+    for target in FAMILIES:
         with monkeypatch.context() as isolated:
             await _check_provider_switch(source, target, database, isolated, require_private=False)

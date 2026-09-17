@@ -10,10 +10,6 @@ from nooa.context_blocks.events import (
     ToolResult,
     UserEvent,
 )
-from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
-    OpenAIProviderFormatter,
-)
 from nooa.context_blocks.models import (
     BlockMetadata,
     DynamicContext,
@@ -104,7 +100,6 @@ class TestCachedRendererEndToEndOpenAI:
         result = render_context(
             [_static_block("sys", "You are X.", expr="self._system_prompt()")],
             block_formatter=CachedBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert result == [{"role": "system", "content": "<sys>\nYou are X.\n</sys>"}]
 
@@ -115,7 +110,6 @@ class TestCachedRendererEndToEndOpenAI:
                 _dynamic_block("plan", "P", expr="self.context['plan']"),
             ],
             block_formatter=CachedBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert len(result) == 3
         assert result[1] == CacheBoundary()
@@ -147,7 +141,6 @@ class TestCachedRendererEndToEndOpenAI:
         result = render_context(
             blocks,
             block_formatter=CachedBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
         assert roles == ["system", "user", "metadata", "user"]
@@ -189,7 +182,6 @@ class TestCachedRendererEndToEndOpenAI:
             return render_context(
                 blocks,
                 block_formatter=CachedBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
             ).output
 
         # Render 1: user_event is trailing event, dynamic value v1.
@@ -247,7 +239,6 @@ class TestCachedRendererEndToEndOpenAI:
                 _dynamic_block("live_state", "version one"),
             ],
             block_formatter=CachedBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         from nooa.llm_types import AssistantReasoning, AssistantText
@@ -274,7 +265,6 @@ class TestCachedRendererEndToEndOpenAI:
                 _dynamic_block("live_state", "version two"),
             ],
             block_formatter=CachedBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         # The last two entries are the boundary metadata and changing live state;
@@ -303,7 +293,6 @@ class TestCachedRendererEndToEndOpenAI:
         result = render_context(
             blocks,
             block_formatter=CachedBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
         assert roles == ["system", "assistant", "metadata", "user"]
@@ -313,7 +302,6 @@ class TestCachedRendererEndToEndOpenAI:
         result = render_context(
             [_static_block("sys", "S")],
             block_formatter=CachedBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert len(result) == 1 and result[0]["role"] == "system"
 
@@ -321,21 +309,5 @@ class TestCachedRendererEndToEndOpenAI:
         result = render_context(
             [],
             block_formatter=CachedBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert result == []
-
-
-class TestCachedRendererEndToEndAnthropic:
-    def test_returns_system_and_messages_dict(self):
-        result = render_context(
-            [_static_block("sys", "S"), _dynamic_block("plan", "P")],
-            block_formatter=CachedBlockFormatter(),
-            provider_formatter=AnthropicProviderFormatter(),
-        ).output
-        assert isinstance(result, dict)
-        assert "system" in result and "messages" in result
-        assert "<sys>" in result["system"]
-        assert len(result["messages"]) == 1
-        assert result["messages"][-1]["role"] == "user"
-        assert "<context>" in result["messages"][-1]["content"]

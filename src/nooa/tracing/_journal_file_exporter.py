@@ -116,12 +116,11 @@ class JournalFileExporter(SpanExporter):
         self._callback = self._install_callback()
 
     def _install_callback(self) -> FileMessageJournalCallback:
-        import litellm
-
+        from nooa.tracing import _llm_hooks as journal
         from nooa.tracing._litellm_journal import _INSTALL_LOCK, FileMessageJournalCallback
 
         with _INSTALL_LOCK:
-            for callback in litellm.callbacks:
+            for callback in journal.callbacks:
                 if (
                     isinstance(callback, FileMessageJournalCallback)
                     and type(callback) is FileMessageJournalCallback
@@ -129,7 +128,7 @@ class JournalFileExporter(SpanExporter):
                     callback.add_writer(self._writer)
                     return callback
             callback = FileMessageJournalCallback(self._writer)
-            litellm.callbacks.append(callback)
+            journal.callbacks.append(callback)
             return callback
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
@@ -155,14 +154,13 @@ class JournalFileExporter(SpanExporter):
         return SpanExportResult.SUCCESS
 
     def shutdown(self) -> None:
-        import litellm
-
+        from nooa.tracing import _llm_hooks as journal
         from nooa.tracing._litellm_journal import _INSTALL_LOCK
 
         with _INSTALL_LOCK:
             self._callback.remove_writer(self._writer)
             if not self._callback.has_writers():
-                litellm.callbacks = [c for c in litellm.callbacks if c is not self._callback]
+                journal.callbacks = [c for c in journal.callbacks if c is not self._callback]
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         return True

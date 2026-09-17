@@ -343,9 +343,6 @@ def enable_tracing(
         _hooks = instrumentor._hooks
         assert _hooks is not None, "NOOAInstrumentor.instrument() should have called set_hooks()"
 
-    # Instrument litellm if available
-    _instrument_litellm(tracer_provider)
-
     # Print trace target
     _print_trace_target(exporters, experiment)
 
@@ -445,25 +442,6 @@ def _default_exporters() -> list[SpanExporter] | None:
         )
 
     return None
-
-
-def _instrument_litellm(tracer_provider: TracerProvider) -> None:
-    """Instrument LiteLLM with the OpenInference auto-instrumentor.
-
-    Required dep: ``openinference-instrumentation-litellm`` is what stamps
-    ``llm.input_messages.*`` / ``llm.output_messages.*`` onto LLM spans
-    at the source.  Without it, file exports silently lack message
-    content (the wire-strip-and-reconstruct path on the viewer side
-    can't recover what was never produced).  Listed in
-    ``pyproject.toml::project.dependencies`` so install failures surface
-    here rather than as missing message attrs at runtime.
-    """
-    from openinference.instrumentation.litellm import LiteLLMInstrumentor
-
-    from nooa.tracing._litellm_patch import apply_litellm_patch
-
-    LiteLLMInstrumentor().instrument(tracer_provider=tracer_provider)
-    apply_litellm_patch()
 
 
 def _describe_exporter(exp: SpanExporter) -> str:

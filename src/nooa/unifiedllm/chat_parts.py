@@ -42,6 +42,10 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
     The LLMResponse stores the compatibility scope once for the whole turn.
     """
     provider = _scope_provider(scope)
+    # Readable reasoning_content is a Chat field on any route. Opaque state
+    # still needs a declared vendor whose extension format we understand.
+    if provider not in {"openai", "azure", "anthropic", "gemini", "deepseek"}:
+        provider = None
     parts: list[AssistantPart] = []
     portable_only = False
     for field in ("thinking_blocks", "reasoning_items"):
@@ -50,12 +54,6 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
             blocks = []
         if not isinstance(blocks, list):
             raise ReasoningReplayError(f"Malformed provider response field {field!r}.")
-        if (
-            blocks
-            and provider is not None
-            and (field == "reasoning_items" and provider not in {"openai", "azure"})
-        ):
-            raise ReasoningReplayError(f"Cannot retain {field} for this provider route.")
         for block in blocks:
             native = opaque_item(block)
             if not isinstance(native, dict):
@@ -86,6 +84,10 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
                 if kind != "reasoning":
                     raise ReasoningReplayError(f"Unsupported reasoning item {kind!r}.")
                 if native.get("encrypted_content") is not None:
+                    if provider is not None and provider not in {"openai", "azure"}:
+                        raise ReasoningReplayError(
+                            f"Cannot retain {field} for this provider route."
+                        )
                     _require_encrypted_reasoning(native)
                 else:
                     portable_only = True
@@ -166,11 +168,18 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
         if any(part.native for part in parts):
             logger.warning("Incomplete native reasoning sequence; replaying the turn portably.")
         return tuple(part.model_copy(update={"native": None}) for part in parts)
-    if scope is None and any(part.native for part in parts):
+    if provider is None and any(
+        part.native and "reasoning_content" not in part.native for part in parts
+    ):
         logger.warning(
             "Unknown provider route: dropping opaque reasoning state; keeping readable text."
         )
-        return tuple(part.model_copy(update={"native": None}) for part in parts)
+        return tuple(
+            part
+            if part.native and "reasoning_content" in part.native
+            else part.model_copy(update={"native": None})
+            for part in parts
+        )
     if any(isinstance(part, ToolCall) and not part.id for part in parts) and any(
         part.native and "reasoning_content" not in part.native
         for part in parts

@@ -13,9 +13,8 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
-import litellm
 from pydantic import BaseModel, RootModel
 
 from nooa.llm_types import (
@@ -26,6 +25,7 @@ from nooa.llm_types import (
     LLMUsage,
     ToolCall,
 )
+from nooa.tracing._llm_hooks import capture_async_request, capture_request, trace_llm_call
 from nooa.unifiedllm.cache_policy import (
     apply_cache_policy,
     enable_openai_explicit_cache,
@@ -34,6 +34,7 @@ from nooa.unifiedllm.cache_policy import (
 )
 
 from . import replay_state, response_parts
+from ._legacy import litellm
 from .errors import EmptyContentError
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
@@ -43,17 +44,7 @@ from .retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
 
-# Bedrock/Anthropic reject requests where messages contain tool_call blocks but
-# no tools= param is passed (e.g. PredictStrategy after a CodeAct turn).
-# This flag tells litellm to auto-insert a dummy tool instead of raising.
-litellm.modify_params = True
-
-# litellm defaults to aiohttp for async HTTP (faster than httpx at high RPS).
-# But it never closes sessions on shutdown, producing noisy ResourceWarnings:
-#   "Unclosed client session" / "Unclosed connector"
-# For a TUI agent making sequential calls the perf difference is irrelevant,
-# and we already patch httpx for connection management. Disable aiohttp.
-litellm.disable_aiohttp_transport = True
+# Legacy global defaults are installed lazily by _legacy.py.
 
 # Optional integration with nooa debug handler for LLM call tracking
 # This allows the debug signal handler to show pending LLM calls
@@ -144,7 +135,7 @@ class _ClientHttp:
     still succeeds, it just doesn't get this client's custom pool/timeout.
     """
 
-    def __init__(self, model: str, config: dict[str, Any], http_config: HttpConfig):
+    def __init__(self, http_config: HttpConfig, *, asynchronous: bool | None = None):
         import httpx
 
         self.http_config = http_config
@@ -163,17 +154,25 @@ class _ClientHttp:
         # The per-client httpx clients. These are what carry this client's
         # connection-pool limits (incl. max_keepalive_connections) + timeouts.
         # transport is left as httpx's default so ``limits`` actually applies.
-        self.httpx_async: httpx.AsyncClient = httpx.AsyncClient(
-            limits=self.limits, timeout=self._timeout, **hardening
+        self.httpx_async = (
+            httpx.AsyncClient(limits=self.limits, timeout=self._timeout, **hardening)
+            if asynchronous is not False
+            else None
         )
-        self.httpx_sync: httpx.Client = httpx.Client(
-            limits=self.limits, timeout=self._timeout, **hardening
+        self.httpx_sync = (
+            httpx.Client(limits=self.limits, timeout=self._timeout, **hardening)
+            if asynchronous is not True
+            else None
         )
+
+        if self.httpx_sync is not None:
+            self.httpx_sync.event_hooks["request"].append(capture_request)
+        if self.httpx_async is not None:
+            self.httpx_async.event_hooks["request"].append(capture_async_request)
 
         # litellm wrappers, filled in by _build_* below.
         self.async_client: Any = None
         self.sync_client: Any = None
-        self._openai_clients: list[Any] = []
 
     @staticmethod
     def _httpx_hardening() -> dict[str, Any]:
@@ -210,20 +209,22 @@ class _ClientHttp:
         # AsyncHTTPHandler eagerly creates an httpx.AsyncClient in __init__.
         # Build the wrapper object directly so there is no throwaway async client
         # to leak before replacing it with this _ClientHttp's managed client.
-        async_handler = AsyncHTTPHandler.__new__(AsyncHTTPHandler)
-        async_handler.timeout = self._timeout
-        async_handler.event_hooks = None
-        async_handler.client = self.httpx_async
-        async_handler.client_alias = None
-        self.async_client = async_handler
+        if self.httpx_async is not None:
+            async_handler = AsyncHTTPHandler.__new__(AsyncHTTPHandler)
+            async_handler.timeout = self._timeout
+            async_handler.event_hooks = None
+            async_handler.client = self.httpx_async
+            async_handler.client_alias = None
+            self.async_client = async_handler
 
-        sync_handler = HTTPHandler(timeout=self._timeout)
-        try:
-            sync_handler.client.close()  # close the throwaway sync client
-        except Exception:  # noqa: BLE001
-            pass
-        sync_handler.client = self.httpx_sync
-        self.sync_client = sync_handler
+        if self.httpx_sync is not None:
+            sync_handler = HTTPHandler(timeout=self._timeout)
+            try:
+                sync_handler.client.close()  # close the throwaway sync client
+            except Exception:  # noqa: BLE001
+                pass
+            sync_handler.client = self.httpx_sync
+            self.sync_client = sync_handler
 
     def _build_completion_wrappers(self, model: str, config: dict[str, Any]) -> None:
         """Pick the right litellm client type for a Chat Completions provider."""
@@ -231,7 +232,8 @@ class _ClientHttp:
             _, provider, dynamic_api_key, dynamic_api_base = litellm.get_llm_provider(
                 model,
                 api_key=config.get("api_key"),
-                api_base=config.get("api_base"),
+                api_base=config.get("base_url") or config.get("api_base"),
+                custom_llm_provider=config.get("custom_llm_provider"),
             )
         except Exception as e:  # noqa: BLE001
             # Unknown/ambiguous model — don't risk handing an incompatible client
@@ -246,6 +248,10 @@ class _ClientHttp:
         openai_family = provider == "openai" or provider in getattr(
             litellm, "openai_compatible_providers", []
         )
+        # These routes use LiteLLM's HTTP handler, not its OpenAI SDK adapter.
+        # The wrong wrapper silently loses the owned pool and its wire hooks.
+        if provider in {"hosted_vllm", "deepseek", "gemini"}:
+            openai_family = False
         if not openai_family:
             # anthropic / bedrock / vertex / ... accept AsyncHTTPHandler|HTTPHandler
             # (guarded by isinstance in their handlers).
@@ -254,7 +260,7 @@ class _ClientHttp:
 
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
-        api_base = config.get("api_base") or dynamic_api_base
+        api_base = config.get("base_url") or config.get("api_base") or dynamic_api_base
         common: dict[str, Any] = {"timeout": self._timeout}
         if api_key:
             common["api_key"] = api_key
@@ -263,9 +269,16 @@ class _ClientHttp:
         try:
             from openai import AsyncOpenAI, OpenAI
 
-            self.async_client = AsyncOpenAI(http_client=self.httpx_async, **common)
-            self.sync_client = OpenAI(http_client=self.httpx_sync, **common)
-            self._openai_clients = [self.async_client, self.sync_client]
+            self.async_client = (
+                AsyncOpenAI(http_client=self.httpx_async, **common)
+                if self.httpx_async is not None
+                else None
+            )
+            self.sync_client = (
+                OpenAI(http_client=self.httpx_sync, **common)
+                if self.httpx_sync is not None
+                else None
+            )
         except Exception as e:  # noqa: BLE001
             # e.g. no API key resolvable — fall back to litellm's own client so
             # auth/behaviour is preserved (this client just loses its custom pool).
@@ -278,14 +291,16 @@ class _ClientHttp:
             self.sync_client = None
 
     @classmethod
-    def for_completion(cls, model: str, config: dict[str, Any], http_config: HttpConfig):
-        inst = cls(model, config, http_config)
+    def for_completion(
+        cls, model: str, config: dict[str, Any], http_config: HttpConfig, *, asynchronous=None
+    ):
+        inst = cls(http_config, asynchronous=asynchronous)
         inst._build_completion_wrappers(model, config)
         return inst
 
     @classmethod
     def for_responses(cls, model: str, config: dict[str, Any], http_config: HttpConfig):
-        inst = cls(model, config, http_config)
+        inst = cls(http_config)
         # The Responses API always accepts the handler wrappers, regardless of
         # provider.
         inst._build_handler_wrappers()
@@ -296,15 +311,11 @@ class _ClientHttp:
         if self._sync_closed:
             return
         self._sync_closed = True
-        for oc in self._openai_clients:
-            close = getattr(oc, "close", None)
-            if close is not None and not inspect.iscoroutinefunction(close):
-                try:
-                    close()
-                except Exception:  # noqa: BLE001
-                    pass
+        # SDK/handler wrappers borrow these pools; closing a wrapper would close
+        # the same pool twice. The pool is the sole resource owner.
         try:
-            self.httpx_sync.close()
+            if self.httpx_sync is not None:
+                self.httpx_sync.close()
         except Exception:  # noqa: BLE001
             pass
 
@@ -312,16 +323,9 @@ class _ClientHttp:
         """Close both the sync and async HTTP resources owned by this client."""
         if not self._async_closed:
             self._async_closed = True
-            for oc in self._openai_clients:
-                close = getattr(oc, "close", None)
-                if close is None or not inspect.iscoroutinefunction(close):
-                    continue
-                try:
-                    await close()
-                except Exception:  # noqa: BLE001
-                    pass
             try:
-                await self.httpx_async.aclose()
+                if self.httpx_async is not None:
+                    await self.httpx_async.aclose()
             except Exception:  # noqa: BLE001
                 pass
         self.close()
@@ -1035,120 +1039,6 @@ def _instantiate_output_model(output_model: type[BaseModel], json_data: Any) -> 
         return output_model(**json_data)
 
 
-class TokenCalibration:
-    """Per-model EMA calibration of token estimates against API-reported usage.
-
-    litellm's token_counter uses OpenAI's cl100k_base tokenizer for all models
-    and ignores chat-template overhead, under-counting by 1.4–2.4× depending on
-    the model family.  After each LLM call we observe the *actual* prompt token
-    count from ``response.usage`` and maintain a running ratio so that future
-    estimates are corrected.
-
-    The ratio is an exponential moving average (EMA) that adapts quickly —
-    after ~10 observations the initial value's influence drops below 3%.
-    Before any observation arrives, ``default_ratio`` (1.0) is used — callers
-    who want a conservative first estimate can raise this.
-    """
-
-    __slots__ = ("_ratios", "_alpha", "_default_ratio")
-
-    def __init__(self, *, alpha: float = 0.3, default_ratio: float = 1.0):
-        self._ratios: dict[str, float] = {}
-        self._alpha = alpha
-        self._default_ratio = default_ratio
-
-    def update(self, model: str, estimated: int, actual: int) -> None:
-        """Record one observation after an LLM call."""
-        if estimated <= 0 or actual <= 0:
-            return
-        observed = actual / estimated
-        prev = self._ratios.get(model)
-        if prev is None:
-            self._ratios[model] = observed
-        else:
-            self._ratios[model] = self._alpha * observed + (1 - self._alpha) * prev
-
-    def ratio(self, model: str) -> float:
-        """Current calibration ratio for *model* (default if unseen)."""
-        return self._ratios.get(model, self._default_ratio)
-
-    def calibrate(self, model: str, estimated: int) -> int:
-        """Apply the calibration ratio to a raw estimate."""
-        return int(estimated * self.ratio(model))
-
-    def __repr__(self) -> str:
-        entries = ", ".join(f"{m}: {r:.3f}" for m, r in self._ratios.items())
-        return f"TokenCalibration({{{entries}}})"
-
-
-# Module-level singleton so all UnifiedLLM instances share calibration data.
-_token_calibration = TokenCalibration()
-
-
-def _update_token_calibration(
-    model: str,
-    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
-    usage: LLMUsage,
-    tools: list[dict[str, Any]] | None = None,
-    *,
-    instructions: str | None = None,
-) -> None:
-    """Update token calibration from an API response's usage data.
-
-    The recorded ratio is ``actual / estimated`` where ``actual`` is the API's
-    reported ``prompt_tokens``. For the ratio to reflect the model tokenizer's
-    real skew (and not a *coverage* gap), ``estimated`` must count the SAME
-    request the API billed:
-
-    * **messages-mode** ``token_counter`` (not a per-message text sum) so the
-      chat-template / role framing the API charges is included, and
-    * the **tool/function schemas** that were sent (``tools``) — for an agent
-      with a large tool surface these are a big, fixed per-call cost that the
-      API bills in ``prompt_tokens``. Omitting them (the old behavior, which
-      summed only message text) made ``estimated`` far smaller than ``actual``
-      and inflated the ratio (observed ~2.7x), which then scaled every
-      displayed/triggering token count up by that bogus factor.
-    """
-    actual = usage.input_tokens
-    if actual <= 0:
-        return
-    # Responses lifts the leading system prompt out of input. It is still
-    # billed input, so include it in the estimate without copying history.
-    if instructions:
-        messages = [{"role": "system", "content": instructions}, *messages]
-    # Calibration is best-effort: it must NEVER raise out of the (already paid)
-    # response path. The whole estimate — primary AND fallback — is guarded.
-    try:
-        try:
-            estimated = litellm.token_counter(model=model, messages=messages)
-            if tools:
-                # Count the full messages+tools payload the way the API bills it,
-                # then take the larger of the bare and with-tools counts
-                # (with_tools is normally >= bare; max only guards a tokenizer
-                # that returns less with tools attached).
-                with_tools = litellm.token_counter(
-                    model=model, messages=messages, tools=cast(Any, tools)
-                )
-                estimated = max(estimated, with_tools)
-        except Exception:
-            # token_counter can reject some message/tool shapes; fall back to the
-            # per-message text sum rather than skip calibration entirely.
-            estimated = 0
-            for msg in messages:
-                content = msg.get("content")
-                if isinstance(content, str):
-                    estimated += litellm.token_counter(model=model, text=content)
-                elif isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            estimated += litellm.token_counter(
-                                model=model, text=part.get("text", "")
-                            )
-        _token_calibration.update(model, estimated, actual)
-    except Exception:
-        logger.debug("token calibration skipped (estimate failed)", exc_info=True)
-
-
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
     cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
@@ -1160,8 +1050,28 @@ class UnifiedLLM(ABC):
         reasoning_levels: dict[str, dict[str, Any]] | None = None,
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
+        transport: Literal["litellm", "direct"] = "litellm",
+        replay_vendor: str | None = None,
         **config,
     ):
+        import os
+
+        transport = os.environ.get("NOOA_LLM_TRANSPORT") or transport
+        if transport not in {"litellm", "direct"}:
+            raise ValueError("transport must be 'litellm' or 'direct'")
+        self.transport = transport
+        if "api_style" in config:
+            raise TypeError(
+                "api_style is derived from the client class and model prefix; "
+                "use ResponsesClient or anthropic/<model> for native Messages"
+            )
+        if replay_vendor is not None and (
+            not isinstance(replay_vendor, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]*", replay_vendor)
+        ):
+            raise ValueError("replay_vendor must be a nonempty lowercase provider name")
+        self.replay_vendor = replay_vendor
+        self._direct = None
         reject_legacy_cache_config(config)
         # Freeze prevents field assignment, not mutations inside nested Any
         # settings. Detach this small configuration once, never the history.
@@ -1178,6 +1088,90 @@ class UnifiedLLM(ABC):
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
+
+    def _init_transport(self, style):
+        if self.transport == "direct":
+            from ._routing import api_style_for
+            from .direct import DirectTransport
+
+            self._direct = DirectTransport(
+                self.model,
+                api_style_for(self.model, style),
+                self.replay_vendor,
+                self.config,
+                self._http_config,
+            )
+            self._http = self._direct
+        else:
+            _apply_cache_control_preserve_patch()
+            factory = (
+                _ClientHttp.for_responses if style == "responses" else _ClientHttp.for_completion
+            )
+            self._http = factory(self.model, self.config, self._http_config)
+
+    def _replay_scope(self, model, style, params):
+        if self._direct is not None:
+            wire_model, vendor = self._direct.route(model, params)
+            return replay_state.scope_for_route(wire_model, vendor, style)
+        return replay_state.replay_scope(
+            model, style, {**params, "replay_vendor": self.replay_vendor}
+        )
+
+    def _send(self, params, *, responses=False):
+        if self._direct is not None:
+            return self._direct.call(params)
+        if responses:
+            return litellm.responses(**params)
+        from ._legacy import preserve_readable_reasoning
+
+        params = preserve_readable_reasoning(params)
+        if "client" in params:
+            return _collect_sync(litellm.completion(**params))
+        # Overrides need fresh bound wrappers, not the constructor's URL/key.
+        temporary = _ClientHttp.for_completion(
+            params["model"], params, self._http_config, asynchronous=False
+        )
+        try:
+            call = dict(params)
+            if temporary.sync_client is not None:
+                call["client"] = temporary.sync_client
+            return _collect_sync(litellm.completion(**call))
+        finally:
+            temporary.close()
+
+    async def _asend(self, params, *, responses=False):
+        if self._direct is not None:
+            return await self._direct.acall(params)
+        if responses:
+            return await litellm.aresponses(**params)
+        from ._legacy import preserve_readable_reasoning
+
+        async def dispatch_and_close():
+            call = preserve_readable_reasoning(params)
+            temporary = None
+            try:
+                if "client" not in call:
+                    temporary = _ClientHttp.for_completion(
+                        call["model"], call, self._http_config, asynchronous=True
+                    )
+                    call = dict(call)
+                    if temporary.async_client is not None:
+                        call["client"] = temporary.async_client
+                return await _collect_async(await litellm.acompletion(**call))
+            finally:
+                if temporary is not None:
+                    await temporary.aclose()
+
+        # One task owns dispatch, stream collection and temporary-pool cleanup.
+        # Shield LiteLLM's executor-to-coroutine handoff from cancellation too:
+        # interrupting it can leave the nested provider coroutine unawaited.
+        # The caller still receives cancellation immediately.
+        task = asyncio.create_task(dispatch_and_close())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(_consume_litellm_acompletion_result)
+            raise
 
     @property
     def reasoning_levels(self) -> tuple[str, ...] | None:
@@ -1261,6 +1255,14 @@ class UnifiedLLM(ABC):
                 "the messages argument"
             )
         extra_body = call_config.get("extra_body")
+        routing_fields = {"transport", "api_style", "replay_vendor"}
+        if routing_fields.intersection(call_config) or (
+            isinstance(extra_body, Mapping) and routing_fields.intersection(extra_body)
+        ):
+            raise ValueError(
+                "transport and replay_vendor are client settings; api_style is derived, "
+                "not a call parameter"
+            )
         if extra_body is not None and not isinstance(extra_body, Mapping):
             raise ValueError("extra_body must be a mapping")
         if "cache_breakpoint" in call_config or (
@@ -1302,24 +1304,17 @@ class UnifiedLLM(ABC):
     def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
         mapping = self.cache_breakpoint
         if mapping == "auto" and not responses:
-            mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
+            mapping = "anthropic" if self._is_anthropic_route(model or self.model) else None
         return apply_cache_policy(messages, mapping, responses=responses, instructions=instructions)
 
-    def count_tokens(self, text: str) -> int:
-        """Count tokens using model-appropriate tokenizer.
-
-        Uses litellm's token_counter with a calibration correction derived
-        from API-reported usage.  Before the first LLM call completes the
-        raw litellm estimate is returned unchanged (ratio = 1.0).
-
-        Args:
-            text: The text to count tokens for.
-
-        Returns:
-            Calibrated number of tokens in the text.
-        """
-        raw = litellm.token_counter(model=self.model, text=text)
-        return _token_calibration.calibrate(self.model, raw)
+    def _is_anthropic_route(self, model: str) -> bool:
+        # Cache/tool requirements also apply to Anthropic behind a Chat gateway.
+        # Chat-compatible transport must not negate that model's cache policy.
+        if _is_anthropic_model(model):
+            return True
+        if self._direct is not None:
+            return self._direct.api_style == "anthropic" or self.replay_vendor == "anthropic"
+        return False
 
     def get_model_info(self) -> "Any":
         """Get model metadata from litellm registry.
@@ -1463,28 +1458,6 @@ async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
-async def _litellm_acompletion(api_params: dict[str, Any]) -> Any:
-    """Await LiteLLM without cancelling its nested provider coroutine.
-
-    LiteLLM runs sync ``completion()`` in an executor for async chat calls.
-    OpenAI-compatible providers return ``OpenAIChatCompletion.acompletion``
-    from that sync frame, then LiteLLM awaits it on the event loop. If a TUI
-    soft-cancel lands in that handoff window, Python can garbage-collect the
-    provider coroutine before it is awaited and print::
-
-        RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion' was never awaited
-
-    Shielding lets LiteLLM finish consuming that provider coroutine while the
-    caller still receives ``CancelledError`` immediately.
-    """
-    task = asyncio.create_task(litellm.acompletion(**api_params))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        task.add_done_callback(_consume_litellm_acompletion_result)
-        raise
-
-
 def _consume_litellm_acompletion_result(task: asyncio.Task[Any]) -> None:
     try:
         task.result()
@@ -1580,6 +1553,15 @@ def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, LLMUsag
     if hasattr(raw_response, "choices") and raw_response.choices:
         msg = raw_response.choices[0].message
         reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
+        if not reasoning:
+            reasoning = (
+                "\n".join(
+                    block["thinking"]
+                    for block in (getattr(msg, "thinking_blocks", None) or [])
+                    if isinstance(block, dict) and isinstance(block.get("thinking"), str)
+                )
+                or None
+            )
 
     return reasoning, _extract_usage(raw_response)
 
@@ -1680,7 +1662,7 @@ def _extract_think_tags(content: str) -> tuple[str, str | None]:
 # ============================================================================
 # litellm's OpenAIGPTConfig.remove_cache_control_flag_from_messages_and_tools()
 # unconditionally strips cache_control from all messages and tools before sending.
-# For Anthropic models behind an OpenAI-compatible endpoint (e.g., NVIDIA gateway),
+# For Anthropic models behind an OpenAI-compatible endpoint (e.g., compatible gateway),
 # we need cache_control to survive so the API can enable prompt caching.
 _cache_control_patch_applied = False
 
@@ -1706,9 +1688,6 @@ def _apply_cache_control_preserve_patch():
         logger.debug("Applied cache_control preserve patch for Anthropic models")
     except (ImportError, AttributeError) as e:
         logger.warning(f"Could not apply cache_control preserve patch: {e}")
-
-
-_apply_cache_control_preserve_patch()
 
 
 class CompletionClient(UnifiedLLM):
@@ -1793,7 +1772,7 @@ class CompletionClient(UnifiedLLM):
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
-        self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
+        self._init_transport("chat")
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Completion API schema format"""
@@ -1808,6 +1787,8 @@ class CompletionClient(UnifiedLLM):
 
     def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""
+        if self._direct is not None:
+            return None
         routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
         if self._effective_model(call_config) != self.model or any(
             call_config.get(key) != self.config.get(key) for key in routing_fields
@@ -1819,6 +1800,7 @@ class CompletionClient(UnifiedLLM):
         assert self._http is not None
         return self._http.async_client if is_async else self._http.sync_client
 
+    @trace_llm_call
     def call(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1837,7 +1819,7 @@ class CompletionClient(UnifiedLLM):
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
+        state_scope = self._replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
@@ -1863,7 +1845,7 @@ class CompletionClient(UnifiedLLM):
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and _needs_dummy_tool(effective_model)
+            and (_needs_dummy_tool(effective_model) or self._is_anthropic_route(effective_model))
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -1885,7 +1867,7 @@ class CompletionClient(UnifiedLLM):
             api_params.setdefault("client", http_client)
 
         def _make_call():
-            raw_response = _collect_sync(litellm.completion(**api_params))
+            raw_response = self._send(api_params)
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -1906,11 +1888,9 @@ class CompletionClient(UnifiedLLM):
         reasoning, usage = _extract_reasoning_and_usage(raw_response)
         if usage:
             _record_llm_metric("token_usage", usage)
-            _update_token_calibration(
-                effective_model, prepared_messages, usage, tools=api_params.get("tools")
-            )
         return self._response_from_chat(raw_response, state_scope, tools, output_model)
 
+    @trace_llm_call
     async def acall(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1929,7 +1909,7 @@ class CompletionClient(UnifiedLLM):
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
+        state_scope = self._replay_scope(effective_model, "chat", call_config)
         messages = replay_state.prepare_chat_messages(messages, state_scope)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
@@ -1955,7 +1935,7 @@ class CompletionClient(UnifiedLLM):
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and _needs_dummy_tool(effective_model)
+            and (_needs_dummy_tool(effective_model) or self._is_anthropic_route(effective_model))
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -1977,7 +1957,7 @@ class CompletionClient(UnifiedLLM):
             api_params.setdefault("client", http_client)
 
         async def _make_call():
-            raw_response = await _collect_async(await _litellm_acompletion(api_params))
+            raw_response = await self._asend(api_params)
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -1998,9 +1978,6 @@ class CompletionClient(UnifiedLLM):
         reasoning, usage = _extract_reasoning_and_usage(raw_response)
         if usage:
             _record_llm_metric("token_usage", usage)
-            _update_token_calibration(
-                effective_model, prepared_messages, usage, tools=api_params.get("tools")
-            )
         return self._response_from_chat(raw_response, state_scope, tools, output_model)
 
 
@@ -2031,6 +2008,7 @@ class ReasoningCompletionClient(CompletionClient):
         print(response.reasoning)  # Extracted reasoning
     """
 
+    @trace_llm_call
     def call(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -2067,6 +2045,7 @@ class ReasoningCompletionClient(CompletionClient):
 
         return response
 
+    @trace_llm_call
     async def acall(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -2168,7 +2147,7 @@ class ResponsesClient(UnifiedLLM):
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
-        self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
+        self._init_transport("responses")
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         params = super()._prepare_call_config(overrides)
@@ -2206,6 +2185,7 @@ class ResponsesClient(UnifiedLLM):
             "strict": use_strict,
         }
 
+    @trace_llm_call
     def call(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -2223,7 +2203,7 @@ class ResponsesClient(UnifiedLLM):
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        state_scope = self._replay_scope(effective_model, "responses", call_config)
         input_messages, instructions, openai_explicit = self._prepare_input(
             messages, state_scope, effective_model
         )
@@ -2255,11 +2235,11 @@ class ResponsesClient(UnifiedLLM):
 
         http_client = self._http
         assert http_client is not None
-        if http_client.sync_client is not None:
+        if self._direct is None and http_client.sync_client is not None:
             api_params.setdefault("client", http_client.sync_client)
 
         def _make_call():
-            return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
+            return self._send(api_params, responses=True)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
@@ -2271,16 +2251,11 @@ class ResponsesClient(UnifiedLLM):
 
         usage = _extract_usage(raw_response)
         if usage:
-            _update_token_calibration(
-                effective_model,
-                input_messages,
-                usage,
-                tools=api_params.get("tools"),
-                instructions=api_params.get("instructions"),
-            )
+            _record_llm_metric("token_usage", usage)
 
         return self._response_from_output(raw_response, state_scope, usage, output_model)
 
+    @trace_llm_call
     async def acall(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -2298,7 +2273,7 @@ class ResponsesClient(UnifiedLLM):
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        state_scope = self._replay_scope(effective_model, "responses", call_config)
         input_messages, instructions, openai_explicit = self._prepare_input(
             messages, state_scope, effective_model
         )
@@ -2330,11 +2305,11 @@ class ResponsesClient(UnifiedLLM):
 
         http_client = self._http
         assert http_client is not None
-        if http_client.async_client is not None:
+        if self._direct is None and http_client.async_client is not None:
             api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
-            return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+            return await self._asend(api_params, responses=True)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
@@ -2346,13 +2321,7 @@ class ResponsesClient(UnifiedLLM):
 
         usage = _extract_usage(raw_response)
         if usage:
-            _update_token_calibration(
-                effective_model,
-                input_messages,
-                usage,
-                tools=api_params.get("tools"),
-                instructions=api_params.get("instructions"),
-            )
+            _record_llm_metric("token_usage", usage)
 
         return self._response_from_output(raw_response, state_scope, usage, output_model)
 

@@ -6,7 +6,7 @@ Structure produced:
 
     (SYSTEM)    static blocks, stable across turns — cacheable prefix
     (events)    the full event history, append-only
-    (METADATA)  standalone cache boundary, translated by the provider formatter
+    (METADATA)  standalone cache boundary, translated by UnifiedLLM at dispatch
     (USER)      trailing message wrapping dynamic blocks in a ``<context>``
                 envelope (always emitted as its own message — never merged
                 into a historical event — so the bytes of every prior
@@ -14,9 +14,8 @@ Structure produced:
                 what enables provider-side prompt caching to hit on the
                 event tail)
 
-Implemented as a single :class:`CachedBlockFormatter`. Pair with any stock
-provider formatter (``OpenAIProviderFormatter``, ``AnthropicProviderFormatter``);
-no paired provider formatter is needed.
+Implemented as a single :class:`CachedBlockFormatter`; ``to_messages`` preserves
+the cache-boundary object for UnifiedLLM to translate at dispatch.
 
 Decoration is minimal by design: no "you are an agent" prose. The format
 description mirrors XMLBlockFormatter since the wire format is the same XML
@@ -83,7 +82,7 @@ class CachedBlockFormatter(BlockFormatter):
     content-address each block individually.
 
     A standalone CacheBoundary separates history from live context. Its position
-    is decided here; the provider formatter passes the object through unchanged.
+    is decided here; message assembly passes the object through unchanged.
     Only UnifiedLLM interprets it when preparing the provider request.
     """
 

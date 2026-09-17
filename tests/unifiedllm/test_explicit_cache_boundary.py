@@ -11,11 +11,7 @@ import litellm
 import pytest
 
 from nooa.context_blocks.events import UserEvent
-from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
-    OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
-)
+from nooa.context_blocks.formatter import to_messages
 from nooa.context_blocks.models import (
     BlockMetadata,
     RenderedMessage,
@@ -60,7 +56,6 @@ def _render_result(dynamic: str) -> RenderResult:
     return render_context(
         blocks,
         block_formatter=CachedBlockFormatter(),
-        provider_formatter=OpenAIProviderFormatter(),
     )
 
 
@@ -179,19 +174,17 @@ def test_renderer_emits_a_standalone_boundary_before_provider_formatting():
     assert result.messages[:-1] == _render_result("state-b").messages[:-1]
 
 
-@pytest.mark.parametrize("formatter", [OpenAIProviderFormatter, ResponsesProviderFormatter])
-def test_boundary_formats_without_a_following_message(formatter):
+def test_boundary_formats_without_a_following_message():
     boundary = CacheBoundary()
     block = RenderedMessage(role=Role.METADATA, replay_message=boundary)
-    assert formatter().format([block])[0] is boundary
-    assert AnthropicProviderFormatter().format([block]) == {"system": "", "messages": []}
+    assert to_messages([block])[0] is boundary
 
 
 def test_boundary_beside_readonly_response_preserves_identity_and_native_parts():
     scope = "responses:openai:test"
     items = [{"type": "reasoning", "encrypted_content": "opaque"}]
     turn = LLMResponse(parts=capture_parts(items, scope), replay_scope=scope)
-    messages = OpenAIProviderFormatter().format(
+    messages = to_messages(
         [
             RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()),
             RenderedMessage(

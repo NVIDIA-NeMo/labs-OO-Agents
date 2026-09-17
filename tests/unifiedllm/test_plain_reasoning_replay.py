@@ -6,11 +6,7 @@ from unittest.mock import patch
 
 from litellm.types.utils import Choices, Message, ModelResponse
 
-from nooa.context_blocks.formatter import (
-    OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
-    XMLBlockFormatter,
-)
+from nooa.context_blocks.formatter import XMLBlockFormatter, to_messages
 from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient
 
@@ -19,8 +15,7 @@ def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
     neutral = XMLBlockFormatter().format(
         [ResolvedBlock(key="turn", content=response.content, role=Role.ASSISTANT, event=response)]
     )
-    formatter = ResponsesProviderFormatter() if responses else OpenAIProviderFormatter()
-    return formatter.format(neutral)
+    return to_messages(neutral)
 
 
 def _chat_response() -> ModelResponse:

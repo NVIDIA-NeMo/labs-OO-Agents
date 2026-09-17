@@ -9,7 +9,7 @@ back after a successful call; the per-category breakdown is then attributed
 from that total by character share.
 """
 
-from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
+from nooa.context_blocks.formatter import XMLBlockFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     ContextWindowStats,
@@ -27,7 +27,6 @@ class TestContextWindowStatsBasic:
         result = render_context(
             [],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         )
         assert isinstance(result, RenderResult)
         assert isinstance(result.stats, ContextWindowStats)
@@ -38,7 +37,6 @@ class TestContextWindowStatsBasic:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.prompt_tokens is None
         assert stats.total_tokens is None
@@ -54,7 +52,6 @@ class TestContextWindowStatsBasic:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.context_blocks_count == 2
         assert stats.context_blocks_chars == 6  # len("AAA") + len("BBB")
@@ -68,7 +65,6 @@ class TestContextWindowStatsBasic:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.events_count == 2
         assert stats.events_chars == 10  # len("hello") + len("world")
@@ -78,7 +74,6 @@ class TestContextWindowStatsBasic:
         stats = render_context(
             [],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.context_blocks_count == 0
         assert stats.context_blocks_chars == 0
@@ -224,7 +219,6 @@ class TestContextWindowStatsTruncation:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=1000,
             count_tokens=len,
         ).stats
@@ -241,7 +235,6 @@ class TestContextWindowStatsTruncation:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=500,
             count_tokens=len,
         ).stats
@@ -255,7 +248,6 @@ class TestContextWindowStatsTruncation:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=10000,
             count_tokens=len,
         ).stats
@@ -270,7 +262,6 @@ class TestContextWindowStatsTruncation:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=1,
             count_tokens=len,
         ).stats
@@ -291,7 +282,6 @@ class TestContextWindowStatsTruncation:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=500,
             count_tokens=len,
         ).stats
@@ -317,7 +307,6 @@ class TestContextWindowStatsToolCallEvents:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.events_count == 2
         assert stats.events_chars == len("hello")  # ToolCallEvent contributes 0
@@ -334,7 +323,6 @@ class TestContextWindowStatsEdgeCases:
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=10000,
             count_tokens=len,
         ).stats
@@ -347,7 +335,6 @@ class TestContextWindowStatsEdgeCases:
         output, stats, messages = render_context(
             [ResolvedBlock(key="sys", content="hello")],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         )
         assert isinstance(output, list)
         assert isinstance(stats, ContextWindowStats)
@@ -534,7 +521,6 @@ class TestContextWindowStatsFrozen:
         stats = render_context(
             [],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).stats
         with pytest.raises(ValidationError):
             stats.prompt_tokens = 999

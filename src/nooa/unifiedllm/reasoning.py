@@ -23,6 +23,9 @@ _RESERVED = _DECLARATIONS | {
     "input",
     "extra_body",
     "client",
+    "transport",
+    "api_style",
+    "replay_vendor",
 }
 
 

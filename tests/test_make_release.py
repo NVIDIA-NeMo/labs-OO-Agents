@@ -759,7 +759,6 @@ def test_unmerged_candidate_requires_reduced_scope_and_never_drafts(mr, tmp_path
     args = _ci_args(mr, tmp_path)
     args.candidate_ref = "refs/pull/163/head"
     args.create_draft = False
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "disposable-test-key")
     monkeypatch.delenv("GH_TOKEN", raising=False)
 
     with pytest.raises(mr.ReleaseError, match="requires a reduced rehearsal"):
@@ -780,7 +779,6 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     args.models = "claude-haiku"
     args.runs = 1
     args.limit = 1
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "disposable-test-key")
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
@@ -791,6 +789,7 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     )
     monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "provider_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
     base = mr.ArmResults("base")
     head = mr.ArmResults("head")
@@ -814,10 +813,11 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     assert manifest["unmerged_candidate"] is True
 
 
-@pytest.mark.parametrize("failure_point", ["deterministic", "infrastructure", "hard-gate"])
+@pytest.mark.parametrize(
+    "failure_point", ["deterministic", "provider", "infrastructure", "hard-gate"]
+)
 def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, failure_point):
     args = _ci_args(mr, tmp_path)
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
     monkeypatch.setenv("GH_TOKEN", "masked")
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(
@@ -828,6 +828,15 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
+    provider_calls = []
+
+    def providers(*_args, **_kwargs):
+        assert _kwargs["internal_wheel"] == args.internal_wheel.resolve()
+        provider_calls.append(True)
+        if failure_point == "provider":
+            raise mr.ReleaseError("provider replay failed")
+
+    monkeypatch.setattr(mr, "provider_checks", providers, raising=False)
     draft_calls = []
     monkeypatch.setattr(mr, "create_or_update_draft", lambda *_args: draft_calls.append(True))
 
@@ -856,13 +865,14 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
     with pytest.raises(mr.ReleaseError):
         mr.ci_main(args)
     assert draft_calls == []
+    if failure_point == "provider":
+        assert provider_calls == [True]
     manifest = json.loads((tmp_path / "artifacts" / "release-manifest.json").read_text())
     assert manifest["status"] == "failed"
 
 
 def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monkeypatch):
     args = _ci_args(mr, tmp_path)
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
     monkeypatch.setenv("GH_TOKEN", "masked")
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(
@@ -873,6 +883,10 @@ def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monke
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
     monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    provider_calls = []
+    monkeypatch.setattr(
+        mr, "provider_checks", lambda *_args, **_kwargs: provider_calls.append(True)
+    )
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
     base = mr.ArmResults("base")
     head = mr.ArmResults("head")
@@ -887,6 +901,7 @@ def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monke
     draft_calls = []
 
     def fake_draft(*call_args):
+        assert provider_calls == [True]
         draft_calls.append(call_args)
         return "https://github.example/draft", 42
 
@@ -907,9 +922,156 @@ def test_release_runner_contains_no_publish_operation(mr):
     assert "def publish(" not in source
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "passed",
+        "skipped",
+        "failure",
+        "error",
+        "empty",
+        "partial",
+        "missing",
+        "malformed",
+        "exit",
+        "duplicate",
+        "wrong_name",
+        "wrong_module",
+    ],
+)
+def test_provider_gate_requires_twenty_passes(mr, monkeypatch, tmp_path, outcome):
+    monkeypatch.delenv("NOOA_LLM_TRANSPORT", raising=False)
+    monkeypatch.setenv("NOOA_TEST_OMITTED_REASONING", "1")
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        assert kwargs["env"]["NOOA_RUN_OPEN_MODEL_REPLAY"] == "1"
+        assert kwargs["env"]["NOOA_RUN_CACHE_RESUME_LIVE"] == "1"
+        assert kwargs["env"]["NOOA_RUN_SUMMARIZER_E2E"] == "1"
+        assert "NOOA_TEST_OMITTED_REASONING" not in kwargs["env"]
+        assert kwargs["timeout"] == 2400
+        assert cmd[cmd.index("--reruns") + 1] == "0"
+        assert cmd[-4:] == [
+            "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume",
+            "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume",
+            "tests/integration/test_summarizer_live.py::test_installed_summarizer_applies_before_next_turn",
+            "tests/integration/test_cache_resume_live.py::test_saved_turn_switches_provider_in_gate",
+        ]
+        report = Path(cmd[cmd.index("--junitxml") + 1])
+        count = {"empty": 0, "partial": 19}.get(outcome, 20)
+        identities = (
+            [
+                (
+                    "tests.integration.test_cache_resume_live",
+                    f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}-{transport}]",
+                )
+                for family in ("openai", "anthropic", "gemini")
+                for transport in ("litellm", "direct")
+            ]
+            + [
+                (
+                    "tests.integration.test_open_model_tool_reasoning_live",
+                    f"test_open_model_tool_reasoning_after_sqlite_resume[{family}-{transport}]",
+                )
+                for family in ("deepseek", "kimi", "glm", "qwen")
+                for transport in ("litellm", "direct")
+            ]
+            + [
+                (
+                    "tests.integration.test_summarizer_live",
+                    f"test_installed_summarizer_applies_before_next_turn[{family}-{transport}]",
+                )
+                for family in ("openai", "anthropic")
+                for transport in ("litellm", "direct")
+            ]
+            + [
+                (
+                    "tests.integration.test_cache_resume_live",
+                    f"test_saved_turn_switches_provider_in_gate[anthropic-openai-{transport}]",
+                )
+                for transport in ("litellm", "direct")
+            ]
+        )
+        if outcome == "duplicate":
+            identities[0] = identities[1]
+        elif outcome == "wrong_name":
+            identities[0] = (identities[0][0], "unrelated_test")
+        elif outcome == "wrong_module":
+            identities[0] = ("unrelated_module", identities[0][1])
+        child = f"<{outcome}/>" if outcome in {"skipped", "failure", "error"} else ""
+        if outcome != "missing":
+            report.write_text(
+                "invalid"
+                if outcome == "malformed"
+                else "<testsuites><testsuite>"
+                + "".join(
+                    f'<testcase classname="{module}" name="{name}">{child if i == 0 else ""}</testcase>'
+                    for i, (module, name) in enumerate(identities[:count])
+                )
+                + "</testsuite></testsuites>"
+            )
+        if outcome == "exit":
+            raise mr.ReleaseError("pytest failed")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "run", run)
+    manifest = mr.ReleaseManifest(tmp_path / "manifest.json", {})
+    if outcome == "passed":
+        mr.provider_checks(tmp_path, manifest)
+        assert manifest.data["provider_validation"]["outcome"] == "passed"
+    else:
+        with pytest.raises(mr.ReleaseError):
+            mr.provider_checks(tmp_path, manifest)
+        assert manifest.data["provider_validation"]["outcome"] == "failed"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("with_wheel", [False, True])
+def test_provider_gate_loads_alias_package_ephemerally(mr, monkeypatch, tmp_path, with_wheel):
+    wheel = tmp_path / "model_aliases-1.0-py3-none-any.whl" if with_wheel else None
+
+    def run(cmd, **kwargs):
+        assert cmd[:3] == ["uv", "run", "--frozen"]
+        if wheel:
+            assert cmd[3:6] == ["--with", str(wheel), "pytest"]
+        else:
+            assert cmd[3] == "pytest"
+        raise mr.ReleaseError("stop before provider calls")
+
+    monkeypatch.setattr(mr, "run", run)
+    with pytest.raises(mr.ReleaseError, match="stop before provider calls"):
+        mr.provider_checks(tmp_path, internal_wheel=wheel)
+
+
+def test_local_release_forwards_alias_wheel_to_provider_gate(mr, monkeypatch, tmp_path):
+    wheel = tmp_path / "model_aliases.whl"
+    args = mr._parser().parse_args(["v1.2.3", "--internal-wheel", str(wheel)])
+    monkeypatch.setattr(mr, "preflight", lambda *_args: ("a" * 40, "v1.2.2", "b" * 40, None))
+    monkeypatch.setattr(mr, "fast_checks", lambda: None)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args: None)
+
+    def providers(*_args, **kwargs):
+        assert kwargs["internal_wheel"] == wheel
+        raise mr.ReleaseError("reached provider gate")
+
+    monkeypatch.setattr(mr, "provider_checks", providers)
+    with pytest.raises(mr.ReleaseError, match="reached provider gate"):
+        mr.local_main(args)
+
+
 def test_existing_publication_workflow_still_uses_published_release_trigger():
     workflow = (REPO / ".github/workflows/publish.yml").read_text()
     assert "release:" in workflow
     assert "types: [published]" in workflow
     assert "workflow_dispatch:" in workflow
     assert "if: github.event_name == 'release'" in workflow
+
+
+def test_emergency_local_without_private_wheel_does_not_require_provider_aliases(mr, monkeypatch):
+    args = mr._parser().parse_args(["v1.2.3", "--skip-capability", "--checks-only"])
+    monkeypatch.setattr(mr, "preflight", lambda *a: ("a" * 40, "v1.2.2", "b" * 40, None))
+    monkeypatch.setattr(mr, "fast_checks", lambda: None)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *a: None)
+    monkeypatch.setattr(mr, "provider_checks", lambda *a, **kw: pytest.fail("paid provider gate"))
+    assert mr.local_main(args) == 0
