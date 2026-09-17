@@ -424,12 +424,22 @@ class DirectTransport:
         if isinstance(fmt, type) and issubclass(fmt, BaseModel):
             body["response_format"] = type_to_response_format_param(fmt)
         if self.api_style == "anthropic":
-            from anthropic import Anthropic, AsyncAnthropic
+            from anthropic import Anthropic, AsyncAnthropic, omit
 
+            if api_key == "":
+                # Suppress both independent SDK credential fallbacks and satisfy
+                # its explicit-header-omission contract for unauthenticated APIs.
+                kwargs["auth_token"] = ""
             body = anthropic_request(body)
             client = (AsyncAnthropic if asynchronous else Anthropic)(**kwargs)
             method = client.messages.create
         else:
+            if api_key == "":
+                from openai import omit
+
+                # The SDK requires a nonempty constructor key even when its
+                # Authorization header is explicitly omitted.
+                kwargs["api_key"] = "no-auth"
             client = (AsyncOpenAI if asynchronous else OpenAI)(**kwargs)
             if self.api_style == "responses":
                 if "max_tokens" in body:
@@ -442,6 +452,14 @@ class DirectTransport:
                 method = client.responses.create
             else:
                 method = client.chat.completions.create
+        if api_key == "":
+            # Anthropic validates explicit omission on the per-request options,
+            # not constructor defaults. Both SDKs remove Omit-valued headers.
+            body["extra_headers"] = {
+                **(body.get("extra_headers") or {}),
+                "Authorization": omit,
+                **({"X-Api-Key": omit} if self.api_style == "anthropic" else {}),
+            }
         # The SDK signature identifies transport kwargs. Provider extensions
         # still reach the server verbatim via the SDK's explicit escape hatch.
         accepted = inspect.signature(method).parameters

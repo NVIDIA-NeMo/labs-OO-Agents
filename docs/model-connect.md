@@ -580,7 +580,9 @@ into a slash command. Model IDs are sent to the endpoint exactly as selected.
 Discovery uses `/models` without generation. Selecting a model previews its
 settings and estimated check budget. `check minimal` explicitly approves routing
 checks; `check all` also runs tool, reasoning, and three-turn session checks.
-These calls may incur charges; token estimates are not billing caps. Saving
+These calls may incur charges; token estimates are not billing caps. Repeating a
+check can reuse previously accepted results for the same unchanged request;
+select the model again to build a fresh plan. Saving
 without checks is allowed and leaves capabilities unconfirmed. Use
 `/connect save --replace` to explicitly replace an existing alias.
 
@@ -592,10 +594,15 @@ endpoint does not support discovery. `/connect` shows the pending preview and
 
 Saving never changes the running agent's model. Launch a new agent with
 `--model work` using the saved config, or use the host's model selection command.
-ACP setup commands do not enter the agent's conversation history.
+ACP setup commands do not enter the agent's conversation history; cancelling a
+check may leave the generic assistant message 'Stopped at your request.'
 
 In the native TUI, `/connect` opens a provider/model picker when no draft exists.
 The picker ends at the preview; the same `check`, `save`, and `cancel` steps then
 apply. A missing key can be entered in a masked dialog and is only persisted to
 workspace `secrets.yaml` when you save. Use `/model ALIAS` after saving to switch
 explicitly. Local Ollama uses its OpenAI-compatible `/v1` endpoint.
+
+An empty `api_key_env` in a direct-transport alias means no authentication.
+Discovery, checks, and later use of the saved alias do not borrow ambient OpenAI
+or Anthropic credentials. Omitting the setting retains the SDK's usual lookup.

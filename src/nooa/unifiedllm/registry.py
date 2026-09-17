@@ -461,6 +461,11 @@ def client_from_config(
             )
 
     params.update(overrides)
+    # An explicit empty key-variable is a saved no-auth choice (Connect uses
+    # this for local/custom endpoints). Omission retains SDK environment lookup.
+    # None from a caller such as Connect is not an explicit credential override.
+    if config.get("api_key_env") == "" and params.get("api_key") is None:
+        params["api_key"] = ""
 
     # Select client class: explicit param > YAML config > default
     client_type = client_type or config.get("client_type", "completion")

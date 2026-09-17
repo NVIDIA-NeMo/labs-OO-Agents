@@ -227,3 +227,33 @@ async def test_provider_exception_is_not_echoed(setup, requests, monkeypatch):
     assert not result.success
     assert "private-connect-key" not in str(result)
     assert not setup.registry_path.exists()
+
+
+async def test_abbreviated_key_flag_is_rejected_without_echo(setup, caplog):
+    result = await setup.invoke("https://gateway.example/v1 --api-key PASTEDKEY")
+    assert not result.success
+    assert "PASTEDKEY" not in str(result) and "PASTEDKEY" not in caplog.text
+
+
+@pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
+async def test_no_auth_discovery_and_checks_do_not_borrow_credentials(setup, monkeypatch, style):
+    from tests.unifiedllm.connect.connect_http import mock_http, response_body
+
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-anthropic")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "ambient-anthropic-token")
+    sent = []
+
+    def respond(request):
+        sent.append(request)
+        assert "authorization" not in request.headers
+        assert "x-api-key" not in request.headers
+        payload = {"data": [{"id": "model"}]} if request.method == "GET" else response_body(style)
+        return httpx.Response(200, json=payload)
+
+    mock_http(monkeypatch, respond)
+    assert (await setup.invoke(f"https://custom.example/v1 --api-style {style}")).success
+    assert (await setup.invoke("model model --as local --max-tokens 128")).success
+    result = await setup.invoke("check minimal")
+    assert result.success and "Checks passed: routing" in str(result)
+    assert [r.method for r in sent] == ["GET", "POST"]

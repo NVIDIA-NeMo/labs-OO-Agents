@@ -116,7 +116,7 @@ class ConnectControl(BehaviorControl):
             if rest not in ([], ["--replace"]):
                 raise ValueError("Usage: /connect save [--replace]")
             return self.save(replace_existing=bool(rest))
-        parser = _Arguments(add_help=False)
+        parser = _Arguments(add_help=False, allow_abbrev=False)
         if action == "model":
             parser.add_argument("model")
             parser.add_argument("--as", dest="alias")

@@ -152,3 +152,28 @@ async def test_session_swap_discards_the_previous_sessions_draft(command):
     assert old._api_key is None
     assert command._control().proposal is None
     assert command._control()._api_key is None
+
+
+async def test_invalid_key_variable_is_rejected_before_logging(command, caplog):
+    secret = "sk-accidentally-pasted-secret"
+    command.frontend.prompt_choice.side_effect = ["Custom endpoint", "chat"]
+    command.frontend.prompt_text.side_effect = ["https://example.test/v1", secret]
+    result = await command.execute([])
+    assert not result.success
+    assert secret not in caplog.text and secret not in str(result)
+    command.frontend.prompt_sensitive.assert_not_awaited()
+    connect.discover.assert_not_awaited()
+
+
+async def test_masked_key_replaces_empty_export(command, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    assert (await command.execute([])).success
+    assert (await command.execute(["save"])).success
+    assert os.environ["OPENAI_API_KEY"] == "private-key"
+
+
+async def test_masked_key_does_not_replace_new_nonempty_export(command, monkeypatch):
+    assert (await command.execute([])).success
+    monkeypatch.setenv("OPENAI_API_KEY", "explicit-export")
+    assert (await command.execute(["save"])).success
+    assert os.environ["OPENAI_API_KEY"] == "explicit-export"

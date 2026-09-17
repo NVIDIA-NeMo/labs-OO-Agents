@@ -666,7 +666,8 @@ class ConnectCommand(ModelCommand):
                         write_secret_env(control.registry_path.with_name("secrets.yaml"), *pending)
                         import os
 
-                        os.environ.setdefault(*pending)
+                        if not os.environ.get(pending[0]):
+                            os.environ[pending[0]] = pending[1]
                     except Exception:
                         return CommandResult.err(
                             "Model settings were saved, but the API key could not be saved. "
@@ -722,6 +723,13 @@ class ConnectCommand(ModelCommand):
             )
             if key_env is None:
                 return await control.run(["cancel"])
+        if key_env:
+            import re
+
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key_env):
+                return ControlResult.err(
+                    "Use an environment variable name for the key, not the key value."
+                )
         key = None
         if key_env and not resolve_api_key_from_config("connect", {"api_key_env": key_env}):
             sensitive = getattr(self.frontend, "prompt_sensitive", None)
@@ -737,7 +745,10 @@ class ConnectCommand(ModelCommand):
             await control.start(endpoint, api_style=style, api_key_env=key_env, api_key=key)
         except Exception:
             return ControlResult.err(
-                "Could not discover models. Check the endpoint and credentials, or enter a model with /connect model ID."
+                "Could not discover models. Check the endpoint and credentials. "
+                "To replace a rejected key, update the named environment variable and restart, "
+                "or unset it and rerun /connect to enter a masked key. "
+                "If discovery is unsupported, enter /connect model ID."
             )
         model = await choice(
             "Model",

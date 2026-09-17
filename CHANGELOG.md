@@ -10,7 +10,9 @@ to follow semantic versioning.
   and preview are separate from explicitly requested checks and saving. Native
   setup now stops at the preview instead of automatically saving and switching;
   use `/connect save`, then `/model ALIAS`. Masked keys are persisted only on
-  save, and replacing an alias requires `/connect save --replace`.
+  save, and replacing an alias requires `/connect save --replace`. An explicit
+  empty `api_key_env` with direct transport disables SDK credential fallback,
+  including when a saved no-auth alias is reloaded.
 
 - Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
   `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new
