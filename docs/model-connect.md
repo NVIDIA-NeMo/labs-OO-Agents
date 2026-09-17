@@ -558,3 +558,38 @@ This is an internal organization, not a separately installable UnifiedLLM packag
 
 Request-shape references: [OpenAI Responses](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
 and [OpenRouter model metadata](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).
+
+## In-session setup with `/connect`
+
+ACP clients advertise `/connect` alongside the shared session commands. The
+command uses the same Connect library as `nooa connect`; setup belongs to the
+current session, and saving writes `<session workspace>/.nooa/llm_config.yaml`.
+
+```text
+/connect openai
+/connect model gpt-5 --as work
+/connect check minimal
+/connect save
+```
+
+For a gateway, start with `/connect https://gateway.example/v1 --api-style responses
+--api-key-env NVIDIA_INFERENCE_API_KEY` (on one line). Keys must already be
+available in the server environment or its loaded secrets; never paste a key
+into a slash command. Model IDs are sent to the endpoint exactly as selected.
+
+Discovery uses `/models` without generation. Selecting a model previews its
+settings and estimated check budget. `check minimal` explicitly approves routing
+checks; `check all` also runs tool, reasoning, and three-turn session checks.
+These calls may incur charges; token estimates are not billing caps. Saving
+without checks is allowed and leaves capabilities unconfirmed. Use
+`/connect save --replace` to explicitly replace an existing alias.
+
+`/connect model` accepts `--max-tokens`, `--context-window`, `--budget-tokens`,
+`--reasoning-template`, `--levels`, and `--reasoning-default`; `/connect help`
+shows the available templates. A manually entered model ID can be used when an
+endpoint does not support discovery. `/connect` shows the pending preview and
+`/connect cancel` discards it. Drafts are not shared between sessions.
+
+Saving never changes the running agent's model. Launch a new agent with
+`--model work` using the saved config, or use the host's model selection command.
+ACP setup commands do not enter the agent's conversation history.

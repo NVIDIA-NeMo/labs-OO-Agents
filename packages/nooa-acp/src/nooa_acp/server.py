@@ -358,7 +358,7 @@ class CodingACPAdapter:
                         if requested in RESERVED_COMMAND_NAMES:
                             message = (
                                 f"NOOA /{requested} is not available through ACP yet. "
-                                "Available behavior controls: /skills, /mcp. "
+                                "Available behavior controls: /connect, /skills, /mcp. "
                                 "Use native NOOA for the other agent controls."
                             )
                             session.bridge.publish(update_agent_message(text_block(message)))

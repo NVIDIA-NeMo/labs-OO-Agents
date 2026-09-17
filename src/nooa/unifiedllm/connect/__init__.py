@@ -1481,11 +1481,13 @@ async def check_interfaces(
     yield InterfaceResult(results, spent)
 
 
-def write(entry: dict, path: Path, *, alias: str) -> None:
+def write(entry: dict, path: Path, *, alias: str, replace_existing: bool = True) -> None:
     """Replace one model; frontends warn before calling this for an existing alias.
 
     Splice the selected YAML entry instead of reformatting the whole file, so
     unrelated entries and comments remain intact. The final replace is atomic.
+    Frontends can set replace_existing=False to reject an existing alias under
+    the same lock, including one created after their preview.
     """
     entry = configure_entry(entry)
     path = Path(path).resolve()
@@ -1496,10 +1498,10 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
 
     with path.with_name(f".{path.name}.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        _write_entry(entry, path, alias=alias)
+        _write_entry(entry, path, alias=alias, replace_existing=replace_existing)
 
 
-def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
+def _write_entry(entry: dict, path: Path, *, alias: str, replace_existing: bool = True) -> None:
     """Perform one locked read/modify/replace, retaining a concurrent-edit check."""
     original = path.read_bytes() if path.exists() else None
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
@@ -1512,6 +1514,8 @@ def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
         data["models"] = {}
     if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
         raise ValueError("Registry must be a mapping with a models mapping")
+    if alias in data.get("models", {}) and not replace_existing:
+        raise ValueError("Alias already exists; replacement must be explicitly enabled.")
     document = yaml.compose(source)
     if any(isinstance(token, (yaml.AnchorToken, yaml.AliasToken)) for token in yaml.scan(source)):
         raise ValueError(

@@ -92,13 +92,13 @@ def test_null_secrets_env_is_populated(tmp_path):
 def _write_from_process(path, alias, first_inside, release_first, second_started, second_inside):
     original_write = connect._write_entry
 
-    def held_write(entry, path, *, alias):
+    def held_write(entry, path, *, alias, replace_existing=True):
         if alias == "first":
             first_inside.set()
             assert release_first.wait(15)
         else:
             second_inside.set()
-        original_write(entry, path, alias=alias)
+        original_write(entry, path, alias=alias, replace_existing=replace_existing)
 
     connect._write_entry = held_write
     if alias == "second":
