@@ -409,7 +409,6 @@ def client_from_config(
         "include",
         "cache_breakpoint",
         "transport",
-        "api_style",
         "replay_vendor",
     ):
         if key in config and key not in overrides:
@@ -449,7 +448,6 @@ def client_from_config(
             "reasoning_levels",
             "reasoning_default",
             "reasoning_level",
-            "api_style",
             "replay_vendor",
         ):
             params.pop(key, None)
@@ -459,6 +457,12 @@ def client_from_config(
                 "Declare reasoning_levels explicitly for the replacement route.",
                 name,
             )
+    else:
+        from ._routing import api_style_for, check_legacy_api_style
+
+        check_legacy_api_style(
+            config, api_style_for(model, client_type or config.get("client_type", "completion"))
+        )
 
     params.update(overrides)
 

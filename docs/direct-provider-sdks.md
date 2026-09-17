@@ -7,15 +7,13 @@ real sessions. A direct request that fails does not fall back to LiteLLM.
 ## Configure a model
 
 Add `transport: direct` to a model entry. Keep its existing model name and
-credentials. `api_style` selects the request format, not the company that
-trained the model:
+credentials. The client type and routing prefix select the request format:
 
 ```yaml
 models:
   my-model:
     model_name: openai/my-model
     client_type: completion
-    api_style: chat
     transport: direct
     api_base: https://models.example/v1
     api_key_env: MODEL_API_KEY
@@ -23,11 +21,12 @@ models:
     max_tokens: 2048
 ```
 
-The formats are `chat` (OpenAI-compatible Chat Completions), `responses`
-(OpenAI Responses, with `client_type: responses`), and `anthropic` (Anthropic
-Messages, with `client_type: completion`). If `api_style` is omitted, the
-`anthropic/` routing prefix selects Messages; otherwise the client class selects
-Chat or Responses. This compatibility default does not infer model capabilities.
+`client_type: responses` selects OpenAI Responses. Otherwise, `anthropic/<model>`
+selects native Messages and other names select OpenAI-compatible Chat Completions.
+The same rule applies to `ResponsesClient` and `CompletionClient` constructors.
+Use `anthropic/<model>` even for an unfamiliar model served by a Messages endpoint.
+An `openai/anthropic/...` gateway name remains Chat; provider names embedded in
+the wire model do not change the interface. There is no separate `api_style` setting.
 
 The routing prefixes `openai/`, `anthropic/`, `deepseek/`,
 `nvidia_nim/`, `openrouter/`, `hosted_vllm/`, `together_ai/`, `xai/`, and
@@ -42,7 +41,7 @@ rejected before dispatch. A compatible gateway can use an explicit
 
 The interface is fixed for the lifetime of a client. Cross-format per-call
 model switches are rejected; construct a new client instead. Replacing an
-alias's route through `get_llm_client` clears inherited format/replay metadata
+alias's route through `get_llm_client` clears inherited replay metadata
 and reasoning choices, while preserving the selected transport.
 
 For a temporary soak run, `NOOA_LLM_TRANSPORT=direct uv run ...` selects the
@@ -102,7 +101,7 @@ Cache configuration follows the shared clients' `cache_breakpoint` policy.
 Both clients default to `auto`; `None` disables NOOA's explicit markers. Native
 Anthropic auto selection preserves the legacy model-route policy (including
 Anthropic behind Chat gateways). Direct native Messages also enables it for
-bare model names; `api_style: chat` never disables an Anthropic cache marker.
+custom models routed with `anthropic/`.
 An endpoint accepting a request does not establish that it used the
 reasoning setting or served a cache hit; inspect reported usage during soaking.
 
@@ -165,8 +164,17 @@ is unchanged. The following shared changes apply to both transports:
   for compatibility, but the `llm.cost.total` span attribute is omitted unless
   a cost was actually supplied (including an explicitly reported zero).
 
-`api_style` remains supported so existing registry/Connect entries do not break
-and native format selection need not depend on a model-name heuristic.
+Context rendering now emits only UnifiedLLM's public message shape via
+`to_messages`. Remove `provider_formatter=` from `render_context` and
+`RenderConfig`; the provider-formatter classes are removed. Provider-specific
+projection stays in UnifiedLLM, preserving replay and cache-boundary objects.
+
+Remove constructor `api_style=` arguments; choose the client class and model
+prefix instead. Matching old registry `api_style` metadata is ignored, and Connect
+removes it on save. Conflicting metadata raises a migration error rather than
+silently switching protocols. Existing Connect entries already have the matching prefix and client
+type. Hand-written native Messages entries with bare names must use
+`anthropic/<model>`; the legacy field no longer forces native routing.
 `replay_vendor` is validated consistently before either transport is constructed.
 The retained compatibility prefixes preserve saved replay scopes; an
 OpenRouter model whose literal name starts with a recognized prefix must retain

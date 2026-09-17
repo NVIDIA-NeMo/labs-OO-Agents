@@ -478,6 +478,13 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
     return missing
 
 
+def entry_api_style(entry: dict) -> str:
+    """Derive the interface from the same fields the runtime uses."""
+    from nooa.unifiedllm._routing import api_style_for
+
+    return api_style_for(entry.get("model_name", ""), entry.get("client_type", "completion"))
+
+
 def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     """Apply safe persisted defaults to a detached entry, without doing any I/O.
 
@@ -508,12 +515,16 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
                 reject_credentials(child)
 
     reject_credentials(entry)
+    from nooa.unifiedllm._routing import check_legacy_api_style
+
+    check_legacy_api_style(entry, entry_api_style(entry))
     result = deepcopy(entry)
+    result.pop("api_style", None)  # Older Connect metadata; routing has one source of truth.
     result.setdefault("transport", "direct")
     extra = result.get("extra_body") or {}
     if not isinstance(extra, dict):
         raise ValueError("extra_body must be a mapping")
-    responses = result.get("api_style") == "responses" or result.get("client_type") == "responses"
+    responses = entry_api_style(result) == "responses"
     managed = {"max_tokens", "max_output_tokens", "max_completion_tokens"}
     if responses:
         managed |= {"include", "store"}
@@ -699,7 +710,7 @@ def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
     Every configured probe sends the saved cap (or the selected level's cap).
     """
     entry = configure_entry(proposal.entry)
-    token_key = "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens"
+    token_key = "max_output_tokens" if entry_api_style(entry) == "responses" else "max_tokens"
     probes = []
     for probe in proposal.probes:
         body = deepcopy(probe.body)
@@ -779,7 +790,6 @@ def plan(
     entry: dict[str, Any] = {
         "model_name": f"{vendor}/{model}",
         "client_type": "responses" if api_style == "responses" else "completion",
-        "api_style": api_style,
         # The Messages runtime adds /v1/messages; Chat/Responses expect an API base.
         "api_base": api_base.removesuffix("/v1") if api_style == "anthropic" else api_base,
         "api_key_env": api_key_env,
@@ -861,7 +871,7 @@ def plan(
         entry["store"] = False
         entry["include"] = ["reasoning.encrypted_content"]
         provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
-        route_keys = ("model_name", "api_base", "api_key_env", "api_style")
+        route_keys = ("model_name", "api_base", "api_key_env", "client_type")
         if (
             existing_entry
             and all(existing_entry.get(key) == entry.get(key) for key in route_keys)
@@ -937,7 +947,7 @@ def plan(
     if existing_entry:
         # Each probe is also compared to its exact request in run_steps. Adding
         # a level must not invalidate an unchanged routing or tool check.
-        keys = ("model_name", "api_base", "api_key_env", "api_style")
+        keys = ("model_name", "api_base", "api_key_env", "client_type")
         if all(existing_entry.get(key) == entry.get(key) for key in keys):
             previous = existing_entry.get("provenance", {}).get("probes", {})
             provenance["probes"] = {
@@ -983,7 +993,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
 
     params = deepcopy(probe.body)
     params.pop("model")  # The saved entry, not a second route, selects the model.
-    messages = params.pop("input" if entry["api_style"] == "responses" else "messages")
+    messages = params.pop("input" if entry_api_style(entry) == "responses" else "messages")
     if params.pop("tools", None):
         params["tools"] = [Tool(name="probe_tool", description="Echo a value", callable=probe_tool)]
     if probe.name.startswith("level:"):
@@ -1122,6 +1132,7 @@ def diagnostic_prompt(
         )
         if key in entry
     }
+    context["api_style"] = entry_api_style(entry)
     # Endpoints from arbitrary caller input may contain credentials or query data.
     if "api_base" in context:
         try:
@@ -1253,7 +1264,7 @@ async def run_steps(
             record["reason"] = "probes require one non-streaming generation"
             yield ProbeUpdate(probe.name, deepcopy(record))
             continue
-        style = entry["api_style"]
+        style = entry_api_style(entry)
         caps = [
             probe.body[name]
             for name in ("max_tokens", "max_output_tokens", "max_completion_tokens")

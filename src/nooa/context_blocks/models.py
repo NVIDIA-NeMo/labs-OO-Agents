@@ -6,7 +6,7 @@ DynamicContext: Marks a context block for dynamic evaluation each turn.
 ResolvedBlock: A fully-resolved block ready for rendering.
 BlockMetadata: Typed metadata for resolved blocks.
 RenderedMessage: Neutral in-memory message emitted by a BlockFormatter,
-    consumed by a ProviderFormatter to produce provider-specific output.
+    assembled into UnifiedLLM input by ``to_messages``.
 ToolCallInfo: Structured tool-call payload carried on a RenderedMessage.
 Role: Re-exported from roles.py for backward compatibility.
 """
@@ -149,7 +149,7 @@ class BlockMetadata(BaseModel):
     """Typed metadata for resolved blocks.
 
     Replaces the untyped dict[str, Any] with well-defined fields.
-    Used by formatters and provider formatters to render blocks correctly.
+    Used by block formatting and message assembly to render blocks correctly.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -260,8 +260,8 @@ class RenderedMessage(BaseModel):
 
     The BlockFormatter is responsible for ordering the system prompt, the
     event history, and any additional context messages into a single
-    ``list[RenderedMessage]``. The ProviderFormatter is a thin adapter that
-    converts this list into provider-specific wire format.
+    ``list[RenderedMessage]``. ``to_messages`` assembles this list into public
+    UnifiedLLM input; the client owns provider-specific wire projection.
 
     Fields are optional and combine based on message kind:
 

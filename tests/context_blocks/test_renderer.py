@@ -3,18 +3,13 @@
 """Tests for render_context().
 
 render_context() takes pre-resolved blocks (list[ResolvedBlock]) and renders
-them via BlockFormatter + ProviderFormatter. No eval function, no expression
+them via BlockFormatter + to_messages. No eval function, no expression
 evaluation, no class — just a pure function.
 """
 
 import pytest
 
-from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
-    MarkdownBlockFormatter,
-    OpenAIProviderFormatter,
-    XMLBlockFormatter,
-)
+from nooa.context_blocks.formatter import MarkdownBlockFormatter, XMLBlockFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 
@@ -32,7 +27,6 @@ class TestRenderContextBasic:
         result = render_context(
             [],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         assert result == []
@@ -44,7 +38,6 @@ class TestRenderContextBasic:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         assert len(result) == 1
@@ -66,7 +59,6 @@ class TestRenderContextBasic:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         system_content = result[0]["content"]
@@ -83,7 +75,6 @@ class TestRenderContextBasic:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         system_content = result[0]["content"]
@@ -102,7 +93,6 @@ class TestRenderContextBasic:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         assert len(result) == 2
@@ -120,7 +110,6 @@ class TestRenderContextBasic:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         assert len(result) == 3  # system + user + assistant
@@ -142,7 +131,6 @@ class TestRenderContextTruncation:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         system_content = result[0]["content"]
@@ -160,7 +148,6 @@ class TestRenderContextTruncation:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         system_content = result[0]["content"]
@@ -183,36 +170,11 @@ class TestRenderContextMarkdown:
         result = render_context(
             blocks,
             block_formatter=MarkdownBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         system_content = result[0]["content"]
         assert "# Instructions" in system_content
         assert "Follow these rules." in system_content
-
-
-class TestRenderContextAnthropic:
-    """Anthropic provider formatter tests."""
-
-    def test_anthropic_format(self):
-        """render_context() produces Anthropic-style output."""
-        blocks = [
-            ResolvedBlock(key="persona", content="Be helpful."),
-            ResolvedBlock(key="msg", content="Hello", role=Role.USER),
-        ]
-
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=AnthropicProviderFormatter(),
-        ).output
-
-        assert isinstance(result, dict)
-        assert "system" in result
-        assert "messages" in result
-        assert "Be helpful." in result["system"]
-        assert len(result["messages"]) == 1
-        assert result["messages"][0]["role"] == "user"
 
 
 class TestRenderContextToolCalls:
@@ -240,7 +202,6 @@ class TestRenderContextToolCalls:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         # System + assistant (tool_calls) + tool (result)
@@ -265,7 +226,6 @@ class TestRenderContextNoMutation:
         render_context(
             [block],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         )
 
         # Original block must be unchanged
@@ -285,7 +245,6 @@ class TestRenderContextNoMutation:
         render_context(
             [block],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         )
 
         # Original block must be unchanged
@@ -303,13 +262,11 @@ class TestRenderContextNoMutation:
         result1 = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         result2 = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         assert result1 == result2
@@ -538,7 +495,6 @@ class TestRenderContextEventSerialization:
         result = render_context(
             [block],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         # Content must appear in the user message
@@ -568,7 +524,6 @@ class TestRenderContextEventSerialization:
         result = render_context(
             [block],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         user_msg = result[1]
@@ -578,7 +533,7 @@ class TestRenderContextEventSerialization:
         assert "output too large" not in user_msg["content"].lower()
 
     def test_tool_call_event_not_passed_to_format_event(self):
-        """ToolCallEvent blocks must not be passed through format_event — ProviderFormatter handles them."""
+        """ToolCallEvent blocks must not be passed through format_event — to_messages handles them."""
         from nooa.context_blocks.events import ToolCallEvent, ToolResult
 
         event = ToolCallEvent(
@@ -596,7 +551,6 @@ class TestRenderContextEventSerialization:
         result = render_context(
             [block],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         # Tool call should appear as assistant tool_calls message, not as a user message
@@ -614,7 +568,6 @@ class TestRenderContextEventSerialization:
         result = render_context(
             [block],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
         ).output
 
         user_msg = result[1]
@@ -631,7 +584,6 @@ class TestCountTokens:
             render_context(
                 [],
                 block_formatter=XMLBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
                 context_limit=10_000,
                 count_tokens=None,
             )
@@ -641,7 +593,6 @@ class TestCountTokens:
         result = render_context(
             [],
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             count_tokens=None,
         ).output
         assert result is not None
@@ -658,7 +609,6 @@ class TestCountTokens:
         render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=10_000,
             count_tokens=counter,
         )

@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from nooa.tracing._llm_hooks import capture_async_request, capture_request
 
+from ._routing import api_style_for
 from .errors import UnsupportedStopReasonError
 from .http_config import HttpConfig
 
@@ -332,6 +333,7 @@ class DirectTransport:
         # UnifiedLLM validates replay_vendor once, before constructing either transport.
         self.replay_vendor = replay_vendor
         self.model = model
+        self._route = self._model_route(model)
         self.route(model, config)
         settings = self._http_settings(http_config)
         self.httpx_sync = httpx.Client(**settings)
@@ -367,25 +369,35 @@ class DirectTransport:
                 "Native Azure routes are unsupported by direct transport; use transport='litellm'. "
                 "For an OpenAI-compatible gateway use openai/<wire-model> with api_base."
             )
-        if model != self.model and separator and prefix in _PREFIXES:
-            if (prefix == "anthropic") != (self.api_style == "anthropic"):
-                raise ValueError(
-                    "A per-call model override cannot change api_style; construct a new client for the replacement route"
-                )
-        recognized = bool(separator and prefix in _PREFIXES)
-        wire_model = rest if recognized else model
-        vendor = self.replay_vendor or (
-            prefix if recognized else ("anthropic" if self.api_style == "anthropic" else "openai")
-        )
         if params.get("custom_llm_provider") or params.get("client"):
             raise ValueError(
-                "direct transport uses api_style, replay_vendor and api_base, not client/custom_llm_provider"
+                "direct transport uses model prefixes, replay_vendor and api_base, not client/custom_llm_provider"
             )
         if separator and prefix not in {"openai", "anthropic"} and not endpoint:
             raise ValueError(
                 "This direct route requires api_base; SDKs do not resolve provider aliases"
             )
-        return wire_model, vendor
+        if model == self.model:
+            return self._route
+        if api_style_for(model, self.api_style) != self.api_style:
+            raise ValueError(
+                "A per-call model override cannot change the wire format; construct a new client for the replacement route"
+            )
+        return self._model_route(model)
+
+    def _model_route(self, model):
+        """Resolve immutable model identity, separately from per-request guards."""
+        prefix, separator, rest = model.partition("/")
+        recognized = bool(separator and prefix in _PREFIXES)
+        return (
+            rest if recognized else model,
+            self.replay_vendor
+            or (
+                prefix
+                if recognized
+                else ("anthropic" if self.api_style == "anthropic" else "openai")
+            ),
+        )
 
     def _request(self, params, *, asynchronous):
         from openai import AsyncOpenAI, OpenAI

@@ -12,11 +12,7 @@ from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.utils import Choices, Message, ModelResponse
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
-from nooa.context_blocks.formatter import (
-    OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
-    XMLBlockFormatter,
-)
+from nooa.context_blocks.formatter import XMLBlockFormatter, to_messages
 from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
 from nooa.unifiedllm.chat_parts import capture_chat_parts
@@ -120,8 +116,7 @@ def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
         for call in response.tool_calls
     )
     neutral = XMLBlockFormatter().format(blocks)
-    formatter = ResponsesProviderFormatter() if responses else OpenAIProviderFormatter()
-    return formatter.format(neutral)
+    return to_messages(neutral)
 
 
 def test_public_thinking_content_blocks_require_a_response(

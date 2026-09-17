@@ -436,7 +436,7 @@ class TestPrefillCallId:
         assert prefill.get_code(call) is None
 
 
-class TestOpenAIProviderFormatter:
+class TestCanonicalMessages:
     """Tests for OpenAI message formatting (via helper function)."""
 
     def test_format_events_basic(self):

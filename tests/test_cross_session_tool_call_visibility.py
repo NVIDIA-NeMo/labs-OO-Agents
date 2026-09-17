@@ -11,7 +11,7 @@ Session structure (two calls to agent.respond()):
 - Session 2 (call 3 on FakeLLM): single call, return_result immediately
 
 After session 2, `fake_llm.last_messages` holds exactly what the LLM received for that
-one call — the full multi-session message history built by OpenAIProviderFormatter.
+one call — the full multi-session message history built by CanonicalMessages.
 
 Background: investigated after trace 20260409_144053_2102fe64 showed an agent
 rediscovering the same bug 49 times. The rediscovery was initially suspected to be
@@ -87,7 +87,7 @@ class TestCrossSessionEventVisibility:
     async def test_execute_python_code_visible_in_next_session(self, storage):
         """Session 1's execute_python ToolCallEvent is visible in session 2's LLM context.
 
-        The OpenAIProviderFormatter renders ToolCallEvents as proper assistant tool_use
+        The CanonicalMessages renders ToolCallEvents as proper assistant tool_use
         messages. All events from the shared event_manager are included in subsequent
         sessions — the LLM sees the full execution history across calls.
 

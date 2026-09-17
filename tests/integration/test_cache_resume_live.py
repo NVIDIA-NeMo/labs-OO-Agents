@@ -30,7 +30,6 @@ import pytest
 
 from nooa._immutable_json import json_containers
 from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult, UserEvent
-from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -156,9 +155,6 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
     messages = render_context(
         blocks,
         block_formatter=CachedBlockFormatter(),
-        provider_formatter=(
-            ResponsesProviderFormatter() if family == "openai" else OpenAIProviderFormatter()
-        ),
     ).output
     if stable_image:
         # A fixed attachment after history must be inside the cache boundary,

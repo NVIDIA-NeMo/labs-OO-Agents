@@ -139,13 +139,7 @@ def select_connection(state: WizardState) -> bool:
                 state.path = source_path
         state.alias = state.alias or state.edit_model
         routed = state.editing.get("model_name", state.edit_model)
-        state.api_style = state.editing.get("api_style") or (
-            "responses"
-            if state.editing.get("client_type") == "responses"
-            else "anthropic"
-            if routed.startswith("anthropic/")
-            else "chat"
-        )
+        state.api_style = connect.entry_api_style(state.editing)
         prefix = "anthropic/" if state.api_style == "anthropic" else "openai/"
         state.model = routed.removeprefix(prefix)
         state.endpoint = (
@@ -709,7 +703,6 @@ def configure_checks(state: WizardState) -> bool:
             if field in state.proposal.entry:
                 merged[field] = deepcopy(state.proposal.entry[field])
         merged["api_key_env"] = state.api_key_env
-        merged.setdefault("api_style", state.api_style)
         if state.proposal.entry.get("allowed_openai_params"):
             merged["allowed_openai_params"] = sorted(
                 set(merged.get("allowed_openai_params", []))
@@ -944,7 +937,7 @@ def save_model(state: WizardState) -> bool:
             fg="yellow",
         )
     view.line(
-        f"Save summary: {state.result.entry['api_style']} · reply budget {state.result.entry['max_tokens']:,} tokens"
+        f"Save summary: {connect.entry_api_style(state.result.entry)} · reply budget {state.result.entry['max_tokens']:,} tokens"
     )
     view.line(
         "Reasoning levels: "

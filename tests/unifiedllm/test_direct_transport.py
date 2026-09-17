@@ -108,7 +108,6 @@ async def test_sdk_round_trip(style, asynchronous, monkeypatch):
         client = cls(
             f"{'anthropic' if style == 'anthropic' else 'openai'}/test-model",
             transport=transport,
-            api_style=style,
             api_base="https://models.example"
             if style == "anthropic"
             else "https://models.example/v1",
@@ -138,7 +137,7 @@ def test_direct_import_does_not_import_litellm():
     script = """
 import sys
 from nooa.unifiedllm import CompletionClient
-c = CompletionClient('test', transport='direct', api_style='chat', api_key='test')
+c = CompletionClient('test', transport='direct', api_key='test')
 assert 'litellm' not in sys.modules
 c.close()
 """
@@ -184,7 +183,7 @@ def test_scope_matches_legacy_and_readable_reasoning_is_retained(style, model):
 
     params = {"api_base": "https://models.example/v1", "api_key": "test"}
     cls = ResponsesClient if style == "responses" else CompletionClient
-    with cls(model, transport="direct", api_style=style, **params) as client:
+    with cls(model, transport="direct", **params) as client:
         api = "responses" if style == "responses" else "chat"
         scope = client._replay_scope(model, api, params)
         assert scope == replay_scope(model, api, params)

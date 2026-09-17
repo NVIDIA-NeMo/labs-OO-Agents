@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Render pre-resolved context blocks into provider-specific output.
+"""Render pre-resolved context blocks into UnifiedLLM's public message shape.
 
 Pipeline:
 
@@ -10,8 +10,7 @@ Pipeline:
 4. Hand the full ordered list of blocks to ``block_formatter`` — it produces a
    neutral ``list[RenderedMessage]`` covering system + events + any extra
    trailing messages the formatter chooses to emit.
-5. Hand the neutral list to ``provider_formatter`` to reshape into the
-   provider-specific wire format.
+5. Assemble UnifiedLLM input with ``to_messages``; the client owns wire projection.
 
 ``render_context()`` never mutates its input blocks — truncation and
 serialization produce new :class:`ResolvedBlock` instances via ``model_copy()``.
@@ -28,9 +27,9 @@ from nooa.context_blocks.formatter import (
     FORMAT_PLAIN,
     FORMAT_XML,
     BlockFormatter,
-    ProviderFormatter,
     _markdown_message_content,
     _xml_message_content,
+    to_messages,
 )
 from nooa.context_blocks.models import (
     ContextWindowStats,
@@ -42,10 +41,10 @@ from nooa.context_blocks.utils import camel_to_snake
 
 
 class RenderResult(NamedTuple):
-    """Result of :func:`render_context`: provider output + utilization stats.
+    """Result of :func:`render_context`: public messages + utilization stats.
 
     ``messages`` is the neutral ``list[RenderedMessage]`` produced by the
-    BlockFormatter *after* truncation and *before* provider formatting.
+    BlockFormatter *after* truncation and *before* message assembly.
     Block-aware formatters populate ``RenderedMessage.parts`` on this list,
     which the journal publisher walks to build a content-addressed skeleton.
     """
@@ -138,7 +137,6 @@ def render_context(
     blocks: list[ResolvedBlock],
     *,
     block_formatter: BlockFormatter,
-    provider_formatter: ProviderFormatter,
     context_limit: int | None = None,
     count_tokens: Callable[[str], int] | None = None,
     event_format: "FormatConfig | None" = None,
@@ -146,7 +144,7 @@ def render_context(
     model_context_window: int | None = None,
     reserved_output_tokens: int | None = None,
 ) -> RenderResult:
-    """Render resolved blocks into provider-specific output with utilization stats.
+    """Render resolved blocks into UnifiedLLM input with utilization stats.
 
     Never mutates input blocks. Per-block head/tail truncation has been removed
     — content passes through verbatim. Context blocks over budget are marked
@@ -216,7 +214,7 @@ def render_context(
 
     # Neutral message list → provider wire format.
     messages = block_formatter.format([*system_blocks, *message_blocks])
-    output = provider_formatter.format(messages)
+    output = to_messages(messages)
     return RenderResult(
         output=output,
         stats=stats,

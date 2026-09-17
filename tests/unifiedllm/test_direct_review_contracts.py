@@ -29,7 +29,7 @@ def test_direct_constructor_guards_before_http(style, config, pattern):
 def test_direct_alias_requires_endpoint_and_style_matches_client():
     with pytest.raises(ValueError, match="requires api_base"):
         DirectTransport("deepseek/test", "chat", None, {}, HttpConfig())
-    with pytest.raises(ValueError, match="api_style"):
+    with pytest.raises(TypeError, match="derived"):
         ResponsesClient("openai/test", transport="direct", api_style="chat", api_key="test-key")
 
 
@@ -196,7 +196,6 @@ def client(style, **kwargs):
     return cls(
         f"{'anthropic' if style == 'anthropic' else 'openai'}/test",
         transport="direct",
-        api_style=style,
         api_base="https://models.example/v1",
         api_key="test-key",
         max_tokens=100,

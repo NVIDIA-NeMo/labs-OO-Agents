@@ -215,7 +215,6 @@ async def test_anthropic_summary_fork_matches_across_transports(
         client = CompletionClient(
             "anthropic/claude-sonnet-4-6",
             transport=transport_name,
-            api_style="anthropic",
             api_base="https://models.example",
             api_key="test",
             cache_breakpoint="anthropic",

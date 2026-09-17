@@ -15,7 +15,6 @@ import httpx
 import pytest
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult, UserEvent
-from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -153,11 +152,6 @@ def _client(family, *, different_model=False):
         "api_key": "test",
         "api_base": "https://provider.test/v1",
         "max_tokens": 200,
-        "api_style": "responses"
-        if family == "responses"
-        else "anthropic"
-        if family == "anthropic"
-        else "chat",
         "retry_config": RetryConfig(max_retries=0, rate_limit_extra_retries=0),
     }
     if family == "responses":
@@ -203,7 +197,8 @@ def _render(turn, state):
         )
     )
     return render_context(
-        blocks, block_formatter=CachedBlockFormatter(), provider_formatter=OpenAIProviderFormatter()
+        blocks,
+        block_formatter=CachedBlockFormatter(),
     ).output
 
 

@@ -6,6 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- **Breaking:** remove the provider-formatter classes and `provider_formatter`
+  options from context rendering. `to_messages` assembles UnifiedLLM's public
+  message shape; only the client projects it onto provider APIs. Remove
+  constructor `api_style` arguments: ResponsesClient selects Responses, and
+  CompletionClient uses `anthropic/<model>` for native Messages, otherwise Chat.
+  Connect saves only the matching model prefix and client type; older registry
+  `api_style` metadata no longer controls dispatch. Direct routes cache model
+  identity while validating endpoint/client overrides on every request.
 - Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
   `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new
   core dependencies. Configured checks send the saved reply limit, including

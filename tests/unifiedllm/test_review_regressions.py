@@ -18,13 +18,11 @@ from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import client_from_config
 
 
-@pytest.mark.parametrize("style", ["chat", None])
 @pytest.mark.parametrize("transport", ["litellm", "direct"])
-async def test_anthropic_cache_uses_actual_route(style, transport):
+async def test_anthropic_cache_uses_actual_route(transport):
     async with CompletionClient(
         "anthropic/claude-test",
         transport=transport,
-        api_style=style,
         api_key="test",
         cache_breakpoint="auto",
     ) as client:
@@ -139,7 +137,7 @@ async def test_anthropic_bare_model_tool_history_gets_dummy_tool(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     async with CompletionClient(
-        "claude-test", transport="direct", api_style="anthropic", api_key="test", max_tokens=100
+        "anthropic/claude-test", transport="direct", api_key="test", max_tokens=100
     ) as client:
         await client.acall(
             [

@@ -1051,7 +1051,6 @@ class UnifiedLLM(ABC):
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
         transport: Literal["litellm", "direct"] = "litellm",
-        api_style: Literal["chat", "responses", "anthropic"] | None = None,
         replay_vendor: str | None = None,
         **config,
     ):
@@ -1061,7 +1060,11 @@ class UnifiedLLM(ABC):
         if transport not in {"litellm", "direct"}:
             raise ValueError("transport must be 'litellm' or 'direct'")
         self.transport = transport
-        self.api_style = api_style
+        if "api_style" in config:
+            raise TypeError(
+                "api_style is derived from the client class and model prefix; "
+                "use ResponsesClient or anthropic/<model> for native Messages"
+            )
         if replay_vendor is not None and (
             not isinstance(replay_vendor, str)
             or not re.fullmatch(r"[a-z][a-z0-9_]*", replay_vendor)
@@ -1088,16 +1091,12 @@ class UnifiedLLM(ABC):
 
     def _init_transport(self, style):
         if self.transport == "direct":
+            from ._routing import api_style_for
             from .direct import DirectTransport
 
-            api_style = self.api_style or (
-                "anthropic" if style == "chat" and self.model.startswith("anthropic/") else style
-            )
-            if (style == "responses") != ((self.api_style or style) == "responses"):
-                raise ValueError("api_style must match the CompletionClient or ResponsesClient")
             self._direct = DirectTransport(
                 self.model,
-                api_style,
+                api_style_for(self.model, style),
                 self.replay_vendor,
                 self.config,
                 self._http_config,
@@ -1256,12 +1255,13 @@ class UnifiedLLM(ABC):
                 "the messages argument"
             )
         extra_body = call_config.get("extra_body")
-        client_settings = {"transport", "api_style", "replay_vendor"}
-        if client_settings.intersection(call_config) or (
-            isinstance(extra_body, Mapping) and client_settings.intersection(extra_body)
+        routing_fields = {"transport", "api_style", "replay_vendor"}
+        if routing_fields.intersection(call_config) or (
+            isinstance(extra_body, Mapping) and routing_fields.intersection(extra_body)
         ):
             raise ValueError(
-                "transport, api_style and replay_vendor are client settings, not call parameters"
+                "transport and replay_vendor are client settings; api_style is derived, "
+                "not a call parameter"
             )
         if extra_body is not None and not isinstance(extra_body, Mapping):
             raise ValueError("extra_body must be a mapping")
@@ -1309,7 +1309,7 @@ class UnifiedLLM(ABC):
 
     def _is_anthropic_route(self, model: str) -> bool:
         # Cache/tool requirements also apply to Anthropic behind a Chat gateway.
-        # api_style describes the interface; "chat" must not negate that policy.
+        # Chat-compatible transport must not negate that model's cache policy.
         if _is_anthropic_model(model):
             return True
         if self._direct is not None:
