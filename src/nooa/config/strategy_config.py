@@ -46,7 +46,7 @@ class CodeActConfig(BaseModel):
     # Maximum consecutive output-token continuations when a text response is
     # truncated with finish_reason="length". The counter resets on natural
     # completion (stop) or a tool call. Set to 0 to disable auto-continuation.
-    max_length_continuations: int = 3
+    max_length_continuations: int = Field(default=3, ge=0)
 
     @model_validator(mode="before")
     @classmethod

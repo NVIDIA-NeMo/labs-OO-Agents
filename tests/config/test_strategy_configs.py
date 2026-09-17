@@ -28,6 +28,11 @@ class TestCodeActConfig:
         with pytest.raises(ValidationError):
             c.max_iterations = 5
 
+    def test_max_length_continuations_must_be_nonnegative(self):
+        assert CodeActConfig(max_length_continuations=0).max_length_continuations == 0
+        with pytest.raises(ValidationError):
+            CodeActConfig(max_length_continuations=-1)
+
     def test_merge_with(self):
         base = CodeActConfig()
         override = CodeActConfig(max_iterations=5, temperature=0.7)

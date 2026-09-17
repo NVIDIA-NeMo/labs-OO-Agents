@@ -31,6 +31,19 @@ def test_no_continue_empty_content():
     )
 
 
+def test_no_continue_whitespace_only_content():
+    assert (
+        decide_length_continuation(
+            finish_reason="length",
+            content=" \t\n",
+            has_tool_calls=False,
+            continuation_count=0,
+            max_continuations=3,
+        )
+        == "fail_empty"
+    )
+
+
 def test_no_continue_tool_calls_only():
     assert (
         decide_length_continuation(

@@ -222,7 +222,7 @@ def decide_length_continuation(
         return "reset"
     if has_tool_calls:
         return "fail_tools"
-    if not content:
+    if not content.strip():
         return "fail_empty"
     if continuation_count >= max_continuations:
         return "fail_bound"
