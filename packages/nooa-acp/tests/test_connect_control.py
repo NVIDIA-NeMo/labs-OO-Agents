@@ -68,3 +68,59 @@ async def test_connect_runs_as_a_session_local_control(tmp_path, monkeypatch):
         assert session.agent.llm is llm
     finally:
         await adapter.close()
+
+
+async def test_connect_reloads_each_session_secrets_after_external_edit(tmp_path, monkeypatch):
+    import nooa.secrets as secrets
+
+    monkeypatch.setattr(secrets, "_file_env", {})
+    monkeypatch.delenv("CONNECT_RELOAD_ACP_KEY", raising=False)
+    monkeypatch.delenv("NEMO_OO_SECRETS", raising=False)
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / "launch-project"))
+    keys, updates = [], []
+
+    async def discover(endpoint, **kwargs):
+        keys.append(kwargs["api_key"])
+        return connect.Discovery(endpoint, ({"id": "model"},))
+
+    async def update(session_id, payload, **kwargs):
+        updates.append(payload.model_dump_json())
+
+    monkeypatch.setattr(connect, "discover", discover)
+    llm = FakeLLMClient()
+    adapter = CodingACPAdapter(
+        lambda: llm, options_factory=lambda root: SessionOptions(working_dir=str(root))
+    )
+    adapter.on_connect(SimpleNamespace(session_update=update))
+    sessions = []
+    try:
+        for label in ("first", "second"):
+            root = tmp_path / label
+            root.mkdir()
+            session_id = (await adapter.new_session(str(root))).session_id
+            sessions.append(session_id)
+            await adapter.prompt(
+                session_id,
+                [
+                    text_block(
+                        "/connect https://gateway.example/v1 --api-key-env CONNECT_RELOAD_ACP_KEY"
+                    )
+                ],
+            )
+            assert len(keys) == len(sessions) - 1
+            path = root / ".nooa/secrets.yaml"
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(f"env:\n  CONNECT_RELOAD_ACP_KEY: {label}-private-key\n")
+            await adapter.prompt(session_id, [text_block("/connect retry")])
+        # The same variable name resolves against the current session's files.
+        await adapter.prompt(sessions[0], [text_block("/connect retry")])
+        assert keys == ["first-private-key", "second-private-key", "first-private-key"]
+        assert "No ACP server restart is needed" in "\n".join(updates)
+        assert "private-key" not in "\n".join(updates)
+        assert llm.call_count == 0
+        for session_id in sessions:
+            session = (await adapter._sessions.get(session_id)).value
+            assert session.handle.turns() == []
+    finally:
+        await adapter.close()

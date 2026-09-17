@@ -133,3 +133,104 @@ def test_non_mapping_env_warns(user_dir, project_dir, caplog):
     with caplog.at_level(logging.WARNING, logger="nooa.secrets"):
         assert load_secrets_into_env() == []
     assert "not a mapping" in caplog.text
+
+
+@pytest.fixture
+def refresh_state(monkeypatch):
+    import nooa.secrets as secrets
+
+    monkeypatch.setattr(secrets, "_file_env", {})
+    return secrets.reload_secret_env
+
+
+def test_reload_added_and_rotated_file_key(refresh_state, user_dir, project_dir):
+    assert refresh_state(_KEY) is None
+    _write(project_dir, f"env:\n  {_KEY}: first-key\n")
+    assert refresh_state(_KEY) == "first-key"
+    _write(project_dir, f"env:\n  {_KEY}: second-key\n")
+    assert refresh_state(_KEY) == "second-key"
+    assert os.environ[_KEY] == "second-key"
+
+
+def test_reload_recognizes_keys_exported_by_startup_loader(refresh_state, user_dir, project_dir):
+    _write(project_dir, f"env:\n  {_KEY}: startup-key\n  {_KEY2}: unrelated\n")
+    load_secrets_into_env()
+    _write(project_dir, f"env:\n  {_KEY}: rotated-key\n  {_KEY2}: changed\n")
+    assert refresh_state(_KEY) == "rotated-key"
+    assert os.environ[_KEY2] == "unrelated"  # Only the selected key is refreshed.
+
+
+@pytest.mark.parametrize("export", ["shell-key", ""])
+def test_reload_preserves_explicit_exports(
+    refresh_state, user_dir, project_dir, monkeypatch, export
+):
+    monkeypatch.setenv(_KEY, export)
+    _write(project_dir, f"env:\n  {_KEY}: file-key\n")
+    load_secrets_into_env()
+    assert refresh_state(_KEY) == export
+
+
+def test_reload_preserves_later_process_override(refresh_state, user_dir, project_dir, monkeypatch):
+    _write(project_dir, f"env:\n  {_KEY}: file-key\n")
+    load_secrets_into_env()
+    monkeypatch.setenv(_KEY, "process-override")
+    _write(project_dir, f"env:\n  {_KEY}: rotated-key\n")
+    assert refresh_state(_KEY) == "process-override"
+
+
+@pytest.mark.parametrize("replacement", [None, "env: {}\n", f"env:\n  {_KEY}: null\n"])
+def test_reload_removes_deleted_file_value(refresh_state, user_dir, project_dir, replacement):
+    _write(project_dir, f"env:\n  {_KEY}: removed-key\n")
+    load_secrets_into_env()
+    if replacement is None:
+        (project_dir / "secrets.yaml").unlink()
+    else:
+        _write(project_dir, replacement)
+    assert refresh_state(_KEY) is None
+    assert _KEY not in os.environ
+
+
+def test_reload_uses_session_directory_and_override_layers(
+    refresh_state, user_dir, project_dir, tmp_path, monkeypatch
+):
+    session = tmp_path / "other-session"
+    session.mkdir()
+    _write(user_dir, f"env:\n  {_KEY}: user-key\n")
+    _write(project_dir, f"env:\n  {_KEY}: launch-key\n")
+    _write(session, f"env:\n  {_KEY}: session-key\n")
+    load_secrets_into_env()
+    assert refresh_state(_KEY, project_dir=session) == "session-key"
+    override = tmp_path / "override.yaml"
+    override.write_text(f"env:\n  {_KEY}: override-key\n")
+    monkeypatch.setenv("NEMO_OO_SECRETS", str(override))
+    assert refresh_state(_KEY, project_dir=session) == "override-key"
+    assert refresh_state(_KEY, project_dir=project_dir) == "override-key"
+
+
+@pytest.mark.parametrize(
+    "bad_yaml",
+    [
+        "env: [PRIVATE-SENTINEL",
+        "[PRIVATE-SENTINEL]",
+        "env: PRIVATE-SENTINEL",
+        f"env:\n  {_KEY}: [PRIVATE-SENTINEL]\n",
+    ],
+)
+def test_reload_invalid_file_never_exposes_key_or_applies_partial_data(
+    refresh_state, user_dir, project_dir, caplog, bad_yaml
+):
+    _write(project_dir, f"env:\n  {_KEY}: previous-key\n")
+    load_secrets_into_env()
+    _write(project_dir, bad_yaml)
+    with pytest.raises(ValueError) as caught:
+        refresh_state(_KEY)
+    assert "PRIVATE-SENTINEL" not in str(caught.value) + caplog.text
+    assert os.environ[_KEY] == "previous-key"
+
+
+def test_fresh_secret_names_do_not_export_values(refresh_state, user_dir, project_dir):
+    from nooa.secrets import secret_env_names
+
+    _write(project_dir, f"env:\n  {_KEY}: PRIVATE-SENTINEL\n  {_KEY2}: null\n")
+    assert secret_env_names() == [_KEY]
+    assert _KEY not in os.environ

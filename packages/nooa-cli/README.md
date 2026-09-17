@@ -113,6 +113,11 @@ ACP uses staged commands with explicit check and save actions. For example:
 /connect save
 ```
 
+Missing credentials can be added under `env:` in workspace `.nooa/secrets.yaml`
+or user-level `~/.config/nooa/secrets.yaml` while ACP is running. Use `/connect retry`
+to retry discovery, or repeat the check command; Connect reloads the selected key
+without restarting the server. Explicit environment exports keep precedence.
+
 Providers include `openai`, `anthropic`, and `nvidia`. Custom endpoints accept
 `--api-style chat|responses|anthropic` and `--api-key-env NAME`; stage commands
 read credentials from the environment and never ask you to paste them into

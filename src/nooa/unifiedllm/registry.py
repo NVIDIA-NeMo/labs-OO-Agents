@@ -87,6 +87,8 @@ def resolve_api_key_from_config(
     config: Mapping[str, Any],
     *,
     allowed_env_vars: Collection[str] | None = None,
+    refresh_secrets: bool = False,
+    project_dir: Path | None = None,
 ) -> str | None:
     """Read the api_key_env-named env var declared by a registry config.
 
@@ -102,7 +104,9 @@ def resolve_api_key_from_config(
 
     ``allowed_env_vars`` is a defense-in-depth boundary for callers handling
     partially untrusted config. When supplied, only those exact env-var names
-    may be resolved.
+    may be resolved. Connect opts into ``refresh_secrets`` to reread file-loaded
+    keys at setup/retry boundaries, with ``project_dir`` selecting the session's
+    secrets directory. Explicit environment values still win.
     """
     api_key_env = config.get("api_key_env")
     if not api_key_env:
@@ -131,12 +135,20 @@ def resolve_api_key_from_config(
             api_key_env,
         )
         return None
-    api_key = os.getenv(api_key_env)
+
+    def read_env(name: str) -> str | None:
+        if refresh_secrets:
+            from nooa.secrets import reload_secret_env
+
+            return reload_secret_env(name, project_dir=project_dir)
+        return os.getenv(name)
+
+    api_key = read_env(api_key_env)
     if api_key:
         return api_key
     synonym = _NVIDIA_KEY_SYNONYMS.get(api_key_env)
     if synonym:
-        api_key = os.getenv(synonym)
+        api_key = read_env(synonym)
         if api_key:
             return api_key
     logger.warning(

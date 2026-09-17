@@ -13,7 +13,10 @@ to follow semantic versioning.
   use masked input and a separate save confirmation. ACP uses explicit staged
   discovery, check, and save commands. Saving leaves the running model unchanged.
   An explicit empty `api_key_env` with direct transport disables SDK credential
-  fallback, including when a saved no-auth alias is reloaded.
+  fallback, including when a saved no-auth alias is reloaded. Setup and retries
+  reload file-backed credentials without restarting ACP; explicit environment
+  exports retain precedence. `/connect retry` resumes model discovery after
+  adding a missing key, and changed keys invalidate earlier check results.
 
 - Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
   `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new

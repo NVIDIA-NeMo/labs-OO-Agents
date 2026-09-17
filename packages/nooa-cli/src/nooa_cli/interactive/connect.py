@@ -10,8 +10,10 @@ changes the running agent's model or the process-wide registry.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -54,6 +56,7 @@ class ConnectControl(BehaviorControl):
         self.discovery: connect.Discovery | None = None
         self.proposal: connect.ConnectPlan | None = None
         self._api_key: str | None = None
+        self._checked_key_digest: bytes | None = None
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
@@ -62,6 +65,7 @@ class ConnectControl(BehaviorControl):
             "/connect model ID [--as ALIAS] [--max-tokens N] [--context-window N]": "Preview settings",
             "/connect check minimal|all": "Approve bounded model calls (may incur charges)",
             "/connect save [--replace]": "Save the previewed alias to this workspace",
+            "/connect retry": "Reload credentials and retry model discovery",
             "/connect cancel": "Discard unfinished setup",
         }
 
@@ -106,6 +110,17 @@ class ConnectControl(BehaviorControl):
         if action == "cancel" and not rest:
             self.reset()
             return ControlResult.ok(ControlMessage("Model setup cancelled."))
+        if action == "retry" and not rest:
+            if self.connection is None:
+                raise ValueError("Start with /connect PROVIDER or /connect URL first.")
+            if self.proposal is not None:
+                raise ValueError(
+                    "Use /connect check minimal or /connect check all to retry checks."
+                )
+            endpoint, style, key_env = self.connection
+            return await self.start(
+                endpoint, api_style=style, api_key_env=key_env, api_key=self._api_key
+            )
         if action == "check":
             if rest not in (["minimal"], ["all"]):
                 raise ValueError(
@@ -147,10 +162,22 @@ class ConnectControl(BehaviorControl):
     def _credential(self) -> str | None:
         assert self.connection is not None
         name = self.connection[2]
-        key = self._api_key or resolve_api_key_from_config("connect", {"api_key_env": name})
+        key = self._api_key or resolve_api_key_from_config(
+            "connect",
+            {"api_key_env": name},
+            refresh_secrets=True,
+            project_dir=self.registry_path.parent,
+        )
         if name and not key:
             raise ValueError(
-                f"Set {name} in the server environment and retry. Do not paste credentials into chat."
+                f"Set {name} under env: in "
+                f"{self.registry_path.with_name('secrets.yaml')}, then retry with "
+                + (
+                    "/connect check minimal or /connect check all."
+                    if self.proposal
+                    else "/connect retry."
+                )
+                + " No ACP server restart is needed. Do not paste credentials into chat."
             )
         return key
 
@@ -266,7 +293,16 @@ class ConnectControl(BehaviorControl):
         if self.proposal is None:
             raise ValueError("Preview settings with /connect model MODEL_ID first.")
         proposal = self.proposal
-        result = await connect.run(proposal, approved=mode, api_key=self._credential())
+        key = self._credential()
+        digest = hashlib.sha256((key or "").encode()).digest()
+        if self._checked_key_digest is not None and self._checked_key_digest != digest:
+            # Don't reuse evidence obtained with a credential the user replaced.
+            entry = deepcopy(proposal.entry)
+            entry["provenance"]["probes"] = {}
+            proposal = connect.refresh_plan(replace(proposal, entry=entry))
+            self.proposal = proposal
+        self._checked_key_digest = digest
+        result = await connect.run(proposal, approved=mode, api_key=key)
         self.proposal = replace(proposal, entry=result.entry)
         verdict = connect.verdict(result.entry)
         return ControlResult.ok(

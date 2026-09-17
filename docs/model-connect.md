@@ -573,9 +573,25 @@ current session, and saving writes `<session workspace>/.nooa/llm_config.yaml`.
 ```
 
 For a gateway, start with `/connect https://gateway.example/v1 --api-style responses
---api-key-env NVIDIA_INFERENCE_API_KEY` (on one line). Keys must already be
-available in the server environment or its loaded secrets; never paste a key
-into a slash command. Model IDs are sent to the endpoint exactly as selected.
+--api-key-env NVIDIA_INFERENCE_API_KEY` (on one line). Credentials come from the
+server environment or layered `secrets.yaml` files; never paste a key into a
+slash command. Model IDs are sent to the endpoint exactly as selected.
+
+Connect rereads the selected file credential on setup and before each check.
+Native variable-name completion also includes names added to secrets files since
+startup, without exporting or displaying their values.
+If a key is missing, it shows the session workspace's `.nooa/secrets.yaml` path.
+Add the variable under `env:` in that file (or your user-level `secrets.yaml`),
+then run `/connect retry` to retry discovery without restarting ACP. To retry
+checks, run `/connect check minimal` or `/connect check all` again. The native
+and console wizards also reread file credentials when you choose **Reload secrets
+and try again**. Masked temporary keys remain in use until you choose another key.
+
+Explicit process environment values take precedence, including empty exports.
+Only values NOOA loaded from files are refreshed or removed after file edits;
+unrelated variables and existing model clients are unchanged. Check results
+obtained with a previous credential are discarded when you retry with a new one.
+Invalid secrets files stop setup with a message that does not expose their content.
 
 Discovery uses `/models` without generation. Selecting a model previews its
 settings and estimated check budget. `check minimal` explicitly approves routing

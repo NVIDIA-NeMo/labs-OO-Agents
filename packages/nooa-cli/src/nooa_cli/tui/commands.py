@@ -655,7 +655,7 @@ class ConnectCommand(ModelCommand):
         if args == ["help"]:
             args = ["--help"]
         if (not args and control.proposal is None) or (
-            args and args[0] not in {"model", "check", "save", "cancel", "help"}
+            args and args[0] not in {"model", "check", "save", "retry", "cancel", "help"}
         ):
             return await self._wizard(args, control)
         else:
@@ -664,14 +664,13 @@ class ConnectCommand(ModelCommand):
             result = await control.run(args)
             if args and args[0] == "save" and result.success:
                 if pending and pending[0] and pending[1]:
-                    from nooa.secrets import write_secret_env
+                    from nooa.secrets import reload_secret_env, write_secret_env
 
                     try:
                         write_secret_env(control.registry_path.with_name("secrets.yaml"), *pending)
-                        import os
-
-                        if not os.environ.get(pending[0]):
-                            os.environ[pending[0]] = pending[1]
+                        reload_secret_env(
+                            pending[0], project_dir=control.registry_path.parent, replace_empty=True
+                        )
                     except Exception:
                         return CommandResult.err(
                             "Model settings were saved, but the API key could not be saved. "
@@ -714,11 +713,6 @@ class ConnectCommand(ModelCommand):
             return CommandResult.ok()
         if not state.saved:
             return CommandResult.ok(TextOutput("Model setup ended without saving a model.", "info"))
-        if state.saved_key:
-            import os
-
-            if not os.environ.get(state.api_key_env):
-                os.environ[state.api_key_env] = state.api_key
         try:
             self._reload_model_registry()
         except Exception:

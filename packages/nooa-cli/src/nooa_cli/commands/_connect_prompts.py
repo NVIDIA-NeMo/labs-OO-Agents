@@ -17,7 +17,13 @@ from ._connect_io import current_host, echo
 
 def environment_names(defaults=()):
     """Suggest variable names, including conventional names not yet exported."""
-    return sorted(set(os.environ).union(defaults))
+    from nooa.secrets import secret_env_names
+
+    host = current_host()
+    file_names = secret_env_names(
+        project_dir=host.secrets_path.parent if host is not None else None
+    )
+    return sorted(set(os.environ).union(defaults, file_names))
 
 
 def prompt(

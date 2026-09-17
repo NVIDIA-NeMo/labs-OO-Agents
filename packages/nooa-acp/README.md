@@ -25,6 +25,27 @@ uv add nooa-acp                 # or: uv add "nooa[acp]"
 There is no default model. Set `NOOA_MODEL` or pass `--model`, or the command
 exits with a usage error.
 
+## Quick start: Pool
+
+Run Pool as the client and point its agent-server command at your NOOA checkout:
+
+```bash
+cd /path/to/workspace
+pool --agent-server "uv run --project /path/to/labs-OO-Agents --package nooa-acp -- nooa-acp --model YOUR_ALIAS"
+```
+
+`YOUR_ALIAS` names a model in NOOA's `llm_config.yaml`. Pool launches the ACP
+server from that checkout, so a worktree at the top of a PR stack uses all of its
+changes. Use `NEMO_OO_PROJECT_DIR` in the server command to explicitly select a
+workspace's `.nooa` configuration directory if needed. Pool's
+[other agent servers guide](https://docs.poolside.ai/cli/other-agent-servers)
+documents this client mode.
+
+`/connect` currently exposes staged setup commands through ACP. If a credential
+is missing, add it under `env:` in the indicated `secrets.yaml` and run
+`/connect retry`; a server restart is not required. Guided elicitation prompts
+are not yet wired into this adapter.
+
 ## Quick start: Zed
 
 Zed launches ACP agents as "external agents". Add NOOA to `settings.json`

@@ -3,6 +3,7 @@
 """Wizard steps; loaded lazily by the Connect command."""
 
 import os
+import re
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -14,7 +15,7 @@ import httpx
 import yaml
 
 from nooa import paths
-from nooa.unifiedllm import connect
+from nooa.unifiedllm import connect, resolve_api_key_from_config
 
 from . import _connect_prompts as prompts
 from . import _connect_view as view
@@ -76,6 +77,29 @@ class WizardState:
     yes: Any = None
     saved: bool = False
     saved_key: bool = False
+    temporary_key: bool = False
+
+
+def refresh_key(state: WizardState, *, required: bool = False) -> bool:
+    """Reload the selected file credential between attempts, keeping masked input."""
+    previous = state.api_key
+    if not state.temporary_key:
+        name = state.api_key_env
+        if name and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError("Use an environment variable name, not the key value.")
+        host = current_host()
+        state.api_key = resolve_api_key_from_config(
+            "connect",
+            {"api_key_env": name},
+            refresh_secrets=True,
+            project_dir=host.secrets_path.parent if host is not None else None,
+        )
+    if required and state.api_key_env and not state.api_key:
+        raise ValueError(
+            "The selected key variable is unset or empty. Add it under env: in "
+            "secrets.yaml and retry setup; no server restart is needed."
+        )
+    return previous != state.api_key
 
 
 async def show_checks(events, *, reasoning_levels=None, summary=True):
@@ -283,19 +307,16 @@ def select_connection(state: WizardState) -> bool:
         state.endpoint,
         state.api_key_env,
     )
+    refresh_key(state)
     needs_key = (
         not state.yes
         and (state.approval != "none" or not state.model)
         and state.api_key_env
-        and not os.environ.get(state.api_key_env)
+        and not state.api_key
     )
-    state.api_key = (
-        prompts.prompt("API key (used only for this setup)", hide_input=True)
-        if state.prompt_key or needs_key
-        else os.environ.get(state.api_key_env)
-        if state.api_key_env
-        else None
-    )
+    if state.prompt_key or needs_key:
+        state.api_key = prompts.prompt("API key (used only for this setup)", hide_input=True)
+        state.temporary_key = True
     return True
 
 
@@ -353,6 +374,7 @@ def check_interfaces(state: WizardState) -> bool:
             retry_styles = ("chat", "responses", "anthropic")
             interface_timeout = 30
             while True:
+                refresh_key(state, required=True)
                 state.interfaces = run_async(
                     show_checks(
                         connect.check_interfaces(
@@ -441,7 +463,7 @@ def check_interfaces(state: WizardState) -> bool:
                     labels={
                         "key": "Change key",
                         "server": "Edit server and model",
-                        "retry": "Try again unchanged",
+                        "retry": "Reload secrets and try again",
                         "longer": "Retry one interface with a 120-second timeout",
                         "cancel": "Exit without saving",
                     },
@@ -468,12 +490,14 @@ def check_interfaces(state: WizardState) -> bool:
                         suggestions=prompts.environment_names(["paste"]),
                     )
                     if source == "paste":
+                        state.temporary_key = True
                         state.api_key = prompts.prompt(
                             "API key (used only for this setup)", hide_input=True
                         )
                     else:
                         state.api_key_env = source
-                        state.api_key = os.environ.get(source)
+                        state.temporary_key = False
+                        refresh_key(state)
                         if not state.api_key:
                             view.line(
                                 "That variable is unset or empty. You can paste a temporary key instead."
@@ -481,6 +505,7 @@ def check_interfaces(state: WizardState) -> bool:
                             state.api_key = prompts.prompt(
                                 "API key (used only for this setup)", hide_input=True
                             )
+                            state.temporary_key = True
                 elif action == "server":
                     state.endpoint = connect.normalize_endpoint(
                         prompts.prompt(
@@ -833,6 +858,11 @@ def run_checks(state: WizardState) -> bool:
     echo(
         "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
     )
+    if refresh_key(state, required=state.approval != "none"):
+        # Evidence from the previous credential cannot validate its replacement.
+        entry = deepcopy(state.proposal.entry)
+        entry["provenance"]["probes"] = {}
+        state.proposal = connect.refresh_plan(replace(state.proposal, entry=entry))
     state.result = run_async(
         show_checks(
             connect.run_steps(state.proposal, approved=state.approval, api_key=state.api_key),
@@ -968,16 +998,23 @@ def save_model(state: WizardState) -> bool:
                 "Save this key for future NOOA runs?", default=True
             )
             if save_key:
-                from nooa.secrets import write_secret_env
+                from nooa.secrets import reload_secret_env, write_secret_env
 
                 write_secret_env(secrets_path, state.api_key_env, state.api_key)
+                if host is not None:
+                    reload_secret_env(
+                        state.api_key_env, project_dir=host.secrets_path.parent, replace_empty=True
+                    )
                 state.saved_key = True
                 view.line(
                     f"Saved key as {state.api_key_env}. Existing secret values are preserved; YAML formatting may change."
                 )
-                if os.environ.get(state.api_key_env):
+                if (
+                    os.environ.get(state.api_key_env)
+                    and os.environ[state.api_key_env] != state.api_key
+                ):
                     view.line(
-                        f"Your current environment still overrides this file. Unset or update {state.api_key_env} before starting NOOA again.",
+                        f"Your environment or a higher-priority secrets file still overrides this value. Update {state.api_key_env} in that source before using this alias.",
                         fg="yellow",
                     )
         connect.write(

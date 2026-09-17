@@ -257,3 +257,85 @@ async def test_no_auth_discovery_and_checks_do_not_borrow_credentials(setup, mon
     result = await setup.invoke("check minimal")
     assert result.success and "Checks passed: routing" in str(result)
     assert [r.method for r in sent] == ["GET", "POST"]
+
+
+async def test_missing_file_key_can_be_added_then_discovery_retried(
+    setup, requests, tmp_path, monkeypatch
+):
+    import nooa.secrets as secrets
+
+    monkeypatch.setattr(secrets, "_file_env", {})
+    monkeypatch.delenv("CONNECT_TEST_KEY")
+    monkeypatch.delenv("NEMO_OO_SECRETS", raising=False)
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    result = await setup.invoke("https://gateway.example/v1 --api-key-env CONNECT_TEST_KEY")
+    assert not result.success and not requests
+    assert str(tmp_path / ".nooa/secrets.yaml") in str(result)
+    assert "/connect retry" in str(result)
+    (tmp_path / ".nooa").mkdir()
+    (tmp_path / ".nooa/secrets.yaml").write_text("env:\n  CONNECT_TEST_KEY: private-connect-key\n")
+    result = await setup.invoke("retry")
+    assert result.success, str(result)
+    assert [r.method for r in requests] == ["GET"]
+    assert "private-connect-key" not in str(result)
+    assert not setup.registry_path.exists()
+
+
+async def test_rotated_key_rechecks_instead_of_reusing_accepted_evidence(
+    setup, monkeypatch, tmp_path
+):
+    import nooa.secrets as secrets
+
+    monkeypatch.setattr(secrets, "_file_env", {})
+    monkeypatch.delenv("CONNECT_TEST_KEY")
+    monkeypatch.delenv("NEMO_OO_SECRETS", raising=False)
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    directory = setup.registry_path.parent
+    directory.mkdir()
+    path = directory / "secrets.yaml"
+    path.write_text("env:\n  CONNECT_TEST_KEY: first-key\n")
+    sent = []
+
+    def respond(request):
+        sent.append((request.method, request.headers.get("authorization")))
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "vendor/model"}]})
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "vendor/model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 2, "total_tokens": 22},
+            },
+        )
+
+    original = httpx.AsyncClient.__init__
+    monkeypatch.setattr(
+        httpx.AsyncClient,
+        "__init__",
+        lambda client, **kwargs: original(
+            client, **{**kwargs, "transport": httpx.MockTransport(respond)}
+        ),
+    )
+    await preview(setup)
+    assert (await setup.invoke("check minimal")).success
+    assert sent == [("GET", "Bearer first-key"), ("POST", "Bearer first-key")]
+    # An unchanged key can reuse accepted evidence.
+    assert (await setup.invoke("check minimal")).success
+    assert len(sent) == 2
+    path.write_text("env:\n  CONNECT_TEST_KEY: replacement-key\n")
+    assert (await setup.invoke("check minimal")).success
+    assert sent[-1] == ("POST", "Bearer replacement-key") and len(sent) == 3
+    path.unlink()
+    result = await setup.invoke("check minimal")
+    assert not result.success and len(sent) == 3
+    assert "replacement-key" not in str(result)

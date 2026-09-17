@@ -177,6 +177,11 @@ async def test_masked_key_is_confirmed_at_save_and_empty_export_is_replaced(wiza
         yaml.safe_load((wizard.root / ".nooa/secrets.yaml").read_text())["env"]["OPENAI_API_KEY"]
         == "private-key"
     )
+    # A key saved by the native dialog remains file-backed for future reloads.
+    (wizard.root / ".nooa/secrets.yaml").write_text("env:\n  OPENAI_API_KEY: rotated-key\n")
+    from nooa.secrets import reload_secret_env
+
+    assert reload_secret_env("OPENAI_API_KEY", project_dir=wizard.root / ".nooa") == "rotated-key"
 
 
 async def test_invalid_key_option_never_echoes_pasted_value(wizard, caplog):
@@ -288,3 +293,63 @@ async def test_concurrent_wizard_hosts_keep_prompts_and_async_output_separate(
     for host, name in zip(hosts, results, strict=True):
         assert [call.args[0].content for call in host.render.call_args_list] == ["result:" + name]
     assert io.current_host() is None
+
+
+async def test_retry_rereads_file_key_without_masked_input(wizard, monkeypatch):
+    import nooa.secrets as secrets
+
+    monkeypatch.setattr(secrets, "_file_env", {})
+    monkeypatch.delenv("CONNECT_REFRESH_KEY", raising=False)
+    monkeypatch.delenv("NEMO_OO_SECRETS", raising=False)
+    path = wizard.root / ".nooa/secrets.yaml"
+    path.parent.mkdir()
+    path.write_text("env:\n  CONNECT_REFRESH_KEY: original-key\n")
+    secrets.load_secrets_into_env()
+    wizard.answers["Key environment variable (new to enter a key; - for no authentication)"] = (
+        "CONNECT_REFRESH_KEY"
+    )
+    wizard.answers["Model settings"] = "cancel"
+    prompt = wizard.command.frontend.prompt_connect.side_effect
+
+    async def answer(text, **options):
+        if text == "Next step":
+            assert options["labels"]["retry"] == "Reload secrets and try again"
+            path.write_text("env:\n  CONNECT_REFRESH_KEY: replacement-key\n")
+            return "retry"
+        return await prompt(text, **options)
+
+    wizard.command.frontend.prompt_connect.side_effect = answer
+    keys = []
+
+    async def interfaces(alias, model, endpoint, key_env, **kwargs):
+        keys.append(kwargs["api_key"])
+        plan = connect.plan(alias, model, "responses", endpoint, key_env)
+        plan.entry["provenance"]["probes"]["routing"] = {
+            "outcome": "accepted" if len(keys) == 2 else "rejected"
+        }
+        yield connect.InterfaceResult({"responses": connect.ConnectResult(alias, plan.entry)}, 1200)
+
+    monkeypatch.setattr(connect, "check_interfaces", interfaces)
+    assert (await wizard.command.execute([])).success
+    assert keys == ["original-key", "replacement-key"]
+    assert not any(options.get("hide_input") for _, options in wizard.prompts)
+    shown = str(wizard.command.frontend.render.call_args_list)
+    assert "original-key" not in shown and "replacement-key" not in shown
+    assert not (wizard.root / ".nooa/llm_config.yaml").exists()
+
+
+async def test_variable_completion_includes_new_file_names_without_exporting_values(
+    wizard, monkeypatch
+):
+    monkeypatch.delenv("NEW_FILE_KEY", raising=False)
+    path = wizard.root / ".nooa/secrets.yaml"
+    path.parent.mkdir()
+    path.write_text("env:\n  NEW_FILE_KEY: PRIVATE-SENTINEL\n")
+    wizard.answers["Model"] = None
+    assert (await wizard.command.execute([])).success
+    options = dict(wizard.prompts)[
+        "Key environment variable (new to enter a key; - for no authentication)"
+    ]
+    assert "NEW_FILE_KEY" in options["suggestions"]
+    assert "PRIVATE-SENTINEL" not in str(wizard.prompts)
+    assert "NEW_FILE_KEY" not in os.environ
