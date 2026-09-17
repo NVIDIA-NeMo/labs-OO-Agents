@@ -27,6 +27,15 @@ Do NOT re-declare `context`/`events` as class annotations to unhide them — use
 
 ## Context blocks
 
+File-backed `SQLiteStorageManager` instances hold both a local file lock and a
+sibling `.active` ownership directory. Always close the manager (or use its
+context manager). After a crash, the ownership directory intentionally remains
+and reopening fails with `SessionAlreadyActiveError`. Verify that no host or
+container process still owns the database before removing that stale directory;
+a PID lookup in one namespace is not proof that another namespace is idle.
+This applies to state databases in scripts and examples as well as interactive
+session databases. In-memory managers need no ownership recovery.
+
 Blocks appear as labelled SYSTEM sections, visible across all method calls on
 the instance (per-instance only — subagents don't inherit them). They are not
 the only information retained between turns of an active generation call: the

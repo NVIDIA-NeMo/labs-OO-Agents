@@ -24,7 +24,7 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
-def test_project_tui_skill_dirs_remain_compatible(tmp_path, monkeypatch):
+def test_project_tui_skill_dirs_remain_compatible(tmp_path, monkeypatch, caplog):
     workspace = tmp_path / "workspace"
     skills = tmp_path / "nemo-oo-skills"
     user_config = tmp_path / "user-config"
@@ -38,6 +38,7 @@ def test_project_tui_skill_dirs_remain_compatible(tmp_path, monkeypatch):
     (config_dir / "settings.yaml").write_text(f"tui:\n  additional_skills_dirs:\n    - {skills}\n")
 
     assert load_coding_skills_dirs(workspace) == [skills.resolve()]
+    assert "use coding.additional_skills_dirs" in caplog.text
 
 
 def test_shared_coding_skill_dirs_and_workspace_conventions_are_loaded(tmp_path, monkeypatch):
