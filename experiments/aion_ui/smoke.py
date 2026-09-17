@@ -120,7 +120,7 @@ async def main() -> None:
             assert artifact.read_text().startswith("# NOOA AionUi scripted spike artifact\n")
             assert "DEMO_TURN = 2" in artifact.read_text()
             listed = await connection.list_sessions(cwd=str(workspace))
-            assert session.session_id not in {item.session_id for item in listed.sessions}
+            assert session.session_id in {item.session_id for item in listed.sessions}
             await connection.close_session(session.session_id)
             listed = await connection.list_sessions(cwd=str(workspace))
             assert session.session_id in {item.session_id for item in listed.sessions}
@@ -204,7 +204,7 @@ async def main() -> None:
 
     summary = {
         "result": "passed",
-        "scope": "Real NOOA ExperimentalCodingAgent and tools over ACP stdio; scripted provider; Aion renderer not exercised",
+        "scope": "Real NOOA CodingAgent and tools over ACP stdio; scripted provider; Aion renderer not exercised",
         "live_llm_calls": 0,
         "completed_turns": len(turn_counts),
         "turn_activity": turn_counts,

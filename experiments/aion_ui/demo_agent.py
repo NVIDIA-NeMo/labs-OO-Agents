@@ -72,7 +72,7 @@ class DemoLLM(FakeLLMClient):
             tool_calls=[
                 ToolCall(
                     id=f"demo-{uuid4()}",
-                    name="python_cell",
+                    name="execute_python",
                     arguments=json.dumps({"code": code}),
                 )
             ],

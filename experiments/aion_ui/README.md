@@ -4,7 +4,7 @@
 server without a fork of either application. Real application tests verified
 chat, Python/tool output, file diffs, and resuming the same NOOA session after a
 runtime restart. The main follow-up work is permission requests, model
-selection, and hosting arbitrary domain agents beyond the shared interactive coding-agent contract.
+selection, and hosting additional domain agents through the interactive coding-agent contract.
 
 **The live model also worked through AionUi:** a secured, self-hosted Qwen
 model wrote a file, executed it, recovered from a Python mistake, and completed
@@ -15,11 +15,12 @@ the turn.
 Can AionUi provide the interactive application around NOOA while NOOA owns
 agent execution, tools, context, and durable sessions?
 
-The current target is NOOA's shared `ExperimentalCodingAgent`, the default ACP
-agent after #330. `--legacy-agent` selects `CodingAgent`, and `--agent` can select
-a custom interactive agent through the existing factory. Arbitrary domain
-`Agent` classes still need to satisfy the host's prompt, messaging, cancellation,
-and persistence contract.
+The current target on `main` is NOOA's `CodingAgent`, which the ACP adapter
+constructs directly. Its CLI has no `--agent` or `--legacy-agent` option.
+Supporting arbitrary domain `Agent` classes requires adapter selection and the
+host's prompt, messaging, cancellation, and persistence contract. The shared
+`ExperimentalCodingAgent` stack tested on September 16 is historical evidence
+for a different branch, described below.
 
 ## Design
 
@@ -45,7 +46,8 @@ integration mechanics; it does not measure live-model quality.
 ### Versions inspected
 
 - Original NOOA base: `f1c2587b` (`nooa-acp` Python SDK `agent-client-protocol==0.11.0`).
-- Stack validation base: #330 at `acaa17bb` on current main and #331 (see below).
+- Historical September 16 stack validation base: #330 at `acaa17bb` and #331 (see below).
+- September 17 rebase target: `main` at `d4d46f78`.
 - [AionUi 2.2.2 source](https://github.com/iOfficeAI/AionUi/tree/6744099b279b991c17e31c243f0920477bd31cb6).
 - [AionCore v0.2.2 source](https://github.com/iOfficeAI/AionCore/tree/47e66d0d151123e973b3fd1e77afcb5671b3f8c5).
 
@@ -190,14 +192,35 @@ messages, cancellation latency, and application-level success. Record provider
 calls separately so deterministic transport tests are not mistaken for live
 LLM tests.
 
-## Validation on the PR stack
+## Validation after rebase onto main (2026-09-17)
+
+The spike was rebased onto `main` at `d4d46f78`. It targets `CodingAgent` and its
+`execute_python` tool; the smoke now checks that active sessions remain listed
+and closed sessions remain available for resume. The typed `RespondResult`,
+notification-worker waits, and artifact assertions from the September 16
+follow-up are retained.
+
+Validation on macOS with an isolated environment from `uv sync --frozen --extra acp`:
+
+- ACP package suite: **85 passed, 3 pre-existing expected failures**, 53.10 s.
+- Scripted stdio smoke: **4 completed turns across 3 processes**, 50.582 s;
+  restart/replay, active and closed session listing, and cancellation/reuse passed.
+- Each completed turn: **2 message chunks, 3 tool cards, 3 tool updates**.
+  Replay: **2 user messages and 4 agent messages**. Cancellation: **1.5 ms**.
+- Ruff lint/format checks and launcher syntax passed. No live model calls.
+- Smoke evidence: `tmp/aion-ui-spike/run-7ed78782653c/summary.json`.
+
+AionCore, the browser, and live models were not rerun for this rebase; the
+application measurements and screenshot below remain historical evidence.
+
+## Historical validation on the PR stack (2026-09-16)
 
 On 2026-09-16, the scripted stdio smoke passed on Linux after placing this spike
 above #330 (`acaa17bb`) and #331. It exercised the real default
 `ExperimentalCodingAgent`, its `python_cell` tool, filesystem/shell tools, and
-ACP transport. The demo now returns a typed `RespondResult`; the resume check
-requires an active session to be hidden and a closed session to be listed.
-The smoke waits for the ACP SDK's notification worker before asserting replay
+ACP transport. That stack's demo returned a typed `RespondResult`; its resume
+check required an active session to be hidden and a closed session to be listed.
+The smoke waited for the ACP SDK's notification worker before asserting replay
 and tool completion, because JSON-RPC responses can arrive first.
 
 The run completed **4 turns across 3 server processes**, including a turn after
@@ -279,7 +302,7 @@ this run's restricted backend; the Python custom agent does not require it.
 | Python | Source and output are ACP tool content |
 | File changes | Structured diff content and file locations |
 | Terminal | Command lifecycle and output; `run_stream()` can publish intermediate output |
-| Sessions | Create, list, load, close; NOOA durable history is workspace-local; active and empty sessions are hidden from resume listings |
+| Sessions | Create, list, load, close; NOOA durable history is workspace-local; active sessions remain listed |
 | Resume | NOOA replays user/agent text; historical tool cards are not replayed by NOOA |
 | Stop | Cooperative cancellation; blocking synchronous code needs process isolation |
 | Skills / MCP | Shared coding skills and slash commands; stdio, HTTP, SSE MCP support |
@@ -287,7 +310,7 @@ this run's restricted backend; the Python custom agent does not require it.
 | Models / modes | Model selected at launch; no NOOA ACP model or permission-mode picker |
 | Attachments | NOOA accepts text and resource links; Aion sends ordinary attachments as `[[AION_FILES]]` path text. This still needs an application test. No NOOA image/audio support is advertised. |
 | NOOA-specific views | Nested method traces and context inspection remain in NOOA's trace viewer |
-| Other Agent classes | Factory and `--agent` selection exist; arbitrary agents still need the interactive host contract |
+| Other Agent classes | ACP constructs `CodingAgent`; other classes need adapter selection and the interactive host contract |
 
 The permission and isolation limits are properties of the current NOOA
 adapter, not protections supplied by choosing a UI. The existing
@@ -326,9 +349,9 @@ Two presentation details were checked against the actual custom-agent path:
    tool execution. This requires an execution decision point, not just a card.
 3. Add ACP model/config options and explicit message boundaries for a polished
    chat experience.
-4. If the goal is a UI for any NOOA agent, extend the existing factory's supported
-   host contract for prompts, messages, cancellation, and durable state beyond
-   interactive agents. Keep the framework's method traces in its existing viewer
+4. If the goal is a UI for any NOOA agent, extend the ACP adapter's agent selection
+   and host contract for prompts, messages, cancellation, and durable state beyond
+   `CodingAgent`. Keep the framework's method traces in its existing viewer
    until there is a specific reason to project them into Aion.
 
 ## Screenshot
