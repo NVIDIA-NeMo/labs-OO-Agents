@@ -85,33 +85,46 @@ CLI usage, and 130 means interrupted.
 
 ### Connect a model
 
-Start the TUI and run `/connect` — it guides you through picking a model and
-stores your credentials for you.
-
-```bash
-nooa tui
-```
+Start the TUI and run `/connect` to pick a provider and model, then preview the
+settings produced by the shared Connect library. Missing keys can be entered
+in a masked dialog. Discovery and preview do not run generation or save files.
 
 ```text
-/connect https://api.anthropic.com          # Anthropic (Claude)
-/connect https://api.openai.com/v1           # OpenAI
-/connect http://localhost:11434              # Local Ollama
-/connect http://localhost:8000/v1            # Local vLLM
-/connect https://inference-api.nvidia.com/v1 # NVIDIA inference API
+/connect
+/connect check minimal
+/connect save
+/model work
 ```
 
-Give it a URL and `/connect` figures out the rest: it fetches the available
-models, prompts for an API key if the backend needs one, saves an alias to your
-project, and switches to the model you pick. Rerun `/connect` on the same URL
-any time to update the saved alias.
+Choose `work` as the alias in the picker. Checks require an explicit `minimal`
+(routing) or `all` (tools, reasoning and session checks) action and may incur
+charges. Saving writes the alias and any key entered in the masked dialog;
+`/model work` separately switches the running agent. Use `save --replace` to
+replace an existing alias, or `cancel` to discard the draft.
+
+The same staged commands are available in ACP. For example:
+
+```text
+/connect anthropic
+/connect model MODEL_ID --as work
+/connect check all
+/connect save
+```
+
+Providers include `openai`, `anthropic`, and `nvidia`. Custom endpoints accept
+`--api-style chat|responses|anthropic` and `--api-key-env NAME`; stage commands
+read credentials from the environment and never ask you to paste them into
+chat. Local Ollama uses `http://localhost:11434/v1`. See the
+[Connect guide](../../docs/model-connect.md#in-session-setup-with-connect) for
+limits, reasoning templates, and workspace behavior.
 
 ### Editing saved config
 
-Everything `/connect` writes lives under your project's `.nooa/` folder:
+Model setup and preferences live under your project's `.nooa/` folder:
 
 - `.nooa/llm_config.yaml` — saved model aliases
 - `.nooa/secrets.yaml` — API keys keyed by env-var name
-- `.nooa/settings.yaml` — TUI preferences and default model
+- `.nooa/settings.yaml` — TUI preferences and the default selected by `/model`
 
 Edit any of them from inside the TUI with `/edit .nooa/<file>`, or open them in
 your usual editor. Changes to `settings.yaml` and `llm_config.yaml` are picked

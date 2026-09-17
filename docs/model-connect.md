@@ -502,7 +502,7 @@ the current runtime (LiteLLM by default). No temporary registry entries or globa
 registry changes are needed. Each checked client is closed even if its call fails.
 The TUI keeps model selection, confirmation, secret persistence and switching;
 it can call these async functions directly without invoking Click or a subprocess.
-Its existing Ollama-specific adapter remains separate from these three API styles.
+The native picker uses Ollama's OpenAI-compatible `/v1` endpoint with the chat style.
 
 ## What the observations mean
 
@@ -593,3 +593,9 @@ endpoint does not support discovery. `/connect` shows the pending preview and
 Saving never changes the running agent's model. Launch a new agent with
 `--model work` using the saved config, or use the host's model selection command.
 ACP setup commands do not enter the agent's conversation history.
+
+In the native TUI, `/connect` opens a provider/model picker when no draft exists.
+The picker ends at the preview; the same `check`, `save`, and `cancel` steps then
+apply. A missing key can be entered in a masked dialog and is only persisted to
+workspace `secrets.yaml` when you save. Use `/model ALIAS` after saving to switch
+explicitly. Local Ollama uses its OpenAI-compatible `/v1` endpoint.

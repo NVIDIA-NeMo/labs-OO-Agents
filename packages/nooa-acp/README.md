@@ -293,3 +293,12 @@ additional workspace directories, images, and embedded resources are not
 advertised yet. An unavailable, duplicate, or unsupported MCP server is skipped
 with a session warning so it cannot prevent a new or restored NOOA session from
 opening.
+
+### Configuring models from an ACP client
+
+The shared `/connect` command discovers models, previews registry settings, and
+runs explicitly requested checks through `nooa.unifiedllm.connect`. Start with
+`/connect openai` or `/connect help`. Saving writes the current workspace's
+`.nooa/llm_config.yaml` without switching the running agent. Credentials must be
+available in the server environment; never paste a key into chat. See the
+[staged command walkthrough](../../docs/model-connect.md#in-session-setup-with-connect).
