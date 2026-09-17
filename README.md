@@ -61,6 +61,7 @@ class SupportAgent(Agent):
 
 - **Agents are Python objects.** Fields are state, methods are capabilities, docstrings are prompts, type annotations are contracts.
 - **`...` bodies are LLM-driven.** A method with `...` becomes an agentic loop; a real body stays deterministic Python.
+- **Generation commits one result.** Deterministic generators are supported, but generated streams need a separate stream contract and are rejected clearly.
 - **Code as action.** The model acts by writing Python in a Jupyter-style REPL with access to `self`, imports, and helpers — Python methods and type annotations supply the callable interfaces, reducing the need to write separate tool-schema definitions.
 - **Pythonic and agent-ready.** Typed I/O with auto-retry, live-object arguments passed by reference, and model-callable context and event APIs — designed around agent-oriented Python workflows.
 

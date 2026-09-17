@@ -272,10 +272,10 @@ class ReflexionStrategy(GenerationStrategy):
         )
 
         # Parse response
-        if isinstance(response.content, ReflectionOutput):
-            return response.content
-        elif isinstance(response.content, dict):
-            return ReflectionOutput(**response.content)
+        if isinstance(response.parsed, ReflectionOutput):
+            return response.parsed
+        elif isinstance(response.parsed, dict):
+            return ReflectionOutput(**response.parsed)
         else:
             # Fallback: assume NOT satisfactory to trigger retry
             logger.warning(

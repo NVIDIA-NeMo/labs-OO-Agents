@@ -30,6 +30,9 @@ from nooa.context_blocks.roles import Role
 
 _logger = logging.getLogger(__name__)
 
+# Trace-only marker: no provider-issued tool call exists to replay.
+CODEACT_INLINE_RETURN = "codeact_inline_return"
+
 # === Global Event Registry ===
 
 # Mapping of event_type string -> EventBase subclass.
@@ -66,6 +69,7 @@ class EventStatus(StrEnum):
 class ResultStatus(StrEnum):
     """Status of a tool result."""
 
+    RUNNING = "running"
     COMPLETE = "complete"
     ERROR = "error"
 
@@ -74,7 +78,11 @@ class ResultStatus(StrEnum):
 
 
 class EventBase(BaseModel):
-    """Base class for all events.
+    """Durable record with identity, lifecycle, and public searchable fields.
+
+    Events are the public conversation IR, not provider messages. The formatter
+    decides how each public event type contributes to model context; specialized
+    assistant replay operations belong to LLMResponse, not every event.
 
     Subclasses define:
     - event_type: Auto-derived from class name (repr=False), or explicit override
@@ -89,6 +97,20 @@ class EventBase(BaseModel):
     """
 
     _role: ClassVar[Role] = Role.USER
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether this event has nothing to contribute to model context.
+
+        Events are meaningful by default, including events without text fields.
+        Specialized durable records may distinguish observability from replay.
+        """
+        return False
+
+    def searchable_fields(self) -> dict[str, Any]:
+        """Public fields for search/debug export; consumers need not know their layout."""
+        # Keep nested objects intact so their display rules still hide private fields.
+        return self.__instance_values__()
 
     # Discriminator field - excluded from repr.
     # Default is "" (empty); model_post_init fills it with cls.__name__ if unset.
@@ -209,9 +231,17 @@ class ToolResult(BaseModel):
     """
 
     tool_call_id: Annotated[str, Field(description="ID of the tool call this is a result for")]
-    content: Annotated[str, Field(description="Result content from the tool")]
+    content: Annotated[
+        str,
+        Field(
+            description=(
+                "Provider-visible result text; immutable after an LLM generation observes it"
+            )
+        ),
+    ]
     result_status: ResultStatus = Field(
-        default=ResultStatus.COMPLETE, description="Execution status"
+        default=ResultStatus.COMPLETE,
+        description="Execution lifecycle status; not part of provider-visible result content",
     )
 
 
@@ -232,13 +262,10 @@ class ToolCallEvent(EventBase):
     tool_call_id: Annotated[str, Field(description="Unique identifier for this tool call")]
     name: Annotated[str, Field(description="Name of the tool being called")]
     arguments: Annotated[dict[str, Any], Field(description="Arguments passed to the tool")]
-    reasoning_items: list[dict[str, Any]] | None = Field(
+    llm_response_id: str | None = Field(
         default=None,
         repr=False,
-        description=(
-            "Opaque provider reasoning state that must accompany this assistant "
-            "tool call when conversation history is replayed"
-        ),
+        description="Canonical LLMResponse event that emitted this tool call",
     )
 
     # Nested result (filled after execution via EventManager.update())

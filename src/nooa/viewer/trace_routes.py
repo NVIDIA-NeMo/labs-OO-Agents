@@ -678,7 +678,18 @@ async def run_inference(request: InferenceRequest):
             msg.get("tool_calls") for msg in normalized_messages if isinstance(msg, dict)
         )
         if has_tool_calls:
-            kwargs["tools"] = DEFAULT_SANDBOX_TOOLS
+            kwargs["tools"] = list(DEFAULT_SANDBOX_TOOLS)
+            if any(
+                call["function"]["name"] == "python_cell"
+                for message in normalized_messages
+                for call in message.get("tool_calls", [])
+            ):
+                kwargs["tools"].append(
+                    {
+                        "type": "function",
+                        "function": {**DEFAULT_SANDBOX_TOOLS[0]["function"], "name": "python_cell"},
+                    }
+                )
 
         if model_config and model_config.get("endpoint"):
             kwargs["api_base"] = model_config["endpoint"]

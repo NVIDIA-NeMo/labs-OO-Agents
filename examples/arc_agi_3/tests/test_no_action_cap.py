@@ -149,17 +149,6 @@ def _codeact_response(code: str):
             ToolCall(id=f"call_{abs(hash(code)) & 0xFFFF}", name="execute_python", arguments=args)
         ],
         finish_reason="tool_calls",
-        assistant_message={
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": f"call_{abs(hash(code)) & 0xFFFF}",
-                    "type": "function",
-                    "function": {"name": "execute_python", "arguments": args},
-                }
-            ],
-        },
         reasoning=None,
         usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     )

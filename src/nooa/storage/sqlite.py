@@ -31,7 +31,6 @@ from nooa.events import (
     BeforeTurn,
     Error,
     Feedback,
-    LLMOutput,
     Message,
     PythonOutput,
     Reasoning,
@@ -40,6 +39,7 @@ from nooa.events import (
     TuiSessionCleared,
     TuiSessionResumed,
 )
+from nooa.llm_types import LLMResponse
 from nooa.storage.json_snapshot import snapshot_from_dict, snapshot_to_dict
 from nooa.storage.snapshot import AgentSnapshot
 
@@ -82,7 +82,7 @@ for _cls in (
     Reasoning,
     Error,
     Feedback,
-    LLMOutput,
+    LLMResponse,
     PythonOutput,
     Summary,
     BeforeTurn,
@@ -293,6 +293,12 @@ class SQLiteEventBackend:
         if not isinstance(raw, dict):
             raise TypeError("event data JSON root must be an object")
         event_type = raw.get("event_type", "")
+        # LLMResponse replaced LLMOutput as the durable assistant-turn event.
+        # Preserve assistant text when an existing session is resumed; all new
+        # fields default safely and opaque state was never present on LLMOutput.
+        if event_type == "LLMOutput":
+            raw["event_type"] = "LLMResponse"
+            return LLMResponse.model_validate(raw, context={"archive": True})
         cls = self._registry.get(event_type)
         if cls is None:
             # Fall back to the global auto-registration registry
@@ -300,7 +306,7 @@ class SQLiteEventBackend:
         if cls is None:
             logger.warning("Unknown event_type %r, falling back to Metadata", event_type)
             return Metadata.model_validate(raw)
-        return cls.model_validate(raw)
+        return cls.model_validate(raw, context={"archive": True})
 
     def _try_deserialize(self, data: str, *, context: str) -> EventBase | None:
         try:
@@ -866,11 +872,15 @@ class SQLiteStorageManager:
             if conn is not None:
                 if lock is not None:
                     with lock:
-                        conn.commit()
-                        conn.close()
+                        try:
+                            conn.commit()
+                        finally:
+                            conn.close()
                 else:
-                    conn.commit()
-                    conn.close()
+                    try:
+                        conn.commit()
+                    finally:
+                        conn.close()
         finally:
             if self._lock_fd is not None:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)

@@ -12,6 +12,17 @@ from nooa.skill import Skill, get_slash_commands, slash_command
 from nooa.unifiedllm import FakeLLMClient
 
 
+async def test_close_awaits_background_components_before_closing_shared_client(tmp_path):
+    from unittest.mock import AsyncMock
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    calls = []
+    agent.event_manager.on_close(AsyncMock(side_effect=lambda: calls.append("component")))
+    agent.llm.aclose = AsyncMock(side_effect=lambda: calls.append("client"))
+    await agent.close()
+    assert calls == ["component", "client"]
+
+
 def test_agent_instructions_follow_repository_hierarchy(tmp_path):
     (tmp_path / ".git").mkdir()
     nested = tmp_path / "packages" / "example"

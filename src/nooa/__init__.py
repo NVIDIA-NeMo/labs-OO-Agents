@@ -62,16 +62,20 @@ from nooa.skill_registry import skill_from_module  # noqa: E402
 from nooa.storage import StorageManager  # noqa: E402
 
 # Export strategy base class and implementations.
-# NOTE: CodeActLiteStrategy and ReflexionStrategy are experimental. They are NOT
-# imported raw here — that would bypass the FutureWarning gate in
-# nooa.experimental. Instead they are exposed lazily via __getattr__
-# below, which returns the warning-emitting factories.
+# NOTE: ReflexionStrategy is experimental. It is exposed lazily via __getattr__
+# below, which returns the warning-emitting factory from nooa.experimental.
 from nooa.strategies import (  # noqa: E402
     CodeActStrategy,
+    CodeActV2,
     GenerationStrategy,
     InspectInputsPrefill,
     PredictStrategy,
+    TextOnlyResponseAction,
+    TextOnlyResponseContext,
+    TextOnlyResponseHandler,
     get_default_strategy,
+    retry_text_only_response,
+    return_text_as_result,
     set_default_strategy,
 )
 from nooa.strategy_validation import (  # noqa: E402
@@ -92,9 +96,9 @@ def __getattr__(name):
 
         return llm_config_chain
     # Experimental strategies: route through the warning factories so that
-    # `from nooa import CodeActLiteStrategy; CodeActLiteStrategy()`
+    # `from nooa import ReflexionStrategy; ReflexionStrategy()`
     # emits the same FutureWarning as importing from nooa.experimental.
-    if name in ("CodeActLiteStrategy", "ReflexionStrategy"):
+    if name == "ReflexionStrategy":
         from nooa import experimental
 
         return getattr(experimental, name)
@@ -119,7 +123,12 @@ __all__ = [
     # Strategies
     "GenerationStrategy",
     "CodeActStrategy",
-    "CodeActLiteStrategy",
+    "CodeActV2",
+    "TextOnlyResponseAction",
+    "TextOnlyResponseContext",
+    "TextOnlyResponseHandler",
+    "retry_text_only_response",
+    "return_text_as_result",
     "ReflexionStrategy",
     "PredictStrategy",
     "get_default_strategy",

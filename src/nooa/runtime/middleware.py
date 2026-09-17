@@ -9,7 +9,10 @@ Register middleware via ``event_manager.intercept()``::
 
 Three hooks are available:
 
-- ``agent_call``: wraps the entire agent method (all turns, all code)
+- ``agent_call``: wraps an instrumented async agent method (all turns, all code).
+  Does **not** apply to sync methods, ``@no_trace`` methods, ``staticmethod`` /
+  ``classmethod``, or methods inherited from non-Agent bases — see
+  :class:`AgentCallContext`.
 - ``llm_call``: wraps ``runtime.generate()`` (the LLM round-trip)
 - ``execute_python``: wraps ``runtime.execute_code()`` (sandbox execution)
 
@@ -19,19 +22,19 @@ context object and *nxt* calls the rest of the chain.
 **intercept() vs on()** — both live on ``EventManager``:
 
 - ``intercept("llm_call", fn)`` wraps a live operation (can transform / block)
-- ``on("LLMOutput", fn)`` observes a recorded event (fire-and-forget, after
+- ``on("LLMResponse", fn)`` observes a recorded event (fire-and-forget, after
   the operation completes and the result is recorded)
 """
 
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nooa.agent import Agent
 from nooa.events import ExecutionResult
 from nooa.runtime.actor import ActorRuntime
-from nooa.unifiedllm import LLMResponse
+from nooa.unifiedllm import CacheBoundary, LLMResponse, UnifiedLLM
 
 # Sentinel indicating that ``AgentCallContext.result`` has not been set yet.
 # Distinguishes "middleware never ran the inner handler" from "method returned None".
@@ -68,8 +71,32 @@ MIDDLEWARE_EXECUTE_PYTHON = "execute_python"
 class AgentCallContext(BaseModel):
     """Context for ``agent_call`` middleware.
 
-    Wraps the entire agent method execution — all LLM turns, all code
-    executions, the final return.
+    Wraps the entire execution of an instrumented async agent method — all LLM
+    turns, all code executions, the final return.
+
+    .. warning::
+       Coverage is narrower than "every agent method". Middleware is async and
+       runs only in the wrapper the metaclass builds for traced async methods, so
+       a method executes with no ``AgentCallContext`` ever created for it when it
+       is any of:
+
+       - synchronous (``def``) — cannot be wrapped by an async chain;
+       - marked ``@no_trace`` and left unwrapped by the metaclass — a
+         ``@no_trace`` method that is generated or carries ``@strategy`` keeps
+         its async wrapper, and the middleware chain with it;
+       - a ``staticmethod`` or ``classmethod`` — skipped as a non-plain function;
+       - inherited from a base that is not itself an ``Agent``.
+
+       This holds however the method is reached, including from generated CodeAct
+       Python. Traced sync methods still emit agent-call events and spans; it is
+       specifically the middleware chain, the part that can *block*, that does
+       not apply.
+
+       Declare a capability as a traced ``async def`` method to place it under
+       middleware, or enforce the policy inside the method body. When
+       ``agent_call`` middleware is registered, a ``RuntimeWarning`` names the
+       uncovered methods the first time a covered method runs, and each
+       traced sync method warns on its own first call.
 
     Attributes:
         agent: The agent instance.
@@ -93,21 +120,28 @@ class LLMCallContext(BaseModel):
     """Context for ``llm_call`` middleware.
 
     Attributes:
-        messages: The prompt messages list (mutable — middleware may edit).
+        messages: Public dictionaries and read-only responses. Replace a response
+                  with a dictionary to edit it and discard its native state.
         params: Extra keyword arguments forwarded to ``acall()``
                 (tools, output_model, etc.).  Middleware may add / remove keys.
         agent: The agent instance that owns the runtime.
         runtime: The ``ActorRuntime`` instance.
+        client: Effective client for this call, including method-level overrides.
+                Read-only: route overrides belong in params, not a replacement client.
+        filtered_history: An event query restricted the rendered history. Consumers
+                          must not treat this request as the complete event archive.
         response: ``None`` on the way *in*; set to the ``LLMResponse`` by the
                   innermost handler on the way *out*.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    messages: list[dict[str, Any]]
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary]
     params: dict[str, Any] = {}
     agent: Agent | None = None
     runtime: ActorRuntime | None = None
+    client: UnifiedLLM | None = Field(default=None, frozen=True)
+    filtered_history: bool = False
     response: LLMResponse | None = None
 
 

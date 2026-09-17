@@ -714,7 +714,7 @@ def _create_tool_instance(
     """
     tool_specs = []
     for tool in tools_result.tools:
-        input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+        input_schema = _tool_input_schema(tool)
         tool_specs.append(
             MCPToolSpec(
                 name=tool.name,
@@ -728,6 +728,15 @@ def _create_tool_instance(
     instance = object.__new__(dynamic_class)
     instance.__init__(client, server_name, refresh_ctx=refresh_ctx)
     return instance
+
+
+def _tool_input_schema(tool: Any) -> dict[str, Any]:
+    """Return a tool schema across MCP SDK field naming conventions."""
+    for attribute in ("input_schema", "inputSchema"):
+        schema = getattr(tool, attribute, None)
+        if isinstance(schema, dict):
+            return schema
+    return {}
 
 
 async def _list_server_tools(server_name: str, client: Any) -> Any:

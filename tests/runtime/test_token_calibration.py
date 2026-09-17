@@ -9,7 +9,7 @@ remain fallback diagnostics and recovery inputs, not the primary token signal.
 
 import pytest
 
-from nooa import Agent
+from nooa import Agent, CodeActStrategy, return_text_as_result, strategy
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent, ToolResult
 from nooa.events import Message
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
@@ -56,13 +56,13 @@ class TestTokenCalibration:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage={"prompt_tokens": 500, "completion_tokens": 7},
                 )
             ]
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...
@@ -105,13 +105,13 @@ class TestTokenCalibration:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage={"prompt_tokens": 150_000, "completion_tokens": 9},
                 )
             ]
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...
@@ -144,13 +144,13 @@ class TestTokenCalibration:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage={"prompt_tokens": 5_000, "completion_tokens": 4},
                 )
             ]
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...
@@ -218,13 +218,13 @@ class TestActualTokenStats:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage={"prompt_tokens": 12_345, "completion_tokens": 7},
                 )
             ]
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...
@@ -252,13 +252,13 @@ class TestActualTokenStats:
                     content="ok",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "ok"},
                     usage=None,
                 )
             ]
         )
 
         class A(Agent, llm=llm):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
             async def respond(self, prompt: str) -> str:
                 """Respond to {prompt}."""
                 ...

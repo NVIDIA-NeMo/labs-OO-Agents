@@ -67,7 +67,7 @@ class RuntimeServices(Protocol):
         - System message: context blocks + strategy.strategy_prompt
         - Events: conversation events
 
-        Creates an LLMOutput event and adds it to event manager.
+        Creates an LLMResponse event and adds it to event manager.
 
         Args:
             tools: Optional list of tool definitions.
@@ -77,7 +77,7 @@ class RuntimeServices(Protocol):
         Returns:
             Tuple of (LLMResponse, event_id) where:
             - LLMResponse has content, reasoning, usage
-            - event_id can be used for event_manager.update() (e.g., strip reasoning)
+            - event_id identifies the append-only provider turn for inspection or linking
         """
         ...
 
@@ -328,14 +328,14 @@ class GenerationStrategy(ABC, metaclass=AgentMeta):
         )
 
         result = None
-        exception = None
+        exception: BaseException | None = None
         try:
             if inspect.iscoroutinefunction(callable_obj):
                 result = await callable_obj(*args, **kwargs)
             else:
                 result = callable_obj(*args, **kwargs)
             return result
-        except Exception as e:
+        except BaseException as e:
             exception = e
             raise
         finally:

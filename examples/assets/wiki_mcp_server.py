@@ -10,9 +10,14 @@ Usage (standalone test):
     uv run python examples/assets/wiki_mcp_server.py
 """
 
-from mcp.server import FastMCP
+from importlib import import_module
 
-mcp = FastMCP("wiki")
+try:
+    _MCPServer = import_module("mcp.server.mcpserver").MCPServer
+except ImportError:
+    _MCPServer = import_module("mcp.server").FastMCP
+
+mcp = _MCPServer("wiki")
 
 # -- Canned knowledge base ---------------------------------------------------
 

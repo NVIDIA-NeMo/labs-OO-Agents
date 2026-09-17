@@ -562,6 +562,7 @@ def main() -> int:
             "[run] harness exited without result.json — check "
             f"{run_dir}/harness.log and {run_dir}/launcher.err"
         )
+        return 1
 
     return 0
 

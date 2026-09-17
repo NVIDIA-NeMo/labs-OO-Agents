@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""A bounded reasoning probe with independently checkable final-answer evidence."""
+
+import json
+from itertools import permutations
+
+import httpx
+import pytest
+
+from nooa.unifiedllm import connect
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
+
+
+def test_scheduling_puzzle_has_one_solution():
+    solutions = []
+    for order in permutations("ABCDEFGH"):
+        p = {job: order.index(job) for job in order}
+        if (
+            p["A"] == p["B"] + 3
+            and p["E"] == p["C"] + 1
+            and p["F"] == p["E"] + 1
+            and p["D"] == p["G"] + 1
+            and p["E"] > p["A"]
+            and p["H"] == 7
+        ):
+            solutions.append("".join(order))
+    assert solutions == ["BGDACEFH"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
+@pytest.mark.parametrize(
+    "answer,correct", [("B G D A C E F H", True), ("ABCDEFGH", False), ("", False)]
+)
+async def test_puzzle_reaches_wire_and_scores_only_final_answer(
+    monkeypatch, style, answer, correct
+):
+    sent = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        assert body.get("max_tokens", body.get("max_output_tokens")) == 32768
+        messages = body.get("messages", body.get("input"))
+        assert connect.REASONING_CHECK_PROMPT in json.dumps(messages, ensure_ascii=False).replace(
+            "\\n", "\n"
+        )
+        return httpx.Response(200, json=response_body(style, answer))
+
+    mock_http(monkeypatch, handle)
+    settings = (
+        {"thinking": {"type": "adaptive"}}
+        if style == "anthropic"
+        else {"reasoning": {"effort": "medium"}}
+        if style == "responses"
+        else {"reasoning_effort": "medium"}
+    )
+    proposal = connect.plan(
+        "test",
+        "claude-sonnet-4-6" if style == "anthropic" else "test-model",
+        style,
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": settings},
+    )
+    assert "Compute 17 * 19" in str(proposal.probes[0].body)
+    assert "Call probe_tool" in str(proposal.probes[1].body)
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    assert len(sent) == 1
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["settings_sent"] is True
+    assert record["answer_correct"] is correct
+    assert record["reasoning_observed"] is False  # Correct text is not reasoning evidence.
+    assert record["input_tokens"] == 20
+    assert record["output_tokens"] == 2
+    assert "answer_correct" in connect.diagnostic_prompt(
+        "reasoning", result.entry, {"level:on": record}
+    )
+    assert not {"content", "reasoning", "response"} & record.keys()

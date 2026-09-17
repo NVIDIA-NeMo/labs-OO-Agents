@@ -32,7 +32,6 @@ def _exec_python_resp(code: str) -> LLMResponse:
         content="",
         tool_calls=[ToolCall(id="c1", name="execute_python", arguments=json.dumps({"code": code}))],
         finish_reason="tool_calls",
-        assistant_message={"role": "assistant", "content": ""},
     )
 
 

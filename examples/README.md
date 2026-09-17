@@ -17,7 +17,8 @@ Most quickstarts use the model selector in
 [`nooa.util.quickstart`](../src/nooa/util/quickstart.py), which chooses a default
 from the provider credentials in your environment. See the root README's
 [Choose a model](../README.md#1-choose-a-model) section when adapting an example
-to use an explicit model.
+to use an explicit model. For local LLM setup, see
+[Running NOOA With Local Models](../docs/local-models.md).
 
 NOOA can execute LLM-generated Python. Run code-executing agents in an OS-level
 sandbox, as described in the root README's [Quick Start safety note](../README.md#quick-start).
@@ -56,6 +57,7 @@ they are references rather than a second tutorial.
 | Example | Focus |
 |---|---|
 | [`codeact_event_sequence.py`](advanced/codeact_event_sequence.py) | Raw events emitted during a CodeAct run |
+| [`durable_hitl.py`](advanced/durable_hitl.py) | Resume a durable workflow after an interruption, illustrated with a human-input pause |
 | [`memory.py`](advanced/memory.py) | Conversation history across method calls |
 | [`prefill.py`](advanced/prefill.py) | Customizing the input prefill shown to generated code |
 | [`swappable_execution_engines.py`](advanced/swappable_execution_engines.py) | Replacing the default Python execution engine |

@@ -5,7 +5,7 @@
 from nooa.events import (
     Error,
     Feedback,
-    LLMOutput,
+    LLMResponse,
     Message,
     Reasoning,
     Task,
@@ -46,10 +46,10 @@ class TestEventTypes:
         assert event.event_type == "Feedback"
         assert event.content == "Code executed. Output: 42"
 
-    def test_llm_output_event(self):
-        """LLMOutput for LLM responses."""
-        event = LLMOutput(content="def foo(): pass")
-        assert event.event_type == "LLMOutput"
+    def test_llm_response_event(self):
+        """LLMResponse for LLM responses."""
+        event = LLMResponse(content="def foo(): pass")
+        assert event.event_type == "LLMResponse"
         assert event.content == "def foo(): pass"
 
     def test_event_serialization(self):
@@ -99,8 +99,8 @@ class TestBackwardCompatAliases:
         assert event.event_type == "Feedback"
 
     def test_assistant_event_alias(self):
-        event = LLMOutput(content="test")
-        assert event.event_type == "LLMOutput"
+        event = LLMResponse(content="test")
+        assert event.event_type == "LLMResponse"
 
 
 class TestEventManagerEventAPI:
@@ -117,16 +117,16 @@ class TestEventManagerEventAPI:
         assert em.values()[0].prompt == "Do something"
         assert em.values()[0].event_type == "Task"
 
-    def test_add_llm_output_event(self):
-        """add() accepts LLMOutput."""
+    def test_add_llm_response_event(self):
+        """add() accepts LLMResponse."""
         em = EventManager()
-        event = LLMOutput(content="def foo(): pass")
+        event = LLMResponse(content="def foo(): pass")
 
         em.add(event)
 
         assert len(em) == 1
         assert em.values()[0].content == "def foo(): pass"
-        assert em.values()[0].event_type == "LLMOutput"
+        assert em.values()[0].event_type == "LLMResponse"
 
     def test_add_error_event(self):
         """add() accepts Error."""

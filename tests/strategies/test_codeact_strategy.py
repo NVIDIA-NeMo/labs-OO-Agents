@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.events import PythonOutput, ResultStatus
-from nooa.strategies.codeact import CodeActStrategy
+from nooa.strategies.codeact import CodeActStrategy, return_text_as_result
 from nooa.strategies.codeact_errors import (
     format_validation_error,
     get_type_example,
@@ -37,7 +37,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -216,8 +215,9 @@ class TestCodeActStrategySimpleExecution:
         assert result == 15
 
     @pytest.mark.asyncio
-    async def test_reasoning_items_replayed_with_tool_call_history(self):
-        """Opaque reasoning state is retained for the next CodeAct turn."""
+    async def test_reasoning_items_are_stored_once_and_fail_closed_on_replay(self):
+        """The IR retains opaque state but never sends it to a fake provider."""
+        from nooa.llm_types import AssistantReasoning
 
         class TestAgent(Agent, llm=_TEST_LLM):
             async def compute(self) -> int:
@@ -233,7 +233,14 @@ class TestCodeActStrategySimpleExecution:
         first_response = _resp(
             "", tool_calls=[_tool_call("value = 42\nprint(value)", call_id="call_reasoning")]
         )
-        first_response.assistant_message["reasoning_items"] = [reasoning_item]
+        first_response = LLMResponse(
+            parts=(
+                AssistantReasoning(text="", native={"reasoning_items": [reasoning_item]}),
+                *first_response.parts,
+            ),
+            replay_scope="chat:openai:test",
+            finish_reason="tool_calls",
+        )
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 first_response,
@@ -245,18 +252,27 @@ class TestCodeActStrategySimpleExecution:
         result = await agent_instance.compute()
 
         assert result == 42
+        output_event = next(
+            event
+            for event in agent_instance.event_manager.values()
+            if event.event_type == "LLMResponse"
+            and event.tool_calls
+            and event.tool_calls[0].id == "call_reasoning"
+        )
         tool_call_event = next(
             event
             for event in agent_instance.event_manager.values()
             if event.event_type == "ToolCallEvent" and event.tool_call_id == "call_reasoning"
         )
-        assert tool_call_event.reasoning_items == [reasoning_item]
+        assert "reasoning_items" not in type(tool_call_event).model_fields
+        assert tool_call_event.llm_response_id == output_event.id
+        assert output_event.parts == first_response.parts
         replayed_tool_call = next(
             message
             for message in fake_llm.last_messages
             if message.get("role") == "assistant" and message.get("tool_calls")
         )
-        assert replayed_tool_call["reasoning_items"] == [reasoning_item]
+        assert "reasoning_items" not in replayed_tool_call
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls_then_result(self):
@@ -1052,7 +1068,7 @@ class TestCodeActStrategyEventSequence:
         The architecture nests ToolResult inside ToolCallEvent.result,
         so there are no separate tool_result events.
 
-        Sequence: task -> tool_call (with nested result) -> execute_python -> tool_call (with nested result)
+        Each provider turn remains as LLMResponse before its execution events.
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
@@ -1082,18 +1098,23 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         event_types = [e.event_type for e in events]
 
-        # Architecture: ToolResult is nested in ToolCallEvent.result (no separate tool_result events)
-        # Sequence: Task -> ToolCallEvent -> PythonOutput -> ToolCallEvent
+        # LLMResponse is the canonical provider turn. ToolResult remains nested
+        # in ToolCallEvent, with no separate tool-result event.
         assert event_types == [
             "Task",
+            "LLMResponse",
             "ToolCallEvent",
             "PythonOutput",
+            "LLMResponse",
             "ToolCallEvent",
-        ], f"Expected ['Task', 'ToolCallEvent', 'PythonOutput', 'ToolCallEvent'], got {event_types}"
+        ]
 
         # Verify first ToolCallEvent has correct data (execute_python)
-        tool_call_event = events[1]
+        first_output = events[1]
+        tool_call_event = events[2]
+        assert first_output.tool_calls[0].id == "call_abc123"
         assert tool_call_event.event_type == "ToolCallEvent"
+        assert tool_call_event.llm_response_id == first_output.id
         assert tool_call_event.tool_call_id == "call_abc123"
         assert tool_call_event.name == "execute_python"
         assert "code" in tool_call_event.arguments
@@ -1103,23 +1124,21 @@ class TestCodeActStrategyEventSequence:
         assert tool_call_event.result.tool_call_id == "call_abc123"
 
         # Verify execute_python event contains the deferred output
-        exec_output_event = events[2]
+        exec_output_event = events[3]
         assert exec_output_event.event_type == "PythonOutput"
         assert exec_output_event.tool_call_id == "call_abc123"
 
         # Verify second ToolCallEvent is return_result
-        return_call_event = events[3]
+        return_output = events[4]
+        return_call_event = events[5]
         assert return_call_event.event_type == "ToolCallEvent"
+        assert return_call_event.llm_response_id == return_output.id
         assert return_call_event.name == "return_result"
         assert return_call_event.result is not None
 
     @pytest.mark.asyncio
-    async def test_no_empty_assistant_event_before_tool_call(self):
-        """Empty LLMOutputs should be removed before ToolCallEvents.
-
-        When the LLM returns a tool call with no content, the CodeAct strategy
-        removes the empty LLMOutput to keep history clean.
-        """
+    async def test_tool_turn_is_retained_but_not_rendered_twice(self):
+        """The canonical LLMResponse persists while ToolCallEvent drives replay."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1139,32 +1158,38 @@ class TestCodeActStrategyEventSequence:
 
         assert result == "done"
 
-        # Check that we don't have empty LLMOutputs before ToolCallEvents
         events = agent_instance.event_manager.values()
-        event_types = [e.event_type for e in events]
-
-        # Verify no empty LLMOutput events remain (they should be removed when tool calls are made)
-        for i in range(len(event_types) - 1):
-            if event_types[i] == "LLMOutput" and event_types[i + 1] == "ToolCallEvent":
-                # Check if it's an empty assistant event
-                if not events[i].content:
-                    pytest.fail(
-                        f"Found empty LLMOutput before ToolCallEvent at index {i}. "
-                        f"Event sequence: {event_types}"
-                    )
+        outputs = [event for event in events if event.event_type == "LLMResponse"]
+        calls = [event for event in events if event.event_type == "ToolCallEvent"]
+        assert len(outputs) == len(calls) == 2
+        assert [output.tool_calls[0].id for output in outputs] == [
+            call.tool_call_id for call in calls
+        ]
+        assert [call.llm_response_id for call in calls] == [output.id for output in outputs]
+        assert not any(
+            message.get("role") == "assistant"
+            and not message.get("tool_calls")
+            and not message.get("content")
+            for message in fake_llm.last_messages
+        )
 
     @pytest.mark.asyncio
     async def test_text_only_stop_response_routes_through_return_result(self):
         """Text-only LLM response (finish_reason=stop) routes through return_result validation.
 
         When the LLM returns finish_reason="stop" with text content, the strategy
-        constructs a synthetic return_result(content) tool call and routes it through
-        validation. If the return type matches (e.g. str), the session terminates
-        successfully with the content as the return value.
+        validates the content as a return_result value without persisting a tool
+        call the model did not make. If the return type matches (e.g. str), the
+        session terminates successfully with the content as the return value.
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def think_and_answer(self) -> str:
                 """A task that requires thinking."""
                 ...
@@ -1185,13 +1210,12 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         event_types = [e.event_type for e in events]
 
-        # The synthetic return_result ToolCallEvent should be present
+        # The original assistant turn is preserved; no synthetic provider tool
+        # exchange is added to history.
+        llm_responses = [e for e in events if e.event_type == "LLMResponse" and not e.tool_calls]
+        assert [event.content for event in llm_responses] == ["The answer is 42."]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 1
-        synthetic = tool_call_events[0]
-        assert synthetic.name == "return_result"
-        assert synthetic.result is not None
-        assert synthetic.result.result_status == ResultStatus.COMPLETE
+        assert tool_call_events == []
 
         # No error event should be added
         assert "Error" not in event_types
@@ -1210,7 +1234,12 @@ class TestCodeActStrategyEventSequence:
             thought: str
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def think_and_answer(self) -> str:
                 """A task that requires thinking."""
                 ...
@@ -1220,7 +1249,6 @@ class TestCodeActStrategyEventSequence:
             content=ThoughtModel(thought="I need to reason carefully here."),
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": ""},
         )
         fake_llm = FakeLLMClient(
             scripted_responses=[
@@ -1235,10 +1263,11 @@ class TestCodeActStrategyEventSequence:
         assert "I need to reason carefully here." in result
 
         events = agent_instance.event_manager.values()
+        llm_responses = [e for e in events if e.event_type == "LLMResponse" and not e.tool_calls]
+        assert len(llm_responses) == 1
+        assert "I need to reason carefully here." in llm_responses[0].content
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 1
-        assert tool_call_events[0].name == "return_result"
-        assert tool_call_events[0].result.result_status == ResultStatus.COMPLETE
+        assert tool_call_events == []
 
     @pytest.mark.asyncio
     async def test_text_only_stop_with_typed_return_gives_validation_error(self):
@@ -1251,7 +1280,12 @@ class TestCodeActStrategyEventSequence:
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def compute_stats(self) -> dict:
                 """Compute statistics and return a dict."""
                 ...
@@ -1272,21 +1306,18 @@ class TestCodeActStrategyEventSequence:
         assert result == {"mean": 42, "count": 10}
 
         events = agent_instance.event_manager.values()
-        # Should see: Task → synthetic return_result (with error) → real return_result (success)
+        # The text-only assistant turn is retained, followed by a user correction
+        # and the model's real return_result call.
+        llm_responses = [e for e in events if e.event_type == "LLMResponse" and not e.tool_calls]
+        assert [event.content for event in llm_responses] == [
+            "I have successfully completed the computation!"
+        ]
+        corrections = [e for e in events if e.event_type == "Error"]
+        assert any("attempted result was invalid" in e.content for e in corrections)
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 2
-
-        # First tool call is the synthetic return_result that failed validation
-        first = tool_call_events[0]
-        assert first.name == "return_result"
-        assert first.result is not None
-        assert first.result.result_status == ResultStatus.ERROR
-        assert "Invalid result" in first.result.content
-
-        # Second tool call is the real return_result that succeeded
-        second = tool_call_events[1]
-        assert second.name == "return_result"
-        assert second.result.result_status == ResultStatus.COMPLETE
+        assert len(tool_call_events) == 1
+        assert tool_call_events[0].name == "return_result"
+        assert tool_call_events[0].result.result_status == ResultStatus.COMPLETE
 
     @pytest.mark.asyncio
     async def test_stop_no_content_with_none_return_type_terminates(self):
@@ -1297,7 +1328,12 @@ class TestCodeActStrategyEventSequence:
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig()))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def do_side_effects(self) -> None:
                 """Perform work via side effects."""
                 ...
@@ -1315,18 +1351,14 @@ class TestCodeActStrategyEventSequence:
         assert result is None
 
         events = agent_instance.event_manager.values()
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert [event.content for event in llm_responses] == [""]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 1
-        assert tool_call_events[0].name == "return_result"
-        assert tool_call_events[0].result.result_status == ResultStatus.COMPLETE
+        assert tool_call_events == []
 
     @pytest.mark.asyncio
-    async def test_text_only_whitespace_response_treated_as_empty(self):
-        """Whitespace-only text response (no tool calls) is treated as empty, not synthetic.
-
-        "   " is truthy but str.strip() is falsy, so it should fall through to the
-        empty-response error handler rather than creating a synthetic comment.
-        """
+    async def test_text_only_whitespace_response_uses_default_retry(self):
+        """Whitespace-only stop output uses text-only recovery without synthetic calls."""
         from nooa.errors import GenerationError
 
         class TestAgent(Agent, llm=_TEST_LLM):
@@ -1358,11 +1390,8 @@ class TestCodeActStrategyEventSequence:
         )
 
     @pytest.mark.asyncio
-    async def test_text_only_basemodel_response_with_tool_calls_prepends_comment(self):
-        """BaseModel content alongside execute_python tool calls is prepended as a comment.
-
-        Exercises the model_dump_json() branch in the content+tool_calls path.
-        """
+    async def test_basemodel_content_with_tool_calls_preserves_turn_and_arguments(self):
+        """BaseModel prose is serialized on the turn without mutating execution."""
         from pydantic import BaseModel as PydanticBaseModel
 
         class ThoughtModel(PydanticBaseModel):
@@ -1379,7 +1408,6 @@ class TestCodeActStrategyEventSequence:
             content=ThoughtModel(thought="I should calculate this."),
             tool_calls=[_tool_call("x = 6 * 7", call_id="c1")],
             finish_reason="tool_calls",
-            assistant_message={"role": "assistant", "content": ""},
         )
         fake_llm = FakeLLMClient(
             scripted_responses=[
@@ -1397,10 +1425,10 @@ class TestCodeActStrategyEventSequence:
             e for e in events if e.event_type == "ToolCallEvent" and e.name == "execute_python"
         ]
         assert len(exec_calls) == 1
-        code = exec_calls[0].arguments["code"]
-        assert code.startswith("# "), f"Expected comment prepended, got: {code!r}"
-        assert "I should calculate this." in code, f"BaseModel JSON should appear in code: {code!r}"
-        assert "x = 6 * 7" in code, f"Original code should follow: {code!r}"
+        assert exec_calls[0].arguments["code"] == "x = 6 * 7"
+        output = next(e for e in events if e.event_type == "LLMResponse" and e.content)
+        assert output.content == '{"thought":"I should calculate this."}'
+        assert output.tool_calls[0].arguments == json.dumps({"code": "x = 6 * 7"})
 
     @pytest.mark.asyncio
     async def test_empty_stop_response_routes_through_return_result(self):
@@ -1429,16 +1457,17 @@ class TestCodeActStrategyEventSequence:
 
         assert result == "corrected answer"
 
-        # The synthetic return_result(None) should have failed validation
+        # The empty assistant turn is retained and the only tool event is the
+        # model's successful self-correction.
         all_events = agent_instance.event_manager.values()
+        llm_responses = [
+            e for e in all_events if e.event_type == "LLMResponse" and not e.tool_calls
+        ]
+        assert [event.content for event in llm_responses] == [""]
         tool_call_events = [e for e in all_events if e.event_type == "ToolCallEvent"]
-        assert len(tool_call_events) == 2
-        # First is the failed synthetic return_result(None)
+        assert len(tool_call_events) == 1
         assert tool_call_events[0].name == "return_result"
-        assert tool_call_events[0].result.result_status == ResultStatus.ERROR
-        # Second is the successful self-correction
-        assert tool_call_events[1].name == "return_result"
-        assert tool_call_events[1].result.result_status == ResultStatus.COMPLETE
+        assert tool_call_events[0].result.result_status == ResultStatus.COMPLETE
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls_event_sequence(self):
@@ -1469,14 +1498,16 @@ class TestCodeActStrategyEventSequence:
         events = agent_instance.event_manager.values()
         event_types = [e.event_type for e in events]
 
-        # Architecture: ToolResult is nested in ToolCallEvent.result (no separate tool_result events)
-        # Sequence: Task -> (ToolCallEvent -> PythonOutput) x2 -> ToolCallEvent
+        # Each provider response is retained immediately before its execution projection.
         assert event_types == [
             "Task",
+            "LLMResponse",
             "ToolCallEvent",
             "PythonOutput",
+            "LLMResponse",
             "ToolCallEvent",
             "PythonOutput",
+            "LLMResponse",
             "ToolCallEvent",
         ], f"Expected correct sequence with nested results, got {event_types}"
 
@@ -1488,13 +1519,8 @@ class TestCodeActStrategyEventSequence:
             )
 
     @pytest.mark.asyncio
-    async def test_content_plus_tool_calls_prepends_comment(self):
-        """When LLM returns both content and execute_python tool calls, the content
-        is prepended as a comment at the top of the first execute_python code.
-
-        This preserves any explanatory text the LLM produced alongside its tool
-        call without creating a separate synthetic event.
-        """
+    async def test_content_plus_tool_calls_preserves_turn_and_arguments(self):
+        """Assistant prose remains on LLMResponse and execution stays exact."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1519,20 +1545,15 @@ class TestCodeActStrategyEventSequence:
         assert result == "done"
 
         events = agent_instance.event_manager.values()
-        tool_calls = [e for e in events if e.event_type == "ToolCallEvent"]
-
-        # First tool call should have the content prepended as a comment
-        first_tc = tool_calls[0]
-        code = first_tc.arguments["code"]
-        assert code.startswith("# "), f"Expected comment prepended, got: {code!r}"
-        assert "Let me work through this step by step." in code, (
-            f"Original content should appear in the comment, got: {code!r}"
-        )
-        assert "x = 42" in code, f"Original code should follow the comment, got: {code!r}"
+        tool_call = next(e for e in events if e.event_type == "ToolCallEvent")
+        assert tool_call.arguments["code"] == "x = 42"
+        output = next(e for e in events if e.event_type == "LLMResponse" and e.content)
+        assert output.content == "Let me work through this step by step."
+        assert output.tool_calls[0].arguments == json.dumps({"code": "x = 42"})
 
     @pytest.mark.asyncio
-    async def test_content_plus_tool_calls_empty_content_not_prepended(self):
-        """Whitespace-only content alongside tool calls is ignored (not prepended)."""
+    async def test_content_plus_tool_calls_empty_content_does_not_mutate_call(self):
+        """Whitespace-only assistant content does not mutate execution arguments."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1551,14 +1572,10 @@ class TestCodeActStrategyEventSequence:
 
         assert result == 7
 
-        # The return_result tool call should have no comment prepended
         events = agent_instance.event_manager.values()
         tool_calls = [e for e in events if e.event_type == "ToolCallEvent"]
         final_tc = tool_calls[0]
-        code = final_tc.arguments.get("code", "")
-        assert not code.startswith("# "), (
-            f"Whitespace-only content should not be prepended, got: {code!r}"
-        )
+        assert final_tc.arguments == {"result": 7}
 
     @pytest.mark.asyncio
     async def test_text_only_loop_aborts_after_threshold(self):
@@ -1603,15 +1620,14 @@ class TestCodeActStrategyEventSequence:
             f"Expected last text preview in message, got: {msg!r}"
         )
 
-        # Should have exactly 3 synthetic return_result events (all failed validation)
-        # then abort fires before the 4th
+        # The three assistant turns remain in history without fabricated tool calls.
         events = agent_instance.event_manager.values()
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert len(llm_responses) == 3
         return_result_calls = [
             e for e in events if e.event_type == "ToolCallEvent" and e.name == "return_result"
         ]
-        assert len(return_result_calls) == 3, (
-            f"Expected exactly 3 return_result attempts before abort, got {len(return_result_calls)}"
-        )
+        assert return_result_calls == []
 
     @pytest.mark.asyncio
     async def test_text_only_counter_resets_on_real_tool_call(self):
@@ -1687,14 +1703,7 @@ class TestCodeActStrategyEventSequence:
         from nooa.errors import GenerationError
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(
-                CodeActStrategy(
-                    config=CodeActConfig(
-                        max_consecutive_text_only=2,
-                        text_only_stop_behavior="synthetic_comment",
-                    )
-                )
-            )
+            @strategy(CodeActStrategy(config=CodeActConfig(max_consecutive_text_only=2)))
             async def stuck(self) -> str:
                 """Task."""
                 ...
@@ -1717,8 +1726,8 @@ class TestCodeActStrategyEventSequence:
         assert last.exception_type == "GenerationError"
 
     @pytest.mark.asyncio
-    async def test_content_plus_tool_calls_prepends_first_execute_python_only(self):
-        """The comment is prepended to the first execute_python; later ones are untouched."""
+    async def test_content_plus_tool_calls_preserves_turn_and_execution_arguments(self):
+        """Assistant prose and raw tool calls are retained without mutating execution."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig()))
@@ -1747,43 +1756,13 @@ class TestCodeActStrategyEventSequence:
         exec_calls = [
             e for e in events if e.event_type == "ToolCallEvent" and e.name == "execute_python"
         ]
-        # First execute_python should have the comment prepended
-        assert exec_calls[0].arguments["code"].startswith("# "), (
-            f"First execute_python should have the comment prepended, got: {exec_calls[0].arguments['code']!r}"
-        )
-        # Second execute_python should be unchanged
-        assert exec_calls[1].arguments["code"] == "y = 2", (
-            f"Second execute_python should be unchanged, got: {exec_calls[1].arguments['code']!r}"
-        )
-
-    def test_prepend_comment_skips_to_next_on_invalid_json(self):
-        """If the first execute_python has invalid JSON arguments, skip it and prepend to next."""
-        from nooa.strategies.codeact import _prepend_comment
-        from nooa.unifiedllm import ToolCall
-
-        bad_tc = ToolCall(id="bad", name="execute_python", arguments="NOT VALID JSON")
-        good_tc = ToolCall(id="c2", name="execute_python", arguments=json.dumps({"code": "x = 42"}))
-        result = _prepend_comment([bad_tc, good_tc], "Thinking aloud.")
-
-        # First tool call unchanged (bad JSON)
-        assert result[0].arguments == "NOT VALID JSON"
-        # Second tool call should have the comment prepended
-        args = json.loads(result[1].arguments)
-        assert args["code"].startswith("# "), (
-            f"Second execute_python should have the comment prepended, got: {args['code']!r}"
-        )
-        assert "x = 42" in args["code"]
-
-    def test_prepend_comment_no_execute_python_unchanged(self):
-        """If there's no execute_python in the list, all tool calls are returned unchanged."""
-        from nooa.strategies.codeact import _prepend_comment
-        from nooa.unifiedllm import ToolCall
-
-        rr = ToolCall(id="ret", name="return_result", arguments=json.dumps({"result": 7}))
-        result = _prepend_comment([rr], "some content")
-
-        assert len(result) == 1
-        assert result[0].arguments == rr.arguments
+        assert [call.arguments["code"] for call in exec_calls] == ["x = 1", "y = 2"]
+        output = next(event for event in events if event.event_type == "LLMResponse")
+        assert output.content == "Thinking aloud."
+        assert [call.arguments for call in output.tool_calls] == [
+            json.dumps({"code": "x = 1"}),
+            json.dumps({"code": "y = 2"}),
+        ]
 
 
 class TestCodeActStrategyPersistentState:
@@ -2892,6 +2871,23 @@ class TestCodeActMultiToolCallsPerResponse:
             if isinstance(event, PythonOutput)
         ]
         assert [event.execution_count for event in outputs] == [1, 2, 3]
+        events = agent_instance.event_manager.values()
+        multi_turn = next(
+            event
+            for event in events
+            if event.event_type == "LLMResponse" and len(event.tool_calls) == 3
+        )
+        projected_calls = [
+            event
+            for event in events
+            if event.event_type == "ToolCallEvent" and event.name == "execute_python"
+        ]
+        assert [call.id for call in multi_turn.tool_calls] == [
+            "call_1",
+            "call_2",
+            "call_3",
+        ]
+        assert {call.llm_response_id for call in projected_calls} == {multi_turn.id}
 
     @pytest.mark.asyncio
     async def test_multi_tool_calls_stop_on_first_error(self):

@@ -43,7 +43,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -145,7 +144,6 @@ class TestNonStringLLMContent:
             content=12345,  # numeric, not str
             tool_calls=[_return_result(result=99)],
             finish_reason="tool_calls",
-            assistant_message={"role": "assistant", "content": "12345"},
         )
         fake_llm = FakeLLMClient(scripted_responses=[numeric_resp])
         agent = _Agent(llm=fake_llm)

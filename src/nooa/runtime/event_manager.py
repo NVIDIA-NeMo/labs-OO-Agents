@@ -10,13 +10,16 @@ EventManager is a unified event pipeline:
 Design: phase-2-strategy-middleware.md
 """
 
+import asyncio
 import itertools
 import logging
 import re
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
+from nooa.agentdoc import pformat
 from nooa.context_blocks import EventStatus
 from nooa.context_blocks.models import Role
 from nooa.events import (
@@ -47,6 +50,31 @@ EventHandler = Callable[[EventBase], None]
 
 # Monotonic counter for stable EventManager identity (middleware re-entry guard).
 _em_id_counter = itertools.count(1)
+
+# Cleanup descendants inherit this context, even when a callback uses create_task.
+# Track drain tasks rather than managers so a stale child cannot skip a later drain.
+_close_drains: ContextVar[tuple[asyncio.Task, ...]] = ContextVar("nooa_close_drains", default=())
+
+# Old rows are migrated at the persistence boundary, but subscriptions are
+# executable application code and should be updated instead of silently going
+# dead after an event rename.
+_REMOVED_EVENT_TYPES = frozenset({"LLMOutput", "LLMComplete"})
+
+
+def _validate_event_type_name(event_type: str, *, action: str) -> None:
+    """Reject event APIs folded into the canonical assistant-turn event."""
+    if event_type not in _REMOVED_EVENT_TYPES:
+        return
+    archive_note = (
+        " Stored LLMOutput rows are migrated to LLMResponse automatically when a session is loaded."
+        if event_type == "LLMOutput"
+        else " LLMComplete was a non-persisted runtime event, so no stored rows require migration."
+    )
+    raise ValueError(
+        f"Cannot {action} removed event type {event_type!r}. Use 'LLMResponse' instead. "
+        "LLMResponse is the canonical assistant-turn event and includes content, reasoning, "
+        f"tool calls, usage, and replay state.{archive_note}"
+    )
 
 
 def _make_next(
@@ -101,6 +129,8 @@ class EventManager:
         """
         self._backend: EventBackend = backend if backend is not None else InMemoryBackend()
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
+        self._close_callbacks: list[Callable[[], Awaitable[None]]] = []
+        self._close_task: asyncio.Task[None] | None = None
 
         # Runtime event query override (set via set_event_query())
         self._event_query: EventQuery | None = None
@@ -114,6 +144,10 @@ class EventManager:
             "execute_python": [],
         }
         self._middleware_id: int = next(_em_id_counter)
+
+        # Methods already reported as being outside agent_call middleware
+        # coverage, so the diagnostic is emitted once rather than per call.
+        self._agent_call_bypass_reported: set[str] = set()
 
     # === Core Methods ===
 
@@ -188,13 +222,20 @@ class EventManager:
         """Subscribe to events of a specific type.
 
         Args:
-            event_type: Event type (e.g., "Task", "LLMOutput", "Error")
+            event_type: Event type (e.g., "Task", "LLMResponse", "Error")
                        or "*" for all events.
             handler: Callback function receiving Event.
 
         Returns:
             Unsubscribe function - call to remove handler.
+
+        Raises:
+            ValueError: If *event_type* names a removed event API. The error
+                identifies its replacement; persisted legacy rows remain
+                readable through storage migration.
         """
+        _validate_event_type_name(event_type, action="subscribe to")
+
         self._handlers[event_type].append(handler)
 
         def unsubscribe() -> None:
@@ -204,6 +245,64 @@ class EventManager:
                 pass  # already removed — idempotent
 
         return unsubscribe
+
+    def on_close(self, callback: Callable[[], Awaitable[None]]) -> Callable[[], None]:
+        """Register asynchronous cleanup; return an idempotent unsubscribe function.
+
+        Background components use this rather than synchronous event handlers
+        when shutdown must await their tasks before shared clients are closed.
+        """
+        self._close_callbacks.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._close_callbacks:
+                self._close_callbacks.remove(callback)
+
+        return unsubscribe
+
+    async def aclose(self) -> None:
+        """Drain background cleanup before propagating caller cancellation.
+
+        Concurrent callers share the drain. Shielding prevents cancellation of an
+        owner from interrupting a component while it still uses shared resources.
+        This does not close storage.
+        """
+        if self._close_task is not None and self._close_task in _close_drains.get():
+            return  # A cleanup callback (or its child) may close its owner recursively.
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._drain_close_callbacks())
+        task = self._close_task
+        cancelled = False
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            task.result()
+        finally:
+            if task.done() and self._close_task is task:
+                self._close_task = None
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _drain_close_callbacks(self) -> None:
+        """Own callbacks until their reverse-order cleanup has finished."""
+        task = asyncio.current_task()
+        assert task is not None
+        token = _close_drains.set((*_close_drains.get(), task))
+        try:
+            callbacks, self._close_callbacks = self._close_callbacks, []
+            for callback in reversed(callbacks):
+                try:
+                    await callback()
+                except asyncio.CancelledError:
+                    # Component cancellation is not cancellation of its owners.
+                    logger.warning("Background component cleanup was cancelled")
+                except Exception:
+                    logger.warning("Background component cleanup failed", exc_info=True)
+        finally:
+            _close_drains.reset(token)
 
     def set_backend(self, backend: EventBackend) -> None:
         """Swap the persistence backend; handlers and middleware are preserved."""
@@ -277,7 +376,7 @@ class EventManager:
 
         Execution order::
 
-            agent_call middleware        ← auth, rate limiting
+            agent_call middleware        ← auth, rate limiting (traced async only)
               → llm_call middleware      ← per-call guardrails
                 → acall()
               → execute_python middleware ← per-exec guardrails
@@ -286,6 +385,21 @@ class EventManager:
                 → on() handlers fire     ← observe only
 
         Registration order = execution order.  First registered = outermost.
+
+        .. warning::
+           ``agent_call`` middleware only wraps async agent methods that the
+           metaclass instruments. Sync (``def``) methods, ``@no_trace`` methods
+           the metaclass leaves unwrapped, ``staticmethod`` / ``classmethod``,
+           and methods inherited from non-Agent bases all execute outside it,
+           so a guard registered here will not block them — including when
+           generated CodeAct Python calls them. (A ``@no_trace`` method that is
+           generated or carries ``@strategy`` keeps its async wrapper and stays
+           covered.) Declare such a capability as a traced ``async def`` method
+           to bring it under middleware, or enforce the policy inside the
+           method body. With ``agent_call`` middleware registered, a
+           ``RuntimeWarning`` names the uncovered methods the first time a
+           covered method runs, and each traced sync method warns on its own
+           first call. See :class:`~nooa.runtime.middleware.AgentCallContext`.
 
         Args:
             kind: ``"agent_call"``, ``"llm_call"``, or ``"execute_python"``.
@@ -371,6 +485,9 @@ class EventManager:
         Returns:
             List of matching events.
         """
+        if type is not None:
+            _validate_event_type_name(type, action="query")
+
         events = list(self._backend.all_events())
 
         # Apply type filter
@@ -409,17 +526,21 @@ class EventManager:
         """Extract searchable text from an event's public fields."""
         parts: list[str] = []
 
-        # Get all public fields from model_dump (excludes private fields)
-        for _field_name, value in event.model_dump().items():
+        for value in event.searchable_fields().values():
             if value is not None:
-                if isinstance(value, list):
-                    parts.append(" ".join(str(item) for item in value))
-                else:
-                    parts.append(str(value))
+                parts.append(pformat(value, unquote_strings=True))
 
         return " ".join(parts) if parts else event.event_type
 
     # === Dict-like Methods (active events) ===
+
+    def all_events(self) -> list[EventBase]:
+        """Return recorded events in insertion order, including archived history.
+
+        Use for exports and analysis, not prompt rendering. ``items()`` and
+        ``values()`` deliberately expose only the active, summarized view.
+        """
+        return list(self._backend.all_events())
 
     def items(self) -> list[tuple[str, EventBase]]:
         """Return (tag, event) pairs for active events.
@@ -580,7 +701,15 @@ class EventManager:
             replaced_range=(actual_start, actual_end),
             children_tags=tags_to_collapse,
             summary_text=summary_text,
-            doc=f'To access collapsed events, call self.events["{summary_tag}"].children_tags',
+            # Keep recovery instructions independent of the generated summary.
+            doc=(
+                "Search original events (including archived): "
+                'self.events.query(query="keyword", limit=10). '
+                f'Read by tag, e.g. self.events["{actual_start}"]. '
+                f'Expand this summary: self.events[self.events["{summary_tag}"].children_tags]. '
+                "For nested summaries, expand their children_tags again. "
+                "Inspect originals when exact wording or omitted details matter."
+            ),
         )
         summary.tag = summary_tag
 

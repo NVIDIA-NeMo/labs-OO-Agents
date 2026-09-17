@@ -138,14 +138,14 @@ return [item.upper() for item in items]
 @pytest.mark.asyncio
 async def test_function_body_extraction_when_wrapped_in_function_definition():
     """Test that when LLM returns code wrapped in function definition matching target method,
-    we extract the body and execute it, updating history to show unpacked code.
+    we extract the body for execution while retaining the exact provider turn.
 
     Scenario:
     1. LLM returns code wrapped in function definition: `async def process(self): ...`
     2. Function name matches target method name (`process`)
     3. No other top-level code exists
     4. System extracts function body and executes it
-    5. History is updated to show unpacked code so LLM learns from example
+    5. History preserves the exact provider response
     """
 
     class TestAgent(Agent):
@@ -167,17 +167,15 @@ async def test_function_body_extraction_when_wrapped_in_function_definition():
     # Should successfully execute the extracted body
     assert result == "Hello, world!"
 
-    # Verify history was updated with unpacked code
+    # The canonical assistant turn remains byte-for-byte provider output.
     history_events = agent_instance.event_manager.values()
-    assistant_events = [e for e in history_events if e.event_type == "LLMOutput"]
+    assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
     # Should have at least one assistant event
     assert len(assistant_events) >= 1
 
-    # The unpacked code should be in the history (without function definition wrapper)
     last_assistant_msg = assistant_events[-1].content
-    assert "async def process" not in last_assistant_msg
-    assert "return" in last_assistant_msg and "Hello, world!" in last_assistant_msg
+    assert last_assistant_msg == wrapped_code
 
 
 @pytest.mark.asyncio
@@ -227,19 +225,15 @@ async def find_negative_sentiment(self) -> str:
     # helpers are plain callables, not attached to the agent.
     assert not hasattr(agent_instance, "is_negative")
 
-    # Verify history was updated with unpacked code
+    # The canonical assistant turn remains byte-for-byte provider output.
     history_events = agent_instance.event_manager.values()
-    assistant_events = [e for e in history_events if e.event_type == "LLMOutput"]
+    assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
     # Should have at least one assistant event
     assert len(assistant_events) >= 1
 
-    # The unpacked code should be in the history (target method body unwrapped)
     last_assistant_msg = assistant_events[-1].content
-    assert "async def find_negative_sentiment" not in last_assistant_msg
-    assert "for sentence in" in last_assistant_msg or "return" in last_assistant_msg
-    # Helper method definition should still be there
-    assert "async def is_negative" in last_assistant_msg
+    assert last_assistant_msg == wrapped_code
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for EventQuery - event filtering configuration."""
 
+import pytest
+
 from nooa.events import Task
 from nooa.runtime.event_query import EventQuery
 
@@ -76,3 +78,8 @@ class TestEventQueryApply:
         assert len(result) >= 1, "must keep at least the task for this call"
         task_prompts = [e.prompt for e in result if isinstance(e, Task)]
         assert "Classify the sentiment" in task_prompts[0]
+
+
+def test_removed_llm_output_type_explains_replacement():
+    with pytest.raises(ValueError, match="Use 'LLMResponse' instead"):
+        EventQuery(type="LLMOutput")

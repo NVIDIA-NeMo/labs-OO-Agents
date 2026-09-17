@@ -19,7 +19,7 @@ from abc import ABCMeta
 from collections.abc import Callable
 from typing import Any
 
-from nooa.ellipsis_detection import has_ellipsis_body
+from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
 
 class AgentMeta(ABCMeta):
@@ -33,6 +33,9 @@ class AgentMeta(ABCMeta):
     - Traceable (async): all async methods (if class sets _enable_tracing = True)
     - Traceable (sync): all sync `def` methods except dunder names
       (if class sets _enable_tracing = True)
+    - Traceable (generators): methods containing `yield` get a generator-specific
+      wrapper (see `create_async_gen_agent_method_wrapper`). `yield` plus an
+      ellipsis body is rejected — see `_reject_ellipsis_generator`.
 
     Sync methods can't generate or run async middleware; they get tracing only.
     Properties, classmethods, and staticmethods are skipped (they aren't plain
@@ -69,13 +72,39 @@ class AgentMeta(ABCMeta):
 
         # Process each method in this class's namespace (not inherited)
         for attr_name in list(namespace.keys()):
-            attr_value = namespace.get(attr_name)
+            attr_value: Any = namespace.get(attr_name)
 
             # Skip if already wrapped (e.g. by @strategy decorator)
             if hasattr(attr_value, "_agent_decorator"):
                 continue
 
-            if inspect.iscoroutinefunction(attr_value):
+            # "Is this an ellipsis-bodied generator?" is a question about the
+            # SOURCE, so it follows `__wrapped__` and looks inside
+            # staticmethod/classmethod descriptors. Kept separate from — and
+            # ahead of — the dispatch below, which is a question about the
+            # CALLING CONVENTION and must not unwrap. See _reject_ellipsis_generator.
+            mcs._reject_ellipsis_generator(name, attr_name, attr_value)
+
+            # Dispatch on `attr_value`'s OWN shape. Unwrapping here would be
+            # wrong: a decorator can change what calling the attribute returns.
+            # `@contextlib.contextmanager` wraps a generator function but returns
+            # a context manager, so dispatching on the unwrapped shape would
+            # install the generator wrapper and break `with agent.session()`.
+            # A decorator that preserves generator-ness is indistinguishable from
+            # one that consumes the generator, so it is left on the plain path.
+            #
+            # Async generators (`async def` + `yield`) are NOT coroutine functions,
+            # so this must come before the iscoroutinefunction check — otherwise
+            # they fall through to the sync branch (`inspect.isfunction` is True
+            # for them) and get a wrapper whose span closes before the body runs.
+            if inspect.isasyncgenfunction(attr_value):
+                # === Async generator path (tracing only) ===
+                should_trace = mcs._should_trace(attr_name, attr_value, should_trace_class)
+                if should_trace:
+                    wrapped = mcs._create_async_gen_wrapper(attr_value)
+                    type.__setattr__(cls, attr_name, wrapped)
+
+            elif inspect.iscoroutinefunction(attr_value):
                 # === Async method path (generation + tracing) ===
                 should_generate = mcs._should_generate(attr_name, attr_value)
                 if should_generate:
@@ -97,16 +126,19 @@ class AgentMeta(ABCMeta):
                 # === Sync method path (tracing only) ===
                 # `inspect.isfunction` is False for property/classmethod/staticmethod
                 # descriptors, so those are naturally skipped.
+                is_generator = inspect.isgeneratorfunction(attr_value)
+
                 # Skip dunders to avoid wrapping __init__/__init_subclass__/__setattr__/
                 # __getattribute__ etc. — risk of infinite recursion or running before
                 # the runtime exists. Custom dunders have to be async to be traced.
                 if attr_name.startswith("__") and attr_name.endswith("__"):
                     continue
 
-                should_trace = mcs._should_trace(attr_name, attr_value, should_trace_class)
-                if should_trace:
-                    wrapped = mcs._create_sync_wrapper(attr_value)
-                    type.__setattr__(cls, attr_name, wrapped)
+                if mcs._should_trace(attr_name, attr_value, should_trace_class):
+                    make = (
+                        mcs._create_sync_gen_wrapper if is_generator else mcs._create_sync_wrapper
+                    )
+                    type.__setattr__(cls, attr_name, make(attr_value))
 
         return cls
 
@@ -179,6 +211,91 @@ class AgentMeta(ABCMeta):
             return inspect.getsource(func)
         except (OSError, TypeError):
             return None
+
+    @staticmethod
+    def _reject_ellipsis_generator(class_name: str, method_name: str, attr_value: Any) -> None:
+        """Reject a generator method whose body is an ellipsis stub.
+
+        An ellipsis body means "the LLM writes this". Generation only happens on
+        the coroutine path, and a generator function is never a coroutine
+        function — so an ellipsis-bodied generator would silently skip
+        generation and run as an ordinary generator yielding whatever its body
+        literally contains. The two markers contradict each other, so this is
+        always an authoring mistake rather than a supported combination.
+
+        This is a question about the source, not about the calling convention,
+        so unlike the dispatch it deliberately looks through `__wrapped__` and
+        into staticmethod/classmethod descriptors — neither of which reaches the
+        dispatch branches, and both of which can hide the contradiction.
+        Ellipsis detection unwraps too, so the two agree on what they inspect.
+        """
+        # staticmethod/classmethod are not functions; inspect the wrapped one.
+        method_obj = (
+            attr_value.__func__
+            if isinstance(attr_value, (staticmethod, classmethod))
+            else attr_value
+        )
+        # Gate on the object's own type, not merely `callable`. This runs on
+        # every namespace entry, and `has_ellipsis_body` -> `inspect.getsource`
+        # rejects anything that is not a real function: `functools.partial` in
+        # particular passes `isgeneratorfunction` (which unwraps partials) but
+        # blows up in `getsource` (which does not), crashing class creation.
+        if not (inspect.isfunction(method_obj) or inspect.ismethod(method_obj)):
+            return
+
+        unwrapped = inspect.unwrap(method_obj)
+        if not (inspect.isgeneratorfunction(unwrapped) or inspect.isasyncgenfunction(unwrapped)):
+            return
+
+        if not has_ellipsis_marker(method_obj):
+            return
+
+        is_async = inspect.isasyncgenfunction(unwrapped)
+        shape = (
+            "an async generator (async def with yield)"
+            if is_async
+            else "a generator (def with yield)"
+        )
+        raise TypeError(
+            f"{class_name}.{method_name} is {shape} with the `...` generation marker, "
+            f"but generator methods cannot be LLM-generated: generation methods "
+            f"produce one final result, so generated streams are not supported.\n"
+            f"Either remove `...` and write the deterministic generator body in full, "
+            f"or remove `yield` and make it a plain `async def` generation method."
+        )
+
+    @staticmethod
+    def _create_async_gen_wrapper(original_func: Callable[..., Any]) -> Callable[..., Any]:
+        """Create a tracing wrapper for an async generator method.
+
+        Generators can't generate and can't run async agent_call middleware, so
+        this is tracing-only. The wrapper scopes the call id to each resumption
+        of the body — see `create_async_gen_agent_method_wrapper`.
+        """
+        from nooa.runtime.method_wrapper import create_async_gen_agent_method_wrapper
+
+        cached_source_code = AgentMeta._extract_source_code(original_func)
+        return create_async_gen_agent_method_wrapper(
+            original_func,
+            needs_tracing=True,
+            cached_source_code=cached_source_code,
+        )
+
+    @staticmethod
+    def _create_sync_gen_wrapper(original_func: Callable[..., Any]) -> Callable[..., Any]:
+        """Create a tracing wrapper for a sync generator method.
+
+        Same span shape as the async generator wrapper — see
+        `create_sync_gen_agent_method_wrapper`.
+        """
+        from nooa.runtime.method_wrapper import create_sync_gen_agent_method_wrapper
+
+        cached_source_code = AgentMeta._extract_source_code(original_func)
+        return create_sync_gen_agent_method_wrapper(
+            original_func,
+            needs_tracing=True,
+            cached_source_code=cached_source_code,
+        )
 
     @staticmethod
     def _create_sync_wrapper(original_func: Callable[..., Any]) -> Callable[..., Any]:

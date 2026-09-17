@@ -1,6 +1,6 @@
 ---
 name: nooa-middleware-hooks
-description: Intercept and observe NOOA execution — middleware via event_manager.intercept() (guardrails, input/output transforms, blocking), event observers via event_manager.on() (react to Task/Error/LLMComplete/turn events), and the InstrumentationHooks protocol for observability backends. Use when adding guardrails, redacting or rewriting prompts, blocking or faking an LLM call or code execution, rate-limiting agent methods, subscribing to lifecycle events, or wiring custom telemetry.
+description: Intercept and observe NOOA execution — middleware via event_manager.intercept() (guardrails, input/output transforms, blocking), event observers via event_manager.on() (react to Task/Error/LLMResponse/turn events), and the InstrumentationHooks protocol for observability backends. Use when adding guardrails, redacting or rewriting prompts, blocking or faking an LLM call or code execution, rate-limiting agent methods, subscribing to lifecycle events, or wiring custom telemetry.
 compatibility: nooa package
 ---
 
@@ -22,7 +22,7 @@ Each middleware is `async def mw(ctx, nxt) -> ctx` — a typed context object an
 
 | Kind | Wraps | Context (`ctx`) mutables in | result out |
 |---|---|---|---|
-| `"agent_call"` | one whole agent-method call (all turns) | `args`, `kwargs` (+ `agent`, `method_name`) | `ctx.result` |
+| `"agent_call"` | one instrumented async agent-method call (all turns) — see coverage note below | `args`, `kwargs` (+ `agent`, `method_name`) | `ctx.result` |
 | `"llm_call"` | one LLM round-trip inside `runtime.generate()` | `messages` (the rendered prompt), `params` (tools, output_model, max_tokens, ...) | `ctx.response` (`LLMResponse`) |
 | `"execute_python"` | one CodeAct cell in `runtime.execute_code()` | `code`, `params` (timeout, restrictions, ...) | `ctx.result` (`ExecutionResult`) |
 
@@ -44,15 +44,16 @@ unsubscribe()                                       # intercept() returns a remo
 Verified semantics:
 
 - **Order**: registration order = execution order; first registered is outermost. Nesting across kinds: `agent_call` → per-turn `llm_call` → per-cell `execute_python`.
-- **Short-circuiting** (don't call `nxt`) is allowed for guardrails/caching, but you MUST set the output slot (`ctx.result` / `ctx.response`) — the runtime raises `RuntimeError` if middleware returns without it. To fake an LLM turn, construct an `LLMResponse` (`content`, `tool_calls=[]`, `finish_reason="stop"`, `assistant_message={...}`, `raw_response=None`).
+- **Short-circuiting** (don't call `nxt`) is allowed for guardrails/caching, but you MUST set the output slot (`ctx.result` / `ctx.response`) — the runtime raises `RuntimeError` if middleware returns without it. To fake an LLM turn, return a fresh `LLMResponse(content=..., tool_calls=[], finish_reason="stop")`; response instances cannot be reused across turns because runtime correlation data is stamped onto the same object that is recorded.
 - **Blocking**: raise from the middleware — the exception propagates to the caller exactly like a failure of the wrapped operation (for `llm_call`, CodeAct counts it against its session error budget).
+- **`agent_call` coverage is narrower than "every agent method"**: it runs only in the wrapper the metaclass builds for traced async methods. Sync (`def`) methods, `@no_trace` methods the metaclass leaves unwrapped (a `@no_trace` method that is generated or carries `@strategy` keeps its async wrapper and stays covered), `staticmethod`/`classmethod`, and methods inherited from non-Agent bases all execute with no `AgentCallContext` at all — so a guard will not block them, including when generated CodeAct Python calls them. This matters most for sync deterministic capabilities, which are the usual way to expose functionality to CodeAct. Declare such a capability as a traced `async def` method, or enforce the policy in the method body. With `agent_call` middleware registered, a `RuntimeWarning` names the uncovered methods the first time a covered method runs, and each traced sync method warns on its own first call.
 - **Exceptions are NOT swallowed** — middleware is control flow, unlike hooks.
 - Per-agent: registered on that agent's `EventManager`; subagents have their own.
 - `execute_python` has a re-entry guard: code the middleware itself triggers (e.g. it calls agent methods) skips the middleware, while nested generation methods called by executed code re-enter it for their own cells.
 - On a context-window error the runtime archives events, rebuilds messages, and retries — so `llm_call` middleware can run more than once per logical turn; keep it idempotent.
 - The tracing `on_messages_built` hook fires inside the innermost core, so traces show the **post-middleware** messages.
 
-Worked production example: `src/nooa/nemo_relay_middleware.py` installs all three kinds to route calls through NeMo Relay (guardrails/ATIF); `nemo_relay_scope(agent, name)` wraps install/uninstall. Runnable: `examples/quickstart/13_nemo_relay.py`. Test patterns (mutate/short-circuit/ordering): `tests/test_event_middleware.py`.
+Worked production example: `src/nooa/nemo_relay_middleware.py` installs all three kinds to route calls through NeMo Relay (guardrails/ATIF); `nemo_relay_scope(agent, name)` wraps install/uninstall. Runnable: `examples/quickstart/15_nemo_relay.py`. Test patterns (mutate/short-circuit/ordering): `tests/test_event_middleware.py`.
 
 ## Observers (`on`)
 
@@ -63,8 +64,8 @@ unsub = agent.event_manager.on("Error", lambda e: log.warning("agent error: %s",
 agent.event_manager.on("*", audit)                 # wildcard: every event
 ```
 
-- Useful runtime-only events (never rendered to the model): `BeforeTurn` / `AfterTurn` (per generation turn; `AfterTurn.is_final` marks method completion) and `LLMComplete` (tokens, cost, model_name, tool_calls, reasoning metadata per round-trip — emitted precisely so you don't need `intercept("llm_call")` just to read LLM metrics).
-- Model-visible events (`Task`, `Message`, `Error`, `PythonOutput`, ...) are observable the same way — see `nooa-context-and-state` for the full list.
+- Useful runtime-only events (never rendered to the model): `BeforeTurn` / `AfterTurn` (per generation turn; `AfterTurn.is_final` marks method completion) and `LLMCallStart` / `LLMCallEnd`.
+- `LLMResponse` is the canonical, model-visible assistant turn. It also carries hidden token, cost, model, and reasoning metadata, so observers can read LLM metrics without wrapping `intercept("llm_call")`. Other model-visible events (`Task`, `Message`, `Error`, `PythonOutput`, ...) are observable the same way — see `nooa-context-and-state` for the full list.
 - The summarizers are the house pattern: subscribe to `AfterTurn` to *schedule* work, apply it at the next `BeforeTurn` (`agents/summarization.py:159-160`).
 
 ## InstrumentationHooks (`set_hooks`)
@@ -90,7 +91,7 @@ set_hooks(TimingHooks())   # set_hooks(None) removes
 
 ## Pitfalls
 
-- Don't use hooks for app logic (they're swallowed-exception observational); don't use middleware for metrics you can get from `LLMComplete` (you'd pay complexity for nothing).
+- Don't use hooks for app logic (they're swallowed-exception observational); don't use middleware for metrics you can get from `LLMResponse` (you'd pay complexity for nothing).
 - `AgentCallContext.result` uses a not-set sentinel — a short-circuiting `agent_call` middleware that "returns None" on purpose must still assign `ctx.result = None`.
 - Middleware lives on the instance's event manager: install in `__init__` (after `super().__init__()`) or on the constructed agent, not on the class.
 - Keep `llm_call` middleware fast — it's on the critical path of every turn, and runs again on context-window retries.

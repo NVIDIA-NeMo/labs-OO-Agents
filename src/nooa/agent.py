@@ -118,6 +118,10 @@ class Agent(metaclass=AgentMeta):
     _enable_tracing: Annotated[bool, hidden]
     _execution_config: Annotated["ExecutionConfig", hidden]
     _agent_llm: Annotated["UnifiedLLM | _InheritSentinel", hidden]
+    # Per-instance cache of clients resolved from @strategy(llm="alias") strings.
+    # Populated lazily by nooa.method_llm._resolve_alias, hidden so snapshots
+    # and the LLM never see client objects through it.
+    _strategy_llm_alias_cache: Annotated["dict[str, UnifiedLLM]", hidden, nosnapshot]
     _agent_truncation: Annotated["TruncationConfig", hidden]
     _agent_context_blocks: Annotated["dict[str, str | DynamicContext | None]", hidden]
     _agent_event_query: Annotated["EventQuery | None", hidden]
@@ -265,6 +269,16 @@ class Agent(metaclass=AgentMeta):
 
         # Create runtime (manages execution, caching, signals)
         self.runtime = ActorRuntime(self)
+
+    @no_trace
+    @hidden
+    async def aclose(self) -> None:
+        """Await registered background cleanup before the owner closes shared resources.
+
+        The agent does not own its LLM client or storage; callers close those
+        after this method returns. Components register with event_manager.on_close.
+        """
+        await self.event_manager.aclose()
 
     @no_trace
     @hidden
@@ -469,6 +483,7 @@ class Agent(metaclass=AgentMeta):
                         value = format(value, fmt_spec)
                     parts.append(str(value))
                 except Exception:
+                    logger.debug("Prompt template eval failed for %r", field, exc_info=True)
                     placeholder = field
                     if conversion:
                         placeholder = f"{field}!{conversion}"

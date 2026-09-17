@@ -9,8 +9,15 @@ from contextvars import ContextVar
 
 from nooa.config import CodeActConfig
 from nooa.strategies.base import GenerationStrategy, RuntimeServices
-from nooa.strategies.codeact import CodeActStrategy
-from nooa.strategies.codeact_lite import CodeActLiteStrategy
+from nooa.strategies.codeact import (
+    CodeActStrategy,
+    TextOnlyResponseAction,
+    TextOnlyResponseContext,
+    TextOnlyResponseHandler,
+    retry_text_only_response,
+    return_text_as_result,
+)
+from nooa.strategies.codeact_v2 import CodeActV2
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.current_call import CurrentCall
 from nooa.strategies.predict import PredictStrategy
@@ -18,10 +25,10 @@ from nooa.strategies.prefill import InspectInputsPrefill, Prefill
 from nooa.strategies.reflexion import ReflexionStrategy
 from nooa.strategies.template import TemplateStrategy
 
-# NOTE: CodeActLiteStrategy and ReflexionStrategy are experimental. The
+# NOTE: ReflexionStrategy is experimental. The
 # FutureWarning gate lives on the top-level package (nooa.__getattr__),
 # so importing them from here — `from nooa.strategies import
-# CodeActLiteStrategy` — is an intentional un-gated (warning-free) escape hatch.
+# ReflexionStrategy` — is an intentional un-gated (warning-free) escape hatch.
 
 # =============================================================================
 # Default Strategy Override
@@ -91,7 +98,12 @@ __all__ = [
     "CompositeStrategy",
     "TemplateStrategy",
     "CodeActStrategy",
-    "CodeActLiteStrategy",
+    "TextOnlyResponseAction",
+    "TextOnlyResponseContext",
+    "TextOnlyResponseHandler",
+    "retry_text_only_response",
+    "return_text_as_result",
+    "CodeActV2",
     "ReflexionStrategy",
     "PredictStrategy",
     # Prefill plugins

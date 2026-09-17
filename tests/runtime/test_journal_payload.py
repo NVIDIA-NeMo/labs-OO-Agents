@@ -35,7 +35,7 @@ def _text_msg(role: Role, content: str) -> RenderedMessage:
 def _assistant_tool_call(call_id: str, name: str, arguments: dict) -> RenderedMessage:
     return RenderedMessage(
         role=Role.ASSISTANT,
-        tool_call=ToolCallInfo(id=call_id, name=name, arguments=arguments),
+        tool_calls=(ToolCallInfo(id=call_id, name=name, arguments=arguments),),
     )
 
 

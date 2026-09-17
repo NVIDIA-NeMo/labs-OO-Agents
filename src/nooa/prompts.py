@@ -80,12 +80,11 @@ def _get_prefill(strategy: Any, call: Any, agent: Any) -> tuple[str | None, str 
     """
     from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
     from nooa.strategies.codeact import CodeActStrategy
-    from nooa.strategies.codeact_lite import CodeActLiteStrategy
     from nooa.strategies.pure_python import PurePythonStrategy
 
     pre_ellipsis = call.pre_ellipsis_code
 
-    if isinstance(strategy, (CodeActStrategy, CodeActLiteStrategy)):
+    if isinstance(strategy, CodeActStrategy):
         prefill = strategy.config.prefill
         if prefill is None:
             return None, pre_ellipsis

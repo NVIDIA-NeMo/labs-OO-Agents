@@ -34,7 +34,6 @@ def make_fake_llm() -> FakeLLMClient:
                 content="test",
                 tool_calls=[],
                 finish_reason="stop",
-                assistant_message={"role": "assistant", "content": "test"},
             )
         ]
     )

@@ -5,11 +5,17 @@
 import asyncio
 import json
 from collections import deque
+from datetime import datetime
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel
 
-from nooa.unifiedllm.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
+from nooa.llm_types import CacheBoundary
+from nooa.unifiedllm.unifiedllm import LLMResponse, LLMUsage, Tool, ToolCall, UnifiedLLM
+
+from .cache_policy import apply_cache_policy
+from .replay_state import prepare_chat_messages
 
 
 class FakeLLMClient(UnifiedLLM):
@@ -31,7 +37,24 @@ class FakeLLMClient(UnifiedLLM):
             scripted_responses: Pre-defined responses to return (in order).
         """
         super().__init__(model="fake-model")
-        self._response_queue = deque(scripted_responses or [])
+        # Each provider call owns one canonical response/event. Tests often use
+        # ``[response] * n`` as shorthand; materialize those aliases as distinct
+        # event objects while preserving the first response by identity.
+        responses: list[LLMResponse] = []
+        seen: set[int] = set()
+        for response in scripted_responses or []:
+            if id(response) in seen:
+                response = response.model_copy(
+                    update={
+                        "id": str(uuid4()),
+                        "metadata": dict(response.metadata),
+                        "tag": None,
+                        "timestamp": datetime.now(),
+                    }
+                )
+            seen.add(id(response))
+            responses.append(response)
+        self._response_queue = deque(responses)
         self._lock = asyncio.Lock()
         self.call_count = 0
         self.last_messages: list[dict[str, Any]] = []
@@ -49,7 +72,7 @@ class FakeLLMClient(UnifiedLLM):
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
@@ -61,8 +84,12 @@ class FakeLLMClient(UnifiedLLM):
         Thread-safe: uses asyncio.Lock to ensure concurrent calls get responses in order.
         """
         async with self._lock:
+            self._prepare_call_config(kwargs)
             self.call_count += 1
-            self.last_messages = messages
+            # A non-provider test client must never observe private replay state.
+            self.last_messages, _, _ = apply_cache_policy(
+                prepare_chat_messages(messages, None), None, responses=False
+            )
             self.last_tools = tools
 
             # Return next response from queue, or empty response if none left
@@ -75,22 +102,24 @@ class FakeLLMClient(UnifiedLLM):
                     content="",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": ""},
                     reasoning=None,
                     usage=None,
                 )
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Synchronous version of acall for UnifiedLLM compatibility."""
         # For sync call, we don't need locking since tests are usually single-threaded
+        self._prepare_call_config(kwargs)
         self.call_count += 1
-        self.last_messages = messages
+        self.last_messages, _, _ = apply_cache_policy(
+            prepare_chat_messages(messages, None), None, responses=False
+        )
         self.last_tools = tools
 
         if self._response_queue:
@@ -101,7 +130,6 @@ class FakeLLMClient(UnifiedLLM):
                 content="",
                 tool_calls=[],
                 finish_reason="stop",
-                assistant_message={"role": "assistant", "content": ""},
                 reasoning=None,
                 usage=None,
             )
@@ -133,13 +161,12 @@ class FakeLLMClient(UnifiedLLM):
                     content=code,
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": code},
                     reasoning=None,
-                    usage={
-                        "prompt_tokens": 10,
-                        "completion_tokens": len(code.split()),
-                        "total_tokens": 10 + len(code.split()),
-                    },
+                    usage=LLMUsage(
+                        input_tokens=10,
+                        output_tokens=len(code.split()),
+                        total_tokens=10 + len(code.split()),
+                    ),
                 )
             )
         return cls(scripted_responses=responses)
@@ -163,13 +190,12 @@ class FakeLLMClient(UnifiedLLM):
                     content=message,
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": message},
                     reasoning=None,
-                    usage={
-                        "prompt_tokens": 10,
-                        "completion_tokens": len(words),
-                        "total_tokens": 10 + len(words),
-                    },
+                    usage=LLMUsage(
+                        input_tokens=10,
+                        output_tokens=len(words),
+                        total_tokens=10 + len(words),
+                    ),
                 )
             ]
         )
@@ -205,22 +231,8 @@ class FakeLLMClient(UnifiedLLM):
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={
-                        "role": "assistant",
-                        "content": message,
-                        "tool_calls": [
-                            {
-                                "id": "call_fake_123",
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": json.dumps(tool_args),
-                                },
-                            }
-                        ],
-                    },
                     reasoning=None,
-                    usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                    usage=LLMUsage(input_tokens=10, output_tokens=5, total_tokens=15),
                 )
             ]
         )
@@ -248,9 +260,8 @@ class FakeLLMClient(UnifiedLLM):
                     content=message,
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": message},
                     reasoning=reasoning,
-                    usage={"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25},
+                    usage=LLMUsage(input_tokens=15, output_tokens=10, total_tokens=25),
                 )
             ]
         )

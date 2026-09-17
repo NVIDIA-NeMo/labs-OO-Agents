@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Test that certain event fields are never truncated by pformat max_string.
+"""Discovered regression tests for event fields that must not be truncated.
 
 Fields annotated with spec(max_string=None) should render their full content
 regardless of the max_string kwarg passed to pformat(). This matches the
@@ -8,7 +8,7 @@ existing behavior of PythonOutput.stdout/stderr.
 """
 
 from nooa.agentdoc import pformat
-from nooa.events import LLMOutput, PythonOutput, ResultStatus, Summary, Task
+from nooa.events import LLMResponse, PythonOutput, ResultStatus, Summary, Task
 
 LONG_STRING = "x" * 20_000
 MAX_STRING = 100  # Aggressively low to verify the override works
@@ -33,9 +33,9 @@ class TestEventMaxStringOverride:
         rendered = pformat(event, max_string=MAX_STRING)
         assert LONG_STRING in rendered
 
-    def test_llm_output_content_not_truncated(self):
-        """LLMOutput.content is bounded by token limits — truncating hides previous code."""
-        event = LLMOutput(content=LONG_STRING)
+    def test_llm_response_content_not_truncated(self):
+        """LLMResponse.content is bounded by token limits — truncating hides previous code."""
+        event = LLMResponse(content=LONG_STRING)
         rendered = pformat(event, max_string=MAX_STRING)
         assert LONG_STRING in rendered
 

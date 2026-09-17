@@ -23,21 +23,35 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
+    from nooa.llm_types import LLMResponse
 
 from nooa.agentdoc import pformat
-from nooa.context_blocks.events import EventBase, ToolCallEvent
+from nooa.context_blocks.events import CODEACT_INLINE_RETURN, EventBase, ToolCallEvent
 from nooa.context_blocks.models import (
     RenderedMessage,
     ResolvedBlock,
     Role,
     ToolCallInfo,
 )
+from nooa.llm_types import assistant_message
 
 logger = logging.getLogger(__name__)
+
+
+def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
+    """Recognize the public assistant IR without exposing its provider internals.
+
+    The formatter owns event-to-message semantics. Keeping this dispatch here
+    avoids assistant-specific hooks on every EventBase subclass. The lazy import
+    avoids the cycle through LLMResponse's EventBase definition.
+    """
+    from nooa.llm_types import LLMResponse
+
+    return isinstance(event, LLMResponse)
 
 
 class FormatType(StrEnum):
@@ -102,7 +116,7 @@ class BlockFormatter(ABC):
         string. ToolCallEvents are handled structurally by :meth:`format` —
         they are not routed through ``format_event``.
 
-        ASSISTANT-role events (``Message``, ``Reasoning``, ``LLMOutput``) with
+        ASSISTANT-role events (``Message``, ``Reasoning``, ``LLMResponse``) with
         string content replay verbatim — no ``EventName(...)`` repr — so the
         model's past turns look exactly like what it naturally emits.
         Non-string content (e.g. structured Pydantic models from Predict)
@@ -113,6 +127,8 @@ class BlockFormatter(ABC):
         No OOM-safety cap is applied here — that belongs to L2 (stdout/stderr
         capture).
         """
+        if _is_llm_response(event):
+            return event.replay_content
         if getattr(event, "_role", None) is Role.ASSISTANT:
             content = getattr(event, "content", None)
             if isinstance(content, str):
@@ -158,7 +174,7 @@ def _xml_message_content(block: ResolvedBlock) -> str:
       class name is already inside the rendered content
       (``PythonOutput(...)``, ``Task(...)``) — nothing is lost, and the
       tag stays uniform across event types.
-    * ASSISTANT-role events (``Message``, ``Reasoning``, ``LLMOutput``)
+    * ASSISTANT-role events (``Message``, ``Reasoning``, ``LLMResponse``)
       are the LLM's own outputs: they pass through **unwrapped** so the
       model's past turns replay exactly as it produced them. Wrapping
       them (the old ``<agent>`` tag) taught models to emit
@@ -198,6 +214,24 @@ def _markdown_message_content(block: ResolvedBlock) -> str:
     return f"### {role_label}{inline_meta}\n\n{block.content}"
 
 
+def _tool_result_message(event: ToolCallEvent) -> RenderedMessage:
+    """Project one execution event into a provider-neutral tool result."""
+    if event.result is not None:
+        content = event.result.content
+    else:
+        logger.warning(
+            "ToolCallEvent %s has result=None — emitting placeholder tool_result "
+            "to prevent context corruption.",
+            event.tool_call_id,
+        )
+        content = "(no result recorded)"
+    return RenderedMessage(
+        role=Role.TOOL,
+        content=content,
+        tool_call_id=event.tool_call_id,
+    )
+
+
 def _event_block_to_messages(
     block: ResolvedBlock,
     *,
@@ -215,47 +249,42 @@ def _event_block_to_messages(
     """
     from nooa.context_blocks.models import BlockPart
 
-    if isinstance(block.event, ToolCallEvent):
+    if _is_llm_response(block.event):
         event = block.event
-        messages: list[RenderedMessage] = [
+        if event.is_empty:
+            return []
+        # The event hook emits a portable replacement when rendering omits calls
+        # or edits text, so incomplete turns cannot retain native authority.
+        return [
             RenderedMessage(
                 role=Role.ASSISTANT,
-                tool_call=ToolCallInfo(
-                    id=event.tool_call_id,
-                    name=event.name,
-                    arguments=event.arguments,
-                ),
-                reasoning_items=event.reasoning_items,
+                content=block.content,
+                reasoning=event.reasoning,
+                replay_message=event,
             )
         ]
-        if event.result is not None:
-            messages.append(
-                RenderedMessage(
-                    role=Role.TOOL,
-                    content=event.result.content,
-                    tool_call_id=event.tool_call_id,
-                )
-            )
-        else:
-            # Defensive: ToolCallEvent with result=None should not happen in
-            # normal flow, but if it does (e.g. a GenerationError was raised
-            # before the caller could update the event), emit a minimal
-            # tool_result to avoid producing tool_use without a matching
-            # tool_result — which corrupts the conversation for the next
-            # session.
-            logger.warning(
-                "ToolCallEvent %s has result=None — emitting placeholder tool_result "
-                "to prevent context corruption.",
-                event.tool_call_id,
-            )
-            messages.append(
-                RenderedMessage(
-                    role=Role.TOOL,
-                    content="(no result recorded)",
-                    tool_call_id=event.tool_call_id,
-                )
-            )
-        return messages
+
+    if isinstance(block.event, ToolCallEvent):
+        event = block.event
+        if event.metadata.get("synthetic_type") == CODEACT_INLINE_RETURN:
+            # Inline return_result() ran inside a Python cell. CodeAct records its
+            # value for traces, but the provider never issued a separate return_result
+            # tool call. Replaying this marker would invent an assistant turn/tool
+            # pair (and duplicate the cell's completion) in subsequent prompts.
+            return []
+        return [
+            RenderedMessage(
+                role=Role.ASSISTANT,
+                tool_calls=(
+                    ToolCallInfo(
+                        id=event.tool_call_id,
+                        name=event.name,
+                        arguments=event.arguments,
+                    ),
+                ),
+            ),
+            _tool_result_message(event),
+        ]
 
     # Non-tool event
     content = (
@@ -272,6 +301,81 @@ def _event_block_to_messages(
             images=images,
         )
     ]
+
+
+def _event_blocks_to_messages(
+    blocks: list[ResolvedBlock],
+    *,
+    wrap_content: "Callable[[ResolvedBlock], str] | None",
+) -> list[RenderedMessage]:
+    """Project the public event-list IR into neutral conversation turns.
+
+    ``LLMResponse`` is the canonical assistant turn. Linked ``ToolCallEvent``
+    objects describe executions of calls from that turn; they are not separate
+    assistant turns. Grouping here preserves the provider's call batch and
+    prevents call/result interleaving from changing its meaning.
+
+    Legacy and synthetic ``ToolCallEvent`` objects without a response link
+    remain independently renderable. Linked executions are only projected as
+    part of a complete canonical response/result batch.
+    """
+    replayable_turn_ids = {
+        block.event.id
+        for block in blocks
+        if _is_llm_response(block.event) and block.event.replay_tool_calls
+    }
+    executions: dict[str, dict[str, ToolCallEvent]] = {}
+    for block in blocks:
+        event = block.event
+        if (
+            isinstance(event, ToolCallEvent)
+            and event.llm_response_id is not None
+            and event.llm_response_id in replayable_turn_ids
+        ):
+            executions.setdefault(event.llm_response_id, {})[event.tool_call_id] = event
+
+    messages: list[RenderedMessage] = []
+    for block in blocks:
+        event = block.event
+        if _is_llm_response(event) and event.replay_tool_calls:
+            by_call_id = executions.get(event.id, {})
+            # Old archives/direct constructions can contain duplicate ids.
+            # They cannot be paired with executions, even when one id matches.
+            calls = event.replay_tool_calls
+            if len({call.id for call in calls}) != len(calls) or any(
+                call.id not in by_call_id or by_call_id[call.id].result is None
+                for call in event.replay_tool_calls
+            ):
+                logger.warning(
+                    "LLMResponse %s has an incomplete visible execution batch — "
+                    "omitting the assistant tool-call turn from replay.",
+                    event.id,
+                )
+                continue
+            messages.append(
+                RenderedMessage(
+                    role=Role.ASSISTANT,
+                    content=block.content,
+                    reasoning=event.reasoning,
+                    tool_calls=tuple(
+                        ToolCallInfo(id=call.id, name=call.name, arguments=call.arguments)
+                        for call in event.replay_tool_calls
+                    ),
+                    replay_message=event,
+                )
+            )
+            for call in event.replay_tool_calls:
+                messages.append(_tool_result_message(by_call_id[call.id]))
+            continue
+
+        # A linked execution is not an independent assistant turn. If its
+        # source response was filtered out (or its batch is incomplete), fail
+        # closed instead of fabricating provider history from the sidecar.
+        if isinstance(event, ToolCallEvent) and event.llm_response_id is not None:
+            continue
+
+        messages.extend(_event_block_to_messages(block, wrap_content=wrap_content))
+    return messages
 
 
 def _build_messages(
@@ -314,8 +418,7 @@ def _build_messages(
             parts=system_parts if system_parts else None,
         )
     ]
-    for block in event_blocks:
-        messages.extend(_event_block_to_messages(block, wrap_content=wrap_message))
+    messages.extend(_event_blocks_to_messages(event_blocks, wrap_content=wrap_message))
     return messages
 
 
@@ -419,30 +522,44 @@ def _append_openai_image_message(out: list[dict], msg: RenderedMessage) -> None:
     out.append({"role": msg.role.value, "content": content_parts})
 
 
+def _arguments_object(arguments: dict[str, Any] | str) -> dict[str, Any]:
+    """Return Anthropic's object-shaped tool input with a useful failure."""
+    if isinstance(arguments, dict):
+        return arguments
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Anthropic tool arguments must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Anthropic tool arguments must decode to a JSON object")
+    return parsed
+
+
+def _with_reasoning(message: dict[str, Any], reasoning: str | None) -> dict[str, Any]:
+    """Portable reasoning on synthetic messages needs no native-state carrier."""
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    return message
+
+
 class OpenAIProviderFormatter(ProviderFormatter):
     """Emit OpenAI-compatible messages (``list[dict]``)."""
 
     def format(self, messages: list[RenderedMessage]) -> list[dict]:
         out: list[dict] = []
         for msg in messages:
-            if msg.tool_call is not None:
-                assistant_message = {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": msg.tool_call.id,
-                            "type": "function",
-                            "function": {
-                                "name": msg.tool_call.name,
-                                "arguments": json.dumps(msg.tool_call.arguments),
-                            },
-                        }
-                    ],
-                }
-                if msg.reasoning_items:
-                    assistant_message["reasoning_items"] = msg.reasoning_items
-                out.append(assistant_message)
+            if msg.replay_message is not None:
+                out.append(
+                    msg.replay_message.render_message(
+                        msg.content, msg.tool_calls, reasoning=msg.reasoning
+                    )
+                )
+            elif msg.tool_calls:
+                out.append(
+                    assistant_message(
+                        msg.content, tool_calls=msg.tool_calls, reasoning=msg.reasoning
+                    )
+                )
             elif msg.tool_call_id is not None:
                 out.append(
                     {
@@ -453,15 +570,22 @@ class OpenAIProviderFormatter(ProviderFormatter):
                 )
             elif msg.images:
                 _append_openai_image_message(out, msg)
+            elif msg.role is Role.ASSISTANT:
+                out.append(assistant_message(msg.content, reasoning=msg.reasoning))
             else:
                 if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
                     continue
-                out.append({"role": msg.role.value, "content": msg.content or ""})
+                out.append(
+                    _with_reasoning(
+                        {"role": msg.role.value, "content": msg.content or ""},
+                        msg.reasoning,
+                    )
+                )
         return out
 
 
 class AnthropicProviderFormatter(ProviderFormatter):
-    """Emit Anthropic-native messages (``{"system": str, "messages": list[dict]}``)."""
+    """Export portable Anthropic-native messages, without private replay or cache metadata."""
 
     def format(self, messages: list[RenderedMessage]) -> dict:
         system_parts: list[str] = []
@@ -472,19 +596,34 @@ class AnthropicProviderFormatter(ProviderFormatter):
                     system_parts.append(msg.content)
                 continue
 
-            if msg.tool_call is not None:
-                out.append(
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": msg.tool_call.id,
-                                "name": msg.tool_call.name,
-                                "input": msg.tool_call.arguments,
-                            }
-                        ],
+            if msg.role is Role.ASSISTANT and msg.reasoning:
+                msg = msg.model_copy(
+                    update={
+                        "content": msg.reasoning + ("\n\n" + msg.content if msg.content else ""),
+                        "reasoning": None,
                     }
+                )
+            if msg.tool_calls:
+                content: list[dict[str, Any]] = []
+                if msg.content:
+                    content.append({"type": "text", "text": msg.content})
+                content.extend(
+                    {
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": _arguments_object(call.arguments),
+                    }
+                    for call in msg.tool_calls
+                )
+                out.append(
+                    _with_reasoning(
+                        {
+                            "role": "assistant",
+                            "content": content,
+                        },
+                        msg.reasoning,
+                    )
                 )
             elif msg.tool_call_id is not None:
                 out.append(
@@ -509,87 +648,18 @@ class AnthropicProviderFormatter(ProviderFormatter):
                 if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
                     continue
                 role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
-                out.append({"role": role.value, "content": msg.content or ""})
+                out.append(
+                    _with_reasoning(
+                        {"role": role.value, "content": msg.content or ""},
+                        msg.reasoning,
+                    )
+                )
 
         return {"system": "\n\n".join(system_parts), "messages": out}
 
 
-class ResponsesProviderFormatter(ProviderFormatter):
-    """Emit OpenAI Responses API native format (``list[dict]``).
+class ResponsesProviderFormatter(OpenAIProviderFormatter):
+    """Select Responses dispatch in the runtime, using the same public message format.
 
-    The Responses API uses a different wire format from Chat Completions:
-    - Tool calls → ``{"type": "function_call", "call_id": ..., "name": ..., "arguments": ...}``
-    - Tool results → ``{"type": "function_call_output", "call_id": ..., "output": ...}``
-    - User/Assistant messages → ``{"role": "user"|"assistant", "content": ...}``
-    - System messages → kept as ``{"role": "system", ...}`` in the list so that
-      downstream budget-clamping can identify and protect them. The LLM client
-      extracts them into the ``instructions`` API parameter at call time.
+    No wire translation belongs here: ResponsesClient projects stored turns at dispatch.
     """
-
-    def format(self, messages: list[RenderedMessage]) -> list[dict]:
-        out: list[dict] = []
-        for msg in messages:
-            if msg.role == Role.SYSTEM:
-                out.append({"role": "system", "content": msg.content or ""})
-                continue
-
-            if msg.tool_call is not None:
-                # Preserve assistant text that precedes the tool call
-                if msg.content and msg.role == Role.ASSISTANT:
-                    out.append({"role": "assistant", "content": msg.content})
-                if msg.reasoning_items:
-                    out.extend(msg.reasoning_items)
-                out.append(
-                    {
-                        "type": "function_call",
-                        "call_id": msg.tool_call.id,
-                        "name": msg.tool_call.name,
-                        "arguments": json.dumps(msg.tool_call.arguments)
-                        if isinstance(msg.tool_call.arguments, dict)
-                        else msg.tool_call.arguments,
-                    }
-                )
-            elif msg.tool_call_id is not None:
-                out.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": msg.tool_call_id,
-                        "output": msg.content or "",
-                    }
-                )
-            elif msg.images:
-                role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
-                content_parts: list[dict] = []
-                if msg.content:
-                    content_parts.append({"type": "input_text", "text": msg.content})
-                for img in msg.images:
-                    if img.get("type") == "image_url":
-                        # Responses API requires input_image, and its image_url must
-                        # be the URL STRING (not the Chat-Completions {"url": ...}
-                        # object) — otherwise the API rejects it with
-                        # "expected an image URL, but got an object instead".
-                        iu = img["image_url"]
-                        if isinstance(iu, dict):
-                            url = iu.get("url")
-                            if not url:
-                                # Fail fast: an empty image_url only yields an opaque
-                                # "invalid URL" from the API, hiding the real problem.
-                                raise ValueError(
-                                    "image_url dict has no 'url'; cannot build a "
-                                    f"Responses input_image block: {iu!r}"
-                                )
-                            part = {"type": "input_image", "image_url": url}
-                            if iu.get("detail"):
-                                part["detail"] = iu["detail"]
-                        else:
-                            part = {"type": "input_image", "image_url": iu}
-                        content_parts.append(part)
-                    else:
-                        content_parts.append(img)
-                out.append({"role": role.value, "content": content_parts})
-            else:
-                if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
-                    continue
-                role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
-                out.append({"role": role.value, "content": msg.content or ""})
-        return out

@@ -38,6 +38,10 @@ YAML schema::
         top_p: 1.0                           # optional
         max_tokens: 4096                     # optional
         drop_params: true                    # optional, defaults to true
+        store: false                         # optional Responses API control
+        include:                             # optional Responses API output fields
+          - reasoning.encrypted_content
+        cache_breakpoint: openai             # optional: openai or anthropic wire mapping
 
 Set a model to ``null`` in a later layer to remove it.
 """
@@ -334,8 +338,6 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         # Responses API without YAML — pass client_type directly
         llm = get_llm_client("openai/gpt-5.3-codex", client_type="responses")
     """
-    from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig
-
     ensure_loaded()
 
     # Snapshot the alias's config under the lock so a concurrent
@@ -345,6 +347,21 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     # happens after release.
     with _registry_lock:
         config = dict(MODELS.get(name, {}))
+
+    return client_from_config(name, config, client_type=client_type, **overrides)
+
+
+def client_from_config(
+    name: str, config: dict[str, Any], *, client_type: str | None = None, **overrides
+) -> UnifiedLLM:
+    """Build a client from a registry entry without registering or saving it.
+
+    Model lookup and onboarding share this construction path so a checked
+    entry has the same defaults and routing when an agent loads it later.
+    """
+    from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig
+
+    config = dict(config)
 
     if config:
         model = config.get("model_name", name)
@@ -382,9 +399,15 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
         "max_tokens",
         "reasoning",
         "reasoning_effort",
+        "reasoning_levels",
+        "reasoning_default",
+        "reasoning_level",
         "allowed_openai_params",
         "additional_drop_params",
         "extra_body",
+        "store",
+        "include",
+        "cache_breakpoint",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]
@@ -404,6 +427,27 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
                 "Ignoring model %r retry_config: expected mapping, false, or null; got %s.",
                 name,
                 type(retry_config).__name__,
+            )
+
+    # An alias's declared levels describe its route, not any replacement client.
+    # Discard inherited selections/defaults as well; explicit declarations below
+    # belong to the replacement route and are validated by its constructor.
+    if config and (
+        overrides.get("model", model) != model
+        or any(
+            key in overrides and overrides[key] != config.get(key)
+            for key in ("api_base", "base_url", "custom_llm_provider")
+        )
+        or (client_type is not None and client_type != config.get("client_type", "completion"))
+        or overrides.get("client") is not None
+    ):
+        for key in ("reasoning_levels", "reasoning_default", "reasoning_level"):
+            params.pop(key, None)
+        if "reasoning_levels" in config:
+            logger.warning(
+                "Route overridden for %r; inherited reasoning choices were cleared. "
+                "Declare reasoning_levels explicitly for the replacement route.",
+                name,
             )
 
     params.update(overrides)

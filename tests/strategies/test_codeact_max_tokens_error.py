@@ -3,12 +3,15 @@
 """Test that empty response with finish_reason='length' raises immediately with an actionable message."""
 
 import json
+from types import SimpleNamespace
+from typing import Literal
 
 import pytest
 
-from nooa import Agent, strategy
+from nooa import Agent, return_text_as_result, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
+from nooa.events import DebugTrace, Error
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -16,7 +19,9 @@ _TEST_LLM = FakeLLMClient()
 
 
 def _resp(
-    content: str, tool_calls: list | None = None, finish_reason: str | None = None
+    content: str,
+    tool_calls: list[ToolCall] | None = None,
+    finish_reason: Literal["stop", "tool_calls", "length", "error"] | None = None,
 ) -> LLMResponse:
     """Create a test LLM response."""
     if finish_reason is None:
@@ -26,7 +31,6 @@ def _resp(
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -57,8 +61,8 @@ class TestMaxTokensExhaustedError:
 
         # Verify a DebugTrace was emitted (not an Error event in LLM context)
         all_events = agent_instance.event_manager.values()
-        debug_events = [e for e in all_events if e.event_type == "DebugTrace"]
-        error_events = [e for e in all_events if e.event_type == "Error"]
+        debug_events = [e for e in all_events if isinstance(e, DebugTrace)]
+        error_events = [e for e in all_events if isinstance(e, Error)]
         assert any("finish_reason='length'" in e.content for e in debug_events), (
             f"Expected DebugTrace with finish_reason, got: {[e.content for e in debug_events]}"
         )
@@ -67,25 +71,79 @@ class TestMaxTokensExhaustedError:
         assert len(max_tokens_errors) == 0, (
             f"max_tokens error should not be an Error event (LLM-visible), got: {max_tokens_errors}"
         )
+        assert [event.content for event in all_events if isinstance(event, LLMResponse)] == [""]
+
+    @pytest.mark.asyncio
+    async def test_finish_reason_length_does_not_return_partial_text(self):
+        """A text-only handler cannot accept output truncated at max_tokens."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        agent_instance = TestAgent(
+            llm=FakeLLMClient(
+                scripted_responses=[
+                    _resp("truncated partial", finish_reason="length"),
+                ]
+            )
+        )
+
+        with pytest.raises(GenerationError, match="max_tokens"):
+            await agent_instance.my_task()
+
+        events = agent_instance.event_manager.values()
+        assert [event.content for event in events if isinstance(event, LLMResponse)] == [
+            "truncated partial"
+        ]
+        assert not any(event.event_type == "TextOnlyReply" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_truncation_diagnostics_do_not_persist_provider_output(self):
+        """Debug metadata records output shape without opaque provider payloads."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy())
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        response = _resp("partial", finish_reason="length")
+        response.raw_response = SimpleNamespace(
+            output=[
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "must-never-enter-debug-events",
+                },
+                {"type": "message", "content": []},
+            ]
+        )
+        agent_instance = TestAgent(llm=FakeLLMClient(scripted_responses=[response]))
+
+        with pytest.raises(GenerationError, match="max_tokens"):
+            await agent_instance.my_task()
+
+        debug = next(
+            event.content
+            for event in agent_instance.event_manager.values()
+            if isinstance(event, DebugTrace)
+        )
+        assert "must-never-enter-debug-events" not in debug
+        assert "raw_response.output_count=2; output_types=['reasoning', 'message']" in debug
 
     @pytest.mark.asyncio
     async def test_empty_response_without_length_retries_normally(self):
         """When empty response has finish_reason != 'length', normal retry logic applies."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(
-                CodeActStrategy(
-                    config=CodeActConfig(
-                        max_retries=2,
-                        text_only_stop_behavior="synthetic_comment",
-                    )
-                )
-            )
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=2)))
             async def my_task(self) -> str:
                 """A task."""
                 ...
 
-        def _ret(val, cid="c2"):
+        def _ret(val: str, cid: str = "c2") -> ToolCall:
             return ToolCall(id=cid, name="return_result", arguments=json.dumps({"result": val}))
 
         fake_llm = FakeLLMClient(
@@ -98,3 +156,15 @@ class TestMaxTokensExhaustedError:
         agent_instance = TestAgent(llm=fake_llm)
         result = await agent_instance.my_task()
         assert result == "hello"
+        assert [
+            event.content
+            for event in agent_instance.event_manager.values()
+            if isinstance(event, LLMResponse)
+        ] == ["", ""]
+        assert not any(
+            message.get("role") == "assistant"
+            and isinstance(message.get("content"), str)
+            and not message["content"].strip()
+            and not message.get("tool_calls")
+            for message in fake_llm.last_messages
+        )

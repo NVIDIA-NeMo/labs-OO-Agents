@@ -182,6 +182,7 @@ class CodingAgent(InteractiveAgent):
     async def close(self) -> None:
         shell = self.shell
         try:
+            await self.aclose()
             await self.skills.aclose()
         finally:
             try:

@@ -367,7 +367,10 @@ class Evaluator:
             writer = ExperimentWriter(output_dir=experiment_dir, experiment_name=self.name)
         writer.start(
             suite_name=self.name,
-            models=[self._model_metadata.get(m, {"id": m}) for m in model_ids],
+            # YAML/from_config fills _model_metadata with ModelSpec dicts. The
+            # documented Python API does not, so fall back to the model id
+            # string — EvalMetadata.models accepts either.
+            models=[self._model_metadata.get(m, m) for m in model_ids],
             tests=[t.name for t in tests_to_run],
             runs=runs,
         )

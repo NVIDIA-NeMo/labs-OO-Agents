@@ -199,21 +199,52 @@ def validate_https_url(value: str, label: str) -> str:
 
 
 def release_for_tag(tag: str) -> dict[str, Any] | None:
-    """Return GitHub release metadata, including drafts, or None for 404."""
+    """Return draft-aware GitHub release metadata, or None when absent."""
     proc = run(
-        ["gh", "api", f"repos/{GITHUB_REPO}/releases/tags/{tag}"],
+        [
+            "gh",
+            "release",
+            "view",
+            tag,
+            "--repo",
+            GITHUB_REPO,
+            "--json",
+            "apiUrl,isDraft,targetCommitish,url",
+        ],
         check=False,
     )
-    if proc.returncode == 0:
-        try:
-            return json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            die(f"GitHub returned invalid release metadata for {tag}")
-    # gh uses exit 1 for HTTP 404. Do not turn authentication/server failures
-    # into "unused tag": its stderr contains the HTTP status, never a token.
-    if "404" in proc.stderr or "release not found" in proc.stderr.lower():
-        return None
-    die(f"could not inspect GitHub release {tag}: {proc.stderr.strip()}")
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()
+        if "release not found" in detail.lower():
+            return None
+        die(f"could not inspect GitHub release {tag}: {detail}")
+    try:
+        metadata = json.loads(proc.stdout)
+        api_url = metadata["apiUrl"]
+        draft = metadata["isDraft"]
+        target = metadata["targetCommitish"]
+        url = metadata["url"]
+        if (
+            not isinstance(api_url, str)
+            or not isinstance(draft, bool)
+            or not isinstance(target, str)
+            or not target
+            or not isinstance(url, str)
+            or not url
+        ):
+            raise TypeError
+        api_prefix = f"https://api.github.com/repos/{GITHUB_REPO}/releases/"
+        database_id_match = re.fullmatch(rf"{re.escape(api_prefix)}([1-9]\d*)", api_url)
+        if database_id_match is None:
+            raise TypeError
+        return {
+            "id": int(database_id_match.group(1)),
+            "draft": draft,
+            "target_commitish": target,
+            "html_url": url,
+        }
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        die(f"GitHub returned invalid release metadata for {tag}")
 
 
 def validate_existing_release(tag: str, sha: str) -> dict[str, Any] | None:

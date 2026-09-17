@@ -339,7 +339,7 @@ def _strategy_recent_events(agent: object, cfg) -> list[str]:
 def _strategy_working_state(agent: object, cfg) -> list[str]:
     texts = []
     for ev in _recent_events(agent, cfg.recent_events_n * 2):
-        if type(ev).__name__ in ("PythonOutput", "LLMOutput"):
+        if type(ev).__name__ in ("PythonOutput", "LLMResponse"):
             txt = _event_text(ev) or getattr(ev, "output", "")
             if isinstance(txt, str) and txt:
                 texts.append(txt)

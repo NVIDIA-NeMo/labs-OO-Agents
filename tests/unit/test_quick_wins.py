@@ -40,18 +40,6 @@ class TestExperimentalStrategies:
 
         assert isinstance(strategy, _Real)
 
-    def test_codeact_lite_strategy_warns(self):
-        from nooa.experimental import CodeActLiteStrategy
-
-        with pytest.warns(FutureWarning, match="experimental"):
-            strategy = CodeActLiteStrategy()
-
-        from nooa.strategies.codeact_lite import (
-            CodeActLiteStrategy as _Real,
-        )
-
-        assert isinstance(strategy, _Real)
-
     def test_reflexion_strategy_warns(self):
         from nooa.experimental import ReflexionStrategy
 
@@ -82,7 +70,6 @@ class TestExperimentalStrategies:
         import nooa.experimental as exp
 
         assert "PurePythonStrategy" in exp.__all__
-        assert "CodeActLiteStrategy" in exp.__all__
         assert "ReflexionStrategy" in exp.__all__
 
     def test_strategies_experimental_still_works(self):

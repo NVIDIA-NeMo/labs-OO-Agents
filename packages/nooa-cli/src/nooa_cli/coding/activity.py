@@ -69,8 +69,15 @@ def _edit_diff(
     old_text: str,
     new_text: str,
     start_line: int | None,
+    *,
+    whole_file: bool = False,
 ) -> tuple[str, bool]:
-    """Return a bounded, line-oriented unified diff and its completeness."""
+    """Return a bounded, line-oriented unified diff and its completeness.
+
+    ``whole_file`` marks both texts as complete file contents, where a missing
+    final newline is a real file state worth reporting. Fragment diffs stop
+    mid-file, so the EOF marker there was noise.
+    """
     if _diff_input_is_too_large(old_text) or _diff_input_is_too_large(new_text):
         return _omitted_diff(path, "file content exceeds the safe diff preview limit")
 
@@ -91,7 +98,13 @@ def _edit_diff(
         if not line.endswith("\n"):
             # difflib emits the source line verbatim, so unterminated content
             # would run the next marker onto the same line ("-a+b").
-            line = f"{line}\n\\ No newline at end of file\n"
+            if whole_file:
+                line = f"{line}\n\\ No newline at end of file\n"
+            else:
+                # A fragment routinely stops before the file's final
+                # newline; marking that as "no newline at end of file"
+                # reported a file state that does not exist.
+                line = f"{line}\n"
         output.write(line)
     return output.getvalue(), not output.was_truncated
 
@@ -313,7 +326,11 @@ class ActivityShellTools(Skill):
     async def run_stream(
         self,
         command: Annotated[str, spec(description="Shell command to execute")],
-        timeout: Annotated[float, spec(description="Max seconds to wait before timeout")] = 30.0,
+        *,
+        stdin: Annotated[
+            str | None, spec(description="Text piped to stdin (replaces heredocs)")
+        ] = None,
+        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         command_id = str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -324,12 +341,18 @@ class ActivityShellTools(Skill):
                 command=bounded_command,
                 working_directory=str(self.cwd),
                 command_truncated=command_truncated,
+                stdin=(
+                    pformat(stdin, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+                    if stdin is not None
+                    else None
+                ),
+                stdin_truncated=stdin is not None and len(stdin) > _MAX_EVENT_TEXT_CHARS,
             )
         )
         finished = False
         stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
         stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
-        stream = self._shell.run_stream(command, timeout=timeout)
+        stream = self._shell.run_stream(command, stdin=stdin, timeout=timeout)
         try:
             async for item in stream:
                 if isinstance(item, StreamDone):
@@ -504,6 +527,7 @@ class ActivityShellTools(Skill):
                 old_diff_text or "",
                 content,
                 None,
+                whole_file=True,
             )
         self._emit(
             FileEdit(

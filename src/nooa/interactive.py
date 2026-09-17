@@ -171,11 +171,9 @@ class AgentMessage(Metadata):
 class SummarizationConfig(BaseModel):
     """Configuration for history summarization.
 
-    ``max_tokens`` defaults to ``None`` meaning "80% of the LLM's context
-    window, resolved at install time." The old 100K absolute was fine when
-    models had ~200K context but fired at ~10% usage on 1M-context models
-    like Opus 4.8, making summarization feel constant. Set an explicit
-    integer to pin a specific threshold.
+    ``max_tokens=None`` means 80% of the usable input window (model window
+    minus the effective reply reserve), resolved for each completed request.
+    Set an explicit integer to pin a threshold, including across model switches.
     """
 
     policy: Literal["token_budget", "none"] = "token_budget"
@@ -206,33 +204,30 @@ with hidden:
 _SUMMARIZER_BUDGET_PCT = 0.8
 
 
-def _summarizer_budget(llm: "UnifiedLLM") -> int:
-    """Resolve the summarizer trigger from the LLM's context window.
+def _summarizer_budget(llm: "UnifiedLLM", fallback_reserve: int = 0) -> int:
+    """Resolve the summarizer trigger from the LLM's usable input window.
 
     Falls back to 100K when the LLM doesn't expose ``context_window`` so
     we still have a functional threshold.
     """
-    cw = getattr(llm, "context_window", None)
-    return int(cw * _SUMMARIZER_BUDGET_PCT) if cw else 100_000
+    from nooa.agents.summarization import context_budget
+
+    return context_budget(llm, _SUMMARIZER_BUDGET_PCT, fallback_reserve=fallback_reserve)
 
 
 def apply_model_limits(agent: Agent) -> None:
-    """Sync the summarizer trigger against ``agent.llm.context_window``.
+    """Sync automatic summarizers against the selected model's usable window.
 
     Call after a model switch so the summarizer threshold moves with the
     new context window. Runtime-level event truncation picks up the new
     window automatically on the next ``_build_messages`` call.
     """
-    from nooa.config.summarizer_config import TokenBudgetConfig
-
-    summarizer_max = _summarizer_budget(agent.llm)
+    summarizer_max = _summarizer_budget(agent.llm, agent._truncation.response_reserve_tokens)
     for summarizer in getattr(agent, "_summarizers", []):
+        if not getattr(summarizer, "_automatic_context_budget", False):
+            continue
         current = summarizer.config
-        summarizer.config = TokenBudgetConfig(
-            max_tokens=summarizer_max,
-            preserve_recent=current.preserve_recent,
-            target_chars=current.target_chars,
-        )
+        summarizer.config = current.model_copy(update={"max_tokens": summarizer_max})
 
 
 def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
@@ -240,8 +235,7 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
 
     Args:
         config: Summarization configuration. ``config.max_tokens=None`` (the
-            default) resolves to 80% of the agent LLM's context window at
-            install time, so the trigger scales with model capability.
+            default) follows 80% of each request's usable input window.
         agent: Agent to install summarizer on (inherits LLM, attaches to history)
     """
     if config.policy == "none":
@@ -250,10 +244,12 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     from nooa.config.summarizer_config import TokenBudgetConfig
 
     summarizer_max = (
-        config.max_tokens if config.max_tokens is not None else _summarizer_budget(agent.llm)
+        config.max_tokens
+        if config.max_tokens is not None
+        else _summarizer_budget(agent.llm, agent._truncation.response_reserve_tokens)
     )
 
-    TokenBudgetSummarizer.install(
+    summarizer = TokenBudgetSummarizer.install(
         agent,
         config=TokenBudgetConfig(
             max_tokens=summarizer_max,
@@ -261,6 +257,7 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
             target_chars=config.target_chars,
         ),
     )
+    summarizer._automatic_context_budget = config.max_tokens is None
 
 
 class AgentVars:

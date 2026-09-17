@@ -23,6 +23,9 @@ asyncio task gets its own value. Concurrent multi-session callers
 per-task attribution without any extra bookkeeping.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from openinference.semconv.trace import SpanAttributes
 from opentelemetry import context as otel_context
 
@@ -52,3 +55,16 @@ def get_session() -> str | None:
     if not value:
         return None
     return str(value)
+
+
+@contextmanager
+def session_scope(session_id: str | None) -> Iterator[None]:
+    """Set a task-local trace session and restore its previous value on exit."""
+
+    value = "" if session_id is None else session_id
+    context = otel_context.set_value(_KEY, value, otel_context.get_current())
+    token = otel_context.attach(context)
+    try:
+        yield
+    finally:
+        otel_context.detach(token)

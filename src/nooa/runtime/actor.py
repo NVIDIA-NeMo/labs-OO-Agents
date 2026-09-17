@@ -20,8 +20,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast, get_type_hints
 from uuid import uuid4
 
-from pydantic import BaseModel
-
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
 from nooa.context_blocks import (
@@ -42,10 +40,9 @@ from nooa.events import (
     ExecutionSignal,
     LLMCallEnd,
     LLMCallStart,
-    LLMComplete,
-    LLMOutput,
     SystemPrompt,
 )
+from nooa.llm_types import LLMUsage
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -103,10 +100,11 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
     from nooa.runtime.token_usage import accumulate_tokens
 
     def _handle_token_usage(usage: Any) -> None:
-        if isinstance(usage, dict):
+        normalized = LLMUsage.from_provider(usage)
+        if normalized is not None:
             accumulate_tokens(
-                input_tokens=usage.get("prompt_tokens", 0) or 0,
-                output_tokens=usage.get("completion_tokens", 0) or 0,
+                input_tokens=normalized.input_tokens,
+                output_tokens=normalized.output_tokens,
             )
 
     _dispatch: dict[str, Callable[[Any], None]] = {
@@ -180,7 +178,7 @@ def _snapshot_llm_request(
     and returns the trailing ``<context>…</context>`` envelope from the
     same list. Called right after ``_build_messages`` so both reflect the
     exact bytes about to be sent to the LLM; the returned envelope is
-    stamped onto the matching :class:`LLMComplete`. ``record=False`` keeps
+    stamped onto the matching :class:`LLMResponse`. ``record=False`` keeps
     the snapshot out of the LLM-visible event timeline.
     """
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
@@ -341,11 +339,17 @@ def _parse_context_window_tokens(exc: BaseException) -> int | None:
     return None
 
 
-def _context_window_for_error(llm_client: Any, exc: BaseException) -> int | None:
+def _context_window_for_error(
+    llm_client: Any, exc: BaseException, params: dict[str, Any] | None = None
+) -> int | None:
     """Return the provider-reported context window, falling back to the client."""
     reported = _parse_context_window_tokens(exc)
     if reported:
         return reported
+    if params is not None:
+        from nooa.unifiedllm.limits import context_limits_for
+
+        return context_limits_for(llm_client, params).context_window
     return getattr(llm_client, "context_window", None)
 
 
@@ -366,6 +370,8 @@ def _compute_reduced_max_tokens(
         reduced = original_max_tokens // 2
     else:
         return None
+    if original_max_tokens:
+        reduced = min(reduced, original_max_tokens)
     if reduced < _MIN_RECOVERY_OUTPUT_TOKENS:
         return None
     return reduced
@@ -601,7 +607,7 @@ class ActorRuntime:
 
         For callbacks on LLM output, use:
             agent.event_manager.on("Message", handler)
-            agent.event_manager.on("LLMOutput", handler)
+            agent.event_manager.on("LLMResponse", handler)
         """
         # Agent instance
         self.agent: Any = agent
@@ -876,7 +882,7 @@ class ActorRuntime:
         - System message: context blocks + strategy.strategy_prompt
         - Events: conversation events
 
-        Creates an LLMOutput event and adds it to event manager.
+        Creates an LLMResponse event and adds it to event manager.
 
         Args:
             tools: Optional list of tool definitions.
@@ -886,10 +892,12 @@ class ActorRuntime:
         Returns:
             Tuple of (LLMResponse, event_id) where:
             - LLMResponse from unifiedllm with content, reasoning, usage
-            - event_id can be used for event_manager.update() or event_manager.get()
+            - event_id identifies the canonical provider turn for inspection or linking
         """
         if self._current_method is None:
             raise RuntimeError("generate() called with no current method context")
+
+        from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
@@ -900,7 +908,7 @@ class ActorRuntime:
             call_args=self._current_call.args if self._current_call else (),
             call_kwargs=self._current_call.kwargs if self._current_call else {},
             tools=tools,
-            max_output_tokens=kwargs.get("max_tokens"),
+            request_params=kwargs,
         )
         _gen_hm = get_harness_metrics()
 
@@ -957,9 +965,20 @@ class ActorRuntime:
                     params=params,
                     agent=self.agent,
                     runtime=self,
+                    client=llm_client,
+                    filtered_history=any(
+                        query is not None
+                        for query in (
+                            self.agent.event_manager.get_event_query(),
+                            _scoped_events_var.get(),
+                            _decorator_events_var.get(),
+                            self.agent.event_query,
+                        )
+                    ),
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
+                    self._update_context_limits(ctx.client, ctx.params)
                     # Tracing hook fires AFTER middleware pre-processing,
                     # so it sees the final (possibly modified) messages.
                     call_before_hook(
@@ -976,9 +995,10 @@ class ActorRuntime:
                     _mw_strategy_tag = (
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
                     )
-                    call_params.setdefault(
+                    ctx.params.setdefault(
                         "prompt_cache_key", f"{self.agent._agent_id}-{_mw_strategy_tag}"
                     )
+                    call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
                     ctx.response = await llm_client.acall(
                         ctx.messages,
                         output_model=om,
@@ -995,7 +1015,7 @@ class ActorRuntime:
                             raise
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc)
+                        _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
                         self._archive_on_context_error(
                             _ctx_window,
                             exc=_cw_exc,
@@ -1003,7 +1023,7 @@ class ActorRuntime:
                         _reduced = _compute_reduced_max_tokens(
                             _cw_exc,
                             _ctx_window,
-                            ctx.params.get("max_tokens"),
+                            context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
                         )
                         if _reduced is None:
                             raise
@@ -1014,17 +1034,18 @@ class ActorRuntime:
                         )
                         # Re-build messages after archival so the retry sees the
                         # reduced event store.
+                        ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
                         ctx.messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=ctx.params.get("tools"),
-                            max_output_tokens=_reduced,
+                            request_params=ctx.params,
+                            llm_client=ctx.client,
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, ctx.messages, current_generation_id or ""
                         )
-                        ctx.params["max_tokens"] = _reduced
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
@@ -1077,7 +1098,7 @@ class ActorRuntime:
                             raise
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc)
+                        _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
                         self._archive_on_context_error(
                             _ctx_window,
                             exc=_cw_exc,
@@ -1085,7 +1106,7 @@ class ActorRuntime:
                         _reduced = _compute_reduced_max_tokens(
                             _cw_exc,
                             _ctx_window,
-                            kwargs.get("max_tokens"),
+                            context_limits_for(llm_client, _kwargs).reserved_output_tokens,
                         )
                         if _reduced is None:
                             # Can't compute a reduced max_tokens, but archival already ran.
@@ -1102,19 +1123,19 @@ class ActorRuntime:
                         # Re-build messages after archival so the retry sees the
                         # reduced event store. Retrying with the same messages would
                         # fail again when input tokens exceed the context window.
+                        _recovery_kw = reduced_reply_params(llm_client, _kwargs, _reduced)
                         messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=tools,
-                            max_output_tokens=_reduced,
+                            request_params=_recovery_kw,
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, messages, current_generation_id or ""
                         )
                         # Reuse _kwargs (already has the per-(agent, strategy) key set)
                         # so recovery lands on the same shard as the original attempt.
-                        _recovery_kw = {**_kwargs, "max_tokens": _reduced}
                         response = await llm_client.acall(
                             messages,
                             tools=tools,
@@ -1126,59 +1147,20 @@ class ActorRuntime:
                     raise
                 _emit_llm_end(success=True)
 
-        # Emit LLMComplete BEFORE LLMOutput so subscribers that build per-turn
-        # records (e.g. the ATIF exporter) populate metrics/tool_calls before
-        # the assistant-message content arrives. record=False keeps this off
-        # the LLM-visible event timeline (Role.RUNTIME_EVENT) but on()
-        # subscribers still receive it.
-        _model_name = getattr(llm_client, "model", "") or ""
-        usage = getattr(response, "usage", None)
-        # Normalize usage to a dict regardless of whether the provider returned
-        # a dict, a Pydantic model with attributes, or nothing at all. The
-        # token-calibration logic above already grovels through both shapes;
-        # mirror that here so LLMComplete metrics don't silently zero out.
-        _usage_raw = usage if usage is not None else getattr(response, "usage", None)
-        _usage_dict: dict[str, Any] = {}
-        if isinstance(_usage_raw, dict):
-            _usage_dict = _usage_raw
-        elif _usage_raw is not None:
-            for _key in (
-                "prompt_tokens",
-                "input_tokens",
-                "completion_tokens",
-                "output_tokens",
-                "cached_tokens",
-                "cache_read_input_tokens",
-                "reasoning_tokens",
-                "cost",
-                "cost_usd",
-            ):
-                _val = getattr(_usage_raw, _key, None)
-                if _val is not None:
-                    _usage_dict[_key] = _val
-            _prompt_details = getattr(_usage_raw, "prompt_tokens_details", None)
-            if _prompt_details is not None:
-                _usage_dict["prompt_tokens_details"] = (
-                    _prompt_details
-                    if isinstance(_prompt_details, dict)
-                    else {
-                        "cached_tokens": getattr(_prompt_details, "cached_tokens", None),
-                    }
-                )
-            _completion_details = getattr(_usage_raw, "completion_tokens_details", None)
-            if _completion_details is not None:
-                _usage_dict["completion_tokens_details"] = (
-                    _completion_details
-                    if isinstance(_completion_details, dict)
-                    else {
-                        "reasoning_tokens": getattr(_completion_details, "reasoning_tokens", None),
-                    }
-                )
-        _prompt_tokens = int(
-            _usage_dict.get("prompt_tokens") or _usage_dict.get("input_tokens") or 0
-        )
-        if _prompt_tokens > 0:
-            self._last_prompt_tokens_actual = _prompt_tokens
+        # UnifiedLLM creates the canonical response. Enrich that same object
+        # with runtime correlation data and persist it once as the assistant
+        # turn; there is no second output or completion event to synchronize.
+        if response.tag is not None:
+            raise RuntimeError(
+                "LLM middleware returned an already-recorded LLMResponse; "
+                "each call must return a fresh response object"
+            )
+        response.model_name = getattr(llm_client, "model", "") or response.model_name
+        response.generation_id = current_generation_id or ""
+        response.dynamic_context = _dynamic_context
+        usage = response.usage
+        if usage is not None and usage.input_tokens > 0:
+            self._last_prompt_tokens_actual = usage.input_tokens
             if self._last_context_stats is not None:
                 # The provider's exact prompt-token count is the single source of
                 # truth for ctx% display, summarization triggers, and archive
@@ -1186,7 +1168,7 @@ class ActorRuntime:
                 # estimate); we write the authoritative value back here.
                 stats = self._last_context_stats
                 self._last_context_stats = stats.model_copy(
-                    update={"prompt_tokens": _prompt_tokens}
+                    update={"prompt_tokens": usage.input_tokens}
                 )
                 # Recalibrate the chars→tokens ratio from this real response:
                 # tokens_per_char = prompt_tokens / total_chars. The next
@@ -1194,56 +1176,8 @@ class ActorRuntime:
                 # or the litellm tokenizer.
                 total_chars = stats.context_blocks_chars + stats.events_chars
                 if total_chars > 0:
-                    self._tokens_per_char = _prompt_tokens / total_chars
-        _completion_tokens = int(
-            _usage_dict.get("completion_tokens") or _usage_dict.get("output_tokens") or 0
-        )
-        _cached_tokens = int(
-            _usage_dict.get("cached_tokens")
-            or _usage_dict.get("cache_read_input_tokens")
-            or (_usage_dict.get("prompt_tokens_details") or {}).get("cached_tokens")
-            or 0
-        )
-        _reasoning_tokens = int(
-            (_usage_dict.get("completion_tokens_details") or {}).get("reasoning_tokens")
-            or _usage_dict.get("reasoning_tokens")
-            or 0
-        )
-        _cost_usd = float(_usage_dict.get("cost") or _usage_dict.get("cost_usd") or 0.0)
-        _tool_calls_payload = [
-            {"tool_call_id": tc.id, "function_name": tc.name, "arguments": tc.arguments}
-            for tc in (getattr(response, "tool_calls", None) or [])
-        ]
-        # _dynamic_context was captured at render time alongside the
-        # SystemPrompt snapshot (see _snapshot_llm_request), so it reflects
-        # the exact messages sent to the LLM even across context-window retry.
-        self.event_manager.add(
-            LLMComplete(
-                model_name=_model_name,
-                prompt_tokens=_prompt_tokens,
-                completion_tokens=_completion_tokens,
-                cached_tokens=_cached_tokens,
-                reasoning_tokens=_reasoning_tokens,
-                cost_usd=_cost_usd,
-                tool_calls=_tool_calls_payload,
-                reasoning_content=getattr(response, "reasoning", None) or "",
-                generation_id=current_generation_id or "",
-                dynamic_context=_dynamic_context,
-            ),
-            record=False,
-        )
-
-        # Create and record LLMOutput
-        # Serialize Pydantic models to JSON for proper event storage
-        content = response.content or ""
-        if isinstance(content, BaseModel):
-            # Pydantic model - serialize to JSON string
-            content = content.model_dump_json()
-        elif not isinstance(content, str):
-            # Other non-string types - convert to string representation
-            content = str(content)
-        event = LLMOutput(content=content)
-        event_id = self.event_manager.add(event)
+                    self._tokens_per_char = usage.input_tokens / total_chars
+        event_id = self.event_manager.add(response)
 
         return response, event_id
 
@@ -1350,6 +1284,7 @@ class ActorRuntime:
         )
 
         result: ExecutionResult | None = None
+        execution_exception: BaseException | None = None
         stdout_token: contextvars.Token[Any] | None = None  # Track for cleanup in finally
         stderr_token: contextvars.Token[Any] | None = None
         stdin_token: contextvars.Token[Any] | None = None
@@ -1514,7 +1449,7 @@ class ActorRuntime:
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
                 result = await sandbox_executor.run_cell(code, execution_count=execution_count)
-                return result
+                return cast(ExecutionResult, result)
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)
@@ -1898,6 +1833,9 @@ class ActorRuntime:
                 )
                 return result
 
+        except asyncio.CancelledError as error:
+            execution_exception = error
+            raise
         finally:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.
             # The ContextVarStream wrappers are transparent (fall through to original
@@ -1932,7 +1870,7 @@ class ActorRuntime:
                 agent=self.agent,
                 code=code,
                 result=result,
-                exception=result.error if result else None,
+                exception=result.error if result else execution_exception,
                 execution_id=execution_id,
                 tool_call_id=tool_call_id,  # LLM's tool call ID for trace correlation
             )
@@ -2015,7 +1953,7 @@ class ActorRuntime:
             # Execute nested strategy directly (we're already in a generation session)
             result = await strategy.execute(self, call)
             return result
-        except Exception as e:
+        except BaseException as e:
             exception_caught = e
             raise
         finally:
@@ -2599,12 +2537,21 @@ class ActorRuntime:
         strategy = call_strategy or decorator_strategy or get_default_strategy()
 
         # Resolve LLM client with priority: call-level > @strategy decorator > agent's default.
-        # A @strategy(llm=...) value may be a callable resolved against the agent
-        # instance; only invoke it when it would actually be used, so a call-level
-        # override doesn't trigger someone else's resolver side effects.
+        # A call-level or @strategy(llm=...) value may be a callable resolved against
+        # the agent instance; only invoke it when it would actually be used, so a
+        # call-level override doesn't trigger someone else's resolver side effects.
         plan_llm = getattr(base_method, "_plan_llm", None)
         if call_llm is not _MISSING and call_llm is not None:
-            llm_client = call_llm
+            from nooa.method_llm import resolve_method_llm
+
+            # Call-site overrides accept the same spellings as the decorator
+            # (client, alias string cached per instance, or callable resolved
+            # against the agent), resolved by the same shared path. The origin
+            # names the call site so a typo'd alias or a raising resolver
+            # points at the caller's line, not the decorator's.
+            llm_client = resolve_method_llm(
+                call_llm, self.agent, method_name, origin="call-site llm="
+            )
             llm_selection_source = "call_site"
         elif plan_llm is not None:
             from nooa.method_llm import resolve_method_llm
@@ -2728,10 +2675,8 @@ class ActorRuntime:
 
                 # Use the call_id already pushed by the wrapper so events added
                 # during this call have metadata["call_id"] matching the agent
-                # call stack.  NOTE: strategies may later mutate call.id (e.g.
-                # CodeActStrategy sets it to the task event tag), so
-                # _prepare_context uses _agent_call_id (the stack value) for
-                # EventQuery.current_call() filtering, not current_call.id.
+                # call stack and runtime.current_call.id. CodeAct stores its
+                # display-only Task event tag separately on call.task_tag.
                 call_id = self._agent_call_id or str(uuid4())
                 call = CurrentCall(
                     id=call_id,
@@ -2810,7 +2755,7 @@ class ActorRuntime:
                     _decorator_events_var.reset(decorator_evt_token)
             else:
                 raise TypeError(f"Expected GenerationStrategy instance, got {type(strategy)}")
-        except Exception as e:
+        except BaseException as e:
             exception_caught = e
             raise
         finally:
@@ -2990,6 +2935,22 @@ class ActorRuntime:
 
         return build_result.blocks
 
+    def _update_context_limits(self, llm_client: Any, params: dict[str, Any]):
+        """Refresh budgets before dynamic context is rendered or a call is sent."""
+        from nooa.unifiedllm.limits import context_limits_for
+
+        fallback = self.truncation_config.response_reserve_tokens
+        limits = context_limits_for(llm_client, params, fallback_reserve=fallback)
+        if self._last_context_stats is not None:
+            self._last_context_stats = self._last_context_stats.model_copy(
+                update={
+                    "model_context_window": limits.context_window,
+                    "reserved_output_tokens": limits.reserved_output_tokens,
+                    "output_reserve_is_fallback": limits.reserve_is_fallback,
+                }
+            )
+        return limits
+
     async def _build_messages(
         self,
         method: Any,
@@ -2998,6 +2959,8 @@ class ActorRuntime:
         *,
         tools: list[Any] | None = None,
         max_output_tokens: int | None = None,
+        request_params: dict[str, Any] | None = None,
+        llm_client: Any = None,
     ) -> list[dict[str, Any]]:
         """Build messages for LLM API.
 
@@ -3010,32 +2973,29 @@ class ActorRuntime:
         stay as render_context fallback until provider usage is written after a
         successful call.
 
-        ``max_output_tokens`` is the completion budget of the upcoming call
-        (``kwargs["max_tokens"]`` at the generate() call site, or the reduced
-        value during context-window recovery). It is reserved out of the model
-        window for budgeting and utilization: the provider rejects any request
-        where prompt + completion budget exceeds the window, so the usable
-        input window is ``context_window - reserve``. When the call does not
-        set ``max_tokens`` explicitly, providers shrink the completion budget
-        to fit and no hard reserve applies — we then fall back to the
-        configured ``TruncationConfig.response_reserve_tokens`` as a planning
-        reserve (0 disables).
+        UnifiedLLM resolves the effective output allowance from client settings,
+        the selected reasoning level and ``request_params``. The usable window
+        is ``context_window - reserve``. Only an unknown cap falls back to the
+        truncation configuration's explicitly labelled planning reserve.
+        ``max_output_tokens`` is retained for direct callers of this helper.
         """
+        llm_client = llm_client if llm_client is not None else _current_llm_var.get()
+        params = dict(request_params or {})
+        if max_output_tokens is not None:
+            params["max_tokens"] = max_output_tokens
+        limits = self._update_context_limits(llm_client, params)
         hm = get_harness_metrics()
         with hm.timer("time_prepare_context"):
             blocks = await self._prepare_context(method, call_args, call_kwargs)
         tc = self.agent._truncation
-        llm_client = _current_llm_var.get()
 
         effective_context_limit = tc.max_context_tokens
-        ctx_window = getattr(llm_client, "context_window", None)
+        ctx_window = limits.context_window
 
         # Output-token reserve (see docstring). Per-call max_tokens is the
         # binding constraint when set; otherwise the configured planning
         # reserve.
-        reserved_output = max_output_tokens
-        if not reserved_output:
-            reserved_output = tc.response_reserve_tokens or None
+        reserved_output = limits.reserved_output_tokens
 
         # Default (unconfigured) context budget: up to half the USABLE window
         # (model window minus the output reserve).
@@ -3072,7 +3032,7 @@ class ActorRuntime:
                 count_tokens=count_tokens,
                 event_format=tc.event_format,
                 event_format_resolver=self._event_format_for_event,
-                model_context_window=getattr(llm_client, "context_window", None),
+                model_context_window=ctx_window,
                 reserved_output_tokens=reserved_output,
             )
 
@@ -3101,6 +3061,8 @@ class ActorRuntime:
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
         messages = result.output
-        self._last_context_stats = result.stats
+        self._last_context_stats = result.stats.model_copy(
+            update={"output_reserve_is_fallback": limits.reserve_is_fallback}
+        )
         self._last_prompt_tokens_actual = None
         return messages

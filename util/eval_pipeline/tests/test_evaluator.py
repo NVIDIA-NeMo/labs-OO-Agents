@@ -864,5 +864,52 @@ class TestCloneEvaluatorWithTests:
         assert evaluator.tests["orig"].agent_class is MockAgent  # original untouched
 
 
+# =============================================================================
+# Tests for the documented plain-Python Evaluator API (#152)
+# =============================================================================
+
+
+class TestEvaluatorPythonApiRun:
+    """Evaluator(models={...}) must run without YAML/_model_metadata."""
+
+    @pytest.mark.asyncio
+    async def test_run_without_model_metadata_writes_valid_jsonl(self, tmp_path):
+        """Documented Python API: constructing Evaluator with a models dict
+        and calling run() must not raise pydantic ValidationError.
+
+        writer.start() previously fell back to {"id": m}, which is neither a
+        ModelSpec (missing model_name) nor a string.
+        """
+        evaluator = Evaluator(
+            models={"gpt-4": MockClient()},
+            output_dir=tmp_path,
+            name="python_api",
+        )
+        evaluator.add_test(
+            name="sentiment",
+            agent_class=MockAgent,
+            method="classify",
+            data=[{"kwargs": {"text": "I love this!"}, "expected": "positive"}],
+            scorers=[MockScorer()],
+        )
+
+        results = await evaluator.run(models=["gpt-4"])
+
+        assert results.total == 1
+        assert results.output_file is not None
+        assert results.output_file.exists()
+
+        import json
+
+        from eval_pipeline.eval_types import EvalMetadataLine
+
+        first_line = results.output_file.read_text().splitlines()[0]
+        metadata_line = EvalMetadataLine.model_validate(json.loads(first_line))
+        models = metadata_line.metadata.models
+        assert models, "metadata must record the model used"
+        recorded_ids = [m if isinstance(m, str) else m.id for m in models]
+        assert "gpt-4" in recorded_ids
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

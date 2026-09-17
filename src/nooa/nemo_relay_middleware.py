@@ -39,6 +39,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
+from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.runtime.middleware import (
     MIDDLEWARE_AGENT_CALL,
     MIDDLEWARE_EXECUTE_PYTHON,
@@ -46,6 +47,41 @@ from nooa.runtime.middleware import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _reconcile_messages(originals, public):
+    """Only unchanged JSON entries at the same position recover their turn.
+
+    Insertions/deletions conservatively demote shifted turns to portable dicts.
+    No native fields cross the relay's JSON boundary.
+    """
+    return [
+        originals[index]
+        if index < len(originals)
+        and isinstance(originals[index], (LLMResponse, CacheBoundary))
+        and message == originals[index].public_message()
+        else message
+        for index, message in enumerate(public)
+    ]
+
+
+def _relay_response(response: LLMResponse) -> dict[str, Any]:
+    """Project the canonical response only when NeMo Relay needs wire JSON."""
+    result: dict[str, Any] = {"finish_reason": response.finish_reason}
+    if response.content or response.tool_calls or response.reasoning:
+        result["message"] = response.public_message()
+    if response.usage is not None:
+        result["usage"] = {
+            "prompt_tokens": response.usage.input_tokens,
+            "completion_tokens": response.usage.output_tokens,
+            "total_tokens": response.usage.total_tokens,
+            "cached_tokens": response.usage.cached_input_tokens,
+            "cache_creation_input_tokens": response.usage.cache_write_input_tokens,
+            "reasoning_tokens": response.usage.reasoning_tokens,
+            "cost_usd": response.usage.cost_usd,
+        }
+    return result
+
 
 if TYPE_CHECKING:
     from nooa.runtime.event_manager import EventManager
@@ -150,7 +186,11 @@ async def nemo_relay_llm_middleware(
         for k, v in ctx.params.items()
         if k not in _SENSITIVE_KEYS and k not in _NON_SERIALIZABLE_KEYS
     }
-    safe_params["messages"] = ctx.messages
+    original_messages = list(ctx.messages)
+    safe_params["messages"] = [
+        dict(message) if isinstance(message, (LLMResponse, CacheBoundary)) else message
+        for message in original_messages
+    ]
     # Tools are excluded via _NON_SERIALIZABLE_KEYS.  Do NOT re-add them:
     # including a "tools" key in request.content triggers an AttributeError
     # ('dict' object has no attribute 'name') inside NeMo Relay's native pipeline.
@@ -171,7 +211,7 @@ async def nemo_relay_llm_middleware(
             intercepted = req.content
             intercepted_msgs = intercepted.get("messages")
             if intercepted_msgs is not None:
-                ctx.messages = intercepted_msgs
+                ctx.messages = _reconcile_messages(original_messages, intercepted_msgs)
             # Propagate any supported param changes from the intercept.
             for key in _PROPAGATABLE_LLM_PARAMS:
                 if key in intercepted:
@@ -182,24 +222,7 @@ async def nemo_relay_llm_middleware(
         resp = captured_ctx.response
         if resp is None:
             return {}
-        # Prefer the raw litellm ModelResponse (Pydantic) — gives NeMo Relay the
-        # full OpenAI-style structure matching what the old hooks-based
-        # integration returned via captured_response.model_dump(mode="json").
-        raw = getattr(resp, "raw_response", None)
-        if raw is not None and hasattr(raw, "model_dump"):
-            return raw.model_dump(mode="json")
-        # Pydantic response (e.g. passed directly)
-        if hasattr(resp, "model_dump"):
-            return resp.model_dump(mode="json")  # type: ignore[union-attr]
-        # Fallback: manual serialization from unifiedllm.LLMResponse dataclass.
-        if hasattr(resp, "assistant_message"):
-            result: dict[str, Any] = {"message": resp.assistant_message}
-            if resp.usage:
-                result["usage"] = resp.usage
-            if resp.finish_reason:
-                result["finish_reason"] = resp.finish_reason
-            return result
-        return {}
+        return _relay_response(resp)
 
     # Note: nemo_relay.llm.execute() returns the pre-guardrail response.
     # Sanitize-response guardrails transform data for NeMo Relay internals
