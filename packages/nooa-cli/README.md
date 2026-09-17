@@ -85,33 +85,53 @@ CLI usage, and 130 means interrupted.
 
 ### Connect a model
 
-Start the TUI and run `/connect` — it guides you through picking a model and
-stores your credentials for you.
-
-```bash
-nooa tui
-```
+Start the TUI and run `/connect` for the same guided workflow as `nooa connect`:
+connection and credentials, model selection, interface checks, selection among
+working interfaces, model settings and reply budget, remaining checks, then save.
+Each prompt offers the console wizard's completions: providers, saved endpoints,
+key-variable names, model IDs, settings choices, and existing aliases. Type to
+filter, Tab to complete, or use the arrow keys to select. Keys use a masked prompt
+without completion or history.
 
 ```text
-/connect https://api.anthropic.com          # Anthropic (Claude)
-/connect https://api.openai.com/v1           # OpenAI
-/connect http://localhost:11434              # Local Ollama
-/connect http://localhost:8000/v1            # Local vLLM
-/connect https://inference-api.nvidia.com/v1 # NVIDIA inference API
+/connect
+/model work
 ```
 
-Give it a URL and `/connect` figures out the rest: it fetches the available
-models, prompts for an API key if the backend needs one, saves an alias to your
-project, and switches to the model you pick. Rerun `/connect` on the same URL
-any time to update the saved alias.
+Choose `work` as the alias at the final save step. The wizard asks for approval
+of the check budget before making model calls, and confirms saving, replacing an
+alias, and storing a new key. `/model work` switches the running agent after saving.
+Use `/connect --no-probe` for manual setup without generation checks, or pass the
+same wizard options as `nooa connect` to prefill answers.
+
+ACP uses staged commands with explicit check and save actions. For example:
+
+```text
+/connect anthropic
+/connect model MODEL_ID --as work
+/connect check all
+/connect save
+```
+
+Missing credentials can be added under `env:` in workspace `.nooa/secrets.yaml`
+or user-level `~/.config/nooa/secrets.yaml` while ACP is running. Use `/connect retry`
+to retry discovery, or repeat the check command; Connect reloads the selected key
+without restarting the server. Explicit environment exports keep precedence.
+
+Providers include `openai`, `anthropic`, and `nvidia`. Custom endpoints accept
+`--api-style chat|responses|anthropic` and `--api-key-env NAME`; stage commands
+read credentials from the environment and never ask you to paste them into
+chat. Local Ollama uses `http://localhost:11434/v1`. See the
+[Connect guide](../../docs/model-connect.md#in-session-setup-with-connect) for
+limits, reasoning templates, and workspace behavior.
 
 ### Editing saved config
 
-Everything `/connect` writes lives under your project's `.nooa/` folder:
+Model setup and preferences live under your project's `.nooa/` folder:
 
 - `.nooa/llm_config.yaml` — saved model aliases
 - `.nooa/secrets.yaml` — API keys keyed by env-var name
-- `.nooa/settings.yaml` — TUI preferences and default model
+- `.nooa/settings.yaml` — TUI preferences and the default selected by `/model`
 
 Edit any of them from inside the TUI with `/edit .nooa/<file>`, or open them in
 your usual editor. Changes to `settings.yaml` and `llm_config.yaml` are picked

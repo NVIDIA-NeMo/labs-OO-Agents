@@ -306,13 +306,14 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
     ]
     assert len(advertised) == 1
     assert [command.name for command in advertised[0].available_commands] == [
+        "connect",
         "diagnose",
         "mcp",
         "mcp-add",
         "skill-status",
         "skills",
     ]
-    diagnose = advertised[0].available_commands[0]
+    diagnose = next(c for c in advertised[0].available_commands if c.name == "diagnose")
     assert diagnose.description == "Diagnose the workspace."
     assert diagnose.input is not None
     assert diagnose.input.root.hint == "<mode>"
@@ -637,6 +638,7 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
     ]
     assert len(advertised) == 2
     assert [command.name for command in advertised[-1].available_commands] == [
+        "connect",
         "later",
         "mcp",
         "mcp-add",
@@ -684,6 +686,7 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
     ]
     assert len(advertised) == 1
     assert [command.name for command in advertised[0].available_commands] == [
+        "connect",
         "mcp",
         "mcp-add",
         "repair",
@@ -723,6 +726,7 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
     assert result.startswith("Reload failed for nvzurich.workflow:")
     assert not any(isinstance(update, AvailableCommandsUpdate) for update in client.updates)
     assert [command.name for command in runtime.commands.commands()] == [
+        "connect",
         "diagnose",
         "mcp",
         "mcp-add",
@@ -988,12 +992,14 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
     }
     assert commands_by_session[alpha_session.session_id] == [
         "alpha",
+        "connect",
         "mcp",
         "mcp-add",
         "skills",
     ]
     assert commands_by_session[beta_session.session_id] == [
         "beta",
+        "connect",
         "mcp",
         "mcp-add",
         "skills",

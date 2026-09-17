@@ -2392,6 +2392,28 @@ class TUIApplication:
         await self.open_subview(view)
         return view.value or ""
 
+    async def prompt_connect(self, text: str, **options) -> str | None:
+        """Collect a wizard value with completion; None means cancel, not blank."""
+        from .prompt_overlay import ChoiceOverlay, PromptOverlay
+
+        if options.get("hide_input"):
+            view = PromptOverlay(self._app, text, "", masked=True)
+        else:
+            choices = options.get("choices", ())
+            view = ChoiceOverlay(
+                self._app,
+                text,
+                "",
+                list(choices or options.get("suggestions", ())),
+                completion=True,
+                allow_custom=not bool(choices),
+                default=str(options["default"]) if options.get("default") is not None else "",
+                labels=options.get("labels"),
+                existing=options.get("existing", ()),
+            )
+        await self.open_subview(view)
+        return view.value
+
     async def open_job_explorer(self) -> None:
         """Open the job explorer as an in-app subview."""
         from .job_explorer import JobExplorerView

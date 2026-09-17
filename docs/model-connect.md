@@ -502,7 +502,7 @@ the current runtime (LiteLLM by default). No temporary registry entries or globa
 registry changes are needed. Each checked client is closed even if its call fails.
 The TUI keeps model selection, confirmation, secret persistence and switching;
 it can call these async functions directly without invoking Click or a subprocess.
-Its existing Ollama-specific adapter remains separate from these three API styles.
+For local Ollama, use its OpenAI-compatible `/v1` endpoint with the chat style.
 
 ## What the observations mean
 
@@ -558,3 +558,78 @@ This is an internal organization, not a separately installable UnifiedLLM packag
 
 Request-shape references: [OpenAI Responses](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
 and [OpenRouter model metadata](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).
+
+## In-session setup with `/connect`
+
+ACP clients advertise `/connect` alongside the shared session commands. The
+command uses the same Connect library as `nooa connect`; setup belongs to the
+current session, and saving writes `<session workspace>/.nooa/llm_config.yaml`.
+
+```text
+/connect openai
+/connect model gpt-5 --as work
+/connect check minimal
+/connect save
+```
+
+For a gateway, start with `/connect https://gateway.example/v1 --api-style responses
+--api-key-env NVIDIA_INFERENCE_API_KEY` (on one line). Credentials come from the
+server environment or layered `secrets.yaml` files; never paste a key into a
+slash command. Model IDs are sent to the endpoint exactly as selected.
+
+Connect rereads the selected file credential on setup and before each check.
+Native variable-name completion also includes names added to secrets files since
+startup, without exporting or displaying their values.
+If a key is missing, it shows the session workspace's `.nooa/secrets.yaml` path.
+Add the variable under `env:` in that file (or your user-level `secrets.yaml`),
+then run `/connect retry` to retry discovery without restarting ACP. To retry
+checks, run `/connect check minimal` or `/connect check all` again. The native
+and console wizards also reread file credentials when you choose **Reload secrets
+and try again**. Masked temporary keys remain in use until you choose another key.
+
+Explicit process environment values take precedence, including empty exports.
+Only values NOOA loaded from files are refreshed or removed after file edits;
+unrelated variables and existing model clients are unchanged. Check results
+obtained with a previous credential are discarded when you retry with a new one.
+Invalid secrets files stop setup with a message that does not expose their content.
+
+Discovery uses `/models` without generation. Selecting a model previews its
+settings and estimated check budget. `check minimal` explicitly approves routing
+checks; `check all` also runs tool, reasoning, and three-turn session checks.
+These calls may incur charges; token estimates are not billing caps. Repeating a
+check can reuse previously accepted results for the same unchanged request;
+select the model again to build a fresh plan. Saving
+without checks is allowed and leaves capabilities unconfirmed. Use
+`/connect save --replace` to explicitly replace an existing alias.
+
+`/connect model` accepts `--max-tokens`, `--context-window`, `--budget-tokens`,
+`--reasoning-template`, `--levels`, and `--reasoning-default`; `/connect help`
+shows the available templates. A manually entered model ID can be used when an
+endpoint does not support discovery. `/connect` shows the pending preview and
+`/connect cancel` discards it. Drafts are not shared between sessions.
+
+Saving never changes the running agent's model. Launch a new agent with
+`--model work` using the saved config, or use the host's model selection command.
+ACP setup commands do not enter the agent's conversation history; cancelling a
+check may leave the generic assistant message 'Stopped at your request.'
+
+In the native TUI, `/connect` runs the same ordered wizard as `nooa connect`.
+After budget approval it asks for the connection and credentials, lists models,
+tests the selected model's interfaces, and only then offers the working API
+formats. If only one works, it selects that format automatically. Public model
+metadata, model settings, reply budget, and configured checks follow; the alias
+and save confirmation come last.
+
+The native prompts provide the wizard's completion choices for providers,
+endpoints, credential-variable names, model IDs, settings, and saved aliases.
+Type to filter, Tab to complete, and arrow keys to select; the right arrow edits
+a displayed default. Secret prompts are masked and have no completion or history.
+New keys are saved in workspace `secrets.yaml` only after confirmation. Use
+`/connect --no-probe` for manual setup without generation checks. Wizard flags
+can prefill answers, for example `/connect --provider nvidia`; a bare provider
+or endpoint URL is also accepted. Use `/model ALIAS` after saving to switch.
+For local Ollama, choose a custom endpoint at `http://localhost:11434/v1`.
+
+An empty `api_key_env` in a direct-transport alias means no authentication.
+Discovery, checks, and later use of the saved alias do not borrow ambient OpenAI
+or Anthropic credentials. Omitting the setting retains the SDK's usual lookup.

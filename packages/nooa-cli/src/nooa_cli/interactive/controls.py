@@ -358,9 +358,10 @@ CONTROL_TYPES = {
 def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_registry: Any):
     """Adapt shared operations to the host-neutral command catalog."""
     from nooa_cli.coding.slash_commands import CodingSlashCommand
+    from nooa_cli.interactive.connect import ConnectControl
 
     result = []
-    for control_type in CONTROL_TYPES.values():
+    for control_type in (*CONTROL_TYPES.values(), ConnectControl):
         control = control_type(
             agent,
             config,
@@ -372,6 +373,7 @@ def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_regis
                 name=control.name,
                 description=control_type.__doc__ or "",
                 argument_hint={
+                    "connect": "[PROVIDER|URL|model ID|check minimal|check all|save|cancel]",
                     "skills": "<list|commands|add DIR|activate ID|deactivate ID>",
                     "mcp": "[status|approve NAME [CODE]|revoke NAME]",
                 }[control.name],

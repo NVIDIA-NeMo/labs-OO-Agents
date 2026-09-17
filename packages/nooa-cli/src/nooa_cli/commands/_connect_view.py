@@ -11,10 +11,15 @@ from contextlib import contextmanager
 
 import click
 
+from ._connect_io import current_host, echo
+
 
 @contextmanager
 def quiet_provider_messages():
     """Hide legacy-library help banners while this CLI displays safe outcomes."""
+    if current_host() is not None:
+        yield
+        return
     legacy = sys.modules.get("litellm")
     previous = getattr(legacy, "suppress_debug_info", False)
     if legacy is not None:
@@ -71,18 +76,21 @@ def local_failure(exc, *, api_key=None, api_key_env=None):
 
 
 def line(text, *, fg=None, bold=False, dim=False):
+    if current_host() is not None:
+        echo(text, err=fg == "yellow")
+        return
     width = max(24, min(84, shutil.get_terminal_size((80, 24)).columns - 4))
     for part in textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]:
         if "NO_COLOR" not in os.environ:
             part = click.style(part, fg=fg, bold=bold, dim=dim)
-        click.echo("  " + part)
+        echo("  " + part)
 
 
 def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096):
-    click.echo()
+    echo()
     line("NOOA  /  CONNECT", fg="bright_cyan", bold=True)
     line("Add a model to your workspace.", dim=True)
-    click.echo()
+    echo()
     if checks:
         line("API checks may incur charges.", fg="yellow")
         line("Checks use the same model client as your agents.", dim=True)
@@ -121,23 +129,23 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
 
 
 def step(number, title):
-    click.echo()
+    echo()
     line(f"{number} / 4  ·  {title}", fg="bright_cyan", bold=True)
-    click.echo()
+    echo()
 
 
 class CheckProgress:
     """Compact human progress; replace only the active line on a real terminal."""
 
     def __init__(self):
-        self.inline = click.get_text_stream("stdout").isatty()
+        self.inline = current_host() is None and click.get_text_stream("stdout").isatty()
         self.active = False
         self.started = {}
         self.results = {}
 
     def _clear(self):
         if self.active:
-            click.echo("\r\033[2K", nl=False, color=True)
+            echo("\r\033[2K", nl=False, color=True)
             self.active = False
 
     def update(self, name, record, *, missing_reasoning=False):
@@ -163,7 +171,7 @@ class CheckProgress:
             text = f"  … {label} — checking"
             if self.inline:
                 width = max(20, shutil.get_terminal_size((80, 24)).columns - 1)
-                click.echo(text[:width], nl=False)
+                echo(text[:width], nl=False)
                 self.active = True
             else:
                 line(text.strip(), dim=True)
@@ -249,7 +257,7 @@ class CheckProgress:
                 )
             ]
             line("Results · " + " · ".join(counts), bold=True)
-            click.echo()
+            echo()
 
 
 def model_details(model, *, output_tokens, edited=False):
@@ -275,7 +283,7 @@ def model_details(model, *, output_tokens, edited=False):
             else "Thinking available; named levels not listed"
         )
         default_text = "Thinking on" if reasoning["default_enabled"] else "Thinking off"
-    click.echo()
+    echo()
     line(f"Model details · {model['id']}", fg="bright_cyan", bold=True)
     for label, value in (
         ("Context window", tokens(model.get("context_length"))),
@@ -328,4 +336,4 @@ def model_details(model, *, output_tokens, edited=False):
             else "This ceiling meets or exceeds the context window. Verify the server limits before using it as a reply budget.",
             fg="yellow",
         )
-    click.echo()
+    echo()

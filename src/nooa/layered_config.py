@@ -175,12 +175,16 @@ def load_layered_yaml(
     *,
     prepend: Iterable[Path] = (),
     project_dir: Path | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Load and deep-merge every layer of *filename* into a single dict.
 
     Walks the same chain as :func:`layered_paths` and merges last-wins.
     ``null`` values delete keys. A file whose YAML doesn't parse to a mapping
     is skipped with a warning so one bad layer never takes down the rest.
+
+    With ``strict=True``, invalid or unreadable files raise a sanitized
+    ValueError without logging parser excerpts (which may contain secrets).
 
     *prepend* supplies lowest-priority paths (e.g. entry-point bundled
     defaults) just like :func:`layered_paths`; omit it for settings / secrets.
@@ -199,11 +203,15 @@ def load_layered_yaml(
         # UnicodeError too: a non-UTF-8 settings file otherwise aborts every
         # caller of this loader rather than degrading to the other layers.
         except (OSError, UnicodeError, yaml.YAMLError) as e:
+            if strict:
+                raise ValueError(f"Could not read valid YAML from {path}.") from None
             logger.warning("Failed to load config file %s: %s", path, e)
             continue
         if data is None:
             continue
         if not isinstance(data, dict):
+            if strict:
+                raise ValueError(f"Config file {path} must contain a YAML mapping.")
             logger.warning("Config file %s is not a YAML mapping; skipping", path)
             continue
         merged = _deep_merge(merged, data)

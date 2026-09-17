@@ -28,6 +28,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import threading
+from pathlib import Path
 
 from nooa.layered_config import load_layered_yaml
 
@@ -35,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 _SECRETS_FILENAME = "secrets.yaml"
 _SECRETS_ENV_VAR = "NEMO_OO_SECRETS"
+# Only values we actually exported are eligible for refresh. Shell exports and
+# later process overrides keep precedence, including intentionally empty ones.
+_file_env: dict[str, str] = {}
+_env_lock = threading.RLock()
 
 
 def load_secrets_into_env() -> list[str]:
@@ -60,12 +67,69 @@ def load_secrets_into_env() -> list[str]:
         if value is None:
             continue
         key = str(name)
-        if key in os.environ:
-            # Process / shell value wins — never clobber.
-            continue
-        os.environ[key] = str(value)
-        applied.append(key)
+        with _env_lock:
+            if key in os.environ:
+                # Process / shell value wins — never clobber.
+                continue
+            os.environ[key] = str(value)
+            _file_env[key] = str(value)
+            applied.append(key)
     return applied
+
+
+def _secret_env_map(project_dir: Path | None) -> dict:
+    merged = load_layered_yaml(
+        _SECRETS_FILENAME, _SECRETS_ENV_VAR, project_dir=project_dir, strict=True
+    )
+    env_map = merged.get("env", {})
+    if not isinstance(env_map, dict):
+        raise ValueError("secrets.yaml must contain an env mapping.")
+    return env_map
+
+
+def secret_env_names(*, project_dir: Path | None = None) -> list[str]:
+    """List fresh credential names for completion without exporting their values."""
+    return [
+        name
+        for name in _secret_env_map(project_dir)
+        if isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+    ]
+
+
+def reload_secret_env(
+    name: str, *, project_dir: Path | None = None, replace_empty: bool = False
+) -> str | None:
+    """Refresh one file-loaded credential, preserving explicit environment values.
+
+    Connect calls this at setup and retry boundaries. Other variables and live
+    clients are untouched. The optional project directory selects the session's
+    secrets layer instead of the server's launch directory. Removed file values
+    are removed from the environment too, so a stale key cannot survive deletion.
+    ``replace_empty`` is reserved for an explicit masked-key save, which also
+    makes the newly saved key usable when the process exported an empty value.
+    """
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise ValueError("Secret variable must be a valid environment variable name")
+    with _env_lock:
+        if (
+            name in os.environ
+            and not (replace_empty and os.environ[name] == "")
+            and (name not in _file_env or os.environ[name] != _file_env[name])
+        ):
+            _file_env.pop(name, None)
+            return os.environ[name]
+        value = _secret_env_map(project_dir).get(name)
+        if value is None:
+            if name in _file_env:
+                os.environ.pop(name, None)
+            _file_env.pop(name, None)
+            return None
+        if not isinstance(value, (str, int, float, bool)):
+            raise ValueError("Secret values must be scalar YAML values.")
+        value = str(value)
+        os.environ[name] = value
+        _file_env[name] = value
+        return value
 
 
 def write_secret_env(path, name: str, value: str) -> None:
@@ -75,9 +139,7 @@ def write_secret_env(path, name: str, value: str) -> None:
     consent and must explain that an exported shell value still takes priority.
     Secret-bearing YAML parser excerpts never escape this helper.
     """
-    import re
     import tempfile
-    from pathlib import Path
 
     import yaml
 
@@ -118,4 +180,4 @@ def write_secret_env(path, name: str, value: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
-__all__ = ["load_secrets_into_env", "write_secret_env"]
+__all__ = ["load_secrets_into_env", "reload_secret_env", "secret_env_names", "write_secret_env"]

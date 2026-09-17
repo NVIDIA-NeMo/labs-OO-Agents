@@ -530,6 +530,38 @@ class TerminalFrontend:
         self._console.console.print(message)
         return await self.get_input(f"{title}: ", completions=options)
 
+    async def prompt_connect(self, text: str, **options) -> str | None:
+        """Present the CLI wizard's choices and editable suggestions in the host."""
+        if self._app is not None:
+            return await self._app.prompt_connect(text, **options)
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import WordCompleter
+        from prompt_toolkit.history import DummyHistory
+
+        hidden = options.get("hide_input", False)
+        words = list(options.get("choices") or options.get("suggestions") or ())
+        session = PromptSession(
+            history=DummyHistory(),
+            is_password=hidden,
+            completer=WordCompleter(
+                words,
+                ignore_case=True,
+                match_middle=True,
+                sentence=True,
+                display_dict=options.get("labels"),
+            )
+            if words and not hidden
+            else None,
+            complete_while_typing=True,
+        )
+        try:
+            return await session.prompt_async(
+                text + ": ",
+                placeholder=str(options.get("default") or "") if not hidden else None,
+            )
+        except (EOFError, KeyboardInterrupt):
+            return None
+
     async def start_thinking(self, message: str = "thinking...") -> None:
         self._console.start_spinner(message)
 
