@@ -502,7 +502,7 @@ the current runtime (LiteLLM by default). No temporary registry entries or globa
 registry changes are needed. Each checked client is closed even if its call fails.
 The TUI keeps model selection, confirmation, secret persistence and switching;
 it can call these async functions directly without invoking Click or a subprocess.
-The native picker uses Ollama's OpenAI-compatible `/v1` endpoint with the chat style.
+For local Ollama, use its OpenAI-compatible `/v1` endpoint with the chat style.
 
 ## What the observations mean
 
@@ -597,11 +597,22 @@ Saving never changes the running agent's model. Launch a new agent with
 ACP setup commands do not enter the agent's conversation history; cancelling a
 check may leave the generic assistant message 'Stopped at your request.'
 
-In the native TUI, `/connect` opens a provider/model picker when no draft exists.
-The picker ends at the preview; the same `check`, `save`, and `cancel` steps then
-apply. A missing key can be entered in a masked dialog and is only persisted to
-workspace `secrets.yaml` when you save. Use `/model ALIAS` after saving to switch
-explicitly. Local Ollama uses its OpenAI-compatible `/v1` endpoint.
+In the native TUI, `/connect` runs the same ordered wizard as `nooa connect`.
+After budget approval it asks for the connection and credentials, lists models,
+tests the selected model's interfaces, and only then offers the working API
+formats. If only one works, it selects that format automatically. Public model
+metadata, model settings, reply budget, and configured checks follow; the alias
+and save confirmation come last.
+
+The native prompts provide the wizard's completion choices for providers,
+endpoints, credential-variable names, model IDs, settings, and saved aliases.
+Type to filter, Tab to complete, and arrow keys to select; the right arrow edits
+a displayed default. Secret prompts are masked and have no completion or history.
+New keys are saved in workspace `secrets.yaml` only after confirmation. Use
+`/connect --no-probe` for manual setup without generation checks. Wizard flags
+can prefill answers, for example `/connect --provider nvidia`; a bare provider
+or endpoint URL is also accepted. Use `/model ALIAS` after saving to switch.
+For local Ollama, choose a custom endpoint at `http://localhost:11434/v1`.
 
 An empty `api_key_env` in a direct-transport alias means no authentication.
 Discovery, checks, and later use of the saved alias do not borrow ambient OpenAI

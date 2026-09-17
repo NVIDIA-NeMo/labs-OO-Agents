@@ -185,7 +185,7 @@ def command(
         raise click.UsageError("--input requires --stage save")
     from ._connect_wizard import run_wizard
 
-    run_wizard(
+    return run_wizard(
         model=model,
         edit_model=edit_model,
         provider=provider,

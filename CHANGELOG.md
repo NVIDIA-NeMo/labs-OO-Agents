@@ -6,13 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- Use the Connect library for native and ACP `/connect` model setup. Discovery
-  and preview are separate from explicitly requested checks and saving. Native
-  setup now stops at the preview instead of automatically saving and switching;
-  use `/connect save`, then `/model ALIAS`. Masked keys are persisted only on
-  save, and replacing an alias requires `/connect save --replace`. An explicit
-  empty `api_key_env` with direct transport disables SDK credential fallback,
-  including when a saved no-auth alias is reloaded.
+- Use the Connect library for native and ACP `/connect` model setup. Native
+  setup reuses the `nooa connect` wizard and its completion choices: select a
+  model, test interfaces, then choose among the working formats. Model settings
+  and further checks precede alias selection and save confirmation. New keys
+  use masked input and a separate save confirmation. ACP uses explicit staged
+  discovery, check, and save commands. Saving leaves the running model unchanged.
+  An explicit empty `api_key_env` with direct transport disables SDK credential
+  fallback, including when a saved no-auth alias is reloaded.
 
 - Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
   `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new

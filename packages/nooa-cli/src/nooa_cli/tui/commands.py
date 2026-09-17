@@ -621,11 +621,11 @@ class ConnectCommand(ModelCommand):
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        from nooa_cli.interactive.connect import ConnectControl
-
         return {
-            "/connect": "Pick a backend or review pending settings",
-            **ConnectControl.help_text(),
+            "/connect [PROVIDER|URL]": "Run the guided Connect wizard",
+            "/connect --no-probe": "Manual setup without generation checks",
+            "/connect --edit-model [ALIAS]": "Edit a saved model's settings",
+            "/connect help": "Show all wizard options",
         }
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
@@ -652,8 +652,12 @@ class ConnectCommand(ModelCommand):
         from nooa_cli.interactive.controls import ControlTable
 
         control = self._control()
-        if not args and control.proposal is None:
-            result = await self._pick_model(control)
+        if args == ["help"]:
+            args = ["--help"]
+        if (not args and control.proposal is None) or (
+            args and args[0] not in {"model", "check", "save", "cancel", "help"}
+        ):
+            return await self._wizard(args, control)
         else:
             # Capture a masked key before save discards the completed draft.
             pending = (control.connection[2], control._api_key) if control.connection else None
@@ -690,80 +694,38 @@ class ConnectCommand(ModelCommand):
             ],
         )
 
-    async def _pick_model(self, control):
-        from nooa.unifiedllm import connect, resolve_api_key_from_config
-        from nooa_cli.interactive.controls import ControlResult
+    async def _wizard(self, args, control):
+        import click
 
-        choice = getattr(self.frontend, "prompt_choice", None)
-        text = getattr(self.frontend, "prompt_text", None)
-        if not callable(choice) or not callable(text):
-            return await control.run(["help"])
-        selected = await choice(
-            "Connect model backend",
-            "Choose a provider or custom endpoint.",
-            [*connect.PROVIDERS, "Ollama local", "Custom endpoint"],
-        )
-        if not selected:
-            return await control.run(["cancel"])
-        preset = connect.PROVIDERS.get(selected)
-        endpoint = preset.api_base if preset else "http://localhost:11434/v1"
-        style = preset.api_style if preset else "chat"
-        key_env = preset.api_key_env if preset else ""
-        if selected == "Custom endpoint":
-            endpoint = await text("Model endpoint", "API base URL", "http://localhost:8000/v1")
-            if not endpoint:
-                return await control.run(["cancel"])
-            style = await choice(
-                "API style", "Choose the endpoint's API.", ["chat", "responses", "anthropic"]
-            )
-            if not style:
-                return await control.run(["cancel"])
-            key_env = await text(
-                "Authentication", "API key environment variable (empty for none)", ""
-            )
-            if key_env is None:
-                return await control.run(["cancel"])
-        if key_env:
-            import re
+        from .connect_wizard import run_native_wizard
 
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key_env):
-                return ControlResult.err(
-                    "Use an environment variable name for the key, not the key value."
-                )
-        key = None
-        if key_env and not resolve_api_key_from_config("connect", {"api_key_env": key_env}):
-            sensitive = getattr(self.frontend, "prompt_sensitive", None)
-            if not callable(sensitive):
-                return ControlResult.err(f"Set {key_env} and retry.")
-            key = await sensitive(
-                "Model API key",
-                f"Used for discovery/checks now; /connect save will also save {key_env} in workspace secrets.yaml.",
-            )
-            if not key:
-                return await control.run(["cancel"])
+        control.reset()
         try:
-            await control.start(endpoint, api_style=style, api_key_env=key_env, api_key=key)
+            state = await run_native_wizard(self.frontend, args, control.registry_path)
+        except click.Abort:
+            return CommandResult.ok(TextOutput("Model setup cancelled.", "info"))
+        except click.UsageError:
+            return CommandResult.err("Invalid /connect options. Use /connect help.")
+        except click.ClickException as exc:
+            return CommandResult.err(exc.format_message())
+        except Exception as exc:
+            return CommandResult.err(f"Model setup failed ({type(exc).__name__}).")
+        if state is None:
+            return CommandResult.ok()
+        if not state.saved:
+            return CommandResult.ok(TextOutput("Model setup ended without saving a model.", "info"))
+        if state.saved_key:
+            import os
+
+            if not os.environ.get(state.api_key_env):
+                os.environ[state.api_key_env] = state.api_key
+        try:
+            self._reload_model_registry()
         except Exception:
-            return ControlResult.err(
-                "Could not discover models. Check the endpoint and credentials. "
-                "To replace a rejected key, update the named environment variable and restart, "
-                "or unset it and rerun /connect to enter a masked key. "
-                "If discovery is unsupported, enter /connect model ID."
-            )
-        model = await choice(
-            "Model",
-            "Choose a model to preview; no generation or save yet.",
-            [item["id"] for item in control.discovery.models],
+            return CommandResult.err("Model saved, but the registry could not be reloaded.")
+        return CommandResult.ok(
+            TextOutput(f"Saved {state.alias}. Use /model {state.alias} to switch.", "success")
         )
-        if not model:
-            return await control.run(["cancel"])
-        alias = await text(
-            "Model alias", "Name to save in this workspace", model.rsplit("/", 1)[-1]
-        )
-        if not alias:
-            return await control.run(["cancel"])
-        result = await control.run(["model", model, "--as", alias])
-        return result
 
 
 class ModelsCommand(Command):

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Wizard steps; loaded lazily by the Connect command."""
 
-import asyncio
 import os
 from contextlib import aclosing
 from copy import deepcopy
@@ -19,6 +18,7 @@ from nooa.unifiedllm import connect
 
 from . import _connect_prompts as prompts
 from . import _connect_view as view
+from ._connect_io import current_host, echo, run_async
 from ._connect_registry import credential_names, diagnostic_context, entries, shadowing_source
 
 
@@ -74,6 +74,8 @@ class WizardState:
     show_config: Any = None
     unobserved: Any = None
     yes: Any = None
+    saved: bool = False
+    saved_key: bool = False
 
 
 async def show_checks(events, *, reasoning_levels=None, summary=True):
@@ -193,7 +195,7 @@ def select_connection(state: WizardState) -> bool:
     )
     if state.approval != "none" and not state.yes:
         if not prompts.confirm("Approve API checks within this budget?", default=True):
-            click.echo("No API checks approved. Run with --no-probe for manual setup.")
+            echo("No API checks approved. Run with --no-probe for manual setup.")
             return False
     if state.editing is None:
         view.step(1, "Connection")
@@ -310,9 +312,9 @@ def select_model(state: WizardState) -> bool:
         state.endpoint_models = read_discovery(state.discovery_file, state.endpoint)
         state.discovery_endpoint = state.endpoint
     if not state.model:
-        click.echo("Connecting to the server and listing models...")
+        echo("Connecting to the server and listing models...")
         try:
-            found = asyncio.run(
+            found = run_async(
                 connect.discover(
                     state.endpoint, api_style=state.discovery_style, api_key=state.api_key
                 )
@@ -320,7 +322,7 @@ def select_model(state: WizardState) -> bool:
         except connect.DiscoveryError as exc:
             state.discovery_succeeded = False
             state.discovery_endpoint = state.endpoint
-            click.echo(f"Could not list models: {exc}", err=True)
+            echo(f"Could not list models: {exc}", err=True)
             if exc.status_code in {401, 403}:
                 raise click.ClickException(
                     "Authentication failed. Check the key and try again."
@@ -332,7 +334,7 @@ def select_model(state: WizardState) -> bool:
             state.discovery_endpoint = state.endpoint
             state.endpoint_models = found.models
             names = [item["id"] for item in found.models]
-            click.echo(
+            echo(
                 f"Server listed {len(names)} model(s). Credentials are checked next. Type part of a name to search, then Tab to select."
             )
             state.model = prompts.prompt("Model", choices=names)
@@ -351,7 +353,7 @@ def check_interfaces(state: WizardState) -> bool:
             retry_styles = ("chat", "responses", "anthropic")
             interface_timeout = 30
             while True:
-                state.interfaces = asyncio.run(
+                state.interfaces = run_async(
                     show_checks(
                         connect.check_interfaces(
                             state.alias or "candidate",
@@ -389,7 +391,7 @@ def check_interfaces(state: WizardState) -> bool:
                     else "Could not confirm a working connection. Listing models does not validate the key.",
                     fg="yellow",
                 )
-                click.echo(
+                echo(
                     "Agent diagnostic prompt:\n"
                     + connect.diagnostic_prompt(
                         "interfaces",
@@ -445,7 +447,7 @@ def check_interfaces(state: WizardState) -> bool:
                     },
                 )
                 if action == "cancel":
-                    click.echo("Setup cancelled. Nothing was saved.")
+                    echo("Setup cancelled. Nothing was saved.")
                     return False
                 if action == "longer":
                     retry_styles = (
@@ -489,15 +491,13 @@ def check_interfaces(state: WizardState) -> bool:
                         )
                     )
                     state.model = prompts.prompt("Exact model ID", default=state.model)
-            click.echo(
-                "Interfaces that returned the expected response format: " + ", ".join(available)
-            )
+            echo("Interfaces that returned the expected response format: " + ", ".join(available))
         if state.interfaces and len(available) == 1:
             state.api_style = available[0]
-            click.echo(f"Using {state.api_style} for {state.model}.")
+            echo(f"Using {state.api_style} for {state.model}.")
         else:
-            click.echo(f"Choose the request interface for {state.model}:")
-            click.echo(
+            echo(f"Choose the request interface for {state.model}:")
+            echo(
                 "chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
             )
             state.api_style = prompts.prompt(
@@ -542,15 +542,15 @@ def configure_metadata(state: WizardState) -> bool:
     if state.no_catalogue and state.catalogue_model:
         raise click.UsageError("--catalogue-model cannot be used with --no-catalogue")
     if not state.no_catalogue:
-        click.echo("Looking up public model information...")
+        echo("Looking up public model information...")
         try:
-            models = asyncio.run(connect.catalogue())
+            models = run_async(connect.catalogue())
         except (httpx.HTTPError, ValueError, KeyError):
             if state.catalogue_model:
                 raise click.ClickException(
                     "Could not load the requested catalogue entry."
                 ) from None
-            click.echo("Public catalogue unavailable; continuing with unknown limits.", err=True)
+            echo("Public catalogue unavailable; continuing with unknown limits.", err=True)
             models = []
         matches = (
             [item for item in models if item.get("id") == state.catalogue_model]
@@ -562,7 +562,7 @@ def configure_metadata(state: WizardState) -> bool:
         if len(matches) == 1:
             state.candidate = matches[0]
         elif matches:
-            click.echo("Possible catalogue models: " + ", ".join(item["id"] for item in matches))
+            echo("Possible catalogue models: " + ", ".join(item["id"] for item in matches))
             if state.yes:
                 raise click.ClickException(
                     "Ambiguous match: choose --catalogue-model or --no-catalogue."
@@ -578,7 +578,7 @@ def configure_metadata(state: WizardState) -> bool:
                 if state.candidate is None:
                     raise click.ClickException("Choose one of the displayed model IDs.")
         else:
-            click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
+            echo("No catalogue match; model limits and reasoning levels remain unknown.")
     endpoint_model = (
         next((item for item in state.endpoint_models if item.get("id") == state.model), None)
         if state.endpoint == state.discovery_endpoint
@@ -592,7 +592,7 @@ def configure_metadata(state: WizardState) -> bool:
     ):
         # Explicit MODEL skips the picker, not the endpoint's own limit metadata.
         try:
-            limits_listing = asyncio.run(
+            limits_listing = run_async(
                 connect.discover(state.endpoint, api_style=state.api_style, api_key=state.api_key)
             )
         except connect.DiscoveryError:
@@ -630,15 +630,15 @@ def configure_metadata(state: WizardState) -> bool:
                 )
             )
             if action == "cancel":
-                click.echo("Setup cancelled. Nothing saved.")
+                echo("Setup cancelled. Nothing saved.")
                 return False
             if action == "skip":
                 if state.editing is not None:
-                    click.echo("Edits discarded. Nothing saved.")
+                    echo("Edits discarded. Nothing saved.")
                     return False
                 state.candidate = None
                 state.edited_settings = False
-                click.echo(
+                echo(
                     "Continuing without the published model settings. Explicit command-line settings still apply."
                 )
                 break
@@ -762,7 +762,7 @@ def configure_checks(state: WizardState) -> bool:
             "template": state.reasoning_template,
         }
     if "context_window" not in state.proposal.entry:
-        click.echo(
+        echo(
             "No context window selected. The runtime will use its fallback; set --context-window to supply a limit."
         )
     state.configured = connect.configure_entry(
@@ -826,14 +826,14 @@ def run_checks(state: WizardState) -> bool:
         dim=True,
     )
     if state.remaining_estimate > state.proposal.budget_tokens:
-        click.echo(
+        echo(
             "Warning: the approved budget is too small for all checks. Some will be skipped. Restart with a larger --budget-tokens value to run them all.",
             err=True,
         )
-    click.echo(
+    echo(
         "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
     )
-    state.result = asyncio.run(
+    state.result = run_async(
         show_checks(
             connect.run_steps(state.proposal, approved=state.approval, api_key=state.api_key),
             reasoning_levels=state.proposal.entry.get("reasoning_levels"),
@@ -848,7 +848,7 @@ def run_checks(state: WizardState) -> bool:
         if record.get("reason") == "budget exhausted"
     ]
     if skipped:
-        click.echo(
+        echo(
             "Warning: setup is incomplete; budget exhausted before "
             + ", ".join(skipped)
             + ". These settings have not been checked.",
@@ -864,7 +864,7 @@ def run_checks(state: WizardState) -> bool:
         decision.needs_attention
         or any(checks[name].get("reason") != "not approved" for name in decision.skipped)
     ):
-        click.echo(
+        echo(
             "Agent diagnostic prompt:\n"
             + connect.diagnostic_prompt(
                 "checks",
@@ -890,7 +890,7 @@ def run_checks(state: WizardState) -> bool:
             )
         )
     if state.unobserved:
-        click.echo(
+        echo(
             "Warning: no reasoning information was returned for: "
             + ", ".join(state.unobserved)
             + ". These checks have not confirmed reasoning for those levels. "
@@ -922,17 +922,15 @@ def save_model(state: WizardState) -> bool:
             existing=tuple(state.data.get("models", {})),
         )
         if not state.alias.strip():
-            click.echo("Enter a non-empty model name.", err=True)
+            echo("Enter a non-empty model name.", err=True)
     if state.alias in state.data.get("models", {}):
-        click.echo(
-            f"Warning: saving will overwrite model {state.alias!r} in {state.path}.", err=True
-        )
+        echo(f"Warning: saving will overwrite model {state.alias!r} in {state.path}.", err=True)
         if not state.yes and not prompts.confirm("Replace this model?", default=False):
             return False
     state.result = replace(state.result, alias=state.alias)
     view.line(f"{state.alias} · {state.model} · {state.api_style}", bold=True)
     if state.show_config:
-        click.echo(yaml.safe_dump({"models": {state.alias: state.result.entry}}, sort_keys=False))
+        echo(yaml.safe_dump({"models": {state.alias: state.result.entry}}, sort_keys=False))
     else:
         view.line(
             "Full configuration is saved with the model. Use --show-config to preview the YAML.",
@@ -959,7 +957,10 @@ def save_model(state: WizardState) -> bool:
             and state.api_key_env
             and state.api_key != os.environ.get(state.api_key_env)
         ):
-            secrets_path = paths.get_user_dir("secrets.yaml")
+            host = current_host()
+            secrets_path = (
+                host.secrets_path if host is not None else paths.get_user_dir("secrets.yaml")
+            )
             view.line(
                 f"This setup used a new key. It can be saved in {secrets_path} with owner-only permissions (plain text, not encrypted). Existing values are preserved; YAML formatting may change."
             )
@@ -970,6 +971,7 @@ def save_model(state: WizardState) -> bool:
                 from nooa.secrets import write_secret_env
 
                 write_secret_env(secrets_path, state.api_key_env, state.api_key)
+                state.saved_key = True
                 view.line(
                     f"Saved key as {state.api_key_env}. Existing secret values are preserved; YAML formatting may change."
                 )
@@ -978,27 +980,38 @@ def save_model(state: WizardState) -> bool:
                         f"Your current environment still overrides this file. Unset or update {state.api_key_env} before starting NOOA again.",
                         fg="yellow",
                     )
-        connect.write(state.result.entry, state.path, alias=state.alias)
-        click.echo(f"Saved {state.alias} to {state.path}.")
+        connect.write(
+            state.result.entry,
+            state.path,
+            alias=state.alias,
+            replace_existing=state.alias in state.data.get("models", {}),
+        )
+        state.saved = True
+        echo(f"Saved {state.alias} to {state.path}.")
         view.line(
             f"Interface: {state.api_style} · max_tokens: {state.result.entry['max_tokens']:,} · reasoning levels: {', '.join(state.result.entry.get('reasoning_levels', {})) or 'unknown'} · default: {state.result.entry.get('reasoning_default', 'unknown')}"
         )
         if state.api_key and not save_key and state.api_key != os.environ.get(state.api_key_env):
-            click.echo(
+            echo(
                 f"The key was not saved. Set {state.api_key_env} (or add it to your NOOA secrets file) before using this alias."
             )
-        click.echo(f'Use it in Python: get_llm_client("{state.alias}")')
+        echo(f'Use it in Python: get_llm_client("{state.alias}")')
         if state.output:
-            click.echo(
-                "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path)."
-            )
+            echo("For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path).")
     return True
 
 
 def run_wizard(**options):
     """Run ordered steps with one shared budget and an explicit save decision."""
     state = WizardState(**options)
-    state.path = Path(state.output) if state.output else paths.get_user_dir("llm_config.yaml")
+    host = current_host()
+    state.path = (
+        Path(state.output)
+        if state.output
+        else host.registry_path
+        if host is not None
+        else paths.get_user_dir("llm_config.yaml")
+    )
     state.api_key = None
     state.explicit_key_env = state.api_key_env is not None
     state.editing = None
@@ -1013,10 +1026,11 @@ def run_wizard(**options):
             save_model,
         ):
             if not step(state):
-                return
+                return state
+        return state
     except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
         detail = view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
-        click.echo(
+        echo(
             "Agent diagnostic prompt:\n"
             + connect.diagnostic_prompt(
                 "setup",

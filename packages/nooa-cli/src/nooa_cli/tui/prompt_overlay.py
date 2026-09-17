@@ -270,8 +270,26 @@ class PromptOverlay(_InputOverlayBase):
 class ChoiceOverlay(_InputOverlayBase):
     """Searchable single-choice overlay on the container host pattern."""
 
-    def __init__(self, app: Any, title: str, message: str, options: list[str]) -> None:
-        if not options:
+    def __init__(
+        self,
+        app: Any,
+        title: str,
+        message: str,
+        options: list[str],
+        *,
+        completion: bool = False,
+        allow_custom: bool = False,
+        default: str = "",
+        labels: dict[str, str] | None = None,
+        existing: tuple[str, ...] = (),
+    ) -> None:
+        self.completion = completion
+        self._selection_changed = False
+        self.allow_custom = allow_custom
+        self.default = default
+        self.labels = labels or {}
+        self.existing = existing
+        if not options and not allow_custom:
             raise ValueError("ChoiceOverlay requires at least one option")
         self.options = list(dict.fromkeys(options))
         self.value: str | None = None
@@ -287,7 +305,9 @@ class ChoiceOverlay(_InputOverlayBase):
                 lambda: [
                     (
                         "class:fullscreen-browser.footer",
-                        " Type to filter   ↑/↓ select   Enter choose   Esc cancel",
+                        " Type to filter   ↑/↓ select   Tab complete   Enter choose   Esc cancel"
+                        if self.completion
+                        else " Type to filter   ↑/↓ select   Enter choose   Esc cancel",
                     )
                 ]
             ),
@@ -319,26 +339,72 @@ class ChoiceOverlay(_InputOverlayBase):
         except Exception:
             page = 20
         self._page = page
+        fragments: list[tuple[str, str]] = []
+        if self.completion and self.default:
+            fragments.append(
+                (
+                    "class:fullscreen-browser.muted",
+                    f"Default: {self.default} (Enter uses it; → edits it)\n",
+                )
+            )
+        current = self.buffer.text or self.default
+        if current in self.existing:
+            fragments.append(
+                (
+                    "class:fullscreen-browser.muted",
+                    "Name already exists · replacement needs confirmation\n",
+                )
+            )
         if not matches:
             self.cursor = 0
             self._offset = 0
-            return [("class:fullscreen-browser.muted", "  (no matching options)")]
+            return fragments + [
+                (
+                    "class:fullscreen-browser.muted",
+                    "  Type a value; Enter submits it."
+                    if self.allow_custom
+                    else "  (no matching options)",
+                )
+            ]
+
         self.cursor = min(max(self.cursor, 0), len(matches) - 1)
         if self.cursor < self._offset:
             self._offset = self.cursor
         elif self.cursor >= self._offset + page:
             self._offset = self.cursor - page + 1
-        fragments: list[tuple[str, str]] = []
         for index in range(self._offset, min(self._offset + page, len(matches))):
             marker = "❯ " if index == self.cursor else "  "
             style = "class:fullscreen-browser.selected" if index == self.cursor else ""
-            fragments.append((style, f"{marker}{matches[index]}"))
+            fragments.append((style, f"{marker}{self.labels.get(matches[index], matches[index])}"))
             fragments.append(("", "\n"))
         if fragments:
             fragments.pop()
         return fragments
 
     def handle_key(self, action: str, value: str = "") -> SubviewKeyResult:
+        if self.completion and action == "tab":
+            matches = self._clamped_matches()
+            if matches:
+                self.buffer.text = matches[self.cursor]
+                self.buffer.cursor_position = len(self.buffer.text)
+                self.cursor = 0
+            return "handled"
+        if self.completion and action == "right" and not self.buffer.text and self.default:
+            self.buffer.insert_text(self.default)
+            return "handled"
+        if self.completion and action in {"home", "end"}:
+            self._handle_edit_action(action, value)
+            return "handled"
+        if self.completion and action == "enter":
+            matches = self._clamped_matches()
+            value = (
+                matches[self.cursor]
+                if self._selection_changed and matches
+                else self.buffer.text or self.default
+            )
+            if self.allow_custom or value in self.options:
+                self.value = value
+                return "close"
         if action == "enter":
             matches = self._clamped_matches()
             if matches:
@@ -349,11 +415,13 @@ class ChoiceOverlay(_InputOverlayBase):
             self.value = None
             return "close"
         if action in ("down", "scroll_down"):
+            self._selection_changed = True
             matches = self._matches()
             if matches:
                 self.cursor = min(self.cursor + 1, len(matches) - 1)
             return "handled"
         if action in ("up", "scroll_up"):
+            self._selection_changed = True
             self.cursor = max(self.cursor - 1, 0)
             return "handled"
         if action == "home":
@@ -363,6 +431,7 @@ class ChoiceOverlay(_InputOverlayBase):
             self.cursor = max(len(self._matches()) - 1, 0)
             return "handled"
         if self._handle_edit_action(action, value):
+            self._selection_changed = False
             self._clamped_matches()
             return "handled"
         return "handled"

@@ -85,24 +85,26 @@ CLI usage, and 130 means interrupted.
 
 ### Connect a model
 
-Start the TUI and run `/connect` to pick a provider and model, then preview the
-settings produced by the shared Connect library. Missing keys can be entered
-in a masked dialog. Discovery and preview do not run generation or save files.
+Start the TUI and run `/connect` for the same guided workflow as `nooa connect`:
+connection and credentials, model selection, interface checks, selection among
+working interfaces, model settings and reply budget, remaining checks, then save.
+Each prompt offers the console wizard's completions: providers, saved endpoints,
+key-variable names, model IDs, settings choices, and existing aliases. Type to
+filter, Tab to complete, or use the arrow keys to select. Keys use a masked prompt
+without completion or history.
 
 ```text
 /connect
-/connect check minimal
-/connect save
 /model work
 ```
 
-Choose `work` as the alias in the picker. Checks require an explicit `minimal`
-(routing) or `all` (tools, reasoning and session checks) action and may incur
-charges. Saving writes the alias and any key entered in the masked dialog;
-`/model work` separately switches the running agent. Use `save --replace` to
-replace an existing alias, or `cancel` to discard the draft.
+Choose `work` as the alias at the final save step. The wizard asks for approval
+of the check budget before making model calls, and confirms saving, replacing an
+alias, and storing a new key. `/model work` switches the running agent after saving.
+Use `/connect --no-probe` for manual setup without generation checks, or pass the
+same wizard options as `nooa connect` to prefill answers.
 
-The same staged commands are available in ACP. For example:
+ACP uses staged commands with explicit check and save actions. For example:
 
 ```text
 /connect anthropic

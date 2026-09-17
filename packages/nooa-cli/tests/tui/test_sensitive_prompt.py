@@ -314,3 +314,101 @@ def test_xclip_is_available_with_x_display(monkeypatch):
         "-selection",
         "clipboard",
     )
+
+
+def test_connect_completion_filters_completes_and_keeps_input_editable():
+    view = ChoiceOverlay(
+        SimpleNamespace(render_counter=0),
+        "Server",
+        "",
+        ["https://a.test/v1", "https://b.test/v1"],
+        completion=True,
+        allow_custom=True,
+        default="https://a.test/v1",
+    )
+    view.handle_key("text", "b.test")
+    assert view._matches() == ["https://b.test/v1"]
+    assert view.handle_key("tab") == "handled"
+    assert view.buffer.text == "https://b.test/v1"
+    assert view.value is None  # Completion does not submit or approve.
+    view.handle_key("end")
+    view.handle_key("text", "/custom")
+    assert view.handle_key("enter") == "close"
+    assert view.value == "https://b.test/v1/custom"
+
+
+def test_connect_arrow_selection_overrides_suggested_default():
+    view = ChoiceOverlay(
+        SimpleNamespace(render_counter=0),
+        "Format",
+        "",
+        ["chat", "responses"],
+        completion=True,
+        default="chat",
+    )
+    view.handle_key("down")
+    assert view.handle_key("enter") == "close"
+    assert view.value == "responses"
+
+
+def test_connect_free_text_shows_and_edits_default_without_suggestions():
+    view = ChoiceOverlay(
+        SimpleNamespace(render_counter=0),
+        "Tokens",
+        "",
+        [],
+        completion=True,
+        allow_custom=True,
+        default="4096",
+    )
+    assert "4096" in str(view._list_text())
+    view.handle_key("right")
+    assert view.buffer.text == "4096"
+    view.handle_key("home")
+    assert view.buffer.cursor_position == 0
+    view.handle_key("escape")
+    assert view.value is None
+
+
+def test_connect_labels_and_existing_alias_hint_are_visible():
+    view = ChoiceOverlay(
+        SimpleNamespace(render_counter=0),
+        "Alias",
+        "",
+        ["work"],
+        completion=True,
+        allow_custom=True,
+        default="work",
+        labels={"work": "Work model"},
+        existing=("work",),
+    )
+    shown = str(view._list_text())
+    assert "Work model" in shown and "replacement needs confirmation" in shown
+
+
+async def test_connect_prompt_uses_native_completion_and_distinguishes_escape():
+    app = TUIApplication.__new__(TUIApplication)
+    app._app = SimpleNamespace(render_counter=0)
+    seen = []
+
+    async def open_view(view):
+        seen.append(view)
+        if len(seen) == 1:
+            assert isinstance(view, ChoiceOverlay)
+            view.handle_key("text", "saved")
+            view.handle_key("tab")
+            assert view.buffer.text == "https://saved.example/v1"
+            view.handle_key("enter")
+        else:
+            assert isinstance(view, PromptOverlay)
+            assert any(
+                type(p).__name__ == "PasswordProcessor" for p in view.input_control.input_processors
+            )
+            view.handle_key("escape")
+
+    app.open_subview = open_view
+    assert (
+        await app.prompt_connect("Endpoint", suggestions=("https://saved.example/v1",))
+        == "https://saved.example/v1"
+    )
+    assert await app.prompt_connect("Key", hide_input=True) is None

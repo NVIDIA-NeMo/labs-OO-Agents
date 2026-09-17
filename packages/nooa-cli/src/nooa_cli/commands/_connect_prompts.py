@@ -12,6 +12,8 @@ import sys
 
 import click
 
+from ._connect_io import current_host, echo
+
 
 def environment_names(defaults=()):
     """Suggest variable names, including conventional names not yet exported."""
@@ -31,11 +33,24 @@ def prompt(
     existing=(),
 ):
     """Read one editable answer with a scrolling, single-column completion menu."""
+    host = current_host()
+    if host is not None:
+        return host.prompt(
+            text,
+            default=default,
+            choices=tuple(choices),
+            suggestions=tuple(suggestions),
+            hide_input=hide_input,
+            show_default=show_default,
+            labels=labels,
+            open_menu=open_menu,
+            existing=tuple(existing),
+        )
     choices = tuple(choices)
     if not sys.stdin.isatty():
         if labels:
             for value, label in labels.items():
-                click.echo(f"  {value}: {label}")
+                echo(f"  {value}: {label}")
         while True:
             value = click.prompt(
                 text, default=default, hide_input=hide_input, show_default=show_default
@@ -43,7 +58,7 @@ def prompt(
             if not choices or value in choices:
                 return value
             # Click.Choice includes every model ID in its prompt and error.
-            click.echo(
+            echo(
                 "Choose an available value; check the spelling of the model or provider name.",
                 err=True,
             )
@@ -176,6 +191,8 @@ def prompt(
 
 def confirm(text, *, default):
     """Keep approval explicit; completion never submits an answer."""
+    if current_host() is not None:
+        return prompt(text, choices=("yes", "no"), default="yes" if default else "no") == "yes"
     if not sys.stdin.isatty():
         return click.confirm(text, default=default)
     value = prompt(
@@ -191,7 +208,7 @@ def edit_model_details(model):
     from copy import deepcopy
 
     edited = deepcopy(model)
-    click.echo(
+    echo(
         "Edit the settings below. Enter keeps a suggestion; - leaves it unknown. Ctrl-C cancels setup."
     )
 
@@ -202,7 +219,7 @@ def edit_model_details(model):
                 return None
             if value.isascii() and value.isdecimal() and int(value) > 0:
                 return int(value)
-            click.echo("Enter a positive whole number, or - for unknown.", err=True)
+            echo("Enter a positive whole number, or - for unknown.", err=True)
 
     edited["context_length"] = count("Context window (tokens)", model.get("context_length"))
     edited["top_provider"] = dict(model.get("top_provider") or {})
@@ -219,7 +236,7 @@ def edit_model_details(model):
         levels = [] if value.strip() == "-" else [v.strip() for v in value.split(",")]
         if all(levels) and len(set(levels)) == len(levels):
             break
-        click.echo("Enter distinct level names separated by commas, or - for unknown.", err=True)
+        echo("Enter distinct level names separated by commas, or - for unknown.", err=True)
     reasoning["supported_efforts"] = levels
     reasoning["default_effort"] = None
     if levels:
@@ -235,8 +252,8 @@ def edit_model_details(model):
 
 def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
     """Choose a real request budget, independent of the capability ceiling."""
-    click.echo("\n  Room for each reply, including thinking and the final answer.")
-    click.echo("  Short replies use fewer tokens; this limit does not make replies longer.\n")
+    echo("\n  Room for each reply, including thinking and the final answer.")
+    echo("  Short replies use fewer tokens; this limit does not make replies longer.\n")
     origin = {
         "connect_default": "NOOA default",
         "catalogue_recommendation": "catalogue recommendation",
@@ -265,13 +282,13 @@ def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
     if selected != "custom":
         return {**smaller, **larger}.get(selected, suggested)
     if ceiling is not None:
-        click.echo(f"  Known upper limit: {ceiling:,} tokens.")
+        echo(f"  Known upper limit: {ceiling:,} tokens.")
     while True:
         value = prompt("Maximum tokens per reply", default=str(suggested))
         if value.isascii() and value.isdecimal() and int(value) > 0:
             cap = int(value)
             if ceiling is None or cap <= ceiling:
                 return cap
-        click.echo(
+        echo(
             f"Enter a positive whole number{f' at most {ceiling:,}' if ceiling else ''}.", err=True
         )
