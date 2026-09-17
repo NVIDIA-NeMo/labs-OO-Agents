@@ -293,7 +293,7 @@ class CodingACPAdapter:
                                 message += f"\n\nUsage: `/{name} {exc.hint}`"
                             session.agent.message(message)
                             await session.bridge.flush()
-                            return PromptResponse(stop_reason="end_turn")
+                            return PromptResponse(stop_reason="end_turn", usage=session.bridge.take_turn_usage())
                         except GenerationError:
                             # Subclasses Exception, so the catch-all below would
                             # swallow it and lose the stop reason the outer
@@ -317,7 +317,7 @@ class CodingACPAdapter:
                             )
                             session.agent.message(f"/{name} failed: {exc}")
                             await session.bridge.flush()
-                            return PromptResponse(stop_reason="end_turn")
+                            return PromptResponse(stop_reason="end_turn", usage=session.bridge.take_turn_usage())
                         if submission is None:
                             result = None
                         else:
@@ -327,7 +327,7 @@ class CodingACPAdapter:
                                 if message:
                                     session.agent.message(message)
                                 await session.bridge.flush()
-                                return PromptResponse(stop_reason="end_turn")
+                                return PromptResponse(stop_reason="end_turn", usage=session.bridge.take_turn_usage())
                 except GenerationError as exc:
                     # The strategy does not guarantee a PythonOutput for a call
                     # it already announced, so a turn ending on a generation
@@ -340,11 +340,11 @@ class CodingACPAdapter:
                     if message.startswith(
                         "Empty response: the model used all available output tokens"
                     ):
-                        return PromptResponse(stop_reason="max_tokens")
+                        return PromptResponse(stop_reason="max_tokens", usage=session.bridge.take_turn_usage())
                     if message.startswith("Generation failed after ") and (
                         "max_iterations=" in message or "max_retries=" in message
                     ):
-                        return PromptResponse(stop_reason="max_turn_requests")
+                        return PromptResponse(stop_reason="max_turn_requests", usage=session.bridge.take_turn_usage())
                     raise
                 if result is None:
                     await session.cancel_complete.wait()
@@ -354,9 +354,9 @@ class CodingACPAdapter:
                     # and the durable transcript on resume — says what happened.
                     session.agent.message("Stopped at your request.")
                     await session.bridge.flush()
-                    return PromptResponse(stop_reason="cancelled")
+                    return PromptResponse(stop_reason="cancelled", usage=session.bridge.take_turn_usage())
                 await session.bridge.flush()
-                return PromptResponse(stop_reason="end_turn")
+                return PromptResponse(stop_reason="end_turn", usage=session.bridge.take_turn_usage())
         except SessionBusyError:
             raise RequestError.invalid_request(
                 {"sessionId": session_id, "reason": "A prompt is already running"}

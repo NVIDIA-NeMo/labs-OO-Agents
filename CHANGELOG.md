@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-acp`'s `prompt` response now populates ACP's `usage` field with the
+  turn's real token accounting (input, output, thought, cached-read,
+  cached-write, total), summed across every LLM call made during that turn
+  and reset for the next. Turns with no LLM call (e.g. a rejected slash
+  command) report no usage, as before.
 - Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
   `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new
   core dependencies. Configured checks send the saved reply limit, including

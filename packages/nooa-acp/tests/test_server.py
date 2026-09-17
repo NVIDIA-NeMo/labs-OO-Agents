@@ -275,6 +275,10 @@ async def test_adapter_completes_one_session_prompt(tmp_path):
     assert capabilities.list is not None
     assert capabilities.close is not None
     assert response.stop_reason == "end_turn"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 10
+    assert response.usage.output_tokens == 5
+    assert response.usage.total_tokens == 15
     assert any(
         isinstance(update, AgentMessageChunk) and update.content.text == "ACP response"
         for update in client.updates
@@ -395,6 +399,7 @@ async def test_adapter_renders_user_only_skill_command_without_llm_turn(tmp_path
 
     handle.assert_not_awaited()
     assert response.stop_reason == "end_turn"
+    assert response.usage is None
     assert any(
         isinstance(update, AgentMessageChunk) and update.content.text == "status:ready"
         for update in client.updates
@@ -424,6 +429,7 @@ async def test_adapter_renders_typed_command_error_without_llm_turn(tmp_path):
 
     handle.assert_not_awaited()
     assert response.stop_reason == "end_turn"
+    assert response.usage is None
     message = next(
         update.content.text
         for update in client.updates

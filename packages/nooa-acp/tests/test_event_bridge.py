@@ -238,6 +238,86 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     await sized.close()
 
 
+async def test_take_turn_usage_returns_none_before_any_llm_call(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    assert bridge.take_turn_usage() is None
+
+    await bridge.close()
+    await agent.close()
+
+
+async def test_take_turn_usage_sums_calls_and_maps_fields(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        LLMResponse(
+            usage=LLMUsage(
+                input_tokens=40,
+                output_tokens=10,
+                cached_input_tokens=5,
+                cache_write_input_tokens=2,
+                reasoning_tokens=3,
+                total_tokens=50,
+                cost_usd=0.25,
+            )
+        )
+    )
+    agent.event_manager.add(
+        LLMResponse(
+            usage=LLMUsage(
+                input_tokens=20,
+                output_tokens=5,
+                cached_input_tokens=1,
+                cache_write_input_tokens=0,
+                reasoning_tokens=0,
+                total_tokens=25,
+                cost_usd=0.1,
+            )
+        )
+    )
+    await bridge.flush()
+
+    usage = bridge.take_turn_usage()
+
+    assert usage is not None
+    assert usage.input_tokens == 60
+    assert usage.output_tokens == 15
+    assert usage.cached_read_tokens == 6
+    assert usage.cached_write_tokens == 2
+    assert usage.thought_tokens == 3
+    assert usage.total_tokens == 75
+
+    await bridge.close()
+    await agent.close()
+
+
+async def test_take_turn_usage_resets_between_turns(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        LLMResponse(
+            usage=LLMUsage(input_tokens=40, output_tokens=10, total_tokens=50, cost_usd=0.25)
+        )
+    )
+    await bridge.flush()
+
+    first = bridge.take_turn_usage()
+    assert first is not None
+    assert first.total_tokens == 50
+
+    assert bridge.take_turn_usage() is None
+
+    await bridge.close()
+    await agent.close()
+
+
 async def test_bridge_emits_structured_file_edit(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()

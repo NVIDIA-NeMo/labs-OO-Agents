@@ -21,7 +21,7 @@ from acp import (
     update_tool_call,
 )
 from acp.interfaces import Client
-from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
+from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, Usage, UsageUpdate
 from nooa_cli.coding import (
     CodingAgent,
     FileEdit,
@@ -81,6 +81,9 @@ class ACPEventBridge:
         self._python_source: dict[str, str] = {}
         self._terminal_output: dict[str, str] = {}
         self._cost_usd = 0.0
+        # Accumulated across LLM calls since the last take_turn_usage() call;
+        # reset on read so each ACP turn reports only its own usage.
+        self._turn_tokens: dict[str, int] = {}
         self._unsubscribers: list[Callable[[], None]] = [
             agent.event_manager.on("AgentMessage", self._on_agent_message),
             agent.event_manager.on("ToolCallEvent", self._on_tool_call),
@@ -261,6 +264,15 @@ class ACPEventBridge:
         if usage is None:
             return
         self._cost_usd += usage.cost_usd
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "total_tokens",
+        ):
+            self._turn_tokens[field] = self._turn_tokens.get(field, 0) + getattr(usage, field)
         context_window = getattr(self.agent.llm, "context_window", None)
         if context_window is None:
             return
@@ -271,6 +283,25 @@ class ACPEventBridge:
                 size=max(context_window, usage.input_tokens),
                 cost=Cost(amount=self._cost_usd, currency="USD"),
             )
+        )
+
+    def take_turn_usage(self) -> Usage | None:
+        """Return and reset this turn's accumulated token usage.
+
+        Returns None when no LLM call has completed since the last call, so
+        early-return turns (e.g. an unrecognized slash command) correctly
+        report no usage rather than a stale or zeroed total.
+        """
+        tokens, self._turn_tokens = self._turn_tokens, {}
+        if not tokens:
+            return None
+        return Usage(
+            total_tokens=tokens["total_tokens"],
+            input_tokens=tokens["input_tokens"],
+            output_tokens=tokens["output_tokens"],
+            thought_tokens=tokens["reasoning_tokens"],
+            cached_read_tokens=tokens["cached_input_tokens"],
+            cached_write_tokens=tokens["cache_write_input_tokens"],
         )
 
     def _stopped_error(self, cause: BaseException) -> RuntimeError:
