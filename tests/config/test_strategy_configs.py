@@ -16,6 +16,7 @@ class TestCodeActConfig:
         c = CodeActConfig()
         assert c.max_iterations is None
         assert c.max_retries == 3
+        assert c.max_length_continuations == 3
         assert c.cell_timeout is None
         assert c.max_tokens is None
         assert c.temperature is None
