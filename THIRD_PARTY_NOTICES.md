@@ -184,11 +184,6 @@ Attribution Statements: NVIDIA includes `openinference-instrumentation` under th
 License Text(https://spdx.org/licenses/Apache-2.0.html)
 Source/Homepage: https://github.com/Arize-ai/openinference
 
-openinference-instrumentation-litellm - Apache License 2.0
-Attribution Statements: NVIDIA includes `openinference-instrumentation-litellm` under the Apache License 2.0 for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/Apache-2.0.html)
-Source/Homepage: https://github.com/Arize-ai/openinference
-
 openinference-semantic-conventions - Apache License 2.0
 Attribution Statements: NVIDIA includes `openinference-semantic-conventions` under the Apache License 2.0 for use with NVIDIA OO Agents.
 License Text(https://spdx.org/licenses/Apache-2.0.html)
