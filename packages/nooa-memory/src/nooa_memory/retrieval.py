@@ -265,8 +265,10 @@ class RetrievalEngine:
 
         spread: dict[str, float] = {}
         frontier = dict(seed_activation)
-        for h in range(1, hops + 1):
-            decay = cfg.per_hop_decay**h
+        # ``act`` already carries the decay of every earlier hop, so applying a
+        # single factor per step is what yields ``per_hop_decay ** h`` at hop h.
+        decay = cfg.per_hop_decay
+        for _ in range(hops):
             nxt: dict[str, float] = {}
             for node, act in frontier.items():
                 edges = self.store.neighbors(node)
