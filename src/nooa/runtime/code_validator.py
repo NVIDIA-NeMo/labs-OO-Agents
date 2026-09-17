@@ -1447,9 +1447,15 @@ class UnifiedCodeValidator:
         # Update context with code
         context.code = code
 
-        # Parse AST
+        # Parse AST. Use the Jupyter-style cell filename so that a syntax error
+        # points the agent at the offending cell instead of the default
+        # ``<unknown>`` placeholder. The execution path parses with the same
+        # filename a few lines later (see ``actor.py``), but validation runs
+        # first and raises here on failure, so the filename must be applied at
+        # this parse site too.
+        cell_filename = f"Cell In[{context.execution_count}]"
         try:
-            tree = ast.parse(code)
+            tree = ast.parse(code, filename=cell_filename)
         except SyntaxError as e:
             raise ValidationError(f"Syntax error: {e}", original_exception=e) from e
 
