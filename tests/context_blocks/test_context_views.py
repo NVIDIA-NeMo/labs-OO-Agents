@@ -198,6 +198,14 @@ def test_agent_and_skill_expose_view_resolution_hook():
     assert skill.__context_view__().name == "skill_instance"
 
 
+def test_agent_and_skill_multiple_inheritance_has_compatible_metaclass():
+    class AgentSkill(Agent, Skill, llm=object()):
+        pass
+
+    instance = AgentSkill(context_view=NamedView("instance"))
+    assert instance.__context_view__().name == "instance"
+
+
 def test_wrapped_skill_preserves_registered_class_view():
     class ConfiguredSkill(Skill, context_view=NamedView("configured")):
         pass

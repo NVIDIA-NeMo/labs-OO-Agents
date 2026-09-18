@@ -132,6 +132,25 @@ class TestContextManager:
         assert agent.context_manager.is_disabled("self") is True
         assert "self" in agent.context_manager.protected_keys
 
+    def test_remove_protected_accepts_reserved_default_without_override(self):
+        """A framework reservation can be removed before it has a stored declaration."""
+        fake_llm = FakeLLMClient()
+
+        class TestAgent(Agent, llm=fake_llm):
+            pass
+
+        manager = TestAgent().context_manager
+        manager.disable("state")
+        manager.update_resolved({"state": "cached"})
+
+        manager.remove_protected("state")
+
+        assert manager.is_protected("state") is False
+        assert manager.is_static("state") is False
+        assert manager.is_disabled("state") is False
+        assert "state" not in manager._protected_expressions
+        assert "state" not in manager._dynamic_cache
+
     def test_disabled_context_blocks_round_trip_through_snapshot(self):
         """Disabled block keys survive save/restore snapshot serialization."""
         from nooa.storage.snapshot import AgentSnapshot

@@ -209,6 +209,28 @@ async def test_malformed_system_prompt_is_materialized_as_an_error():
     assert prompt.content.startswith("ValueError:")
 
 
+async def test_system_prompt_uses_agent_override():
+    class CustomPromptAgent(ExampleAgent):
+        def _resolve_system_prompt(self):
+            return "custom prompt"
+
+    agent = CustomPromptAgent()
+    prompt = await system_prompt_block(agent, _call(agent))
+    assert prompt is not None
+    assert prompt.content == "custom prompt"
+
+
+async def test_system_prompt_awaits_async_agent_override():
+    class AsyncPromptAgent(ExampleAgent):
+        async def _resolve_system_prompt(self):
+            return "custom async prompt"
+
+    agent = AsyncPromptAgent()
+    prompt = await system_prompt_block(agent, _call(agent))
+    assert prompt is not None
+    assert prompt.content == "custom async prompt"
+
+
 async def test_interface_and_state_failures_are_materialized_as_errors():
     class BrokenInterfaceAgent(ExampleAgent):
         @classmethod

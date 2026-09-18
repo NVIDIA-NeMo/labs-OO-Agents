@@ -146,7 +146,12 @@ def _source_error(key: str, exc: Exception) -> str:
 async def system_prompt_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     """Build the default system prompt directly from the agent."""
     try:
-        content = resolve_agent_system_prompt(agent)
+        value = await evaluate_context_expression(
+            "self._resolve_system_prompt()",
+            owner=agent,
+            call=call,
+        )
+        content = context_text(value, call=call)
     except Exception as exc:
         content = _source_error("system_prompt", exc)
     return _block(

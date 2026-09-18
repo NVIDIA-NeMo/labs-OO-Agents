@@ -741,6 +741,25 @@ def _is_anthropic_model(model: str) -> bool:
     return _is_bedrock_model(model) and "claude" in m
 
 
+def _validate_anthropic_message_order(
+    messages: Sequence[dict[str, Any] | CacheBoundary],
+) -> None:
+    """Reject chat layouts Anthropic would silently reorder."""
+    from nooa.context_blocks.exceptions import UnsupportedContextLayout
+
+    saw_non_system = False
+    for message in messages:
+        if isinstance(message, CacheBoundary):
+            continue
+        if message.get("role") == "system":
+            if saw_non_system:
+                raise UnsupportedContextLayout(
+                    "Anthropic requires all system context before conversation messages"
+                )
+        else:
+            saw_non_system = True
+
+
 def _sanitize_schema_for_bedrock(schema: dict[str, Any]) -> dict[str, Any]:
     """Deep-copy *schema* and strip/fix keywords unsupported by Bedrock.
 
@@ -1769,12 +1788,14 @@ class CompletionClient(UnifiedLLM):
             },
         }
 
-    def _validate_provider_layout(self, messages: Sequence[Any], effective_model: str) -> None:
+    def _validate_provider_layout(
+        self,
+        messages: Sequence[dict[str, Any] | CacheBoundary],
+        effective_model: str,
+    ) -> None:
         """Reject message orders the selected provider cannot preserve."""
         if self.cache_breakpoint == "anthropic" or _is_anthropic_model(effective_model):
-            from nooa.context_blocks.formatter import validate_anthropic_message_order
-
-            validate_anthropic_message_order(messages)
+            _validate_anthropic_message_order(messages)
 
     def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""

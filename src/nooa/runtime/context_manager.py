@@ -465,9 +465,9 @@ class ContextManager:
         Raises:
             KeyError: If key not found.
         """
-        if key not in self._blocks:
+        if key not in self.protected_keys and key not in self._blocks:
             raise KeyError(key)
-        del self._blocks[key]
+        self._blocks.pop(key, None)
         self.protected_keys.discard(key)
         self._protected_expressions.pop(key, None)
         self._static.pop(key, None)
