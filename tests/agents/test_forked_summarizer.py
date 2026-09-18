@@ -240,30 +240,112 @@ async def test_unavailable_fork_preserves_history_without_fallback(missing, capl
 
 
 @pytest.mark.asyncio
-async def test_pending_summary_is_not_replaced_or_queued():
+async def test_prepare_next_llm_call_waits_until_compaction_applies():
     agent, summarizer, ctx = setup()
-    release = asyncio.Event()
-    agent.llm.acall = AsyncMock(side_effect=lambda *a, **kw: None)
+    entered, release = asyncio.Event(), asyncio.Event()
+    parent_calls = 0
 
     async def summary(*args, **kwargs):
+        entered.set()
         await release.wait()
-        return response()
+        return response("compacted")
 
     agent.llm.acall = summary
+
+    async def core(request):
+        nonlocal parent_calls
+        parent_calls += 1
+        request.response = response("parent")
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    await asyncio.wait_for(entered.wait(), 1)
+    pending = summarizer._pending_task
+
+    prepare = asyncio.create_task(summarizer._prepare_next_llm_call())
+    await asyncio.sleep(0)
+    assert not prepare.done()
+    assert parent_calls == 1
+    assert summarizer._pending_task is pending
+
+    release.set()
+    await prepare
+    assert agent.event_manager.keys() == ["1..3", "4"]
+    await summarizer.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_applies_pending_compaction_before_rendering_next_prompt(monkeypatch):
+    from nooa.runtime.actor import _current_llm_var, _current_method_var
+
+    agent = Agent(llm=FakeLLMClient())
+    for i in range(4):
+        agent.event_manager.add(Message(content=f"fact {i}"))
+    summarizer = TokenBudgetSummarizer.install(
+        agent, config=TokenBudgetConfig(max_tokens=10_000, preserve_recent=1)
+    )
+    summarizer._pending_range = ("1", "3")
+    summarizer._pending_summary = "compacted"
+    release = asyncio.Event()
+
+    async def finish_summary():
+        await release.wait()
+
+    summarizer._pending_task = asyncio.create_task(finish_summary())
+    rendered = asyncio.Event()
+
+    async def build_messages(*args, **kwargs):
+        assert agent.event_manager.keys() == ["1..3", "4"]
+        rendered.set()
+        return [{"role": "user", "content": "next"}]
+
+    monkeypatch.setattr(agent.runtime, "_build_messages", build_messages)
+    agent.llm.acall = AsyncMock(
+        return_value=LLMResponse(content="answer", usage=LLMUsage(input_tokens=10))
+    )
+
+    async def work():
+        pass
+
+    llm_token = _current_llm_var.set(agent.llm)
+    method_token = _current_method_var.set(work)
+    try:
+        call = asyncio.create_task(agent.runtime.generate(tools=[]))
+        await asyncio.sleep(0)
+        assert not rendered.is_set()
+        release.set()
+        await call
+        assert rendered.is_set()
+    finally:
+        _current_method_var.reset(method_token)
+        _current_llm_var.reset(llm_token)
+        await summarizer.aclose()
+
+
+@pytest.mark.asyncio
+async def test_prepare_next_llm_call_cancels_timed_out_compaction(caplog):
+    agent, summarizer, ctx = setup()
+    summarizer.config = summarizer.config.model_copy(update={"wait_timeout_seconds": 0.01})
+    entered = asyncio.Event()
+
+    async def never_finishes(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    agent.llm.acall = never_finishes
 
     async def core(request):
         request.response = response("parent")
         return request
 
     await agent.event_manager.run_middleware("llm_call", ctx, core)
-    task = summarizer._pending_task
-    await agent.event_manager.run_middleware("llm_call", ctx, core)
-    assert summarizer._pending_task is task
-    release.set()
-    await task
-    await agent.event_manager.run_middleware("llm_call", ctx, core)
-    assert summarizer._pending_task is task
-    summarizer._uninstall()
+    await asyncio.wait_for(entered.wait(), 1)
+    await summarizer._prepare_next_llm_call()
+
+    assert summarizer._pending_task is None
+    assert agent.event_manager.keys() == ["1", "2", "3", "4"]
+    assert "leaving history unchanged" in caplog.text
+    await summarizer.aclose()
 
 
 @pytest.mark.asyncio

@@ -606,8 +606,10 @@ class TokenBudgetSummarizer(SummarizationAgent):
     parents drop their output schema on the fork so it can return summary text;
     that schema change may reduce cache reuse.
 
-    Completed summaries apply at BeforeTurn, provided the selected event IDs
-    still match. Owners should await aclose() before closing the shared client.
+    Completed summaries apply before the next prompt is rendered (or at
+    BeforeTurn), provided the selected event IDs still match. A next generation
+    waits for an in-flight compaction so iterative strategies cannot outrun it.
+    Owners should await aclose() before closing the shared client.
 
     Example:
         from nooa.config.summarizer_config import TokenBudgetConfig
@@ -654,6 +656,26 @@ class TokenBudgetSummarizer(SummarizationAgent):
             self._unsub_llm()
             self._unsub_llm = None
         super()._uninstall()
+
+    @hidden
+    @no_trace
+    async def _prepare_next_llm_call(self) -> None:
+        """Finish an in-flight compaction before the next prompt is rendered."""
+        task = self._pending_task
+        if task is None:
+            return
+        try:
+            async with asyncio.timeout(self.config.wait_timeout_seconds):
+                await asyncio.shield(task)
+        except TimeoutError:
+            logger.warning(
+                "Summary fork did not finish within %.1fs; cancelling it and leaving history unchanged",
+                self.config.wait_timeout_seconds,
+            )
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._pending_summary = None
+        self._apply_pending_summary()
 
     @hidden
     @no_trace
