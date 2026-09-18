@@ -26,6 +26,15 @@ def quiet_provider_messages():
             legacy.suppress_debug_info = previous
 
 
+def format_budget(tokens):
+    """Render a check-token budget, spelling out the unset-flag sentinel as unlimited."""
+    # DEFAULT_CHECK_BUDGET is a large finite sentinel, not float("inf"), so it
+    # survives JSON encoding and every existing int arithmetic site unchanged
+    # (see its definition). A threshold, not an exact-equality check, so this
+    # keeps working if that sentinel's value ever changes.
+    return "unlimited" if tokens >= 10**12 else f"{tokens:,}"
+
+
 def check_failure(outcome):
     """Translate sanitized error classes, never show a provider error body."""
     error = outcome.get("error", "")
@@ -95,7 +104,7 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
             dim=True,
         )
         line(
-            f"{budget_tokens:,} shared token budget"
+            f"{format_budget(budget_tokens)} shared token budget"
             if budget_tokens is not None
             else "Up to 3 interface calls, then tools and each proposed reasoning level.",
             dim=True,

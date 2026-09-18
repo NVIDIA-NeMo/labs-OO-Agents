@@ -601,7 +601,10 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         ),
     )
     assert result.exit_code == 0, result.output
-    assert [r.method for r in requests] == ["GET"] + ["POST"] * 5
+    # An unset --budget-tokens is now unlimited, so every check that would
+    # previously have been skipped by the old 131072-token default budget
+    # now actually runs (3 more than before).
+    assert [r.method for r in requests] == ["GET"] + ["POST"] * 8
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
@@ -678,6 +681,8 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     import httpx
     import litellm
 
+    from nooa.unifiedllm import connect
+
     monkeypatch.setenv("CONNECT_BAD", "wrong-test-secret")
     monkeypatch.setenv("CONNECT_GOOD", "right-test-secret")
     monkeypatch.setattr(litellm, "suppress_debug_info", False)
@@ -723,7 +728,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     context = details["run_context"]
     assert context["target_file"] == str(path.resolve())
     assert context["alias"] == "local"
-    assert context["remaining_budget_tokens"] == 131072 - 3 * 712
+    assert context["remaining_budget_tokens"] == connect.DEFAULT_CHECK_BUDGET - 3 * 712
     assert context["interface_timeout_seconds"] == 30
     assert "--stage interfaces" in context["rerun_command"]
     assert "skills/nooa-model-configuration/SKILL.md" in handoff
@@ -975,6 +980,38 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     assert len(bodies) == 11
     probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
     assert all(record["outcome"] == "accepted" for record in probes.values())
+
+
+def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch):
+    import httpx
+
+    def handle(request):
+        if request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--output",
+            str(path),
+        ],
+        input="y\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "budget remaining: unlimited" in result.output
+    assert "too small for all checks" not in result.output
+    assert "The approved check budget is exhausted" not in result.output
 
 
 def test_bare_command_cancel_before_endpoint_does_nothing(tmp_path, monkeypatch):

@@ -430,7 +430,11 @@ async def test_alternate_cap_cannot_bypass_budget(monkeypatch):
 
     mock_post(monkeypatch, post)
     result = await connect.run(
-        make_plan(reasoning_levels={"high": {"max_completion_tokens": 100000}}), approved="all"
+        make_plan(
+            reasoning_levels={"high": {"max_completion_tokens": 100000}},
+            budget_tokens=131072,
+        ),
+        approved="all",
     )
     assert len(bodies) == 2
     assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"

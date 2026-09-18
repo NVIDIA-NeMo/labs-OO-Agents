@@ -36,7 +36,11 @@ from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 from ._records import ProbeRecord, check_status, public_record
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
-DEFAULT_CHECK_BUDGET = 131072
+# Effectively unlimited: no real check plan approaches this, so an unset
+# --budget-tokens never causes checks to be skipped. A finite sentinel (not
+# float("inf")) keeps every arithmetic site, type annotation, and JSON
+# encoding of a ConnectPlan unchanged.
+DEFAULT_CHECK_BUDGET = 10**15
 DEFAULT_REASONING_OUTPUT_TOKENS = 4096
 REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
 Each job runs exactly once.

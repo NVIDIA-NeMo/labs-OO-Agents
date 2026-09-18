@@ -6,6 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect`'s reply-budget dropdown now truncates `high`/`extended`
+  presets against the model's actual declared max output, and adds an
+  explicit "Model maximum" choice showing that number, so picking exactly
+  the ceiling never requires `--custom`.
+- `nooa connect`'s `--budget-tokens` for API checks now defaults to
+  unlimited instead of a fixed 131,072-token cap; it's only capped when the
+  flag is passed explicitly. Previously the default could cause "some
+  checks will be skipped" even with no explicit budget set.
 - Add `nooa connect --working-dir`/`-w`: save to a project's own registry
   (`<working-dir>/.nooa/llm_config.yaml`) instead of the user-global one —
   the same file `nooa tui -w <working-dir>` reads. Mutually exclusive with

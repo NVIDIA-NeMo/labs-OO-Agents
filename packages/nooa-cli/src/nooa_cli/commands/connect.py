@@ -75,7 +75,7 @@ from ._connect_stages import STAGES
 @click.option(
     "--budget-tokens",
     type=click.IntRange(min=1),
-    help="Shared estimated-token budget for all checks (default: 131072); never increased after approval.",
+    help="Shared estimated-token budget for all checks (default: unlimited); never increased after approval.",
 )
 @click.option(
     "--output-tokens",
