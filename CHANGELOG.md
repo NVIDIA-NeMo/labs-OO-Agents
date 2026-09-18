@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Add `nooa connect --working-dir`/`-w`: save to a project's own registry
+  (`<working-dir>/.nooa/llm_config.yaml`) instead of the user-global one —
+  the same file `nooa tui -w <working-dir>` reads. Mutually exclusive with
+  `--output`.
 - Fix `nooa connect` claiming "Using saved key variable X for this endpoint"
   and then immediately prompting for that same key. The registry only
   remembers which variable *name* an endpoint used last time, not whether a

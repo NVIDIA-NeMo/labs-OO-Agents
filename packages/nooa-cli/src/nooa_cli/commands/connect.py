@@ -102,7 +102,17 @@ from ._connect_stages import STAGES
 @click.option(
     "--output",
     type=click.Path(dir_okay=False),
-    help="Registry path; defaults to the user llm_config.yaml.",
+    help="Registry path; defaults to the user llm_config.yaml. Mutually exclusive with --working-dir.",
+)
+@click.option(
+    "--working-dir",
+    "-w",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=str),
+    help=(
+        "Save to this project's registry (<working-dir>/.nooa/llm_config.yaml) "
+        "instead of the user-global one — the same file `nooa tui -w <working-dir>` "
+        "reads. Mutually exclusive with --output."
+    ),
 )
 @click.option(
     "--yes",
@@ -135,6 +145,7 @@ def command(
     reply_tokens,
     show_config,
     output,
+    working_dir,
     yes,
 ):
     """Walk through model setup, check the connection, and save an alias.
@@ -144,6 +155,14 @@ def command(
     explicit --endpoint and --api-style.
     MODEL is the exact endpoint model ID, without a LiteLLM routing prefix.
     """
+    if working_dir:
+        if output:
+            raise click.UsageError("--working-dir and --output are mutually exclusive.")
+        from pathlib import Path
+
+        from nooa import paths
+
+        output = str(Path(working_dir).expanduser().resolve() / paths.DIR_NAME / "llm_config.yaml")
     if stage:
         from ._connect_stages import run_stage
 

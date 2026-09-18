@@ -43,6 +43,54 @@ def args(path):
     ]
 
 
+def test_working_dir_saves_under_its_nooa_directory_like_the_tui(tmp_path):
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--api-key-env",
+        "CONNECT_TEST_KEY",
+        "--no-catalogue",
+        "--no-probe",
+        "--working-dir",
+        str(workspace),
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 0, result.output
+    target = workspace / ".nooa" / "llm_config.yaml"
+    assert target.exists()
+    assert yaml.safe_load(target.read_text())["models"]["local"]["api_base"] == "https://api.test/v1"
+
+
+def test_working_dir_and_output_are_mutually_exclusive(tmp_path):
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--working-dir",
+        str(workspace),
+        "--output",
+        str(tmp_path / "explicit.yaml"),
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
 @pytest.mark.parametrize("mode", ["missing", "observed", "usage", "rejected", "unprobed"])
 def test_enabled_reasoning_without_evidence_warns_once_before_save(
