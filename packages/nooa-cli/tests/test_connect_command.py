@@ -874,7 +874,6 @@ def test_model_details_appear_before_accepting_published_settings(tmp_path, monk
     assert entry["reasoning_default"] == "low"
 
 
-@pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
 @pytest.mark.parametrize("select", [True, False])
 def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(tmp_path, monkeypatch, select):
     from nooa.unifiedllm import connect
@@ -928,6 +927,7 @@ def test_no_exact_catalogue_match_is_not_guessed_under_yes(tmp_path, monkeypatch
     assert "No catalogue match; model limits and reasoning levels remain unknown." in result.output
 
 
+@pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
 def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch, action):
     from nooa.unifiedllm import connect
 
