@@ -171,13 +171,14 @@ class AgentMessage(Metadata):
 class SummarizationConfig(BaseModel):
     """Configuration for history summarization.
 
-    ``max_tokens=None`` means 80% of the usable input window (model window
-    minus the effective reply reserve), resolved for each completed request.
-    Set an explicit integer to pin a threshold, including across model switches.
+    ``max_tokens=None`` uses ``threshold_fraction`` of the usable input window
+    (model window minus the effective reply reserve), resolved for each completed
+    request. Set an explicit integer to pin a threshold across model switches.
     """
 
     policy: Literal["token_budget", "none"] = "token_budget"
     max_tokens: int | None = None
+    threshold_fraction: float = Field(default=0.75, gt=0, lt=1)
     preserve_recent: int = 10
     target_chars: int = 4000
 
@@ -201,10 +202,15 @@ with hidden:
 # ONLY budget managed here — event-pile truncation is enforced at the
 # runtime level (see ActorRuntime._build_messages) and adapts to whichever
 # LLM is actually resolved for each call (including per-call overrides).
-_SUMMARIZER_BUDGET_PCT = 0.8
+_SUMMARIZER_BUDGET_PCT = 0.75
 
 
-def _summarizer_budget(llm: "UnifiedLLM", fallback_reserve: int = 0) -> int:
+def _summarizer_budget(
+    llm: "UnifiedLLM",
+    fallback_reserve: int = 0,
+    *,
+    threshold_fraction: float = _SUMMARIZER_BUDGET_PCT,
+) -> int:
     """Resolve the summarizer trigger from the LLM's usable input window.
 
     Falls back to 100K when the LLM doesn't expose ``context_window`` so
@@ -212,7 +218,7 @@ def _summarizer_budget(llm: "UnifiedLLM", fallback_reserve: int = 0) -> int:
     """
     from nooa.agents.summarization import context_budget
 
-    return context_budget(llm, _SUMMARIZER_BUDGET_PCT, fallback_reserve=fallback_reserve)
+    return context_budget(llm, threshold_fraction, fallback_reserve=fallback_reserve)
 
 
 def apply_model_limits(agent: Agent) -> None:
@@ -222,10 +228,14 @@ def apply_model_limits(agent: Agent) -> None:
     new context window. Runtime-level event truncation picks up the new
     window automatically on the next ``_build_messages`` call.
     """
-    summarizer_max = _summarizer_budget(agent.llm, agent._truncation.response_reserve_tokens)
     for summarizer in getattr(agent, "_summarizers", []):
         if not getattr(summarizer, "_automatic_context_budget", False):
             continue
+        summarizer_max = _summarizer_budget(
+            agent.llm,
+            agent._truncation.response_reserve_tokens,
+            threshold_fraction=summarizer._automatic_context_budget_percent,
+        )
         current = summarizer.config
         summarizer.config = current.model_copy(update={"max_tokens": summarizer_max})
 
@@ -234,8 +244,8 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     """Install a summarizer on the agent based on configuration.
 
     Args:
-        config: Summarization configuration. ``config.max_tokens=None`` (the
-            default) follows 80% of each request's usable input window.
+        config: Summarization configuration. ``config.max_tokens=None`` follows
+            ``threshold_fraction`` (75% by default) of each request's usable input window.
         agent: Agent to install summarizer on (inherits LLM, attaches to history)
     """
     if config.policy == "none":
@@ -246,7 +256,11 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     summarizer_max = (
         config.max_tokens
         if config.max_tokens is not None
-        else _summarizer_budget(agent.llm, agent._truncation.response_reserve_tokens)
+        else _summarizer_budget(
+            agent.llm,
+            agent._truncation.response_reserve_tokens,
+            threshold_fraction=config.threshold_fraction,
+        )
     )
 
     summarizer = TokenBudgetSummarizer.install(
@@ -258,6 +272,7 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
         ),
     )
     summarizer._automatic_context_budget = config.max_tokens is None
+    summarizer._automatic_context_budget_percent = config.threshold_fraction
 
 
 class AgentVars:

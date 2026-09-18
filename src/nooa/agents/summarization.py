@@ -623,6 +623,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
     _warned_filtered: Annotated[bool, hidden] = False
     _failed_forks: Annotated[int, hidden] = 0
     _automatic_context_budget: Annotated[bool, hidden] = False
+    _automatic_context_budget_percent: Annotated[float, hidden] = 0.8
 
     @hidden
     @no_trace
@@ -675,6 +676,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         if self._automatic_context_budget and ctx.client is not None:
             budget = context_budget(
                 ctx.client,
+                self._automatic_context_budget_percent,
                 request_params=ctx.params,
                 fallback_reserve=ctx.runtime.truncation_config.response_reserve_tokens,
             )
