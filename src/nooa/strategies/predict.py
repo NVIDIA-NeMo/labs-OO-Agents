@@ -239,11 +239,18 @@ class PredictStrategy(GenerationStrategy):
 
         # bound_parameters() attaches each effective input once (positional args
         # also appear in kwargs, so a raw args+kwargs union would double-attach).
-        media_blocks = [
-            media_to_content_block(v)
-            for v in call.bound_parameters().values()
-            if isinstance(v, Media)
-        ]
+        media_values: list[Any] = []
+        for name, value in call.bound_parameters().items():
+            # A variadic positional parameter is represented as the tuple Python
+            # exposes inside the method. Inspect its elements individually so
+            # ``*images`` continues to attach every image exactly once.
+            if name == call.var_positional_param_name and isinstance(value, tuple):
+                media_values.extend(value)
+            elif name == call.var_keyword_param_name and isinstance(value, dict):
+                media_values.extend(value.values())
+            else:
+                media_values.append(value)
+        media_blocks = [media_to_content_block(v) for v in media_values if isinstance(v, Media)]
 
         # Guard against oversized parameters before building the prompt.
         # PredictStrategy is single-shot — a truncated input produces silently wrong output.
