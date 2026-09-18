@@ -21,9 +21,15 @@ class Result(BaseModel):
 
 def _media_blocks(call: CurrentCall) -> list:
     """Mirror PredictStrategy's media collection."""
-    return [
-        media_to_content_block(v) for v in call.bound_parameters().values() if isinstance(v, Media)
-    ]
+    values = []
+    for name, value in call.bound_parameters().items():
+        if name == call.var_positional_param_name and isinstance(value, tuple):
+            values.extend(value)
+        elif name == call.var_keyword_param_name and isinstance(value, dict):
+            values.extend(value.values())
+        else:
+            values.append(value)
+    return [media_to_content_block(value) for value in values if isinstance(value, Media)]
 
 
 def test_positional_media_attached_once():
@@ -72,4 +78,22 @@ def test_var_positional_media_each_attached_once():
     img2 = Image.from_bytes(b"two", media_type="image/png")
     call = CurrentCall.from_method(analyze, args=(img1, img2), kwargs={})
 
+    assert len(_media_blocks(call)) == 2
+
+
+def test_colliding_variadic_media_each_attached_once():
+    """Same-named *args and **kwargs media are both retained without duplication."""
+
+    def analyze(self, *imgs: Image, **metadata: Image) -> Result:
+        """Analyze the images."""
+        ...
+
+    positional = Image.from_bytes(b"positional", media_type="image/png")
+    keyword = Image.from_bytes(b"keyword", media_type="image/png")
+    call = CurrentCall.from_method(analyze, args=(positional,), kwargs={"imgs": keyword})
+
+    assert call.bound_parameters() == {
+        "imgs": (positional,),
+        "metadata": {"imgs": keyword},
+    }
     assert len(_media_blocks(call)) == 2
