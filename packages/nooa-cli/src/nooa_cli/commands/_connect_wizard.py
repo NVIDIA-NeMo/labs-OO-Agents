@@ -779,21 +779,25 @@ def configure_checks(state: WizardState) -> bool:
         state.proposal.entry, reply_tokens=state.reply_tokens
     )
     if state.reply_tokens is None and not state.yes:
+        output_ceiling = state.configured["provenance"].get("catalogue_limits", {}).get(
+            "max_completion_tokens"
+        )
+        if not (isinstance(output_ceiling, int) and output_ceiling > 0):
+            output_ceiling = None
         bounds = [
             v
             for v in (
                 state.configured["context_window"] - 1
                 if state.configured.get("context_window")
                 else None,
-                state.configured["provenance"]
-                .get("catalogue_limits", {})
-                .get("max_completion_tokens"),
+                output_ceiling,
             )
             if isinstance(v, int) and v > 0
         ]
         chosen_cap = prompts.choose_reply_limit(
             state.configured["max_tokens"],
             min(bounds) if bounds else None,
+            output_ceiling=output_ceiling,
             source=state.configured["provenance"]["reply_limit"]["source"],
         )
         state.configured = connect.configure_entry(state.configured, reply_tokens=chosen_cap)
@@ -832,7 +836,8 @@ def run_checks(state: WizardState) -> bool:
         dim=True,
     )
     view.line(
-        f"Estimated tokens: {state.remaining_estimate:,} · budget remaining: {state.proposal.budget_tokens:,} · estimated price: {price}",
+        f"Estimated tokens: {state.remaining_estimate:,} · budget remaining: "
+        f"{view.format_budget(state.proposal.budget_tokens)} · estimated price: {price}",
         dim=True,
     )
     if state.remaining_estimate > state.proposal.budget_tokens:
