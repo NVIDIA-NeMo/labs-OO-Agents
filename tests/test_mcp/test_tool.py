@@ -226,6 +226,184 @@ async def test_generated_method_calls_through_to_mcp_session():
 
 
 @pytest.mark.asyncio
+async def test_pydantic_nullable_schema_preserves_type_and_required_null():
+    """Pydantic nullable fields retain their type and forward required nulls."""
+    import inspect
+    import types
+
+    from pydantic import BaseModel
+
+    class ProviderInput(BaseModel):
+        count: int | None
+
+    input_schema = ProviderInput.model_json_schema()
+    tool_specs = [
+        MCPToolSpec(
+            "provider_call",
+            "Call a provider",
+            input_schema,
+            required=set(input_schema["required"]),
+        )
+    ]
+    mock_client, mock_session = _create_mock_client_with_session("provider result")
+    dynamic_class = _make_dynamic_class("pydantic-server", tool_specs, MCPTool)
+    instance = dynamic_class(mock_client, "pydantic-server")
+
+    count = inspect.signature(instance.provider_call).parameters["count"]
+    assert count.default is inspect.Parameter.empty
+    assert isinstance(count.annotation, types.UnionType)
+    assert set(count.annotation.__args__) == {int, type(None)}
+
+    await instance.provider_call(count=3)
+    mock_session.call_tool.assert_awaited_once_with("provider_call", {"count": 3})
+
+    mock_session.call_tool.reset_mock()
+    await instance.provider_call(count=None)
+    mock_session.call_tool.assert_awaited_once_with("provider_call", {"count": None})
+
+
+@pytest.mark.parametrize(
+    ("property_schema", "expected_types"),
+    [
+        ({"type": ["integer", "null"]}, {int, type(None)}),
+        (
+            {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+            {int, str},
+        ),
+        (
+            {"oneOf": [{"type": "boolean"}, {"type": "object"}]},
+            {bool, dict},
+        ),
+        (
+            {"anyOf": [{"$ref": "#/$defs/Value"}, {"type": "null"}]},
+            {str, type(None)},
+        ),
+    ],
+    ids=["type-array", "any-of", "one-of", "unsupported-branch-fallback"],
+)
+def test_composed_schema_types_generate_union_annotations(property_schema, expected_types):
+    """Supported composed schemas become unions without changing fallback behavior."""
+    import inspect
+    import types
+
+    tool_specs = [
+        MCPToolSpec(
+            "convert",
+            "Convert a value",
+            {
+                "type": "object",
+                "properties": {"value": property_schema},
+                "required": ["value"],
+            },
+            required={"value"},
+        )
+    ]
+
+    dynamic_class = _make_dynamic_class("union-server", tool_specs, MCPTool)
+    value = inspect.signature(dynamic_class.convert).parameters["value"]
+
+    assert value.default is inspect.Parameter.empty
+    assert isinstance(value.annotation, types.UnionType)
+    assert set(value.annotation.__args__) == expected_types
+
+
+@pytest.mark.parametrize(
+    "property_schema",
+    [
+        {"type": []},
+        {"type": {"unexpected": "shape"}},
+        {"anyOf": []},
+    ],
+    ids=["empty-type-array", "invalid-type-shape", "empty-any-of"],
+)
+def test_unsupported_schema_type_shapes_keep_string_fallback(property_schema):
+    """Empty or unsupported type shapes retain the existing string fallback."""
+    tool_specs = [
+        MCPToolSpec(
+            "convert",
+            "Convert a value",
+            {
+                "type": "object",
+                "properties": {"value": property_schema},
+                "required": ["value"],
+            },
+            required={"value"},
+        )
+    ]
+
+    dynamic_class = _make_dynamic_class("fallback-server", tool_specs, MCPTool)
+
+    assert dynamic_class.convert.__annotations__["value"] is str
+
+
+@pytest.mark.asyncio
+async def test_required_null_only_schema_forwards_none():
+    """A required null-only property remains present in the MCP request."""
+    import inspect
+
+    tool_specs = [
+        MCPToolSpec(
+            "clear",
+            "Clear a value",
+            {
+                "type": "object",
+                "properties": {"value": {"type": "null"}},
+                "required": ["value"],
+            },
+            required={"value"},
+        )
+    ]
+    mock_client, mock_session = _create_mock_client_with_session("cleared")
+    dynamic_class = _make_dynamic_class("null-server", tool_specs, MCPTool)
+    instance = dynamic_class(mock_client, "null-server")
+
+    value = inspect.signature(instance.clear).parameters["value"]
+    assert value.annotation is type(None)
+    assert value.default is inspect.Parameter.empty
+
+    await instance.clear(value=None)
+    mock_session.call_tool.assert_awaited_once_with("clear", {"value": None})
+
+
+@pytest.mark.asyncio
+async def test_optional_nullable_schema_remains_omittable():
+    """Schema nullability does not make a non-required property mandatory."""
+    import inspect
+    import types
+
+    tool_specs = [
+        MCPToolSpec(
+            "filter",
+            "Filter by count",
+            {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    }
+                },
+            },
+            required=set(),
+        )
+    ]
+    mock_client, mock_session = _create_mock_client_with_session("filtered")
+    dynamic_class = _make_dynamic_class("nullable-server", tool_specs, MCPTool)
+    instance = dynamic_class(mock_client, "nullable-server")
+
+    count = inspect.signature(instance.filter).parameters["count"]
+    assert count.default is None
+    assert isinstance(count.annotation, types.UnionType)
+    assert set(count.annotation.__args__) == {int, type(None)}
+
+    await instance.filter()
+    mock_session.call_tool.assert_awaited_once_with("filter", {})
+
+    mock_session.call_tool.reset_mock()
+    await instance.filter(count=4)
+    mock_session.call_tool.assert_awaited_once_with("filter", {"count": 4})
+
+
+@pytest.mark.asyncio
 async def test_parameter_with_default_none_gets_union_type():
     """Parameters with default=None in JSON schema should get str | None = None annotation."""
     tool_specs = [
@@ -393,7 +571,7 @@ async def test_optional_parameter_without_default_in_schema():
     Optionality is decided by the schema's ``required`` list, so a parameter
     that is neither required nor default-bearing must still be optional: it
     gets a synthesized ``None`` default and a ``T | None`` annotation, and it
-    is omitted from the call when left unset (``_call_tool`` strips None).
+    is omitted from the call when left unset.
     """
     tool_specs = [
         MCPToolSpec(
