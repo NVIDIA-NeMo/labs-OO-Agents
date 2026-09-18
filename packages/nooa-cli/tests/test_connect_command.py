@@ -224,6 +224,67 @@ def test_multiple_saved_key_variables_require_an_explicit_choice(tmp_path, monke
         assert yaml.safe_load(path.read_text())["models"]["new"]["api_key_env"] == "KEY_TWO"
 
 
+def _single_saved_key_options(path):
+    return [
+        "model",
+        "--as",
+        "new",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--no-catalogue",
+        "--no-probe",
+        "--output",
+        str(path),
+    ]
+
+
+def _write_single_saved_key_entry(path, name="CONNECT_SAVED_KEY"):
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "existing": {
+                        "model_name": "openai/model",
+                        "api_base": "https://api.test/v1",
+                        "api_key_env": name,
+                    }
+                }
+            }
+        )
+    )
+
+
+def test_saved_key_message_says_using_only_when_a_value_is_actually_set(tmp_path, monkeypatch):
+    path = tmp_path / "models.yaml"
+    _write_single_saved_key_entry(path)
+    monkeypatch.setenv("CONNECT_SAVED_KEY", "sk-already-set")
+    result = CliRunner().invoke(command, _single_saved_key_options(path), input="y\n")
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Using saved key variable CONNECT_SAVED_KEY for this endpoint." in normalized_output
+    assert "API key (used only for this setup)" not in normalized_output
+    assert yaml.safe_load(path.read_text())["models"]["new"]["api_key_env"] == "CONNECT_SAVED_KEY"
+
+
+def test_saved_key_message_is_honest_and_still_prompts_when_no_value_is_set(tmp_path, monkeypatch):
+    path = tmp_path / "models.yaml"
+    _write_single_saved_key_entry(path)
+    monkeypatch.delenv("CONNECT_SAVED_KEY", raising=False)
+    result = CliRunner().invoke(
+        command, _single_saved_key_options(path), input="sk-freshly-entered\ny\n"
+    )
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert (
+        "This endpoint previously used key variable CONNECT_SAVED_KEY, "
+        "but it has no value set." in normalized_output
+    )
+    assert "Using saved key variable CONNECT_SAVED_KEY for this endpoint." not in normalized_output
+    assert yaml.safe_load(path.read_text())["models"]["new"]["api_key_env"] == "CONNECT_SAVED_KEY"
+
+
 @pytest.mark.parametrize("save_key", [False, True])
 def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkeypatch, save_key):
     from nooa import paths

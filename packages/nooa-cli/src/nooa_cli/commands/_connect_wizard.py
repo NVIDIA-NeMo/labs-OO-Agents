@@ -231,9 +231,19 @@ def select_connection(state: WizardState) -> bool:
         saved_names = credential_names(state.registry, state.endpoint)
         if len(saved_names) == 1:
             state.api_key_env = saved_names[0]
-            view.line(
-                f"Using saved key variable {state.api_key_env or '(no authentication)'} for this endpoint."
-            )
+            if not state.api_key_env:
+                view.line("Using saved key variable (no authentication) for this endpoint.")
+            elif os.environ.get(state.api_key_env):
+                view.line(f"Using saved key variable {state.api_key_env} for this endpoint.")
+            else:
+                # credential_names only remembers which variable NAME this
+                # endpoint used last time, not whether a value is still set —
+                # saying "using" here when we're about to prompt for the same
+                # key again reads as broken, not reassuring.
+                view.line(
+                    f"This endpoint previously used key variable {state.api_key_env}, "
+                    "but it has no value set."
+                )
         elif len(saved_names) > 1:
             if state.yes:
                 raise click.UsageError(

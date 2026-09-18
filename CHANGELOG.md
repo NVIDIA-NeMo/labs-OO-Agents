@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Fix `nooa connect` claiming "Using saved key variable X for this endpoint"
+  and then immediately prompting for that same key. The registry only
+  remembers which variable *name* an endpoint used last time, not whether a
+  value is currently set; the message now says so honestly when the value is
+  missing, instead of contradicting the prompt that follows it.
 - Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
   `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new
   core dependencies. Configured checks send the saved reply limit, including
