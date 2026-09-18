@@ -440,6 +440,27 @@ async def test_alternate_cap_cannot_bypass_budget(monkeypatch):
     assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
 
 
+def test_fuzzy_match_finds_a_gateway_routed_model_by_its_catalogue_name():
+    catalogue = [
+        {"id": "anthropic/claude-opus-5"},
+        {"id": "anthropic/claude-opus-4.5"},
+        {"id": "openai/gpt-5.6"},
+        {"id": "google/gemini-3-pro"},
+    ]
+    assert connect.match_models("aws/anthropic/bedrock-claude-opus-5", catalogue) == []
+    matches = connect.fuzzy_match_models("aws/anthropic/bedrock-claude-opus-5", catalogue)
+    ids = [item["id"] for item in matches]
+    assert "anthropic/claude-opus-5" in ids
+    assert len(matches) <= 3
+    assert "openai/gpt-5.6" not in ids
+    assert "google/gemini-3-pro" not in ids
+
+
+def test_fuzzy_match_returns_nothing_below_the_cutoff():
+    catalogue = [{"id": "openai/gpt-5.6"}, {"id": "google/gemini-3-pro"}]
+    assert connect.fuzzy_match_models("totally-unrelated-vendor/made-up-model", catalogue) == []
+
+
 def test_entry_loads_through_main_registry(tmp_path, monkeypatch):
     from nooa.unifiedllm import registry
 

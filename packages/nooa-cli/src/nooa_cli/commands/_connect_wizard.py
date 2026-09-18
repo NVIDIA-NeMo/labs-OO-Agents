@@ -588,7 +588,31 @@ def configure_metadata(state: WizardState) -> bool:
                 if state.candidate is None:
                     raise click.ClickException("Choose one of the displayed model IDs.")
         else:
-            click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
+            # An exact/suffix match found nothing — likely a gateway prefix
+            # (aws/..., bedrock-..., vertex/...) the catalogue never records.
+            # Never auto-select a fuzzy guess; only offer it for confirmation.
+            fuzzy = [] if state.yes else connect.fuzzy_match_models(state.model, models)
+            if fuzzy:
+                click.echo(
+                    "Model not found; did you mean one of these? "
+                    + ", ".join(item["id"] for item in fuzzy)
+                )
+                selected = prompts.prompt(
+                    "Catalogue model (blank leaves it unknown)",
+                    default="",
+                    show_default=False,
+                    choices=[""] + [item["id"] for item in fuzzy],
+                )
+                if selected:
+                    state.candidate = next(
+                        (item for item in fuzzy if item["id"] == selected), None
+                    )
+                    if state.candidate is None:
+                        raise click.ClickException("Choose one of the displayed model IDs.")
+            if state.candidate is None:
+                click.echo(
+                    "No catalogue match; model limits and reasoning levels remain unknown."
+                )
     endpoint_model = (
         next((item for item in state.endpoint_models if item.get("id") == state.model), None)
         if state.endpoint == state.discovery_endpoint

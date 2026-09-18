@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect`'s reasoning-level puzzle checks now end with a one-line
+  "Reasoning tokens · max: N · high: N · low: N (wrong)" summary, so a
+  cross-level comparison doesn't require scrolling back through the run.
+- `nooa connect`'s catalogue lookup now offers a fuzzy "did you mean" picklist
+  when no exact/suffix match is found — common for gateway-routed model IDs
+  (`aws/anthropic/bedrock-claude-opus-5`) whose routing prefix the catalogue
+  never records. Never auto-selects a guess; only offered interactively.
 - `nooa connect`'s reasoning-level puzzle check now shows the actual
   reasoning token count alongside the correct/incorrect result, so a wrong
   answer can be told apart from reasoning effort having no real effect.

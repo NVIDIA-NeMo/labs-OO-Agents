@@ -875,6 +875,59 @@ def test_model_details_appear_before_accepting_published_settings(tmp_path, monk
 
 
 @pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
+@pytest.mark.parametrize("select", [True, False])
+def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(tmp_path, monkeypatch, select):
+    from nooa.unifiedllm import connect
+
+    # "gateway/wired-model" is close to "wire/model" but not an exact or
+    # suffix match, the way a gateway-routed model ID (aws/..., bedrock-...)
+    # commonly isn't an exact match for the catalogue's own model ID.
+    suggestion = {
+        "id": "gateway/wired-model",
+        "context_length": 50000,
+        "top_provider": {"max_completion_tokens": 4096},
+    }
+
+    async def catalogue():
+        return [suggestion]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    path = tmp_path / "models.yaml"
+    options = [arg for arg in args(path) if arg != "--no-catalogue"]
+    result = CliRunner().invoke(
+        command,
+        options,
+        input=("gateway/wired-model\n" if select else "\n") + "use\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "Model not found; did you mean one of these?" in result.output
+    assert "gateway/wired-model" in result.output
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    if select:
+        assert entry["context_window"] == 50000
+        assert "No catalogue match" not in result.output
+    else:
+        assert "context_window" not in entry
+        assert "No catalogue match; model limits and reasoning levels remain unknown." in (
+            result.output
+        )
+
+
+def test_no_exact_catalogue_match_is_not_guessed_under_yes(tmp_path, monkeypatch):
+    from nooa.unifiedllm import connect
+
+    async def catalogue():
+        return [{"id": "gateway/wired-model"}]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    path = tmp_path / "models.yaml"
+    options = [arg for arg in args(path) if arg != "--no-catalogue"] + ["--yes"]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 0, result.output
+    assert "Model not found; did you mean" not in result.output
+    assert "No catalogue match; model limits and reasoning levels remain unknown." in result.output
+
+
 def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch, action):
     from nooa.unifiedllm import connect
 

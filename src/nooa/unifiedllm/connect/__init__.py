@@ -11,6 +11,7 @@ obeyed. The runtime reads the result, never these onboarding templates.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import math
 import os
@@ -419,6 +420,41 @@ def match_models(model: str, models: list[dict]) -> list[dict]:
         elif target.rsplit("/", 1)[-1] == candidate.rsplit("/", 1)[-1]:
             matches.append((1, name, item))
     return [item for _, _, item in sorted(matches, key=lambda item: item[:2])[:3]]
+
+
+_FUZZY_MATCH_CUTOFF = 0.6
+
+
+def fuzzy_match_models(model: str, models: list[dict]) -> list[dict]:
+    """Best-effort "did you mean" suggestions once match_models finds nothing.
+
+    A gateway-routed model ID (e.g. ``aws/anthropic/bedrock-claude-opus-5``)
+    carries routing segments the catalogue never records, so exact/suffix
+    matching in match_models() can find nothing even though the model is
+    listed under its own name. This never auto-selects a candidate; the
+    frontend must still confirm one.
+    """
+
+    def normalized(value):
+        return re.sub(r"[-_.]", "", value.lower())
+
+    target = normalized(model)
+    target_tail = target.rsplit("/", 1)[-1]
+    scored = []
+    for item in models:
+        name = item.get("id")
+        if not isinstance(name, str):
+            continue
+        candidate = normalized(name)
+        candidate_tail = candidate.rsplit("/", 1)[-1]
+        ratio = max(
+            difflib.SequenceMatcher(None, target, candidate).ratio(),
+            difflib.SequenceMatcher(None, target_tail, candidate_tail).ratio(),
+        )
+        if ratio >= _FUZZY_MATCH_CUTOFF:
+            scored.append((ratio, name, item))
+    scored.sort(key=lambda entry: entry[0], reverse=True)
+    return [item for _, _, item in scored[:3]]
 
 
 def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4096) -> dict:
