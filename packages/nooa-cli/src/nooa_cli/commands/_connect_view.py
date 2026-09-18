@@ -214,6 +214,8 @@ class CheckProgress:
             if record.get("reason") == "previous result reused":
                 detail += " · already checked"
             if name.startswith("level:") and isinstance(record.get("answer_correct"), bool):
+                if isinstance(record.get("reasoning_tokens"), int):
+                    detail += f" · {record['reasoning_tokens']:,} reasoning tokens"
                 detail += " · answer correct" if record["answer_correct"] else " · answer incorrect"
                 if not record["answer_correct"]:
                     status = "attention"

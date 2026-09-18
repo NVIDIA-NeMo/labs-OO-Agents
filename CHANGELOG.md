@@ -6,6 +6,9 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect`'s reasoning-level puzzle check now shows the actual
+  reasoning token count alongside the correct/incorrect result, so a wrong
+  answer can be told apart from reasoning effort having no real effect.
 - `nooa connect`'s reply-budget dropdown now truncates `high`/`extended`
   presets against the model's actual declared max output, and adds an
   explicit "Model maximum" choice showing that number, so picking exactly
