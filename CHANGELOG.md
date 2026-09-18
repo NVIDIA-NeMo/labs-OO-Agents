@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Fix `nooa connect` reporting no reasoning observed for providers that
+  return a reasoning part with a signature but deliberately empty text
+  (Claude Sonnet 5/Opus 5 via Azure or Bedrock). The level-check probe was
+  reading `response.reasoning`, which joins only non-empty parts, instead of
+  checking for the part's presence the way session checks already do.
 - `nooa connect`'s reasoning-level puzzle checks now end with a one-line
   "Reasoning tokens · max: N · high: N · low: N (wrong)" summary, so a
   cross-level comparison doesn't require scrolling back through the run.

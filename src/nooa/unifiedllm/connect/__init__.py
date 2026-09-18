@@ -1333,7 +1333,16 @@ async def run_steps(
                     proposal.alias, entry, probe, key
                 )
             usage = response.usage
-            reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
+            # response.reasoning joins only non-empty AssistantReasoning parts,
+            # so a provider that returns a reasoning part with a signature but
+            # deliberately empty/opaque text (Claude Sonnet 5/Opus 5 via Azure
+            # or Bedrock) reads as no reasoning at all through that property.
+            # Check for the part's presence directly, matching how session
+            # checks in _session.py already detect it.
+            reasoning = bool(
+                any(part.kind == "reasoning" for part in response.parts)
+                or (usage and usage.reasoning_tokens)
+            )
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
             tokens = usage.input_tokens + usage.output_tokens if usage else 0
         except Exception as exc:

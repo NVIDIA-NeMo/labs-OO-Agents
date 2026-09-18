@@ -8,7 +8,7 @@ from itertools import permutations
 import httpx
 import pytest
 
-from nooa.unifiedllm import connect
+from nooa.unifiedllm import AssistantReasoning, LLMResponse, LLMUsage, connect
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
@@ -26,6 +26,36 @@ def test_scheduling_puzzle_has_one_solution():
         ):
             solutions.append("".join(order))
     assert solutions == ["BGDACEFH"]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_observed_counts_an_empty_text_reasoning_part(monkeypatch):
+    """Claude Sonnet 5/Opus 5 via Azure or Bedrock return a reasoning part with a
+    signature but deliberately empty text. response.reasoning joins only
+    non-empty parts, so a probe that checked that property alone (instead of
+    the part's presence) reported no reasoning even though one was returned.
+    """
+
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(AssistantReasoning(text=""),),
+            finish_reason="stop",
+            usage=LLMUsage(input_tokens=20, output_tokens=2, total_tokens=22),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "claude-opus-5",
+        "anthropic",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"thinking": {"type": "adaptive"}}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_observed"] is True
 
 
 @pytest.mark.asyncio
