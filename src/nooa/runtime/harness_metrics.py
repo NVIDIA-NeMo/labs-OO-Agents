@@ -166,7 +166,6 @@ class HarnessMetrics(BaseModel):
     shell_failures: list[ErrorRecord] = Field(default_factory=list)
     shell_deaths: list[ErrorRecord] = Field(default_factory=list)
     repo_failures: list[ErrorRecord] = Field(default_factory=list)
-    tool_avoidance: list[str] = Field(default_factory=list)
 
     # ── Code Validation ──
     missing_awaits_detected: list[str] = Field(default_factory=list)
@@ -373,14 +372,6 @@ class HarnessMetrics(BaseModel):
                 code_preview=_truncate(code_preview, _MAX_CODE_PREVIEW_CHARS),
             ),
         )
-
-    def tool_avoided(self, detail: str) -> None:
-        """Record when the LLM bypasses a higher-level tool with a raw command.
-
-        E.g. using shell.bash("sed ...") instead of shell.edit, or
-        shell.bash("cat ...") instead of shell.view.
-        """
-        self._append(self.tool_avoidance, detail)
 
     # Code Validation
     def missing_await(self, method_name: str) -> None:
@@ -878,19 +869,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Repo failure messages",
         "Tool Usage",
         lambda m: [e.message for e in m.repo_failures],
-        True,
-    ),
-    SchemaEntry(
-        "harness.tool_avoidance.count",
-        "Tool avoidance",
-        "Tool Usage",
-        lambda m: len(m.tool_avoidance),
-    ),
-    SchemaEntry(
-        "harness.tool_avoidance.details",
-        "Tool avoidance details",
-        "Tool Usage",
-        lambda m: m.tool_avoidance,
         True,
     ),
     # Code Validation
