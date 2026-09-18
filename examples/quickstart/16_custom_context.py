@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Quickstart 16: Use an independent context API and assembly policy.
 
+The agent searches a private corpus, then its view projects the selected
+documents into the next LLM turn so the agent can answer from them.
+
 uv run python examples/quickstart/16_custom_context.py
 """
 
@@ -45,6 +48,7 @@ class ResearchContextView:
     """Turn ResearchContext state into the context for one model call."""
 
     async def assemble(self, owner, call):
+        # Tell the first model turn how to select evidence through the custom API.
         yield Block(
             key="research_api",
             content=(
@@ -57,6 +61,8 @@ class ResearchContextView:
         for event in select_context_events(owner.events, call=call):
             yield event
         yield CacheBoundary()
+
+        # A search changes ResearchContext; the next turn receives its selection.
         selected = owner.research_context.selected()
         if selected:
             yield Block(
@@ -88,6 +94,7 @@ class ResearchAgent(
 
 async def main():
     agent = ResearchAgent()
+    # This corpus belongs to the application, not NOOA's built-in ContextApi.
     agent.research_context.add("aurora-brief", "Project Aurora's verification code is Q7-MANGO.")
     agent.research_context.add("borealis-brief", "Project Borealis meets in Oslo.")
 

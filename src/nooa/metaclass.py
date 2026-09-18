@@ -21,8 +21,24 @@ from typing import Any
 
 from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
+_MISSING_CONTEXT_VIEW = object()
 
-class AgentMeta(ABCMeta):
+
+class ContextViewOwnerMeta(ABCMeta):
+    """Support instance context views for owners whose constructors do not."""
+
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
+        if not getattr(cls, "_consume_context_view_argument", False):
+            return super().__call__(*args, **kwargs)
+
+        context_view = kwargs.pop("context_view", _MISSING_CONTEXT_VIEW)
+        instance = super().__call__(*args, **kwargs)
+        if context_view is not _MISSING_CONTEXT_VIEW:
+            instance._context_view = context_view
+        return instance
+
+
+class AgentMeta(ContextViewOwnerMeta):
     """Generic metaclass for auto-wrapping ellipsis methods and tracing helpers.
 
     Inherits from ABCMeta to support abstract base classes.

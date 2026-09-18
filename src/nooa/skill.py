@@ -5,7 +5,6 @@
 import inspect
 import re
 import shlex
-from abc import ABCMeta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -13,19 +12,7 @@ import yaml
 from pydantic import BaseModel
 
 from nooa.agentdoc import hidden
-
-_MISSING = object()
-
-
-class SkillMeta(ABCMeta):
-    """Consume instance context views without constraining subclass constructors."""
-
-    def __call__(cls, *args: Any, context_view: Any = _MISSING, **kwargs: Any):
-        instance = super().__call__(*args, **kwargs)
-        if context_view is not _MISSING:
-            instance._context_view = context_view
-        return instance
-
+from nooa.metaclass import ContextViewOwnerMeta
 
 # ---------------------------------------------------------------------------
 # @slash_command decorator
@@ -266,7 +253,7 @@ def _build_script_command(
     return cmd.strip()
 
 
-class Skill(metaclass=SkillMeta):
+class Skill(metaclass=ContextViewOwnerMeta):
     """Base class for agent skills.
 
     Wraps a Python object or inline content so the LLM can discover it via
@@ -298,6 +285,7 @@ class Skill(metaclass=SkillMeta):
     context_block: Annotated[tuple[str, str] | None, hidden] = None
 
     _context_view: Annotated[Any, hidden] = None
+    _consume_context_view_argument: Annotated[bool, hidden] = True
 
     _agent: Any = None
     _source_dir: Path

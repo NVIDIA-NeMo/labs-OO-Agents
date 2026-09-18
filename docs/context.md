@@ -1,8 +1,6 @@
 # Context Management in NOOA
 
-## Goal
-
-Use one pattern for context produced by agents, skills, and future components. One agent view creates the complete ordered model context and may explicitly compose other views. The default view is a readable reference implementation. Rendering adds no context sources or placement policy.
+A context view projects any owner state into the ordered context for one LLM turn. Agents, skills, and future components use this pattern; one agent view creates the complete context and may explicitly compose other views. The default view is a readable reference implementation. Rendering adds no context sources or placement policy.
 
 ## Contract
 
