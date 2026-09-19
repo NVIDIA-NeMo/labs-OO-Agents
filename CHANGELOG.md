@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect`'s encrypted-reasoning-bundle message now includes the
+  decoded byte size of Anthropic's `redacted_thinking` blob when available
+  ("~N bytes of encrypted state"), a rough size signal since there is no way
+  to convert an opaque encrypted payload into an actual token count.
+
 - `nooa connect` no longer shows a misleading "0 reasoning tokens" for
   providers whose reasoning-token estimate is a text-length count of a
   deliberately-empty reasoning field (Claude Sonnet 5/Opus 5 via Azure or

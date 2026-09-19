@@ -11,6 +11,8 @@ obeyed. The runtime reads the result, never these onboarding templates.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import difflib
 import json
 import math
@@ -1345,12 +1347,26 @@ async def run_steps(
             # wire type (chat_parts.py preserves the raw block on .native),
             # not just "reasoning with no visible text" — surface that instead
             # of reporting a token count litellm has no text left to estimate.
-            reasoning_encrypted = any(
-                isinstance(part.native, Mapping)
-                and isinstance(part.native.get("thinking_blocks"), Mapping)
-                and part.native["thinking_blocks"].get("type") == "redacted_thinking"
-                for part in reasoning_parts
-            )
+            reasoning_encrypted = False
+            reasoning_encrypted_bytes = None
+            for part in reasoning_parts:
+                if not isinstance(part.native, Mapping):
+                    continue
+                block = part.native.get("thinking_blocks")
+                if not isinstance(block, Mapping) or block.get("type") != "redacted_thinking":
+                    continue
+                reasoning_encrypted = True
+                data = block.get("data")
+                if isinstance(data, str) and data:
+                    # The decoded byte count of an opaque encrypted blob is a
+                    # rough size signal only — a proxy for how much reasoning
+                    # state it carries, not a token count. Anthropic gives no
+                    # way to convert this into an actual reasoning-token figure.
+                    try:
+                        size = len(base64.b64decode(data, validate=False))
+                    except (binascii.Error, ValueError):
+                        size = len(data)
+                    reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + size
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
             tokens = usage.input_tokens + usage.output_tokens if usage else 0
         except Exception as exc:
@@ -1393,6 +1409,7 @@ async def run_steps(
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,
             reasoning_encrypted=reasoning_encrypted,
+            reasoning_encrypted_bytes=reasoning_encrypted_bytes,
             tool_observed=tool,
             reported_tokens=tokens,
             input_tokens=usage.input_tokens if usage else None,

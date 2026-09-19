@@ -304,6 +304,34 @@ def test_encrypted_reasoning_bundle_shows_output_tokens_not_a_zero_count():
     assert "Reasoning tokens · max: 687 output (encrypted)" in normalized_output
 
 
+def test_encrypted_reasoning_bundle_shows_its_byte_size_when_known():
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update(
+            "level:max",
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "reasoning_encrypted": True,
+                "reasoning_encrypted_bytes": 100,
+                "reasoning_tokens": 0,
+                "output_tokens": 687,
+                "answer_correct": True,
+            },
+        )
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert (
+        "encrypted reasoning bundle returned "
+        "(687 output tokens, not split out; ~100 bytes of encrypted state)"
+    ) in normalized_output
+    assert "Reasoning tokens · max: 687 output (encrypted, ~100B)" in normalized_output
+
+
 def test_unsplit_reasoning_tokens_falls_back_to_output_tokens():
     @click.command()
     def command():

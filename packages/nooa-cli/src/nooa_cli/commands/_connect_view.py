@@ -55,7 +55,12 @@ def _reasoning_tokens_label(record):
     if not isinstance(output_tokens, int):
         return ""
     if record.get("reasoning_encrypted"):
-        return f"encrypted reasoning bundle returned ({output_tokens:,} output tokens, not split out)"
+        size = record.get("reasoning_encrypted_bytes")
+        size_note = f"; ~{size:,} bytes of encrypted state" if isinstance(size, int) else ""
+        return (
+            f"encrypted reasoning bundle returned ({output_tokens:,} output tokens, "
+            f"not split out{size_note})"
+        )
     if record.get("reasoning_observed"):
         return f"{output_tokens:,} output tokens (reasoning tokens not reported separately)"
     return ""
@@ -70,7 +75,9 @@ def _reasoning_tokens_summary(record):
     if not isinstance(output_tokens, int):
         return "0"
     if record.get("reasoning_encrypted"):
-        return f"{output_tokens:,} output (encrypted)"
+        size = record.get("reasoning_encrypted_bytes")
+        size_note = f", ~{size:,}B" if isinstance(size, int) else ""
+        return f"{output_tokens:,} output (encrypted{size_note})"
     return f"{output_tokens:,} output"
 
 
