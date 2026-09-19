@@ -108,6 +108,9 @@ class TestBashSessionWindowsGuard:
     asyncio.create_subprocess_exec."""
 
     async def test_start_raises_clear_error_on_win32(self, tmp_path, monkeypatch):
+        """start() raises NemoOOAgentsRuntimeError immediately on win32, naming
+        the POSIX shell / fd-3 control-channel constraint, instead of letting a
+        low-level subprocess failure surface to the caller."""
         monkeypatch.setattr("nooa.tools._bash_session.sys.platform", "win32")
         s = BashSession(cwd=tmp_path)
 
