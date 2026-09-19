@@ -56,6 +56,43 @@ async def test_reasoning_observed_counts_an_empty_text_reasoning_part(monkeypatc
     result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
     record = result.entry["provenance"]["probes"]["level:on"]
     assert record["reasoning_observed"] is True
+    assert record["reasoning_encrypted"] is False
+
+
+@pytest.mark.asyncio
+async def test_redacted_thinking_block_is_flagged_as_encrypted_not_missing(monkeypatch):
+    """Anthropic's redacted_thinking is a distinct, detectable wire type (real
+    reasoning occurred; the provider withholds the text) — not the same as a
+    generic empty-text reasoning part from some other cause.
+    """
+
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(
+                AssistantReasoning(
+                    text="",
+                    native={"thinking_blocks": {"type": "redacted_thinking", "data": "opaque"}},
+                ),
+            ),
+            finish_reason="stop",
+            usage=LLMUsage(input_tokens=147, output_tokens=687, total_tokens=834),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "claude-opus-5",
+        "anthropic",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"thinking": {"type": "adaptive"}}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_observed"] is True
+    assert record["reasoning_encrypted"] is True
+    assert record["output_tokens"] == 687
 
 
 @pytest.mark.asyncio

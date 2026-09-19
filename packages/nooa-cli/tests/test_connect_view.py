@@ -264,6 +264,93 @@ def test_error_or_filtered_finish_reason_keeps_the_generic_message(finish_reason
     assert "Ran out of reply tokens" not in normalized_output
 
 
+def test_length_advice_to_raise_the_budget_is_only_for_level_checks():
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update("tools", {"outcome": "accepted", "finish_reason": "length"})
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert "Ran out of reply tokens before finishing" in result.output
+    assert "increase the reply budget" not in result.output
+
+
+def test_encrypted_reasoning_bundle_shows_output_tokens_not_a_zero_count():
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update(
+            "level:max",
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "reasoning_encrypted": True,
+                "reasoning_tokens": 0,
+                "output_tokens": 687,
+                "answer_correct": True,
+            },
+        )
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "encrypted reasoning bundle returned (687 output tokens, not split out)" in (
+        normalized_output
+    )
+    assert "0 reasoning tokens" not in normalized_output
+    assert "Reasoning tokens · max: 687 output (encrypted)" in normalized_output
+
+
+def test_unsplit_reasoning_tokens_falls_back_to_output_tokens():
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update(
+            "level:high",
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "reasoning_tokens": 0,
+                "output_tokens": 300,
+                "answer_correct": True,
+            },
+        )
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "300 output tokens (reasoning tokens not reported separately)" in normalized_output
+    assert "0 reasoning tokens" not in normalized_output
+    assert "Reasoning tokens · high: 300 output" in normalized_output
+
+
+def test_no_reasoning_signal_at_all_shows_no_token_suffix():
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update(
+            "level:low",
+            {
+                "outcome": "accepted",
+                "reasoning_observed": False,
+                "reasoning_tokens": 0,
+                "output_tokens": 20,
+                "answer_correct": True,
+            },
+        )
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert "output tokens" not in result.output
+    assert "reasoning tokens" not in result.output
+    assert "Reasoning tokens ·" not in result.output
+
+
 def test_success_hides_test_cap_but_length_retry_explains_increase():
     @click.command()
     def command():

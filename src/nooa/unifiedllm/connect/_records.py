@@ -21,6 +21,7 @@ class ProbeRecord(TypedDict, total=False):
     request_shape: dict[str, Any]
     status_code: int
     reasoning_observed: bool
+    reasoning_encrypted: bool
     answer_correct: bool
     tool_observed: bool
     state_retained: bool

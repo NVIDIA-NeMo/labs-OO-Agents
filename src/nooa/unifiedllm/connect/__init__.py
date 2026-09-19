@@ -20,7 +20,7 @@ import stat
 import tempfile
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -1339,9 +1339,17 @@ async def run_steps(
             # or Bedrock) reads as no reasoning at all through that property.
             # Check for the part's presence directly, matching how session
             # checks in _session.py already detect it.
-            reasoning = bool(
-                any(part.kind == "reasoning" for part in response.parts)
-                or (usage and usage.reasoning_tokens)
+            reasoning_parts = [part for part in response.parts if part.kind == "reasoning"]
+            reasoning = bool(reasoning_parts or (usage and usage.reasoning_tokens))
+            # Anthropic's redacted_thinking blocks are a distinct, detectable
+            # wire type (chat_parts.py preserves the raw block on .native),
+            # not just "reasoning with no visible text" — surface that instead
+            # of reporting a token count litellm has no text left to estimate.
+            reasoning_encrypted = any(
+                isinstance(part.native, Mapping)
+                and isinstance(part.native.get("thinking_blocks"), Mapping)
+                and part.native["thinking_blocks"].get("type") == "redacted_thinking"
+                for part in reasoning_parts
             )
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
             tokens = usage.input_tokens + usage.output_tokens if usage else 0
@@ -1384,6 +1392,7 @@ async def run_steps(
             transport=transport,
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,
+            reasoning_encrypted=reasoning_encrypted,
             tool_observed=tool,
             reported_tokens=tokens,
             input_tokens=usage.input_tokens if usage else None,

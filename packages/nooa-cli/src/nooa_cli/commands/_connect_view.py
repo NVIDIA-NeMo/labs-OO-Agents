@@ -35,6 +35,45 @@ def format_budget(tokens):
     return "unlimited" if tokens >= 10**12 else f"{tokens:,}"
 
 
+def _reasoning_tokens_label(record):
+    """Describe what's actually known about a level check's reasoning cost.
+
+    A real, positive count from the endpoint/litellm is shown as-is. Anthropic's
+    redacted_thinking blocks are a distinct, detectable wire type (real
+    reasoning occurred; the provider withholds the text), not just "no
+    reasoning" — litellm's reasoning_tokens estimate is a text-length count
+    and reads 0 when there is no visible text to count, regardless of how much
+    thinking actually happened, so showing that 0 as though it were measured
+    would be misleading. output_tokens is shown instead where it's available,
+    since Anthropic bills thinking tokens as ordinary output tokens without
+    splitting them out. Returns "" when nothing is known.
+    """
+    tokens = record.get("reasoning_tokens")
+    if isinstance(tokens, int) and tokens > 0:
+        return f"{tokens:,} reasoning tokens"
+    output_tokens = record.get("output_tokens")
+    if not isinstance(output_tokens, int):
+        return ""
+    if record.get("reasoning_encrypted"):
+        return f"encrypted reasoning bundle returned ({output_tokens:,} output tokens, not split out)"
+    if record.get("reasoning_observed"):
+        return f"{output_tokens:,} output tokens (reasoning tokens not reported separately)"
+    return ""
+
+
+def _reasoning_tokens_summary(record):
+    """Compact form of _reasoning_tokens_label for the end-of-run summary line."""
+    tokens = record.get("reasoning_tokens")
+    if isinstance(tokens, int) and tokens > 0:
+        return f"{tokens:,}"
+    output_tokens = record.get("output_tokens")
+    if not isinstance(output_tokens, int):
+        return "0"
+    if record.get("reasoning_encrypted"):
+        return f"{output_tokens:,} output (encrypted)"
+    return f"{output_tokens:,} output"
+
+
 def check_failure(outcome):
     """Translate sanitized error classes, never show a provider error body."""
     error = outcome.get("error", "")
@@ -212,17 +251,19 @@ class CheckProgress:
                 detail += " · reasoning returned"
             if record.get("finish_reason") == "length":
                 status, detail = "attention", "Ran out of reply tokens before finishing"
+                if name.startswith("level:"):
+                    detail += (
+                        " — if you plan to use this reasoning level, increase the reply budget"
+                    )
             elif record.get("finish_reason") in {"error", "content_filter"}:
                 status, detail = "attention", "Reply incomplete; check not conclusive"
             if record.get("reason") == "previous result reused":
                 detail += " · already checked"
             if name.startswith("level:") and isinstance(record.get("answer_correct"), bool):
-                if isinstance(record.get("reasoning_tokens"), int):
-                    detail += f" · {record['reasoning_tokens']:,} reasoning tokens"
-                    self.reasoning_levels[name[6:]] = (
-                        record["reasoning_tokens"],
-                        record["answer_correct"],
-                    )
+                tokens_label = _reasoning_tokens_label(record)
+                if tokens_label:
+                    detail += f" · {tokens_label}"
+                    self.reasoning_levels[name[6:]] = record
                 detail += " · answer correct" if record["answer_correct"] else " · answer incorrect"
                 if not record["answer_correct"]:
                     status = "attention"
@@ -259,8 +300,9 @@ class CheckProgress:
         self._clear()
         if self.reasoning_levels and summary:
             parts = [
-                f"{level}: {tokens:,}{'' if correct else ' (wrong)'}"
-                for level, (tokens, correct) in self.reasoning_levels.items()
+                f"{level}: {_reasoning_tokens_summary(record)}"
+                f"{'' if record['answer_correct'] else ' (wrong)'}"
+                for level, record in self.reasoning_levels.items()
             ]
             line("Reasoning tokens · " + " · ".join(parts), dim=True)
         if self.results and summary:

@@ -6,6 +6,20 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect` no longer shows a misleading "0 reasoning tokens" for
+  providers whose reasoning-token estimate is a text-length count of a
+  deliberately-empty reasoning field (Claude Sonnet 5/Opus 5 via Azure or
+  Bedrock). Detects Anthropic's `redacted_thinking` block specifically —
+  real reasoning occurred; the provider withholds the text — and shows
+  "encrypted reasoning bundle returned (N output tokens, not split out)".
+  Any other case where reasoning was observed but not separately counted
+  falls back to showing `output_tokens` (which does include the reasoning
+  cost, just not broken out) instead of a bare, misleading 0. A real,
+  positive reasoning-token count from the endpoint still displays as before.
+- `nooa connect`'s "Ran out of reply tokens before finishing" message now
+  adds "if you plan to use this reasoning level, increase the reply budget"
+  for level checks specifically.
+
 - `nooa connect` now says "Ran out of reply tokens before finishing" for a
   check whose reply was truncated by the reply cap (`finish_reason: length`),
   distinct from the generic "Reply incomplete" message still used for a
