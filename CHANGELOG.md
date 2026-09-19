@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect` now says "Ran out of reply tokens before finishing" for a
+  check whose reply was truncated by the reply cap (`finish_reason: length`),
+  distinct from the generic "Reply incomplete" message still used for a
+  provider error or content filter.
 - Fix `nooa connect` reporting no reasoning observed for providers that
   return a reasoning part with a signature but deliberately empty text
   (Claude Sonnet 5/Opus 5 via Azure or Bedrock). The level-check probe was

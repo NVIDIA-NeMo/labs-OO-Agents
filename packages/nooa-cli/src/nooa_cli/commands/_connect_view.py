@@ -143,6 +143,7 @@ class CheckProgress:
         self.active = False
         self.started = {}
         self.results = {}
+        self.reasoning_levels = {}
 
     def _clear(self):
         if self.active:
@@ -209,13 +210,19 @@ class CheckProgress:
                     status, detail = "attention", "No reasoning details returned"
             elif record.get("reasoning_observed"):
                 detail += " · reasoning returned"
-            if record.get("finish_reason") in {"length", "error", "content_filter"}:
+            if record.get("finish_reason") == "length":
+                status, detail = "attention", "Ran out of reply tokens before finishing"
+            elif record.get("finish_reason") in {"error", "content_filter"}:
                 status, detail = "attention", "Reply incomplete; check not conclusive"
             if record.get("reason") == "previous result reused":
                 detail += " · already checked"
             if name.startswith("level:") and isinstance(record.get("answer_correct"), bool):
                 if isinstance(record.get("reasoning_tokens"), int):
                     detail += f" · {record['reasoning_tokens']:,} reasoning tokens"
+                    self.reasoning_levels[name[6:]] = (
+                        record["reasoning_tokens"],
+                        record["answer_correct"],
+                    )
                 detail += " · answer correct" if record["answer_correct"] else " · answer incorrect"
                 if not record["answer_correct"]:
                     status = "attention"
@@ -250,6 +257,12 @@ class CheckProgress:
 
     def finish(self, *, summary=True):
         self._clear()
+        if self.reasoning_levels and summary:
+            parts = [
+                f"{level}: {tokens:,}{'' if correct else ' (wrong)'}"
+                for level, (tokens, correct) in self.reasoning_levels.items()
+            ]
+            line("Reasoning tokens · " + " · ".join(parts), dim=True)
         if self.results and summary:
             counts = [
                 f"{sum(s == status for s in self.results.values())} {label}"
