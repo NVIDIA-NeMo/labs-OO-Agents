@@ -231,9 +231,19 @@ def select_connection(state: WizardState) -> bool:
         saved_names = credential_names(state.registry, state.endpoint)
         if len(saved_names) == 1:
             state.api_key_env = saved_names[0]
-            view.line(
-                f"Using saved key variable {state.api_key_env or '(no authentication)'} for this endpoint."
-            )
+            if not state.api_key_env:
+                view.line("Using saved key variable (no authentication) for this endpoint.")
+            elif os.environ.get(state.api_key_env):
+                view.line(f"Using saved key variable {state.api_key_env} for this endpoint.")
+            else:
+                # credential_names only remembers which variable NAME this
+                # endpoint used last time, not whether a value is still set —
+                # saying "using" here when we're about to prompt for the same
+                # key again reads as broken, not reassuring.
+                view.line(
+                    f"This endpoint previously used key variable {state.api_key_env}, "
+                    "but it has no value set."
+                )
         elif len(saved_names) > 1:
             if state.yes:
                 raise click.UsageError(
@@ -578,7 +588,31 @@ def configure_metadata(state: WizardState) -> bool:
                 if state.candidate is None:
                     raise click.ClickException("Choose one of the displayed model IDs.")
         else:
-            click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
+            # An exact/suffix match found nothing — likely a gateway prefix
+            # (aws/..., bedrock-..., vertex/...) the catalogue never records.
+            # Never auto-select a fuzzy guess; only offer it for confirmation.
+            fuzzy = [] if state.yes else connect.fuzzy_match_models(state.model, models)
+            if fuzzy:
+                click.echo(
+                    "Model not found; did you mean one of these? "
+                    + ", ".join(item["id"] for item in fuzzy)
+                )
+                selected = prompts.prompt(
+                    "Catalogue model (blank leaves it unknown)",
+                    default="",
+                    show_default=False,
+                    choices=[""] + [item["id"] for item in fuzzy],
+                )
+                if selected:
+                    state.candidate = next(
+                        (item for item in fuzzy if item["id"] == selected), None
+                    )
+                    if state.candidate is None:
+                        raise click.ClickException("Choose one of the displayed model IDs.")
+            if state.candidate is None:
+                click.echo(
+                    "No catalogue match; model limits and reasoning levels remain unknown."
+                )
     endpoint_model = (
         next((item for item in state.endpoint_models if item.get("id") == state.model), None)
         if state.endpoint == state.discovery_endpoint
@@ -769,21 +803,25 @@ def configure_checks(state: WizardState) -> bool:
         state.proposal.entry, reply_tokens=state.reply_tokens
     )
     if state.reply_tokens is None and not state.yes:
+        output_ceiling = state.configured["provenance"].get("catalogue_limits", {}).get(
+            "max_completion_tokens"
+        )
+        if not (isinstance(output_ceiling, int) and output_ceiling > 0):
+            output_ceiling = None
         bounds = [
             v
             for v in (
                 state.configured["context_window"] - 1
                 if state.configured.get("context_window")
                 else None,
-                state.configured["provenance"]
-                .get("catalogue_limits", {})
-                .get("max_completion_tokens"),
+                output_ceiling,
             )
             if isinstance(v, int) and v > 0
         ]
         chosen_cap = prompts.choose_reply_limit(
             state.configured["max_tokens"],
             min(bounds) if bounds else None,
+            output_ceiling=output_ceiling,
             source=state.configured["provenance"]["reply_limit"]["source"],
         )
         state.configured = connect.configure_entry(state.configured, reply_tokens=chosen_cap)
@@ -822,7 +860,8 @@ def run_checks(state: WizardState) -> bool:
         dim=True,
     )
     view.line(
-        f"Estimated tokens: {state.remaining_estimate:,} · budget remaining: {state.proposal.budget_tokens:,} · estimated price: {price}",
+        f"Estimated tokens: {state.remaining_estimate:,} · budget remaining: "
+        f"{view.format_budget(state.proposal.budget_tokens)} · estimated price: {price}",
         dim=True,
     )
     if state.remaining_estimate > state.proposal.budget_tokens:

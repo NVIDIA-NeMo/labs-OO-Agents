@@ -6,6 +6,61 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect`'s encrypted-reasoning-bundle message now includes the
+  decoded byte size of Anthropic's `redacted_thinking` blob when available
+  ("~N bytes of encrypted state"), a rough size signal since there is no way
+  to convert an opaque encrypted payload into an actual token count.
+
+- `nooa connect` no longer shows a misleading "0 reasoning tokens" for
+  providers whose reasoning-token estimate is a text-length count of a
+  deliberately-empty reasoning field (Claude Sonnet 5/Opus 5 via Azure or
+  Bedrock). Detects Anthropic's `redacted_thinking` block specifically —
+  real reasoning occurred; the provider withholds the text — and shows
+  "encrypted reasoning bundle returned (N output tokens, not split out)".
+  Any other case where reasoning was observed but not separately counted
+  falls back to showing `output_tokens` (which does include the reasoning
+  cost, just not broken out) instead of a bare, misleading 0. A real,
+  positive reasoning-token count from the endpoint still displays as before.
+- `nooa connect`'s "Ran out of reply tokens before finishing" message now
+  adds "if you plan to use this reasoning level, increase the reply budget"
+  for level checks specifically.
+
+- `nooa connect` now says "Ran out of reply tokens before finishing" for a
+  check whose reply was truncated by the reply cap (`finish_reason: length`),
+  distinct from the generic "Reply incomplete" message still used for a
+  provider error or content filter.
+- Fix `nooa connect` reporting no reasoning observed for providers that
+  return a reasoning part with a signature but deliberately empty text
+  (Claude Sonnet 5/Opus 5 via Azure or Bedrock). The level-check probe was
+  reading `response.reasoning`, which joins only non-empty parts, instead of
+  checking for the part's presence the way session checks already do.
+- `nooa connect`'s reasoning-level puzzle checks now end with a one-line
+  "Reasoning tokens · max: N · high: N · low: N (wrong)" summary, so a
+  cross-level comparison doesn't require scrolling back through the run.
+- `nooa connect`'s catalogue lookup now offers a fuzzy "did you mean" picklist
+  when no exact/suffix match is found — common for gateway-routed model IDs
+  (`aws/anthropic/bedrock-claude-opus-5`) whose routing prefix the catalogue
+  never records. Never auto-selects a guess; only offered interactively.
+- `nooa connect`'s reasoning-level puzzle check now shows the actual
+  reasoning token count alongside the correct/incorrect result, so a wrong
+  answer can be told apart from reasoning effort having no real effect.
+- `nooa connect`'s reply-budget dropdown now truncates `high`/`extended`
+  presets against the model's actual declared max output, and adds an
+  explicit "Model maximum" choice showing that number, so picking exactly
+  the ceiling never requires `--custom`.
+- `nooa connect`'s `--budget-tokens` for API checks now defaults to
+  unlimited instead of a fixed 131,072-token cap; it's only capped when the
+  flag is passed explicitly. Previously the default could cause "some
+  checks will be skipped" even with no explicit budget set.
+- Add `nooa connect --working-dir`/`-w`: save to a project's own registry
+  (`<working-dir>/.nooa/llm_config.yaml`) instead of the user-global one —
+  the same file `nooa tui -w <working-dir>` reads. Mutually exclusive with
+  `--output`.
+- Fix `nooa connect` claiming "Using saved key variable X for this endpoint"
+  and then immediately prompting for that same key. The registry only
+  remembers which variable *name* an endpoint used last time, not whether a
+  value is currently set; the message now says so honestly when the value is
+  missing, instead of contradicting the prompt that follows it.
 - Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
   `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new
   core dependencies. Configured checks send the saved reply limit, including

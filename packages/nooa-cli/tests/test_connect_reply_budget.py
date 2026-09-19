@@ -97,6 +97,60 @@ def test_high_reasoning_options_never_exceed_known_limit(monkeypatch, ceiling):
     assert _connect_prompts.choose_reply_limit(32768, ceiling) == 32768
 
 
+def test_model_maximum_choice_is_offered_and_selectable(monkeypatch):
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert kwargs["choices"] == ("recommended", "high", "max", "smaller", "short", "custom")
+        assert kwargs["labels"]["max"] == "Model maximum — 100,000 tokens"
+        return "max"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    assert (
+        _connect_prompts.choose_reply_limit(32768, 100000, output_ceiling=100000) == 100000
+    )
+
+
+def test_model_maximum_is_omitted_when_unknown(monkeypatch):
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert "max" not in kwargs["choices"]
+        return "recommended"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    # ceiling is known (context window) but output_ceiling (true max output) isn't.
+    assert _connect_prompts.choose_reply_limit(32768, 200000, output_ceiling=None) == 32768
+
+
+def test_model_maximum_is_omitted_when_it_duplicates_extended(monkeypatch):
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert "max" not in kwargs["choices"]
+        return "extended"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    assert (
+        _connect_prompts.choose_reply_limit(32768, 131072, output_ceiling=131072) == 131072
+    )
+
+
+def test_model_maximum_never_exceeds_the_stricter_context_ceiling(monkeypatch):
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert "max" not in kwargs["choices"]
+        return "recommended"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    # output_ceiling (200000) exceeds the stricter overall ceiling (40000, e.g.
+    # from context window), so it must not be offered as an achievable choice.
+    assert (
+        _connect_prompts.choose_reply_limit(32768, 40000, output_ceiling=200000) == 32768
+    )
+
+
 def test_stage_save_fills_defaults_and_reports_shadow(tmp_path, monkeypatch):
     from nooa import llm_config
 

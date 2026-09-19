@@ -11,6 +11,9 @@ obeyed. The runtime reads the result, never these onboarding templates.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import difflib
 import json
 import math
 import os
@@ -19,7 +22,7 @@ import stat
 import tempfile
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -36,7 +39,11 @@ from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 from ._records import ProbeRecord, check_status, public_record
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
-DEFAULT_CHECK_BUDGET = 131072
+# Effectively unlimited: no real check plan approaches this, so an unset
+# --budget-tokens never causes checks to be skipped. A finite sentinel (not
+# float("inf")) keeps every arithmetic site, type annotation, and JSON
+# encoding of a ConnectPlan unchanged.
+DEFAULT_CHECK_BUDGET = 10**15
 DEFAULT_REASONING_OUTPUT_TOKENS = 4096
 REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
 Each job runs exactly once.
@@ -415,6 +422,41 @@ def match_models(model: str, models: list[dict]) -> list[dict]:
         elif target.rsplit("/", 1)[-1] == candidate.rsplit("/", 1)[-1]:
             matches.append((1, name, item))
     return [item for _, _, item in sorted(matches, key=lambda item: item[:2])[:3]]
+
+
+_FUZZY_MATCH_CUTOFF = 0.6
+
+
+def fuzzy_match_models(model: str, models: list[dict]) -> list[dict]:
+    """Best-effort "did you mean" suggestions once match_models finds nothing.
+
+    A gateway-routed model ID (e.g. ``aws/anthropic/bedrock-claude-opus-5``)
+    carries routing segments the catalogue never records, so exact/suffix
+    matching in match_models() can find nothing even though the model is
+    listed under its own name. This never auto-selects a candidate; the
+    frontend must still confirm one.
+    """
+
+    def normalized(value):
+        return re.sub(r"[-_.]", "", value.lower())
+
+    target = normalized(model)
+    target_tail = target.rsplit("/", 1)[-1]
+    scored = []
+    for item in models:
+        name = item.get("id")
+        if not isinstance(name, str):
+            continue
+        candidate = normalized(name)
+        candidate_tail = candidate.rsplit("/", 1)[-1]
+        ratio = max(
+            difflib.SequenceMatcher(None, target, candidate).ratio(),
+            difflib.SequenceMatcher(None, target_tail, candidate_tail).ratio(),
+        )
+        if ratio >= _FUZZY_MATCH_CUTOFF:
+            scored.append((ratio, name, item))
+    scored.sort(key=lambda entry: entry[0], reverse=True)
+    return [item for _, _, item in scored[:3]]
 
 
 def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4096) -> dict:
@@ -1293,7 +1335,38 @@ async def run_steps(
                     proposal.alias, entry, probe, key
                 )
             usage = response.usage
-            reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
+            # response.reasoning joins only non-empty AssistantReasoning parts,
+            # so a provider that returns a reasoning part with a signature but
+            # deliberately empty/opaque text (Claude Sonnet 5/Opus 5 via Azure
+            # or Bedrock) reads as no reasoning at all through that property.
+            # Check for the part's presence directly, matching how session
+            # checks in _session.py already detect it.
+            reasoning_parts = [part for part in response.parts if part.kind == "reasoning"]
+            reasoning = bool(reasoning_parts or (usage and usage.reasoning_tokens))
+            # Anthropic's redacted_thinking blocks are a distinct, detectable
+            # wire type (chat_parts.py preserves the raw block on .native),
+            # not just "reasoning with no visible text" — surface that instead
+            # of reporting a token count litellm has no text left to estimate.
+            reasoning_encrypted = False
+            reasoning_encrypted_bytes = None
+            for part in reasoning_parts:
+                if not isinstance(part.native, Mapping):
+                    continue
+                block = part.native.get("thinking_blocks")
+                if not isinstance(block, Mapping) or block.get("type") != "redacted_thinking":
+                    continue
+                reasoning_encrypted = True
+                data = block.get("data")
+                if isinstance(data, str) and data:
+                    # The decoded byte count of an opaque encrypted blob is a
+                    # rough size signal only — a proxy for how much reasoning
+                    # state it carries, not a token count. Anthropic gives no
+                    # way to convert this into an actual reasoning-token figure.
+                    try:
+                        size = len(base64.b64decode(data, validate=False))
+                    except (binascii.Error, ValueError):
+                        size = len(data)
+                    reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + size
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
             tokens = usage.input_tokens + usage.output_tokens if usage else 0
         except Exception as exc:
@@ -1335,6 +1408,8 @@ async def run_steps(
             transport=transport,
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,
+            reasoning_encrypted=reasoning_encrypted,
+            reasoning_encrypted_bytes=reasoning_encrypted_bytes,
             tool_observed=tool,
             reported_tokens=tokens,
             input_tokens=usage.input_tokens if usage else None,

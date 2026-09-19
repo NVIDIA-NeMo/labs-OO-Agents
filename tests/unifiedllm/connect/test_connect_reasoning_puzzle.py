@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """A bounded reasoning probe with independently checkable final-answer evidence."""
 
+import base64
 import json
 from itertools import permutations
 
 import httpx
 import pytest
 
-from nooa.unifiedllm import connect
+from nooa.unifiedllm import AssistantReasoning, LLMResponse, LLMUsage, connect
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
@@ -26,6 +27,111 @@ def test_scheduling_puzzle_has_one_solution():
         ):
             solutions.append("".join(order))
     assert solutions == ["BGDACEFH"]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_observed_counts_an_empty_text_reasoning_part(monkeypatch):
+    """Claude Sonnet 5/Opus 5 via Azure or Bedrock return a reasoning part with a
+    signature but deliberately empty text. response.reasoning joins only
+    non-empty parts, so a probe that checked that property alone (instead of
+    the part's presence) reported no reasoning even though one was returned.
+    """
+
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(AssistantReasoning(text=""),),
+            finish_reason="stop",
+            usage=LLMUsage(input_tokens=20, output_tokens=2, total_tokens=22),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "claude-opus-5",
+        "anthropic",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"thinking": {"type": "adaptive"}}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_observed"] is True
+    assert record["reasoning_encrypted"] is False
+
+
+@pytest.mark.asyncio
+async def test_redacted_thinking_block_is_flagged_as_encrypted_not_missing(monkeypatch):
+    """Anthropic's redacted_thinking is a distinct, detectable wire type (real
+    reasoning occurred; the provider withholds the text) — not the same as a
+    generic empty-text reasoning part from some other cause.
+    """
+
+    encoded_blob = base64.b64encode(b"x" * 100).decode()
+
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(
+                AssistantReasoning(
+                    text="",
+                    native={
+                        "thinking_blocks": {"type": "redacted_thinking", "data": encoded_blob}
+                    },
+                ),
+            ),
+            finish_reason="stop",
+            usage=LLMUsage(input_tokens=147, output_tokens=687, total_tokens=834),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "claude-opus-5",
+        "anthropic",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"thinking": {"type": "adaptive"}}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_observed"] is True
+    assert record["reasoning_encrypted"] is True
+    assert record["output_tokens"] == 687
+    assert record["reasoning_encrypted_bytes"] == 100
+
+
+@pytest.mark.asyncio
+async def test_redacted_thinking_falls_back_to_char_count_for_non_base64_data(monkeypatch):
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(
+                AssistantReasoning(
+                    text="",
+                    # Not valid base64 (wrong padding length) — the opaque
+                    # blob format isn't guaranteed, so this must degrade to a
+                    # raw character count rather than raise.
+                    native={"thinking_blocks": {"type": "redacted_thinking", "data": "opaque"}},
+                ),
+            ),
+            finish_reason="stop",
+            usage=LLMUsage(input_tokens=147, output_tokens=687, total_tokens=834),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "claude-opus-5",
+        "anthropic",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"thinking": {"type": "adaptive"}}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_encrypted"] is True
+    assert record["reasoning_encrypted_bytes"] == len("opaque")
 
 
 @pytest.mark.asyncio
