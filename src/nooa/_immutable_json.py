@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import isfinite
 from types import MappingProxyType
 from typing import Annotated, Any
 
@@ -17,9 +18,15 @@ class _FrozenObject(Mapping):
     _values: Mapping
 
     def __init__(self, values):
-        object.__setattr__(
-            self, "_values", MappingProxyType({k: freeze(v) for k, v in values.items()})
-        )
+        """Freeze a JSON object after validating its key types."""
+        frozen: dict[str, Any] = {}
+        for key, value in values.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"Native extension object keys must be strings, got {type(key).__name__}"
+                )
+            frozen[key] = freeze(value)
+        object.__setattr__(self, "_values", MappingProxyType(frozen))
 
     def __getitem__(self, key):
         return self._values[key]
@@ -35,13 +42,18 @@ class _FrozenObject(Mapping):
 
 
 def freeze(value):
+    """Return an immutable JSON value while rejecting lossy inputs."""
     if isinstance(value, _FrozenObject):
         return value
     if isinstance(value, dict):
         return _FrozenObject(value)
     if isinstance(value, (list, tuple)):
         return tuple(freeze(item) for item in value)
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError(f"Native extensions require finite JSON numbers, got {value}")
+        return value
+    if value is None or isinstance(value, (str, bool, int)):
         return value
     raise TypeError(f"Native extensions must contain JSON values only, got {type(value).__name__}")
 
