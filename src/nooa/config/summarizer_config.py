@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Summarizer configuration for TokenBudgetSummarizer and MethodSummarizer."""
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TokenBudgetConfig(BaseModel):
@@ -18,6 +18,7 @@ class TokenBudgetConfig(BaseModel):
     max_tokens: int = 100_000
     preserve_recent: int = 10
     target_chars: int = 1000
+    wait_timeout_seconds: float = Field(default=120.0, gt=0)
 
     def merge_with(self, other: "TokenBudgetConfig") -> "TokenBudgetConfig":
         if not other.model_fields_set:

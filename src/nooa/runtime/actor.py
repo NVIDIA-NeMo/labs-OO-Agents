@@ -899,6 +899,15 @@ class ActorRuntime:
 
         from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
+        # A token-budget summary runs in the background after an over-budget
+        # response. Finish and apply it before rendering another prompt; otherwise
+        # iterative strategies can issue many calls against the same oversized
+        # history while compaction is still in flight.
+        for summarizer in tuple(getattr(self.agent, "_summarizers", ())):
+            prepare = getattr(summarizer, "_prepare_next_llm_call", None)
+            if prepare is not None:
+                await prepare()
+
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
