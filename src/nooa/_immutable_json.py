@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import math
 from types import MappingProxyType
 from typing import Annotated, Any
 
@@ -17,9 +18,14 @@ class _FrozenObject(Mapping):
     _values: Mapping
 
     def __init__(self, values):
-        object.__setattr__(
-            self, "_values", MappingProxyType({k: freeze(v) for k, v in values.items()})
-        )
+        frozen = {}
+        for k, v in values.items():
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"Native extension object keys must be strings, got {type(k).__name__}"
+                )
+            frozen[k] = freeze(v)
+        object.__setattr__(self, "_values", MappingProxyType(frozen))
 
     def __getitem__(self, key):
         return self._values[key]
@@ -41,7 +47,13 @@ def freeze(value):
         return _FrozenObject(value)
     if isinstance(value, (list, tuple)):
         return tuple(freeze(item) for item in value)
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"Native extensions cannot contain non-finite float: {value}")
         return value
     raise TypeError(f"Native extensions must contain JSON values only, got {type(value).__name__}")
 
