@@ -5,8 +5,11 @@
 TDD: Write tests first, then implement to make them pass.
 """
 
+import pytest
+
 from nooa import strategy
 from nooa.strategies.pure_python import PurePythonStrategy
+
 
 
 class TestStrategyDecoratorWithInstances:
@@ -67,3 +70,26 @@ class TestStrategyDecoratorValidation:
 
         # Should have the decorator metadata
         assert has_body._strategy_override is not None
+
+    def test_strategy_on_standalone_function_without_ellipsis_raises(self):
+        """@strategy on a standalone function without '...' body raises RuntimeError."""
+        with pytest.raises(
+            RuntimeError,
+            match=r"@strategy\(\.\.\.\) on a function without an '\.\.\.' body does nothing",
+        ):
+
+            @strategy(PurePythonStrategy())
+            async def standalone_without_ellipsis(text: str) -> str:
+                return "text"
+
+    def test_strategy_without_args_on_standalone_without_ellipsis_raises(self):
+        """@strategy() without args on standalone function without '...' body raises RuntimeError."""
+        with pytest.raises(
+            RuntimeError,
+            match=r"@strategy\(\.\.\.\) on a function without an '\.\.\.' body does nothing",
+        ):
+
+            @strategy()
+            async def standalone_default(text: str) -> str:
+                return "text"
+
