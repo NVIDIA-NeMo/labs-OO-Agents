@@ -193,16 +193,37 @@ def test_bench_agent_class_exists():
     assert hasattr(BenchAgent, "_run_evaluation")
 
 
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+def test_solve_task_description_prefill_allows_32k_chars(agent_type):
+    from nooa.config import TruncationConfig
+    from nooa.strategies.current_call import CurrentCall
+
+    full = "x" * 32_000
+    call = CurrentCall.from_method(agent_type._solve_task, args=(full,))
+    rendered = call.format_parameters_as_code(tc=TruncationConfig())
+    assert "str(len=" not in rendered
+    assert full in rendered
+
+    oversized = "y" * 32_001
+    call = CurrentCall.from_method(agent_type._solve_task, args=(oversized,))
+    rendered = call.format_parameters_as_code(tc=TruncationConfig())
+    assert "str(len=32001" in rendered
+
+
 def test_bench_agent_close_is_hidden_from_model_docs():
     agent = BenchAgent(llm=FakeLLMClient())
 
     assert "def close(" not in doc(agent)
 
 
+def test_solve_description_annotation_helpers_are_hidden():
+    hidden_names = getattr(bench_agent_module, "_agentdoc_hidden_names", set())
+    assert {"_SOLVE_DESCRIPTION_MAX_CHARS", "_SolveDescription"} <= hidden_names
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_class", [BenchAgent, RLMBenchAgent])
 async def test_merge_error_is_not_advertised_in_python_cell_context(agent_class):
-    """Recovery exceptions remain importable but are not up-front capabilities."""
     from nooa.strategies import CodeActV2
 
     agent = agent_class(llm=FakeLLMClient())
