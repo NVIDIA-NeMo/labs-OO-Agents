@@ -514,6 +514,9 @@ that a setting had an effect.
 Reasoning-level checks use an eight-job scheduling puzzle and request only the
 final order. `answer_correct` scores that public answer independently of
 `reasoning_observed`; a correct answer alone does not prove reasoning was enabled.
+The puzzle exists to elicit reasoning, not to prove the model can solve it: a
+wrong answer with reasoning genuinely observed does not flag the check for
+attention. Only a missing reasoning signal does.
 Per-call input, output and reasoning-token counts are included when usage is
 available. The final answer and reasoning text are not saved. The default
 reasoning-check cap is the configured reply limit; a `length` finish is inconclusive.
