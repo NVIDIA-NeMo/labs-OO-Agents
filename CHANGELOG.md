@@ -6,7 +6,42 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- Fix several issues found in code review of the Connect work above:
+- Fix a second round of code-review findings on the Connect work above:
+  - Encrypted-reasoning detection could mislabel a response with a real
+    visible summary as "withheld" whenever encrypted_content was also
+    present alongside it (a normal OpenAI-style shape: a visible reasoning
+    summary plus an opaque replay blob at the same time). Both the
+    Responses-native and openai/azure Chat "reasoning_items" branches now
+    require empty visible text before flagging withheld, matching the
+    Anthropic `thinking` branch's existing rule.
+  - `--stage catalogue` never used `fuzzy_match_models()` — the gateway-ID
+    "did you mean" fallback only reached the interactive wizard, not this
+    scripted/agent-facing JSON entry point. Exact/suffix matches that find
+    nothing now also surface fuzzy suggestions under a `fuzzy_models` key;
+    still never auto-selected, same as the wizard.
+  - `--working-dir`'s existence check reported "does not exist" for a path
+    that exists but is a file, whenever `~`-expansion was needed (a literal
+    absolute path was already caught correctly by click's own check).
+    Existence and directory-ness are now checked and reported separately.
+  - `shadowing_source()` couldn't recognize a `--working-dir` save target as
+    an effective registry layer, so it warned "still resolved from X" on
+    every `--working-dir` save with a same-named alias defined elsewhere --
+    even though that is `--working-dir`'s whole intended, correct use
+    (`entries()`'s `extra_path` is always the highest-priority layer,
+    matching what a later `nooa tui -w` read of the same directory would
+    do). A plain `--output` path has no such guarantee and keeps the
+    original, stricter behavior.
+  - `--edit-model` combined with `--working-dir` could silently copy a
+    different project's entry for the same alias name into the
+    `--working-dir` target, because `entries()` only redirects to the
+    target's own file when that file already exists -- otherwise the
+    edited alias comes from the general (cwd/global) chain instead. Now
+    prints a clear warning naming both files when this happens, instead of
+    looking like an in-place edit of the target's own prior settings.
+  - Ran `ruff format` on `test_connect_reply_budget.py`; the diff was
+    previously unformatted.
+
+- Fix a first round of code-review findings on the Connect work above:
   - Ran `ruff format` on `_connect_wizard.py`; the diff was previously unformatted.
   - `nooa connect`'s encrypted-reasoning detection now also recognizes the
     openai/azure Chat Completions shape (`part.native["reasoning_items"]`), a

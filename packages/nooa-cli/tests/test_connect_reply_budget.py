@@ -106,9 +106,7 @@ def test_model_maximum_choice_is_offered_and_selectable(monkeypatch):
         return "max"
 
     monkeypatch.setattr(_connect_prompts, "prompt", prompt)
-    assert (
-        _connect_prompts.choose_reply_limit(32768, 100000, output_ceiling=100000) == 100000
-    )
+    assert _connect_prompts.choose_reply_limit(32768, 100000, output_ceiling=100000) == 100000
 
 
 def test_model_maximum_is_omitted_when_unknown(monkeypatch):
@@ -131,9 +129,7 @@ def test_model_maximum_is_omitted_when_it_duplicates_extended(monkeypatch):
         return "extended"
 
     monkeypatch.setattr(_connect_prompts, "prompt", prompt)
-    assert (
-        _connect_prompts.choose_reply_limit(32768, 131072, output_ceiling=131072) == 131072
-    )
+    assert _connect_prompts.choose_reply_limit(32768, 131072, output_ceiling=131072) == 131072
 
 
 def test_model_maximum_never_exceeds_the_stricter_context_ceiling(monkeypatch):
@@ -146,9 +142,7 @@ def test_model_maximum_never_exceeds_the_stricter_context_ceiling(monkeypatch):
     monkeypatch.setattr(_connect_prompts, "prompt", prompt)
     # output_ceiling (200000) exceeds the stricter overall ceiling (40000, e.g.
     # from context window), so it must not be offered as an achievable choice.
-    assert (
-        _connect_prompts.choose_reply_limit(32768, 40000, output_ceiling=200000) == 32768
-    )
+    assert _connect_prompts.choose_reply_limit(32768, 40000, output_ceiling=200000) == 32768
 
 
 def test_stage_save_fills_defaults_and_reports_shadow(tmp_path, monkeypatch):
@@ -240,3 +234,29 @@ def test_stage_reasoning_budget_override_reaches_wire(monkeypatch, tmp_path):
     assert len(seen) == 1
     report = json.loads(result.stdout)
     assert report["checks"]["level:high"]["answer_correct"] is True
+
+
+def test_shadowing_source_extra_priority_treats_the_save_target_as_highest(tmp_path, monkeypatch):
+    """entries()'s extra_path is always appended last (highest priority) --
+    a --working-dir save is never actually shadowed by anything as long as
+    the caller keeps pairing -w with the same directory. Without
+    extra_priority=True, shadowing_source used to report a shadow warning
+    on every --working-dir save with a same-named alias defined elsewhere,
+    even though that is --working-dir's whole intended, correct use.
+    """
+    from nooa_cli.commands._connect_registry import shadowing_source
+
+    from nooa import llm_config
+
+    elsewhere = tmp_path / "elsewhere.yaml"
+    elsewhere.write_text("models: {local: {model_name: openai/old}}\n")
+    monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [elsewhere])
+    # shadowing_source's own priority list is built from conventional
+    # locations (bundled/user/project/NEMO_OO_LLM_CONFIG), independent of
+    # the mocked llm_config_chain() used only to resolve `found` above --
+    # register `elsewhere` as one so it participates in that comparison.
+    monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(elsewhere))
+
+    target = tmp_path / "target.yaml"
+    assert shadowing_source("local", target) == str(elsewhere)
+    assert shadowing_source("local", target, extra_priority=True) is None

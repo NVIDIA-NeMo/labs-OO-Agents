@@ -73,6 +73,7 @@ class WizardState:
     server_urls: Any = None
     show_config: Any = None
     unobserved: Any = None
+    working_dir: Any = None
     yes: Any = None
 
 
@@ -159,6 +160,19 @@ def select_connection(state: WizardState) -> bool:
         state.explicit_key_env = True
         state.no_catalogue = True
         view.line(f"Editing {state.edit_model} from {source_path}. No model discovery is needed.")
+        # --working-dir only redirects entries() to the target's own file
+        # when that file already exists (it cannot read a file that isn't
+        # there yet) — otherwise this alias was found via the general
+        # chain (cwd/global), not target's own copy. Silently saving that
+        # into target without saying so looks like an in-place edit of
+        # target's own prior settings when it's actually a copy from
+        # elsewhere into a project that never had this alias.
+        if state.working_dir and source_path.resolve() != state.path.resolve():
+            view.line(
+                f"{state.path} does not define {state.edit_model!r} yet; copying it in from "
+                f"{source_path} rather than editing it in place there.",
+                fg="yellow",
+            )
     state.data = {}
     if state.path.exists():
         with state.path.open() as source:
@@ -973,7 +987,7 @@ def save_model(state: WizardState) -> bool:
             "Full configuration is saved with the model. Use --show-config to preview the YAML.",
             dim=True,
         )
-    if shadow := shadowing_source(state.alias, state.path):
+    if shadow := shadowing_source(state.alias, state.path, extra_priority=bool(state.working_dir)):
         view.line(
             f"Warning: {shadow} currently defines this alias and takes precedence over this destination. Update that file or explicitly load {state.path} to use this entry.",
             fg="yellow",

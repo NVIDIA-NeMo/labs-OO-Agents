@@ -218,3 +218,50 @@ def test_final_save_cancel_does_not_persist_pasted_key(registry):
     assert result.exit_code == 0, result.output
     assert path.read_bytes() == before
     assert not path.with_name("secrets.yaml").exists()
+
+
+def test_edit_model_with_working_dir_warns_when_source_is_not_the_target(
+    registry, tmp_path, monkeypatch
+):
+    """--edit-model finds an alias via entries(), which only redirects to
+    the --working-dir target's own file when that file already exists on
+    disk (it cannot read a file that isn't there yet) -- otherwise the
+    alias comes from the general chain instead. Saving that into the
+    working-dir target without saying so looks like an in-place edit of the
+    target's own prior settings, when it is actually a copy of a different
+    file's data into a project that never defined this alias.
+    """
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    from nooa.unifiedllm import connect
+
+    path, _ = registry
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Editing does not discover models or fetch metadata")
+
+    monkeypatch.setattr(connect, "discover", forbidden)
+    monkeypatch.setattr(connect, "catalogue", forbidden)
+    monkeypatch.setattr(
+        _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
+    )
+
+    target = tmp_path / "target_project"
+    target.mkdir()
+    result = CliRunner().invoke(
+        command,
+        [
+            "--edit-model",
+            "saved",
+            "--working-dir",
+            str(target),
+            "--no-probe",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Editing saved from" in result.output
+    assert "does not define" in result.output and "yet" in result.output
+    assert "copying it in from" in result.output
+    saved = yaml.safe_load((target / ".nooa" / "llm_config.yaml").read_text())
+    assert saved["models"]["saved"]["model_name"] == "openai/vendor/model"

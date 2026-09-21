@@ -217,6 +217,31 @@ def test_discovery_stages_report_structured_results(monkeypatch, stage):
     assert report["data"]
 
 
+def test_stage_catalogue_offers_fuzzy_suggestions_when_nothing_matches(monkeypatch):
+    """--stage catalogue used to call only match_models(), never
+    fuzzy_match_models() — the wizard's own "did you mean" fallback for a
+    gateway-routed model ID never reached this non-interactive JSON front
+    door used by scripts/agents.
+    """
+
+    async def catalogue():
+        return [{"id": "anthropic/claude-opus-5"}]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    result = CliRunner().invoke(
+        command,
+        [
+            "aws/anthropic/bedrock-claude-opus-5",
+            "--stage",
+            "catalogue",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["data"]["models"] == []
+    assert report["data"]["fuzzy_models"] == [{"id": "anthropic/claude-opus-5"}]
+
+
 @pytest.mark.parametrize("stage", ["tools", "reasoning", "session"])
 def test_acceptance_without_feature_evidence_is_inconclusive(monkeypatch, tmp_path, stage):
     monkeypatch.setenv("STAGE_TEST_KEY", "test-secret")

@@ -1398,10 +1398,16 @@ async def run_steps(
                 # shape distinct from both "thinking_blocks" above and the
                 # unwrapped Responses-style native below — same
                 # encrypted_content field, different wrapper key.
+                #
+                # An OpenAI-style reasoning item can carry a visible summary
+                # (part.text) alongside encrypted_content at the same time —
+                # the encrypted blob is opaque replay state, not proof the
+                # readable text was withheld. Only flag "withheld" when there
+                # is no visible text, matching the "thinking" branch above.
                 block = part.native.get("reasoning_items")
                 if isinstance(block, Mapping):
                     encrypted_content = block.get("encrypted_content")
-                    if isinstance(encrypted_content, str) and encrypted_content:
+                    if isinstance(encrypted_content, str) and encrypted_content and not part.text:
                         reasoning_encrypted = True
                         reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
                             _encrypted_blob_size(encrypted_content)
@@ -1413,9 +1419,10 @@ async def run_steps(
                 # "reasoning", "encrypted_content": "..."}. Detect that shape
                 # too, or Responses/OpenAI-style encrypted reasoning always
                 # reads as "not encrypted" here regardless of what the
-                # provider sent.
+                # provider sent. Same visible-summary-plus-encrypted-blob
+                # caveat as the reasoning_items branch above.
                 encrypted_content = part.native.get("encrypted_content")
-                if isinstance(encrypted_content, str) and encrypted_content:
+                if isinstance(encrypted_content, str) and encrypted_content and not part.text:
                     reasoning_encrypted = True
                     reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
                         _encrypted_blob_size(encrypted_content)

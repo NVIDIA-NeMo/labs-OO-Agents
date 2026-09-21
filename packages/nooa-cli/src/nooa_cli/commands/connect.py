@@ -172,8 +172,15 @@ def command(
         from nooa import paths
 
         resolved_dir = Path(working_dir).expanduser().resolve()
-        if not resolved_dir.is_dir():
+        # click's own file_okay/dir_okay checks only run when its (raw,
+        # unexpanded) argument happens to already exist, so a "~"-relative
+        # path skips them entirely — check both cases explicitly here,
+        # after expansion, rather than reporting "does not exist" for a
+        # real path that just isn't a directory.
+        if not resolved_dir.exists():
             raise click.UsageError(f"--working-dir directory {str(resolved_dir)!r} does not exist.")
+        if not resolved_dir.is_dir():
+            raise click.UsageError(f"--working-dir path {str(resolved_dir)!r} is not a directory.")
         output = str(resolved_dir / paths.DIR_NAME / "llm_config.yaml")
     if stage:
         from ._connect_stages import run_stage
@@ -210,6 +217,7 @@ def command(
                 }.items()
                 if used
             ],
+            working_dir=bool(working_dir),
         )
         raise click.exceptions.Exit(code)
     if input_file:
@@ -240,5 +248,6 @@ def command(
         reply_tokens=reply_tokens,
         show_config=show_config,
         output=output,
+        working_dir=working_dir,
         yes=yes,
     )

@@ -195,6 +195,35 @@ def test_working_dir_reports_a_missing_directory_clearly():
     assert "does not exist" in result.output
 
 
+def test_working_dir_reports_a_file_as_not_a_directory(tmp_path, monkeypatch):
+    """click's own file_okay=False check only runs when its raw, unexpanded
+    argument happens to already exist as given — a "~"-relative path skips
+    it entirely (click never expands "~" itself), so a real file reached
+    only through "~" used to be misreported as "does not exist" instead of
+    "is not a directory". A plain absolute path to the same file is already
+    caught correctly by click's own check, so this needs the "~" form to
+    actually exercise the gap.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notadir.txt").write_text("hello")
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--working-dir",
+        "~/notadir.txt",
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 2
+    assert "is not a directory" in result.output
+    assert "does not exist" not in result.output
+
+
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
 @pytest.mark.parametrize("mode", ["missing", "observed", "usage", "rejected", "unprobed"])
 def test_enabled_reasoning_without_evidence_warns_once_before_save(

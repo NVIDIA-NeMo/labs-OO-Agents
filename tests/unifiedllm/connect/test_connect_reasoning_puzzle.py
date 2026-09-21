@@ -279,6 +279,86 @@ async def test_chat_encrypted_reasoning_item_is_flagged_as_encrypted(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_responses_visible_summary_with_encrypted_content_is_not_flagged_as_withheld(
+    monkeypatch,
+):
+    """An OpenAI-style Responses reasoning item can carry a visible summary
+    (real reasoning text) alongside encrypted_content at the same time — the
+    encrypted blob is opaque replay state, not proof the readable text was
+    withheld. Flagging this as "withheld" hides the real char count the
+    provider actually returned.
+    """
+
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(
+                AssistantReasoning(
+                    text="Here is a short visible summary of my reasoning.",
+                    native={"type": "reasoning", "encrypted_content": "abcd1234=="},
+                ),
+            ),
+            finish_reason="stop",
+            usage=LLMUsage(input_tokens=101, output_tokens=259, total_tokens=360),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "gpt-6-astra",
+        "responses",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"reasoning": {"effort": "medium"}}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_observed"] is True
+    assert record["reasoning_encrypted"] is False
+    assert record["reasoning_text_chars"] == len("Here is a short visible summary of my reasoning.")
+
+
+@pytest.mark.asyncio
+async def test_chat_visible_summary_with_encrypted_content_is_not_flagged_as_withheld(monkeypatch):
+    """Same caveat as the Responses-style case above, for the openai/azure
+    Chat Completions "reasoning_items" shape.
+    """
+
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(
+                AssistantReasoning(
+                    text="Here is a short visible summary of my reasoning.",
+                    native={
+                        "reasoning_items": {
+                            "type": "reasoning",
+                            "encrypted_content": "abcd1234==",
+                        }
+                    },
+                ),
+            ),
+            finish_reason="stop",
+            usage=LLMUsage(input_tokens=101, output_tokens=259, total_tokens=360),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "gpt-6-astra",
+        "chat",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"reasoning_effort": "medium"}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_observed"] is True
+    assert record["reasoning_encrypted"] is False
+    assert record["reasoning_text_chars"] == len("Here is a short visible summary of my reasoning.")
+
+
+@pytest.mark.asyncio
 async def test_signed_thinking_block_with_real_text_is_not_flagged_as_withheld(monkeypatch):
     """A normal, fully visible signed thinking block must not be treated as
     withheld — only an empty one should be.
