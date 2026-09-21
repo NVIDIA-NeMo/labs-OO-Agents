@@ -455,9 +455,13 @@ Each completed check records the runtime's actual `transport` separately.
 If the runtime bypasses Connect's owned HTTP pool (for example an unauthenticated
 legacy fallback), accepted requests are labelled unobserved, not as settings
 proven missing from the wire.
-Edits preserve explicit `transport: litellm` choices. `api_style` identifies the
-wire interface for Connect and the forthcoming direct runtime. Connect does not
-infer a `replay_vendor` from an interface or model name.
+Edits preserve explicit `transport: litellm` choices. The selected interface is
+encoded once: `client_type: responses` selects Responses, `anthropic/` selects
+native Messages, and other completion entries select Chat. Connect does not save
+an `api_style` field (matching older metadata is removed on save; conflicting
+metadata requires correcting the prefix/client type first). The CLI's `--api-style`
+still selects which interface to configure or probe. Connect does not infer a
+`replay_vendor` from an interface or model name.
 
 `provenance` contains diagnostic evidence and metadata, not runtime request
 settings. Catalogue identity belongs under `provenance.catalogue.id`, not

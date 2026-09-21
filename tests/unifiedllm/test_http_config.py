@@ -165,6 +165,34 @@ def test_handler_wrapper_does_not_create_throwaway_async_client(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sdk_wrappers_borrow_pools_closed_once(monkeypatch):
+    """SDK wrappers do not need a second cleanup path for the same pools."""
+    from nooa.unifiedllm import CompletionClient
+
+    client = CompletionClient("openai/test", api_key="test")
+    sync_sdk, async_sdk = client._http.sync_client, client._http.async_client
+    calls = []
+    sync_close = client._http.httpx_sync.close
+    async_close = client._http.httpx_async.aclose
+
+    def close_sync():
+        calls.append("sync")
+        sync_close()
+
+    async def close_async():
+        calls.append("async")
+        await async_close()
+
+    monkeypatch.setattr(client._http.httpx_sync, "close", close_sync)
+    monkeypatch.setattr(client._http.httpx_async, "aclose", close_async)
+    await client.aclose()
+    await client.aclose()
+    client.close()
+    assert sync_sdk.is_closed() and async_sdk.is_closed()
+    assert sorted(calls) == ["async", "sync"]
+
+
+@pytest.mark.asyncio
 async def test_aclose_is_idempotent_after_aclose_and_close(monkeypatch):
     """aclose() should match close() idempotency and not double-close transports."""
     from nooa.unifiedllm import CompletionClient

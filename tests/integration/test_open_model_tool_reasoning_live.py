@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in Hub reasoning/tool replay: two capped calls per model, no retries.
+"""Opt-in open-model reasoning/tool replay: two capped calls per model, no retries.
 
-NOOA_RUN_OPEN_MODEL_REPLAY=1 uv run --env-file ../.env pytest -m integration -s
+NOOA_RUN_OPEN_MODEL_REPLAY=1 uv run pytest -m integration -s
     tests/integration/test_open_model_tool_reasoning_live.py
+
+Routes come from the ``release-gate-<family>`` registry aliases supplied by the
+bundled-config package (see tests/integration/_release_gate.py); a missing alias
+skips the case.
 
 Tests raw reasoning_content on the next HTTP request after SQLite close/reopen,
 not merely its visibility somewhere in answer text. No opaque state is printed.
@@ -20,24 +24,21 @@ import pytest
 
 from nooa.llm_types import LLMResponse
 from nooa.storage.sqlite import SQLiteStorageManager
-from nooa.unifiedllm import CompletionClient, Tool
+from nooa.unifiedllm import Tool
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.retry_config import RetryConfig
+from tests.integration._release_gate import gate_cases, gate_client, gate_host
 
 pytestmark = [
     pytest.mark.integration,
+    pytest.mark.usefixtures("isolated_gate_tracing"),
     pytest.mark.skipif(
         os.getenv("NOOA_RUN_OPEN_MODEL_REPLAY") != "1",
         reason="set NOOA_RUN_OPEN_MODEL_REPLAY=1 to spend inference tokens",
     ),
 ]
 
-MODELS = {
-    "deepseek": "openai/nvidia/deepseek-ai/deepseek-v4-pro",
-    "kimi": "openai/nvidia/moonshotai/kimi-k3",
-    "glm": "openai/nvidia/zai-org/glm-5.3",
-    "qwen": "openai/nvidia/qwen/qwen3-5-397b-a17b",
-}
+FAMILIES = ("deepseek", "kimi", "glm", "qwen")
 
 
 def lookup(key: str) -> int:
@@ -45,17 +46,53 @@ def lookup(key: str) -> int:
     return 0
 
 
+def seed_messages(family: str) -> list[dict[str, str]]:
+    task = (
+        "Is 17 times 19 less than 18 squared plus offset? First call lookup with "
+        "key=offset; do not answer until the tool returns. Then give the difference."
+    )
+    if family == "glm":
+        # The lookup key must require computation BEFORE the tool call. A fixed
+        # key lets the model legitimately call the tool without any reasoning.
+        task = (
+            "Schedule four jobs on one worker starting at time 0, with no gaps. "
+            "Job durations are A=3, B=2, C=4, D=1; weights are A=3, B=6, C=2, D=4. "
+            "A must precede C and B must precede D. Minimize the sum of each job's "
+            "weight times its completion time. Work out the optimal order before "
+            "calling lookup: its key must be the four job letters in that order. "
+            "Do not give the final answer until the tool returns. Then report the "
+            "minimum weighted completion cost plus the returned offset."
+        )
+    return [
+        {"role": "system", "content": "Use the lookup tool when asked. Think briefly."},
+        {"role": "user", "content": task},
+        {"role": "user", "content": "Live context: phase=before lookup."},
+    ]
+
+
+def readable_seed_reasoning(seed: LLMResponse) -> str:
+    raw = getattr(seed.raw_response.choices[0].message, "reasoning_content", None)
+    assert isinstance(raw, str) and raw.strip(), (
+        "seed reply returned no nonempty reasoning_content; readable reasoning "
+        f"replay cannot be tested (finish_reason={seed.finish_reason})"
+    )
+    return raw
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", MODELS)
-async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, monkeypatch):
+@pytest.mark.parametrize("family,transport", gate_cases(FAMILIES))
+async def test_open_model_tool_reasoning_after_sqlite_resume(
+    family, transport, tmp_path, monkeypatch, record_property
+):
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
+    host = gate_host(family)
     sent = []
     omitted_status = []
     omit_reasoning = False
     original_send = httpx.AsyncClient.send
 
     async def capture(client, request, *args, **kwargs):
-        if request.method == "POST" and request.url.host == "inference-api.nvidia.com":
+        if request.method == "POST" and request.url.host == host:
             body = json.loads(request.content)
             if omit_reasoning:
                 assistant = next(m for m in body["messages"] if m.get("role") == "assistant")
@@ -82,28 +119,17 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, m
         return response
 
     monkeypatch.setattr(httpx.AsyncClient, "send", capture)
-    messages = [
-        {"role": "system", "content": "Use the lookup tool when asked. Think briefly."},
-        {
-            "role": "user",
-            "content": (
-                "Is 17 times 19 less than 18 squared plus offset? First call lookup with "
-                "key=offset; do not answer until the tool returns. Then give the difference."
-            ),
-        },
-        {"role": "user", "content": "Live context: phase=before lookup."},
-    ]
+    messages = seed_messages(family)
     options = {
-        "model": MODELS[family],
-        "api_base": "https://inference-api.nvidia.com/v1",
-        "api_key": os.environ["NVIDIA_INFERENCE_API_KEY"],
+        "transport": transport,
         "max_tokens": 1536,
         "http_config": HttpConfig(read_timeout=120),
         "num_retries": 0,
         "retry_config": RetryConfig(max_retries=0, rate_limit_extra_retries=0),
     }
     tools = [Tool(name="lookup", description="Look up an offset", callable=lookup)]
-    async with CompletionClient(**options) as client:
+    async with gate_client(family, **options) as client:
+        model_name = client.model
         seed = await client.acall(messages, tools=tools)
     print(
         json.dumps(
@@ -117,8 +143,7 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, m
         ),
         flush=True,
     )
-    raw = seed.raw_response.choices[0].message.reasoning_content
-    assert isinstance(raw, str) and raw, "route returned no readable reasoning"
+    raw = readable_seed_reasoning(seed)
     assert seed.tool_calls and seed.finish_reason != "length"
     database = tmp_path / "session.db"
     with SQLiteStorageManager(database) as storage:
@@ -137,13 +162,16 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, m
         ],
         {"role": "user", "content": "Live context: lookup complete. Answer concisely."},
     ]
-    async with CompletionClient(**options) as client:
+    async with gate_client(family, **options) as client:
         result = await client.acall(history, tools=tools)
     assert len(sent) == 2, "probe must not retry"
     replay = next(m for m in sent[1]["messages"] if m.get("role") == "assistant")
     assert replay.get("reasoning_content") == raw, "native reasoning field changed on wire"
     assert result.finish_reason == "stop"
     assert result.content
+    record_property("model", model_name)
+    record_property("seed_usage", seed.usage.model_dump_json())
+    record_property("resumed_usage", result.usage.model_dump_json())
     print(
         json.dumps(
             {
@@ -161,7 +189,7 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, m
         error_type = None
         omitted_result = None
         try:
-            async with CompletionClient(**options) as client:
+            async with gate_client(family, **options) as client:
                 omitted_result = await client.acall(history, tools=tools)
         except Exception as exc:
             # This is an observational negative probe: record rejection, never

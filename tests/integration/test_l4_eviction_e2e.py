@@ -12,7 +12,7 @@ from nooa import Agent
 from nooa.config.truncation_config import TruncationConfig
 from nooa.context_blocks import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent, ToolResult
-from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
+from nooa.context_blocks.formatter import XMLBlockFormatter
 from nooa.context_blocks.renderer import render_context
 from nooa.events import PythonOutput
 from nooa.runtime.actor import _current_llm_var
@@ -97,7 +97,6 @@ class TestContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=50,
             count_tokens=_count_words,
         )
@@ -121,7 +120,6 @@ class TestContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=50,
             count_tokens=_count_words,
         )
@@ -144,7 +142,6 @@ class TestContextBlockEviction:
         result = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
             context_limit=100,
             count_tokens=_count_words,
         )
@@ -176,7 +173,6 @@ class TestContextBlockEviction:
             result = render_context(
                 blocks,
                 block_formatter=XMLBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
                 context_limit=200,
                 count_tokens=_count_words,
             )

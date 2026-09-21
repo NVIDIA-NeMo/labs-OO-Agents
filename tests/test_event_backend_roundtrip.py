@@ -14,7 +14,7 @@ context_blocks event types) are added to the SQLiteEventBackend type registry
 (_CORE_TYPES in storage/sqlite.py).
 
 Why this matters: when a type is missing from the registry, SQLiteEventBackend falls
-back to deserializing as Metadata (Role.METADATA). The provider formatter silently
+back to deserializing as Metadata (Role.METADATA). The message assembly silently
 skips Metadata-role blocks, so ToolCallEvents simply vanish from LLM context —
 the LLM never sees the code it wrote.
 """

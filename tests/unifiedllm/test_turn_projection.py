@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
-from nooa.context_blocks.formatter import ResponsesProviderFormatter
+from nooa.context_blocks.formatter import to_messages
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -105,7 +105,6 @@ def render(response, state="live 1", formatter=None):
     return render_context(
         blocks(response, state),
         block_formatter=formatter or CachedBlockFormatter(),
-        provider_formatter=ResponsesProviderFormatter(),
     )
 
 
@@ -270,7 +269,7 @@ def test_rendered_reasoning_edit_discards_native_authority():
     original = turn()
     message = render(original).messages[1]
     edited = message.model_copy(update={"reasoning": "different reasoning"})
-    projected = ResponsesProviderFormatter().format([edited])[0]
+    projected = to_messages([edited])[0]
     assert type(projected) is dict
     assert projected["reasoning_content"] == "different reasoning"
     assert original.reasoning != "different reasoning"
@@ -458,7 +457,7 @@ def test_rendered_public_values_share_strings_but_no_native_objects():
     assert message.tool_calls[0].arguments is original.tool_calls[0].arguments
     assert not hasattr(message.tool_calls[0], "native")
     replacement = message.model_copy(update={"content": "edited"})
-    public = ResponsesProviderFormatter().format([replacement])
+    public = to_messages([replacement])
     assert isinstance(public[0], dict)
 
 
@@ -490,7 +489,7 @@ def test_generic_snapshot_round_trip_and_flat_archive_migration():
 
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.asyncio
-async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch, is_async):
+async def test_cache_helpers_receive_projected_dicts(monkeypatch, is_async):
     from nooa.llm_types import LLMUsage
 
     response = SimpleNamespace(
@@ -513,16 +512,11 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
     async def arespond(**params):
         return respond(**params)
 
-    calibrated = []
     monkeypatch.setattr("litellm.responses", respond)
     monkeypatch.setattr("litellm.aresponses", arespond)
     monkeypatch.setattr(
         "nooa.unifiedllm.unifiedllm._extract_usage",
         lambda _: LLMUsage(input_tokens=10, output_tokens=1),
-    )
-    monkeypatch.setattr(
-        "nooa.unifiedllm.unifiedllm._update_token_calibration",
-        lambda model, messages, usage, **kwargs: calibrated.append(messages),
     )
     client = ResponsesClient("anthropic/claude-sonnet-4-5", api_key="test")
     try:
@@ -533,8 +527,6 @@ async def test_cache_helpers_and_calibration_receive_projected_dicts(monkeypatch
         ]
         result = await client.acall(messages) if is_async else client.call(messages)
         assert result.content == "done"
-        assert len(calibrated) == 1
-        assert calibrated[0] is sent[0]
         assert all(isinstance(message, dict) for message in sent[0])
         assert sent[0][-1] == {
             "role": "user",

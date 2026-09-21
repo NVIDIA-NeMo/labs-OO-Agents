@@ -6,6 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- **Breaking:** remove the provider-formatter classes and `provider_formatter`
+  options from context rendering. `to_messages` assembles UnifiedLLM's public
+  message shape; only the client projects it onto provider APIs. Remove
+  constructor `api_style` arguments: ResponsesClient selects Responses, and
+  CompletionClient uses `anthropic/<model>` for native Messages, otherwise Chat.
+  Connect saves only the matching model prefix and client type; older registry
+  `api_style` metadata no longer controls dispatch. Direct routes cache model
+  identity while validating endpoint/client overrides on every request.
 - Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
   `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new
   core dependencies. Configured checks send the saved reply limit, including
@@ -93,6 +101,28 @@ to follow semantic versioning.
   status and compaction guidance, and recreate the shell for each evaluation's
   working directory.
 
+- Direct Anthropic translates stop sequences and reports context exhaustion as
+  truncation; unsupported paused turns raise a specific stop-reason error rather
+  than a content-filter error. Direct native OpenAI Chat uses
+  `max_completion_tokens` for the existing `max_tokens` budget; compatible
+  endpoints retain their existing spelling. No new model-entry setting is needed.
+- Direct transports add mandatory `anthropic`, `opentelemetry-api`,
+  `opentelemetry-sdk` and `openinference-semantic-conventions` dependencies;
+  remove `openinference-instrumentation-litellm`. Require `openai>=2.44.0,<3`
+  with the tested version in the lockfile; upgrades require re-running the
+  structured-output wire contracts. ResponsesClient now emits `token_usage`.
+- Preserve readable reasoning as portable assistant text on legacy adapters
+  that strip Chat extension fields (including Mistral); compatible routes
+  continue to send the separate `reasoning_content` field.
+
+- Breaking: remove `UnifiedLLM.count_tokens` and `TokenCalibration`; actual token
+  usage comes from provider reports and summarization retains its character
+  estimate fallback. See `docs/direct-provider-sdks.md` for tracing, lazy
+  initialization and readable-reasoning replay migrations on both transports.
+
+- LLM tracing and journals now cover UnifiedLLM calls on either transport,
+  including the viewer playground. Raw LiteLLM calls outside UnifiedLLM are
+  no longer automatically instrumented.
 - Responses clients now honor the cached renderer's stable-prefix boundary by default,
   without a cache setting in the model registry. Requests without a usable boundary
   retain provider-default caching; `cache_breakpoint=None` opts out of NOOA markers.

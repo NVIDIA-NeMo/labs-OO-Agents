@@ -8,7 +8,6 @@ import json
 import httpx
 import pytest
 
-from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -16,12 +15,14 @@ from nooa.unifiedllm import CacheBoundary, ResponsesClient, RetryConfig, registr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["litellm", "direct"])
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("style", ["responses", "anthropic", "chat"])
 @pytest.mark.parametrize("mode", ["default", "no-boundary", "disabled"])
-async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchronous):
+async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchronous, transport):
     """Exercise renderer -> registry client -> SDK -> HTTP, with no cache opt-in."""
     entry = {
+        "transport": transport,
         "model_name": "anthropic/claude-sonnet-4-5" if style == "anthropic" else "openai/gpt-4o",
         "client_type": "responses" if style == "responses" else "completion",
         "api_base": "https://models.example"
@@ -97,9 +98,6 @@ async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchro
             ),
         ],
         block_formatter=CachedBlockFormatter(),
-        provider_formatter=ResponsesProviderFormatter()
-        if style == "responses"
-        else OpenAIProviderFormatter(),
     ).output
     assert sum(isinstance(m, CacheBoundary) for m in messages) == 1
     if mode == "no-boundary":

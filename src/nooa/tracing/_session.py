@@ -5,15 +5,13 @@
 ``set_session()`` writes ``session.id`` into the current OTel context.
 Two things then read from that one source of truth:
 
-1. **OpenInference instrumentations** (``OITracer`` used by
-   ``LiteLLMInstrumentor`` and others) — at span creation, they call
+1. **External OpenInference instrumentations** — at span creation, they call
    ``get_attributes_from_context()`` and merge the value into the
-   span's initial attribute dict. This is what makes
-   litellm's ``acompletion`` spans land in the correct session.
+   span's initial attribute dict.
 2. **Our own hooks** — :class:`SessionSpanProcessor` reads the same
    OTel context at ``on_start`` and stamps ``session.id`` on spans
    created by the plain SDK tracer (framework hooks like
-   ``method.respond``, ``generation``, ``code_execution``,
+   ``llm.call``, ``method.respond``, ``generation``, ``code_execution``,
    ``context_snapshot``) which otherwise have no OpenInference layer
    to consult the context on their behalf.
 

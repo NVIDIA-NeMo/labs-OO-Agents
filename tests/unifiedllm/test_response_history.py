@@ -62,7 +62,7 @@ async def test_fake_projects_response_objects_as_portable_messages(async_call):
 
 
 def test_hand_built_null_content_call_uses_the_same_public_builder():
-    from nooa.context_blocks.formatter import OpenAIProviderFormatter
+    from nooa.context_blocks.formatter import to_messages
     from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
     from nooa.llm_types import ToolCall
 
@@ -74,7 +74,7 @@ def test_hand_built_null_content_call_uses_the_same_public_builder():
         replay_message=turn,
     )
     message = message.model_copy(update={"content": ""})
-    public = OpenAIProviderFormatter().format([message])
+    public = to_messages([message])
     assert public[0] is turn
     assert public[0]["tool_calls"][0]["function"]["arguments"] is arguments
 
@@ -94,11 +94,7 @@ def test_hand_built_null_content_call_uses_the_same_public_builder():
 @pytest.mark.parametrize("responses", [False, True])
 def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached, responses):
     from nooa.context_blocks.events import ToolCallEvent, ToolResult
-    from nooa.context_blocks.formatter import (
-        OpenAIProviderFormatter,
-        ResponsesProviderFormatter,
-        XMLBlockFormatter,
-    )
+    from nooa.context_blocks.formatter import XMLBlockFormatter
     from nooa.context_blocks.models import ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -143,7 +139,6 @@ def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached, r
     result = render_context(
         blocks,
         block_formatter=Formatter(),
-        provider_formatter=ResponsesProviderFormatter() if responses else OpenAIProviderFormatter(),
     )
     resolved = next(message for message in result.output if message.get("role") == "assistant")
     if shape == "truncated":

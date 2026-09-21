@@ -3,7 +3,7 @@
 """Tests for context_blocks formatters.
 
 BlockFormatter.format() takes ``list[ResolvedBlock]`` (both SYSTEM and event
-blocks) and returns ``list[RenderedMessage]``. ProviderFormatter.format() takes
+blocks) and returns ``list[RenderedMessage]``. ``to_messages`` takes
 ``list[RenderedMessage]`` and returns provider-specific wire format.
 """
 
@@ -11,13 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
-from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
-    MarkdownBlockFormatter,
-    OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
-    XMLBlockFormatter,
-)
+from nooa.context_blocks.formatter import MarkdownBlockFormatter, XMLBlockFormatter, to_messages
 from nooa.context_blocks.models import (
     BlockMetadata,
     RenderedMessage,
@@ -274,12 +268,11 @@ class TestXMLBlockFormatter:
         )
 
         assert all(not message.tool_calls for message in messages)
-        output = AnthropicProviderFormatter().format(messages)
-        assert output["system"] == ""
-        assert [message["content"] for message in output["messages"]] == (
+        output = to_messages(messages)
+        assert [message["content"] for message in output if message["role"] == "assistant"] == (
             [content] if content else []
         )
-        assert all("tool_calls" not in message for message in output["messages"])
+        assert all(not message.get("tool_calls") for message in output)
 
     @pytest.mark.parametrize("field", ["reasoning", "llm_state"])
     def test_replay_only_response_creates_private_carrier(self, field):
@@ -421,18 +414,10 @@ class TestMarkdownBlockFormatter:
         assert MarkdownBlockFormatter().format_type == "markdown"
 
 
-class TestProviderFormatterABC:
-    def test_is_abstract(self):
-        from nooa.context_blocks.formatter import ProviderFormatter
-
-        with pytest.raises(TypeError):
-            ProviderFormatter()  # type: ignore[abstract]
-
-
-class TestOpenAIProviderFormatter:
+class TestCanonicalMessages:
     def test_system_message_only(self):
         messages = [RenderedMessage(role=Role.SYSTEM, content="You are helpful.")]
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
         assert result == [{"role": "system", "content": "You are helpful."}]
 
     def test_user_message(self):
@@ -440,7 +425,7 @@ class TestOpenAIProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(role=Role.USER, content="Hello"),
         ]
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
         assert len(result) == 2
         assert result[1] == {"role": "user", "content": "Hello"}
 
@@ -449,7 +434,7 @@ class TestOpenAIProviderFormatter:
             RenderedMessage(role=Role.SYSTEM, content="System"),
             RenderedMessage(role=Role.ASSISTANT, content="Hi there!"),
         ]
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
         assert result[1]["role"] == "assistant" and result[1]["content"] == "Hi there!"
 
     def test_tool_call_message(self):
@@ -462,7 +447,7 @@ class TestOpenAIProviderFormatter:
                 ),
             ),
         ]
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
         assert len(result) == 2
         msg = result[1]
         assert msg["role"] == "assistant" and msg["content"] == ""
@@ -480,7 +465,7 @@ class TestOpenAIProviderFormatter:
             ),
             RenderedMessage(role=Role.TOOL, content="Sunny", tool_call_id="call_abc"),
         ]
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
         assert len(result) == 3
         assert result[1]["role"] == "assistant" and "tool_calls" in result[1]
         assert result[2] == {"role": "tool", "tool_call_id": "call_abc", "content": "Sunny"}
@@ -497,7 +482,7 @@ class TestOpenAIProviderFormatter:
             )
         ]
 
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
 
         assert result[0]["content"] == "Calling both"
         assert [call["id"] for call in result[0]["tool_calls"]] == ["a", "b"]
@@ -515,7 +500,7 @@ class TestOpenAIProviderFormatter:
             RenderedMessage(role=Role.USER, content="Hello"),
             RenderedMessage(role=Role.RUNTIME_EVENT, content="internal"),
         ]
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
         roles = [m["role"] for m in result]
         assert "runtime_event" not in roles and roles == ["user"]
 
@@ -524,82 +509,12 @@ class TestOpenAIProviderFormatter:
             RenderedMessage(role=Role.USER, content="Hello"),
             RenderedMessage(role=Role.METADATA, content="session-start"),
         ]
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
         assert [m["role"] for m in result] == ["user"]
 
 
-class TestAnthropicProviderFormatter:
-    def test_returns_dict_with_system_and_messages(self):
-        messages = [RenderedMessage(role=Role.SYSTEM, content="You are helpful.")]
-        result = AnthropicProviderFormatter().format(messages)
-        assert result == {"system": "You are helpful.", "messages": []}
-
-    def test_user_message(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(role=Role.USER, content="Hello"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert result["system"] == "System"
-        assert result["messages"] == [{"role": "user", "content": "Hello"}]
-
-    def test_assistant_message(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(role=Role.ASSISTANT, content="Hi!"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert result["messages"] == [{"role": "assistant", "content": "Hi!"}]
-
-    def test_tool_call_message(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(
-                role=Role.ASSISTANT,
-                tool_calls=(ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),),
-            ),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        msg = result["messages"][0]
-        assert msg["role"] == "assistant"
-        assert msg["content"][0]["type"] == "tool_use" and msg["content"][0]["id"] == "tc_1"
-
-    def test_tool_call_with_result(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(
-                role=Role.ASSISTANT,
-                tool_calls=(ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),),
-            ),
-            RenderedMessage(role=Role.TOOL, content="Result", tool_call_id="tc_1"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert len(result["messages"]) == 2
-        assert result["messages"][0]["role"] == "assistant"
-        assert result["messages"][1]["role"] == "user"
-        assert result["messages"][1]["content"][0]["type"] == "tool_result"
-
-    def test_tool_role_mapped_to_user(self):
-        """TOOL role without tool_call_id falls back to user (matches old behavior)."""
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(role=Role.TOOL, content="Tool output"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert result["messages"][0]["role"] == "user"
-
-    def test_metadata_skipped(self):
-        messages = [
-            RenderedMessage(role=Role.USER, content="Hello"),
-            RenderedMessage(role=Role.METADATA, content="session-start"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert len(result["messages"]) == 1
-        assert result["messages"][0]["role"] == "user"
-
-
 class TestEndToEndPipelines:
-    """Compose BlockFormatter + ProviderFormatter through the neutral type."""
+    """Compose BlockFormatter + to_messages through the neutral type."""
 
     def test_xml_with_openai(self):
         blocks = [
@@ -608,20 +523,20 @@ class TestEndToEndPipelines:
             ResolvedBlock(key="msg", content="Hello", role=Role.USER),
         ]
         messages = XMLBlockFormatter().format(blocks)
-        result = OpenAIProviderFormatter().format(messages)
+        result = to_messages(messages)
         assert len(result) == 2
         assert "<persona>" in result[0]["content"]
         assert "Hello" in result[1]["content"]
 
-    def test_markdown_with_anthropic(self):
+    def test_markdown_messages(self):
         blocks = [
             ResolvedBlock(key="persona", content="You are helpful."),
             ResolvedBlock(key="msg", content="Hello", role=Role.USER),
         ]
         messages = MarkdownBlockFormatter().format(blocks)
-        result = AnthropicProviderFormatter().format(messages)
-        assert "# Persona" in result["system"]
-        assert result["messages"][0]["content"] == "Hello"
+        result = to_messages(messages)
+        assert "# Persona" in result[0]["content"]
+        assert result[1]["content"] == "Hello"
 
     def test_legacy_reasoning_items_fail_closed_without_provider_gate(self):
         """Removed opaque legacy fields are ignored and cannot be emitted."""
@@ -644,7 +559,7 @@ class TestEndToEndPipelines:
         blocks = [ResolvedBlock(key="tc", content="", role=Role.ASSISTANT, event=legacy_event)]
 
         messages = XMLBlockFormatter().format(blocks)
-        openai_input = OpenAIProviderFormatter().format(messages)
+        openai_input = to_messages(messages)
         responses_input = _responses_wire(messages)
 
         openai_tool_call = next(message for message in openai_input if "tool_calls" in message)
@@ -694,11 +609,11 @@ def _responses_wire(messages):
     from nooa.unifiedllm import ResponsesClient
 
     with ResponsesClient(model="openai/gpt-5.6") as client:
-        wire, _ = client._transform_messages(ResponsesProviderFormatter().format(messages))
+        wire, _ = client._transform_messages(to_messages(messages))
     return wire
 
 
-class TestResponsesProviderFormatterImages:
+class TestResponsesProjectionImages:
     """Responses API image blocks: image_url must be a URL STRING, not the
     Chat-Completions {"url": ...} object (regression — the object shape makes the
     API reject the request with 'expected an image URL, but got an object')."""

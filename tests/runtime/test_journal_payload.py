@@ -6,7 +6,7 @@ The skeleton + content-addressed blocks the journal streams to the viewer
 have to mirror what actually went on the wire to the LLM. Two concrete
 invariants the viewer relies on:
 
-1. Roles the provider formatter strips (``RUNTIME_EVENT``, ``METADATA``)
+1. Roles the message assembly strips (``RUNTIME_EVENT``, ``METADATA``)
    never go to the LLM, so they must not appear in the skeleton either —
    otherwise the viewer's reconstructed message list contains rows the
    LLM never saw.
