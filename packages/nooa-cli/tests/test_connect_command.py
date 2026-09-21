@@ -71,6 +71,44 @@ def test_working_dir_saves_under_its_nooa_directory_like_the_tui(tmp_path):
     )
 
 
+def test_working_dir_keeps_project_registry_guidance_and_precedence(tmp_path, monkeypatch):
+    from nooa import llm_config, paths
+
+    user_registry = tmp_path / "user-llm-config.yaml"
+    user_registry.write_text("models: {local: {model_name: openai/old}}\n")
+    monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [user_registry])
+    monkeypatch.setattr(
+        paths,
+        "get_user_dir",
+        lambda name: user_registry if name == "llm_config.yaml" else tmp_path / name,
+    )
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    result = CliRunner().invoke(
+        command,
+        [
+            "wire/model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            "chat",
+            "--api-key-env",
+            "CONNECT_TEST_KEY",
+            "--no-catalogue",
+            "--no-probe",
+            "--working-dir",
+            str(workspace),
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "include it in NEMO_OO_LLM_CONFIG" not in result.output
+    assert "takes precedence over this destination" not in result.output
+    assert (workspace / ".nooa" / "llm_config.yaml").exists()
+
+
 def test_working_dir_and_output_are_mutually_exclusive(tmp_path):
     workspace = tmp_path / "myproject"
     workspace.mkdir()
@@ -454,10 +492,13 @@ def test_saved_key_message_is_honest_and_still_prompts_when_no_value_is_set(tmp_
     _write_single_saved_key_entry(path)
     monkeypatch.delenv("CONNECT_SAVED_KEY", raising=False)
     result = CliRunner().invoke(
-        command, _single_saved_key_options(path), input="sk-freshly-entered\ny\n"
+        command,
+        [*_single_saved_key_options(path), "--prompt-key"],
+        input="sk-freshly-entered\ny\nn\n",
     )
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
+    assert "API key (used only for this setup)" in normalized_output
     assert (
         "This endpoint previously used key variable CONNECT_SAVED_KEY, "
         "but it has no value set." in normalized_output

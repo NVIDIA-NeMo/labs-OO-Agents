@@ -816,7 +816,11 @@ def configure_checks(state: WizardState) -> bool:
         output_ceiling = (
             state.configured["provenance"].get("catalogue_limits", {}).get("max_completion_tokens")
         )
-        if not (isinstance(output_ceiling, int) and output_ceiling > 0):
+        if not (
+            isinstance(output_ceiling, int)
+            and not isinstance(output_ceiling, bool)
+            and output_ceiling > 0
+        ):
             output_ceiling = None
         bounds = [
             v
@@ -1037,7 +1041,7 @@ def save_model(state: WizardState) -> bool:
                 f"The key was not saved. Set {state.api_key_env} (or add it to your NOOA secrets file) before using this alias."
             )
         click.echo(f'Use it in Python: get_llm_client("{state.alias}")')
-        if state.output:
+        if state.output and not state.working_dir:
             click.echo(
                 "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path)."
             )

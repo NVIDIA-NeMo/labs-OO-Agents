@@ -121,6 +121,52 @@ def test_model_maximum_is_omitted_when_unknown(monkeypatch):
     assert _connect_prompts.choose_reply_limit(32768, 200000, output_ceiling=None) == 32768
 
 
+def test_boolean_catalogue_output_limit_is_not_treated_as_one_token(tmp_path, monkeypatch):
+    from nooa_cli.commands import _connect_prompts as prompts
+
+    from nooa.unifiedllm import connect
+
+    real_configure_entry = connect.configure_entry
+
+    def configure_with_boolean_catalogue_limit(*args, **kwargs):
+        configured = real_configure_entry(*args, **kwargs)
+        configured["provenance"]["catalogue_limits"] = {"max_completion_tokens": True}
+        return configured
+
+    chosen = {}
+
+    def choose_reply_limit(suggested, ceiling, *, output_ceiling=None, **kwargs):
+        chosen["ceiling"] = ceiling
+        chosen["output_ceiling"] = output_ceiling
+        return suggested
+
+    monkeypatch.setattr(connect, "configure_entry", configure_with_boolean_catalogue_limit)
+    monkeypatch.setattr(prompts, "choose_reply_limit", choose_reply_limit)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            "responses",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--no-probe",
+            "--output",
+            str(path),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert chosen["output_ceiling"] is None
+    assert chosen["ceiling"] != 1
+
+
 def test_model_maximum_is_omitted_when_it_duplicates_extended(monkeypatch):
     from nooa_cli.commands import _connect_prompts as _connect_prompts
 
