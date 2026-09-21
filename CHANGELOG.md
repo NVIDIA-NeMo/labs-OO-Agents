@@ -6,6 +6,44 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Fix several issues found in code review of the Connect work above:
+  - Ran `ruff format` on `_connect_wizard.py`; the diff was previously unformatted.
+  - `nooa connect`'s encrypted-reasoning detection now also recognizes the
+    openai/azure Chat Completions shape (`part.native["reasoning_items"]`), a
+    third wire dialect distinct from both the Anthropic `thinking_blocks`
+    wrapper and the unwrapped Responses-style native — previously always read
+    as "not encrypted" on that route.
+  - `nooa connect --working-dir` combined with any `--stage` other than
+    `save` used to crash with a confusing, generic usage error; it now
+    raises a clear one explaining that only the full interactive run and
+    `--stage save` write a registry file.
+  - `nooa connect --working-dir ~` (a literal, unexpanded tilde) is no longer
+    rejected as nonexistent; existence is now checked after expansion,
+    not before.
+  - `format_budget()` no longer mislabels a genuine, very large, explicit
+    `--budget-tokens` value as "unlimited"; the threshold is now anchored to
+    the actual sentinel with a fixed buffer for in-run spend, not a
+    magnitude cutoff independent of it.
+  - A level check whose response carried no `usage` object no longer
+    silently vanishes from the end-of-run "Reasoning tokens · ..." summary
+    when reasoning was genuinely observed; it now shows "reasoning observed"
+    instead of being omitted. Levels where reasoning was never observed
+    still stay out of the summary entirely, unchanged.
+  - `_reasoning_tokens_summary()` (the summary line) now checks
+    `reasoning_observed` the same way its sibling `_reasoning_tokens_label()`
+    (the per-check row) already did, so the two can no longer disagree about
+    whether a reasoning cost was actually measured for a level.
+  - Removed the dead, misleading manual `status` computation in
+    `CheckProgress.update()` that `check_status()` always overwrote anyway;
+    kept only the `detail` text those branches actually control.
+  - `docs/model-connect.md` no longer documents the old 131,072-token default
+    `--budget-tokens` (now unlimited by default) or omits the "Model maximum"
+    reply-budget choice.
+  - De-duplicated the identical `normalized()` id-matching closure between
+    `match_models()` and `fuzzy_match_models()` into one shared function.
+  - Removed a redundant `except (binascii.Error, ValueError)` — `binascii.Error`
+    is already a `ValueError` subclass — and its now-unused import.
+
 - `nooa connect`'s session check's replay/repeat turns now change one rule of
   the puzzle instead of asking the model to "verify the recorded result."
   Verifying a known answer from memory is itself trivial enough that a model

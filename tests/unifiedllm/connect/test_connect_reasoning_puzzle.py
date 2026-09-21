@@ -94,9 +94,7 @@ async def test_redacted_thinking_block_is_flagged_as_encrypted_not_missing(monke
             parts=(
                 AssistantReasoning(
                     text="",
-                    native={
-                        "thinking_blocks": {"type": "redacted_thinking", "data": encoded_blob}
-                    },
+                    native={"thinking_blocks": {"type": "redacted_thinking", "data": encoded_blob}},
                 ),
             ),
             finish_reason="stop",
@@ -235,6 +233,49 @@ async def test_responses_encrypted_reasoning_item_is_flagged_as_encrypted(monkey
     assert record["reasoning_observed"] is True
     assert record["reasoning_encrypted"] is True
     assert record["reasoning_encrypted_bytes"] == 64
+
+
+@pytest.mark.asyncio
+async def test_chat_encrypted_reasoning_item_is_flagged_as_encrypted(monkeypatch):
+    """openai/azure Chat Completions routes (chat_parts.py) store their
+    reasoning item under a third, distinct shape: part.native["reasoning_items"]
+    holding the raw item with encrypted_content — neither the Anthropic-style
+    "thinking_blocks" wrapper nor the unwrapped Responses-style native.
+    Missing this shape means every openai/azure Chat-API encrypted-reasoning
+    route always reads as "not encrypted".
+    """
+
+    encoded_blob = base64.b64encode(b"x" * 48).decode()
+
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(
+                AssistantReasoning(
+                    text="",
+                    native={
+                        "reasoning_items": {"type": "reasoning", "encrypted_content": encoded_blob}
+                    },
+                ),
+            ),
+            finish_reason="stop",
+            usage=LLMUsage(input_tokens=101, output_tokens=259, total_tokens=360),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "gpt-6-astra",
+        "chat",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"reasoning_effort": "medium"}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_observed"] is True
+    assert record["reasoning_encrypted"] is True
+    assert record["reasoning_encrypted_bytes"] == 48
 
 
 @pytest.mark.asyncio

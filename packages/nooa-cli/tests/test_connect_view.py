@@ -215,13 +215,21 @@ def test_finish_summarizes_reasoning_tokens_across_levels():
         progress = view.CheckProgress()
         progress.update(
             "level:max",
-            {"outcome": "accepted", "reasoning_observed": True, "answer_correct": True,
-             "reasoning_tokens": 224},
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "answer_correct": True,
+                "reasoning_tokens": 224,
+            },
         )
         progress.update(
             "level:low",
-            {"outcome": "accepted", "reasoning_observed": True, "answer_correct": False,
-             "reasoning_tokens": 800},
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "answer_correct": False,
+                "reasoning_tokens": 800,
+            },
         )
         progress.finish()
 
@@ -390,8 +398,7 @@ def test_visible_reasoning_with_no_token_estimate_shows_its_char_count():
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
     assert (
-        "2,329 output tokens (reasoning tokens not reported separately; "
-        "~2,400 reasoning chars)"
+        "2,329 output tokens (reasoning tokens not reported separately; ~2,400 reasoning chars)"
     ) in normalized_output
     assert "Reasoning tokens · on: 2,329 output, ~2,400 chars" in normalized_output
 
@@ -469,6 +476,33 @@ def test_no_reasoning_signal_at_all_shows_no_token_suffix():
     assert "Reasoning tokens ·" not in result.output
 
 
+def test_reasoning_observed_without_usage_still_appears_in_the_summary():
+    """A level whose response carried no usage object (so output_tokens
+    isn't an int) must not silently vanish from the end-of-run summary just
+    because no token count could be computed for it — that defeats the
+    point of a complete cross-level comparison. It reads "reasoning
+    observed" rather than a misleading "0", since reasoning genuinely did
+    happen here; only levels where it never happened stay out entirely.
+    """
+
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update(
+            "level:low",
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "answer_correct": True,
+            },
+        )
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert "Reasoning tokens · low: reasoning observed" in result.output
+
+
 def test_success_hides_test_cap_but_length_retry_explains_increase():
     @click.command()
     def command():
@@ -501,3 +535,31 @@ def test_success_hides_test_cap_but_length_retry_explains_increase():
     assert "retrying with 4,096 tokens" in text
     assert "saved setting unchanged" in text
     assert "2 passed · 0 need attention · 0 skipped" in result.output
+
+
+def test_format_budget_labels_the_sentinel_as_unlimited():
+    from nooa.unifiedllm.connect import DEFAULT_CHECK_BUDGET
+
+    assert view.format_budget(DEFAULT_CHECK_BUDGET) == "unlimited"
+
+
+def test_format_budget_labels_sentinel_minus_realistic_spend_as_unlimited():
+    """The default budget's "remaining" value is the sentinel minus whatever
+    a run spent so far (observed up to ~1.2M tokens for a full run), never
+    exactly equal to it — that must still read as unlimited.
+    """
+    from nooa.unifiedllm.connect import DEFAULT_CHECK_BUDGET
+
+    assert view.format_budget(DEFAULT_CHECK_BUDGET - 5_000_000) == "unlimited"
+
+
+def test_format_budget_does_not_mislabel_a_large_explicit_value():
+    """--budget-tokens has no declared upper bound. A genuine, very large,
+    explicitly-chosen budget must still display as its real number, not be
+    conflated with the much larger unlimited sentinel.
+    """
+    assert view.format_budget(2_000_000_000_000) == "2,000,000,000,000"
+
+
+def test_format_budget_shows_small_values_as_is():
+    assert view.format_budget(4096) == "4,096"

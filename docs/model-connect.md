@@ -98,7 +98,8 @@ presets and `--no-probe` do not apply. Stages normally never prompt; explicitly
 passing `--prompt-key` enables one masked credential prompt on stderr, leaving
 JSON on stdout. Pasted keys are not persisted or included in reproduction commands.
 `--budget-tokens` defaults to
-131,072. `--output-tokens` controls only initial interface discovery.
+unlimited; it is only capped when the flag is passed explicitly.
+`--output-tokens` controls only initial interface discovery.
 Configured routing, tools, reasoning and conversation checks send the saved
 `--max-tokens` value, or the selected level's cap. `--reasoning-output-tokens`
 is retained for command compatibility but no longer overrides configured caps.
@@ -207,10 +208,13 @@ The displayed **reported reply ceiling** is capability metadata saved under
 Every entry also has an actual **reply budget**, saved as `max_tokens` for all
 three interfaces. Responses translates that to `max_output_tokens` on the wire.
 Press Enter to accept the recommendation, choose a higher budget for high reasoning
-(65,536) or extended reasoning (131,072), choose a smaller 8,192- or 2,048-token
-budget, or choose Custom to edit the number. Higher options appear only above the
-recommendation and within known model limits; they do not change the reasoning
-level itself. Smaller options appear only when
+(65,536) or extended reasoning (131,072), choose the model's declared maximum output
+directly via "Model maximum" (no `--custom` needed to hit that ceiling exactly),
+choose a smaller 8,192- or 2,048-token budget, or choose Custom to edit the number.
+Higher options — including "Model maximum" — appear only above the recommendation
+and within known model limits; they do not change the reasoning level itself. High/
+extended presets are truncated against "Model maximum" when the model's declared
+ceiling is lower. Smaller options appear only when
 below the recommendation. Connect offers the catalogue's output recommendation when available,
 otherwise 32,768 (labelled NOOA default), bounded by the known ceiling and half the
 known context window. Explicit caps may exceed half the window but must leave
@@ -261,9 +265,10 @@ These calls send the configured reply cap, including the selected reasoning
 level's override. The three-turn reservation is `3 * (8192 + 3 * cap)`, accounting
 for reusable input and earlier replies. If that does not fit the remaining approved
 budget, the conversation check is skipped; Connect never silently lowers the cap.
-For example, a 32,768 cap requires a 319,488-token conversation reservation,
-more than the default shared budget. Choose a larger approved budget explicitly
-to run it. Routing/tool/level checks each reserve their configured cap plus 512.
+For example, a 32,768 cap requires a 319,488-token conversation reservation;
+if an explicit `--budget-tokens` is set below that, choose a larger approved
+budget to run it — the default shared budget is unlimited and always covers
+it. Routing/tool/level checks each reserve their configured cap plus 512.
 There are no automatic length retries: truncation at the configured cap is
 inconclusive, and the partial response is never replayed. To try a larger cap,
 edit the configuration and rerun the affected checks within your allowance.

@@ -66,7 +66,9 @@ def test_working_dir_saves_under_its_nooa_directory_like_the_tui(tmp_path):
     assert result.exit_code == 0, result.output
     target = workspace / ".nooa" / "llm_config.yaml"
     assert target.exists()
-    assert yaml.safe_load(target.read_text())["models"]["local"]["api_base"] == "https://api.test/v1"
+    assert (
+        yaml.safe_load(target.read_text())["models"]["local"]["api_base"] == "https://api.test/v1"
+    )
 
 
 def test_working_dir_and_output_are_mutually_exclusive(tmp_path):
@@ -89,6 +91,108 @@ def test_working_dir_and_output_are_mutually_exclusive(tmp_path):
     result = CliRunner().invoke(command, options)
     assert result.exit_code == 2
     assert "mutually exclusive" in result.output
+
+
+def test_working_dir_with_a_non_save_stage_is_a_clear_usage_error(tmp_path):
+    """--working-dir computes an --output path, but every stage other than
+    save rejects any --output at all (those stages just emit JSON and never
+    write a registry file). Without this check that combination crashed with
+    a generic, confusing "--input and --output are for stage save" error.
+    """
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    options = [
+        "wire/model",
+        "--stage",
+        "routing",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--working-dir",
+        str(workspace),
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 2
+    assert "--working-dir only applies to" in result.output
+
+
+def test_working_dir_with_stage_save_still_works(tmp_path):
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "alias": "local",
+                "entry": {
+                    "model_name": "wire/model",
+                    "api_base": "https://api.test/v1",
+                    "api_style": "chat",
+                    "api_key_env": "CONNECT_TEST_KEY",
+                    "client_type": "completion",
+                },
+            }
+        )
+    )
+    options = [
+        "--stage",
+        "save",
+        "--input",
+        str(plan_file),
+        "--working-dir",
+        str(workspace),
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 0, result.output
+    assert (workspace / ".nooa" / "llm_config.yaml").exists()
+
+
+def test_working_dir_expands_a_literal_tilde(tmp_path, monkeypatch):
+    """click's exists=True check on --working-dir used to run on the raw,
+    unexpanded argument, before the command's own expanduser() call — so a
+    literal "~" was rejected as nonexistent even though it's a real
+    directory. --working-dir no longer declares exists=True; existence is
+    checked explicitly after expansion instead.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--api-key-env",
+        "CONNECT_TEST_KEY",
+        "--no-catalogue",
+        "--no-probe",
+        "--working-dir",
+        "~",
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".nooa" / "llm_config.yaml").exists()
+
+
+def test_working_dir_reports_a_missing_directory_clearly():
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--working-dir",
+        "/no/such/directory/at/all",
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 2
+    assert "does not exist" in result.output
 
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])

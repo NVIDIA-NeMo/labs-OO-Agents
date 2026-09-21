@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import difflib
 import json
 import math
@@ -404,12 +403,18 @@ async def catalogue() -> list[dict]:
         return data
 
 
+def _normalized_model_id(value: str) -> str:
+    """Shared normalization rule for match_models() and fuzzy_match_models().
+
+    Kept in one place so the two matchers cannot silently disagree on what
+    counts as "the same" model id.
+    """
+    return re.sub(r"[-_.]", "", value.lower())
+
+
 def match_models(model: str, models: list[dict]) -> list[dict]:
     """Suggest up to three matches. The frontend must confirm a candidate."""
-
-    def normalized(value):
-        return re.sub(r"[-_.]", "", value.lower())
-
+    normalized = _normalized_model_id
     target = normalized(model)
     matches = []
     for item in models:
@@ -436,10 +441,7 @@ def fuzzy_match_models(model: str, models: list[dict]) -> list[dict]:
     listed under its own name. This never auto-selects a candidate; the
     frontend must still confirm one.
     """
-
-    def normalized(value):
-        return re.sub(r"[-_.]", "", value.lower())
-
+    normalized = _normalized_model_id
     target = normalized(model)
     target_tail = target.rsplit("/", 1)[-1]
     scored = []
@@ -1362,7 +1364,7 @@ async def run_steps(
                 # to convert this into an actual reasoning-token figure.
                 try:
                     return len(base64.b64decode(data, validate=False))
-                except (binascii.Error, ValueError):
+                except ValueError:  # binascii.Error is a ValueError subclass
                     return len(data)
 
             for part in reasoning_parts:
@@ -1391,12 +1393,27 @@ async def run_steps(
                         # withheld.
                         reasoning_encrypted = True
                     continue
+                # openai/azure Chat Completions routes (chat_parts.py) store
+                # their reasoning item under "reasoning_items", a third
+                # shape distinct from both "thinking_blocks" above and the
+                # unwrapped Responses-style native below — same
+                # encrypted_content field, different wrapper key.
+                block = part.native.get("reasoning_items")
+                if isinstance(block, Mapping):
+                    encrypted_content = block.get("encrypted_content")
+                    if isinstance(encrypted_content, str) and encrypted_content:
+                        reasoning_encrypted = True
+                        reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
+                            _encrypted_blob_size(encrypted_content)
+                        )
+                    continue
                 # Responses-style routes (response_parts.py) store the raw
                 # output item on .native directly, not wrapped under
-                # "thinking_blocks" — e.g. {"type": "reasoning",
-                # "encrypted_content": "..."}. Detect that shape too, or
-                # Responses/OpenAI-style encrypted reasoning always reads as
-                # "not encrypted" here regardless of what the provider sent.
+                # "thinking_blocks" or "reasoning_items" — e.g. {"type":
+                # "reasoning", "encrypted_content": "..."}. Detect that shape
+                # too, or Responses/OpenAI-style encrypted reasoning always
+                # reads as "not encrypted" here regardless of what the
+                # provider sent.
                 encrypted_content = part.native.get("encrypted_content")
                 if isinstance(encrypted_content, str) and encrypted_content:
                     reasoning_encrypted = True

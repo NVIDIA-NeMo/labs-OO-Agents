@@ -28,11 +28,20 @@ def quiet_provider_messages():
 
 def format_budget(tokens):
     """Render a check-token budget, spelling out the unset-flag sentinel as unlimited."""
+    from nooa.unifiedllm.connect import DEFAULT_CHECK_BUDGET
+
     # DEFAULT_CHECK_BUDGET is a large finite sentinel, not float("inf"), so it
     # survives JSON encoding and every existing int arithmetic site unchanged
-    # (see its definition). A threshold, not an exact-equality check, so this
-    # keeps working if that sentinel's value ever changes.
-    return "unlimited" if tokens >= 10**12 else f"{tokens:,}"
+    # (see its definition). "Budget remaining" values are the sentinel minus
+    # whatever a run has spent so far (observed up to ~1.2M tokens for a full
+    # run; see TOKEN_RESERVATION), never exactly equal to it — so this stays
+    # a threshold, not an exact-equality check, but one anchored to the
+    # actual sentinel with a generous fixed buffer for spend, rather than a
+    # fraction of it. --budget-tokens has no declared upper bound, so a
+    # threshold that scaled down with the sentinel (e.g. a fraction of it)
+    # would mislabel a genuine, very large, explicitly-chosen budget as
+    # unlimited; a fixed buffer close to the sentinel does not.
+    return "unlimited" if tokens >= DEFAULT_CHECK_BUDGET - 10**9 else f"{tokens:,}"
 
 
 def _reasoning_tokens_label(record):
@@ -78,17 +87,26 @@ def _reasoning_tokens_label(record):
 
 
 def _reasoning_tokens_summary(record):
-    """Compact form of _reasoning_tokens_label for the end-of-run summary line."""
+    """Compact form of _reasoning_tokens_label for the end-of-run summary line.
+
+    Mirrors _reasoning_tokens_label's gating exactly: the final "N output
+    (chars)" fallback only applies when reasoning was actually observed.
+    Without that gate, a level where the model reported real output tokens
+    but never reasoned at all would print as though a reasoning cost was
+    measured for it.
+    """
     tokens = record.get("reasoning_tokens")
     if isinstance(tokens, int) and tokens > 0:
         return f"{tokens:,}"
     output_tokens = record.get("output_tokens")
     if not isinstance(output_tokens, int):
-        return "0"
+        return "reasoning observed" if record.get("reasoning_observed") else "0"
     if record.get("reasoning_encrypted"):
         size = record.get("reasoning_encrypted_bytes")
         size_note = f", ~{size:,}B" if isinstance(size, int) else ""
         return f"{output_tokens:,} output (withheld{size_note})"
+    if not record.get("reasoning_observed"):
+        return "0"
     chars = record.get("reasoning_text_chars")
     chars_note = f", ~{chars:,} chars" if isinstance(chars, int) else ""
     return f"{output_tokens:,} output{chars_note}"
@@ -245,10 +263,11 @@ class CheckProgress:
                 fg="yellow",
             )
             return
-        status = "passed" if outcome in {"accepted", "confirmed"} else "attention"
+        # `status` here is display-only scratch state for the fallback table
+        # below (`fallback[status]`); check_status() a few lines down is the
+        # sole source of truth for the icon/color, and always overwrites
+        # whatever this block computes. Do not read `status` above that call.
         detail = check_failure(record) or record.get("reason")
-        if outcome == "not_probed" and not record.get("error"):
-            status = "skipped"
         if outcome == "accepted":
             detail = (
                 "Connected"
@@ -259,30 +278,38 @@ class CheckProgress:
                 detail = (
                     "Tool call returned" if record.get("tool_observed") else "No tool call returned"
                 )
-                if not record.get("tool_observed"):
-                    status = "attention"
             elif name.startswith("level:"):
                 detail = (
                     "Reasoning returned" if record.get("reasoning_observed") else "Request accepted"
                 )
                 if missing_reasoning:
-                    status, detail = "attention", "No reasoning details returned"
+                    detail = "No reasoning details returned"
             elif record.get("reasoning_observed"):
                 detail += " · reasoning returned"
             if record.get("finish_reason") == "length":
-                status, detail = "attention", "Ran out of reply tokens before finishing"
+                detail = "Ran out of reply tokens before finishing"
                 if name.startswith("level:"):
                     detail += (
                         " — if you plan to use this reasoning level, increase the reply budget"
                     )
             elif record.get("finish_reason") in {"error", "content_filter"}:
-                status, detail = "attention", "Reply incomplete; check not conclusive"
+                detail = "Reply incomplete; check not conclusive"
             if record.get("reason") == "previous result reused":
                 detail += " · already checked"
             if name.startswith("level:") and isinstance(record.get("answer_correct"), bool):
                 tokens_label = _reasoning_tokens_label(record)
                 if tokens_label:
                     detail += f" · {tokens_label}"
+                if record.get("reasoning_observed"):
+                    # Record every level where reasoning genuinely happened,
+                    # even when no token count/label is available (e.g. the
+                    # response carried no usage) — omitting it here silently
+                    # drops the level from the finish() summary line,
+                    # defeating the point of a complete cross-level
+                    # comparison. Levels where reasoning was never observed
+                    # stay out entirely: a bare "0" there would look like a
+                    # measured reasoning cost instead of an absence of
+                    # evidence (see unobserved_reasoning_levels).
                     self.reasoning_levels[name[6:]] = record
                 detail += " · answer correct" if record["answer_correct"] else " · answer incorrect"
         elif name == "cache" and outcome == "confirmed" and record.get("input_tokens"):

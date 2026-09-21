@@ -107,7 +107,11 @@ from ._connect_stages import STAGES
 @click.option(
     "--working-dir",
     "-w",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=str),
+    # No exists=True here: click validates the raw argument before this
+    # command ever runs, so a literal "~" would fail as "does not exist"
+    # even though it's a real directory — expand it ourselves below, then
+    # check existence on the expanded path.
+    type=click.Path(file_okay=False, dir_okay=True, path_type=str),
     help=(
         "Save to this project's registry (<working-dir>/.nooa/llm_config.yaml) "
         "instead of the user-global one — the same file `nooa tui -w <working-dir>` "
@@ -158,11 +162,19 @@ def command(
     if working_dir:
         if output:
             raise click.UsageError("--working-dir and --output are mutually exclusive.")
+        if stage and stage != "save":
+            raise click.UsageError(
+                "--working-dir only applies to the full interactive run or --stage save; "
+                "other stages emit JSON and never write a registry file."
+            )
         from pathlib import Path
 
         from nooa import paths
 
-        output = str(Path(working_dir).expanduser().resolve() / paths.DIR_NAME / "llm_config.yaml")
+        resolved_dir = Path(working_dir).expanduser().resolve()
+        if not resolved_dir.is_dir():
+            raise click.UsageError(f"--working-dir directory {str(resolved_dir)!r} does not exist.")
+        output = str(resolved_dir / paths.DIR_NAME / "llm_config.yaml")
     if stage:
         from ._connect_stages import run_stage
 

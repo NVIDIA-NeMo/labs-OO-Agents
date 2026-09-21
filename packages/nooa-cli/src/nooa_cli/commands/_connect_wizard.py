@@ -604,15 +604,11 @@ def configure_metadata(state: WizardState) -> bool:
                     choices=[""] + [item["id"] for item in fuzzy],
                 )
                 if selected:
-                    state.candidate = next(
-                        (item for item in fuzzy if item["id"] == selected), None
-                    )
+                    state.candidate = next((item for item in fuzzy if item["id"] == selected), None)
                     if state.candidate is None:
                         raise click.ClickException("Choose one of the displayed model IDs.")
             if state.candidate is None:
-                click.echo(
-                    "No catalogue match; model limits and reasoning levels remain unknown."
-                )
+                click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
     endpoint_model = (
         next((item for item in state.endpoint_models if item.get("id") == state.model), None)
         if state.endpoint == state.discovery_endpoint
@@ -803,8 +799,8 @@ def configure_checks(state: WizardState) -> bool:
         state.proposal.entry, reply_tokens=state.reply_tokens
     )
     if state.reply_tokens is None and not state.yes:
-        output_ceiling = state.configured["provenance"].get("catalogue_limits", {}).get(
-            "max_completion_tokens"
+        output_ceiling = (
+            state.configured["provenance"].get("catalogue_limits", {}).get("max_completion_tokens")
         )
         if not (isinstance(output_ceiling, int) and output_ceiling > 0):
             output_ceiling = None
