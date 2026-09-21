@@ -1447,9 +1447,12 @@ class UnifiedCodeValidator:
         # Update context with code
         context.code = code
 
-        # Parse AST
+        # Parse AST.  Pass the cell filename so a SyntaxError carries
+        # "Cell In[N]" rather than "<unknown>", matching the location format
+        # the agent already sees for runtime errors (issue #267).
+        cell_filename = f"Cell In[{context.execution_count}]"
         try:
-            tree = ast.parse(code)
+            tree = ast.parse(code, filename=cell_filename)
         except SyntaxError as e:
             raise ValidationError(f"Syntax error: {e}", original_exception=e) from e
 

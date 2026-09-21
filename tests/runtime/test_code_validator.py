@@ -1328,6 +1328,33 @@ exec('2')
         with pytest.raises(ValidationError, match="[Ss]yntax"):
             validator.validate(code, default_context)
 
+    def test_syntax_error_includes_cell_filename(self, validator: UnifiedCodeValidator):
+        """Syntax errors must name the cell, not '<unknown>' (issue #267).
+
+        A syntax error in the generated code reaches the agent as the *only*
+        location hint.  '<unknown>' tells the model nothing about where to
+        look; 'Cell In[N]' matches the format it already sees for runtime
+        errors, so it can locate and correct the mistake without an extra
+        round-trip.
+        """
+        context = ValidationContext(code="", execution_count=7)
+        unclosed = "a = (1 + 2\nb = 3\n"
+        with pytest.raises(ValidationError) as exc_info:
+            validator.validate(unclosed, context)
+        msg = str(exc_info.value)
+        assert "Cell In[7]" in msg, f"expected 'Cell In[7]' in error, got: {msg!r}"
+        assert "<unknown>" not in msg, f"'<unknown>' must not appear in error: {msg!r}"
+
+    def test_syntax_error_cell_filename_uses_execution_count(
+        self, validator: UnifiedCodeValidator
+    ):
+        """The cell number in the syntax error tracks the execution count."""
+        for count in (1, 5, 42):
+            ctx = ValidationContext(code="", execution_count=count)
+            with pytest.raises(ValidationError) as exc_info:
+                validator.validate("def f(", ctx)
+            assert f"Cell In[{count}]" in str(exc_info.value)
+
     def test_validators_run_in_order(
         self, validator: UnifiedCodeValidator, default_context: ValidationContext
     ):
