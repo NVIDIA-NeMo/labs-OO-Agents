@@ -86,3 +86,9 @@ def test_install_summarizer_attaches(agent):
     summarizers = getattr(agent, "_summarizers", [])
     assert len(summarizers) == 1
     assert summarizers[0].config.max_tokens == 50_000
+
+
+@pytest.mark.parametrize("fraction", [0, -0.1, 1, 1.1])
+def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction):
+    with pytest.raises(ValidationError):
+        SummarizationConfig(threshold_fraction=fraction)
