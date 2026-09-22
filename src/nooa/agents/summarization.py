@@ -143,6 +143,9 @@ class SummarizationAgent(Agent):
         kwargs.setdefault("llm", agent.llm)
         self.target_event_manager = agent.event_manager
         self._target_agent = agent
+        self._summary_llm_override: contextvars.ContextVar[UnifiedLLM | None] = (
+            contextvars.ContextVar(f"summary_llm_override_{id(self)}", default=None)
+        )
 
         # Extract annotated class attributes from kwargs (max_tokens, preserve_recent, etc.)
         # Skip descriptors (e.g. Agent's ``llm`` property): they are not summarizer
@@ -179,6 +182,9 @@ class SummarizationAgent(Agent):
     @no_trace
     def _summary_llm(self) -> "UnifiedLLM":
         """Resolve the client for standalone summaries and their input budget."""
+        override = self._summary_llm_override.get()
+        if override is not None:
+            return override
         return self._target_agent.llm if self._inherits_parent_llm else self.llm
 
     @hidden
@@ -349,24 +355,23 @@ class SummarizationAgent(Agent):
             return
 
         self._pending_range = (start_tag, end_tag)
-
-        # Render events to markdown for LLM consumption
-        history_markdown = self._render_range_to_markdown(start_tag, end_tag)
-
-        logger.debug(
-            f"Scheduling summarization: {start_tag} -> {end_tag} ({len(history_markdown)} chars)"
-        )
-
-        # Schedule the async summarization
-        self._pending_task = asyncio.create_task(
-            self._run_summarization(history_markdown, start_tag, end_tag)
-        )
+        self._pending_task = asyncio.create_task(self._run_summarization(None, start_tag, end_tag))
 
     @hidden
     @no_trace
-    async def _run_summarization(self, history_markdown: str, start_tag: str, end_tag: str) -> None:
-        """Run summarization and store result for later application."""
+    async def _run_summarization(
+        self, history_markdown: str | None, start_tag: str, end_tag: str
+    ) -> None:
+        """Render and summarize with one task-local resolved client."""
+        summary_llm = self._summary_llm()
+        override_token = self._summary_llm_override.set(summary_llm)
         try:
+            if history_markdown is None:
+                history_markdown = self._render_range_to_markdown(start_tag, end_tag)
+            logger.debug(
+                f"Scheduling summarization: {start_tag} -> {end_tag} "
+                f"({len(history_markdown)} chars)"
+            )
             summary = await self.summarize(history_markdown, self.config.target_chars)
             self._pending_summary = summary
             logger.debug(
@@ -377,6 +382,7 @@ class SummarizationAgent(Agent):
             logger.warning(f"Summarization failed: {e}")
             self._pending_summary = None
         finally:
+            self._summary_llm_override.reset(override_token)
             # Clear our own events to stay stateless
             self.event_manager.clear()
 

@@ -8,7 +8,7 @@ Tests the SummarizationAgent base class and its implementations:
 """
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -619,6 +619,32 @@ class TestSummarizationAsyncIntegration:
         # Summary should be pending application
         assert summarizer._pending_summary is not None
         assert summarizer._pending_summary == "Mocked summary of messages 1-3"
+
+    @pytest.mark.asyncio
+    async def test_scheduled_summary_resolves_one_client_for_sizing_and_generation(
+        self, test_agent, fake_llm
+    ):
+        """A parent switch before task execution controls both sizing and generation."""
+        old_counter = Mock(return_value=1)
+        fake_llm.count_tokens = old_counter
+        replacement = FakeLLMClient(scripted_responses=[_resp('{"value": "Replacement summary"}')])
+        replacement._context_window = 100
+        replacement_counter = Mock(return_value=1)
+        replacement.count_tokens = replacement_counter
+
+        for i in range(5):
+            test_agent.event_manager.add(Message(content=f"Message {i}"))
+        summarizer = SummarizationAgent(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
+
+        summarizer._schedule_summarization("1", "5")
+        test_agent.set_llm(replacement)
+        assert summarizer._pending_task is not None
+        await summarizer._pending_task
+
+        assert summarizer._pending_summary == "Replacement summary"
+        assert replacement.call_count == 1
+        assert replacement_counter.call_count > 0
+        assert old_counter.call_count == 0
 
     @pytest.mark.asyncio
     async def test_apply_pending_summary_collapses_history(self, test_agent):
