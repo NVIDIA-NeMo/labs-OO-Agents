@@ -206,11 +206,18 @@ def test_progress_reports_puzzle_result_and_parse_failure(correct):
         progress = view.CheckProgress()
         progress.update(
             "level:high",
-            {"outcome": "accepted", "reasoning_observed": True, "answer_correct": correct},
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "answer_correct": correct,
+                "reasoning_tokens": 4096,
+            },
         )
         progress.update("anthropic", {"outcome": "not_confirmed", "error": "ReasoningReplayError"})
 
     result = CliRunner().invoke(display)
-    assert ("answer correct" if correct else "answer incorrect") in result.output
+    normalized_output = " ".join(result.output.split())
+    assert "4,096 reasoning tokens" in normalized_output
+    assert ("answer correct" if correct else "answer incorrect") in normalized_output
     assert "Reply not understood (ReasoningReplayError)" in result.output
     assert "Not checked" not in result.output

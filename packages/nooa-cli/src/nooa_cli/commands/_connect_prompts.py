@@ -233,8 +233,15 @@ def edit_model_details(model):
     return edited
 
 
-def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
-    """Choose a real request budget, independent of the capability ceiling."""
+def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="connect_default"):
+    """Choose a real request budget, independent of the capability ceiling.
+
+    ``ceiling`` is the strict upper bound every choice must respect (the
+    tighter of context window and known max output, when both are known).
+    ``output_ceiling`` is specifically the model's own declared max output —
+    never inferred from context window — offered as an explicit "Model
+    maximum" choice so picking exactly that value never requires --custom.
+    """
     click.echo("\n  Room for each reply, including thinking and the final answer.")
     click.echo("  Short replies use fewer tokens; this limit does not make replies longer.\n")
     origin = {
@@ -247,9 +254,17 @@ def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
         for name, cap in (("high", 65536), ("extended", 131072))
         if cap > suggested and (ceiling is None or cap <= ceiling)
     }
+    maximum = (
+        {"max": output_ceiling}
+        if output_ceiling is not None
+        and output_ceiling > suggested
+        and output_ceiling not in larger.values()
+        and (ceiling is None or output_ceiling <= ceiling)
+        else {}
+    )
     selected = prompt(
         "Reply budget",
-        choices=("recommended", *larger, *smaller, "custom"),
+        choices=("recommended", *larger, *maximum, *smaller, "custom"),
         default="recommended",
         open_menu=True,
         labels={
@@ -258,12 +273,13 @@ def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
                 name: f"{'High' if name == 'high' else 'Extended'} reasoning budget — {cap:,} tokens"
                 for name, cap in larger.items()
             },
+            **{name: f"Model maximum — {cap:,} tokens" for name, cap in maximum.items()},
             **{name: f"{cap:,} tokens" for name, cap in smaller.items()},
             "custom": "Custom…",
         },
     )
     if selected != "custom":
-        return {**smaller, **larger}.get(selected, suggested)
+        return {**smaller, **larger, **maximum}.get(selected, suggested)
     if ceiling is not None:
         click.echo(f"  Known upper limit: {ceiling:,} tokens.")
     while True:

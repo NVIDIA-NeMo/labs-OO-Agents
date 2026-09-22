@@ -26,6 +26,92 @@ def quiet_provider_messages():
             legacy.suppress_debug_info = previous
 
 
+def format_budget(tokens):
+    """Render a check-token budget, spelling out the unset-flag sentinel as unlimited."""
+    from nooa.unifiedllm.connect import DEFAULT_CHECK_BUDGET
+
+    # DEFAULT_CHECK_BUDGET is a large finite sentinel, not float("inf"), so it
+    # survives JSON encoding and every existing int arithmetic site unchanged
+    # (see its definition). "Budget remaining" values are the sentinel minus
+    # whatever a run has spent so far (observed up to ~1.2M tokens for a full
+    # run; see TOKEN_RESERVATION), never exactly equal to it — so this stays
+    # a threshold, not an exact-equality check, but one anchored to the
+    # actual sentinel with a generous fixed buffer for spend, rather than a
+    # fraction of it. --budget-tokens has no declared upper bound, so a
+    # threshold that scaled down with the sentinel (e.g. a fraction of it)
+    # would mislabel a genuine, very large, explicitly-chosen budget as
+    # unlimited; a fixed buffer close to the sentinel does not.
+    return "unlimited" if tokens >= DEFAULT_CHECK_BUDGET - 10**9 else f"{tokens:,}"
+
+
+def _reasoning_tokens_label(record):
+    """Describe what's actually known about a level check's reasoning cost.
+
+    A real, positive count from the endpoint/litellm is shown as-is. Anthropic
+    can withhold the visible thinking text in more than one wire shape — a
+    genuine redacted_thinking block (an opaque encrypted blob, no text field
+    at all), or a normal *signed* "thinking" block whose text simply comes
+    back empty (observed live for Claude Sonnet 5/Opus 5 via Azure/Bedrock) —
+    but either way litellm's reasoning_tokens estimate is a text-length count
+    that reads 0 when there is no visible text, regardless of how much
+    thinking actually happened. Showing that 0 as though it were measured
+    would be misleading. output_tokens is shown instead where available,
+    since Anthropic bills thinking tokens as ordinary output tokens without
+    splitting them out.
+
+    litellm's text-length estimate only exists for Anthropic/Bedrock at all —
+    for every other provider (observed live for Qwen and DeepSeek), it never
+    attempts one, even when real, non-empty reasoning text came back. When we
+    have that text in hand, its character count is shown as a size signal
+    instead of just "not reported separately" with nothing further. Returns
+    "" when nothing is known.
+    """
+    tokens = record.get("reasoning_tokens")
+    if isinstance(tokens, int) and tokens > 0:
+        return f"{tokens:,} reasoning tokens"
+    output_tokens = record.get("output_tokens")
+    if not isinstance(output_tokens, int):
+        return ""
+    if record.get("reasoning_encrypted"):
+        size = record.get("reasoning_encrypted_bytes")
+        size_note = f"; ~{size:,} bytes of encrypted state" if isinstance(size, int) else ""
+        return (
+            f"reasoning text withheld by the provider ({output_tokens:,} output tokens, "
+            f"not split out{size_note})"
+        )
+    if record.get("reasoning_observed"):
+        chars = record.get("reasoning_text_chars")
+        chars_note = f"; ~{chars:,} reasoning chars" if isinstance(chars, int) else ""
+        return f"{output_tokens:,} output tokens (reasoning tokens not reported separately{chars_note})"
+    return ""
+
+
+def _reasoning_tokens_summary(record):
+    """Compact form of _reasoning_tokens_label for the end-of-run summary line.
+
+    Mirrors _reasoning_tokens_label's gating exactly: the final "N output
+    (chars)" fallback only applies when reasoning was actually observed.
+    Without that gate, a level where the model reported real output tokens
+    but never reasoned at all would print as though a reasoning cost was
+    measured for it.
+    """
+    tokens = record.get("reasoning_tokens")
+    if isinstance(tokens, int) and tokens > 0:
+        return f"{tokens:,}"
+    output_tokens = record.get("output_tokens")
+    if not isinstance(output_tokens, int):
+        return "reasoning observed" if record.get("reasoning_observed") else "0"
+    if record.get("reasoning_encrypted"):
+        size = record.get("reasoning_encrypted_bytes")
+        size_note = f", ~{size:,}B" if isinstance(size, int) else ""
+        return f"{output_tokens:,} output (withheld{size_note})"
+    if not record.get("reasoning_observed"):
+        return "0"
+    chars = record.get("reasoning_text_chars")
+    chars_note = f", ~{chars:,} chars" if isinstance(chars, int) else ""
+    return f"{output_tokens:,} output{chars_note}"
+
+
 def check_failure(outcome):
     """Translate sanitized error classes, never show a provider error body."""
     error = outcome.get("error", "")
@@ -95,7 +181,7 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
             dim=True,
         )
         line(
-            f"{budget_tokens:,} shared token budget"
+            f"{format_budget(budget_tokens)} shared token budget"
             if budget_tokens is not None
             else "Up to 3 interface calls, then tools and each proposed reasoning level.",
             dim=True,
@@ -134,6 +220,7 @@ class CheckProgress:
         self.active = False
         self.started = {}
         self.results = {}
+        self.reasoning_levels = {}
 
     def _clear(self):
         if self.active:
@@ -176,10 +263,11 @@ class CheckProgress:
                 fg="yellow",
             )
             return
-        status = "passed" if outcome in {"accepted", "confirmed"} else "attention"
+        # `status` here is display-only scratch state for the fallback table
+        # below (`fallback[status]`); check_status() a few lines down is the
+        # sole source of truth for the icon/color, and always overwrites
+        # whatever this block computes. Do not read `status` above that call.
         detail = check_failure(record) or record.get("reason")
-        if outcome == "not_probed" and not record.get("error"):
-            status = "skipped"
         if outcome == "accepted":
             detail = (
                 "Connected"
@@ -190,24 +278,40 @@ class CheckProgress:
                 detail = (
                     "Tool call returned" if record.get("tool_observed") else "No tool call returned"
                 )
-                if not record.get("tool_observed"):
-                    status = "attention"
             elif name.startswith("level:"):
                 detail = (
                     "Reasoning returned" if record.get("reasoning_observed") else "Request accepted"
                 )
                 if missing_reasoning:
-                    status, detail = "attention", "No reasoning details returned"
+                    detail = "No reasoning details returned"
             elif record.get("reasoning_observed"):
                 detail += " · reasoning returned"
-            if record.get("finish_reason") in {"length", "error", "content_filter"}:
-                status, detail = "attention", "Reply incomplete; check not conclusive"
+            if record.get("finish_reason") == "length":
+                detail = "Ran out of reply tokens before finishing"
+                if name.startswith("level:"):
+                    detail += (
+                        " — if you plan to use this reasoning level, increase the reply budget"
+                    )
+            elif record.get("finish_reason") in {"error", "content_filter"}:
+                detail = "Reply incomplete; check not conclusive"
             if record.get("reason") == "previous result reused":
                 detail += " · already checked"
             if name.startswith("level:") and isinstance(record.get("answer_correct"), bool):
+                tokens_label = _reasoning_tokens_label(record)
+                if tokens_label:
+                    detail += f" · {tokens_label}"
+                if record.get("reasoning_observed"):
+                    # Record every level where reasoning genuinely happened,
+                    # even when no token count/label is available (e.g. the
+                    # response carried no usage) — omitting it here silently
+                    # drops the level from the finish() summary line,
+                    # defeating the point of a complete cross-level
+                    # comparison. Levels where reasoning was never observed
+                    # stay out entirely: a bare "0" there would look like a
+                    # measured reasoning cost instead of an absence of
+                    # evidence (see unobserved_reasoning_levels).
+                    self.reasoning_levels[name[6:]] = record
                 detail += " · answer correct" if record["answer_correct"] else " · answer incorrect"
-                if not record["answer_correct"]:
-                    status = "attention"
         elif name == "cache" and outcome == "confirmed" and record.get("input_tokens"):
             cached, total = record.get("cached_input_tokens", 0), record["input_tokens"]
             detail = f"Reused {cached / total:.0%} of input ({cached:,} / {total:,} tokens)"
@@ -239,6 +343,13 @@ class CheckProgress:
 
     def finish(self, *, summary=True):
         self._clear()
+        if self.reasoning_levels and summary:
+            parts = [
+                f"{level}: {_reasoning_tokens_summary(record)}"
+                f"{'' if record['answer_correct'] else ' (wrong)'}"
+                for level, record in self.reasoning_levels.items()
+            ]
+            line("Reasoning tokens · " + " · ".join(parts), dim=True)
         if self.results and summary:
             counts = [
                 f"{sum(s == status for s in self.results.values())} {label}"

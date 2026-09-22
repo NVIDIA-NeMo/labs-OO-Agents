@@ -11,6 +11,8 @@ obeyed. The runtime reads the result, never these onboarding templates.
 from __future__ import annotations
 
 import asyncio
+import base64
+import difflib
 import json
 import math
 import os
@@ -19,7 +21,7 @@ import stat
 import tempfile
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -36,7 +38,11 @@ from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 from ._records import ProbeRecord, check_status, public_record
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
-DEFAULT_CHECK_BUDGET = 131072
+# Effectively unlimited: no real check plan approaches this, so an unset
+# --budget-tokens never causes checks to be skipped. A finite sentinel (not
+# float("inf")) keeps every arithmetic site, type annotation, and JSON
+# encoding of a ConnectPlan unchanged.
+DEFAULT_CHECK_BUDGET = 10**15
 DEFAULT_REASONING_OUTPUT_TOKENS = 4096
 REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
 Each job runs exactly once.
@@ -397,12 +403,18 @@ async def catalogue() -> list[dict]:
         return data
 
 
+def _normalized_model_id(value: str) -> str:
+    """Shared normalization rule for match_models() and fuzzy_match_models().
+
+    Kept in one place so the two matchers cannot silently disagree on what
+    counts as "the same" model id.
+    """
+    return re.sub(r"[-_.]", "", value.lower())
+
+
 def match_models(model: str, models: list[dict]) -> list[dict]:
     """Suggest up to three matches. The frontend must confirm a candidate."""
-
-    def normalized(value):
-        return re.sub(r"[-_.]", "", value.lower())
-
+    normalized = _normalized_model_id
     target = normalized(model)
     matches = []
     for item in models:
@@ -415,6 +427,38 @@ def match_models(model: str, models: list[dict]) -> list[dict]:
         elif target.rsplit("/", 1)[-1] == candidate.rsplit("/", 1)[-1]:
             matches.append((1, name, item))
     return [item for _, _, item in sorted(matches, key=lambda item: item[:2])[:3]]
+
+
+_FUZZY_MATCH_CUTOFF = 0.6
+
+
+def fuzzy_match_models(model: str, models: list[dict]) -> list[dict]:
+    """Best-effort "did you mean" suggestions once match_models finds nothing.
+
+    A gateway-routed model ID (e.g. ``aws/anthropic/bedrock-claude-opus-5``)
+    carries routing segments the catalogue never records, so exact/suffix
+    matching in match_models() can find nothing even though the model is
+    listed under its own name. This never auto-selects a candidate; the
+    frontend must still confirm one.
+    """
+    normalized = _normalized_model_id
+    target = normalized(model)
+    target_tail = target.rsplit("/", 1)[-1]
+    scored = []
+    for item in models:
+        name = item.get("id")
+        if not isinstance(name, str):
+            continue
+        candidate = normalized(name)
+        candidate_tail = candidate.rsplit("/", 1)[-1]
+        ratio = max(
+            difflib.SequenceMatcher(None, target, candidate).ratio(),
+            difflib.SequenceMatcher(None, target_tail, candidate_tail).ratio(),
+        )
+        if ratio >= _FUZZY_MATCH_CUTOFF:
+            scored.append((ratio, name, item))
+    scored.sort(key=lambda entry: entry[0], reverse=True)
+    return [item for _, _, item in scored[:3]]
 
 
 def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4096) -> dict:
@@ -1293,7 +1337,108 @@ async def run_steps(
                     proposal.alias, entry, probe, key
                 )
             usage = response.usage
-            reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
+            # response.reasoning joins only non-empty AssistantReasoning parts,
+            # so a provider that returns a reasoning part with a signature but
+            # deliberately empty/opaque text (Claude Sonnet 5/Opus 5 via Azure
+            # or Bedrock) reads as no reasoning at all through that property.
+            # Check for the part's presence directly, matching how session
+            # checks in _session.py already detect it.
+            reasoning_parts = [part for part in response.parts if part.kind == "reasoning"]
+            reasoning = bool(reasoning_parts or (usage and usage.reasoning_tokens))
+            # Anthropic withholds the visible thinking text in (at least) two
+            # distinct wire shapes, both preserved on .native by chat_parts.py:
+            # a genuine redacted_thinking block (opaque "data" blob, no text
+            # field at all), and a normal *signed* "thinking" block whose
+            # "thinking" text happens to be empty (observed live for Claude
+            # Sonnet 5/Opus 5 via this Bedrock/Azure route) — chat_parts.py
+            # accepts empty text there as long as a real signature is present.
+            # Either way there's no visible text left for litellm to estimate
+            # a token count from — surface that instead of a bare, misleading 0.
+            reasoning_encrypted = False
+            reasoning_encrypted_bytes = None
+
+            def _encrypted_blob_size(data: str) -> int:
+                # The decoded byte count of an opaque encrypted blob is a
+                # rough size signal only — a proxy for how much reasoning
+                # state it carries, not a token count. Providers give no way
+                # to convert this into an actual reasoning-token figure.
+                try:
+                    return len(base64.b64decode(data, validate=False))
+                except ValueError:  # binascii.Error is a ValueError subclass
+                    return len(data)
+
+            for part in reasoning_parts:
+                if not isinstance(part.native, Mapping):
+                    continue
+                block = part.native.get("thinking_blocks")
+                if isinstance(block, Mapping):
+                    kind = block.get("type")
+                    if kind == "redacted_thinking" and isinstance(block.get("data"), str):
+                        reasoning_encrypted = True
+                        data = block["data"]
+                        reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
+                            _encrypted_blob_size(data)
+                        )
+                    elif (
+                        kind == "thinking"
+                        and isinstance(block.get("signature"), str)
+                        and not part.text
+                    ):
+                        # chat_parts.py already popped "thinking" text out of
+                        # this dict, so part.text (not the dict) is the only
+                        # place left to check whether it was actually empty.
+                        # A signature's length is fixed by the signing
+                        # scheme, not by how much was thought — there is no
+                        # size signal to report here, only that the text was
+                        # withheld.
+                        reasoning_encrypted = True
+                    continue
+                # openai/azure Chat Completions routes (chat_parts.py) store
+                # their reasoning item under "reasoning_items", a third
+                # shape distinct from both "thinking_blocks" above and the
+                # unwrapped Responses-style native below — same
+                # encrypted_content field, different wrapper key.
+                #
+                # An OpenAI-style reasoning item can carry a visible summary
+                # (part.text) alongside encrypted_content at the same time —
+                # the encrypted blob is opaque replay state, not proof the
+                # readable text was withheld. Only flag "withheld" when there
+                # is no visible text, matching the "thinking" branch above.
+                block = part.native.get("reasoning_items")
+                if isinstance(block, Mapping):
+                    encrypted_content = block.get("encrypted_content")
+                    if isinstance(encrypted_content, str) and encrypted_content and not part.text:
+                        reasoning_encrypted = True
+                        reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
+                            _encrypted_blob_size(encrypted_content)
+                        )
+                    continue
+                # Responses-style routes (response_parts.py) store the raw
+                # output item on .native directly, not wrapped under
+                # "thinking_blocks" or "reasoning_items" — e.g. {"type":
+                # "reasoning", "encrypted_content": "..."}. Detect that shape
+                # too, or Responses/OpenAI-style encrypted reasoning always
+                # reads as "not encrypted" here regardless of what the
+                # provider sent. Same visible-summary-plus-encrypted-blob
+                # caveat as the reasoning_items branch above.
+                encrypted_content = part.native.get("encrypted_content")
+                if isinstance(encrypted_content, str) and encrypted_content and not part.text:
+                    reasoning_encrypted = True
+                    reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
+                        _encrypted_blob_size(encrypted_content)
+                    )
+            # litellm's text-length reasoning_tokens estimate (see the
+            # redacted_thinking/signed-empty-thinking comment above) only
+            # exists in its Anthropic/Bedrock transformation code — for every
+            # other provider it makes no estimate at all, even when real,
+            # non-empty reasoning text came back (observed live for Qwen and
+            # DeepSeek routes on this gateway). We already have that text
+            # in hand; report its length ourselves rather than nothing. Never
+            # the text itself — only its size, same privacy stance as the
+            # encrypted-blob byte count above.
+            reasoning_text_chars = (
+                sum(len(part.text) for part in reasoning_parts if part.text) or None
+            )
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
             tokens = usage.input_tokens + usage.output_tokens if usage else 0
         except Exception as exc:
@@ -1335,6 +1480,9 @@ async def run_steps(
             transport=transport,
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,
+            reasoning_encrypted=reasoning_encrypted,
+            reasoning_encrypted_bytes=reasoning_encrypted_bytes,
+            reasoning_text_chars=reasoning_text_chars,
             tool_observed=tool,
             reported_tokens=tokens,
             input_tokens=usage.input_tokens if usage else None,

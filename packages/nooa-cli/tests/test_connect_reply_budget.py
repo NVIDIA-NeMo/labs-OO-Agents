@@ -97,6 +97,100 @@ def test_high_reasoning_options_never_exceed_known_limit(monkeypatch, ceiling):
     assert _connect_prompts.choose_reply_limit(32768, ceiling) == 32768
 
 
+def test_model_maximum_choice_is_offered_and_selectable(monkeypatch):
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert kwargs["choices"] == ("recommended", "high", "max", "smaller", "short", "custom")
+        assert kwargs["labels"]["max"] == "Model maximum — 100,000 tokens"
+        return "max"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    assert _connect_prompts.choose_reply_limit(32768, 100000, output_ceiling=100000) == 100000
+
+
+def test_model_maximum_is_omitted_when_unknown(monkeypatch):
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert "max" not in kwargs["choices"]
+        return "recommended"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    # ceiling is known (context window) but output_ceiling (true max output) isn't.
+    assert _connect_prompts.choose_reply_limit(32768, 200000, output_ceiling=None) == 32768
+
+
+def test_boolean_catalogue_output_limit_is_not_treated_as_one_token(tmp_path, monkeypatch):
+    from nooa_cli.commands import _connect_prompts as prompts
+
+    from nooa.unifiedllm import connect
+
+    real_configure_entry = connect.configure_entry
+
+    def configure_with_boolean_catalogue_limit(*args, **kwargs):
+        configured = real_configure_entry(*args, **kwargs)
+        configured["provenance"]["catalogue_limits"] = {"max_completion_tokens": True}
+        return configured
+
+    chosen = {}
+
+    def choose_reply_limit(suggested, ceiling, *, output_ceiling=None, **kwargs):
+        chosen["ceiling"] = ceiling
+        chosen["output_ceiling"] = output_ceiling
+        return suggested
+
+    monkeypatch.setattr(connect, "configure_entry", configure_with_boolean_catalogue_limit)
+    monkeypatch.setattr(prompts, "choose_reply_limit", choose_reply_limit)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            "responses",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--no-probe",
+            "--output",
+            str(path),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert chosen["output_ceiling"] is None
+    assert chosen["ceiling"] != 1
+
+
+def test_model_maximum_is_omitted_when_it_duplicates_extended(monkeypatch):
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert "max" not in kwargs["choices"]
+        return "extended"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    assert _connect_prompts.choose_reply_limit(32768, 131072, output_ceiling=131072) == 131072
+
+
+def test_model_maximum_never_exceeds_the_stricter_context_ceiling(monkeypatch):
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert "max" not in kwargs["choices"]
+        return "recommended"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    # output_ceiling (200000) exceeds the stricter overall ceiling (40000, e.g.
+    # from context window), so it must not be offered as an achievable choice.
+    assert _connect_prompts.choose_reply_limit(32768, 40000, output_ceiling=200000) == 32768
+
+
 def test_stage_save_fills_defaults_and_reports_shadow(tmp_path, monkeypatch):
     from nooa import llm_config
 
@@ -186,3 +280,29 @@ def test_stage_reasoning_budget_override_reaches_wire(monkeypatch, tmp_path):
     assert len(seen) == 1
     report = json.loads(result.stdout)
     assert report["checks"]["level:high"]["answer_correct"] is True
+
+
+def test_shadowing_source_extra_priority_treats_the_save_target_as_highest(tmp_path, monkeypatch):
+    """entries()'s extra_path is always appended last (highest priority) --
+    a --working-dir save is never actually shadowed by anything as long as
+    the caller keeps pairing -w with the same directory. Without
+    extra_priority=True, shadowing_source used to report a shadow warning
+    on every --working-dir save with a same-named alias defined elsewhere,
+    even though that is --working-dir's whole intended, correct use.
+    """
+    from nooa_cli.commands._connect_registry import shadowing_source
+
+    from nooa import llm_config
+
+    elsewhere = tmp_path / "elsewhere.yaml"
+    elsewhere.write_text("models: {local: {model_name: openai/old}}\n")
+    monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [elsewhere])
+    # shadowing_source's own priority list is built from conventional
+    # locations (bundled/user/project/NEMO_OO_LLM_CONFIG), independent of
+    # the mocked llm_config_chain() used only to resolve `found` above --
+    # register `elsewhere` as one so it participates in that comparison.
+    monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(elsewhere))
+
+    target = tmp_path / "target.yaml"
+    assert shadowing_source("local", target) == str(elsewhere)
+    assert shadowing_source("local", target, extra_priority=True) is None

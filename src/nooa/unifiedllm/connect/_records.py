@@ -21,6 +21,9 @@ class ProbeRecord(TypedDict, total=False):
     request_shape: dict[str, Any]
     status_code: int
     reasoning_observed: bool
+    reasoning_encrypted: bool
+    reasoning_encrypted_bytes: int | None
+    reasoning_text_chars: int | None
     answer_correct: bool
     tool_observed: bool
     state_retained: bool
@@ -63,6 +66,10 @@ def check_status(name: str, record: dict, *, missing_reasoning=False) -> str:
         return "attention"
     if name == "tools" and not record.get("tool_observed"):
         return "attention"
-    if name.startswith("level:") and (missing_reasoning or record.get("answer_correct") is False):
+    # The puzzle exists to elicit reasoning, not to prove the model can solve
+    # it — a wrong answer with reasoning genuinely observed is not a check
+    # failure. Only a missing reasoning signal (the thing this check actually
+    # verifies) gates "attention" here.
+    if name.startswith("level:") and missing_reasoning:
         return "attention"
     return "passed"
