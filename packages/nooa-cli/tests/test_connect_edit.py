@@ -260,8 +260,9 @@ def test_edit_model_with_working_dir_warns_when_source_is_not_the_target(
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Editing saved from" in result.output
-    assert "does not define" in result.output and "yet" in result.output
-    assert "copying it in from" in result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Editing saved from" in normalized_output
+    assert "does not define" in normalized_output and "yet" in normalized_output
+    assert "copying it in from" in normalized_output
     saved = yaml.safe_load((target / ".nooa" / "llm_config.yaml").read_text())
     assert saved["models"]["saved"]["model_name"] == "openai/vendor/model"
