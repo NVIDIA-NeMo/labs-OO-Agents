@@ -8,19 +8,17 @@ from litellm.types.utils import Choices, Message, ModelResponse
 
 from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient
 
 
-def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
+def _render(response: LLMResponse) -> list[dict]:
     neutral = XMLBlockFormatter().format(
         [ResolvedBlock(key="turn", content=response.content, role=Role.ASSISTANT, event=response)]
     )
-    formatter = ResponsesProviderFormatter() if responses else OpenAIProviderFormatter()
-    return formatter.format(neutral)
+    return OpenAIProviderFormatter().format(neutral)
 
 
 def _chat_response() -> ModelResponse:
@@ -64,7 +62,7 @@ def test_reasoning_only_response_demotes_for_responses_api() -> None:
     response = LLMResponse(content="", reasoning="portable thought")
     client = ResponsesClient(model="openai/gpt-5")
     try:
-        transformed, instructions = client._transform_messages(_render(response, responses=True))
+        transformed, instructions = client._transform_messages(_render(response))
     finally:
         client.close()
 

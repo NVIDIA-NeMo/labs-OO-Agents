@@ -125,7 +125,7 @@ def _reasoning_values(response):
 
 async def session_steps(alias, entry, *, api_key, budget_tokens):
     """Three configured-cap turns, without retries; never execute model tools."""
-    from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
+    from nooa.context_blocks.formatter import OpenAIProviderFormatter
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -173,11 +173,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         raise RuntimeError("Setup checks never execute model tools")
 
     formatter = CachedBlockFormatter()
-    provider = (
-        ResponsesProviderFormatter()
-        if entry["api_style"] == "responses"
-        else OpenAIProviderFormatter()
-    )
+    provider = OpenAIProviderFormatter()
     # Non-repetitive lines give a reusable prefix without any user's private data.
     # Short hex ids in place of zero-padded decimal digit runs measurably lower
     # (but do not eliminate) a stochastic provider content filter observed live
