@@ -624,15 +624,14 @@ class LocalAgentRunner:
         Spares daemon=True handles (long-lived infrastructure producers,
         e.g. an inbox pump or a persistent connection): this is a mid-session
         interrupt meant to leave the session otherwise usable, not a full
-        teardown. Without keep_daemons, a stray cancel destroyed every
-        daemon job underneath the session with no signal that anything
-        beyond the current turn was affected.
+        teardown. QueueManager.shutdown() spares daemons by default; only
+        the runner's own final shutdown() passes include_daemons=True.
         """
         with self._lifecycle_lock:
             self._suspend_restart += 1
         try:
             await self.cancel_turn(force=True, notify=False)
-            await self.shutdown_queue_manager(flush=True, keep_daemons=True)
+            await self.shutdown_queue_manager(flush=True)
             self._finish_foreground(error=TurnCancelled())
         finally:
             with self._lifecycle_lock:
@@ -1253,12 +1252,12 @@ class LocalAgentRunner:
         return loop
 
     async def shutdown_queue_manager(
-        self, *, agent: Any | None = None, flush: bool = False, keep_daemons: bool = False
+        self, *, agent: Any | None = None, flush: bool = False, include_daemons: bool = False
     ) -> None:
         queue_manager = self._queue_manager if agent is None else agent.queue_manager
 
         async def shutdown() -> None:
-            await queue_manager.shutdown(keep_daemons=keep_daemons)
+            await queue_manager.shutdown(include_daemons=include_daemons)
             if flush:
                 for channel in queue_manager.channels().values():
                     if channel.mode == "queue":
@@ -1323,7 +1322,7 @@ class LocalAgentRunner:
         try:
             try:
                 await self._cancel_turn_in_lifecycle("closing", force=True, notify=False)
-                await self.shutdown_queue_manager()
+                await self.shutdown_queue_manager(include_daemons=True)
             except BaseException as exc:
                 error = exc
             loop = self._loop
