@@ -498,6 +498,17 @@ def _print_trace_target(exporters: list[SpanExporter], experiment: str | None) -
 # ---------------------------------------------------------------------------
 
 
+def emit_status(message: str, attributes: dict[str, Any] | None = None) -> None:
+    """Emit a status event to the current active trace span.
+
+    This is useful for exposing framework state (e.g., 'Thinking...', 'Parsing')
+    to trace viewers and external consumers.
+    """
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.add_event("status_update", attributes={**(attributes or {}), "message": message})
+
+
 def flush_traces(timeout_millis: int = 30000) -> None:
     """Force-flush all pending spans across all exporters."""
     if _provider:
@@ -527,6 +538,7 @@ __all__ = [
     "set_session",
     "session_scope",
     "get_session",
+    "emit_status",
     "flush_traces",
     "shutdown_traces",
 ]
