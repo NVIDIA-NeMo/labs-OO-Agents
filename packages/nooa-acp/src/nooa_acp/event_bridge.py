@@ -21,7 +21,13 @@ from acp import (
     update_tool_call,
 )
 from acp.interfaces import Client
-from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
+from acp.schema import (
+    ContentToolCallContent,
+    Cost,
+    SessionInfoUpdate,
+    ToolCallLocation,
+    UsageUpdate,
+)
 from nooa_cli.coding import (
     CodingAgent,
     FileEdit,
@@ -34,6 +40,7 @@ from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
+from nooa.sessions import SessionHandle, SessionTitleUpdated
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
 # the logging default sends them.
@@ -81,17 +88,28 @@ class ACPEventBridge:
         self._python_source: dict[str, str] = {}
         self._terminal_output: dict[str, str] = {}
         self._cost_usd = 0.0
-        self._unsubscribers: list[Callable[[], None]] = [
-            agent.event_manager.on("AgentMessage", self._on_agent_message),
-            agent.event_manager.on("ToolCallEvent", self._on_tool_call),
-            agent.event_manager.on("PythonOutput", self._on_python_output),
-            agent.event_manager.on("LLMResponse", self._on_llm_response),
-            agent.event_manager.on("FileEdit", self._on_file_edit),
-            agent.event_manager.on("TerminalCommandStarted", self._on_terminal_started),
-            agent.event_manager.on("TerminalCommandOutput", self._on_terminal_output),
-            agent.event_manager.on("TerminalCommandFinished", self._on_terminal_finished),
-        ]
+        self._unsubscribers: list[Callable[[], None]] = self._subscribe(agent.event_manager)
+        # A delegated/spawned CodingWorker gets its own independent
+        # event_manager (kept off this agent's own, so a worker's turn-by-
+        # turn activity never leaks into the controller's LLM context — only
+        # its final report does, via delegate()/spawn()). Without this hook
+        # none of that live activity — tool cards, diffs, cost — ever
+        # reached the ACP client; the delegation feature ran invisibly.
+        agent._on_worker_spawned = lambda worker: self._subscribe(worker.event_manager)
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
+
+    def _subscribe(self, event_manager: Any) -> list[Callable[[], None]]:
+        """Wire this bridge's handlers onto one EventManager (agent or worker)."""
+        return [
+            event_manager.on("AgentMessage", self._on_agent_message),
+            event_manager.on("ToolCallEvent", self._on_tool_call),
+            event_manager.on("PythonOutput", self._on_python_output),
+            event_manager.on("LLMResponse", self._on_llm_response),
+            event_manager.on("FileEdit", self._on_file_edit),
+            event_manager.on("TerminalCommandStarted", self._on_terminal_started),
+            event_manager.on("TerminalCommandOutput", self._on_terminal_output),
+            event_manager.on("TerminalCommandFinished", self._on_terminal_finished),
+        ]
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
@@ -104,6 +122,20 @@ class ACPEventBridge:
     def publish_best_effort(self, update: Any) -> None:
         """Queue bootstrap metadata without poisoning the live event stream."""
         self._enqueue(_BestEffortUpdate(update))
+
+    def watch_session(self, handle: SessionHandle) -> None:
+        """Forward durable metadata changes from the session's event manager."""
+
+        def on_title(event: SessionTitleUpdated) -> None:
+            self._enqueue(
+                SessionInfoUpdate(
+                    session_update="session_info_update",
+                    title=event.title,
+                    updated_at=event.timestamp.isoformat(),
+                )
+            )
+
+        self._unsubscribers.append(handle.events.on("SessionTitleUpdated", on_title))
 
     def _on_agent_message(self, event: EventBase) -> None:
         if not isinstance(event, AgentMessage):

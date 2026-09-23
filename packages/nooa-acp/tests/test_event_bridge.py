@@ -548,3 +548,50 @@ async def test_a_dead_pump_fails_flush_instead_of_hanging(tmp_path):
     # And teardown must not hang either.
     await asyncio.wait_for(bridge.close(), timeout=5)
     await agent.close()
+
+
+async def test_bridge_observes_a_delegated_workers_own_events(tmp_path):
+    """A delegated/spawned CodingWorker gets its own independent event_manager
+    (kept off the controller's, so a worker's turn-by-turn activity never
+    leaks into the controller's LLM context -- only its final report does).
+    Without CodingAgent._on_worker_spawned wired to the bridge, none of that
+    live activity -- tool cards, diffs, cost -- ever reached the ACP client;
+    the delegation feature ran invisibly. Exercises the actual hook
+    CodingAgent.delegate() calls, using a fake worker rather than a real
+    (slow, LLM-driven) delegate() call.
+    """
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    assert agent._on_worker_spawned is not None
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.event_manager = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path).event_manager
+
+    worker = _FakeWorker()
+    agent._on_worker_spawned(worker)
+
+    # Emitted on the WORKER's own event_manager, not the controller's --
+    # this must still reach the bridge.
+    worker.event_manager.add(AgentMessage(content="worker says hi"))
+    await bridge.flush()
+
+    texts = [
+        _content_text_or_none(update)
+        for _, update in client.updates
+        if isinstance(update, AgentMessageChunk)
+    ]
+    assert "worker says hi" in texts
+
+    # The controller's own context must stay untouched by the worker's event:
+    # nothing was ever added to the controller's own event_manager.
+    assert agent.event_manager.keys() == []
+
+    await bridge.close()
+    await agent.close()
+
+
+def _content_text_or_none(update: AgentMessageChunk) -> str | None:
+    block = update.content
+    return getattr(block, "text", None)

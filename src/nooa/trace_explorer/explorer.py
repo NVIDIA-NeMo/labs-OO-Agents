@@ -3289,6 +3289,8 @@ class TraceExplorer:
                         try:
                             args = json.loads(tc.arguments)
                             code = args.get("code", "") if isinstance(args, dict) else ""
+                            if not isinstance(code, str):
+                                code = ""
                             # When the turn errored, prefer the failing line extracted from
                             # the error message (e.g. "Cell In[N], line M\n    <code>").
                             # Fall back to the first meaningful code line.
@@ -3381,7 +3383,11 @@ class TraceExplorer:
             try:
                 args = json.loads(args_json)
                 # Extract Python cell code for readability
-                if _is_python_tool(tool_name) and isinstance(args, dict) and "code" in args:
+                if (
+                    _is_python_tool(tool_name)
+                    and isinstance(args, dict)
+                    and isinstance(args.get("code"), str)
+                ):
                     return args["code"]
                 return _pformat(args, max_string=200 if concise else 5000)
             except (json.JSONDecodeError, TypeError):
@@ -3609,7 +3615,11 @@ class TraceExplorer:
             """Format tool arguments, extracting code for readability."""
             try:
                 args = json.loads(args_json)
-                if _is_python_tool(tool_name) and isinstance(args, dict) and "code" in args:
+                if (
+                    _is_python_tool(tool_name)
+                    and isinstance(args, dict)
+                    and isinstance(args.get("code"), str)
+                ):
                     return args["code"]
                 return _pformat(args, max_string=5000)
             except (json.JSONDecodeError, TypeError):
@@ -3869,7 +3879,7 @@ class TraceExplorer:
                             if (
                                 _is_python_tool(tc.function_name)
                                 and isinstance(args, dict)
-                                and "code" in args
+                                and isinstance(args.get("code"), str)
                             ):
                                 lines.extend(indent(trunc(args["code"]), "    "))
                             else:
@@ -3893,14 +3903,6 @@ class TraceExplorer:
         # correlated LLM turn is available; legacy traces fall back to execute_python.
         if turn.code:
             tool_name = "execute_python"
-            if not turn.tool_call_id and context_llm_turn:
-                calls = context_llm_turn.tool_calls + [
-                    tc for message in context_llm_turn.messages for tc in message.tool_calls
-                ]
-                matching_call = next(
-                    (tc for tc in calls if _is_python_tool(tc.function_name)),
-                    None,
-                )
             if matching_call is not None:
                 tool_name = matching_call.function_name
             id_attr = f' id="{turn.tool_call_id}"' if turn.tool_call_id else ""

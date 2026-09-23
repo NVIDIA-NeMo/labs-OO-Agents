@@ -171,12 +171,7 @@ class SessionStore:
         host: str = "",
         session_id: str | None = None,
         check_same_thread: bool = True,
-        origin: str | None = None,
     ) -> SessionHandle:
-        # ``origin`` is the pre-move name for ``host``; nooa_acp still passes it
-        # until its server moves onto this store.
-        if origin is not None:
-            host = host or origin
         session_id = self._validate_id(session_id or str(uuid.uuid4()))
         started = SessionStarted(
             host=host,

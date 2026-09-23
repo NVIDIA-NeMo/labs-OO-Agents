@@ -88,7 +88,7 @@ async def close_every_adapter(monkeypatch):
 
 def _completed_llm() -> FakeLLMClient:
     return FakeLLMClient.with_tool_call(
-        "execute_python",
+        "python_cell",
         {
             "code": (
                 "self.message('ACP response')\n"
@@ -307,7 +307,10 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
     assert len(advertised) == 1
     assert [command.name for command in advertised[0].available_commands] == [
         "diagnose",
+        "mcp",
+        "mcp-add",
         "skill-status",
+        "skills",
     ]
     diagnose = advertised[0].available_commands[0]
     assert diagnose.description == "Diagnose the workspace."
@@ -602,7 +605,12 @@ async def test_cancel_clears_agent_facing_slash_result_and_session_remains_usabl
         resumed = await adapter.prompt(created.session_id, [text_block("continue")])
 
     assert resumed.stop_reason == "end_turn"
-    assert observed == [{"user_messages": ["continue"]}]
+    assert len(observed) == 1
+    assert set(observed[0]) == {"user_messages", "system_messages"}
+    assert observed[0]["user_messages"] == ["continue"]
+    housekeeping = observed[0]["system_messages"]
+    assert len(housekeeping) == 1
+    assert str(housekeeping[0]).startswith("[session-title]")
     await adapter.close()
 
 
@@ -628,7 +636,12 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 2
-    assert [command.name for command in advertised[-1].available_commands] == ["later"]
+    assert [command.name for command in advertised[-1].available_commands] == [
+        "later",
+        "mcp",
+        "mcp-add",
+        "skills",
+    ]
     await adapter.close()
 
 
@@ -670,7 +683,12 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
-    assert [command.name for command in advertised[0].available_commands] == ["repair"]
+    assert [command.name for command in advertised[0].available_commands] == [
+        "mcp",
+        "mcp-add",
+        "repair",
+        "skills",
+    ]
     invoked = await runtime.commands.invoke("repair", "deep")
     assert invoked.text == "Repair using deep mode (reloaded)."
     await adapter.close()
@@ -706,7 +724,10 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
     assert not any(isinstance(update, AvailableCommandsUpdate) for update in client.updates)
     assert [command.name for command in runtime.commands.commands()] == [
         "diagnose",
+        "mcp",
+        "mcp-add",
         "skill-status",
+        "skills",
     ]
     invoked = await runtime.commands.invoke("diagnose", "deep")
     assert invoked.text == "Diagnose using deep mode."
@@ -965,8 +986,18 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
         for session_id, update in client.accepted
         if isinstance(update, AvailableCommandsUpdate)
     }
-    assert commands_by_session[alpha_session.session_id] == ["alpha"]
-    assert commands_by_session[beta_session.session_id] == ["beta"]
+    assert commands_by_session[alpha_session.session_id] == [
+        "alpha",
+        "mcp",
+        "mcp-add",
+        "skills",
+    ]
+    assert commands_by_session[beta_session.session_id] == [
+        "beta",
+        "mcp",
+        "mcp-add",
+        "skills",
+    ]
     messages = {
         session_id: update.content.text
         for session_id, update in client.accepted
@@ -1115,9 +1146,11 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     await first_adapter.prompt(created.session_id, [text_block("remember this")])
 
     listed = await first_adapter.list_sessions(str(tmp_path))
+    assert listed.sessions == []  # Already open in this ACP server.
+    await first_adapter.close_session(created.session_id)
+    listed = await first_adapter.list_sessions(str(tmp_path))
     assert [session.session_id for session in listed.sessions] == [created.session_id]
     assert listed.sessions[0].cwd == str(tmp_path)
-    await first_adapter.close_session(created.session_id)
     with pytest.raises(RequestError):
         await first_adapter.prompt(created.session_id, [text_block("closed")])
     await first_adapter.close()
@@ -1144,6 +1177,74 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     await replay_adapter.close()
 
 
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_close_checkpoints_state_when_cancelling_work_fails(tmp_path, failure):
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+    session.agent.vars["checkpoint_probe"] = "last unsaved value"
+    cancel_work = session.dispatcher.runtime.cancel_work
+    attempts = 0
+
+    async def fail_first_cancel():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise failure("cancel-work failure")
+        await cancel_work()
+
+    with patch.object(session.dispatcher.runtime, "cancel_work", side_effect=fail_first_cancel):
+        with pytest.raises(failure):
+            await adapter.close_session(created.session_id)
+
+    # Loading through a fresh adapter checks both the final durable checkpoint
+    # and release of ownership despite the cleanup error.
+    resumed_adapter = CodingACPAdapter(_completed_llm)
+    resumed_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    await resumed_adapter.load_session(str(tmp_path), created.session_id)
+    resumed = await _session(resumed_adapter, created.session_id)
+    assert resumed.agent.vars["checkpoint_probe"] == "last unsaved value"
+    await resumed_adapter.close()
+    await adapter.close()
+
+
+async def test_resume_pagination_skips_open_and_empty_sessions_before_slicing(
+    tmp_path, monkeypatch
+):
+    from contextlib import ExitStack
+
+    from nooa_acp import server
+
+    from nooa.sessions import SessionStore
+
+    monkeypatch.setattr(server, "_SESSION_PAGE_SIZE", 2)
+    store = SessionStore(tmp_path / ".nooa" / "sessions")
+    adapter = CodingACPAdapter(_completed_llm)
+    with ExitStack() as open_sessions:
+        for index in range(3):
+            with store.create(
+                session_id=f"ready-{index}", working_directory=str(tmp_path)
+            ) as ready:
+                ready.record_user_message("A saved conversation, even without a reply or title")
+            busy = open_sessions.enter_context(
+                store.create(session_id=f"busy-{index}", working_directory=str(tmp_path))
+            )
+            busy.record_user_message("An open conversation")
+            with store.create(
+                session_id=f"empty-{index}", working_directory=str(tmp_path)
+            ) as empty:
+                empty.set_title("A title alone is not a conversation")
+
+        first = await adapter.list_sessions(str(tmp_path))
+        assert [session.session_id for session in first.sessions] == ["ready-2", "ready-1"]
+        assert first.next_cursor == "2"
+        second = await adapter.list_sessions(str(tmp_path), cursor=first.next_cursor)
+        assert [session.session_id for session in second.sessions] == ["ready-0"]
+        assert second.next_cursor is None
+        assert len(store.list(limit=None)) == 9  # Filtering never deletes databases.
+
+
 async def test_loading_session_is_not_available_until_replay_finishes(tmp_path):
     create_adapter = CodingACPAdapter(_completed_llm)
     create_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
@@ -1168,12 +1269,79 @@ async def test_loading_session_is_not_available_until_replay_finishes(tmp_path):
         with pytest.raises(RequestError) as exc_info:
             await adapter.close_session(created.session_id)
         assert exc_info.value.code == _RESOURCE_NOT_FOUND
+        with pytest.raises(RequestError) as exc_info:
+            await adapter.cancel(created.session_id)
+        assert exc_info.value.code == _RESOURCE_NOT_FOUND
         release_replay.set()
         await loading
 
     response = await adapter.prompt(created.session_id, [text_block("now ready")])
     assert response.stop_reason == "end_turn"
     await adapter.close()
+
+
+@pytest.mark.parametrize("failure", ["error", "cancel"])
+async def test_failed_replay_releases_session_and_allows_retry(tmp_path, failure):
+    source = CodingACPAdapter(_completed_llm)
+    source.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await source.new_session(str(tmp_path))
+    await source.close()
+
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    replay_started = asyncio.Event()
+    release_replay = asyncio.Event()
+
+    async def fail_replay(_handle):
+        replay_started.set()
+        await release_replay.wait()
+        raise RuntimeError("replay failed")
+
+    with patch.object(adapter, "_replay_session", side_effect=fail_replay):
+        loading = asyncio.create_task(adapter.load_session(str(tmp_path), created.session_id))
+        await asyncio.wait_for(replay_started.wait(), timeout=5)
+        if failure == "cancel":
+            loading.cancel()
+        else:
+            release_replay.set()
+        with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
+            await loading
+
+    with pytest.raises(RequestError) as exc_info:
+        await adapter.prompt(created.session_id, [text_block("failed session")])
+    assert exc_info.value.code == _RESOURCE_NOT_FOUND
+
+    # Reopen the same durable session: both the resource claim and the ACP
+    # readiness state must recover after failure or caller cancellation.
+    await adapter.load_session(str(tmp_path), created.session_id)
+    response = await adapter.prompt(created.session_id, [text_block("retry")])
+    assert response.stop_reason == "end_turn"
+    await adapter.close()
+
+
+async def test_shutdown_during_replay_does_not_publish_closed_session(tmp_path):
+    source = CodingACPAdapter(_completed_llm)
+    source.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await source.new_session(str(tmp_path))
+    await source.close()
+
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    replay_started = asyncio.Event()
+    release_replay = asyncio.Event()
+
+    async def replay(_handle):
+        replay_started.set()
+        await release_replay.wait()
+
+    with patch.object(adapter, "_replay_session", side_effect=replay):
+        loading = asyncio.create_task(adapter.load_session(str(tmp_path), created.session_id))
+        await asyncio.wait_for(replay_started.wait(), timeout=5)
+        await adapter.close()
+        release_replay.set()
+        with pytest.raises(RequestError) as exc_info:
+            await loading
+        assert exc_info.value.code == _RESOURCE_NOT_FOUND
 
 
 async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(tmp_path):
@@ -1570,4 +1738,89 @@ async def test_bootstrap_updates_do_not_interleave_into_a_replay(tmp_path):
     assert replayed, kinds
     # The replayed turns must be contiguous — nothing wedged between them.
     assert replayed == list(range(replayed[0], replayed[0] + len(replayed))), kinds
+    await adapter.close()
+
+
+async def test_none_turn_result_without_cancel_does_not_deadlock_the_turn_lock(
+    tmp_path, monkeypatch
+):
+    """prompt() treats a None dispatch result as "a cancel is in flight" and
+    waits on session.cancel_complete -- but the shared LocalAgentRunner can
+    also settle a turn with no result via a purely internal completion path
+    that never calls dispatcher.cancel() at all, so nothing would ever set
+    that event. Without a bound, that wait (and the turn lock it's held
+    under) never returns, and every later prompt/close/shutdown on this
+    session hangs too.
+    """
+    import nooa_acp.server as server_module
+
+    monkeypatch.setattr(server_module, "_CANCEL_CONFIRMATION_TIMEOUT_SECONDS", 0.05)
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+
+    async def submit_without_cancelling(_text: str):
+        # No call to session.dispatcher.cancel() here, so
+        # session.cancel_complete is never set for this turn.
+        return None
+
+    with patch.object(session.dispatcher, "submit", side_effect=submit_without_cancelling):
+        response = await asyncio.wait_for(
+            adapter.prompt(created.session_id, [text_block("hello")]), timeout=2
+        )
+    assert response.stop_reason == "cancelled"
+    assert session.cancel_complete.is_set()
+
+    # The turn lock was actually released: a follow-up prompt must not raise
+    # "A prompt is already running".
+    follow_up = await adapter.prompt(created.session_id, [text_block("again")])
+    assert follow_up.stop_reason == "end_turn"
+    await adapter.close()
+
+
+async def test_orphaned_claim_from_a_dead_process_is_surfaced_not_hidden(tmp_path):
+    """A session's .active claim never auto-expires (a paused-but-alive owner
+    must never be treated as stale), so an unclean exit used to make the
+    session permanently invisible in list_sessions -- no way to even
+    discover its id/path for the manual cleanup the SessionAlreadyActiveError
+    message describes. A claim whose recorded owner process is confirmed
+    dead (not just "unknown or still alive") must now surface instead,
+    flagged via ACP's _meta extension point.
+    """
+    import json
+    import subprocess
+
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    await adapter.prompt(created.session_id, [text_block("remember this")])
+    await adapter.close_session(created.session_id)
+
+    # A session with no claim at all is listed normally.
+    listed = await adapter.list_sessions(str(tmp_path))
+    assert [s.session_id for s in listed.sessions] == [created.session_id]
+    assert listed.sessions[0].field_meta is None
+
+    # Simulate an unclean exit: recreate the claim with a PID this process
+    # can prove is dead (a subprocess that has already exited and been
+    # reaped can never collide with a live process in this PID namespace).
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    dead_pid = dead.pid
+
+    store = adapter._store(tmp_path.resolve())
+    claim_path = store.path_for(created.session_id).with_suffix(".active")
+    claim_path.mkdir(mode=0o755)
+    (claim_path / "owner-orphan-test.json").write_text(
+        json.dumps({"token": "orphan-test", "pid": dead_pid})
+    )
+    try:
+        listed = await adapter.list_sessions(str(tmp_path))
+        assert [s.session_id for s in listed.sessions] == [created.session_id]
+        assert listed.sessions[0].field_meta == {"dev.nooa/orphaned_claim": True}
+    finally:
+        (claim_path / "owner-orphan-test.json").unlink()
+        claim_path.rmdir()
+
     await adapter.close()
