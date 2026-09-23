@@ -16,15 +16,21 @@ from concurrent.futures import Future as ConcurrentFuture
 from typing import Any
 
 import pytest
-from nooa_coder.interactive.local_agent import LocalAgentRunner
+from nooa_coder.interactive.local_agent import LocalAgentRunner, TurnAbandoned, TurnCancelled
 
 
 class _FakeQueueManager:
     def set_notify_callback(self, callback: Any) -> None:
         pass
 
-    def channels(self) -> list[Any]:
+    async def shutdown(self, **kwargs: Any) -> None:
+        pass
+
+    def running_work_handles(self) -> list[Any]:
         return []
+
+    def channels(self) -> dict[str, Any]:
+        return {}
 
     def handles(self) -> list[Any]:
         return []
@@ -98,3 +104,42 @@ async def test_failed_cancel_dispatch_does_not_wedge_later_cancel_requests():
     assert second is True
     assert runner._cancel_requested is True
     assert live_future.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_cancel_work_settles_a_pending_foreground_with_turn_cancelled():
+    """A host awaiting submit_and_wait() used to get a bare None for a cancel,
+    indistinguishable from a turn the runner simply abandoned; it now gets a
+    typed TurnCancelled so it can confirm the cancel without a timed guess.
+    """
+    runner = _make_runner()
+    runner._lifecycle_state = "active"
+    completion: ConcurrentFuture = ConcurrentFuture()
+    runner._foreground = completion
+
+    await runner.cancel_work()
+
+    assert isinstance(completion.exception(), TurnCancelled)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_exit_without_a_result_settles_the_foreground_with_turn_abandoned():
+    """When the dispatch task finishes normally without any turn producing a
+    result (queue manager torn down, exit exception fired), the pending
+    foreground is settled with TurnAbandoned instead of None."""
+    runner = _make_runner()
+    runner._lifecycle_state = "active"
+    completion: ConcurrentFuture = ConcurrentFuture()
+    runner._foreground = completion
+
+    async def dispatch_that_exits_early() -> None:
+        return None
+
+    task = asyncio.get_running_loop().create_task(dispatch_that_exits_early())
+    runner._task = task
+    await task
+    runner._on_done(task)
+
+    error = completion.exception()
+    assert isinstance(error, TurnAbandoned)
+    assert "before the turn produced a result" in error.reason
