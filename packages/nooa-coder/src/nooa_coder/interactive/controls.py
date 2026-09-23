@@ -183,14 +183,14 @@ class SkillsControl(BehaviorControl):
             persisted = list(
                 dict.fromkeys(
                     (base / Path(item).expanduser()).resolve()
-                    for item in project_saved.get(
-                        "additional_skills_dirs", self.config.additional_skills_dirs
-                    )
+                    for item in project_saved.get("additional_skills_dirs", [])
                 )
             )
             if path not in persisted:
                 persisted.append(path)
-                self.config.additional_skills_dirs = persisted
+            self.config.additional_skills_dirs = list(
+                dict.fromkeys([*self.config.additional_skills_dirs, path])
+            )
             try:
                 settings_path = self._persist_setting(
                     "additional_skills_dirs", [str(item) for item in persisted]
@@ -265,18 +265,14 @@ class SkillsControl(BehaviorControl):
                 return ControlResult.err(f"Failed to activate `{skill_id}`: {e}")
             if skill_id not in registry.activated():
                 return ControlResult.err(f"Failed to activate `{skill_id}`")
-            active = list(
-                dict.fromkeys(
-                    [*project_saved.get("active_skills", self.config.active_skills), skill_id]
-                )
-            )
+            active = list(dict.fromkeys([*project_saved.get("active_skills", []), skill_id]))
             inactive = [
-                name
-                for name in project_saved.get("inactive_skills", self.config.inactive_skills)
-                if name != skill_id
+                name for name in project_saved.get("inactive_skills", []) if name != skill_id
             ]
-            self.config.active_skills = active
-            self.config.inactive_skills = inactive
+            self.config.active_skills = list(dict.fromkeys([*self.config.active_skills, skill_id]))
+            self.config.inactive_skills = [
+                name for name in self.config.inactive_skills if name != skill_id
+            ]
             try:
                 self._persist_settings({"active_skills": active, "inactive_skills": inactive})
             except Exception as exc:
@@ -297,18 +293,10 @@ class SkillsControl(BehaviorControl):
             return ControlResult.err(f"Failed to deactivate `{skill_id}`: {e}")
         if skill_id in registry.activated():
             return ControlResult.err(f"Failed to deactivate `{skill_id}`")
-        active = [
-            name
-            for name in project_saved.get("active_skills", self.config.active_skills)
-            if name != skill_id
-        ]
-        inactive = list(
-            dict.fromkeys(
-                [*project_saved.get("inactive_skills", self.config.inactive_skills), skill_id]
-            )
-        )
-        self.config.active_skills = active
-        self.config.inactive_skills = inactive
+        active = [name for name in project_saved.get("active_skills", []) if name != skill_id]
+        inactive = list(dict.fromkeys([*project_saved.get("inactive_skills", []), skill_id]))
+        self.config.active_skills = [name for name in self.config.active_skills if name != skill_id]
+        self.config.inactive_skills = list(dict.fromkeys([*self.config.inactive_skills, skill_id]))
         try:
             self._persist_settings({"active_skills": active, "inactive_skills": inactive})
         except Exception as exc:
@@ -350,10 +338,17 @@ class MCPControl(BehaviorControl):
         if not args or args[0] == "status":
             rows = []
             for name in registry.discovered():
+                try:
+                    approval = "approved" if registry._is_approved(name) else "approval required"
+                except ValueError:
+                    # build_approval_request() raises for an invalid/unsupported
+                    # entry; one bad server config must not blank out /mcp
+                    # status for every other, valid server.
+                    approval = "invalid configuration"
                 rows.append(
                     [
                         _safe_display(name),
-                        "approved" if registry._is_approved(name) else "approval required",
+                        approval,
                         "connected" if name in registry.connected() else "disconnected",
                     ]
                 )

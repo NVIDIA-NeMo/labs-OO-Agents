@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
@@ -244,7 +245,17 @@ class CodingAgent(InteractiveAgent):
         finally:
             await worker.close()
         if todo_base is not None:
-            self.todo.merge_todo(updated, base=todo_base)
+            try:
+                self.todo.merge_todo(updated, base=todo_base)
+            except Exception as exc:
+                # merge_todo() raising here would otherwise discard a report
+                # the worker already fully produced -- the JobError this
+                # propagates to has no separate payload field, so fold the
+                # report into its message rather than lose it.
+                raise RuntimeError(
+                    f"delegate report was produced but merging todo {todo_base.id!r} "
+                    f"failed: {exc}\n\n--- worker report (not lost) ---\n{report}"
+                ) from exc
         return report
 
     async def _delegation_report(
@@ -267,8 +278,12 @@ class CodingAgent(InteractiveAgent):
         source = label if label is not None else (lines[0] if lines else "")
         compact = " ".join(source.split())
         if label is None:
-            first_sentence, separator, _rest = compact.partition(".")
-            compact = f"{first_sentence}." if separator else compact
+            # partition(".") would cut at every dot, including ones inside
+            # file names and version numbers (e.g. "agent.py", "v1.2") --
+            # only a dot followed by whitespace or end-of-string ends a
+            # sentence.
+            match = re.search(r"\.(?=\s|$)", compact)
+            compact = compact[: match.end()] if match else compact
         if len(compact) <= max_length:
             return compact or "Delegated task"
         return f"{compact[: max_length - 1].rstrip()}…"
