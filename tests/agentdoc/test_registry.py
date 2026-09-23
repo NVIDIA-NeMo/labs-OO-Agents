@@ -59,6 +59,35 @@ def test_register_and_get_type_info_extractor():
     assert extractor is sample_extractor
 
 
+def test_registry_distinguishes_unhashable_equal_types_by_identity():
+    """Registration and removal use type identity, not metaclass equality or hashing."""
+
+    class EqualUnhashableMeta(type):
+        __hash__ = None
+
+        def __eq__(cls, other):
+            return isinstance(other, EqualUnhashableMeta)
+
+    first = EqualUnhashableMeta("First", (), {})
+    second = EqualUnhashableMeta("Second", (), {})
+
+    @register_type_info_extractor(first)
+    def extract_first(obj):
+        return TypeInfo("First", None, [], [], None)
+
+    @register_type_info_extractor(second)
+    def extract_second(obj):
+        return TypeInfo("Second", None, [], [], None)
+
+    assert get_type_info_extractor(first) is extract_first
+    assert get_type_info_extractor(second) is extract_second
+
+    unregister_type_info_extractor(first)
+
+    assert get_type_info_extractor(first) is None
+    assert get_type_info_extractor(second) is extract_second
+
+
 def test_get_type_info_extractor_returns_none_if_not_registered():
     """Test that get_type_info_extractor returns None for unregistered types."""
     obj = SampleType(42)
