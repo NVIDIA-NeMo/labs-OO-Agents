@@ -25,6 +25,7 @@ from acp.schema import (
 )
 from click.testing import CliRunner
 from nooa_acp.cli import command
+from nooa_acp.dispatcher import TurnAbandoned, TurnCancelled
 from nooa_acp.server import CodingACPAdapter, _SlashRequest
 from nooa_cli.commands import discover_commands
 
@@ -1745,41 +1746,56 @@ async def test_bootstrap_updates_do_not_interleave_into_a_replay(tmp_path):
     await adapter.close()
 
 
-async def test_none_turn_result_without_cancel_does_not_deadlock_the_turn_lock(
-    tmp_path, monkeypatch
-):
-    """prompt() treats a None dispatch result as "a cancel is in flight" and
-    waits on session.cancel_complete -- but the shared LocalAgentRunner can
-    also settle a turn with no result via a purely internal completion path
-    that never calls dispatcher.cancel() at all, so nothing would ever set
-    that event. Without a bound, that wait (and the turn lock it's held
-    under) never returns, and every later prompt/close/shutdown on this
-    session hangs too.
+async def test_abandoned_turn_releases_the_turn_lock_without_a_timed_guess(tmp_path):
+    """The runner can end a turn with no result and no cancel (its dispatch
+    loop exited, or it was closed mid-turn). It now reports that as
+    TurnAbandoned instead of a bare None that prompt() had to disambiguate
+    from a cancel by waiting on cancel_complete with a timeout and guessing.
     """
-    import nooa_acp.server as server_module
-
-    monkeypatch.setattr(server_module, "_CANCEL_CONFIRMATION_TIMEOUT_SECONDS", 0.05)
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     session = await _session(adapter, created.session_id)
 
-    async def submit_without_cancelling(_text: str):
-        # No call to session.dispatcher.cancel() here, so
-        # session.cancel_complete is never set for this turn.
-        return None
+    async def abandon(_text: str):
+        raise TurnAbandoned("dispatcher exited before the turn produced a result")
 
-    with patch.object(session.dispatcher, "submit", side_effect=submit_without_cancelling):
+    with patch.object(session.dispatcher, "submit", side_effect=abandon):
         response = await asyncio.wait_for(
             adapter.prompt(created.session_id, [text_block("hello")]), timeout=2
         )
     assert response.stop_reason == "cancelled"
     assert session.cancel_complete.is_set()
+    assert any("ended without a result" in turn.content for turn in session.handle.turns())
 
     # The turn lock was actually released: a follow-up prompt must not raise
     # "A prompt is already running".
-    follow_up = await adapter.prompt(created.session_id, [text_block("again")])
+    follow_up = await asyncio.wait_for(
+        adapter.prompt(created.session_id, [text_block("again")]), timeout=2
+    )
     assert follow_up.stop_reason == "end_turn"
+    await adapter.close()
+
+
+async def test_close_driven_cancel_does_not_wait_for_a_cancel_rpc(tmp_path):
+    """TurnCancelled can also come from dispatcher.close() (session teardown),
+    which holds no cancel_lock and never sets cancel_complete. prompt() must
+    only wait for the confirmation event when an actual cancel() RPC owns it.
+    """
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+
+    async def cancelled_by_close(_text: str):
+        raise TurnCancelled()
+
+    with patch.object(session.dispatcher, "submit", side_effect=cancelled_by_close):
+        response = await asyncio.wait_for(
+            adapter.prompt(created.session_id, [text_block("hello")]), timeout=2
+        )
+    assert response.stop_reason == "cancelled"
+    assert any("Stopped at your request" in turn.content for turn in session.handle.turns())
     await adapter.close()
 
 

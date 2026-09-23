@@ -87,17 +87,12 @@ from nooa.storage.sqlite import (
 )
 from nooa.unifiedllm import UnifiedLLM
 from nooa_acp._mcp_trace import MCPHandoffTrace
-from nooa_acp.dispatcher import InteractiveSessionDispatcher
+from nooa_acp.dispatcher import InteractiveSessionDispatcher, TurnAbandoned, TurnCancelled
 from nooa_acp.event_bridge import ACPEventBridge
 
 logger = logging.getLogger(__name__)
 
 _SESSION_PAGE_SIZE = 50
-# Bound on prompt()'s wait for cancel_complete after a None turn result. A
-# genuine cancel() RPC sets that event almost immediately; this only matters
-# for the (rare, internal) case where the shared runtime settles a turn with
-# no result outside of cancel() at all, which would otherwise wait forever.
-_CANCEL_CONFIRMATION_TIMEOUT_SECONDS = 30
 
 
 async def _close_in_order(*closers: Callable[[], Any] | None) -> None:
@@ -147,8 +142,6 @@ class _ACPSession:
     commands_sent_on_prompt: bool = False
     restored: bool = False
     policy: LocalTurnPolicy | None = None
-    # ACP requests must not interleave with the transcript replay on load.
-    ready: bool = False
     # Set by prompt() right before admitting a non-slash turn, whose text it
     # already recorded synchronously (see prompt()). Lets the dequeue-
     # triggered callback below recognize and skip that one admission instead
@@ -277,7 +270,7 @@ class CodingACPAdapter:
             handle.close()
             self._store(root).delete(handle.id)
             raise
-        runtime.value.ready = True
+        await self._sessions.publish(handle.id)
         self._defer_bootstrap_updates(runtime.value)
         return NewSessionResponse(session_id=handle.id)
 
@@ -313,12 +306,12 @@ class CodingACPAdapter:
             await self._replay_session(handle)
             if runtime.is_closed:
                 raise RequestError.resource_not_found(session_id)
-            runtime.value.ready = True
+            await self._sessions.publish(session_id)
             self._defer_bootstrap_updates(runtime.value)
         except BaseException:
             if runtime is not None:
                 with suppress(KeyError):
-                    await self._sessions.remove(session_id)
+                    await self._sessions.remove(session_id, include_unavailable=True)
             else:
                 handle.close()
             raise
@@ -470,11 +463,13 @@ class CodingACPAdapter:
                             session.agent.message(message)
                             await session.bridge.flush()
                             return PromptResponse(stop_reason="end_turn")
-                        except GenerationError:
-                            # Subclasses Exception, so the catch-all below would
-                            # swallow it and lose the stop reason the outer
-                            # handler maps. Generation limits are the runtime's
-                            # to report, not a command failure.
+                        except (GenerationError, TurnCancelled, TurnAbandoned):
+                            # All subclass Exception, so the catch-all below
+                            # would swallow them: a generation limit would lose
+                            # the stop reason the outer handler maps, and a
+                            # cancelled/abandoned turn would be reported as a
+                            # command failure. They are the runtime's to
+                            # report, not the command's.
                             raise
                         except Exception as exc:
                             # Command bodies are third-party code from workspace
@@ -494,22 +489,46 @@ class CodingACPAdapter:
                             session.agent.message(f"/{name} failed: {exc}")
                             await session.bridge.flush()
                             return PromptResponse(stop_reason="end_turn")
-                        if submission is None:
-                            result = None
-                        else:
-                            slash_result, result = submission
-                            if not slash_result.output_to_agent:
-                                message = str(slash_result)
-                                if command is not None and command.is_control:
-                                    if message:
-                                        session.bridge.publish(
-                                            update_agent_message(text_block(message))
-                                        )
-                                    session.handle.storage.save_snapshot(session.agent)
-                                elif message:
-                                    session.agent.message(message)
-                                await session.bridge.flush()
-                                return PromptResponse(stop_reason="end_turn")
+                        slash_result, result = submission
+                        if not slash_result.output_to_agent:
+                            message = str(slash_result)
+                            if command.is_control:
+                                if message:
+                                    session.bridge.publish(
+                                        update_agent_message(text_block(message))
+                                    )
+                                session.handle.storage.save_snapshot(session.agent)
+                            elif message:
+                                session.agent.message(message)
+                            await session.bridge.flush()
+                            return PromptResponse(stop_reason="end_turn")
+                except TurnCancelled:
+                    # Raised only when dispatcher.cancel() stopped this turn.
+                    # If that came from the cancel() RPC (which holds
+                    # cancel_lock and sets cancel_complete in its finally), wait
+                    # for it so the turn lock isn't released mid-teardown. A
+                    # cancel driven by session close holds no lock and sets no
+                    # event, so there is nothing to wait for.
+                    if session.cancel_lock.locked():
+                        await session.cancel_complete.wait()
+                    session.cancel_complete.set()
+                    # stop_reason and the tool card both carry the outcome, but
+                    # a collapsed card shows nothing and the turn just goes
+                    # quiet. Record it as a real message so the conversation --
+                    # and the durable transcript on resume -- says what happened.
+                    session.agent.message("Stopped at your request.")
+                    await session.bridge.flush()
+                    return PromptResponse(stop_reason="cancelled")
+                except TurnAbandoned as exc:
+                    # The runner ended the turn with no result and no cancel
+                    # (dispatch loop exited, runner closed). Nothing else will
+                    # report on it, so release the turn immediately and say so.
+                    # ACP has no closer stop reason than "cancelled".
+                    logger.warning("Session %s: %s", session_id, exc.reason)
+                    session.cancel_complete.set()
+                    session.agent.message(f"The turn ended without a result ({exc.reason}).")
+                    await session.bridge.flush()
+                    return PromptResponse(stop_reason="cancelled")
                 except GenerationError as exc:
                     # The strategy does not guarantee a PythonOutput for a call
                     # it already announced, so a turn ending on a generation
@@ -528,42 +547,6 @@ class CodingACPAdapter:
                     ):
                         return PromptResponse(stop_reason="max_turn_requests")
                     raise RequestError(-32603, message, {"details": message}) from exc
-                if result is None:
-                    # A None result usually means an in-flight cancel() RPC,
-                    # which always sets cancel_complete in its finally block
-                    # (near-instantly relative to this wait). But the shared
-                    # LocalAgentRunner can also settle a turn with no result
-                    # on a purely internal completion path that never goes
-                    # through cancel() at all -- nothing would ever set the
-                    # event then. Bound the wait so that ambiguity can never
-                    # turn into a permanently held turn lock; a real cancel
-                    # is expected to finish this wait well within the bound.
-                    confirmed = True
-                    try:
-                        async with asyncio.timeout(_CANCEL_CONFIRMATION_TIMEOUT_SECONDS):
-                            await session.cancel_complete.wait()
-                    except TimeoutError:
-                        confirmed = False
-                        logger.warning(
-                            "Session %s: turn ended with no result and no cancel "
-                            "confirmation within %ss; releasing the turn lock anyway.",
-                            session_id,
-                            _CANCEL_CONFIRMATION_TIMEOUT_SECONDS,
-                        )
-                        session.cancel_complete.set()
-                    # stop_reason and the tool card both carry the outcome, but
-                    # a collapsed card shows nothing and the turn just goes
-                    # quiet. Record it as a real message so the conversation —
-                    # and the durable transcript on resume — says what happened.
-                    # The timeout above means this None result was never
-                    # actually confirmed as a cancel, so don't claim one.
-                    session.agent.message(
-                        "Stopped at your request."
-                        if confirmed
-                        else "The turn ended without a result."
-                    )
-                    await session.bridge.flush()
-                    return PromptResponse(stop_reason="cancelled")
                 await session.bridge.flush()
                 return PromptResponse(stop_reason="end_turn")
         except SessionBusyError:
@@ -699,7 +682,10 @@ class CodingACPAdapter:
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
             try:
-                runtime = await self._sessions.add(handle.id, value)
+                # Registered unpublished: the id is reserved (a concurrent
+                # new/load for it fails) but get()/ids() don't serve it until
+                # new_session()/load_session() publish it after bootstrap.
+                runtime = await self._sessions.add(handle.id, value, available=False)
                 return runtime
             except ValueError:
                 raise RequestError.invalid_request(
@@ -770,12 +756,10 @@ class CodingACPAdapter:
 
     async def _get_runtime(self, session_id: str) -> SessionRuntime[_ACPSession]:
         try:
-            runtime = await self._sessions.get(session_id)
+            # Unpublished (still replaying) runtimes look absent to the pool.
+            return await self._sessions.get(session_id)
         except KeyError:
             raise RequestError.resource_not_found(session_id) from None
-        if not runtime.value.ready:
-            raise RequestError.resource_not_found(session_id)
-        return runtime
 
     @staticmethod
     def _defer_bootstrap_updates(session: _ACPSession) -> None:
