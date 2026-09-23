@@ -88,6 +88,13 @@ class TestRecording:
         m.empty_response()
         assert m.empty_response_count == 2
 
+    def test_length_continuation(self):
+        m = HarnessMetrics()
+        m.length_continuation("gpt-5.5")
+        m.length_continuation("")
+        assert m.length_continuation_count == 2
+        assert m.length_continuation_models == ["gpt-5.5", "unknown"]
+
     def test_gpt4o_double_quote_fix(self):
         m = HarnessMetrics()
         m.gpt4o_double_quote_fix()
@@ -253,6 +260,13 @@ class TestListCapping:
             m.exec_error("Error", "msg", i, "code")
         assert len(m.exec_errors) == _MAX_LIST_ITEMS
 
+    def test_length_continuation_models_capped(self):
+        m = HarnessMetrics()
+        for i in range(_MAX_LIST_ITEMS + 5):
+            m.length_continuation(f"model-{i}")
+        assert m.length_continuation_count == _MAX_LIST_ITEMS + 5
+        assert len(m.length_continuation_models) == _MAX_LIST_ITEMS
+
     def test_validation_error_list_capped_and_correlated(self):
         m = HarnessMetrics()
         for i in range(_MAX_LIST_ITEMS + 5):
@@ -336,6 +350,7 @@ class TestSpanAttributes:
         assert attrs["harness.imports_stripped.count"] == 1
         assert attrs["harness.imports_stripped.details"] == ["from typing import Literal"]
         assert attrs["harness.empty_response.count"] == 1
+        assert "harness.length_continuation.count" not in attrs
         assert attrs["harness.exec_python.total"] == 2
         assert attrs["harness.exec_python.success"] == 1
         assert attrs["harness.exec_error.count"] == 1
@@ -356,6 +371,14 @@ class TestSpanAttributes:
         assert attrs["harness.validation_error.count"] == 2
         assert attrs["harness.validation_error.types"] == ["ValueError", "TypeError"]
 
+    def test_length_continuation_attributes(self):
+        m = HarnessMetrics()
+        m.length_continuation("gpt-5.5")
+        m.length_continuation("o4-mini")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.length_continuation.count"] == 2
+        assert attrs["harness.length_continuation.models"] == ["gpt-5.5", "o4-mini"]
+
 
 # ── Schema tests ────────────────────────────────────────────────────
 
@@ -369,6 +392,7 @@ def _populate_all_fields(m: HarnessMetrics) -> None:
     m.blocked_module_removed("os")
     m.text_to_synthetic()
     m.empty_response()
+    m.length_continuation("gpt-test")
     m.gpt4o_double_quote_fix('"x\\n"')
     m.variable_ref_resolved("x")
     m.json_auto_parsed("json")
