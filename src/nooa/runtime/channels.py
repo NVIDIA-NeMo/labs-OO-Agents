@@ -1276,21 +1276,22 @@ class QueueManager:
 
     # ---- shutdown --------------------------------------------------------
 
-    async def shutdown(self, *, keep_daemons: bool = False) -> None:
-        """Cancel and await all outstanding spawned jobs.
+    async def shutdown(self, *, include_daemons: bool = False) -> None:
+        """Cancel and await outstanding spawned jobs, sparing daemons by default.
 
-        ``keep_daemons`` spares ``daemon=True`` handles (a long-lived
-        infrastructure producer, e.g. an inbox pump or a persistent
-        connection) — the same distinction :meth:`running_work_handles`
-        already makes for quiescence checks. A mid-session interrupt (a
-        single cancelled turn, meant to leave the session otherwise usable)
-        should pass this; a genuine final close should not, since nothing
-        will run the daemon down afterward otherwise.
+        ``daemon=True`` handles (a long-lived infrastructure producer, e.g.
+        an inbox pump or a persistent connection) survive a plain
+        ``shutdown()`` — the same distinction :meth:`running_work_handles`
+        makes for quiescence checks — so a mid-session interrupt or a
+        model-issued cleanup cannot tear down infrastructure the user never
+        asked to stop. Only a genuine final close passes
+        ``include_daemons=True``; nothing will run the daemons down afterward
+        otherwise.
 
         Safe to call multiple times. After shutdown, the cancelled handles
         are removed from the handles list; spared daemon handles stay.
         """
-        handles = [h for h in self._handles if not (keep_daemons and h.daemon)]
+        handles = [h for h in self._handles if include_daemons or not h.daemon]
         # Request every cancellation before awaiting cleanup. If this caller is
         # cancelled, unfinished jobs remain discoverable for a later shutdown.
         # Same repeat-request rule as JobHandle.cancel(): skip only when this

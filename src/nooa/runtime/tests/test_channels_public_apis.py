@@ -172,7 +172,7 @@ async def test_daemon_spawn_is_flagged_and_excluded_from_work_handles():
     assert h_daemon not in work
     assert h_done not in work
 
-    await qm.shutdown()
+    await qm.shutdown(include_daemons=True)
 
     assert h_daemon.state == "cancelled"
     assert h_work.state == "cancelled"

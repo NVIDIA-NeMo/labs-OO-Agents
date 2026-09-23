@@ -965,6 +965,9 @@ class SQLiteStorageManager:
     Args:
         db_path: Path to SQLite database file. Use ":memory:" for in-memory
                  (useful for testing).
+        must_exist: Open a file-backed database only if it already exists;
+                    a missing file raises ``sqlite3.OperationalError`` instead
+                    of being silently created empty.
 
     Raises:
         SessionAlreadyActiveError: If ``db_path`` is already open in another
@@ -972,12 +975,19 @@ class SQLiteStorageManager:
             resuming this one.
     """
 
-    def __init__(self, db_path: str | Path = ":memory:", *, check_same_thread: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        *,
+        check_same_thread: bool = True,
+        must_exist: bool = False,
+    ) -> None:
         # Safety invariant for check_same_thread=False: callers (the TUI)
         # guarantee that all DB access is serialized through a single
         # asyncio event loop on the agent thread. No concurrent writes.
         self._db_path = str(db_path)
         self._check_same_thread = check_same_thread
+        self._must_exist = must_exist and self._db_path != ":memory:"
         self._lock_fd: int | None = None
         self._session_claim: _SessionClaim | None = None
         self._closed = False
@@ -1006,7 +1016,11 @@ class SQLiteStorageManager:
 
     def _open_connection(self) -> sqlite3.Connection:
         """Create and configure a new SQLite connection."""
-        conn = sqlite3.connect(self._db_path, check_same_thread=self._check_same_thread)
+        if self._must_exist:
+            uri = f"{Path(self._db_path).resolve().as_uri()}?mode=rw"
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=self._check_same_thread)
+        else:
+            conn = sqlite3.connect(self._db_path, check_same_thread=self._check_same_thread)
         # Retry up to 5 s on SQLITE_BUSY before raising, giving concurrent
         # readers time to release shared locks on virtiofs/FUSE mounts.
         conn.execute("PRAGMA busy_timeout=5000")

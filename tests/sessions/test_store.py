@@ -425,6 +425,25 @@ def test_open_missing_or_invalid_session(tmp_path):
             store.path_for(unsafe)
 
 
+def test_open_does_not_recreate_a_session_deleted_after_its_metadata_was_read(
+    tmp_path, monkeypatch
+):
+    store = SessionStore(tmp_path)
+    store.create(session_id="vanishing").close()
+    path = store.path_for("vanishing")
+    real_read_info = store._read_info
+
+    def read_then_delete(target):
+        info = real_read_info(target)
+        assert store.delete("vanishing") is True
+        return info
+
+    monkeypatch.setattr(store, "_read_info", read_then_delete)
+    with pytest.raises(SessionNotFoundError):
+        store.open("vanishing")
+    assert not path.exists()
+
+
 def test_delete_refuses_live_session_then_removes_database_and_sidecars(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create(session_id="delete-me")

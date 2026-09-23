@@ -47,7 +47,9 @@ class PathResolutionError(FileNotFoundError):
     ) -> None:
         resolved = Path(resolved_path)
         self.reason = reason or ("not_a_file" if resolved.exists() else "not_found")
-        self.code = "PATH_NOT_FILE" if self.reason == "not_a_file" else "PATH_NOT_FOUND"
+        self.code = {"not_a_file": "PATH_NOT_FILE", "unreadable": "PATH_UNREADABLE"}.get(
+            self.reason, "PATH_NOT_FOUND"
+        )
         self.operation = operation
         self.requested_path = str(requested_path)
         self.resolved_path = str(resolved)
@@ -575,7 +577,15 @@ class RepoTools(Skill):
         if await self._path_is_file(resolved):
             file_result = await self._filemap(path, max_symbols=max_results if not query else 500)
             if file_result.diagnostic is not None:
-                return RepoResult(query=path, lines=[file_result.diagnostic])
+                diagnostic = PathResolutionError(
+                    "symbols",
+                    path,
+                    resolved,
+                    base_name="self.repo.root",
+                    base_path=self._root,
+                    reason="unreadable",
+                )
+                return RepoResult(query=path, lines=[], diagnostic=diagnostic)
             pairs = [
                 (symbol, anchor)
                 for symbol, anchor in zip(file_result.symbols, file_result.anchors, strict=True)

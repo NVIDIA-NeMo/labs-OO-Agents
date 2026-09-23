@@ -442,10 +442,10 @@ class TestIntegrationSpawnFlushReplaceRespawn:
 
 
 class TestQueueManagerShutdownKeepDaemons:
-    """shutdown(keep_daemons=True) must spare daemon=True handles."""
+    """A plain shutdown() must spare daemon=True handles; only include_daemons=True ends them."""
 
     @pytest.mark.asyncio
-    async def test_shutdown_keep_daemons_spares_daemon_jobs_but_cancels_others(self):
+    async def test_shutdown_spares_daemon_jobs_unless_included(self):
         """A mid-session interrupt (ACP cancel() -> cancel_work()) must not
         destroy a long-lived infrastructure producer marked daemon=True --
         only the same "genuinely finite work" this shutdown is meant to
@@ -474,7 +474,7 @@ class TestQueueManagerShutdownKeepDaemons:
         assert daemon_handle.state == "running"
         assert work_handle.state == "running"
 
-        await qm.shutdown(keep_daemons=True)
+        await qm.shutdown()
 
         assert daemon_handle.state == "running"
         assert work_handle.state == "cancelled"
@@ -482,7 +482,7 @@ class TestQueueManagerShutdownKeepDaemons:
         assert work_handle not in qm.handles()
 
         # A real final close must still take everything down.
-        await qm.shutdown()
+        await qm.shutdown(include_daemons=True)
         assert daemon_handle.state == "cancelled"
         assert qm.handles() == []
 

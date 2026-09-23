@@ -140,8 +140,11 @@ async def test_session_file_failure_is_reported_without_unpaired_symbols(failure
     repo = RepoTools(root="/app", session=FailingSession(dict(FS)))
     result = await repo.symbols("mod.py")
     assert result.matches == []
+    assert result.lines == []
     assert result.total_matches == 0
-    assert "Error:" in result.text
+    assert result.diagnostic is not None
+    assert result.diagnostic.code == "PATH_UNREADABLE"  # type: ignore[attr-defined]
+    assert "matches" not in result.text
 
 
 @pytest.mark.parametrize("operation", ["file", "map", "search", "refs"])

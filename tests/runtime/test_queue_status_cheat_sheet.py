@@ -91,6 +91,21 @@ def test_cheat_sheet_mentions_shutdown():
     assert "shutdown" in status
 
 
+@pytest.mark.asyncio
+async def test_suggested_shutdown_leaves_a_running_daemon_alone():
+    """Following the rendered hint must not tear down a daemon the user never asked to stop."""
+    qm = QueueManager()
+    qm.queue("infra")
+    handle = qm.spawn(_dummy_gen(), channel="infra", daemon=True)
+    try:
+        status = qm.status()
+        assert "| .shutdown()" in status
+        await qm.shutdown()
+        assert handle.state == "running"
+    finally:
+        await qm.shutdown(include_daemons=True)
+
+
 def test_no_cheat_sheet_when_no_channels():
     """No cheat sheet when no channels at all."""
     qm = QueueManager()

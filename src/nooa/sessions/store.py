@@ -218,7 +218,18 @@ class SessionStore:
         info = self._read_info(path)
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
-        storage = SQLiteStorageManager(path, check_same_thread=check_same_thread)
+        try:
+            storage = SQLiteStorageManager(
+                path, check_same_thread=check_same_thread, must_exist=True
+            )
+        except sqlite3.OperationalError:
+            # A concurrent delete() between the metadata read above and the
+            # lock below must surface as "gone", not as a fresh empty database.
+            if path.exists():
+                raise
+            raise SessionNotFoundError(
+                f"Session {session_id!r} was not found or is invalid"
+            ) from None
         try:
             return SessionHandle(self, storage, info)
         except BaseException:
