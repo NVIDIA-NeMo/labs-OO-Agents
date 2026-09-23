@@ -4,7 +4,11 @@
 
 The runtime value is intentionally generic. This module serializes turns,
 coordinates cleanup, and keeps session identifiers reserved until resources
-are released. Callers decide when a registered session is ready for use.
+are released. A runtime can be registered before it is ready to serve (for
+example while a durable transcript is still being replayed to a client):
+``add(available=False)`` reserves the identifier and ``publish()`` opens it
+to ``get()``/``ids()`` once initialization has finished. ``remove()`` can
+still tear down an unpublished runtime for failure cleanup.
 """
 
 from __future__ import annotations
@@ -127,6 +131,7 @@ class SessionRuntimePool[T]:
 
     def __init__(self) -> None:
         self._runtimes: dict[str, SessionRuntime[T]] = {}
+        self._available: set[str] = set()
         self._remove_tasks: dict[str, asyncio.Task[T]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -138,7 +143,9 @@ class SessionRuntimePool[T]:
         value: T,
         *,
         close: CloseCallback[T] | None = None,
+        available: bool = True,
     ) -> SessionRuntime[T]:
+        """Register a runtime; ``available=False`` reserves the id until publish()."""
         async with self._lock:
             if self._closed:
                 raise SessionRuntimeClosedError("Session runtime pool is closed")
@@ -146,23 +153,39 @@ class SessionRuntimePool[T]:
                 raise ValueError(f"Session {session_id!r} is already registered")
             runtime = SessionRuntime(session_id, value, close=close)
             self._runtimes[session_id] = runtime
+            if available:
+                self._available.add(session_id)
             return runtime
 
-    async def get(self, session_id: str) -> SessionRuntime[T]:
+    async def publish(self, session_id: str) -> None:
+        """Open a registered runtime to get()/ids() once it is ready to serve."""
         async with self._lock:
-            try:
-                return self._runtimes[session_id]
-            except KeyError:
-                raise KeyError(f"Unknown live session {session_id!r}") from None
+            if session_id not in self._runtimes:
+                raise KeyError(f"Unknown live session {session_id!r}")
+            self._available.add(session_id)
+
+    async def get(self, session_id: str) -> SessionRuntime[T]:
+        """Return a published runtime; unpublished ones look absent."""
+        async with self._lock:
+            if session_id not in self._available:
+                raise KeyError(f"Unknown live session {session_id!r}")
+            return self._runtimes[session_id]
 
     async def ids(self) -> tuple[str, ...]:
         async with self._lock:
-            return tuple(self._runtimes)
+            return tuple(sid for sid in self._runtimes if sid in self._available)
 
-    async def remove(self, session_id: str) -> T:
-        """Close and unregister one runtime, returning its value."""
+    async def remove(self, session_id: str, *, include_unavailable: bool = False) -> T:
+        """Close and unregister one runtime, returning its value.
+
+        Unpublished runtimes are invisible to callers by default; pass
+        ``include_unavailable=True`` from the initialization path that owns
+        them to tear one down after a failed or cancelled setup.
+        """
         async with self._lock:
-            if session_id not in self._runtimes:
+            if session_id not in self._runtimes or (
+                not include_unavailable and session_id not in self._available
+            ):
                 raise KeyError(f"Unknown live session {session_id!r}")
             runtime = self._runtimes[session_id]
             remove_task = self._remove_tasks.get(session_id)
@@ -191,6 +214,7 @@ class SessionRuntimePool[T]:
                 self._remove_tasks.pop(session_id, None)
                 if self._runtimes.get(session_id) is runtime:
                     del self._runtimes[session_id]
+                    self._available.discard(session_id)
         return runtime.value
 
     async def close(self) -> None:
@@ -214,6 +238,7 @@ class SessionRuntimePool[T]:
         )
         async with self._lock:
             self._runtimes.clear()
+            self._available.clear()
 
         failures = [result for result in results if isinstance(result, BaseException)]
         if failures:

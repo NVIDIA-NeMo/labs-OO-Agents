@@ -622,3 +622,30 @@ async def test_explicit_cleanup_callback_receives_value_and_overrides_value_clos
     assert cleaned == [value]
     assert value.close_calls == 0
     assert runtime.is_closed
+
+
+async def test_unpublished_runtime_is_reserved_but_not_served():
+    """add(available=False) reserves the id for setup work (e.g. a transcript
+    replay) without letting get()/ids() serve it; publish() opens it, and the
+    owning setup path can still remove() it on failure via include_unavailable.
+    """
+    pool: SessionRuntimePool[str] = SessionRuntimePool()
+    await pool.add("one", "A", available=False)
+
+    with pytest.raises(KeyError):
+        await pool.get("one")
+    assert await pool.ids() == ()
+    with pytest.raises(ValueError):
+        await pool.add("one", "duplicate")  # still reserved
+    with pytest.raises(KeyError):
+        await pool.remove("one")  # invisible to ordinary callers
+
+    await pool.publish("one")
+    assert (await pool.get("one")).value == "A"
+    assert await pool.ids() == ("one",)
+
+    await pool.add("two", "B", available=False)
+    assert await pool.remove("two", include_unavailable=True) == "B"
+    with pytest.raises(KeyError):
+        await pool.publish("two")
+    assert await pool.ids() == ("one",)
