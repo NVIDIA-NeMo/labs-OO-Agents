@@ -39,6 +39,10 @@ class BashSession:
     and execute one at a time.  This is safe but sequential; for true
     parallelism, create multiple BashSession instances.
 
+    A session can be reused after its previous event loop has stopped and
+    all commands on that loop have finished. Sharing a session concurrently
+    across threads or event loops is not supported.
+
     Usage::
 
         session = BashSession(cwd="/my/project")
@@ -49,6 +53,7 @@ class BashSession:
     """
 
     def __init__(self, cwd: str | Path = ".", init_command: str | None = None) -> None:
+        """Configure the working directory and optional command to run on each start."""
         self._cwd = Path(cwd).resolve()
         # Optional shell snippet run once every time the session (re)starts —
         # before any user command — to set up the environment (e.g. activating a
@@ -61,6 +66,7 @@ class BashSession:
         self._started = False
         self._started_on_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
@@ -242,18 +248,25 @@ class BashSession:
         return f'eval "$(base64 -d <<<{blob})" </dev/null\n{protocol}'
 
     def _ensure_lock_on_current_loop(self) -> None:
-        """Recreate the lock if the event loop changed since it was created."""
-        if (
-            self._started_on_loop is not None
-            and self._started_on_loop is not asyncio.get_running_loop()
-        ):
+        """Recreate the lock if serialized commands move to another event loop.
+
+        Track the lock separately from the shell lifecycle so reset() cannot
+        replace a lock that a caller still holds.
+
+        The previous loop's commands must have finished before switching loops.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is None:
+            self._lock_loop = loop
+        elif self._lock_loop is not loop:
             self._lock = asyncio.Lock()
+            self._lock_loop = loop
 
     async def run(self, command: str, timeout: float = 30.0) -> tuple[str, str, int]:
         """Run a command and return (stdout, stderr, exit_code).
 
         The session persists state: cd, export, etc. carry over.
-        Concurrent calls are serialized via an internal lock.
+        Concurrent calls on the same event loop are serialized via an internal lock.
 
         On timeout, exit_code is 124 — same as the ``timeout(1)`` command.
         Use ``run_with_timeout_flag()`` if you need to distinguish a real
@@ -324,7 +337,7 @@ class BashSession:
         yields ('__done__', 'exit_code,timed_out_flag') where timed_out_flag
         is '1' if the command timed out, '0' otherwise.
 
-        Concurrent calls are serialized via an internal lock.
+        Concurrent calls on the same event loop are serialized via an internal lock.
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:
@@ -687,4 +700,3 @@ class BashSession:
         self._process = None
         self._started = False
         self._started_on_loop = None
-        self._lock = asyncio.Lock()
