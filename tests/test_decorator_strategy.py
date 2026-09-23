@@ -6,6 +6,7 @@ TDD: Write tests first, then implement to make them pass.
 """
 
 from nooa import strategy
+from nooa.agent import Agent
 from nooa.strategies.pure_python import PurePythonStrategy
 
 
@@ -57,13 +58,14 @@ class TestStrategyDecoratorWithInstances:
 class TestStrategyDecoratorValidation:
     """Tests for @strategy decorator validation."""
 
-    def test_strategy_on_implemented_method_is_allowed(self):
-        """@strategy on implemented method is allowed (acts as entry point marker)."""
+    def test_strategy_on_implemented_agent_method_is_allowed(self):
+        """@strategy on an implemented Agent method remains a valid entry-point marker."""
 
-        # This should NOT raise - @strategy on implemented methods is valid
-        @strategy(PurePythonStrategy())
-        async def has_body(self) -> str:
-            return "implemented"
+        class ImplementedAgent(Agent):
+            @strategy(PurePythonStrategy())
+            async def has_body(self) -> str:
+                return "implemented"
 
         # Should have the decorator metadata
-        assert has_body._strategy_override is not None
+        assert ImplementedAgent.has_body._strategy_override is not None
+        assert ImplementedAgent.has_body._needs_generation is False

@@ -72,7 +72,7 @@ def strategy(
 
     Raises:
         ValueError: If multiple @strategy decorators are stacked
-        TypeError: If context is not a dict or ScopedContext instance
+        TypeError: If context is invalid or the decorated function cannot use a strategy
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
@@ -129,6 +129,13 @@ def strategy(
         _params = list(inspect.signature(func).parameters)
         is_standalone = not _params or _params[0] != "self"
 
+        if is_standalone and not needs_gen:
+            raise TypeError(
+                f"@strategy(...) on standalone function '{func.__name__}' without an "
+                f"'...' body does nothing — add '...' as the function body or remove "
+                f"the decorator."
+            )
+
         # Validate the llm spec now so a bad value points at the @strategy
         # line rather than failing mid-generation.
         if llm is not None:
@@ -146,11 +153,9 @@ def strategy(
                 strat = get_default_strategy()
 
         if is_standalone:
-            if needs_gen:
-                from nooa.standalone import create_standalone_wrapper
+            from nooa.standalone import create_standalone_wrapper
 
-                return create_standalone_wrapper(func, strat, llm)
-            return func  # type: ignore[return-value]  # non-generation standalone: nothing to wrap
+            return create_standalone_wrapper(func, strat, llm)
 
         from nooa.runtime.method_wrapper import create_agent_method_wrapper
 
