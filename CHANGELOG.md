@@ -14,13 +14,22 @@ to follow semantic versioning.
     `nooa_coder.sessions`. The `nemo.repo` skill entry point and the `ast`
     and `datascience` extras move from `nooa-cli` to `nooa-coder`.
   - `nooa_acp.server`, `nooa_acp.event_bridge` and `nooa_acp.cli` ->
-    `nooa_coder.acp.*`; `nooa_acp._runtime` -> `nooa_coder.sessions.runtime`;
-    `nooa_acp.dispatcher` -> `nooa_coder.interactive.dispatcher`.
+    `nooa_coder.acp.*` (including `nooa_acp.dispatcher` ->
+    `nooa_coder.acp.dispatcher`); `nooa_acp._runtime` ->
+    `nooa_coder.sessions.runtime`.
     `nooa-coder` installs the `nooa-coder` and `nooa-acp` console scripts
     (same program) and the `nooa acp` command.
   - `nooa-cli` now depends only on `nooa`; `nooa-bench` depends on
     `nooa-coder` instead of `nooa-cli`. New `nooa[coder]` extra; `nooa[acp]`
     now installs `nooa-coder`, and `nooa[arc]` adds it.
+- Add `nooa_coder.interactive`: `LocalAgentRunner` owns an in-process
+  agent's turn lifecycle (submit, cancel, swap, shutdown), with a shared
+  `InteractiveSessionDispatcher`, state projection, turn policy, options,
+  session paths and titles, skills and MCP controls, workspace settings, and
+  the MCP registry and approval flow. `nooa_coder.coding` adds `CodingWorker`
+  delegation, the `create_session_agent` factory, mentions, identity and an
+  experimental agent. The ACP server keeps using `nooa_coder.acp.dispatcher`
+  for now.
 - Remove `nooa.interactive` (no compatibility module). `InteractiveAgent`,
   `AgentMessage`, `AgentVars`, `RespondReason`, `RespondResult`,
   `RespondKind` and `DEFAULT_MODEL` are now in `nooa_coder.interactive_agent`;

@@ -52,6 +52,7 @@ from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.unifiedllm import UnifiedLLM
+from nooa_coder.acp.dispatcher import InteractiveSessionDispatcher
 from nooa_coder.acp.event_bridge import ACPEventBridge
 from nooa_coder.coding import (
     CodingAgent,
@@ -59,7 +60,6 @@ from nooa_coder.coding import (
     CodingSlashCommandRegistry,
     load_coding_skills_dirs,
 )
-from nooa_coder.interactive.dispatcher import InteractiveSessionDispatcher
 from nooa_coder.sessions import (
     InvalidSessionIdError,
     SessionHandle,
