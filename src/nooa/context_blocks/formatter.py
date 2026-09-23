@@ -11,14 +11,14 @@ Two orthogonal formatters:
    system message.
 
 2. :class:`ProviderFormatter` — a thin syntactic adapter that reshapes the
-   neutral message list into provider-specific wire format (OpenAI ``list[dict]``,
-   Anthropic ``{"system": ..., "messages": [...]}``).
+   neutral message list into the OpenAI-compatible ``list[dict]`` that
+   UnifiedLLM accepts. Provider-specific wire translation happens downstream
+   (LiteLLM, or the client's own projection), never here.
 
 This split keeps the "format" axis (XML / Markdown / Plain) orthogonal to the
-"provider" axis (OpenAI / Anthropic / ...). Neither knows about the other.
+message-shape axis. Neither knows about the other.
 """
 
-import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -522,19 +522,6 @@ def _append_openai_image_message(out: list[dict], msg: RenderedMessage) -> None:
     out.append({"role": msg.role.value, "content": content_parts})
 
 
-def _arguments_object(arguments: dict[str, Any] | str) -> dict[str, Any]:
-    """Return Anthropic's object-shaped tool input with a useful failure."""
-    if isinstance(arguments, dict):
-        return arguments
-    try:
-        parsed = json.loads(arguments)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Anthropic tool arguments must be a JSON object") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("Anthropic tool arguments must decode to a JSON object")
-    return parsed
-
-
 def _with_reasoning(message: dict[str, Any], reasoning: str | None) -> dict[str, Any]:
     """Portable reasoning on synthetic messages needs no native-state carrier."""
     if reasoning:
@@ -582,84 +569,3 @@ class OpenAIProviderFormatter(ProviderFormatter):
                     )
                 )
         return out
-
-
-class AnthropicProviderFormatter(ProviderFormatter):
-    """Export portable Anthropic-native messages, without private replay or cache metadata."""
-
-    def format(self, messages: list[RenderedMessage]) -> dict:
-        system_parts: list[str] = []
-        out: list[dict] = []
-        for msg in messages:
-            if msg.role == Role.SYSTEM:
-                if msg.content:
-                    system_parts.append(msg.content)
-                continue
-
-            if msg.role is Role.ASSISTANT and msg.reasoning:
-                msg = msg.model_copy(
-                    update={
-                        "content": msg.reasoning + ("\n\n" + msg.content if msg.content else ""),
-                        "reasoning": None,
-                    }
-                )
-            if msg.tool_calls:
-                content: list[dict[str, Any]] = []
-                if msg.content:
-                    content.append({"type": "text", "text": msg.content})
-                content.extend(
-                    {
-                        "type": "tool_use",
-                        "id": call.id,
-                        "name": call.name,
-                        "input": _arguments_object(call.arguments),
-                    }
-                    for call in msg.tool_calls
-                )
-                out.append(
-                    _with_reasoning(
-                        {
-                            "role": "assistant",
-                            "content": content,
-                        },
-                        msg.reasoning,
-                    )
-                )
-            elif msg.tool_call_id is not None:
-                out.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg.tool_call_id,
-                                "content": msg.content or "",
-                            }
-                        ],
-                    }
-                )
-            elif msg.images:
-                # Keep the universal LiteLLM image_url shape — LiteLLM translates for Anthropic.
-                role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
-                content_parts: list[dict] = [{"type": "text", "text": msg.content or ""}]
-                content_parts.extend(msg.images)
-                out.append({"role": role.value, "content": content_parts})
-            else:
-                if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
-                    continue
-                role = msg.role if msg.role in (Role.USER, Role.ASSISTANT) else Role.USER
-                out.append(
-                    _with_reasoning(
-                        {"role": role.value, "content": msg.content or ""},
-                        msg.reasoning,
-                    )
-                )
-
-        return {"system": "\n\n".join(system_parts), "messages": out}
-
-
-class ResponsesProviderFormatter(OpenAIProviderFormatter):
-    """Select Responses dispatch in the runtime, using the same public message format.
-
-    No wire translation belongs here: ResponsesClient projects stored turns at dispatch.
-    """

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for ResponsesProviderFormatter and ResponsesClient._transform_messages.
+Unit tests for ResponsesClient's projection of public messages (_transform_messages).
 
 Tests the formatting pipeline without requiring a live API.
 """
@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from nooa.context_blocks.formatter import ResponsesProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.unifiedllm import ResponsesClient
 
@@ -18,14 +18,12 @@ from nooa.unifiedllm import ResponsesClient
 def _project_rendered(messages):
     # Formatters retain logical turns; native wire expansion is the client job.
     with ResponsesClient(model="openai/gpt-5.6") as client:
-        wire, instructions = client._transform_messages(
-            ResponsesProviderFormatter().format(messages)
-        )
+        wire, instructions = client._transform_messages(OpenAIProviderFormatter().format(messages))
     return ([{"role": "system", "content": instructions}] if instructions else []) + wire
 
 
-class TestResponsesProviderFormatter:
-    """Test that ResponsesProviderFormatter emits correct wire format."""
+class TestResponsesClientProjection:
+    """ResponsesClient projects the public message list into Responses wire format."""
 
     def test_simple_user_message(self):
         messages = [

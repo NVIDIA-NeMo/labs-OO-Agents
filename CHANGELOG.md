@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Remove `AnthropicProviderFormatter` and `ResponsesProviderFormatter` from
+  `nooa.context_blocks`, and the runtime's client-type dispatch that swapped in
+  the Responses one. Neither was on the live path: every client (including
+  Anthropic via LiteLLM) already renders through `OpenAIProviderFormatter`, and
+  `ResponsesClient` projects that public message list itself. The runtime now
+  uses `RenderConfig.provider_formatter` as configured for every client, and
+  Connect's setup probe no longer branches on `api_style` to pick a formatter.
 - Fix a second round of code-review findings on the Connect work above:
   - Encrypted-reasoning detection could mislabel a response with a real
     visible summary as "withheld" whenever encrypted_content was also
