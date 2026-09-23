@@ -25,7 +25,7 @@ from acp.schema import (
 )
 from click.testing import CliRunner
 from nooa_acp.cli import command
-from nooa_acp.server import CodingACPAdapter
+from nooa_acp.server import CodingACPAdapter, _SlashRequest
 from nooa_cli.commands import discover_commands
 
 from nooa.context_blocks.events import ToolCallEvent
@@ -1678,7 +1678,11 @@ async def test_slash_command_still_reports_generation_limits(tmp_path):
     boom = GenerationError("Empty response: the model used all available output tokens")
     with (
         # The session has no workspace commands, so force the slash branch.
-        patch.object(CodingACPAdapter, "_slash_invocation", return_value=("anything", "now")),
+        patch.object(
+            CodingACPAdapter,
+            "_slash_invocation",
+            return_value=_SlashRequest("anything", "now", session.commands.get("skills")),
+        ),
         patch.object(session.dispatcher, "invoke_slash", side_effect=boom),
     ):
         response = await adapter.prompt(created.session_id, [text_block("/anything now")])

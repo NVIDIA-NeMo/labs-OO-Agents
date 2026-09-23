@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import signal
 from collections.abc import Callable
@@ -13,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, NamedTuple, cast
 
 from acp import (
     PROTOCOL_VERSION,
@@ -99,6 +100,37 @@ _SESSION_PAGE_SIZE = 50
 _CANCEL_CONFIRMATION_TIMEOUT_SECONDS = 30
 
 
+async def _close_in_order(*closers: Callable[[], Any] | None) -> None:
+    """Run each closer in order, tolerating failures, then re-raise.
+
+    Equivalent to nesting one ``try/finally`` per closer: every closer runs
+    even if an earlier one fails, and the last failure propagates with the
+    earlier ones chained as its ``__context__``.
+    """
+    pending: BaseException | None = None
+    for close in closers:
+        if close is None:
+            continue
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except BaseException as exc:
+            if pending is not None:
+                exc.__context__ = pending
+            pending = exc
+    if pending is not None:
+        raise pending
+
+
+class _SlashRequest(NamedTuple):
+    """One parsed ``/name args`` request; ``command`` is None when unregistered."""
+
+    name: str
+    raw_args: str
+    command: CodingSlashCommand | None
+
+
 @dataclass(slots=True)
 class _ACPSession:
     """Live resources owned by one ACP session runtime."""
@@ -147,16 +179,12 @@ class _ACPSession:
 
     async def _close_resources(self) -> None:
         """Release every resource even if a checkpoint or earlier close fails."""
-        try:
-            await self.bridge.close()
-        finally:
-            try:
-                self.commands.close()
-            finally:
-                try:
-                    await self.dispatcher.close()
-                finally:
-                    self.handle.close()
+        await _close_in_order(
+            self.bridge.close,
+            self.commands.close,
+            self.dispatcher.close,
+            self.handle.close,
+        )
 
 
 class CodingACPAdapter:
@@ -315,12 +343,14 @@ class CodingACPAdapter:
 
         store = self._store(root)
 
-        def _locked_state(session_id: str) -> tuple[bool, bool]:
-            """Return (active, orphaned). orphaned only when provably stale."""
+        def _lock_status(session_id: str) -> Literal["free", "active", "orphaned"]:
+            """ "orphaned" only when the claim's owner is provably dead."""
             db_path = store.path_for(session_id)
             if not is_sqlite_database_active(db_path):
-                return False, False
-            return True, claim_owner_is_confirmed_dead(_claim_path(db_path))
+                return "free"
+            if claim_owner_is_confirmed_dead(_claim_path(db_path)):
+                return "orphaned"
+            return "active"
 
         # ACP has no standard field for disabling a busy entry in the picker,
         # so a session currently open elsewhere still must be omitted (like
@@ -344,10 +374,10 @@ class CodingACPAdapter:
             for info in store.list(limit=None):
                 if info.turn_count == 0:
                     continue
-                active, orphaned = _locked_state(info.id)
-                if active and not orphaned:
+                status = _lock_status(info.id)
+                if status == "active":
                     continue
-                result.append((info, orphaned))
+                result.append((info, status == "orphaned"))
             return result
 
         found = await asyncio.to_thread(_list_and_filter)
@@ -399,17 +429,11 @@ class CodingACPAdapter:
                         )
                         session.commands_sent_on_prompt = True
                     slash = self._slash_invocation(session.commands, text)
-                    if slash is None:
-                        stripped = text.strip()
-                        requested = (
-                            stripped[1:].split(maxsplit=1)[0].lower()
-                            if stripped.startswith("/") and stripped[1:].strip()
-                            else ""
-                        )
-                        if requested in RESERVED_COMMAND_NAMES:
+                    if slash is None or slash.command is None:
+                        if slash is not None and slash.name in RESERVED_COMMAND_NAMES:
                             available = ", ".join(f"/{name}" for name in CONTROL_TYPES)
                             message = (
-                                f"NOOA /{requested} is not available through ACP yet. "
+                                f"NOOA /{slash.name} is not available through ACP yet. "
                                 f"Available behavior controls: {available}. "
                                 "Use native NOOA for the other agent controls."
                             )
@@ -430,13 +454,8 @@ class CodingACPAdapter:
                         session.handle.record_user_message(text)
                         result = await session.dispatcher.submit(text)
                     else:
-                        name, raw_args = slash
-                        command = session.commands.get(name)
-                        if (
-                            command is not None
-                            and command._method is not None
-                            and not command.is_control
-                        ):
+                        name, raw_args, command = slash
+                        if command._method is not None and not command.is_control:
                             session.handle.record_user_message(text)
                         try:
                             submission = await session.dispatcher.invoke_slash(
@@ -690,18 +709,15 @@ class CodingACPAdapter:
             if value is not None:
                 await value.close()
             elif agent is not None:
-                try:
-                    if bridge is not None:
-                        await bridge.close()
-                finally:
-                    try:
-                        if commands is not None:
-                            commands.close()
-                    finally:
-                        if dispatcher is not None:
-                            await dispatcher.close()
-                        else:
-                            await agent.close()
+                # Same order as _ACPSession._close_resources, restricted to
+                # whatever got built before the failure. dispatcher.close()
+                # closes the agent itself, so the bare agent is closed only
+                # when no dispatcher wrapped it yet.
+                await _close_in_order(
+                    bridge.close if bridge is not None else None,
+                    commands.close if commands is not None else None,
+                    dispatcher.close if dispatcher is not None else agent.close,
+                )
             else:
                 await llm.aclose()
             raise
@@ -851,16 +867,22 @@ class CodingACPAdapter:
     def _slash_invocation(
         commands: CodingSlashCommandRegistry,
         text: str,
-    ) -> tuple[str, str] | None:
+    ) -> _SlashRequest | None:
+        """Parse ``/name args`` once, resolving the command if one is registered.
+
+        Returns None for text that is not a slash request at all. A request
+        naming an unregistered command still comes back (with ``command``
+        None) so the caller can tell a reserved-but-unavailable control apart
+        from a plain prompt without re-parsing the text.
+        """
         stripped = text.strip()
         if not stripped.startswith("/"):
             return None
-        command_text = stripped[1:]
-        parts = command_text.split(maxsplit=1)
+        parts = stripped[1:].split(maxsplit=1)
         name = parts[0].lower() if parts else ""
-        if not name or commands.get(name) is None:
+        if not name:
             return None
-        return name, parts[1] if len(parts) == 2 else ""
+        return _SlashRequest(name, parts[1] if len(parts) == 2 else "", commands.get(name))
 
     async def close(self) -> None:
         await self._sessions.close()
