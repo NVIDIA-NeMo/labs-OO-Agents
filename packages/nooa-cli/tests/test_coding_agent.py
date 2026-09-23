@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared coding-agent construction and repository instructions."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -95,7 +94,7 @@ async def test_installed_skill_commands_load_without_automatic_activation(tmp_pa
         await agent.close()
 
 
-async def test_installed_memory_skill_is_left_for_host_configuration(tmp_path, monkeypatch):
+async def test_installed_memory_skill_is_not_automatically_attached(tmp_path, monkeypatch):
     class InstalledMemory(Skill):
         pass
 
@@ -160,41 +159,91 @@ async def test_coding_agent_owns_session_naming(tmp_path):
 
 
 def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
-    """The cap must bound the read, not just what is kept.
-
-    Truncating after read_text() still pulls a workspace-controlled file into
-    memory in full. The budget also has to cover the rendered text — headers,
-    separators, truncation markers — or the declared total is not the real one.
-    """
+    """The real reader asks the stream for at most budget + 1 characters."""
     from nooa_cli.coding import instructions
 
     (tmp_path / ".git").mkdir()
-    reads: list[int | None] = []
-    real_open = Path.open
+    (tmp_path / "AGENTS.md").write_text("x" * 1000)
+    reads: list[int] = []
+    real_fdopen = instructions.os.fdopen
 
-    def spying_open(self, *args, **kwargs):
-        stream = real_open(self, *args, **kwargs)
-        real_read = stream.read
+    class BoundedStream:
+        def __init__(self, *args, **kwargs):
+            self.stream = real_fdopen(*args, **kwargs)
 
-        def read(size=-1):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def read(self, size=-1):
             reads.append(size)
-            return real_read(size)
+            assert 0 <= size <= 101
+            return self.stream.read(size)
 
-        stream.read = read  # type: ignore[method-assign]
-        return stream
-
-    monkeypatch.setattr(Path, "open", spying_open)
     monkeypatch.setattr(instructions, "_MAX_INSTRUCTION_FILE_CHARS", 100)
-    (tmp_path / "AGENTS.md").write_text("x" * 10_000)
+    monkeypatch.setattr(instructions.os, "fdopen", BoundedStream)
 
     rendered = instructions.render_agent_instructions(tmp_path)
 
-    # Positive sizes only: an unbounded .read() records -1, which satisfies
-    # any `<= limit` assertion and made this test pass against the very
-    # regression it names.
-    assert reads == [101], reads
+    assert reads == [101]
     assert "[... truncated ...]" in rendered
-    assert len(rendered) < 1_000
+    assert len(rendered) <= instructions._MAX_INSTRUCTION_TOTAL_CHARS
+
+
+def test_repository_instructions_allow_a_symlinked_workspace(tmp_path):
+    from nooa_cli.coding.instructions import render_agent_instructions
+
+    root = tmp_path / "real"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("reachable repository instructions")
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    assert "reachable repository instructions" in render_agent_instructions(alias)
+    (root / "AGENTS.md").unlink()
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside instructions")
+    (root / "AGENTS.md").symlink_to(outside)
+    assert not render_agent_instructions(alias)
+
+
+def test_repository_instructions_allow_a_symlink_within_the_boundary(tmp_path):
+    """A symlinked AGENTS.md whose target stays inside the repo (the common
+    AGENTS.md -> CLAUDE.md pattern) must not be rejected outright -- only a
+    symlink that actually escapes the boundary should be. _is_safe_path
+    already rejects any symlinked ANCESTOR DIRECTORY on the path to the
+    file; the file itself being a symlink to ordinary text content in the
+    same tree carries no additional risk.
+    """
+    from nooa_cli.coding.instructions import render_agent_instructions
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "CLAUDE.md").write_text("claude-specific instructions")
+    (root / "AGENTS.md").symlink_to(root / "CLAUDE.md")
+
+    rendered = render_agent_instructions(root)
+    assert "claude-specific instructions" in rendered
+
+
+async def test_coding_agent_owns_bounded_application_state_context(tmp_path):
+    from nooa_cli.coding.experimental_agent import ExperimentalCodingAgent
+
+    from nooa.unifiedllm import FakeLLMClient
+
+    agent = ExperimentalCodingAgent(cwd=tmp_path, llm=FakeLLMClient())
+    try:
+        agent.vars["token"] = "private-value"
+        agent.shell.cwd = "</coding_state>\n" + "x" * 500
+        rendered = agent._coding_state_context()
+        assert "1 persistent vars" in rendered
+        assert "print(self.v.items())" in rendered
+        assert "private-value" not in rendered
+        assert "</coding_state>" not in rendered
+        assert len(rendered) < 600
+    finally:
+        await agent.close()
 
 
 async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_path):

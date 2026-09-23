@@ -81,7 +81,7 @@ def _edit_diff(
     if _diff_input_is_too_large(old_text) or _diff_input_is_too_large(new_text):
         return _omitted_diff(path, "file content exceeds the safe diff preview limit")
 
-    output = TruncatingStringIO(limit=_MAX_EVENT_TEXT_CHARS)
+    lines: list[str] = []
     # A region diff is generated in region coordinates; every hunk shifts by the
     # same amount to reach file coordinates. Rewriting only the first one, with
     # the whole region's counts, left later hunks region-relative — able to point
@@ -105,8 +105,24 @@ def _edit_diff(
                 # newline; marking that as "no newline at end of file"
                 # reported a file state that does not exist.
                 line = f"{line}\n"
-        output.write(line)
-    return output.getvalue(), not output.was_truncated
+        lines.extend(line.splitlines(keepends=True))
+
+    diff = "".join(lines)
+    if len(diff) <= _MAX_EVENT_TEXT_CHARS:
+        return diff, True
+
+    head: list[str] = []
+    head_chars = 0
+    for index, line in enumerate(lines):
+        omitted_after_line = len(lines) - index - 1
+        marker = f"… +{omitted_after_line} lines\n"
+        if head_chars + len(line) + len(marker) > _MAX_EVENT_TEXT_CHARS:
+            break
+        head.append(line)
+        head_chars += len(line)
+
+    omitted = len(lines) - len(head)
+    return "".join(head) + f"… +{omitted} lines\n", False
 
 
 class FileEdit(EventBase):  # type: ignore[misc]
