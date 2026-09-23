@@ -210,13 +210,17 @@ class BashSession:
             self._running_init = True
             try:
                 init_sentinel = f"__CTRL_{secrets.token_hex(8)}__"
-                init_script = (
-                    f"{self._init_command}\n_nemo_ec=$?\n"
-                    f"echo $_nemo_ec >&3\npwd >&3\necho {init_sentinel} >&3\n"
-                )
+                # Same framing as user commands: base64 keeps bash's parser away
+                # from the protocol lines, </dev/null keeps a stdin-reading init
+                # from consuming them.
+                init_script = self._build_script(self._init_command, init_sentinel)
                 ctrl_lines, _out, _err, _timed = await self._send_and_wait(
                     init_script, init_sentinel, timeout=60.0
                 )
+                if ctrl_lines:
+                    ec = ctrl_lines[0].strip()
+                    if ec.isdigit() and ec != "0":
+                        logger.warning("init_command %r exited %s", self._init_command, ec)
                 if len(ctrl_lines) >= 2 and ctrl_lines[1].strip().startswith("/"):
                     self._cwd = Path(ctrl_lines[1].strip())
             finally:
