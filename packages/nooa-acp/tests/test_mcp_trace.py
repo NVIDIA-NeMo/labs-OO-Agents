@@ -116,8 +116,8 @@ async def test_trace_write_does_not_block_the_running_event_loop(tmp_path):
     trace(StreamEvent(StreamDirection.INCOMING, {"method": "session/new"}))
     # The offloaded write is fire-and-forget; give the executor thread a
     # scheduling tick to finish before checking the file landed.
-    for _ in range(20):
-        if path.read_text().count("\n") >= 2:
+    for _ in range(50):
+        if path.exists() and path.read_text().count("\n") >= 2:
             break
         await asyncio.sleep(0.01)
     lines = [json.loads(line) for line in path.read_text().splitlines()]

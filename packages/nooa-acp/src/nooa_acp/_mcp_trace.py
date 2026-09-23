@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,8 @@ class MCPHandoffTrace:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._enabled = True
+        # One worker so offloaded writes keep the order events arrived in.
+        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nooa-acp-mcp-trace")
         self._write({"event": "trace_started"})
 
     @classmethod
@@ -66,16 +69,17 @@ class MCPHandoffTrace:
         # runs inline on the receive loop multiplexing every open session in
         # this process; a blocking disk write here would stall all of them
         # for its duration on a slow/contended filesystem. Offload the actual
-        # I/O to a worker thread and don't wait on it -- this is opt-in,
-        # best-effort diagnostic tracing, not something ACP correctness
-        # depends on, so an occasional out-of-order or lost-at-exit line is
-        # an acceptable trade for never blocking the loop.
+        # I/O to the trace's single writer thread (so lines stay in arrival
+        # order) and don't wait on it -- this is opt-in, best-effort
+        # diagnostic tracing, not something ACP correctness depends on, so a
+        # line lost at abrupt process exit is an acceptable trade for never
+        # blocking the loop.
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             self._write_now(record)
             return
-        loop.run_in_executor(None, self._write_now, record)
+        self._writer.submit(self._write_now, record)
 
     def _write_now(self, record: dict[str, Any]) -> None:
         try:

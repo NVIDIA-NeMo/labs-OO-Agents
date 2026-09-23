@@ -5,7 +5,8 @@
 import asyncio
 from typing import Any
 
-from nooa_acp.dispatcher import InteractiveSessionDispatcher
+import pytest
+from nooa_acp.dispatcher import InteractiveSessionDispatcher, TurnCancelled
 from nooa_cli.coding import CodingAgent
 
 from nooa.context_blocks.events import ToolCallEvent
@@ -105,7 +106,8 @@ async def test_dispatcher_cancels_active_nooa_turn(tmp_path):
     await asyncio.wait_for(llm.started.wait(), timeout=2)
 
     assert await dispatcher.cancel() is True
-    assert await asyncio.wait_for(prompt_task, timeout=2) is None
+    with pytest.raises(TurnCancelled):
+        await asyncio.wait_for(prompt_task, timeout=2)
     assert dispatcher.active is False
     await dispatcher.close()
 
@@ -117,7 +119,8 @@ async def test_dispatcher_accepts_another_prompt_after_cancellation(tmp_path):
     await asyncio.wait_for(agent.started.wait(), timeout=1)
 
     assert await dispatcher.cancel() is True
-    assert await asyncio.wait_for(first, timeout=1) is None
+    with pytest.raises(TurnCancelled):
+        await asyncio.wait_for(first, timeout=1)
     result = await asyncio.wait_for(dispatcher.submit("try again"), timeout=1)
 
     assert result is not None
@@ -145,7 +148,8 @@ async def test_dispatcher_cancels_background_jobs(tmp_path):
     await asyncio.wait_for(agent.job_started.wait(), timeout=1)
 
     assert await dispatcher.cancel() is True
-    assert await asyncio.wait_for(prompt_task, timeout=1) is None
+    with pytest.raises(TurnCancelled):
+        await asyncio.wait_for(prompt_task, timeout=1)
     assert agent.job is not None
     assert agent.job.state == "cancelled"
     await dispatcher.close()
