@@ -29,21 +29,27 @@ _agentdoc_hidden_names = {"_hidden"}
 with _hidden:
     import logging
     import os
-    from typing import TYPE_CHECKING, Any
+    from typing import TYPE_CHECKING, Annotated, Any
 
     from pydantic import BaseModel, Field
 
     from nooa import Agent, Context, no_trace, strategy
-    from nooa.agentdoc import doc
+    from nooa.agentdoc import doc, spec
     from nooa.config import CodeActConfig
     from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.strategies import CodeActV2
     from nooa.unifiedllm import FakeLLMClient
 
+    # SWE-bench Verified's 500 problem statements top out at 24,770 characters
+    # (p99 9,252; dataset revision c104f840). A 32K cap covers the full benchmark
+    # with ~29% headroom while bounding the prompt to roughly 8K tokens.
+    _SOLVE_DESCRIPTION_MAX_CHARS = 32_000
+    _SolveDescription = Annotated[str, spec(max_string=_SOLVE_DESCRIPTION_MAX_CHARS)]
+
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
-
 _logger = logging.getLogger(__name__)
+
 
 _OPTIONAL_TESTBED_ACTIVATE = (
     "if [ -f /opt/miniconda3/etc/profile.d/conda.sh ]; then "
@@ -304,7 +310,9 @@ class BenchAgent(
         _SOLVE_STRATEGY,
         context=_SOLVE_CONTEXT,
     )
-    async def _solve_task(self, description: str, supplied_context: Any = None) -> TaskResult:
+    async def _solve_task(
+        self, description: _SolveDescription, supplied_context: Any = None
+    ) -> TaskResult:
         """Solve the supplied task completely.
 
         Inspect before editing. Plan with ``self.todo`` only when useful. Make the
