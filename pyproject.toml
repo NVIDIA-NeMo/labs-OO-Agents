@@ -118,7 +118,9 @@ sandbox = [
 # (kept optional so glibc<2.28 hosts can `uv sync` without pulling
 # pydantic-core wheels that only target manylinux_2_28). See issue 189.
 mcp = [
-    "mcp>=1.0.0",
+    # 1.24.0 is the first release with both cursor-based discovery and the
+    # streamable_http_client API used by nooa.mcp.
+    "mcp>=1.24.0",
 ]
 # NeMo Relay integration (guardrails, intercepts, event subscribers, ATIF
 # export).

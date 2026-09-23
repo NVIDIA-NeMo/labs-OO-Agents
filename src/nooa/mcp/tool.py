@@ -13,6 +13,7 @@ import asyncio
 import concurrent.futures
 import copy
 import json
+import time
 import types
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -21,9 +22,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
+from mcp.types import PaginatedRequestParams
 
 from .client import create_mcp_client
 from .oauth import handle_mcp_oauth
+
+_MAX_MCP_TOOL_DISCOVERY_PAGES = 10_000
+_DEFAULT_MCP_TOOL_DISCOVERY_TIMEOUT = timedelta(minutes=5)
 
 
 def _flatten_exceptions(exc: BaseException) -> list[BaseException]:
@@ -739,11 +744,100 @@ def _tool_input_schema(tool: Any) -> dict[str, Any]:
     return {}
 
 
-async def _list_server_tools(server_name: str, client: Any) -> Any:
-    """Connect once for discovery and preserve the useful cause of TaskGroup errors."""
+@dataclass(frozen=True)
+class _DiscoveredTools:
+    """Complete tool collection assembled from MCP discovery pages."""
+
+    tools: list[Any]
+
+
+def _next_tools_cursor(result: Any) -> str | None:
+    """Return the next-page cursor across MCP SDK field naming conventions."""
+    for attribute in ("next_cursor", "nextCursor"):
+        cursor = getattr(result, attribute, None)
+        if isinstance(cursor, str):
+            return cursor
+    return None
+
+
+async def _list_all_tools(session: Any) -> _DiscoveredTools:
+    """Collect every page returned by an MCP server's ``list_tools`` method."""
+    tools: list[Any] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+
+    for _ in range(_MAX_MCP_TOOL_DISCOVERY_PAGES):
+        result = (
+            await session.list_tools()
+            if cursor is None
+            else await session.list_tools(params=PaginatedRequestParams(cursor=cursor))
+        )
+        tools.extend(result.tools)
+
+        next_cursor = _next_tools_cursor(result)
+        if next_cursor is None:
+            return _DiscoveredTools(tools=tools)
+        if next_cursor in seen_cursors:
+            raise RuntimeError(
+                f"MCP tool discovery returned repeated pagination cursor {next_cursor!r}"
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    raise RuntimeError(
+        "MCP tool discovery exceeded "
+        f"{_MAX_MCP_TOOL_DISCOVERY_PAGES:,} pages without reaching the final page"
+    )
+
+
+def _tool_discovery_deadline(discovery_timeout: timedelta) -> tuple[float, float]:
+    """Return an absolute monotonic deadline and its validated duration."""
+    timeout_seconds = discovery_timeout.total_seconds()
+    if timeout_seconds <= 0:
+        raise ValueError("discovery_timeout must be greater than zero")
+    return time.monotonic() + timeout_seconds, timeout_seconds
+
+
+async def _run_before_discovery_deadline(
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    deadline: float,
+    timeout_seconds: float,
+) -> Any:
+    """Run one discovery-stage operation within the shared overall deadline."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError(
+            f"MCP tool discovery exceeded its overall {timeout_seconds:g}-second timeout"
+        )
     try:
-        async with client.connect_to_server() as session:
-            return await session.list_tools()
+        async with asyncio.timeout(remaining):
+            return await operation()
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"MCP tool discovery exceeded its overall {timeout_seconds:g}-second timeout"
+        ) from exc
+
+
+async def _connect_and_list_all_tools(client: Any) -> _DiscoveredTools:
+    """Connect to one MCP client and collect all of its tool pages."""
+    async with client.connect_to_server() as session:
+        return await _list_all_tools(session)
+
+
+async def _list_server_tools(
+    server_name: str,
+    client: Any,
+    discovery_timeout: timedelta = _DEFAULT_MCP_TOOL_DISCOVERY_TIMEOUT,
+) -> Any:
+    """Connect once for discovery and preserve the useful cause of TaskGroup errors."""
+    deadline, timeout_seconds = _tool_discovery_deadline(discovery_timeout)
+    try:
+        return await _run_before_discovery_deadline(
+            lambda: _connect_and_list_all_tools(client),
+            deadline=deadline,
+            timeout_seconds=timeout_seconds,
+        )
     except Exception as exc:
         details = _describe_exceptions([exc])
         raise RuntimeError(
@@ -797,6 +891,7 @@ class MCPManager:
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
         tool_call_timeout: timedelta = timedelta(seconds=60),
+        discovery_timeout: timedelta = _DEFAULT_MCP_TOOL_DISCOVERY_TIMEOUT,
     ) -> MCPTool:
         """Create an MCP tool from explicit stdio config, from inside an event loop.
 
@@ -818,6 +913,7 @@ class MCPManager:
             args: Arguments passed to ``command``.
             env: Extra environment for the subprocess.
             tool_call_timeout: Per-call timeout for the generated methods.
+            discovery_timeout: Overall timeout for connection and paginated discovery.
 
         Returns:
             An MCPTool instance with one method per tool on the server.
@@ -829,7 +925,7 @@ class MCPManager:
             env=env,
             tool_call_timeout=tool_call_timeout,
         )
-        tools_result = await _list_server_tools(server_name, client)
+        tools_result = await _list_server_tools(server_name, client, discovery_timeout)
         refresh_ctx = {
             "server_url": "",
             "tool_call_timeout": tool_call_timeout,
@@ -848,6 +944,7 @@ class MCPManager:
         headers: dict[str, str] | None = None,
         transport: Literal["sse", "streamable-http"] = "streamable-http",
         tool_call_timeout: timedelta = timedelta(seconds=60),
+        discovery_timeout: timedelta = _DEFAULT_MCP_TOOL_DISCOVERY_TIMEOUT,
     ) -> MCPTool:
         """Create an HTTP or SSE MCP tool from trusted, explicit client configuration.
 
@@ -864,7 +961,7 @@ class MCPManager:
             headers=resolved_headers,
             tool_call_timeout=tool_call_timeout,
         )
-        tools_result = await _list_server_tools(server_name, client)
+        tools_result = await _list_server_tools(server_name, client, discovery_timeout)
         refresh_ctx = {
             "server_url": url,
             "tool_call_timeout": tool_call_timeout,
@@ -893,6 +990,7 @@ class MCPManager:
         mcp_file: Path | None = None,
         servers: dict[str, dict[str, Any]] | None = None,
         tool_call_timeout: timedelta = timedelta(seconds=60),
+        discovery_timeout: timedelta = _DEFAULT_MCP_TOOL_DISCOVERY_TIMEOUT,
     ) -> MCPTool:
         """Create a per-server tool instance; connects to the MCP server.
 
@@ -913,10 +1011,16 @@ class MCPManager:
             oauth_open_browser: Whether to automatically open browser for OAuth. Defaults to config, then True.
             oauth_manual: Use out-of-band OAuth (link + pasted code). Defaults to config, then False.
             oauth_browser_open: Async hook to open the auth URL in a reachable browser (host handoff).
+            oauth_timeout: Maximum seconds allowed for the OAuth flow itself.
+                When set, it must not exceed ``discovery_timeout`` and may have
+                less time available after the initial connection attempt.
             mcp_file: Path to .mcp.json file (default: .mcp.json in cwd)
             servers: Optional inline server config from the TUI config.toml.
             tool_call_timeout: How long one tool call may take before it fails.
                 Raise it for servers whose tools wrap slow work such as an LLM call.
+            discovery_timeout: Overall timeout shared by initial connection,
+                paginated discovery, OAuth, and any authenticated retry. An
+                explicit ``oauth_timeout`` must not exceed this value.
 
         Returns:
             An MCPTool instance (dynamically generated class with methods for each tool).
@@ -924,13 +1028,14 @@ class MCPManager:
 
         # Helper to run async code synchronously
         def _run_sync(coro):
+            """Run a coroutine here or in a worker when a loop is already active."""
             try:
                 asyncio.get_running_loop()
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, coro)
-                    return future.result()
             except RuntimeError:
                 return asyncio.run(coro)
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
 
         # Load config from .mcp.json
         configured_servers = _load_mcp_config(mcp_file)
@@ -965,6 +1070,11 @@ class MCPManager:
             oauth_manual if oauth_manual is not None else config_server.get("oauth_manual", False)
         )
 
+        # Create one deadline shared by initial discovery, OAuth, and retry.
+        deadline, timeout_seconds = _tool_discovery_deadline(discovery_timeout)
+        if oauth_timeout is not None and oauth_timeout > timeout_seconds:
+            raise ValueError("oauth_timeout must not exceed discovery_timeout")
+
         # Create client and connect
         client = create_mcp_client(
             transport=transport,
@@ -979,12 +1089,13 @@ class MCPManager:
         # Connect and list tools (with OAuth retry if needed)
         tools_result = None
         try:
-
-            async def _connect_and_list():
-                async with client.connect_to_server() as session:
-                    return await session.list_tools()
-
-            tools_result = _run_sync(_connect_and_list())
+            tools_result = _run_sync(
+                _run_before_discovery_deadline(
+                    lambda: _connect_and_list_all_tools(client),
+                    deadline=deadline,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
         except Exception as e:
             exceptions = e.exceptions if isinstance(e, ExceptionGroup) else [e]
 
@@ -998,16 +1109,20 @@ class MCPManager:
             if auth_exceptions:
                 try:
                     token = _run_sync(
-                        handle_mcp_oauth(
-                            server_url=url or config_server.get("url") or "",
-                            redirect_uri=oauth_redirect_uri,
-                            client_id=oauth_client_id,
-                            scope=oauth_scope,
-                            open_browser=oauth_open_browser,
-                            manual=oauth_manual,
-                            code_prompt=oauth_code_prompt,
-                            browser_open=oauth_browser_open,
-                            timeout=oauth_timeout,
+                        _run_before_discovery_deadline(
+                            lambda: handle_mcp_oauth(
+                                server_url=url or config_server.get("url") or "",
+                                redirect_uri=oauth_redirect_uri,
+                                client_id=oauth_client_id,
+                                scope=oauth_scope,
+                                open_browser=oauth_open_browser,
+                                manual=oauth_manual,
+                                code_prompt=oauth_code_prompt,
+                                browser_open=oauth_browser_open,
+                                timeout=oauth_timeout,
+                            ),
+                            deadline=deadline,
+                            timeout_seconds=timeout_seconds,
                         )
                     )
                     headers["Authorization"] = f"{token.token_type} {token.access_token}"
@@ -1022,11 +1137,13 @@ class MCPManager:
                         tool_call_timeout=tool_call_timeout,
                     )
 
-                    async def _connect_and_list_retry():
-                        async with client.connect_to_server() as session:
-                            return await session.list_tools()
-
-                    tools_result = _run_sync(_connect_and_list_retry())
+                    tools_result = _run_sync(
+                        _run_before_discovery_deadline(
+                            lambda: _connect_and_list_all_tools(client),
+                            deadline=deadline,
+                            timeout_seconds=timeout_seconds,
+                        )
+                    )
                 except Exception as retry_error:
                     all_exceptions = auth_exceptions + [retry_error] + non_auth_exceptions
                     details = _describe_exceptions(all_exceptions)
