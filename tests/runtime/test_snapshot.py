@@ -8,7 +8,8 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel
 
-from nooa import Agent
+from nooa import Agent, Context
+from nooa.context_blocks import ExpressionContextBlock, LiteralContextBlock
 from nooa.errors.storage import SerializationError
 from nooa.storage.json_snapshot import (
     snapshot_from_dict,
@@ -17,7 +18,7 @@ from nooa.storage.json_snapshot import (
     snapshot_to_json,
 )
 from nooa.storage.markers import nosnapshot
-from nooa.storage.snapshot import SNAPSHOT_VERSION, AgentSnapshot, StaticContextBlock
+from nooa.storage.snapshot import SNAPSHOT_VERSION, AgentSnapshot
 from nooa.unifiedllm import FakeLLMClient
 
 fake_llm = FakeLLMClient()
@@ -63,11 +64,47 @@ class TestSnapshotRoundtrip:
         agent2 = SimpleAgent()
         snapshot_from_json(snap, agent2)
 
-        from nooa.context_blocks import DynamicContext
-
         raw = dict(agent2.context_manager._raw_items())
-        assert isinstance(raw["status"], DynamicContext)
+        assert isinstance(raw["status"], ExpressionContextBlock)
         assert raw["status"].expr == "self.__class__.__name__"
+
+    def test_content_kind_and_placement_roundtrip_independently(self, agent):
+        """All literal/expression and prefix/suffix combinations retain both axes."""
+        agent.context_manager["prefix_literal"] = Context("stable", prefix=True)
+        agent.context_manager["suffix_literal"] = Context("volatile")
+        agent.context_manager["prefix_expression"] = Context(expr="'stable'", prefix=True)
+        agent.context_manager["suffix_expression"] = Context(expr="'volatile'")
+
+        snapshot = snapshot_to_json(agent)
+        restored = SimpleAgent()
+        snapshot_from_json(snapshot, restored)
+
+        blocks = dict(restored.context_manager._raw_items())
+        assert isinstance(blocks["prefix_literal"], LiteralContextBlock)
+        assert blocks["prefix_literal"].prefix is True
+        assert isinstance(blocks["suffix_literal"], LiteralContextBlock)
+        assert blocks["suffix_literal"].prefix is False
+        assert isinstance(blocks["prefix_expression"], ExpressionContextBlock)
+        assert blocks["prefix_expression"].prefix is True
+        assert isinstance(blocks["suffix_expression"], ExpressionContextBlock)
+        assert blocks["suffix_expression"].prefix is False
+
+    def test_expression_display_expr_roundtrip(self, agent):
+        block = ExpressionContextBlock(
+            key="status",
+            expr="self.__class__.__name__",
+            display_expr="self.context['status']",
+            prefix=True,
+        )
+        agent.context_manager.restore_block(block)
+
+        restored = SimpleAgent()
+        snapshot_from_json(snapshot_to_json(agent), restored)
+
+        restored_block = dict(restored.context_manager._raw_items())["status"]
+        assert isinstance(restored_block, ExpressionContextBlock)
+        assert restored_block.display_expr == "self.context['status']"
+        assert restored_block.prefix is True
 
     def test_event_manager_state_not_in_snapshot(self, agent):
         """Snapshots no longer carry next_tag_num; allocation lives on the backend."""
@@ -154,7 +191,7 @@ class TestAgentSnapshot:
         assert isinstance(snap, AgentSnapshot)
         assert snap.version == SNAPSHOT_VERSION
         assert len(snap.context) == 1
-        assert isinstance(snap.context[0], StaticContextBlock)
+        assert isinstance(snap.context[0], LiteralContextBlock)
         assert snap.context[0].key == "key"
         assert snap.context[0].value == "value"
 
@@ -171,6 +208,47 @@ class TestAgentSnapshot:
         assert restored.version == original.version
         assert len(restored.context) == len(original.context)
         assert restored.attributes == {"score": 42}
+
+    @pytest.mark.parametrize(
+        ("legacy_type", "payload_field", "payload_value", "expected_type"),
+        [
+            ("static", "value", {"nested": [1, 2]}, LiteralContextBlock),
+            ("dynamic", "expr", "'value'", ExpressionContextBlock),
+        ],
+    )
+    def test_v2_snapshot_migrates_old_tags(
+        self, legacy_type, payload_field, payload_value, expected_type
+    ):
+        legacy = {
+            "version": 2,
+            "context": [{"key": "legacy", "type": legacy_type, payload_field: payload_value}],
+        }
+
+        migrated = snapshot_from_dict(legacy)
+
+        assert migrated.version == SNAPSHOT_VERSION
+        assert isinstance(migrated.context[0], expected_type)
+        assert migrated.context[0].prefix is False
+
+    def test_v2_snapshot_preserves_compatibility_fix_placement(self):
+        legacy = {
+            "version": 2,
+            "context": [
+                {
+                    "key": "python_cell_tools",
+                    "type": "dynamic",
+                    "expr": "'tools'",
+                    "prefix": True,
+                }
+            ],
+        }
+
+        migrated = snapshot_from_dict(legacy)
+
+        block = migrated.context[0]
+        assert isinstance(block, ExpressionContextBlock)
+        assert block.prefix is True
+        assert block.display_expr is None
 
     def test_restore_via_model(self, agent):
         """AgentSnapshot.restore mutates agent correctly."""
