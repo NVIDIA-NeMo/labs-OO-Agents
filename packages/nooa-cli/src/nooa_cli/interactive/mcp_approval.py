@@ -114,11 +114,19 @@ def _placeholder_bindings(value: Any, path: str = "") -> list[tuple[str, str]]:
     return sorted(set(found))
 
 
-def _fingerprint(server_name: str, config: dict[str, Any]) -> str:
-    """Hash the server name and complete literal config deterministically."""
+def _fingerprint(server_name: str, config: dict[str, Any], scope: str) -> str:
+    """Hash the server name, complete literal config, and workspace scope.
+
+    Approvals are user-level (see ApprovalStore), but the stdio client runs
+    with no separate working directory, so a relative command or module
+    resolves against whatever workspace launched it, and a saved server can
+    auto-connect on startup. Without ``scope`` bound into the hash, approving
+    a definition in one workspace would silently also approve the identical
+    definition in every other workspace on the machine.
+    """
     try:
         canonical = json.dumps(
-            {"server": server_name, "config": config},
+            {"server": server_name, "config": config, "scope": scope},
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
@@ -230,11 +238,24 @@ def build_approval_request(
     *,
     mcp_file: Path | None,
     servers: dict[str, dict[str, Any]],
+    scope: str,
 ) -> MCPApprovalRequest:
     """Build review material for the current effective server definition."""
     config = _load_server_config(server_name, mcp_file=mcp_file, servers=servers)
     if not all(isinstance(field_name, str) for field_name in config):
         raise ValueError(f"MCP server {server_name!r} field names must be strings")
+    if "type" in config:
+        # Claude Code style configs use "type" where core uses "transport"
+        # ("http" there means what core calls "streamable-http"). Normalize
+        # it before the unsupported-field check below, which would otherwise
+        # reject "type" outright and never reach core's own field.
+        declared = config.pop("type")
+        mapped = "streamable-http" if declared == "http" else declared
+        if mapped not in ("stdio", "sse", "streamable-http"):
+            raise ValueError(f"Unsupported MCP type {declared!r}")
+        if config.get("transport") not in (None, mapped):
+            raise ValueError(f"MCP server {server_name!r} has conflicting type and transport")
+        config["transport"] = mapped
     unsupported = sorted(set(config) - _SUPPORTED_CONFIG_FIELDS)
     if unsupported:
         names = ", ".join(unsupported)
@@ -287,7 +308,7 @@ def build_approval_request(
         target = _safe_preview(invocation)
     return MCPApprovalRequest(
         server_name=server_name,
-        fingerprint=_fingerprint(server_name, config),
+        fingerprint=_fingerprint(server_name, config, scope),
         transport=transport,
         target=target,
         bindings=tuple(_placeholder_bindings(config)),
@@ -404,7 +425,20 @@ class MCPApprovalStore:
         temp = Path(raw_temp)
         try:
             os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            # fd is not yet owned by a file object here, so this is the only
+            # path that should ever close it directly.
+            os.close(fd)
+            temp.unlink(missing_ok=True)
+            raise
+        try:
+            with handle:
+                # os.fdopen's context manager closes fd on exit (success or
+                # error) from here on -- an os.close(fd) in a shared except
+                # block below would double-close a descriptor number the
+                # process may have already reused for something unrelated
+                # (this runs alongside the agent loop and to_thread workers).
                 json.dump(data, handle, indent=2, sort_keys=True)
                 handle.write("\n")
                 handle.flush()
@@ -412,10 +446,6 @@ class MCPApprovalStore:
             os.replace(temp, self.path)
             self.path.chmod(stat.S_IRUSR | stat.S_IWUSR)
         except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
             temp.unlink(missing_ok=True)
             raise
 

@@ -401,6 +401,7 @@ class MCPRegistry(Skill):
             name,
             mcp_file=self._mcp_file,
             servers=self._servers,
+            scope=str((self._project_dir or Path.cwd()).resolve()),
         )
 
     def _is_approved(self, name: str) -> bool:

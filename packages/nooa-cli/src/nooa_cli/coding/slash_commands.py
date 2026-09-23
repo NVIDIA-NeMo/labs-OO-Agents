@@ -92,8 +92,17 @@ def discover_markdown_commands(skills_dirs, reserved=RESERVED_COMMAND_NAMES):
                         raw = m.group(2).strip()
                         try:
                             parsed = yaml.safe_load(raw)
-                            meta[m.group(1)] = str(parsed) if isinstance(parsed, list) else parsed
                         except Exception:
+                            parsed = raw
+                        # Keep the raw text for anything but the scalar/list
+                        # shapes the callers below actually handle (bool/str/
+                        # None display as-is; a list gets bracket-notation
+                        # reconstruction). A dict (e.g. "description: Fix: the
+                        # bug" parsing as {"Fix": "the bug"}) would otherwise
+                        # surface its Python repr instead of the source text.
+                        if isinstance(parsed, bool | str | list) or parsed is None:
+                            meta[m.group(1)] = parsed
+                        else:
                             meta[m.group(1)] = raw
                 if not isinstance(meta, dict):
                     continue

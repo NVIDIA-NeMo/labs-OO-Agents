@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Agent-facing workspace preferences for NOOA interactive hosts."""
 
+import re
 from pathlib import Path
 from typing import Any
 
 from nooa.skill import Skill
+
+_ENV_PLACEHOLDER_ONLY = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
 
 class WorkspaceSettings(Skill):
@@ -87,8 +90,21 @@ class WorkspaceSettings(Skill):
         # Reuse the registry's exact, unresolved definition. The request only
         # describes configuration; it neither grants approval nor reads secrets.
         definition = registry._approval_request(name).config
-        options = self._options()
-        names = [item for item in options.mcp_auto_connect if item != name]
+        for field_name in ("headers", "env"):
+            for key, value in (definition.get(field_name) or {}).items():
+                if isinstance(value, str) and not _ENV_PLACEHOLDER_ONLY.match(value):
+                    # This definition is about to be written to the workspace's
+                    # committed .nooa/settings.yaml, not the user-level approval
+                    # store -- a literal secret here would land in version
+                    # control. Only a value that is entirely one ${VAR}
+                    # placeholder (resolved from the environment at connect
+                    # time) may be persisted.
+                    raise ValueError(
+                        f"MCP server {name!r} {field_name}[{key!r}] must be a "
+                        "${VAR} placeholder, not a literal value, to be saved "
+                        "in the workspace settings file"
+                    )
+        names = [item for item in self._project_auto_connect() if item != name]
         if auto_connect:
             names.append(name)
         path = self._save(
@@ -110,11 +126,12 @@ class WorkspaceSettings(Skill):
         """
         if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a nonempty MCP server name")
-        options = self._options()
         path = self._save(
             {
                 ("coding", "mcp_servers", name): None,
-                ("coding", "mcp_auto_connect"): [n for n in options.mcp_auto_connect if n != name],
+                ("coding", "mcp_auto_connect"): [
+                    n for n in self._project_auto_connect() if n != name
+                ],
             }
         )
         return f"Forgot MCP startup preference `{name}` in {path}."
@@ -146,6 +163,30 @@ class WorkspaceSettings(Skill):
                 ],
             },
         }
+
+    def _project_auto_connect(self) -> list[str]:
+        """Read mcp_auto_connect from the project-scope settings file only.
+
+        _save() always writes project scope. Basing an add/remove on the
+        fully layered options.mcp_auto_connect (user+project merged) would
+        copy any server name from a user's personal settings into the
+        shared, committed project file -- the same cross-scope leak
+        test_skills_control_settings_scope.py guards for skills.
+        """
+        import yaml
+
+        from .settings import resolve_behavior_settings, settings_path
+
+        path = settings_path("project", workspace=self._workspace)
+        if not path.exists():
+            return []
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, UnicodeError, yaml.YAMLError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        return list(resolve_behavior_settings(data).get("mcp_auto_connect", []))
 
     def _save(self, updates: dict[tuple[str, ...], Any]) -> Path:
         from .settings import write_settings_updates

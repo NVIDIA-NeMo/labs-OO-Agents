@@ -119,7 +119,16 @@ def load_agent_class(spec: str) -> type:
             if mod_spec is None or mod_spec.loader is None:
                 raise ImportError(f"Cannot load module from {file_path}")
             module = importlib.util.module_from_spec(mod_spec)
-            mod_spec.loader.exec_module(module)  # type: ignore[union-attr]
+            # Some code (dataclasses with postponed annotations, typing.get_type_hints)
+            # resolves a class's string annotations via sys.modules[cls.__module__];
+            # that lookup fails unless the module is registered before exec_module()
+            # runs the file's class definitions.
+            sys.modules[mod_spec.name] = module
+            try:
+                mod_spec.loader.exec_module(module)  # type: ignore[union-attr]
+            except BaseException:
+                sys.modules.pop(mod_spec.name, None)
+                raise
         finally:
             if inserted:
                 sys.path.remove(parent_str)
