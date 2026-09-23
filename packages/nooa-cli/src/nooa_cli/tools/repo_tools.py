@@ -44,6 +44,7 @@ class PathResolutionError(FileNotFoundError):
         base_name: str,
         base_path: str | Path,
         reason: str | None = None,
+        detail: str | None = None,
     ) -> None:
         resolved = Path(resolved_path)
         self.reason = reason or ("not_a_file" if resolved.exists() else "not_found")
@@ -55,11 +56,16 @@ class PathResolutionError(FileNotFoundError):
         self.resolved_path = str(resolved)
         self.base_name = base_name
         self.base_path = str(base_path)
+        self.detail = detail
         self.message = (
             f"[{self.code}] {operation}: path is {self.reason.replace('_', ' ')}: "
             f"{self.requested_path!r}; resolved to {self.resolved_path!r} against "
             f"{base_name}={self.base_path!r}"
         )
+        if detail:
+            # The underlying cause (e.g. the session's own read error) -- a
+            # typed code alone tells the caller what, not why.
+            self.message += f": {detail}"
         super().__init__(self.message)
         self.filename = self.resolved_path
 
@@ -584,6 +590,7 @@ class RepoTools(Skill):
                     base_name="self.repo.root",
                     base_path=self._root,
                     reason="unreadable",
+                    detail=file_result.diagnostic,
                 )
                 return RepoResult(query=path, lines=[], diagnostic=diagnostic)
             pairs = [

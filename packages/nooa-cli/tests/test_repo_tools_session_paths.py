@@ -145,6 +145,9 @@ async def test_session_file_failure_is_reported_without_unpaired_symbols(failure
     assert result.diagnostic is not None
     assert result.diagnostic.code == "PATH_UNREADABLE"  # type: ignore[attr-defined]
     assert "matches" not in result.text
+    # The typed code says what; the session's own error still says why.
+    assert result.diagnostic.detail  # type: ignore[attr-defined]
+    assert result.diagnostic.detail in result.text  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("operation", ["file", "map", "search", "refs"])
