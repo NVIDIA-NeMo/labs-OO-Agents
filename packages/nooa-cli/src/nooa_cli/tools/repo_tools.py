@@ -491,6 +491,13 @@ class RepoTools(Skill):
     subprocess, not a remote/sandboxed one), so anchors stay editable. A
     non-``BashSession`` session (e.g. a scripted double over its own
     in-memory filesystem) may not share it, so its anchors are read-only.
+
+    ``root`` sets the default base for relative paths and result display; it
+    is not a security boundary. Both an absolute ``path=`` argument and a
+    shared ``session`` give the same filesystem access ``ShellTools.run()``
+    already has in that session (host, or a Gym-seeded sandbox). Callers that
+    need to keep an agent inside a tree must not wire a ``session`` (or
+    ``ShellTools``) that reaches outside it.
     """
 
     __nosnapshot__ = True
@@ -517,7 +524,10 @@ class RepoTools(Skill):
     @property
     @hidden
     def root(self) -> Path:
-        """Repository root this tool is scoped to."""
+        """Default base for relative paths and result display.
+
+        Not a security boundary — see the class docstring.
+        """
         return self._root
 
     @property
@@ -1166,6 +1176,12 @@ class RepoTools(Skill):
             count += 1
 
     def _resolve(self, path: str) -> Path:
-        """Resolve a path relative to the repo root."""
+        """Resolve a path relative to the repo root.
+
+        An absolute ``path`` (or one that walks out via ``..``) is returned
+        as given, not clamped to ``self._root`` — intentional, see the class
+        docstring: this tool has the same filesystem reach as the shared
+        session's ``ShellTools.run()``, no narrower.
+        """
         p = Path(path)
         return p if p.is_absolute() else self._root / p
