@@ -289,6 +289,45 @@ def test_orphaned_shared_claim_requires_explicit_recovery(tmp_path, monkeypatch,
     resumed.close()
 
 
+def test_claim_owner_is_confirmed_dead_requires_matching_identity(tmp_path):
+    """A recorded PID alone is not enough to declare an owner dead: the same
+    number can belong to an unrelated live process in a different PID
+    namespace (sandbox vs. host) or after a reboot recycles it. The claim
+    must also record -- and this check must also match -- the owner's
+    PID-namespace and boot identity before trusting os.kill(pid, 0) at all.
+    """
+    import nooa.storage.sqlite as sqlite_storage
+
+    claim_path = tmp_path / "claim.active"
+    claim_path.mkdir()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+
+    identity = sqlite_storage._owner_identity()
+    assert identity is not None
+
+    # Matching identity + a provably dead PID: confirmed dead.
+    (claim_path / "owner-match.json").write_text(
+        json.dumps({"token": "match", "pid": dead.pid, "identity": identity})
+    )
+    assert sqlite_storage.claim_owner_is_confirmed_dead(claim_path) is True
+    (claim_path / "owner-match.json").unlink()
+
+    # Same dead PID, but a different identity (a different namespace/boot):
+    # must refuse to answer rather than risk probing an unrelated live PID.
+    mismatched = dict(identity)
+    mismatched["boot_id"] = "not-" + str(mismatched["boot_id"])
+    (claim_path / "owner-mismatch.json").write_text(
+        json.dumps({"token": "mismatch", "pid": dead.pid, "identity": mismatched})
+    )
+    assert sqlite_storage.claim_owner_is_confirmed_dead(claim_path) is False
+    (claim_path / "owner-mismatch.json").unlink()
+
+    # A legacy claim with no identity field at all: also refuse to answer.
+    (claim_path / "owner-legacy.json").write_text(json.dumps({"token": "legacy", "pid": dead.pid}))
+    assert sqlite_storage.claim_owner_is_confirmed_dead(claim_path) is False
+
+
 def test_claim_cleanup_failure_still_releases_local_lock(tmp_path, monkeypatch):
     """A marker unlink error cannot leak the manager's flock descriptor."""
     import nooa.storage.sqlite as sqlite_storage

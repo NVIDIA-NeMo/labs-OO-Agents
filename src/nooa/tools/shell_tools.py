@@ -780,6 +780,15 @@ class ShellTools(Skill):
             new: Only for path form: the replacement text.
         """
         if isinstance(target, Match):
+            if not target.editable:
+                # Checked before the ambiguity error below: that error's advice
+                # ("use the path-string form") has no editable guard, so a
+                # caller following it would write straight to the same-named
+                # host file -- exactly what this read-only anchor forbids.
+                raise ValueError(
+                    "This read-only anchor belongs to a session filesystem. "
+                    "Edit through the originating session; host replacement is disabled."
+                )
             if new is not None:
                 raise ValueError(
                     "replace(match, old, new) is ambiguous and no file was changed. "
@@ -789,11 +798,6 @@ class ShellTools(Skill):
                     "to keep the original file even if the shell directory changed. "
                     "This guard prevents silently overwriting the whole matched region "
                     "(possibly the entire file) with the old text."
-                )
-            if not target.editable:
-                raise ValueError(
-                    "This read-only anchor belongs to a session filesystem. "
-                    "Edit through the originating session; host replacement is disabled."
                 )
             new_text = old_or_new
             resolved = Path(target.resolved_path)

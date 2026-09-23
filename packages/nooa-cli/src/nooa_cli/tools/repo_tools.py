@@ -3,9 +3,10 @@
 """RepoTools — code navigation that returns ShellTools Match anchors.
 
 Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
-``RepoResult``: printable lines plus ``Match`` objects, editable via
-``self.shell.replace(result[i], new_text)`` — the same host filesystem a wired
-BashSession also operates on.
+``RepoResult``: printable lines plus ``Match`` objects. Anchors with
+``editable=True`` support ``self.shell.replace(result[i], new_text)`` — the
+same host filesystem a wired ``BashSession`` also operates on; anchors from a
+non-host session are read-only.
 """
 
 import base64
@@ -486,8 +487,10 @@ class RepoTools(Skill):
         r = await self.repo.symbols("src/", query="Handler")
         await self.shell.replace(r[0], new_code)
 
-    A wired session shares this same host filesystem (BashSession is a local
-    subprocess, not a remote/sandboxed one), so anchors remain editable either way.
+    A wired ``BashSession`` shares this same host filesystem (it is a local
+    subprocess, not a remote/sandboxed one), so anchors stay editable. A
+    non-``BashSession`` session (e.g. a scripted double over its own
+    in-memory filesystem) may not share it, so its anchors are read-only.
     """
 
     __nosnapshot__ = True
@@ -542,8 +545,9 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find definitions under a file or directory.
 
-        Returns printable lines plus ``Match`` anchors, editable via
-        ``self.shell.replace`` whether or not a session is wired.
+        Returns printable lines plus ``Match`` anchors. Anchors with
+        ``editable=True`` support ``self.shell.replace``; anchors from a
+        non-host session are read-only.
         """
         resolved = self._resolve(path)
         if not await self._path_exists(resolved):
@@ -604,8 +608,9 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
-        Returns printable lines plus ``Match`` anchors, editable via
-        ``self.shell.replace`` whether or not a session is wired.
+        Returns printable lines plus ``Match`` anchors. Anchors with
+        ``editable=True`` support ``self.shell.replace``; anchors from a
+        non-host session are read-only.
         """
         resolved = self._resolve(path)
         if not await self._path_exists(resolved):
@@ -1038,7 +1043,7 @@ class RepoTools(Skill):
                 ts_find_references,
             )
 
-            if TREE_SITTER_AVAILABLE and not self._session:
+            if TREE_SITTER_AVAILABLE and self._anchors_editable:
                 all_matches: list[str] = []
                 for fpath in self._iter_source_files(resolved, max_files=500):
                     lang = _detect_lang(fpath)

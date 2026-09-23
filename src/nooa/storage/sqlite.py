@@ -658,17 +658,37 @@ def _claim_path(db_path: str | Path) -> Path:
     return Path(db_path).with_suffix(".active")
 
 
-def _read_claim_owner(claim_path: Path) -> int | None:
-    """Return the diagnostic PID from an active-session claim, if readable."""
+def _owner_identity() -> dict[str, object] | None:
+    """Return this process's PID-namespace and boot identity, if determinable.
+
+    Used to detect when a recorded PID cannot be safely compared: the same
+    number can belong to an unrelated live process in a different PID
+    namespace (e.g. sandbox vs. host) or after a reboot recycles it.
+    """
+    try:
+        pidns = os.stat("/proc/self/ns/pid").st_ino
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not boot_id:
+        return None
+    return {"pidns": pidns, "boot_id": boot_id}
+
+
+def _read_claim_payload(claim_path: Path) -> dict[str, object] | None:
     try:
         owner_path = next(claim_path.glob("owner-*.json"))
         payload = json.loads(owner_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return None
-        pid = payload.get("pid")
-        return pid if isinstance(pid, int) else None
+        return payload if isinstance(payload, dict) else None
     except (OSError, StopIteration, ValueError, TypeError):
         return None
+
+
+def _read_claim_owner(claim_path: Path) -> int | None:
+    """Return the diagnostic PID from an active-session claim, if readable."""
+    payload = _read_claim_payload(claim_path)
+    pid = payload.get("pid") if payload is not None else None
+    return pid if isinstance(pid, int) else None
 
 
 def claim_owner_is_confirmed_dead(claim_path: Path) -> bool:
@@ -680,16 +700,26 @@ def claim_owner_is_confirmed_dead(claim_path: Path) -> bool:
     provably dead" or "unknown/still alive", never the reverse. In this
     process's own PID namespace, ``os.kill(pid, 0)`` raising
     ``ProcessLookupError`` means that exact PID is not running anywhere this
-    process could see, which is a genuine answer. Across independent
-    sandbox/host PID namespaces the same PID number can belong to a
-    different, unrelated live process, but that only ever produces a false
-    "still alive" (matching today's default), never a false "safe to
-    reclaim" — so callers may use this to surface an otherwise permanently
-    hidden, unrecoverable session for manual cleanup, but must never use it
-    to automatically delete or reopen the claim.
+    process could see, which is a genuine answer.
+
+    Across independent sandbox/host PID namespaces the same PID number can
+    belong to a different, unrelated live process; a reboot can recycle it
+    too. The claim records the owner's PID-namespace inode and boot ID
+    alongside its PID, and this check refuses to answer (returns False) when
+    that identity is missing or does not match this process's own -- so an
+    ``os.kill`` that would otherwise probe an unrelated process in a
+    different namespace never runs. Combined with the PID check, this can
+    only ever produce a false "still alive" (matching today's default),
+    never a false "safe to reclaim" -- callers may use this to surface an
+    otherwise permanently hidden, unrecoverable session for manual cleanup,
+    but must never use it to automatically delete or reopen the claim.
     """
-    pid = _read_claim_owner(claim_path)
-    if pid is None:
+    payload = _read_claim_payload(claim_path)
+    identity = _owner_identity()
+    if payload is None or identity is None:
+        return False
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or payload.get("identity") != identity:
         return False
     try:
         os.kill(pid, 0)
@@ -731,7 +761,9 @@ class _SessionClaim:
             ) from None
 
         try:
-            payload = json.dumps({"token": self._token, "pid": self._pid}).encode()
+            payload = json.dumps(
+                {"token": self._token, "pid": self._pid, "identity": _owner_identity()}
+            ).encode()
             fd = os.open(self._owner_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             try:
                 os.write(fd, payload)

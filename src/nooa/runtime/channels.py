@@ -861,7 +861,13 @@ class QueueManager:
         for handle in self._handles:
             if handle.name == name and handle.state == "running":
                 handle.state = "cancelled"
-                handle._task.cancel()
+                # Same repeat-request rule as JobHandle.cancel(): set
+                # _cancel_called so a later shutdown()/cancel() on this same
+                # handle doesn't inject a second CancelledError while its
+                # cleanup is still awaiting the first one.
+                if not handle._task.done():
+                    handle._cancel_called = True
+                    handle._task.cancel()
         # A handle for this same channel name from an earlier
         # remove/recreate cycle (e.g. queue(name, replace=True), an MCP
         # reconnect loop) has had a full turn of the event loop to finish

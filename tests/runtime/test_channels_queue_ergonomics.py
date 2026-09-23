@@ -521,6 +521,42 @@ class TestQueueManagerRemoveChannelPrunesFinishedHandles:
 
         await qm.shutdown()
 
+    @pytest.mark.asyncio
+    async def test_remove_channel_cancel_does_not_double_cancel_during_cleanup(self):
+        """remove_channel() used to call handle._task.cancel() directly
+        without setting _cancel_called. If shutdown() (or another
+        remove_channel/cancel) reached the same still-cleaning-up handle
+        before its cancelled task finished, the repeat-cancel guard didn't
+        apply and a second CancelledError could interrupt the job's cleanup
+        mid-await.
+        """
+        qm = QueueManager()
+        qm.queue("work")
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        cleanup_completed = asyncio.Event()
+
+        async def job():
+            try:
+                await asyncio.sleep(100)
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                cleanup_completed.set()
+
+        handle = qm.spawn(job(), channel="work")
+        await asyncio.sleep(0)
+        qm.remove_channel("work")
+        await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+
+        shutdown = asyncio.create_task(qm.shutdown())
+        await asyncio.sleep(0)
+        release_cleanup.set()
+        await asyncio.wait_for(shutdown, timeout=2)
+
+        assert cleanup_completed.is_set()
+        assert handle.state == "cancelled"
+
 
 class TestJobHandleCancelIgnoresUnrelatedCancellingCount:
     @pytest.mark.asyncio
