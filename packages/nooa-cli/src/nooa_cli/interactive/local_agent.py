@@ -35,6 +35,29 @@ _CALLBACK_OWNER_ATTRIBUTE = "_nooa_local_agent_runner_owner"
 _CALLBACK_LEASE_LOCK = threading.RLock()
 
 
+class TurnCancelled(Exception):
+    """The foreground turn was stopped by a cancel request.
+
+    Raised out of ``submit_and_wait()``/``submit_slash_and_wait()`` instead of
+    returning ``None`` so a host can tell a deliberate cancel apart from
+    :class:`TurnAbandoned` without inferring it from timing.
+    """
+
+
+class TurnAbandoned(Exception):
+    """The foreground turn ended without producing a result and without a cancel.
+
+    The dispatch loop exited (its queue manager was torn down, its configured
+    exit exception fired) or the runner was closed while the turn was still
+    pending. Nothing else will report on this turn; the host should release
+    it immediately.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 async def _stop_litellm_worker() -> None:
     """Stop litellm's global worker before its owning loop is torn down."""
     try:
@@ -610,7 +633,7 @@ class LocalAgentRunner:
         try:
             await self.cancel_turn(force=True, notify=False)
             await self.shutdown_queue_manager(flush=True, keep_daemons=True)
-            self._finish_foreground()
+            self._finish_foreground(error=TurnCancelled())
         finally:
             with self._lifecycle_lock:
                 self._suspend_restart -= 1
@@ -750,7 +773,11 @@ class LocalAgentRunner:
                 self._finish_foreground(error=error)
                 self._present(f"Agent error: {error}\n")
             else:
-                self._finish_foreground()
+                # The dispatch loop returned (queue manager torn down, its
+                # exit exception fired) before any turn produced a result.
+                self._finish_foreground(
+                    error=TurnAbandoned("dispatcher exited before the turn produced a result")
+                )
         else:
             self._finish_foreground(error=asyncio.CancelledError())
         self._changed()
@@ -1349,7 +1376,7 @@ class LocalAgentRunner:
             self._lifecycle_state = "closing"
             self._binding_generation += 1
             self._closed = True
-            self._finish_foreground()
+            self._finish_foreground(error=TurnAbandoned("runner closed during the turn"))
         with self._callback_lock:
             self._restore_callbacks()
         self._close_state()

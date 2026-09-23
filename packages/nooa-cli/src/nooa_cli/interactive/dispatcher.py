@@ -10,7 +10,9 @@ from contextlib import suppress
 from typing import Any
 
 from nooa.interactive import RespondResult
-from nooa_cli.interactive.local_agent import LocalAgentRunner
+from nooa_cli.interactive.local_agent import LocalAgentRunner, TurnAbandoned, TurnCancelled
+
+__all__ = ["InteractiveSessionDispatcher", "TurnAbandoned", "TurnCancelled"]
 
 
 class InteractiveSessionDispatcher:
@@ -33,8 +35,13 @@ class InteractiveSessionDispatcher:
     def active(self) -> bool:
         return self._cancelling or (self._active_task is not None and not self._active_task.done())
 
-    async def submit(self, text: str) -> RespondResult | None:
-        """Submit one user prompt and wait through any background-job notifications."""
+    async def submit(self, text: str) -> RespondResult:
+        """Submit one user prompt and wait through any background-job notifications.
+
+        Raises :class:`TurnCancelled` when :meth:`cancel` stopped the turn and
+        :class:`TurnAbandoned` when the runner ended it with no result and no
+        cancel (see ``LocalAgentRunner``); never returns ``None``.
+        """
         self._ensure_idle()
         return await self._run_active(self.runtime.submit_and_wait(text))
 
@@ -77,7 +84,7 @@ class InteractiveSessionDispatcher:
             return await task
         except asyncio.CancelledError:
             if self._cancel_requested:
-                return None
+                raise TurnCancelled() from None
             raise
         finally:
             if self._active_task is task:
