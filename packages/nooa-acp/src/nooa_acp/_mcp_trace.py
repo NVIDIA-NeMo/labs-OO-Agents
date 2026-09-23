@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -61,6 +62,22 @@ class MCPHandoffTrace:
         self._write({"event": method, "mcpServersField": state, "servers": summary})
 
     def _write(self, record: dict[str, Any]) -> None:
+        # __call__ (an acp.connection observer) is a plain sync callback that
+        # runs inline on the receive loop multiplexing every open session in
+        # this process; a blocking disk write here would stall all of them
+        # for its duration on a slow/contended filesystem. Offload the actual
+        # I/O to a worker thread and don't wait on it -- this is opt-in,
+        # best-effort diagnostic tracing, not something ACP correctness
+        # depends on, so an occasional out-of-order or lost-at-exit line is
+        # an acceptable trade for never blocking the loop.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._write_now(record)
+            return
+        loop.run_in_executor(None, self._write_now, record)
+
+    def _write_now(self, record: dict[str, Any]) -> None:
         try:
             with self._path.open("a", encoding="utf-8") as journal:
                 journal.write(json.dumps({"pid": os.getpid(), **record}) + "\n")

@@ -1809,11 +1809,19 @@ async def test_orphaned_claim_from_a_dead_process_is_surfaced_not_hidden(tmp_pat
     dead.wait()
     dead_pid = dead.pid
 
+    import nooa.storage.sqlite as sqlite_storage
+
     store = adapter._store(tmp_path.resolve())
     claim_path = store.path_for(created.session_id).with_suffix(".active")
     claim_path.mkdir(mode=0o755)
     (claim_path / "owner-orphan-test.json").write_text(
-        json.dumps({"token": "orphan-test", "pid": dead_pid})
+        json.dumps(
+            {
+                "token": "orphan-test",
+                "pid": dead_pid,
+                "identity": sqlite_storage._owner_identity(),
+            }
+        )
     )
     try:
         listed = await adapter.list_sessions(str(tmp_path))
@@ -1823,4 +1831,52 @@ async def test_orphaned_claim_from_a_dead_process_is_surfaced_not_hidden(tmp_pat
         (claim_path / "owner-orphan-test.json").unlink()
         claim_path.rmdir()
 
+    await adapter.close()
+
+
+async def test_prompt_records_the_user_message_even_when_cancel_wins_the_race(tmp_path):
+    """dispatcher.submit() wraps admission in a freshly created asyncio.Task; a
+    cancel() arriving before the event loop ever schedules that task's first
+    run cancels it without running any of its body. If recording depended on
+    the runtime's dequeue-triggered callback, the text would never even reach
+    the queue, let alone get dequeued, and would vanish from the transcript
+    with no trace -- even after resume/replay. prompt() must record it
+    synchronously before that race window opens.
+    """
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+
+    prompt_task = asyncio.create_task(
+        adapter.prompt(created.session_id, [text_block("remember this exact message")])
+    )
+    # Give the prompt task exactly one scheduling tick -- empirically the
+    # narrowest window in which its wrapping task could be cancelled before
+    # ever running dispatcher.submit()'s body.
+    await asyncio.sleep(0)
+    await adapter.cancel(created.session_id)
+    with suppress(Exception):
+        await asyncio.wait_for(prompt_task, timeout=2)
+
+    runtime = await adapter._sessions.get(created.session_id)
+    turns = runtime.value.handle.turns()
+    assert any("remember this exact message" in turn.content for turn in turns)
+    await adapter.close()
+
+
+async def test_prompt_records_the_user_message_exactly_once(tmp_path):
+    """The synchronous record in prompt() and the runtime's own dequeue
+    machinery must not both fire for the same accepted turn.
+    """
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+
+    response = await adapter.prompt(created.session_id, [text_block("hello world unique")])
+    assert response.stop_reason == "end_turn"
+
+    runtime = await adapter._sessions.get(created.session_id)
+    turns = runtime.value.handle.turns()
+    occurrences = [turn for turn in turns if "hello world unique" in turn.content]
+    assert len(occurrences) == 1, occurrences
     await adapter.close()

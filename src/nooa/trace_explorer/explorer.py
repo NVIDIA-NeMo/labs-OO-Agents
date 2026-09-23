@@ -3290,7 +3290,11 @@ class TraceExplorer:
                             args = json.loads(tc.arguments)
                             code = args.get("code", "") if isinstance(args, dict) else ""
                             if not isinstance(code, str):
-                                code = ""
+                                # A malformed code argument (e.g. {"code": 7})
+                                # must stay visible in this concise preview,
+                                # not vanish -- the detailed views still show
+                                # it, so hiding it here just hides the bug.
+                                code = _pformat(args, max_string=60, max_length=5, max_depth=2)
                             # When the turn errored, prefer the failing line extracted from
                             # the error message (e.g. "Cell In[N], line M\n    <code>").
                             # Fall back to the first meaningful code line.

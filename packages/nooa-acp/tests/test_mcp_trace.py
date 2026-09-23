@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The MCP diagnostic records the handoff without capturing private payloads."""
 
+import asyncio
 import json
 
 import pytest
@@ -80,13 +81,44 @@ def test_trace_distinguishes_missing_empty_and_malformed_fields(tmp_path, params
     assert record["servers"] == []
 
 
-def test_trace_requires_opt_in_and_handles_file_failure(tmp_path, monkeypatch, caplog):
+def test_trace_requires_opt_in(monkeypatch):
     monkeypatch.delenv("NOOA_ACP_MCP_TRACE", raising=False)
     assert MCPHandoffTrace.from_env() is None
 
-    monkeypatch.setenv("NOOA_ACP_MCP_TRACE", str(tmp_path))  # Cannot append to a directory.
-    trace = MCPHandoffTrace.from_env()
-    assert trace is not None
+
+def test_trace_handles_a_write_failure_on_a_later_event(tmp_path, caplog):
+    """A write failure on a later event -- not the constructor's own initial
+    write -- must disable tracing and log a warning. Breaking the path only
+    after successful construction keeps this from passing merely because
+    __init__'s own eager write already failed and disabled tracing before
+    the event under test ever ran (which happened when both writes used the
+    same already-broken path: __call__'s "if not self._enabled: return"
+    guard would short-circuit and never reach _write again).
+    """
+    trace = MCPHandoffTrace(tmp_path / "trace.jsonl")
+    assert trace._enabled is True
+    assert len(caplog.records) == 0
+
+    trace._path = tmp_path  # Cannot append to a directory.
     trace(StreamEvent(StreamDirection.INCOMING, {"method": "session/new"}))
+    assert trace._enabled is False
     assert len(caplog.records) == 1
     assert "Cannot write ACP MCP handoff trace" in caplog.text
+
+
+async def test_trace_write_does_not_block_the_running_event_loop(tmp_path):
+    """__call__ runs inline on acp.connection's sync receive loop; the actual
+    file write must be offloaded to a worker thread from within a running
+    event loop rather than blocking it, while still landing durably.
+    """
+    path = tmp_path / "trace.jsonl"
+    trace = MCPHandoffTrace(path)
+    trace(StreamEvent(StreamDirection.INCOMING, {"method": "session/new"}))
+    # The offloaded write is fire-and-forget; give the executor thread a
+    # scheduling tick to finish before checking the file landed.
+    for _ in range(20):
+        if path.read_text().count("\n") >= 2:
+            break
+        await asyncio.sleep(0.01)
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [line["event"] for line in lines] == ["trace_started", "session/new"]

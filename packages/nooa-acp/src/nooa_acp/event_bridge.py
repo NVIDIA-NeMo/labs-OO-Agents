@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -95,16 +96,22 @@ class ACPEventBridge:
         # its final report does, via delegate()/spawn()). Without this hook
         # none of that live activity — tool cards, diffs, cost — ever
         # reached the ACP client; the delegation feature ran invisibly.
-        agent._on_worker_spawned = lambda worker: self._subscribe(worker.event_manager)
+        agent._on_worker_spawned = lambda worker: self._unsubscribers.extend(
+            self._subscribe(worker.event_manager, is_worker=True)
+        )
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
 
-    def _subscribe(self, event_manager: Any) -> list[Callable[[], None]]:
+    def _subscribe(
+        self, event_manager: Any, *, is_worker: bool = False
+    ) -> list[Callable[[], None]]:
         """Wire this bridge's handlers onto one EventManager (agent or worker)."""
         return [
             event_manager.on("AgentMessage", self._on_agent_message),
             event_manager.on("ToolCallEvent", self._on_tool_call),
             event_manager.on("PythonOutput", self._on_python_output),
-            event_manager.on("LLMResponse", self._on_llm_response),
+            event_manager.on(
+                "LLMResponse", lambda event: self._on_llm_response(event, is_worker=is_worker)
+            ),
             event_manager.on("FileEdit", self._on_file_edit),
             event_manager.on("TerminalCommandStarted", self._on_terminal_started),
             event_manager.on("TerminalCommandOutput", self._on_terminal_output),
@@ -131,7 +138,12 @@ class ACPEventBridge:
                 SessionInfoUpdate(
                     session_update="session_info_update",
                     title=event.title,
-                    updated_at=event.timestamp.isoformat(),
+                    # event.timestamp is naive local time (EventBase's
+                    # default_factory=datetime.now); list_sessions() reports
+                    # UTC-aware timestamps for the same conceptual field, so a
+                    # live update and a later list_sessions() call disagreed
+                    # by the local UTC offset and used different formats.
+                    updated_at=event.timestamp.astimezone(UTC).isoformat(),
                 )
             )
 
@@ -286,13 +298,21 @@ class ACPEventBridge:
             )
         )
 
-    def _on_llm_response(self, event: EventBase) -> None:
+    def _on_llm_response(self, event: EventBase, *, is_worker: bool = False) -> None:
         if not isinstance(event, LLMResponse):
             return
         usage = event.usage
         if usage is None:
             return
         self._cost_usd += usage.cost_usd
+        if is_worker:
+            # A worker's own small, isolated usage has nothing to do with the
+            # controller's context window; publishing it here would overwrite
+            # the client's usage display with an unrelated, much smaller
+            # number, making it look like compaction happened when it didn't.
+            # Its cost is still summed above -- only the used/size display is
+            # controller-only.
+            return
         context_window = getattr(self.agent.llm, "context_window", None)
         if context_window is None:
             return

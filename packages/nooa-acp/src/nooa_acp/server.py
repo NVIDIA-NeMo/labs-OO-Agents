@@ -55,7 +55,7 @@ from nooa_cli.coding import (
 )
 from nooa_cli.coding.factory import create_session_agent
 from nooa_cli.coding.slash_commands import RESERVED_COMMAND_NAMES
-from nooa_cli.interactive.controls import behavior_commands
+from nooa_cli.interactive.controls import CONTROL_TYPES, behavior_commands
 from nooa_cli.interactive.local_turn_policy import LocalTurnPolicy
 from nooa_cli.interactive.options import (
     SessionOptions,
@@ -80,6 +80,7 @@ from nooa.sessions import (
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import (
     SessionAlreadyActiveError,
+    _claim_path,
     claim_owner_is_confirmed_dead,
     is_sqlite_database_active,
 )
@@ -116,6 +117,12 @@ class _ACPSession:
     policy: LocalTurnPolicy | None = None
     # ACP requests must not interleave with the transcript replay on load.
     ready: bool = False
+    # Set by prompt() right before admitting a non-slash turn, whose text it
+    # already recorded synchronously (see prompt()). Lets the dequeue-
+    # triggered callback below recognize and skip that one admission instead
+    # of double-recording it, while still recording every other admission
+    # path (e.g. a markdown skill's prepared next turn) exactly as before.
+    _pending_synced_text: str | None = None
 
     def __post_init__(self) -> None:
         self.cancel_complete.set()
@@ -217,8 +224,16 @@ class CodingACPAdapter:
         try:
             handle = self._store(root).create(
                 model=llm.model,
-                agent=options.agent_spec
-                or ("CodingAgent" if options.legacy_agent else "ExperimentalCodingAgent"),
+                # Match create_session_agent()'s actual precedence exactly
+                # (options.agent_spec and not options.legacy_agent): that
+                # function's "or" here would persist agent_spec even when
+                # legacy_agent overrides it, so a later resume's class-mismatch
+                # check would compare against a class that was never built.
+                agent=(
+                    options.agent_spec
+                    if (options.agent_spec and not options.legacy_agent)
+                    else ("CodingAgent" if options.legacy_agent else "ExperimentalCodingAgent")
+                ),
                 working_directory=str(root),
                 host="acp",
                 check_same_thread=False,
@@ -305,8 +320,7 @@ class CodingACPAdapter:
             db_path = store.path_for(session_id)
             if not is_sqlite_database_active(db_path):
                 return False, False
-            claim_path = db_path.with_suffix(".active")
-            return True, claim_owner_is_confirmed_dead(claim_path)
+            return True, claim_owner_is_confirmed_dead(_claim_path(db_path))
 
         # ACP has no standard field for disabling a busy entry in the picker,
         # so a session currently open elsewhere still must be omitted (like
@@ -320,14 +334,23 @@ class CodingACPAdapter:
         # ACP's _meta extension point so unaware clients still just work.
         # Filter before pagination so excluded sessions cannot hide later results.
         # The load-time lock still handles sessions opened after this check.
-        found = []
-        for info in store.list(limit=None):
-            if info.turn_count == 0:
-                continue
-            active, orphaned = _locked_state(info.id)
-            if active and not orphaned:
-                continue
-            found.append((info, orphaned))
+        def _list_and_filter() -> list[tuple[Any, bool]]:
+            # store.list() and _locked_state() are pure synchronous filesystem
+            # I/O (no awaits), one flock probe per non-empty session -- run
+            # off the event loop so a workspace with many sessions can't
+            # stall every other open session's prompt/cancel/response
+            # delivery in this same process for the duration of the scan.
+            result = []
+            for info in store.list(limit=None):
+                if info.turn_count == 0:
+                    continue
+                active, orphaned = _locked_state(info.id)
+                if active and not orphaned:
+                    continue
+                result.append((info, orphaned))
+            return result
+
+        found = await asyncio.to_thread(_list_and_filter)
         page = found[offset : offset + _SESSION_PAGE_SIZE]
         sessions = [
             ACPSessionInfo(
@@ -384,14 +407,27 @@ class CodingACPAdapter:
                             else ""
                         )
                         if requested in RESERVED_COMMAND_NAMES:
+                            available = ", ".join(f"/{name}" for name in CONTROL_TYPES)
                             message = (
                                 f"NOOA /{requested} is not available through ACP yet. "
-                                "Available behavior controls: /skills, /mcp. "
+                                f"Available behavior controls: {available}. "
                                 "Use native NOOA for the other agent controls."
                             )
                             session.bridge.publish(update_agent_message(text_block(message)))
                             await session.bridge.flush()
                             return PromptResponse(stop_reason="end_turn")
+                        # Recorded here, synchronously, instead of relying solely
+                        # on the runtime's dequeue-triggered callback:
+                        # dispatcher.submit() wraps admission in a freshly created
+                        # asyncio.Task, and a cancel() arriving before the event
+                        # loop ever schedules that task's first run cancels it
+                        # without running any of its body -- the text would never
+                        # even reach the queue, let alone get dequeued, and be
+                        # lost with no trace. record_unless_already_synced()
+                        # above skips the matching dequeue-triggered call so a
+                        # normal (non-cancelled) turn isn't recorded twice.
+                        session._pending_synced_text = text
+                        session.handle.record_user_message(text)
                         result = await session.dispatcher.submit(text)
                     else:
                         name, raw_args = slash
@@ -483,10 +519,12 @@ class CodingACPAdapter:
                     # event then. Bound the wait so that ambiguity can never
                     # turn into a permanently held turn lock; a real cancel
                     # is expected to finish this wait well within the bound.
+                    confirmed = True
                     try:
                         async with asyncio.timeout(_CANCEL_CONFIRMATION_TIMEOUT_SECONDS):
                             await session.cancel_complete.wait()
                     except TimeoutError:
+                        confirmed = False
                         logger.warning(
                             "Session %s: turn ended with no result and no cancel "
                             "confirmation within %ss; releasing the turn lock anyway.",
@@ -498,7 +536,13 @@ class CodingACPAdapter:
                     # a collapsed card shows nothing and the turn just goes
                     # quiet. Record it as a real message so the conversation —
                     # and the durable transcript on resume — says what happened.
-                    session.agent.message("Stopped at your request.")
+                    # The timeout above means this None result was never
+                    # actually confirmed as a cancel, so don't claim one.
+                    session.agent.message(
+                        "Stopped at your request."
+                        if confirmed
+                        else "The turn ended without a result."
+                    )
                     await session.bridge.flush()
                     return PromptResponse(stop_reason="cancelled")
                 await session.bridge.flush()
@@ -586,7 +630,6 @@ class CodingACPAdapter:
                     # instead of failing session/new with an opaque error.
                     registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
             dispatcher = InteractiveSessionDispatcher(agent)
-            dispatcher.runtime.set_user_message_accepted_callback(handle.record_user_message)
             bridge = ACPEventBridge(agent, self._client, handle.id)
             bridge.watch_session(handle)
 
@@ -625,6 +668,14 @@ class CodingACPAdapter:
                 restored=restored,
                 policy=policy,
             )
+
+            def record_unless_already_synced(text: str) -> None:
+                if text is value._pending_synced_text:
+                    value._pending_synced_text = None
+                    return
+                handle.record_user_message(text)
+
+            dispatcher.runtime.set_user_message_accepted_callback(record_unless_already_synced)
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
@@ -834,6 +885,14 @@ async def serve(
         if not terminating and task is not None:
             terminating = True
             task.cancel()
+            # A second SIGTERM must be able to kill the process outright even
+            # if cleanup hangs (e.g. SessionRuntime._close_once() blocked on
+            # the turn lock): the process's inherited SIGTERM handler could be
+            # SIG_IGN or another custom handler, so simply restoring it
+            # (finally, below) is not guaranteed to make a second signal
+            # terminate anything. Install the default action right away.
+            loop.remove_signal_handler(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
     signal_installed = False
     try:
