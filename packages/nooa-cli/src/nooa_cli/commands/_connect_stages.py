@@ -60,6 +60,7 @@ def run_stage(
     prompt_key=False,
     discovery_file=None,
     invalid_options=(),
+    working_dir=False,
 ):
     """Return JSON; only an explicit --prompt-key enables a masked stdin prompt."""
     import asyncio
@@ -126,13 +127,23 @@ def run_stage(
             data = {"alias": alias, "path": str(path), "entry": entry}
             from ._connect_registry import shadowing_source
 
-            if shadow := shadowing_source(alias, path):
+            if shadow := shadowing_source(alias, path, extra_priority=bool(working_dir)):
                 data["shadowed_by"] = shadow
                 click.echo(f"Warning: alias is still resolved from {shadow}.", err=True)
             ok = True
         elif stage == "catalogue":
             models = asyncio.run(connect.catalogue())
-            data = {"models": connect.match_models(model, models) if model else models}
+            matches = connect.match_models(model, models) if model else models
+            data = {"models": matches}
+            if model and not matches:
+                # An exact/suffix match found nothing — likely a gateway
+                # prefix (aws/..., bedrock-..., vertex/...) the catalogue
+                # never records. Surface fuzzy suggestions for the caller to
+                # confirm; never auto-select one, matching the wizard's own
+                # "did you mean" behavior for the same situation.
+                fuzzy = connect.fuzzy_match_models(model, models)
+                if fuzzy:
+                    data["fuzzy_models"] = fuzzy
             ok = True
         else:
             if not endpoint:

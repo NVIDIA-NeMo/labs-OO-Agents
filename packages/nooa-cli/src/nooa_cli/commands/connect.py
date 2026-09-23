@@ -75,7 +75,7 @@ from ._connect_stages import STAGES
 @click.option(
     "--budget-tokens",
     type=click.IntRange(min=1),
-    help="Shared estimated-token budget for all checks (default: 131072); never increased after approval.",
+    help="Shared estimated-token budget for all checks (default: unlimited); never increased after approval.",
 )
 @click.option(
     "--output-tokens",
@@ -102,7 +102,21 @@ from ._connect_stages import STAGES
 @click.option(
     "--output",
     type=click.Path(dir_okay=False),
-    help="Registry path; defaults to the user llm_config.yaml.",
+    help="Registry path; defaults to the user llm_config.yaml. Mutually exclusive with --working-dir.",
+)
+@click.option(
+    "--working-dir",
+    "-w",
+    # No exists=True here: click validates the raw argument before this
+    # command ever runs, so a literal "~" would fail as "does not exist"
+    # even though it's a real directory — expand it ourselves below, then
+    # check existence on the expanded path.
+    type=click.Path(file_okay=False, dir_okay=True, path_type=str),
+    help=(
+        "Save to this project's registry (<working-dir>/.nooa/llm_config.yaml) "
+        "instead of the user-global one — the same file `nooa tui -w <working-dir>` "
+        "reads. Mutually exclusive with --output."
+    ),
 )
 @click.option(
     "--yes",
@@ -135,6 +149,7 @@ def command(
     reply_tokens,
     show_config,
     output,
+    working_dir,
     yes,
 ):
     """Walk through model setup, check the connection, and save an alias.
@@ -144,6 +159,29 @@ def command(
     explicit --endpoint and --api-style.
     MODEL is the exact endpoint model ID, without a LiteLLM routing prefix.
     """
+    if working_dir:
+        if output:
+            raise click.UsageError("--working-dir and --output are mutually exclusive.")
+        if stage and stage != "save":
+            raise click.UsageError(
+                "--working-dir only applies to the full interactive run or --stage save; "
+                "other stages emit JSON and never write a registry file."
+            )
+        from pathlib import Path
+
+        from nooa import paths
+
+        resolved_dir = Path(working_dir).expanduser().resolve()
+        # click's own file_okay/dir_okay checks only run when its (raw,
+        # unexpanded) argument happens to already exist, so a "~"-relative
+        # path skips them entirely — check both cases explicitly here,
+        # after expansion, rather than reporting "does not exist" for a
+        # real path that just isn't a directory.
+        if not resolved_dir.exists():
+            raise click.UsageError(f"--working-dir directory {str(resolved_dir)!r} does not exist.")
+        if not resolved_dir.is_dir():
+            raise click.UsageError(f"--working-dir path {str(resolved_dir)!r} is not a directory.")
+        output = str(resolved_dir / paths.DIR_NAME / "llm_config.yaml")
     if stage:
         from ._connect_stages import run_stage
 
@@ -179,6 +217,7 @@ def command(
                 }.items()
                 if used
             ],
+            working_dir=bool(working_dir),
         )
         raise click.exceptions.Exit(code)
     if input_file:
@@ -209,5 +248,6 @@ def command(
         reply_tokens=reply_tokens,
         show_config=show_config,
         output=output,
+        working_dir=working_dir,
         yes=yes,
     )

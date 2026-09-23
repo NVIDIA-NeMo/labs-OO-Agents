@@ -52,8 +52,18 @@ def credential_names(registry, endpoint):
     return names
 
 
-def shadowing_source(alias, path):
-    """Name a currently effective file that would override this destination."""
+def shadowing_source(alias, path, *, extra_priority=False):
+    """Name a currently effective file that would override this destination.
+
+    ``extra_priority`` is for a ``--working-dir``/``-w`` save target
+    specifically: ``entries()``'s ``extra_path`` is always appended last
+    (highest priority, matching what a future ``nooa tui -w`` read of the
+    same directory would do), so that target is never actually shadowed by
+    anything as long as the caller keeps pairing ``-w`` with the same
+    directory. An arbitrary ``--output`` path has no such guaranteed future
+    re-inclusion, so it keeps the original, stricter behavior: absent from
+    priority means always shadowed by an existing definition elsewhere.
+    """
     import os
     from pathlib import Path
 
@@ -74,6 +84,7 @@ def shadowing_source(alias, path):
             for p in os.environ.get("NEMO_OO_LLM_CONFIG", "").split(",")
             if p.strip()
         ),
+        *([path] if extra_priority else []),
     ]
     priority = {p.resolve(): i for i, p in enumerate(paths)}
     target = priority.get(path.resolve())

@@ -192,27 +192,6 @@ def _snapshot_llm_request(
     return _extract_trailing_context_envelope(messages)
 
 
-def _resolve_provider_formatter(llm_client: Any, default_formatter: Any) -> Any:
-    """Auto-select provider formatter based on LLM client type.
-
-    ResponsesClient needs ResponsesProviderFormatter to emit native Responses
-    API wire format.  All other clients (including Anthropic via LiteLLM) use
-    the agent's configured formatter.
-
-    This is intentionally runtime-dispatched rather than config-driven:
-    Anthropic formatting is handled by LiteLLM (so OpenAIProviderFormatter
-    works), but the Responses API has a fundamentally different wire shape
-    that LiteLLM does not translate, requiring its own formatter.
-    """
-    from nooa.unifiedllm import ResponsesClient
-
-    if isinstance(llm_client, ResponsesClient):
-        from nooa.context_blocks.formatter import ResponsesProviderFormatter
-
-        return ResponsesProviderFormatter()
-    return default_formatter
-
-
 # ---------------------------------------------------------------------------
 # Shared collapse/archival helpers (L4 boundary + error-driven archival)
 # ---------------------------------------------------------------------------
@@ -3021,13 +3000,10 @@ class ActorRuntime:
             return round(len(text) * ratio)
 
         with hm.timer("time_render_context"):
-            provider_formatter = _resolve_provider_formatter(
-                llm_client, self.agent.render_config.provider_formatter
-            )
             result = render_context(
                 blocks,
                 block_formatter=self.agent.render_config.block_formatter,
-                provider_formatter=provider_formatter,
+                provider_formatter=self.agent.render_config.provider_formatter,
                 context_limit=effective_context_limit,
                 count_tokens=count_tokens,
                 event_format=tc.event_format,

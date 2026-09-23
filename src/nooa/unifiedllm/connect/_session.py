@@ -4,7 +4,10 @@
 
 import asyncio
 import json
+import uuid
 from copy import deepcopy
+
+from . import REASONING_CHECK_PROMPT
 
 REPLY_CAP = 2048
 # Includes padding, schema/instructions, and up to two prior reply-sized items.
@@ -122,7 +125,7 @@ def _reasoning_values(response):
 
 async def session_steps(alias, entry, *, api_key, budget_tokens):
     """Three configured-cap turns, without retries; never execute model tools."""
-    from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
+    from nooa.context_blocks.formatter import OpenAIProviderFormatter
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -170,14 +173,15 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         raise RuntimeError("Setup checks never execute model tools")
 
     formatter = CachedBlockFormatter()
-    provider = (
-        ResponsesProviderFormatter()
-        if entry["api_style"] == "responses"
-        else OpenAIProviderFormatter()
-    )
+    provider = OpenAIProviderFormatter()
     # Non-repetitive lines give a reusable prefix without any user's private data.
+    # Short hex ids in place of zero-padded decimal digit runs measurably lower
+    # (but do not eliminate) a stochastic provider content filter observed live
+    # on this check's arithmetic-verification turn; see CHANGELOG.
+    train_ids = [uuid.uuid5(uuid.NAMESPACE_DNS, f"train-{i}").hex[:6] for i in range(360)]
     padding = "\n".join(
-        f"Reference record {i:04d}: item {i * 17 + 3:06d} belongs to batch {i % 97:02d}."
+        f"Train {train_ids[i]} departs platform {1 + i % 12}; its trip takes "
+        f"{15 + (i * 17 + 3) % 180} minutes."
         for i in range(360)
     )
     messages = render_context(
@@ -198,8 +202,22 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 key="task",
                 # The cached formatter partitions SYSTEM context blocks and
                 # renders the dynamic half as a trailing USER message.
+                #
+                # Reuses the reasoning-level puzzle rather than a trivial
+                # arithmetic task: a model with adaptive/content-dependent
+                # reasoning effort can legitimately skip reasoning on
+                # something this easy even at a real reasoning level, which
+                # previously showed up as a false "reasoning not retained"
+                # result indistinguishable from an actual replay bug
+                # (observed live for gpt-6-astra). The puzzle is hard enough
+                # to force genuine reasoning at any configured level. As
+                # with level checks, a wrong answer here is not graded —
+                # only whether reasoning was observed at all.
                 role=Role.SYSTEM,
-                content="Find the sum of item numbers for records 0013 and 0027. Call probe_tool with the sum as a string, or answer briefly.",
+                content=(
+                    f"{REASONING_CHECK_PROMPT}\n\nCall probe_tool with your eight-letter "
+                    "answer, or answer briefly."
+                ),
                 metadata=BlockMetadata(static=False, user_block=True),
             ),
         ],
@@ -267,7 +285,19 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                     CacheBoundary(),
                     {
                         "role": "user",
-                        "content": f"Check {index}: verify the recorded result briefly.",
+                        # A plain "verify the answer" ask is itself trivial —
+                        # answerable from memory without reasoning again, so a
+                        # model with adaptive/content-dependent reasoning
+                        # effort can legitimately skip it on this turn even
+                        # though it reasoned on the original puzzle (observed
+                        # live for gpt-6-astra). Changing one rule forces a
+                        # genuine new reasoning pass rather than a recall.
+                        "content": (
+                            f"Check {index}: one rule changed — H now runs first, not "
+                            "last. Solve the puzzle again with this update. Call "
+                            "probe_tool with your new eight-letter answer, or answer "
+                            "briefly."
+                        ),
                     },
                 ]
             )

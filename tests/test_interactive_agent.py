@@ -164,3 +164,9 @@ async def test_web_publisher_is_not_installed_or_restored(monkeypatch):
         assert "web" not in agent.context
     finally:
         await agent.llm.aclose()
+
+
+@pytest.mark.parametrize("fraction", [0, -0.1, 1, 1.1])
+def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction):
+    with pytest.raises(ValidationError):
+        SummarizationConfig(threshold_fraction=fraction)

@@ -11,7 +11,12 @@ from nooa.llm_types import (
     assistant_message,
 )
 from nooa.unifiedllm.errors import EmptyContentError, ReasoningReplayError
-from nooa.unifiedllm.fake import FakeLLMClient
+from nooa.unifiedllm.fake import (
+    FakeLLMCall,
+    FakeLLMClient,
+    FakeLLMResponseExhaustedError,
+    FakeLLMToolSnapshot,
+)
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import (
     MODELS,
@@ -71,7 +76,10 @@ __all__ = [
     "with_retry",
     "sync_retry",
     # Testing
+    "FakeLLMCall",
     "FakeLLMClient",
+    "FakeLLMResponseExhaustedError",
+    "FakeLLMToolSnapshot",
     # Utilities
     "extract_and_parse_json",
     "assistant_message",
