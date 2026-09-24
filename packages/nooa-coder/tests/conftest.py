@@ -61,3 +61,50 @@ async def make_session(sessions_dir, tmp_path):
     yield factory
     for session in made:
         await session.close()
+
+
+class ScriptedModels:
+    """An agent factory that gives each session its own strict fake model.
+
+    Scripts are keyed by session name (``None`` for an unnamed root); a
+    session whose name has no script gets an empty strict model.
+    """
+
+    def __init__(self, scripts=None):
+        self.scripts = dict(scripts or {})
+        self.llms = {}
+        self.built = []
+
+    def __call__(self, options, storage):
+        from nooa_coder.session.loader import default_agent_factory
+
+        from nooa.unifiedllm import FakeLLMClient
+
+        llm = FakeLLMClient(list(self.scripts.get(options.name, [])), strict_exhaustion=True)
+        self.llms[options.name] = llm
+        self.built.append(options)
+        return default_agent_factory(options.model_copy(update={"llm": llm}), storage)
+
+
+@pytest.fixture
+def models():
+    return ScriptedModels()
+
+
+@pytest.fixture
+async def registry(sessions_dir, models):
+    from nooa_coder.session.registry import SessionRegistry
+    from nooa_coder.session.store import SessionStore
+
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
+    yield registry
+    await registry.close_all()
+
+
+@pytest.fixture
+def root_options(tmp_path, sessions_dir):
+    from nooa_coder.session.options import SessionOptions
+
+    return SessionOptions(
+        workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent", sessions_dir=sessions_dir
+    )
