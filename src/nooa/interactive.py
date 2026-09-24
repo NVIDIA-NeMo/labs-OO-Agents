@@ -11,7 +11,9 @@ queues and re-enters ``handle()`` once per notification. It provides:
 * ``self.v`` — snapshot-backed persistent variables that survive turns
   and sessions,
 * ``message()`` — send a Markdown message to the user,
-* the ``handle()`` → ``RespondResult`` turn protocol,
+* the turn protocol: ``handle()`` returns ``Done``, ``NeedInput`` or
+  ``Waiting`` (``RespondResult`` is the older form, still accepted);
+  ``handle_batch()`` runs unattended turns and returns ``Done`` or ``Waiting``,
 * token-budget history summarization (``install_summarizer`` /
   ``apply_model_limits``).
 
@@ -22,7 +24,7 @@ interactive hosts such as the TUI and ACP.
 from enum import StrEnum
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from nooa import hidden, strategy
 from nooa.agentdoc import doc
@@ -55,6 +57,7 @@ from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: 
 # the agent's REPL — hide it so doc(self) / exec_globals don't advertise it.
 with hidden:
     import os
+    import warnings
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -88,8 +91,77 @@ with hidden:
     from nooa.unifiedllm import UnifiedLLM
 
 
+def _non_blank(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("must not be blank")
+    return value
+
+
+class Done(BaseModel):
+    """Turn result: the work for this turn is finished.
+
+    ``explanation`` is a short status line for the host, not the reply to
+    the user; send the reply with ``self.message()`` first. ``result`` is
+    set only when a delegated objective or benchmark task completes; it is
+    then a ``TaskResult`` (defined with the bench and session code, so it is
+    typed ``Any`` here).
+    """
+
+    explanation: str = Field(description="Status line saying what was finished; not the reply")
+    result: Any | None = Field(
+        default=None, description="TaskResult when a delegated or bench task completes"
+    )
+
+    _check_explanation = field_validator("explanation")(_non_blank)
+
+
+# The field is named schema_json on purpose (design §4.4). It replaces
+# pydantic's deprecated BaseModel.schema_json() method on this class only,
+# so pydantic's "shadows an attribute" warning and pyright's override check
+# are silenced here.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", message='Field name "schema_json"', category=UserWarning)
+
+    class NeedInput(BaseModel):
+        """Turn result: a question the agent cannot continue without.
+
+        ``question`` is the question itself; the host shows it to the person,
+        so do not also send it with ``self.message()``. Set ``options`` for a
+        single choice, or ``schema_json`` (a flat JSON schema) for a typed
+        answer, or neither for free text. The answer arrives in the next
+        notification.
+        """
+
+        question: str = Field(description="The question to show the person")
+        options: list[str] | None = Field(default=None, description="Choices for a single choice")
+        schema_json: dict[str, Any] | None = Field(  # pyright: ignore[reportIncompatibleMethodOverride]
+            default=None, description="Flat JSON schema for a typed answer"
+        )
+
+        _check_question = field_validator("question")(_non_blank)
+
+        @model_validator(mode="after")
+        def _one_answer_shape(self) -> "NeedInput":
+            if self.options is not None and self.schema_json is not None:
+                raise ValueError("set options or schema_json, not both")
+            return self
+
+
+class Waiting(BaseModel):
+    """Turn result: waiting on a background job or queue, not on a person.
+
+    ``explanation`` names what is being waited on. The host keeps the
+    request open and runs the next turn when that arrives.
+    """
+
+    explanation: str = Field(description="What is being waited on and why")
+
+    _check_explanation = field_validator("explanation")(_non_blank)
+
+
 class RespondReason(StrEnum):
-    """Reason/action returned by ``handle()`` at the end of a turn."""
+    """Reason/action returned by ``handle()`` at the end of a turn (older form)."""
 
     DONE = "DONE"
     NEED_INPUT = "NEED_INPUT"
@@ -101,7 +173,10 @@ RespondKind = Literal["DONE", "NEED_INPUT", "WAIT", "GET_USER_INPUT"]
 
 
 class RespondResult(BaseModel):
-    """Return value for ``handle()`` — signals what the outer loop should do next.
+    """Older return value for ``handle()`` — signals what the outer loop should do next.
+
+    Still accepted by ``handle()`` so existing hosts and agents keep working;
+    new code returns ``Done``, ``NeedInput`` or ``Waiting``.
 
     Fields:
 
@@ -440,14 +515,12 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     async def handle(
         self,
         notification: dict[str, list],
-    ) -> "RespondResult":
-        """Handle a single turn of the conversation.
+    ) -> Done | NeedInput | Waiting | RespondResult:
+        """Handle one interactive turn.
 
         Called once per inbound notification (or batch). Unpack
-        ``notification`` and do the work, then return a
-        ``RespondResult`` telling the outer dispatcher what to do next.
-
-        Use ``self.v.<name> = value`` for state that should survive
+        ``notification``, do the work, then end the turn with one typed
+        result. Use ``self.v.<name> = value`` for state that must survive
         across turns (snapshot-backed via ``self.vars``).
 
         ## Turn anatomy
@@ -463,38 +536,34 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Do ALL the work before returning. Use as many ``execute_python``
         calls as needed — explore, implement, test, iterate. A turn that
         returns after one or two cells when the task clearly needs more
-        is a bug. The only reasons to call ``return_result`` are:
-
-        1. You have genuinely completed everything the user asked for.
-        2. You need user input to proceed (ambiguity, confirmation).
-        3. You are waiting on a background job.
+        is a bug. End the turn only when the request is complete, when you
+        need an answer from the person, or when you are waiting on a
+        background job.
 
         ## Returning
 
-        End the turn with exactly one ``return_result(REASON_ENUM, explanation="...")``.
-        ``explanation`` is required and must be non-empty. The host records and renders it as the
-        visible stop reason, so be specific and user-facing: if waiting on a
-        job/queue, name which job and why; if asking for input, say what input
-        is needed and why.
+        End the turn with exactly one ``return_result(...)`` of one of these:
 
-        - Request complete; wait for the next user message::
+        - ``Done(explanation=...)`` — the request is complete. Send the
+          reply to the user with ``self.message()`` first; ``explanation``
+          is a short status line the host records, not the reply::
 
-              return_result(RespondReason.DONE, explanation="implemented the feature and verified focused tests")
+              self.message("Added the flag and its test; all tests pass.")
+              return_result(Done(explanation="implemented the flag and verified focused tests"))
 
-        - Need human input before proceeding::
+        - ``NeedInput(question=...)`` — you cannot continue without an
+          answer. ``question`` is the question; the host shows it, so do
+          not also send it with ``message()``. Add ``options=[...]`` for a
+          single choice. The answer arrives in the next notification::
 
-              return_result(RespondReason.NEED_INPUT, explanation="need the target branch before pushing the MR")
+              return_result(NeedInput(question="Which branch should I push to?", options=["main", "dev"]))
 
-        - Waiting for a background job or producer queue::
+        - ``Waiting(explanation=...)`` — waiting on a background job or
+          queue, not on a person. Name the job and why::
 
-              return_result(RespondReason.WAIT, explanation="waiting for pytest job ci-42 to finish before reporting results")
+              return_result(Waiting(explanation="waiting for pytest job ci-42 before reporting results"))
 
-        All stop reasons use the same dispatcher wake path: the host races every
-        declared queue/event channel and re-enters ``handle()`` with the first
-        arrival. Use ``kind`` to say why you are stopping, not to select a
-        different queue primitive.
-
-
+        ``RespondResult`` is the older form and is still accepted.
 
         ## Available queues
 
@@ -513,7 +582,30 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         prompts such as keep-going continuations); a harness might add
         ``"job_outputs"``. The
         ``<queue_status>`` context block lists the pending count per
-        queue each turn. After any stop reason, the dispatcher races every
+        queue each turn. After any result, the dispatcher races every
         declared queue/event and re-enters with the first arrival.
+        """
+        ...
+
+    @hidden
+    @strategy(CodeActStrategy())
+    async def handle_batch(
+        self,
+        notification: dict[str, list],
+    ) -> Done | Waiting:
+        """Handle one unattended turn.
+
+        No person is watching this turn and nobody can answer a question,
+        so ``NeedInput`` is not allowed here and is rejected as a type
+        error. Unpack ``notification`` (channel name → list of items) and
+        do all the work.
+
+        End with exactly one ``return_result(...)``:
+
+        - ``Done(explanation=...)`` — the work is finished, or cannot go
+          further. If something blocks you, say what in ``explanation``.
+          Set ``result`` when the task asks for a structured result.
+        - ``Waiting(explanation=...)`` — waiting on a background job or
+          queue you started. Name the job.
         """
         ...
