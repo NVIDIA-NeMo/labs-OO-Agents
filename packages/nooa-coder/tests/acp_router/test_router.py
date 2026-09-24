@@ -202,6 +202,9 @@ class Harness:
     async def initialize(self, params: dict[str, Any] | None = None) -> Frame:
         return await self.call("initialize", params or {"protocolVersion": PROTOCOL_VERSION})
 
+    async def initialize_request_only(self) -> None:
+        await self.request("initialize", {"protocolVersion": PROTOCOL_VERSION})
+
     async def new_session(self, cwd: str = "/tmp") -> str:
         frame = await self.call("session/new", {"cwd": cwd, "mcpServers": []})
         return frame.message["result"]["sessionId"]
@@ -639,3 +642,31 @@ async def test_worker_sockets_are_closed_when_workers_end(harness):
         and any(word in str(w.message) for word in ("StreamWriter", "transport", "socket"))
     ]
     assert unclosed == []
+
+
+async def test_a_store_error_during_load_routing_is_an_internal_error(harness, monkeypatch):
+    def broken(path: Any) -> Any:
+        raise RuntimeError("store is broken")
+
+    monkeypatch.setattr(harness.store, "_read_info", broken)
+    await harness.initialize()
+    request_id = await harness.request("session/load", {"sessionId": "abc", "cwd": "/tmp"})
+    frame = await harness.response(request_id, timeout=3)
+    assert frame.message["error"]["code"] == -32603
+    assert "store is broken" in json.dumps(frame.message["error"])
+    assert harness.spawned == []
+
+
+async def test_a_failure_in_the_input_loop_is_logged_and_ends_the_router(harness, caplog):
+    caplog.set_level(logging.ERROR, logger="nooa_coder.acp.router")
+
+    def explode(frame: Frame) -> None:
+        raise RuntimeError("handler exploded")
+
+    harness.router._on_client_frame = explode  # type: ignore[method-assign]
+    await harness.initialize_request_only()
+    await asyncio.wait_for(harness.serving, TIMEOUT)
+    assert any(
+        record.exc_info and "handler exploded" in str(record.exc_info[1])
+        for record in caplog.records
+    )
