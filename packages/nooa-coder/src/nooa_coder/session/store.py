@@ -298,10 +298,13 @@ class SessionStore:
         *,
         limit: int | None = None,
         workspace: str | Path | None = None,
+        roots_only: bool = True,
     ) -> list[SessionInfo]:
         """Sessions on disk, most recently active first.
 
-        ``workspace`` keeps only sessions recorded for that directory.
+        Only root sessions by default; ``roots_only=False`` includes
+        children. ``workspace`` keeps only sessions recorded for that
+        directory.
         """
         if limit is not None and limit < 0:
             raise ValueError("limit must be non-negative")
@@ -313,6 +316,7 @@ class SessionStore:
             for path in self.root.glob("*.db")
             if not path.stem.endswith("-memory")
             if (info := self._read_info(path)) is not None
+            if not roots_only or info.parent_id is None
             if wanted is None or _normalise_workspace(info.workspace) == wanted
         ]
         sessions.sort(key=lambda info: info.last_active, reverse=True)

@@ -157,3 +157,12 @@ def test_readers_racing_a_delete_create_no_file(sessions_dir, tmp_path, monkeypa
         assert store._read_info(path) is None
         assert store._read_rows(path) == []
     assert not path.exists()
+
+
+def test_listing_shows_roots_by_default(sessions_dir):
+    store = SessionStore(sessions_dir)
+    with store.create() as root:
+        with store.create(parent_id=root.id, depth=1, name="child") as child:
+            root_id, child_id = root.id, child.id
+    assert [info.id for info in store.list()] == [root_id]
+    assert {info.id for info in store.list(roots_only=False)} == {root_id, child_id}
