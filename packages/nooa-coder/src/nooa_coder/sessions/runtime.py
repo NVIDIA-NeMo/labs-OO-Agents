@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Private in-process ownership for live ACP sessions.
+"""Lifecycle and foreground-turn ownership for live sessions.
 
-This is an adapter implementation detail, not part of the durable session
-model. A future agent daemon can replace this registry with daemon handles
-without changing :mod:`nooa_coder.sessions` or the ACP protocol surface.
+The runtime value is intentionally generic. This module serializes turns,
+coordinates cleanup, and keeps session identifiers reserved until resources
+are released. A runtime can be registered before it is ready to serve (for
+example while a durable transcript is still being replayed to a client):
+``add(available=False)`` reserves the identifier and ``publish()`` opens it
+to ``get()``/``ids()`` once initialization has finished. ``remove()`` can
+still tear down an unpublished runtime for failure cleanup.
 """
 
 from __future__ import annotations
@@ -19,11 +23,11 @@ type CloseCallback[T] = Callable[[T], Awaitable[None] | None]
 
 
 class SessionBusyError(RuntimeError):
-    """Raised when a second foreground turn targets a busy ACP session."""
+    """Raised when a second foreground turn targets a busy session."""
 
 
 class SessionRuntimeClosedError(RuntimeError):
-    """Raised when a caller targets a closing or closed ACP session."""
+    """Raised when a caller targets a closing or closed session."""
 
 
 class _RuntimeState(StrEnum):
@@ -33,7 +37,7 @@ class _RuntimeState(StrEnum):
 
 
 class SessionRuntime[T]:
-    """One adapter-owned live session with serialized foreground turns."""
+    """A live session value with serialized turns and cancellation-safe cleanup."""
 
     def __init__(
         self,
@@ -48,27 +52,27 @@ class SessionRuntime[T]:
         self._turn_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
         self._state = _RuntimeState.OPEN
-        self._turn_claimed = False
+        self._turn_claims = 0
         self._close_task: asyncio.Task[None] | None = None
 
     @property
     def busy(self) -> bool:
         """Whether a foreground turn currently owns or is entering this session."""
-        return self._turn_claimed
+        return self._turn_claims > 0
 
     @property
     def is_closed(self) -> bool:
         return self._state is _RuntimeState.CLOSED
 
     @asynccontextmanager
-    async def turn(self) -> AsyncIterator[T]:
-        """Own the foreground turn, failing immediately if it is already claimed."""
+    async def turn(self, *, wait: bool = False) -> AsyncIterator[T]:
+        """Own a turn, rejecting contention unless ``wait=True`` requests queueing."""
         async with self._state_lock:
             if self._state is not _RuntimeState.OPEN:
                 raise SessionRuntimeClosedError(f"Session {self.session_id!r} is not open")
-            if self._turn_claimed:
+            if not wait and self._turn_claims:
                 raise SessionBusyError(f"Session {self.session_id!r} already has an active turn")
-            self._turn_claimed = True
+            self._turn_claims += 1
 
         acquired = False
         try:
@@ -82,7 +86,7 @@ class SessionRuntime[T]:
             if acquired:
                 self._turn_lock.release()
             async with self._state_lock:
-                self._turn_claimed = False
+                self._turn_claims -= 1
 
     async def close(self) -> None:
         """Wait for the foreground turn, release resources once, and mark closed."""
@@ -93,11 +97,11 @@ class SessionRuntime[T]:
                 self._state = _RuntimeState.CLOSING
                 self._close_task = asyncio.create_task(
                     self._close_once(),
-                    name=f"nooa-acp-close-{self.session_id}",
+                    name=f"nooa-session-close-{self.session_id}",
                 )
             close_task = self._close_task
 
-        # Cleanup belongs to the adapter, not to the lifetime of one request.
+        # Resource cleanup must survive cancellation of an individual caller.
         await asyncio.shield(close_task)
 
     async def _close_once(self) -> None:
@@ -123,7 +127,7 @@ class SessionRuntime[T]:
 
 
 class SessionRuntimePool[T]:
-    """Concurrency-safe, ACP-private registry of live in-process sessions."""
+    """Concurrency-safe registry of live session runtimes."""
 
     def __init__(self) -> None:
         self._runtimes: dict[str, SessionRuntime[T]] = {}
@@ -141,9 +145,10 @@ class SessionRuntimePool[T]:
         close: CloseCallback[T] | None = None,
         available: bool = True,
     ) -> SessionRuntime[T]:
+        """Register a runtime; ``available=False`` reserves the id until publish()."""
         async with self._lock:
             if self._closed:
-                raise SessionRuntimeClosedError("ACP session runtime pool is closed")
+                raise SessionRuntimeClosedError("Session runtime pool is closed")
             if session_id in self._runtimes:
                 raise ValueError(f"Session {session_id!r} is already registered")
             runtime = SessionRuntime(session_id, value, close=close)
@@ -153,37 +158,41 @@ class SessionRuntimePool[T]:
             return runtime
 
     async def publish(self, session_id: str) -> None:
-        """Make a fully initialized runtime available to protocol requests."""
+        """Open a registered runtime to get()/ids() once it is ready to serve."""
         async with self._lock:
             if session_id not in self._runtimes:
-                raise KeyError(f"Unknown live ACP session {session_id!r}")
+                raise KeyError(f"Unknown live session {session_id!r}")
             self._available.add(session_id)
 
     async def get(self, session_id: str) -> SessionRuntime[T]:
+        """Return a published runtime; unpublished ones look absent."""
         async with self._lock:
             if session_id not in self._available:
-                raise KeyError(f"Unknown live ACP session {session_id!r}")
+                raise KeyError(f"Unknown live session {session_id!r}")
             return self._runtimes[session_id]
 
     async def ids(self) -> tuple[str, ...]:
         async with self._lock:
-            return tuple(
-                session_id for session_id in self._runtimes if session_id in self._available
-            )
+            return tuple(sid for sid in self._runtimes if sid in self._available)
 
     async def remove(self, session_id: str, *, include_unavailable: bool = False) -> T:
-        """Close and unregister one runtime, returning its adapter value."""
+        """Close and unregister one runtime, returning its value.
+
+        Unpublished runtimes are invisible to callers by default; pass
+        ``include_unavailable=True`` from the initialization path that owns
+        them to tear one down after a failed or cancelled setup.
+        """
         async with self._lock:
             if session_id not in self._runtimes or (
                 not include_unavailable and session_id not in self._available
             ):
-                raise KeyError(f"Unknown live ACP session {session_id!r}")
+                raise KeyError(f"Unknown live session {session_id!r}")
             runtime = self._runtimes[session_id]
             remove_task = self._remove_tasks.get(session_id)
             if remove_task is None:
                 remove_task = asyncio.create_task(
                     self._remove_once(session_id, runtime),
-                    name=f"nooa-acp-remove-{session_id}",
+                    name=f"nooa-session-remove-{session_id}",
                 )
                 self._remove_tasks[session_id] = remove_task
 
@@ -193,9 +202,8 @@ class SessionRuntimePool[T]:
 
                 remove_task.add_done_callback(_finished)
 
-        # Teardown and unregistration belong to the adapter, not to the request
-        # that happened to initiate them. Cancellation must not make the id
-        # reusable while its old runtime is still active.
+        # Cancellation of a caller must not make the id reusable while its old
+        # runtime is still active. Concurrent removers share the same cleanup.
         return await asyncio.shield(remove_task)
 
     async def _remove_once(self, session_id: str, runtime: SessionRuntime[T]) -> T:
@@ -217,7 +225,7 @@ class SessionRuntimePool[T]:
                 runtimes = list(self._runtimes.values())
                 self._close_task = asyncio.create_task(
                     self._close_all(runtimes),
-                    name="nooa-acp-close-sessions",
+                    name="nooa-session-close-sessions",
                 )
             close_task = self._close_task
 
@@ -234,4 +242,4 @@ class SessionRuntimePool[T]:
 
         failures = [result for result in results if isinstance(result, BaseException)]
         if failures:
-            raise BaseExceptionGroup("Failed to close one or more ACP sessions", failures)
+            raise BaseExceptionGroup("Failed to close one or more session runtimes", failures)

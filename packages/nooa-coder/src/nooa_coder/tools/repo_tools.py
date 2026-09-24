@@ -3,10 +3,13 @@
 """RepoTools — code navigation that returns ShellTools Match anchors.
 
 Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
-``RepoResult``: printable lines plus editable ``Match`` objects for
-``self.shell.replace(result[i], new_text)``.
+``RepoResult``: printable lines plus ``Match`` objects. Anchors with
+``editable=True`` support ``self.shell.replace(result[i], new_text)`` — the
+same host filesystem a wired ``BashSession`` also operates on; anchors from a
+non-host session are read-only.
 """
 
+import base64
 import logging
 import re
 import shlex
@@ -14,6 +17,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
@@ -25,6 +30,47 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
+
+
+class PathResolutionError(FileNotFoundError):
+    """A path failure with the resolution base made explicit."""
+
+    def __init__(
+        self,
+        operation: str,
+        requested_path: str | Path,
+        resolved_path: str | Path,
+        *,
+        base_name: str,
+        base_path: str | Path,
+        reason: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        resolved = Path(resolved_path)
+        self.reason = reason or ("not_a_file" if resolved.exists() else "not_found")
+        self.code = {"not_a_file": "PATH_NOT_FILE", "unreadable": "PATH_UNREADABLE"}.get(
+            self.reason, "PATH_NOT_FOUND"
+        )
+        self.operation = operation
+        self.requested_path = str(requested_path)
+        self.resolved_path = str(resolved)
+        self.base_name = base_name
+        self.base_path = str(base_path)
+        self.detail = detail
+        self.message = (
+            f"[{self.code}] {operation}: path is {self.reason.replace('_', ' ')}: "
+            f"{self.requested_path!r}; resolved to {self.resolved_path!r} against "
+            f"{base_name}={self.base_path!r}"
+        )
+        if detail:
+            # The underlying cause (e.g. the session's own read error) -- a
+            # typed code alone tells the caller what, not why.
+            self.message += f": {detail}"
+        super().__init__(self.message)
+        self.filename = self.resolved_path
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass
@@ -39,9 +85,12 @@ class FileMapResult:
         list[Match],
         spec(description="ShellTools-compatible anchors for each symbol line"),
     ] = field(default_factory=list)
+    diagnostic: str | None = None
 
     @property
     def text(self) -> str:
+        if self.diagnostic is not None:
+            return self.diagnostic
         if not self.symbols:
             return f"[{self.path}] ({self.language}) — no symbols found"
         header = f"[{self.path}] ({self.language}, {len(self.symbols)} symbols)"
@@ -122,19 +171,29 @@ class ReferenceSearchResult:
         return self.text
 
 
-@dataclass
-class RepoResult:
-    query: Annotated[str, spec(description="Search query or symbol name")]
-    lines: Annotated[list[str], spec(description="Display lines: file:line: context")]
-    matches: Annotated[
-        list[Match],
-        spec(description="ShellTools-compatible anchors; pass an item to self.shell.replace()"),
-    ] = field(default_factory=list)
-    total_matches: Annotated[int, spec(description="Total matches found")] = 0
-    truncated: Annotated[bool, spec(description="True if results were capped")] = False
+class RepoResult(BaseModel):
+    """Repository symbol/reference matches and their display metadata."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    query: str = Field(description="Search query or symbol name")
+    lines: list[str] = Field(description="Display lines: file:line: context")
+    matches: list[Match] = Field(
+        default_factory=list,
+        description="Match anchors; only editable=True anchors support self.shell.replace()",
+    )
+    total_matches: int = Field(default=0, description="Total matches found")
+    truncated: bool = Field(default=False, description="True if results were capped")
+    diagnostic: PathResolutionError | None = Field(
+        default=None,
+        description="Structured path failure, including resolved path and base",
+    )
 
     @property
     def text(self) -> str:
+        """Human-readable search results or diagnostic."""
+        if self.diagnostic is not None:
+            return str(self.diagnostic)
         if not self.lines:
             return f'No matches for "{self.query}" found.'
         parts = list(self.lines)
@@ -261,6 +320,7 @@ def _tree_sitter_available() -> bool:
 
 
 def _line_match(path: Path, line_no: int) -> Match | None:
+    """Build a ``Match`` for one line of a host-readable file; None if unreadable."""
     try:
         lines = path.read_text(errors="replace").splitlines(keepends=True)
     except OSError:
@@ -270,11 +330,30 @@ def _line_match(path: Path, line_no: int) -> Match | None:
     return Match(str(path), line_no, line_no, lines[line_no - 1], resolved_path=path)
 
 
+def _line_match_from_lines(
+    path: Path, line_no: int, lines: list[str], *, editable: bool = True
+) -> Match | None:
+    """Build a ``Match`` from already-read lines (e.g. session-fetched content)."""
+    if not (1 <= line_no <= len(lines)):
+        return None
+    return Match(
+        str(path), line_no, line_no, lines[line_no - 1], resolved_path=path, editable=editable
+    )
+
+
 def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Match]]:
+    """Pair formatted symbol lines with anchors read from the host filesystem."""
     try:
         lines = path.read_text(errors="replace").splitlines(keepends=True)
     except OSError:
         return []
+    return _symbol_anchor_pairs_from_lines(path, symbols, lines)
+
+
+def _symbol_anchor_pairs_from_lines(
+    path: Path, symbols: list[str], lines: list[str], *, editable: bool = True
+) -> list[tuple[str, Match]]:
+    """Pair formatted symbol lines with anchors built from pre-read content."""
     pairs: list[tuple[str, Match]] = []
     for symbol in symbols:
         line_text = symbol.strip()
@@ -295,6 +374,7 @@ def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Matc
                         line_no,
                         lines[line_no - 1],
                         resolved_path=path,
+                        editable=editable,
                     ),
                 )
             )
@@ -348,8 +428,14 @@ def _is_definition_line(content: str, name: str = "") -> bool:
     )
 
 
-def _extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[str]:
-    """Extract symbol definitions from a file using tree-sitter AST (with regex fallback)."""
+def _extract_symbols(
+    path: Path, lang: str, max_symbols: int = 200, source: bytes | None = None
+) -> list[str]:
+    """Extract symbol definitions from a file using tree-sitter AST (with regex fallback).
+
+    ``source`` supplies already-read file bytes (e.g. content fetched through a
+    sandbox session); when omitted the file is read from the host filesystem.
+    """
     # Try tree-sitter first (AST-aware, more accurate)
     try:
         from nooa_coder.tools._tree_sitter_backend import (
@@ -358,7 +444,7 @@ def _extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[str]
         )
 
         if TREE_SITTER_AVAILABLE:
-            ts_result = ts_extract_symbols(path, lang, max_symbols)
+            ts_result = ts_extract_symbols(path, lang, max_symbols, source=source)
             if ts_result is not None:
                 return ts_result
     except ImportError:
@@ -370,7 +456,10 @@ def _extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[str]
         return []
 
     try:
-        text = path.read_text(errors="replace")
+        if source is None:
+            text = path.read_text(errors="replace")
+        else:
+            text = source.decode("utf-8", errors="replace")
     except (OSError, PermissionError):
         return []
 
@@ -401,9 +490,22 @@ class RepoTools(Skill):
         symbols(path=".", query="")  — definitions / file or repo overview
         refs(name, path=".")         — references/usages, excluding definitions
 
-    Results print like search output and index/iterate as editable matches::
+    Results print like search output and index/iterate as matches. Host anchors
+    support replacement::
         r = await self.repo.symbols("src/", query="Handler")
         await self.shell.replace(r[0], new_code)
+
+    A wired ``BashSession`` shares this same host filesystem (it is a local
+    subprocess, not a remote/sandboxed one), so anchors stay editable. A
+    non-``BashSession`` session (e.g. a scripted double over its own
+    in-memory filesystem) may not share it, so its anchors are read-only.
+
+    ``root`` sets the default base for relative paths and result display; it
+    is not a security boundary. Both an absolute ``path=`` argument and a
+    shared ``session`` give the same filesystem access ``ShellTools.run()``
+    already has in that session (host, or a Gym-seeded sandbox). Callers that
+    need to keep an agent inside a tree must not wire a ``session`` (or
+    ``ShellTools``) that reaches outside it.
     """
 
     __nosnapshot__ = True
@@ -414,7 +516,7 @@ class RepoTools(Skill):
         session: BashSession | None = None,
         require_tree_sitter: bool = False,
     ) -> None:
-        self._root = Path(root).resolve()
+        self._root = Path(root).absolute() if session is not None else Path(root).resolve()
         self._session = session  # shared session with ShellTools (optional)
         self._has_rg: bool | None = None  # lazy-checked
         if not _tree_sitter_available():
@@ -430,7 +532,10 @@ class RepoTools(Skill):
     @property
     @hidden
     def root(self) -> Path:
-        """Repository root this tool is scoped to."""
+        """Default base for relative paths and result display.
+
+        Not a security boundary — see the class docstring.
+        """
         return self._root
 
     @property
@@ -438,6 +543,17 @@ class RepoTools(Skill):
     def session(self) -> BashSession | None:
         """The shared bash session, if one was wired in (else None)."""
         return self._session
+
+    @property
+    def _anchors_editable(self) -> bool:
+        """No session, or a real BashSession, shares this host filesystem.
+
+        A non-``BashSession`` session object (e.g. a scripted session over
+        its own in-memory filesystem) may not — its anchors stay read-only
+        so ``self.shell.replace()`` never writes to a same-named but
+        unrelated host file.
+        """
+        return self._session is None or isinstance(self._session, BashSession)
 
     async def symbols(
         self,
@@ -447,14 +563,36 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find definitions under a file or directory.
 
-        Returns printable lines plus editable ``Match`` anchors; use
-        ``await self.shell.replace(result[0], new_text)`` to edit a hit.
+        Returns printable lines plus ``Match`` anchors. Anchors with
+        ``editable=True`` support ``self.shell.replace``; anchors from a
+        non-host session are read-only.
         """
         resolved = self._resolve(path)
+        if not await self._path_exists(resolved):
+            diagnostic = PathResolutionError(
+                "symbols",
+                path,
+                resolved,
+                base_name="self.repo.root",
+                base_path=self._root,
+                reason="not_found",
+            )
+            return RepoResult(query=path, lines=[], diagnostic=diagnostic)
         query_lower = query.lower()
 
-        if resolved.is_file():
+        if await self._path_is_file(resolved):
             file_result = await self._filemap(path, max_symbols=max_results if not query else 500)
+            if file_result.diagnostic is not None:
+                diagnostic = PathResolutionError(
+                    "symbols",
+                    path,
+                    resolved,
+                    base_name="self.repo.root",
+                    base_path=self._root,
+                    reason="unreadable",
+                    detail=file_result.diagnostic,
+                )
+                return RepoResult(query=path, lines=[], diagnostic=diagnostic)
             pairs = [
                 (symbol, anchor)
                 for symbol, anchor in zip(file_result.symbols, file_result.anchors, strict=True)
@@ -497,9 +635,21 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
-        Returns printable lines plus editable ``Match`` anchors; use
-        ``await self.shell.replace(result[0], new_text)`` to edit a hit.
+        Returns printable lines plus ``Match`` anchors. Anchors with
+        ``editable=True`` support ``self.shell.replace``; anchors from a
+        non-host session are read-only.
         """
+        resolved = self._resolve(path)
+        if not await self._path_exists(resolved):
+            diagnostic = PathResolutionError(
+                "refs",
+                path,
+                resolved,
+                base_name="self.repo.root",
+                base_path=self._root,
+                reason="not_found",
+            )
+            return RepoResult(query=name, lines=[], diagnostic=diagnostic)
         result = await self._search_references(name, path=path, max_results=max_results)
         return RepoResult(
             query=name,
@@ -508,6 +658,97 @@ class RepoTools(Skill):
             total_matches=result.total_matches,
             truncated=result.truncated,
         )
+
+    async def _path_exists(self, resolved: Path) -> bool:
+        """Existence probe that works for sandbox-mounted roots.
+
+        With a shared session the repo root lives in the session's filesystem
+        (e.g. a Gym-hosted seeded sandbox), where a host-side
+        ``Path.exists()`` would wrongly report paths as missing. Probe via
+        the session when one is wired; fall back to the host otherwise.
+        """
+        if self._session:
+            _, _, code = await self._session.run(
+                f"test -e {shlex.quote(str(resolved))}", timeout=10
+            )
+            return code == 0
+        return resolved.exists()
+
+    async def _path_is_file(self, resolved: Path) -> bool:
+        """File (not directory) probe, session-aware like ``_path_exists``."""
+        if self._session:
+            _, _, code = await self._session.run(
+                f"test -f {shlex.quote(str(resolved))}", timeout=10
+            )
+            return code == 0
+        return resolved.is_file()
+
+    async def _path_is_dir(self, resolved: Path) -> bool:
+        """Directory probe, session-aware like ``_path_exists``."""
+        if self._session:
+            _, _, code = await self._session.run(
+                f"test -d {shlex.quote(str(resolved))}", timeout=10
+            )
+            return code == 0
+        return resolved.is_dir()
+
+    async def _read_bytes(self, resolved: Path) -> bytes | None:
+        """Read file bytes through the wired session, or from the host.
+
+        Session reads travel as base64 payloads so only the base64 alphabet
+        crosses the process boundary (the same transfer the Gym sandbox
+        shell uses). Returns None when the read fails on either side.
+        """
+        if self._session:
+            stdout, _, code = await self._session.run(
+                f"base64 < {shlex.quote(str(resolved))}", timeout=30
+            )
+            if code != 0:
+                return None
+            try:
+                return base64.b64decode(stdout.strip())
+            except (ValueError, TypeError):
+                return None
+        try:
+            return resolved.read_bytes()
+        except OSError:
+            return None
+
+    async def _read_lines(self, resolved: Path) -> list[str] | None:
+        """Read a file as newline-kept lines, session-aware; None on failure."""
+        data = await self._read_bytes(resolved)
+        if data is None:
+            return None
+        return data.decode("utf-8", errors="replace").splitlines(keepends=True)
+
+    async def _anchor_from_match_line(
+        self, line: str, *, cache: dict[Path, list[str] | None] | None = None
+    ) -> Match | None:
+        """Build a ``Match`` from a ``file:line: content`` search result.
+
+        Session-aware: the referenced file is read through the wired session
+        when one is configured, so anchors are not dropped for files that
+        only exist in the session's filesystem.
+        """
+        path_text, sep, rest = line.partition(":")
+        if not sep:
+            return None
+        m = re.match(r"\s*(\d+)\b", rest)
+        if not m:
+            return None
+        fpath = Path(path_text)
+        if not fpath.is_absolute():
+            fpath = self._root / fpath
+        line_no = int(m.group(1))
+        if cache is None:
+            lines = await self._read_lines(fpath)
+        else:
+            if fpath not in cache:
+                cache[fpath] = await self._read_lines(fpath)
+            lines = cache[fpath]
+        if lines is None:
+            return None
+        return _line_match_from_lines(fpath, line_no, lines, editable=self._anchors_editable)
 
     async def _check_rg(self) -> bool:
         """Check if rg (ripgrep) is available, caching the result."""
@@ -542,21 +783,34 @@ class RepoTools(Skill):
             r = await self.repo._filemap("internal/llm/tools/edit.go")
         """
         resolved = self._resolve(path)
-        if not resolved.is_file():
+        if not await self._path_is_file(resolved):
             from nooa.runtime.harness_metrics import get_harness_metrics
 
             get_harness_metrics().repo_failure(
                 "filemap:file_not_found", f"File not found: {path}", path
             )
             return FileMapResult(
-                path=path, language="unknown", symbols=[f"Error: {path} not found"]
+                path=path, language="unknown", symbols=[], diagnostic=f"Error: {path} not found"
             )
 
         lang = _detect_lang(resolved)
-        symbols = _extract_symbols(resolved, lang, max_symbols=max_symbols)
+        source = await self._read_bytes(resolved)
+        if source is None:
+            from nooa.runtime.harness_metrics import get_harness_metrics
+
+            get_harness_metrics().repo_failure(
+                "filemap:read_failed", f"Could not read: {path}", path
+            )
+            return FileMapResult(
+                path=path, language=lang, symbols=[], diagnostic=f"Error: could not read {path}"
+            )
+        symbols = _extract_symbols(resolved, lang, max_symbols=max_symbols, source=source)
         truncated = len(symbols) >= max_symbols
 
-        symbol_anchor_pairs = _symbol_anchor_pairs(resolved, symbols)
+        lines = source.decode("utf-8", errors="replace").splitlines(keepends=True)
+        symbol_anchor_pairs = _symbol_anchor_pairs_from_lines(
+            resolved, symbols, lines, editable=self._anchors_editable
+        )
         return FileMapResult(
             path=path,
             language=lang,
@@ -601,7 +855,7 @@ class RepoTools(Skill):
 
         for sp in search_paths:
             resolved = self._resolve(sp)
-            if not resolved.is_dir():
+            if not await self._path_is_dir(resolved):
                 continue
             # Use rg to find files respecting gitignore, or fall back to walking
             if self._session and await self._check_rg():
@@ -611,12 +865,22 @@ class RepoTools(Skill):
                 )
                 for line in stdout.splitlines():
                     p = Path(line.strip())
-                    if p.is_file() and _detect_lang(p) != "unknown":
+                    if _detect_lang(p) != "unknown":
                         all_files.append(p)
-                # Sort by mtime (newest first) — rg --sort requires v14+
-                all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                # Session-only paths have no host mtime, so the listing order
+                # is kept as-is.
+            elif self._session:
+                # Session image without rg (common in minimal images): use find.
+                stdout, _, _ = await self._session.run(
+                    f"find {shlex.quote(str(resolved))} -type f 2>/dev/null | head -{max_files * 3}",
+                    timeout=15,
+                )
+                for line in stdout.splitlines():
+                    p = Path(line.strip())
+                    if _detect_lang(p) != "unknown":
+                        all_files.append(p)
             else:
-                # Fallback: walk directory (rg not available or no session)
+                # Fallback: walk directory (no session configured)
                 for ext in _LANG_MAP:
                     for p in sorted(resolved.rglob(f"*{ext}"))[:max_files]:
                         all_files.append(p)
@@ -640,8 +904,15 @@ class RepoTools(Skill):
             except ValueError:
                 rel = fpath
             lang = _detect_lang(fpath)
-            symbols = _extract_symbols(fpath, lang, max_symbols=max_symbols_per_file)
-            symbol_anchor_pairs = _symbol_anchor_pairs(fpath, symbols)
+            source = await self._read_bytes(fpath)
+            if source is None:
+                sections.append(f"\n{rel}: ({lang}, unreadable)")
+                continue
+            symbols = _extract_symbols(fpath, lang, max_symbols=max_symbols_per_file, source=source)
+            lines = source.decode("utf-8", errors="replace").splitlines(keepends=True)
+            symbol_anchor_pairs = _symbol_anchor_pairs_from_lines(
+                fpath, symbols, lines, editable=self._anchors_editable
+            )
             if symbol_anchor_pairs:
                 sections.append(f"\n{rel}:")
                 sections.extend(symbol for symbol, _ in symbol_anchor_pairs)
@@ -695,14 +966,20 @@ class RepoTools(Skill):
         resolved = self._resolve(path)
         matches: list[str] = []
 
-        # Use grep to find definition patterns matching the name
-        if self._session and await self._check_rg():
+        if self._session:
             # Build a regex that matches common definition patterns
             pattern = f"(def|class|function|func|struct|trait|interface|type|impl|module|const)\\s+\\w*{re.escape(name)}\\w*"
-            stdout, _, _ = await self._session.run(
-                f"rg -n -i --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
-                timeout=30,
-            )
+            if await self._check_rg():
+                stdout, _, _ = await self._session.run(
+                    f"rg -n -i --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
+                    timeout=30,
+                )
+            else:
+                # GNU grep is present in images where rg is not (e.g. SWE-bench).
+                stdout, _, _ = await self._session.run(
+                    f"grep -rnE -i {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
+                    timeout=30,
+                )
             for line in stdout.splitlines():
                 if line.strip():
                     matches.append(line.strip())
@@ -728,13 +1005,14 @@ class RepoTools(Skill):
                     break
 
         total = len(matches)
-        paired = [
-            (match, anchor)
-            for match, anchor in (
-                (m, _anchor_from_match_line(m, self._root)) for m in matches[:max_results]
-            )
-            if anchor is not None
-        ]
+        paired: list[tuple[str, Match]] = []
+        file_lines: dict[Path, list[str] | None] = {}
+        for match in matches[:max_results]:
+            # Session-aware anchor creation: the referenced file is read
+            # through the wired session when one is configured.
+            anchor = await self._anchor_from_match_line(match, cache=file_lines)
+            if anchor is not None:
+                paired.append((match, anchor))
         if total == 0:
             from nooa.runtime.harness_metrics import get_harness_metrics
 
@@ -783,14 +1061,16 @@ class RepoTools(Skill):
         """
         resolved = self._resolve(path)
 
-        # Try tree-sitter first for accurate AST-aware reference finding
+        # Try tree-sitter first for accurate AST-aware reference finding.
+        # The AST branch walks the host filesystem, so it only applies when no
+        # session is wired; session results come from rg/grep below instead.
         try:
             from nooa_coder.tools._tree_sitter_backend import (
                 TREE_SITTER_AVAILABLE,
                 ts_find_references,
             )
 
-            if TREE_SITTER_AVAILABLE:
+            if TREE_SITTER_AVAILABLE and self._anchors_editable:
                 all_matches: list[str] = []
                 for fpath in self._iter_source_files(resolved, max_files=500):
                     lang = _detect_lang(fpath)
@@ -833,7 +1113,11 @@ class RepoTools(Skill):
         pattern = f"\\b{search_name}\\b"
 
         if self._session:
-            cmd = f"rg -n --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
+            if await self._check_rg():
+                cmd = f"rg -n --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
+            else:
+                # GNU grep is present in images where rg is not (e.g. SWE-bench).
+                cmd = f"grep -rnE {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
             stdout, _, code = await self._session.run(cmd, timeout=30)
             if code != 0 or not stdout:
                 return ReferenceSearchResult(query=name, matches=[], total_matches=0)
@@ -853,6 +1137,7 @@ class RepoTools(Skill):
         # Filter out definitions, comments, and string-only lines.
         matches: list[str] = []
         anchors: list[Match] = []
+        file_lines: dict[Path, list[str] | None] = {}
         for raw in raw_lines:
             if len(matches) >= max_results:
                 break
@@ -868,7 +1153,7 @@ class RepoTools(Skill):
             stripped = content.lstrip()
             if stripped.startswith("#") or stripped.startswith("//"):
                 continue
-            anchor = _anchor_from_match_line(raw, self._root)
+            anchor = await self._anchor_from_match_line(raw, cache=file_lines)
             if anchor is None:
                 continue
             matches.append(f"{parts[0]}:{parts[1]}: {content}")
@@ -908,6 +1193,12 @@ class RepoTools(Skill):
             count += 1
 
     def _resolve(self, path: str) -> Path:
-        """Resolve a path relative to the repo root."""
+        """Resolve a path relative to the repo root.
+
+        An absolute ``path`` (or one that walks out via ``..``) is returned
+        as given, not clamped to ``self._root`` — intentional, see the class
+        docstring: this tool has the same filesystem reach as the shared
+        session's ``ShellTools.run()``, no narrower.
+        """
         p = Path(path)
         return p if p.is_absolute() else self._root / p

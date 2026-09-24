@@ -174,7 +174,7 @@ class CodingACPAdapter:
                 model=llm.model,
                 agent="CodingAgent",
                 working_directory=str(root),
-                origin="acp",
+                host="acp",
                 check_same_thread=False,
             )
         except BaseException:

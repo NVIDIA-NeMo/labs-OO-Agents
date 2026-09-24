@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SQLite-backed coding-agent sessions discoverable by interactive hosts."""
+"""SQLite-backed durable session repository shared by interactive hosts."""
 
 from __future__ import annotations
 
@@ -51,11 +51,11 @@ class SessionInfo:
     agent: str
     started_at: float
     last_active: float
-    turn_count: int = 0
+    turn_count: int = 0  # Accepted user messages; agent output may contain several messages.
     working_directory: str = ""
     title: str | None = None
     title_is_user_set: bool = False
-    origin: str = ""
+    host: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,12 +66,7 @@ class SessionTurn:
 
 
 class SessionHandle:
-    """An agent-runtime-owned session database and metadata writer.
-
-    Exactly one live agent runtime owns this handle. Interactive hosts attach
-    to that runtime through their transport; they do not open the database for
-    writing alongside it.
-    """
+    """One open session database and its metadata event writer."""
 
     def __init__(
         self,
@@ -99,12 +94,12 @@ class SessionHandle:
 
     @property
     def storage(self) -> SQLiteStorageManager:
-        """Storage to pass to the agent constructed by the owning runtime."""
+        """Storage to pass to the agent constructed for this session."""
         return self._storage
 
     @property
     def events(self) -> EventManager:
-        """Event manager for runtime-owned session metadata."""
+        """Event manager for host-owned session metadata."""
         return self._events
 
     @property
@@ -158,12 +153,7 @@ class SessionHandle:
 
 
 class SessionStore:
-    """Repository and factory for project-local durable coding-agent sessions.
-
-    A daemon may use read-only operations such as :meth:`list` and :meth:`get`
-    for discovery. Only the process running the agent opens a
-    :class:`SessionHandle` for writes.
-    """
+    """Repository and factory for project-local durable sessions."""
 
     def __init__(self, root: str | Path | None = None) -> None:
         self.root = Path(root) if root is not None else get_project_dir("sessions")
@@ -178,53 +168,68 @@ class SessionStore:
         model: str = "",
         agent: str = "",
         working_directory: str = "",
-        origin: str = "",
+        host: str = "",
         session_id: str | None = None,
         check_same_thread: bool = True,
     ) -> SessionHandle:
         session_id = self._validate_id(session_id or str(uuid.uuid4()))
+        started = SessionStarted(
+            host=host,
+            model=model,
+            agent=agent,
+            working_directory=working_directory,
+        )
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(session_id)
         if path.exists():
             raise FileExistsError(f"Session {session_id!r} already exists")
 
         storage = SQLiteStorageManager(path, check_same_thread=check_same_thread)
-        events = EventManager(backend=storage.event_backend)
-        for event_type in SESSION_EVENT_TYPES:
-            events.register_event_type(event_type)
-        started = SessionStarted(
-            origin=origin,
-            model=model,
-            agent=agent,
-            working_directory=working_directory,
-        )
         try:
+            events = EventManager(backend=storage.event_backend)
+            for event_type in SESSION_EVENT_TYPES:
+                events.register_event_type(event_type)
             events.add(started)
+            timestamp = started.timestamp.timestamp()
+            return SessionHandle(
+                self,
+                storage,
+                SessionInfo(
+                    id=session_id,
+                    model=model,
+                    agent=agent,
+                    started_at=timestamp,
+                    last_active=timestamp,
+                    working_directory=working_directory,
+                    host=started.host,
+                ),
+            )
         except BaseException:
             storage.close()
             raise
-        timestamp = started.timestamp.timestamp()
-        return SessionHandle(
-            self,
-            storage,
-            SessionInfo(
-                id=session_id,
-                model=model,
-                agent=agent,
-                started_at=timestamp,
-                last_active=timestamp,
-                working_directory=working_directory,
-                origin=origin,
-            ),
-        )
 
     def open(self, session_id: str, *, check_same_thread: bool = True) -> SessionHandle:
         path = self.path_for(session_id)
         info = self._read_info(path)
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
-        storage = SQLiteStorageManager(path, check_same_thread=check_same_thread)
-        return SessionHandle(self, storage, info)
+        try:
+            storage = SQLiteStorageManager(
+                path, check_same_thread=check_same_thread, must_exist=True
+            )
+        except sqlite3.OperationalError:
+            # A concurrent delete() between the metadata read above and the
+            # lock below must surface as "gone", not as a fresh empty database.
+            if path.exists():
+                raise
+            raise SessionNotFoundError(
+                f"Session {session_id!r} was not found or is invalid"
+            ) from None
+        try:
+            return SessionHandle(self, storage, info)
+        except BaseException:
+            storage.close()
+            raise
 
     def get(self, session_id: str) -> SessionInfo:
         path = self.path_for(session_id)
@@ -233,8 +238,9 @@ class SessionStore:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
         return info
 
-    def list(self, *, limit: int = 20) -> list[SessionInfo]:
-        if limit < 0:
+    def list(self, *, limit: int | None = 20) -> list[SessionInfo]:
+        """Return newest sessions, or all sessions when *limit* is ``None``."""
+        if limit is not None and limit < 0:
             raise ValueError("limit must be non-negative")
         if limit == 0 or not self.root.exists():
             return []
@@ -245,11 +251,45 @@ class SessionStore:
             if (info := self._read_info(path)) is not None
         ]
         sessions.sort(key=lambda info: info.last_active, reverse=True)
-        return sessions[:limit]
+        return sessions if limit is None else sessions[:limit]
 
     def load_turns(self, session_id: str) -> list[SessionTurn]:
         path = self.path_for(session_id)
-        rows = self._read_rows(path, event_types=_TURN_EVENT_TYPES)
+        return self._decode_turn_rows(path, self._read_rows(path, event_types=_TURN_EVENT_TYPES))
+
+    def load_recent_turns(self, session_id: str, *, limit: int = 12) -> list[SessionTurn]:
+        """Load the newest turns in chronological order with a bounded query."""
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        if limit == 0:
+            return []
+        path = self.path_for(session_id)
+        if not path.exists():
+            return []
+        try:
+            connection = sqlite3.connect(str(path))
+            try:
+                placeholders = ", ".join("?" for _ in _TURN_EVENT_TYPES)
+                rows = connection.execute(
+                    "SELECT event_type, data FROM events "
+                    f"WHERE event_type IN ({placeholders}) "
+                    "ORDER BY insertion_order DESC LIMIT ?",
+                    (*_TURN_EVENT_TYPES, limit),
+                ).fetchall()
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error):
+            logger.debug("Could not read recent turns from %s", path, exc_info=True)
+            return []
+        decoded = []
+        for event_type, data in reversed(rows):
+            if (raw := self._decode_data(data, path)) is not None:
+                decoded.append((event_type, raw))
+        return self._decode_turn_rows(path, decoded)
+
+    def _decode_turn_rows(
+        self, path: Path, rows: list[tuple[str, dict[str, object]]]
+    ) -> list[SessionTurn]:
         turns: list[SessionTurn] = []
         for event_type, raw in rows:
             try:
@@ -355,13 +395,10 @@ class SessionStore:
             working_directory=str(start.get("working_directory", start.get("working_dir", ""))),
             title=title,
             title_is_user_set=title_is_user_set,
-            origin=str(
+            host=str(
                 start.get(
-                    "origin",
-                    start.get(
-                        "host",
-                        "tui" if start_event_type == "TUISessionStart" else "",
-                    ),
+                    "host",
+                    start.get("origin", "tui" if start_event_type == "TUISessionStart" else ""),
                 )
             ),
         )
@@ -373,7 +410,7 @@ class SessionStore:
             return None
         try:
             raw = json.loads(data)
-        except (TypeError, json.JSONDecodeError):
+        except (TypeError, json.JSONDecodeError, UnicodeDecodeError):
             logger.debug("Skipping corrupt session event in %s", path, exc_info=True)
             return None
         return raw if isinstance(raw, dict) else None
