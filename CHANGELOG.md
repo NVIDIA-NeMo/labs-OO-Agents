@@ -20,6 +20,29 @@ to follow semantic versioning.
   (about 3.3 s down to 0.3 s here). The strategy names, `LLMResponse` and
   `llm_config_chain` load on first use; `from nooa import CodeActStrategy`
   and `from nooa import *` work as before.
+- New workspace package `nooa-coder` (pre-release, not published yet; the
+  `coder` extra installs it). It holds the Session layer of the session
+  tree design (#388):
+  - `Session` owns one `InteractiveAgent` and its turn loop. Items are
+    recorded before they are queued (`submit`), each with a receipt that
+    can be withdrawn; `prompt` waits for the turn that consumed the item;
+    `steer` hands text to the running turn's next model call (or queues
+    it); `cancel` returns once the interrupted cell's output and a
+    model-visible `TurnCancelled` event are recorded. The agent is
+    checkpointed after each turn when its state changed. Listeners get
+    data-only session updates.
+  - `SessionRegistry` creates root and child sessions in two phases,
+    caps depth, loads sessions from disk (re-queueing unhandled items),
+    refuses a parent whose child is live elsewhere, and closes children
+    first.
+  - An agent's `self.session` port delegates to child sessions
+    (`delegate`, `ChildRef.wait/send/steer/close`); results arrive as
+    `ChildResult`, `ChildQuestion` or `ChildFailed` on the `delegates`
+    channel. Children with `retain=False` run unattended (`handle_batch`).
+  - `open_tree()` runs a tree in-process for headless use.
+  - Sessions live in the user directory (`~/.config/nooa/sessions`), not
+    per project; the store is adapted from `nooa_cli.sessions`.
+
 - Groundwork for the session tree design, in shared code:
   - A cancelled CodeAct cell is now recorded for the model: an appended
     `PythonOutput` with the new `ResultStatus.CANCELLED` carries the stdout
