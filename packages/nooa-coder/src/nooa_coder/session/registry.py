@@ -12,7 +12,7 @@ import asyncio
 import contextvars
 import logging
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,9 @@ from nooa_coder.session.session import Session
 from nooa_coder.session.store import SessionHandle, SessionNotFoundError, SessionStore
 
 logger = logging.getLogger(__name__)
+
+Prepare = Callable[[Session], Awaitable[None]]
+"""Host hook run on a built session before it starts and is published."""
 
 LLMFactory = Callable[[str | None, Path], Any]
 """Builds a model client from a model-registry alias and the session's workspace."""
@@ -94,13 +97,17 @@ class SessionRegistry:
         parent_id: str | None = None,
         initial_items: Iterable[tuple[str, Any]] = (),
         initial_source: str = "user",
+        prepare: Prepare | None = None,
     ) -> Session:
         """Create a root session, or a child of a live ``parent_id``.
 
         Two phases: the id is reserved (not visible), the file, agent and
         Session are built and ``initial_items`` admitted, then the session
-        is published and started. A failure before publishing closes and
-        deletes what was built and drops the reservation.
+        is published and started. ``prepare(session)`` runs after the
+        build and before the session starts or is visible, so a host can
+        attach listeners and tools before any turn runs. A failure before
+        publishing (including in ``prepare``) closes and deletes what was
+        built and drops the reservation.
         """
         parent = None
         if parent_id is not None:
@@ -130,6 +137,8 @@ class SessionRegistry:
             session = self._build(options, handle)
             for channel, item in initial_items:
                 session._admit(item, channel=channel, source=initial_source)
+            if prepare is not None:
+                await prepare(session)
             session.start()
         except BaseException:
             self._discard(session_id, handle, reservation)
@@ -332,7 +341,9 @@ class SessionRegistry:
 
     # ---- load --------------------------------------------------------
 
-    async def load(self, session_id: str, options: SessionOptions) -> Session:
+    async def load(
+        self, session_id: str, options: SessionOptions, *, prepare: Prepare | None = None
+    ) -> Session:
         """Attach to a live session, or open one from disk and resume it.
 
         A live id returns the same Session (the caller subscribes and reads
@@ -345,6 +356,8 @@ class SessionRegistry:
         allowed (a detached child: its results stay in its own transcript).
         Loading a parent whose child is live elsewhere is refused with
         ``ChildActiveElsewhereError``. Concurrent loads of one id share it.
+        ``prepare(session)`` runs after the re-queue and before the session
+        starts or is visible (not when attaching to a live session).
         """
         while True:
             live = self.sessions.get(session_id)
@@ -367,6 +380,8 @@ class SessionRegistry:
                 TuiSessionResumed(session_id=session_id, restored=restored)
             )
             self._requeue(session)
+            if prepare is not None:
+                await prepare(session)
             session.start()
         except BaseException:
             self._reserved.pop(session_id, None)

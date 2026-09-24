@@ -342,3 +342,75 @@ async def test_set_model_needs_an_llm_factory(registry, root_options):
     root = await registry.create(root_options)
     with pytest.raises(RuntimeError, match="llm_factory"):
         await root.set_model("alias-b")
+
+
+async def test_prepare_runs_before_publish_and_start(registry, root_options, models, sessions_dir):
+    models.scripts["child"] = [done("first turn")]
+    root = await registry.create(root_options)
+    seen = []
+
+    async def prepare(session):
+        assert registry.get(session.id) is None  # not published yet
+        assert session._loop_task is None  # not started yet
+        session.subscribe(seen.append)
+
+    child = await registry.create(
+        root.options.inherit(name="child"),
+        parent_id=root.id,
+        initial_items=[("user_messages", "go")],
+        prepare=prepare,
+    )
+    await _until_turn_ended(seen)
+    assert [e.kind for e in seen if e.kind in ("turn_started", "turn_ended")] == [
+        "turn_started",
+        "turn_ended",
+    ]
+    assert registry.get(child.id) is child
+
+    async def broken(session):
+        raise RuntimeError("bridge failed")
+
+    before = _db_files(sessions_dir)
+    with pytest.raises(RuntimeError, match="bridge failed"):
+        await registry.create(root.options.inherit(name="x"), parent_id=root.id, prepare=broken)
+    assert _db_files(sessions_dir) == before
+    assert registry._reserved == {}
+
+
+async def test_prepare_on_load_sees_requeued_turns_but_not_on_attach(
+    registry, root_options, sessions_dir
+):
+    root = await registry.create(root_options)
+    root_id = root.id
+    await root.cancel()
+    # Leave an unhandled item behind: close before the loop can consume it.
+    root._loop_task.cancel()
+    await root.submit("LEFT-BEHIND")
+    await registry.close_all()
+
+    fresh = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=ScriptedModels({None: [done("resumed")]})
+    )
+    seen = []
+    calls = []
+
+    async def prepare(session):
+        calls.append(session.id)
+        session.subscribe(seen.append)
+
+    try:
+        loaded = await fresh.load(root_id, root_options, prepare=prepare)
+        await _until_turn_ended(seen)
+        assert calls == [root_id]
+        assert await fresh.load(root_id, root_options, prepare=prepare) is loaded
+        assert calls == [root_id]
+    finally:
+        await fresh.close_all()
+
+
+async def _until_turn_ended(seen):
+    async def poll():
+        while not any(e.kind == "turn_ended" for e in seen):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), TIMEOUT)
