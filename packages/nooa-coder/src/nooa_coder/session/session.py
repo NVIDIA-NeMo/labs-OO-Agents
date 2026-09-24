@@ -16,7 +16,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -72,6 +72,9 @@ logger = logging.getLogger(__name__)
 
 Outcome = Done | NeedInput | Waiting | TurnCancelledOutcome
 """What ``prompt()`` returns."""
+
+_FINISHED_KEPT = 256
+"""How many finished items' outcomes ``outcome()`` still answers."""
 
 OutcomeKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
 _MODES = ("auto", "ask")
@@ -191,6 +194,7 @@ class Session:
         self._ids: dict[str, deque[tuple[Any, str]]] = {}
         self._hooked: dict[str, Channel[Any]] = {}
         self._futures: dict[str, asyncio.Future[Outcome]] = {}
+        self._finished: OrderedDict[str, Any] = OrderedDict()
         self._consumed: list[str] = []  # consumed since the last turn settled
         self._waiting: list[str] = []  # items whose prompt stays open over a Waiting
         self._loop_task: asyncio.Task[None] | None = None
@@ -399,9 +403,7 @@ class Session:
         elif not self._remove_queued(receipt.channel, item_id):
             return False
         self.handle.events.add(ItemWithdrawn(item_id=item_id))
-        future = self._futures.pop(item_id, None)
-        if future is not None and not future.done():
-            future.set_exception(ItemWithdrawnError(f"Item {item_id!r} was withdrawn"))
+        self._resolve(item_id, ItemWithdrawnError(f"Item {item_id!r} was withdrawn"))
         return True
 
     def _remove_queued(self, channel_name: str, item_id: str) -> bool:
@@ -444,11 +446,20 @@ class Session:
         call saw resolves with that turn; one admitted again as a message
         resolves with the turn that consumed it. ``Waiting`` outcomes keep
         it open; a cancelled turn resolves it with ``TurnCancelledOutcome``;
-        a failed turn raises ``TurnFailedError``. ``KeyError`` if the item
-        is unknown or its turn has already ended.
+        a failed turn raises ``TurnFailedError``. The outcomes of the last
+        256 finished items are kept, so a recently finished item still
+        answers; ``KeyError`` for an unknown item or an older one.
         """
         future = self._futures.get(item_id)
         if future is None:
+            if item_id in self._finished and not self._is_pending(item_id):
+                done: asyncio.Future[Outcome] = asyncio.get_running_loop().create_future()
+                finished = self._finished[item_id]
+                if isinstance(finished, BaseException):
+                    done.set_exception(finished)
+                else:
+                    done.set_result(finished)
+                return done
             if not self._is_pending(item_id):
                 raise KeyError(item_id)
             future = asyncio.get_running_loop().create_future()
@@ -704,7 +715,15 @@ class Session:
         self.agent.event_manager.add(TurnCancelled(by=by, interrupted=interrupted))
         self._emit(CancelledUpdate(session_id=self.id, by=by, interrupted=interrupted))
 
+    def _record_finished(self, item_id: str, outcome: Any) -> None:
+        """Keep a recent item's outcome so ``outcome()`` can still answer it."""
+        self._finished[item_id] = outcome
+        self._finished.move_to_end(item_id)
+        while len(self._finished) > _FINISHED_KEPT:
+            self._finished.popitem(last=False)
+
     def _resolve(self, item_id: str, outcome: Any) -> None:
+        self._record_finished(item_id, outcome)
         future = self._futures.pop(item_id, None)
         if future is None or future.done():
             return
