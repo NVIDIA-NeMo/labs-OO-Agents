@@ -10,7 +10,7 @@ import sqlite3
 
 import coder_test_agents as agents
 import pytest
-from coder_test_agents import ask, cell, done, reply, wait_on
+from coder_test_agents import ask, cell, done, reply, until, wait_on
 from nooa_coder.session import session as session_module
 from nooa_coder.session.items import (
     CommandInfo,
@@ -95,8 +95,7 @@ async def test_waiting_keeps_prompt_open_until_a_later_turn_ends(make_session):
     session.subscribe(lambda e: ended.append(e) if isinstance(e, TurnEndedUpdate) else None)
 
     pending = asyncio.ensure_future(session.prompt("run the job"))
-    while not ended:
-        await asyncio.sleep(0.01)
+    await until(lambda: ended)
     assert ended[0].outcome_kind == "waiting"
     await asyncio.sleep(0.05)
     assert not pending.done()
@@ -267,8 +266,7 @@ async def test_idle_cancel_while_waiting_closes_the_prompt_without_an_event(make
     ended = []
     session.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
     pending = asyncio.ensure_future(session.prompt("run the job"))
-    while not ended:
-        await asyncio.sleep(0.01)
+    await until(lambda: ended)
     assert await session.cancel() is False
     assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="user")
     assert not [e for e in session.agent.event_manager.values() if isinstance(e, TurnCancelled)]
@@ -310,8 +308,7 @@ async def test_steer_after_the_last_model_call_becomes_the_next_message(make_ses
     assert receipt.delivered == "steered"
     block.set()
     assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="first")
-    while len(turns) < 2:
-        await asyncio.sleep(0.01)
+    await until(lambda: len(turns) >= 2)
 
     assert len(llm.calls) == 2
     assert "STEER-late" not in str(llm.calls[0].messages)
@@ -341,8 +338,7 @@ async def test_a_steer_left_by_a_cancel_is_admitted_after_the_cancel(make_sessio
     receipt = await session.steer("STEER-then-stop")
     assert await asyncio.wait_for(session.cancel(), TIMEOUT) is True
     assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="user")
-    while len(turns) < 2:
-        await asyncio.sleep(0.01)
+    await until(lambda: len(turns) >= 2)
 
     order = [
         (event_type, raw.get("channel"))
@@ -384,8 +380,7 @@ async def test_withdraw_removes_a_queued_item(make_session):
     session.start()
     ended = []
     session.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
-    while not ended:
-        await asyncio.sleep(0.01)
+    await until(lambda: ended)
     assert "KEEP-ME" in str(llm.calls[0].messages)
     assert "DROP-ME" not in str(llm.calls[0].messages)
     assert session.withdraw(first) is False  # consumed
@@ -536,7 +531,7 @@ async def test_outcome_after_the_turn_ended_without_an_earlier_wait(make_session
     ended = []
     session.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
     receipt = await session.submit("do it")
-    await asyncio.wait_for(_until(lambda: ended), TIMEOUT)
+    await until(lambda: ended)
     assert await session.outcome(receipt.item_id) == Done(explanation="handled")
     for index in range(300):
         session._record_finished(f"filler-{index}", Done(explanation="x"))
@@ -593,11 +588,6 @@ async def test_listeners_can_read_an_agent_event_by_its_id(make_session):
     await asyncio.sleep(0)
     assert found and all(ok for _, ok in found), found
     assert "AgentMessage" in {event_type for event_type, _ in found}
-
-
-async def _until(predicate):
-    while not predicate():
-        await asyncio.sleep(0.01)
 
 
 async def test_item_admitted_updates_carry_the_full_text(make_session):

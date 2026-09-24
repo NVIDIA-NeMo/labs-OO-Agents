@@ -243,3 +243,13 @@ class HiddenPortAgent(InteractiveAgent, llm=FakeLLMClient()):
     """An agent that exposes delegation its own way, so the port is hidden from the model."""
 
     session_port_visible: ClassVar[bool] = False
+
+
+async def until(predicate: Any, timeout: float = 5) -> None:
+    """Wait until ``predicate()`` is true; fail with TimeoutError after ``timeout`` seconds."""
+
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
