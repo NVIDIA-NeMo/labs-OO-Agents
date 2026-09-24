@@ -16,3 +16,48 @@ def _user_dir(tmp_path, monkeypatch):
 @pytest.fixture
 def sessions_dir(tmp_path):
     return tmp_path / "sessions"
+
+
+@pytest.fixture
+async def make_session(sessions_dir, tmp_path):
+    """Build a Session directly (no registry) around a scripted fake model.
+
+    Returns ``(session, llm)``. The fake model is strict: a model call with
+    no scripted response left fails the turn, so tests see extra calls.
+    """
+    from nooa_coder.session.loader import default_agent_factory
+    from nooa_coder.session.options import SessionOptions
+    from nooa_coder.session.session import Session
+    from nooa_coder.session.store import SessionStore
+
+    from nooa.unifiedllm import FakeLLMClient
+
+    made = []
+
+    def factory(
+        *responses,
+        agent_spec: str = "coder_test_agents:EchoAgent",
+        turn_method: str = "handle",
+        start: bool = True,
+        llm=None,
+    ):
+        llm = llm if llm is not None else FakeLLMClient(list(responses), strict_exhaustion=True)
+        store = SessionStore(sessions_dir)
+        options = SessionOptions(
+            workspace=tmp_path,
+            agent_spec=agent_spec,
+            llm=llm,
+            turn_method=turn_method,
+            sessions_dir=sessions_dir,
+        )
+        handle = store.create(agent=agent_spec, workspace=str(tmp_path), host=options.host)
+        agent = default_agent_factory(options, handle.storage)
+        session = Session(options=options, agent=agent, handle=handle)
+        if start:
+            session.start()
+        made.append(session)
+        return session, llm
+
+    yield factory
+    for session in made:
+        await session.close()
