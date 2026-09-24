@@ -88,6 +88,10 @@ class TaskResult(BaseModel):
             "expected results. Include commands when appropriate; a shell command is not required."
         ),
     )
+    report: str = Field(
+        default="",
+        description="Concise human-readable report that a parent or runner shows inline.",
+    )
 
 
 @_hidden

@@ -125,6 +125,9 @@ def test_task_result_model(how_to_verify):
     )
     assert "URL-encoding" in r.solution_description
     assert r.how_to_verify == how_to_verify
+    assert r.report == ""
+    with_report = TaskResult(**r.model_dump(exclude={"report"}), report="Fixed URL-encoding.")
+    assert with_report.report == "Fixed URL-encoding."
     properties = TaskResult.model_json_schema()["properties"]
     assert properties["how_to_verify"]["title"] == "How to Verify"
     assert "command_to_verify" not in properties
@@ -308,6 +311,7 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
             "solution_description": "Fixed the bug.",
             "evidence": "pytest passed",
             "how_to_verify": how_to_verify,
+            "report": "",
         },
     }
     assert shells[-1].cwd == str(tmp_path)
