@@ -23,12 +23,33 @@ ChildStatus = SessionStatus  # a child reports the same statuses as any session
 
 
 class TaskResult(BaseModel):
-    """Structured result of a delegated objective or a benchmark task."""
+    """Structured result of a delegated objective or a benchmark task.
 
-    solution_description: str = Field(description="What was done")
-    evidence: str = Field(description="What shows that it works")
-    how_to_verify: str = Field(description="How someone else can check it")
-    report: str = Field(default="", description="Optional longer report")
+    The field descriptions are what the model reads when it builds one;
+    they come from the benchmark agent, which re-exports this class.
+    """
+
+    solution_description: str = Field(
+        description="What you did and why it solves the problem. Describe root cause and fix."
+    )
+    evidence: str = Field(
+        description=(
+            "Concrete evidence that the task is done: what tests passed, "
+            "what output was produced, what behavior changed. Not a guess -- "
+            "cite the actual results you observed."
+        )
+    )
+    how_to_verify: str = Field(
+        title="How to Verify",
+        description=(
+            "How a verifier can confirm correctness: concrete checks or steps and their "
+            "expected results. Include commands when appropriate; a shell command is not required."
+        ),
+    )
+    report: str = Field(
+        default="",
+        description="Concise human-readable report that a parent or runner shows inline.",
+    )
 
 
 class Receipt(BaseModel):
