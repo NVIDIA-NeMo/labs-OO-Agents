@@ -3,9 +3,10 @@
 """A cancel during a CodeAct cell is recorded for the model.
 
 When the task running a CodeAct turn is cancelled while an ``execute_python``
-cell is awaiting, the strategy closes the cell's ``ToolCallEvent`` with
-``ResultStatus.CANCELLED``, emits a ``PythonOutput`` with the same status and
-the output the cell printed before the cancel, and re-raises. A cancel that
+cell is awaiting, the strategy appends a ``PythonOutput`` with
+``ResultStatus.CANCELLED`` and the output the cell printed before the cancel,
+leaves the cell's ``ToolCallEvent`` untouched (events are appended, never
+rewritten), and re-raises. A cancel that
 lands during the model call (no cell running) emits no ``PythonOutput``.
 """
 
@@ -79,8 +80,9 @@ async def test_cancel_during_cell_records_cancelled_output():
 
     calls = [e for e in events if isinstance(e, ToolCallEvent) and e.tool_call_id == "call_cell"]
     assert len(calls) == 1
-    assert calls[0].result is not None
-    assert calls[0].result.result_status is ResultStatus.CANCELLED
+    # The tool-call event is not rewritten on cancel: it keeps whatever it had
+    # when the cell started running. The appended PythonOutput is the record.
+    assert calls[0].result is None or calls[0].result.result_status is not ResultStatus.CANCELLED
 
 
 class _BlockingLLM(FakeLLMClient):

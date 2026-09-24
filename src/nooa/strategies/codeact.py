@@ -1584,9 +1584,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
                 )
             except asyncio.CancelledError as cancel:
-                self._record_cancelled_cell(
-                    runtime, tool_call.id, tool_call_event_id, execution_count, cancel
-                )
+                self._record_cancelled_cell(runtime, tool_call.id, execution_count, cancel)
                 raise
 
         # Determine final status
@@ -1789,29 +1787,21 @@ Standard Python builtins and agent instance (`self`) are available."""
     def _record_cancelled_cell(
         runtime: RuntimeServices,
         tool_call_id: str,
-        tool_call_event_id: str,
         execution_count: int,
         cancel: asyncio.CancelledError,
     ) -> None:
         """Record a cell interrupted by cancellation so the model can see it.
 
-        Closes the cell's tool-call event with ``ResultStatus.CANCELLED`` (the
-        receipt text is kept, as on every other path) and emits a
-        ``PythonOutput`` with the same status and the stdout/stderr the cell
-        produced before the cancel. ``execute_code`` attaches that partial
-        output to the exception as ``execution_result``; when it is absent
-        (the cancel landed before capture started) the output is empty. The
-        caller re-raises the cancellation.
+        Appends a ``PythonOutput`` with ``ResultStatus.CANCELLED`` and the
+        stdout/stderr the cell produced before the cancel. ``execute_code``
+        attaches that partial output to the exception as ``execution_result``;
+        when it is absent (the cancel landed before capture started) the output
+        is empty. The cell's tool-call event is left exactly as it was written:
+        a cancel is a later fact about the turn, recorded by appending, not by
+        rewriting an earlier event (which would also invalidate cached prompt
+        prefixes). The caller re-raises the cancellation.
         """
         partial = getattr(cancel, "execution_result", None)
-        runtime.event_manager.update(
-            tool_call_event_id,
-            result=ToolResult(
-                tool_call_id=tool_call_id,
-                content=_EXECUTE_PYTHON_RECEIPT,
-                result_status=ResultStatus.CANCELLED,
-            ),
-        )
         runtime.event_manager.add(
             PythonOutput(
                 tool_call_id=tool_call_id,
