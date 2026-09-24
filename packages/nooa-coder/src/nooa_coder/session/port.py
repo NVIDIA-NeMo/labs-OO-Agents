@@ -7,6 +7,7 @@ import contextvars
 from typing import TYPE_CHECKING, Any
 
 from nooa import hidden
+from nooa.agentdoc import spec
 from nooa.interactive import Done, InteractiveAgent
 from nooa_coder.session.items import ChildFailedError, ChildRef, Receipt, SessionInfo, Usage
 from nooa_coder.session.session import Session, as_data
@@ -188,16 +189,30 @@ def _parent_source(session: Session) -> str:
 
 
 def install_port(
-    agent: InteractiveAgent, session: Session, registry: "SessionRegistry"
+    agent: InteractiveAgent,
+    session: Session,
+    registry: "SessionRegistry",
+    *,
+    visible: bool | None = None,
 ) -> SessionPort:
     """Install ``self.session`` on the agent and the channels delegation uses.
 
     Registers ``delegates`` (child results) and, on a child, ``context``
     (data from the parent) when the agent has not, and makes the loop set
     ``current_port`` so ``ChildRef`` methods work from any cell.
+
+    The port is in the model docs unless ``visible=False``; when
+    ``visible`` is not given, the agent class decides with a
+    ``session_port_visible: ClassVar[bool]`` attribute (True when absent),
+    so an agent that offers delegation through its own methods can hide
+    the port without the host passing anything.
     """
+    if visible is None:
+        visible = bool(getattr(type(agent), "session_port_visible", True))
     port = SessionPort(session, registry)
     agent.session = port  # type: ignore[attr-defined]
+    if not visible:
+        spec(agent, "session", hidden=True)
     channels = agent.queue_manager.channels()
     if "delegates" not in channels:
         agent.queue_manager.queue("delegates")
