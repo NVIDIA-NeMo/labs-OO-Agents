@@ -560,6 +560,7 @@ class Router:
                 answer = await self._read_init_answer(worker, process)
         except asyncio.CancelledError:
             self._kill(worker)
+            self._close_socket(worker)
             worker.live = False
             worker.exited.set()
             raise
@@ -717,6 +718,11 @@ class Router:
         except Exception:
             logger.debug("worker %d: kill failed", worker.k, exc_info=True)
 
+    def _close_socket(self, worker: _Worker) -> None:
+        if worker.process is not None:
+            with contextlib.suppress(Exception):
+                worker.process.writer.close()
+
     async def _worker_exited(self, worker: _Worker, process: WorkerProcess) -> None:
         """End of a worker's socket: tell the client, then reap the process."""
         worker.live = False
@@ -735,6 +741,7 @@ class Router:
             await self._answer_orphans(worker, code)
         # The group may hold processes the worker started; kill it even after a clean exit.
         self._kill(worker)
+        self._close_socket(worker)
         worker.exited.set()
 
     async def _worker_failed(self, worker: _Worker, reason: str) -> None:
@@ -743,6 +750,7 @@ class Router:
         for session_id in list(worker.sessions):
             self._unmap(session_id, worker)
         self._kill(worker)
+        self._close_socket(worker)
         worker.exited.set()
         for key, pending in list(self._pending.items()):
             if pending.worker is worker:
