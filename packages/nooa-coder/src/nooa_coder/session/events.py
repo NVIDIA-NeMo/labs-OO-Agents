@@ -4,8 +4,11 @@
 
 from typing import ClassVar
 
-from nooa.context_blocks import Metadata
+from pydantic import Field
+
+from nooa.context_blocks import EventBase, Metadata
 from nooa.context_blocks.roles import Role
+from nooa_coder.session.items import TurnCancelled, Usage
 
 
 class SessionStarted(Metadata):
@@ -45,8 +48,101 @@ class SessionUserMessage(Metadata):
     content: str = ""
 
 
-SESSION_EVENT_TYPES: tuple[type[Metadata], ...] = (
+class ItemAdmitted(Metadata):
+    """An item accepted onto one of the agent's channels, recorded before it is queued.
+
+    ``item_id`` identifies the item for its whole life (receipt, consumed,
+    withdrawn, re-queued). ``item_type`` is ``module:qualname`` of the
+    item's class so a re-queued pydantic item comes back typed. A steer is
+    admitted on channel ``"steer"``; if no model call sees it, it is
+    admitted again on ``user_messages`` with the same ``item_id``.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    channel: str = ""
+    item_id: str = ""
+    item_json: str = ""
+    item_type: str = ""
+    source: str = ""
+
+
+class ItemConsumed(Metadata):
+    """An admitted item was taken off its channel (by the turn loop or by agent code)."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    item_id: str = ""
+
+
+class ItemWithdrawn(Metadata):
+    """An admitted item was withdrawn by its sender before anything consumed it."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    item_id: str = ""
+
+
+class ItemRequeued(Metadata):
+    """An item admitted but never consumed was put back on its channel after a load."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    item_id: str = ""
+
+
+class TurnStarted(Metadata):
+    """A turn started; ``item_ids`` are the admitted items its notification carries."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    item_ids: list[str] = Field(default_factory=list)
+    item_preview: str = ""
+
+
+class TurnEnded(Metadata):
+    """A turn ended.
+
+    ``outcome_kind`` is ``done``, ``need_input``, ``waiting``,
+    ``cancelled`` or ``error``. ``result_json`` is the outcome as JSON
+    data. ``usage`` is this turn's own token and cost delta.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    outcome_kind: str = ""
+    explanation: str = ""
+    result_json: str = ""
+    usage: Usage = Field(default_factory=Usage)
+
+
+class ChildDeleted(Metadata):
+    """Tombstone: a child session of this one was deleted."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    child_id: str = ""
+    name: str | None = None
+
+
+SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     SessionStarted,
     SessionTitleUpdated,
     SessionUserMessage,
+    ItemAdmitted,
+    ItemConsumed,
+    ItemWithdrawn,
+    ItemRequeued,
+    TurnStarted,
+    TurnEnded,
+    ChildDeleted,
+    TurnCancelled,
 )
+"""Event types registered on every session's storage backend.
+
+Registering them per backend (not only through the global registry) keeps
+them loading as their own classes even when another package defines a
+class with the same name; an unknown type would load back as ``Metadata``
+and a model-visible event like ``TurnCancelled`` would drop out of the
+prompt.
+"""

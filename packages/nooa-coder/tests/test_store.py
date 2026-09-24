@@ -7,8 +7,11 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from nooa_coder.session.items import SessionInfo, Usage
+from nooa_coder.session.items import SessionInfo, TurnCancelled, Usage
 from nooa_coder.session.store import SessionNotFoundError, SessionStore
+
+from nooa.context_blocks import Metadata
+from nooa.context_blocks.roles import Role
 
 
 def test_store_returns_the_single_session_info_model(sessions_dir):
@@ -166,3 +169,58 @@ def test_listing_shows_roots_by_default(sessions_dir):
             root_id, child_id = root.id, child.id
     assert [info.id for info in store.list()] == [root_id]
     assert {info.id for info in store.list(roots_only=False)} == {root_id, child_id}
+
+
+def test_turn_markers_and_turn_cancelled_reload_with_their_types(sessions_dir, monkeypatch):
+    # Another class with the same name in the global registry (as nooa_cli's
+    # copies are in a full test run) must not change what this store loads.
+    from nooa_coder.session import events
+
+    from nooa.context_blocks.events import _EVENT_REGISTRY
+
+    store = SessionStore(sessions_dir)
+    written = [
+        events.ItemAdmitted(
+            channel="user_messages",
+            item_id="i1",
+            item_json='"hi"',
+            item_type="builtins:str",
+            source="user",
+        ),
+        events.ItemConsumed(item_id="i1"),
+        events.TurnStarted(item_ids=["i1"], item_preview="hi"),
+        TurnCancelled(by="user", interrupted="7"),
+        events.TurnEnded(outcome_kind="cancelled", usage=Usage(input_tokens=3)),
+        events.ItemWithdrawn(item_id="i2"),
+        events.ItemRequeued(item_id="i3"),
+    ]
+    with store.create() as handle:
+        session_id = handle.id
+        for event in written:
+            handle.events.add(event)
+
+    for event in written:
+        monkeypatch.setitem(_EVENT_REGISTRY, type(event).__name__, SessionInfo)
+    with store.open(session_id) as handle:
+        loaded = [e for e in handle.events.values() if type(e).__name__ != "SessionStarted"]
+    assert [type(e) for e in loaded] == [type(e) for e in written]
+    assert [e.model_dump(exclude={"tag"}) for e in loaded] == [
+        e.model_dump(exclude={"tag"}) for e in written
+    ]
+    [cancelled] = [e for e in loaded if isinstance(e, TurnCancelled)]
+    assert cancelled._role is Role.USER
+    assert not isinstance(cancelled, Metadata)
+    assert all(isinstance(e, Metadata) for e in loaded if e is not cancelled)
+
+
+def test_turn_count_counts_admitted_user_messages(sessions_dir):
+    from nooa_coder.session import events
+
+    store = SessionStore(sessions_dir)
+    with store.create() as handle:
+        for channel in ("user_messages", "delegates", "user_messages"):
+            handle.events.add(
+                events.ItemAdmitted(channel=channel, item_id=channel, item_json="1", source="x")
+            )
+        session_id = handle.id
+    assert store.get(session_id).turn_count == 2
