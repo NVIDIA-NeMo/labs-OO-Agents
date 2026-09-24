@@ -2,13 +2,69 @@
 # SPDX-License-Identifier: Apache-2.0
 """Agent-facing workspace preferences for NOOA interactive hosts."""
 
+import copy
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from nooa.skill import Skill
 
 _ENV_PLACEHOLDER_ONLY = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+# Command-line flags whose value is a credential, e.g. --token X or --api-key=X.
+_SECRET_FLAG = re.compile(
+    r"^--?(?:[a-z0-9]+[-_])*(?:token|api[-_]?key|apikey|password|passwd|secret|auth)$",
+    re.IGNORECASE,
+)
+# URL query parameters whose value is a credential, e.g. ?api_key=X or ?sig=X.
+_SECRET_QUERY_KEY = re.compile(
+    r"(?:token|key|secret|password|passwd|auth|credential|signature|^sig$)", re.IGNORECASE
+)
+
+
+def _is_placeholder(value: str) -> bool:
+    return bool(_ENV_PLACEHOLDER_ONLY.match(value))
+
+
+def _literal_credentials(definition: dict[str, Any]) -> list[str]:
+    """Name each place in an MCP definition that holds a literal credential.
+
+    Only a value that is entirely one ``${VAR}`` placeholder (resolved from the
+    environment at connect time) may be written to the committed workspace
+    settings file.
+    """
+    found = []
+    for field_name in ("headers", "env"):
+        for key, value in (definition.get(field_name) or {}).items():
+            if isinstance(value, str) and not _is_placeholder(value):
+                found.append(f"{field_name}[{key!r}]")
+    url = definition.get("url")
+    if isinstance(url, str):
+        parts = urlsplit(url)
+        if parts.password is not None and not _is_placeholder(parts.password):
+            found.append("url password")
+        if parts.username and parts.password is None and not _is_placeholder(parts.username):
+            # A lone userinfo value (https://TOKEN@host) is a bearer credential.
+            found.append("url userinfo")
+        for key, value in parse_qsl(parts.query, keep_blank_values=True):
+            if value and _SECRET_QUERY_KEY.search(key) and not _is_placeholder(value):
+                found.append(f"url query {key!r}")
+    args = definition.get("args") or []
+    for index, arg in enumerate(args):
+        if not isinstance(arg, str):
+            continue
+        flag, separator, inline = arg.partition("=")
+        if not _SECRET_FLAG.match(flag):
+            continue
+        if separator:
+            value = inline
+        elif index + 1 < len(args) and isinstance(args[index + 1], str):
+            value = args[index + 1]
+        else:
+            continue
+        if not _is_placeholder(value):
+            found.append(f"args value for {flag}")
+    return found
 
 
 class WorkspaceSettings(Skill):
@@ -90,20 +146,16 @@ class WorkspaceSettings(Skill):
         # Reuse the registry's exact, unresolved definition. The request only
         # describes configuration; it neither grants approval nor reads secrets.
         definition = registry._approval_request(name).config
-        for field_name in ("headers", "env"):
-            for key, value in (definition.get(field_name) or {}).items():
-                if isinstance(value, str) and not _ENV_PLACEHOLDER_ONLY.match(value):
-                    # This definition is about to be written to the workspace's
-                    # committed .nooa/settings.yaml, not the user-level approval
-                    # store -- a literal secret here would land in version
-                    # control. Only a value that is entirely one ${VAR}
-                    # placeholder (resolved from the environment at connect
-                    # time) may be persisted.
-                    raise ValueError(
-                        f"MCP server {name!r} {field_name}[{key!r}] must be a "
-                        "${VAR} placeholder, not a literal value, to be saved "
-                        "in the workspace settings file"
-                    )
+        # This definition is about to be written to the workspace's committed
+        # .nooa/settings.yaml, not the user-level approval store -- a literal
+        # secret here would land in version control.
+        literals = _literal_credentials(definition)
+        if literals:
+            raise ValueError(
+                f"MCP server {name!r} {', '.join(literals)} must be a ${{VAR}} "
+                "placeholder, not a literal value, to be saved in the workspace "
+                "settings file"
+            )
         names = [item for item in self._project_auto_connect() if item != name]
         if auto_connect:
             names.append(name)
@@ -113,6 +165,11 @@ class WorkspaceSettings(Skill):
                 ("coding", "mcp_auto_connect"): names,
             }
         )
+        if name in registry._servers:
+            # The saved form is normalized (e.g. a bare url gains its transport).
+            # Adopt it first so the refresh does not see a "changed" definition
+            # and disconnect a live server.
+            registry._servers[name] = copy.deepcopy(definition)
         registry.refresh_settings()
         return f"Saved MCP server `{name}` in {path}; auto-connect={auto_connect}. Connection approvals are unchanged."
 

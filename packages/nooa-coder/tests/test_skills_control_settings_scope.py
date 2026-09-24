@@ -74,3 +74,27 @@ async def test_add_skills_dir_does_not_leak_a_users_personal_directory(tmp_path,
         assert any(str(extra_dir) in entry for entry in persisted_dirs)
     finally:
         await agent.close()
+
+
+async def test_activate_works_when_project_settings_mask_an_mcp_server(tmp_path, monkeypatch):
+    """forget_mcp() leaves ``mcp_servers: {name: null}``; /skills must still load settings."""
+    workspace = tmp_path / "project"
+    (workspace / ".nooa").mkdir(parents=True)
+    (workspace / ".nooa" / "settings.yaml").write_text(
+        yaml.safe_dump({"coding": {"mcp_servers": {"forgotten": None}}})
+    )
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
+
+    options = SessionOptions.load(workspace)
+    assert "forgotten" not in options.mcp_servers
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=workspace)
+    try:
+        control = SkillsControl(agent, options, workspace=workspace)
+        result = await control.invoke("activate nemo.methodwriting")
+        assert result.success, str(result)
+        project_settings = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
+        assert "nemo.methodwriting" in project_settings["coding"]["active_skills"]
+        assert project_settings["coding"]["mcp_servers"] == {"forgotten": None}
+    finally:
+        await agent.close()

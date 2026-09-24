@@ -94,3 +94,83 @@ async def test_forget_mcp_does_not_leak_a_users_personal_auto_connect(
     persisted = saved["coding"]["mcp_auto_connect"]
     assert "personal-server" not in persisted
     assert "shared" not in persisted
+
+
+async def test_remember_mcp_after_forget_mcp_saves_the_definition_again(workspace_settings):
+    """forget_mcp writes a null mask; a later remember_mcp must read past it."""
+    ws, registry, workspace = workspace_settings
+    registry.register("again", command="again-command")
+    ws.remember_mcp("again")
+    ws.forget_mcp("again")
+    saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
+    assert saved["coding"]["mcp_servers"]["again"] is None
+
+    registry.register("again", command="again-command")
+    ws.remember_mcp("again")
+
+    saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
+    assert saved["coding"]["mcp_servers"]["again"]["command"] == "again-command"
+    assert saved["coding"]["mcp_auto_connect"] == ["again"]
+
+
+async def test_remember_mcp_keeps_a_connected_server_connected(workspace_settings, monkeypatch):
+    """Saving normalizes the definition (a bare url gains a transport).
+
+    The registry must adopt the saved form before refreshing, or the refresh
+    sees a "changed" definition and disconnects the live server.
+    """
+    ws, registry, workspace = workspace_settings
+    registry.register("live", url="https://example.com/mcp")
+    registry._connected["live"] = object()
+    detached = []
+    monkeypatch.setattr(registry, "deactivate", lambda names: detached.extend(names))
+    monkeypatch.setattr(registry, "_detach", lambda name: detached.append(name))
+
+    ws.remember_mcp("live")
+
+    saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
+    assert saved["coding"]["mcp_servers"]["live"]["transport"] == "streamable-http"
+    assert detached == []
+    assert "live" in registry._connected
+    assert registry._servers["live"] == saved["coding"]["mcp_servers"]["live"]
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        {"url": "https://user:hunter2@example.com/mcp"},
+        {"url": "https://sk-live-token@example.com/mcp"},
+        {"url": "https://example.com/mcp?api_key=sk-live-token"},
+        {"url": "https://example.com/mcp?region=us&access_token=sk-live-token"},
+        {"command": "server", "args": ["--token", "sk-live-token"]},
+        {"command": "server", "args": ["--api-key=sk-live-token"]},
+        {"command": "server", "args": ["--password", "hunter2"]},
+    ],
+)
+async def test_remember_mcp_rejects_literal_credentials_in_url_and_args(
+    workspace_settings, registration
+):
+    ws, registry, workspace = workspace_settings
+    registry.register("leaky", **registration)
+    with pytest.raises(ValueError, match="placeholder"):
+        ws.remember_mcp("leaky")
+    assert not (workspace / ".nooa" / "settings.yaml").exists()
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        {"url": "https://${MCP_USER}:${MCP_PASSWORD}@example.com/mcp"},
+        {"url": "https://example.com/mcp?api_key=${MCP_KEY}&verbose"},
+        {"url": "https://example.com/mcp?region=us-east&format=json"},
+        {"command": "server", "args": ["--token", "${MCP_TOKEN}", "--port", "8080"]},
+        {"command": "server", "args": ["--api-key=${MCP_KEY}", "--verbose"]},
+        {"command": "server", "args": ["--tokenizer", "bpe"]},
+    ],
+)
+async def test_remember_mcp_accepts_placeholders_and_ordinary_args(
+    workspace_settings, registration
+):
+    ws, registry, workspace = workspace_settings
+    registry.register("clean", **registration)
+    assert "Saved" in ws.remember_mcp("clean")

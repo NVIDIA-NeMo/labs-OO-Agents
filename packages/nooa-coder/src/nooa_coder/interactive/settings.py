@@ -68,6 +68,11 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
                 values.setdefault(key, {}).update(value)
             else:
                 values[key] = deepcopy(value)
+    servers = values.get("mcp_servers")
+    if isinstance(servers, dict):
+        # forget_mcp() writes ``name: null`` to mask an inherited definition;
+        # a masked server is simply absent from the resolved options.
+        values["mcp_servers"] = {k: v for k, v in servers.items() if v is not None}
     return SessionOptions(**values).model_dump(exclude_unset=True)
 
 
