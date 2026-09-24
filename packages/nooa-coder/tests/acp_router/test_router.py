@@ -8,10 +8,12 @@ forwards.
 """
 
 import asyncio
+import gc
 import json
 import logging
 import socket
 import time
+import warnings
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -614,3 +616,26 @@ async def test_a_load_sent_while_close_is_answered_keeps_the_session(harness):
     assert frame.message["result"] == {"stopReason": "end_turn"}
     assert harness.spawned == [1]
     assert not harness.workers[1].eof.is_set()
+
+
+async def test_worker_sockets_are_closed_when_workers_end(harness):
+    await harness.initialize()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        for _ in range(20):
+            session_id = await harness.new_session()
+            await harness.call("session/close", {"sessionId": session_id})
+            k = harness.spawned[-1]
+            await asyncio.wait_for(harness.workers[k].eof.wait(), TIMEOUT)
+        await asyncio.sleep(0.2)  # let the router reap the last worker
+        harness.workers.clear()
+        gc.collect()
+    # Only the router's sockets count; other objects collected here (the
+    # store's SQLite connections from earlier tests) are not this test's.
+    unclosed = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, ResourceWarning)
+        and any(word in str(w.message) for word in ("StreamWriter", "transport", "socket"))
+    ]
+    assert unclosed == []
