@@ -633,11 +633,12 @@ class CoderACPAgent:
         error = getattr(exc, "error", None) or exc.__cause__ or exc
         message = str(error)
         if isinstance(error, GenerationError):
-            if message.startswith("Empty response: the model used all available output tokens"):
+            # The wordings CodeActStrategy uses (nooa/strategies/codeact.py).
+            # max_retries ("failed after N errors") is repeated invalid output,
+            # not a limit on turn requests, so it stays an error.
+            if "The model used all available output tokens" in message:
                 return PromptResponse(stop_reason="max_tokens")
-            if message.startswith("Generation failed after ") and (
-                "max_iterations=" in message or "max_retries=" in message
-            ):
+            if message.startswith("Generation failed after ") and "max_iterations=" in message:
                 return PromptResponse(stop_reason="max_turn_requests")
         raise RequestError(-32603, message, {"details": message}) from exc
 
