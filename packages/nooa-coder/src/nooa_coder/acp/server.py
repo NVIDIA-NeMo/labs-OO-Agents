@@ -174,6 +174,7 @@ class CoderACPAgent:
         self.client_capabilities: ClientCapabilities | None = None
         self._bridges: dict[str, ACPEventBridge] = {}
         self._background: set[asyncio.Task[None]] = set()
+        self._title_checked: set[str] = set()
 
     def on_connect(self, conn: Client) -> None:
         self._conn = conn
@@ -400,12 +401,32 @@ class CoderACPAgent:
                 handled = await self._run_command(session, bridge, *slash)
                 if handled is not None:
                     return handled
+            await self._request_title(session, text)
             receipt = await session.steer(text, source=SOURCE)
             return await self._finish(session, bridge, receipt.item_id)
         except SessionClosedError:
             raise RequestError.resource_not_found(session_id) from None
         except TurnFailedError as exc:
             return await self._turn_failed(bridge, exc)
+
+    async def _request_title(self, session: Session, text: str) -> None:
+        """On a session's first prompt, ask the agent to title it (once per session).
+
+        The request goes on ``system_messages`` (housekeeping, not part of
+        the conversation) just before the prompt, so the same turn handles
+        both. Agents without that channel, and sessions that already have a
+        title or a message, are left alone.
+        """
+        if session.id in self._title_checked:
+            return
+        self._title_checked.add(session.id)
+        if session.info.title or "system_messages" not in session.agent.queue_manager.channels():
+            return
+        if any(entry.role == "user" for entry in session.transcript()):
+            return
+        from nooa_coder.coding.agent import session_title_request
+
+        await session.submit(session_title_request(text), channel="system_messages", source="host")
 
     async def _finish(
         self, session: Session, bridge: ACPEventBridge, item_id: str
