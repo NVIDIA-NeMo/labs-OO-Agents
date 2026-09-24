@@ -14,6 +14,7 @@ import os
 import sqlite3
 import subprocess
 import threading
+import time
 import typing
 import uuid
 from collections.abc import Iterator
@@ -98,6 +99,8 @@ for _cls in (
             "Each event class must have a unique event_type default."
         )
     _CORE_TYPES[_key] = _cls
+
+_CORE_TYPES.update({"TuiSessionResumed": TuiSessionResumed, "TuiSessionCleared": TuiSessionCleared})
 
 _SCHEMA_VERSION = 1
 
@@ -311,7 +314,12 @@ class SQLiteEventBackend:
     def _try_deserialize(self, data: str, *, context: str) -> EventBase | None:
         try:
             return self._deserialize(data)
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, PydanticValidationError) as e:
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            TypeError,
+            PydanticValidationError,
+        ) as e:
             logger.warning("%s: skipping corrupt event data (%s)", context, type(e).__name__)
             return None
 
@@ -395,7 +403,9 @@ class SQLiteEventBackend:
                 if not _is_corruption_error(e):
                     raise
                 logger.warning(
-                    "get(%s): corrupt/unreadable row, skipping (%s)", tag, type(e).__name__
+                    "get(%s): corrupt/unreadable row, skipping (%s)",
+                    tag,
+                    type(e).__name__,
                 )
                 return None
             if row is None:
@@ -452,7 +462,9 @@ class SQLiteEventBackend:
                 if not _is_corruption_error(e):
                     raise
                 logger.warning(
-                    "remove(%s): corrupt/unreadable DB, skipping (%s)", tag, type(e).__name__
+                    "remove(%s): corrupt/unreadable DB, skipping (%s)",
+                    tag,
+                    type(e).__name__,
                 )
                 return False
             if row is None:
@@ -492,7 +504,10 @@ class SQLiteEventBackend:
             except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
                 if not _is_corruption_error(e):
                     raise
-                logger.error("active_tags(): table corrupt, returning empty (%s)", type(e).__name__)
+                logger.error(
+                    "active_tags(): table corrupt, returning empty (%s)",
+                    type(e).__name__,
+                )
                 return []
             return [r[0] for r in rows]
 
@@ -526,7 +541,10 @@ class SQLiteEventBackend:
             except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
                 if not _is_corruption_error(e):
                     raise
-                logger.error("all_events(): query failed due to corruption (%s)", type(e).__name__)
+                logger.error(
+                    "all_events(): query failed due to corruption (%s)",
+                    type(e).__name__,
+                )
                 return
         for (data,) in rows:
             if event := self._try_deserialize(data, context="all_events()"):
@@ -601,8 +619,8 @@ class SessionAlreadyActiveError(Exception):
     """Raised when a session database is already open in another process.
 
     Attributes:
-        session_id: The session identifier (db filename stem), if known.
-        owner_pid: PID read from the lock file, or None if unavailable/unparseable.
+        session_id: The session identifier (database filename stem), if known.
+        owner_pid: Diagnostic PID recorded by the active owner, if available.
     """
 
     def __init__(
@@ -636,6 +654,162 @@ def _read_lock_pid(lock_path: str) -> int | None:
         return None
 
 
+def _claim_path(db_path: str | Path) -> Path:
+    return Path(db_path).with_suffix(".active")
+
+
+def _owner_identity() -> dict[str, object] | None:
+    """Return this process's PID-namespace and boot identity, if determinable.
+
+    Used to detect when a recorded PID cannot be safely compared: the same
+    number can belong to an unrelated live process in a different PID
+    namespace (e.g. sandbox vs. host) or after a reboot recycles it.
+    """
+    try:
+        pidns = os.stat("/proc/self/ns/pid").st_ino
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not boot_id:
+        return None
+    return {"pidns": pidns, "boot_id": boot_id}
+
+
+def _read_claim_payload(claim_path: Path) -> dict[str, object] | None:
+    try:
+        owner_path = next(claim_path.glob("owner-*.json"))
+        payload = json.loads(owner_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, StopIteration, ValueError, TypeError):
+        return None
+
+
+def _read_claim_owner(claim_path: Path) -> int | None:
+    """Return the diagnostic PID from an active-session claim, if readable."""
+    payload = _read_claim_payload(claim_path)
+    pid = payload.get("pid") if payload is not None else None
+    return pid if isinstance(pid, int) else None
+
+
+def claim_owner_is_confirmed_dead(claim_path: Path) -> bool:
+    """Return True only when a claim's recorded owner process is verifiably gone.
+
+    Claims never auto-expire (see ``_SessionClaim``): a paused-but-alive owner
+    must never be treated as stale. This check stays on that same
+    conservative side by construction -- it can only ever answer "yes,
+    provably dead" or "unknown/still alive", never the reverse. In this
+    process's own PID namespace, ``os.kill(pid, 0)`` raising
+    ``ProcessLookupError`` means that exact PID is not running anywhere this
+    process could see, which is a genuine answer.
+
+    Across independent sandbox/host PID namespaces the same PID number can
+    belong to a different, unrelated live process; a reboot can recycle it
+    too. The claim records the owner's PID-namespace inode and boot ID
+    alongside its PID, and this check refuses to answer (returns False) when
+    that identity is missing or does not match this process's own -- so an
+    ``os.kill`` that would otherwise probe an unrelated process in a
+    different namespace never runs. Combined with the PID check, this can
+    only ever produce a false "still alive" (matching today's default),
+    never a false "safe to reclaim" -- callers may use this to surface an
+    otherwise permanently hidden, unrecoverable session for manual cleanup,
+    but must never use it to automatically delete or reopen the claim.
+    """
+    payload = _read_claim_payload(claim_path)
+    identity = _owner_identity()
+    if payload is None or identity is None:
+        return False
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or payload.get("identity") != identity:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        # Any other errno (e.g. EPERM for a live process we can't signal)
+        # means the PID does exist; only ESRCH (ProcessLookupError) is "gone".
+        return False
+    return False
+
+
+class _SessionClaim:
+    """Atomic ownership marker visible across sandbox and host namespaces.
+
+    Unlike ``flock``, creating a directory on the shared filesystem remains
+    visible when the sandbox and host use independent lock namespaces. Claims
+    intentionally do not expire: reclaiming on a timeout could admit a second
+    writer while a paused owner is still alive. After an unclean exit, users
+    must remove the ``.active`` directory explicitly.
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
+        self._claim_path = _claim_path(db_path)
+        self._token = uuid.uuid4().hex
+        self._owner_path = self._claim_path / f"owner-{self._token}.json"
+        self._pid = os.getpid()
+        session_id = Path(db_path).stem
+        try:
+            self._claim_path.mkdir(mode=0o755)
+        except FileExistsError:
+            owner_pid = _read_claim_owner(self._claim_path)
+            detail = f" (pid {owner_pid})" if owner_pid is not None else ""
+            raise SessionAlreadyActiveError(
+                f"Session {session_id!r} is already active in another process{detail}. "
+                f"If that process is gone, remove {str(self._claim_path)!r} to reclaim it.",
+                session_id=session_id,
+                owner_pid=owner_pid,
+            ) from None
+
+        try:
+            payload = json.dumps(
+                {"token": self._token, "pid": self._pid, "identity": _owner_identity()}
+            ).encode()
+            fd = os.open(self._owner_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            try:
+                os.write(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except BaseException:
+            try:
+                self._owner_path.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                self._claim_path.rmdir()
+            except OSError:
+                pass
+            raise
+
+    def _remove_owned_claim(self) -> None:
+        """Best-effort removal of only this owner's unguessable marker."""
+        try:
+            self._owner_path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError:
+            logger.warning("Could not remove session claim owner %s", self._owner_path)
+            return
+        try:
+            self._claim_path.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Another owner marker means recovery replaced the claim. Never
+            # remove an entry whose random token does not belong to us.
+            logger.warning("Could not remove session claim %s", self._claim_path)
+
+    def close(self) -> None:
+        # A forked child must not remove the parent's claim. The tokenized owner
+        # filename also makes cleanup harmless if recovery replaced the directory.
+        if os.getpid() == self._pid:
+            self._remove_owned_claim()
+
+
+_LOCK_ACQUIRE_RETRIES = 20
+_LOCK_ACQUIRE_RETRY_DELAY_SECONDS = 0.003
+
+
 def _acquire_session_lock(lock_path: str) -> int:
     """Acquire an exclusive flock on *lock_path*, returning the held fd.
 
@@ -645,29 +819,42 @@ def _acquire_session_lock(lock_path: str) -> int:
     process dies, so a genuine crash doesn't wedge the next run — no
     stale-file cleanup needed here.
 
+    A few short, immediate retries absorb a concurrent
+    ``is_sqlite_database_active()`` liveness probe, which briefly takes and
+    releases a *shared* lock on the same file. A real owner holds this lock
+    for its entire session lifetime, so retrying only ever helps against
+    that kind of microsecond-scale transient contention — it cannot mask a
+    genuine conflict with another owner, which keeps failing every retry.
+
     Lock file contents: the ASCII decimal PID of the current owner. We
     truncate before writing so a shorter PID can't leave trailing digits
     from a longer predecessor.
     """
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        owner_pid = _read_lock_pid(lock_path)
-        session_id = Path(lock_path).stem
-        if owner_pid is not None:
-            msg = (
-                f"Session {session_id!r} is already active in another process "
-                f"(pid {owner_pid}). If that process is gone, remove "
-                f"{lock_path!r} to reclaim the session."
-            )
-        else:
-            msg = (
-                f"Session {session_id!r} is already active in another process "
-                f"(owner pid unavailable — lock file {lock_path!r} is empty or unreadable)."
-            )
-        raise SessionAlreadyActiveError(msg, session_id=session_id, owner_pid=owner_pid) from None
+    for attempt in range(_LOCK_ACQUIRE_RETRIES + 1):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if attempt == _LOCK_ACQUIRE_RETRIES:
+                os.close(fd)
+                owner_pid = _read_lock_pid(lock_path)
+                session_id = Path(lock_path).stem
+                if owner_pid is not None:
+                    msg = (
+                        f"Session {session_id!r} is already active in another process "
+                        f"(pid {owner_pid})."
+                    )
+                else:
+                    msg = (
+                        f"Session {session_id!r} is already active in another process "
+                        f"(owner pid unavailable — lock file {lock_path!r} is empty or "
+                        "unreadable)."
+                    )
+                raise SessionAlreadyActiveError(
+                    msg, session_id=session_id, owner_pid=owner_pid
+                ) from None
+            time.sleep(_LOCK_ACQUIRE_RETRY_DELAY_SECONDS)
 
     # Holder now; replace any stale predecessor PID with ours.
     os.lseek(fd, 0, os.SEEK_SET)
@@ -676,15 +863,56 @@ def _acquire_session_lock(lock_path: str) -> int:
     return fd
 
 
+def is_sqlite_database_active(db_path: str | Path) -> bool:
+    """Return whether a local lock or shared-filesystem claim is active.
+
+    Probes with a *shared* flock, not the exclusive one a real owner holds
+    (see ``_acquire_session_lock``). Two shared-lock probes never conflict
+    with each other, so concurrent probing can't self-collide into a false
+    "active" report; a shared lock only fails to acquire while an exclusive
+    lock is genuinely held, which is the actual liveness signal this
+    function exists to answer. Probing with an exclusive lock, like an
+    earlier version of this function did, is not idempotent: two concurrent
+    probes then race for mutual exclusion against *each other* (not just
+    against a real owner), and a probe can transiently make a real opener's
+    own exclusive-lock attempt fail too.
+    """
+    path = Path(db_path)
+    if str(db_path) == ":memory:":
+        return False
+    claim_path = _claim_path(path)
+    try:
+        claim_path.stat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return True
+    else:
+        return True
+    try:
+        fd = os.open(path.with_suffix(".lock"), os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
 def delete_sqlite_database(db_path: str | Path) -> bool:
     """Delete an inactive SQLite database and its WAL/SHM sidecars.
 
-    The same file lock used by :class:`SQLiteStorageManager` is held for the
-    whole deletion. Attempting to delete a live session therefore raises
-    :class:`SessionAlreadyActiveError` instead of unlinking an open database.
-    The lock file itself is intentionally retained: unlinking a flock target
-    creates a race where another process can lock a different inode at the
-    same path.
+    The same file lock and shared-filesystem claim used by
+    :class:`SQLiteStorageManager` are held for the whole deletion. Attempting
+    to delete a live session therefore raises :class:`SessionAlreadyActiveError`
+    instead of unlinking an open database. The lock file itself is intentionally
+    retained: unlinking a flock target creates a race where another process can
+    lock a different inode at the same path.
 
     Returns:
         True when the main database existed, otherwise false.
@@ -697,7 +925,9 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
 
     lock_path = str(path.with_suffix(".lock"))
     lock_fd = _acquire_session_lock(lock_path)
+    claim: _SessionClaim | None = None
     try:
+        claim = _SessionClaim(path)
         existed = path.exists()
         for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
             try:
@@ -706,8 +936,12 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
                 pass
         return existed
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        try:
+            if claim is not None:
+                claim.close()
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 class SQLiteStorageManager:
@@ -715,6 +949,13 @@ class SQLiteStorageManager:
 
     Provides persistent event storage and agent snapshots.
     Supports use as a context manager for safe resource cleanup.
+
+    File-backed databases also acquire a sibling ``.active`` directory claim,
+    visible across host/container lock namespaces. Clean close removes it; a
+    crash deliberately leaves it in place. After independently verifying that
+    no process still owns the database, remove that stale directory to reopen.
+    Never reclaim based only on a PID lookup from another namespace. This
+    fail-closed behavior applies to all file-backed users, not only sessions.
 
     Security: Snapshot restore executes stored Python source code via
     ``exec()``. The database file must be treated as trusted input —
@@ -724,6 +965,9 @@ class SQLiteStorageManager:
     Args:
         db_path: Path to SQLite database file. Use ":memory:" for in-memory
                  (useful for testing).
+        must_exist: Open a file-backed database only if it already exists;
+                    a missing file raises ``sqlite3.OperationalError`` instead
+                    of being silently created empty.
 
     Raises:
         SessionAlreadyActiveError: If ``db_path`` is already open in another
@@ -731,18 +975,33 @@ class SQLiteStorageManager:
             resuming this one.
     """
 
-    def __init__(self, db_path: str | Path = ":memory:", *, check_same_thread: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        *,
+        check_same_thread: bool = True,
+        must_exist: bool = False,
+    ) -> None:
         # Safety invariant for check_same_thread=False: callers (the TUI)
         # guarantee that all DB access is serialized through a single
         # asyncio event loop on the agent thread. No concurrent writes.
         self._db_path = str(db_path)
         self._check_same_thread = check_same_thread
+        self._must_exist = must_exist and self._db_path != ":memory:"
         self._lock_fd: int | None = None
+        self._session_claim: _SessionClaim | None = None
         self._closed = False
 
         if self._db_path != ":memory:":
             lock_path = str(Path(self._db_path).with_suffix(".lock"))
             self._lock_fd = _acquire_session_lock(lock_path)
+            try:
+                self._session_claim = _SessionClaim(self._db_path)
+            except BaseException:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                os.close(self._lock_fd)
+                self._lock_fd = None
+                raise
 
         self._db_lock = threading.RLock()
 
@@ -751,13 +1010,17 @@ class SQLiteStorageManager:
             _ensure_schema(self._conn)
             self._backend = SQLiteEventBackend(self._conn, lock=self._db_lock)
             self._backend._on_io_error = self._reconnect
-        except Exception:
+        except BaseException:
             self.close()
             raise
 
     def _open_connection(self) -> sqlite3.Connection:
         """Create and configure a new SQLite connection."""
-        conn = sqlite3.connect(self._db_path, check_same_thread=self._check_same_thread)
+        if self._must_exist:
+            uri = f"{Path(self._db_path).resolve().as_uri()}?mode=rw"
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=self._check_same_thread)
+        else:
+            conn = sqlite3.connect(self._db_path, check_same_thread=self._check_same_thread)
         # Retry up to 5 s on SQLITE_BUSY before raising, giving concurrent
         # readers time to release shared locks on virtiofs/FUSE mounts.
         conn.execute("PRAGMA busy_timeout=5000")
@@ -796,10 +1059,11 @@ class SQLiteStorageManager:
             pass
         try:
             new_conn = self._open_connection()
-        except Exception:
-            # Reconnect failed — mark as closed so callers get a clear error
-            # rather than "cannot operate on a closed database".
+        except BaseException:
+            # Reconnect failed after closing the old connection. Release session
+            # ownership immediately; close() remains idempotent afterward.
             self._closed = True
+            self._release_session_ownership()
             raise
         self._conn = new_conn
         self._backend._conn = self._conn
@@ -862,6 +1126,20 @@ class SQLiteStorageManager:
         self.restore_snapshot(snapshot_id, agent)
         return True
 
+    def _release_session_ownership(self) -> None:
+        """Release cross-namespace and local ownership guards once."""
+        claim, self._session_claim = self._session_claim, None
+        lock_fd, self._lock_fd = self._lock_fd, None
+        try:
+            if claim is not None:
+                claim.close()
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+
     def close(self) -> None:
         if self._closed:
             return
@@ -882,10 +1160,7 @@ class SQLiteStorageManager:
                     finally:
                         conn.close()
         finally:
-            if self._lock_fd is not None:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
-                self._lock_fd = None
+            self._release_session_ownership()
 
     def __enter__(self) -> Self:
         return self

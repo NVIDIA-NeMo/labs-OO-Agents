@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 
 import pytest
@@ -11,14 +12,49 @@ import pytest
 from nooa.runtime.channels import QueueManager
 
 
-def test_no_cheat_sheet_with_only_user_messages():
-    """No cheat sheet when only user_messages is registered."""
+def test_no_cheat_sheet_with_only_empty_user_messages():
+    """No cheat sheet when the sole user_messages queue is empty."""
     qm = QueueManager()
     qm.queue("user_messages")
     status = qm.status()
     assert "queue_manager" not in status.lower()
     assert "remove_channel" not in status
     assert "shutdown" not in status
+
+
+def test_pending_queue_shows_public_reader_hint():
+    """Pending counts explain how the agent can consume the queued item."""
+    qm = QueueManager()
+    channel = qm.queue("user_messages")
+    channel.put("follow-up")
+
+    status = qm.status()
+
+    assert "user_messages: 1 pending" in status
+    assert "Hint: dequeue: await self.user_messages.get()" in status
+
+
+@pytest.mark.parametrize(
+    "name", ["class", "await", "quoted'name", "back\\slash", "line\nbreak", "safe_name"]
+)
+def test_channel_hints_are_valid_python_and_preserve_the_name(name):
+    qm = QueueManager()
+    qm.queue(name).put("pending")
+    hints = [line for line in qm.status().splitlines() if line.startswith("Hint:")]
+    cleanup_names = []
+    for hint in hints:
+        if hint.startswith("Hint: dequeue: "):
+            code = hint.removeprefix("Hint: dequeue: ")
+            compile(code, "<dequeue hint>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        else:
+            commands = hint.removeprefix("Hint: ").split(" | ")
+            for command in commands:
+                code = "self.queue_manager" + command if command.startswith(".") else command
+                tree = ast.parse(code)
+                call = tree.body[0].value
+                if call.func.attr == "remove_channel":
+                    cleanup_names.append(ast.literal_eval(call.args[0]))
+    assert cleanup_names == [name]
 
 
 def test_cheat_sheet_appears_with_extra_channels():
@@ -55,6 +91,21 @@ def test_cheat_sheet_mentions_shutdown():
     assert "shutdown" in status
 
 
+@pytest.mark.asyncio
+async def test_suggested_shutdown_leaves_a_running_daemon_alone():
+    """Following the rendered hint must not tear down a daemon the user never asked to stop."""
+    qm = QueueManager()
+    qm.queue("infra")
+    handle = qm.spawn(_dummy_gen(), channel="infra", daemon=True)
+    try:
+        status = qm.status()
+        assert "| .shutdown()" in status
+        await qm.shutdown()
+        assert handle.state == "running"
+    finally:
+        await qm.shutdown(include_daemons=True)
+
+
 def test_no_cheat_sheet_when_no_channels():
     """No cheat sheet when no channels at all."""
     qm = QueueManager()
@@ -84,8 +135,163 @@ async def test_active_spawns_shown_when_queues_empty():
     assert "active background job" in status
     assert "ci_monitor" in status
     assert "running" in status
+    assert "Output arrives through channels" in status
+    assert "do not poll job handles" in status
+    # No daemon jobs → no legend line.
+    assert "daemon = long-lived infrastructure producer" not in status
 
     # Cleanup
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_label_is_normalized_at_construction() -> None:
+    """Multi-line/overlong labels are collapsed and bounded on the handle."""
+    qm = QueueManager()
+    qm.queue("data")
+
+    async def _gen():
+        yield "x"
+        await asyncio.sleep(9999)
+
+    handle = qm.spawn(
+        _gen(),
+        channel="data",
+        label="injected\n  • forged status line: " + "x" * 300,
+    )
+    assert "\n" not in handle.label
+    assert handle.label.startswith("injected • forged status line:")
+    assert len(handle.label) <= 80
+    assert handle.label.endswith("…")
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_label_falls_back_to_channel_name() -> None:
+    """A blank label must not render as an empty string."""
+    qm = QueueManager()
+    qm.queue("data")
+
+    async def _gen():
+        yield "x"
+        await asyncio.sleep(9999)
+
+    handle = qm.spawn(_gen(), channel="data", label="   ")
+    assert handle.label == "data"
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_status_render_normalizes_labels_and_channel_names() -> None:
+    """The render path re-normalizes labels and names (defense in depth)."""
+    from nooa.runtime.channels import JobHandle
+
+    qm = QueueManager()
+    qm.queue("data")
+
+    async def _gen():
+        yield "x"
+        await asyncio.sleep(9999)
+
+    qm.spawn(_gen(), channel="data", label="clean")
+    # Simulate a stale/hand-built handle bypassing the constructor path.
+    raw = JobHandle(
+        name="attacker\nchannel",
+        task=asyncio.get_running_loop().create_future(),
+        label="unnormalized\nlabel " + "y" * 200,
+    )
+    qm._handles.append(raw)
+    try:
+        status = qm.status()
+    finally:
+        qm._handles.remove(raw)
+    assert "unnormalized" in status
+    assert "\nlabel" not in status  # collapsed at render
+    assert "attacker channel" in status  # name whitespace collapsed
+    assert "attacker\nchannel" not in status
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_daemon_spawn_is_marked_in_status_block():
+    """Daemon (infrastructure) jobs render with an explicit daemon marker."""
+    qm = QueueManager()
+    qm.queue("mesh")
+
+    async def _pump():
+        while True:
+            await asyncio.sleep(9999)
+            yield "msg"
+
+    qm.spawn(_pump(), channel="mesh", daemon=True, label="inbox pump")
+    qm.spawn(_dummy_gen(), channel="mesh", label="finite job")
+    await asyncio.sleep(0.05)
+
+    status = qm.status()
+    assert "(running, daemon)" in status
+    assert "inbox pump → mesh (running, daemon)" in status
+    # Non-daemon jobs keep the plain rendering.
+    assert "finite job → mesh (running)" in status
+    assert "finite job → mesh (running, daemon)" not in status
+    # The legend explains what the daemon marker means, including that
+    # already-queued output still counts as pending work.
+    assert "daemon = long-lived infrastructure producer" in status
+    assert "queued output still counts as pending work" in status
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_active_spawn_description_is_normalized_and_bounded():
+    """Model-facing descriptions are concise even when callers pass raw prose."""
+    qm = QueueManager()
+    qm.queue("monitor")
+    handle = qm.spawn(
+        _dummy_gen(),
+        channel="monitor",
+        label="persistent monitor",
+        description="  Persistent   infrastructure producer.\n" + "x" * 300,
+    )
+
+    assert handle.description.startswith("Persistent infrastructure producer. ")
+    assert len(handle.description) == 240
+    assert handle.description.endswith("…")
+    status = qm.status()
+    assert f"[{handle.job_id}] persistent monitor → monitor (running)" in status
+    assert f"    {handle.description}" in status
+
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_active_spawn_status_bounds_number_of_rendered_jobs():
+    """Many long-lived producers cannot grow the model context without bound."""
+    qm = QueueManager()
+    qm.queue("monitor")
+    handles = [
+        qm.spawn(
+            _dummy_gen(),
+            channel="monitor",
+            label=f"monitor {index}",
+            description=f"description {index}",
+        )
+        for index in range(10)
+    ]
+
+    status = qm.status()
+    assert "⚡ 10 active background job(s):" in status
+    assert "… 2 more active job(s) omitted; inspect " in status
+    assert "self.queue_manager.running_handles() for their IDs." in status
+    assert qm.running_handles() == handles
+    for handle in handles[:8]:
+        assert handle.job_id in status
+        assert f".cancel_job('{handle.job_id}')" in status
+    for handle in handles[8:]:
+        assert handle.job_id not in status
+
     await qm.shutdown()
 
 

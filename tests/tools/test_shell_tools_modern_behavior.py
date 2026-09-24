@@ -267,3 +267,26 @@ async def test_replace_match_at_eof_preserves_missing_newline(sh, tmp_path):
     match = await sh.read("f.py", (2, 2))
     await sh.replace(match, "b = 20")
     assert (tmp_path / "f.py").read_text() == "a = 1\nb = 20"
+
+
+@pytest.mark.asyncio
+async def test_replace_on_a_readonly_match_reports_readonly_not_ambiguous(sh, tmp_path):
+    """A read-only Match called with the (old, new) two-text form used to hit
+    the ambiguity check first, which tells the caller to retry with the
+    path-string form using match.resolved_path -- advice with no editable
+    guard, so following it would write straight to the same-named host file.
+    The editable check must run before the ambiguity check so a read-only
+    anchor always gets the session-only error instead.
+    """
+    await sh.write_file("f.py", "a = 1\nb = 2\n")
+    match = await sh.read("f.py", (2, 2))
+    readonly = Match(
+        match.path,
+        match.start,
+        match.end,
+        match.text,
+        resolved_path=match.resolved_path,
+        editable=False,
+    )
+    with pytest.raises(ValueError, match="read-only anchor"):
+        await sh.replace(readonly, "b = 2", "b = 20")

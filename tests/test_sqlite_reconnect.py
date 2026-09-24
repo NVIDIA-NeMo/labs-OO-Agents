@@ -50,6 +50,23 @@ class TestReconnect:
         assert retrieved is not None
         assert retrieved.tag == "1"
 
+    def test_failed_reconnect_releases_session_ownership(self, storage, monkeypatch):
+        """A failed reconnect must not leave the database permanently claimed."""
+        db_path = storage.path
+        assert db_path is not None
+        monkeypatch.setattr(
+            storage,
+            "_open_connection",
+            lambda: (_ for _ in ()).throw(RuntimeError("connect failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="connect failed"):
+            storage._reconnect()
+
+        assert not db_path.with_suffix(".active").exists()
+        replacement = SQLiteStorageManager(db_path)
+        replacement.close()
+
     def test_store_retries_on_disk_io_error(self, storage):
         """store() should reconnect and retry once on disk I/O error."""
         call_count = 0

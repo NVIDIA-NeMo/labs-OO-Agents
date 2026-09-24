@@ -70,10 +70,12 @@ class FileWrite:
 class Match:
     """Editable file anchor returned by file/search tools.
 
-    Pass any ``Match`` to ``self.shell.replace(match, new_text)``. Print it to
+    Pass an editable ``Match`` to ``self.shell.replace(match, new_text)``. Print it to
     view numbered lines. Slice with ``match[start:end]`` (1-indexed inclusive
     line numbers) to narrow the region before replacing. ``resolved_path`` is
     required so the anchor remains bound to that file if the shell cwd changes.
+    Read-only anchors from another filesystem have ``editable=False``; edit those
+    files through their originating session instead of the host file helpers.
     """
 
     def __init__(
@@ -84,6 +86,7 @@ class Match:
         text: str,
         *,
         resolved_path: str | Path,
+        editable: bool = True,
     ):
         self._path = path
         anchor = Path(resolved_path)
@@ -92,10 +95,16 @@ class Match:
             # which is not the shell cwd — so a relative anchor would silently
             # point at a different file. Fail loudly instead.
             raise ValueError(f"Match.resolved_path must be absolute, got {str(resolved_path)!r}")
-        self._resolved_path = str(anchor.resolve())
+        self._editable = editable
+        self._resolved_path = str(anchor.resolve() if editable else anchor)
         self._start = start
         self._end = end
         self._text = text
+
+    @property
+    def editable(self) -> bool:
+        """Whether host file helpers may edit this anchor's filesystem."""
+        return self._editable
 
     @property
     def path(self) -> str:
@@ -136,7 +145,8 @@ class Match:
         return self.numbered
 
     def __repr__(self) -> str:
-        return f"Match({self._path!r}, lines {self._start}-{self._end})"
+        mode = "" if self.editable else ", read-only session anchor"
+        return f"Match({self._path!r}, lines {self._start}-{self._end}{mode})"
 
     def __getitem__(self, key: Any) -> Match:
         lines = self._text.splitlines(keepends=True)
@@ -156,6 +166,7 @@ class Match:
                 stop,
                 text,
                 resolved_path=self._resolved_path,
+                editable=self.editable,
             )
 
         raise TypeError(f"indices must be int or slice, not {type(key).__name__}")
@@ -769,6 +780,15 @@ class ShellTools(Skill):
             new: Only for path form: the replacement text.
         """
         if isinstance(target, Match):
+            if not target.editable:
+                # Checked before the ambiguity error below: that error's advice
+                # ("use the path-string form") has no editable guard, so a
+                # caller following it would write straight to the same-named
+                # host file -- exactly what this read-only anchor forbids.
+                raise ValueError(
+                    "This read-only anchor belongs to a session filesystem. "
+                    "Edit through the originating session; host replacement is disabled."
+                )
             if new is not None:
                 raise ValueError(
                     "replace(match, old, new) is ambiguous and no file was changed. "

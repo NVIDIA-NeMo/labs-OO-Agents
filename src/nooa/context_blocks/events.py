@@ -13,6 +13,7 @@ Each event class has:
 - id: Unique identifier (repr=False, excluded from display)
 - metadata: Arbitrary metadata dict (repr=False, excluded from display)
 - _role: ClassVar for provider role (USER/ASSISTANT/TOOL)
+- handler_aliases: Optional legacy names notified alongside event_type
 - tag: Event position (e.g., '5' or '2..40'), set by EventManager
 - timestamp: Creation time
 """
@@ -87,6 +88,7 @@ class EventBase(BaseModel):
     Subclasses define:
     - event_type: Auto-derived from class name (repr=False), or explicit override
     - _role: ClassVar for provider role
+    - handler_aliases: Optional legacy subscriber names for compatibility
     - Public fields which are rendered via pformat()
 
     Auto-registration: When a subclass is defined, ``__init_subclass__``
@@ -97,6 +99,7 @@ class EventBase(BaseModel):
     """
 
     _role: ClassVar[Role] = Role.USER
+    handler_aliases: ClassVar[tuple[str, ...]] = ()
 
     @property
     def is_empty(self) -> bool:
