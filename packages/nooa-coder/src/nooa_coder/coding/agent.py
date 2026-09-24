@@ -12,8 +12,14 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.agents import TokenBudgetSummarizer
-from nooa.agents.summarization import SummarizationConfig, install_summarizer
 from nooa.config import CodeActConfig, PredictConfig
+from nooa.interactive import (
+    InteractiveAgent,
+    RespondReason,
+    RespondResult,
+    SummarizationConfig,
+    install_summarizer,
+)
 from nooa.paths import get_project_dir
 from nooa.runtime.channels import JobHandle, _ChannelReader
 from nooa.skill_registry import SkillRegistry
@@ -24,7 +30,6 @@ from nooa.tools.shell_tools import ShellTools
 from nooa_coder.coding.activity import ActivityShellTools
 from nooa_coder.coding.delegation import CodingWorker
 from nooa_coder.coding.instructions import render_agent_instructions
-from nooa_coder.interactive_agent import InteractiveAgent, RespondReason, RespondResult
 from nooa_coder.tools.repo_tools import RepoTools
 
 if TYPE_CHECKING:

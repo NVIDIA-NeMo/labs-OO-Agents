@@ -9,13 +9,18 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from nooa.agents.summarization import SummarizationConfig
+from nooa.interactive import DEFAULT_MODEL, SummarizationConfig
 from nooa_coder.coding.settings import load_coding_skills_dirs
-from nooa_coder.interactive_agent import DEFAULT_MODEL
 
 
-class SessionOptions(BaseModel):
-    """Behavioral options; terminal presentation settings stay with the TUI."""
+class CoderOptions(BaseModel):
+    """Behavioral options; terminal presentation settings stay with the TUI.
+
+    These are the coding agent's own settings, read from the workspace and
+    user settings files. They are not the Session layer's
+    ``nooa_coder.session.options.SessionOptions``, which say how a session
+    is built and run.
+    """
 
     working_dir: str = "."
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig)
@@ -31,7 +36,7 @@ class SessionOptions(BaseModel):
     mcp_auto_connect: list[str] = Field(default_factory=list)
 
     @classmethod
-    def load(cls, workspace: str | Path, **overrides: Any) -> SessionOptions:
+    def load(cls, workspace: str | Path, **overrides: Any) -> CoderOptions:
         """Load legacy ``tui`` and shared ``coding`` settings for this workspace."""
         root = Path(workspace).expanduser().resolve()
         from .settings import load_settings_data, resolve_behavior_settings
@@ -43,7 +48,7 @@ class SessionOptions(BaseModel):
         return cls(**values)
 
 
-async def connect_session_mcp(agent: Any, options: SessionOptions) -> list[str]:
+async def connect_session_mcp(agent: Any, options: CoderOptions) -> list[str]:
     """Connect remembered servers, preserving exact-configuration approvals."""
     warnings = []
     for name in dict.fromkeys(options.mcp_auto_connect):
@@ -54,14 +59,14 @@ async def connect_session_mcp(agent: Any, options: SessionOptions) -> list[str]:
     return warnings
 
 
-def configure_session_skills(agent: Any, options: SessionOptions) -> list[str]:
+def configure_session_skills(agent: Any, options: CoderOptions) -> list[str]:
     """Attach the same MCP registry and explicit skills before resume events.
 
     Return actionable warnings for either host to display. Discovering a skill
     does not activate it; negative activation preferences override positives.
     """
-    from nooa_coder.interactive.mcp_registry import MCPRegistry
-    from nooa_coder.interactive.workspace_settings import WorkspaceSettings
+    from nooa_coder.workspace.mcp_registry import MCPRegistry
+    from nooa_coder.workspace.workspace_settings import WorkspaceSettings
 
     # Older shared-host snapshots contain memory prompts even though the skill
     # itself is excluded from snapshots. Drop those prompts when no custom agent

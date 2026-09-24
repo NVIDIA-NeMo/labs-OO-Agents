@@ -39,10 +39,10 @@ except ImportError:
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc  # noqa: F401 — used by dynamic context expressions
 from nooa.config import CodeActConfig
+from nooa.interactive import RespondResult
 from nooa.strategies import CodeActV2
 from nooa_coder.coding.agent import CodingAgent
 from nooa_coder.coding.delegation import CodingWorker
-from nooa_coder.interactive_agent import RespondResult
 
 
 class ExperimentalCodingWorker(CodingWorker):
