@@ -13,8 +13,9 @@ class SessionOptions(BaseModel):
 
     ``agent_spec`` names the agent class as ``module:Class``. ``llm`` is an
     already-built client (tests inject a fake one); it is never
-    serialised. When it is ``None`` and ``model`` is set, the registry
-    builds a client for that alias.
+    serialised. When it is ``None`` and the registry has an ``llm_factory``,
+    the registry builds a client for ``model`` (``None`` means the
+    factory's default) and the session owns it.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

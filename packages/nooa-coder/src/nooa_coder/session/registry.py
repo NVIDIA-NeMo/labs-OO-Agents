@@ -75,9 +75,11 @@ class SessionRegistry:
         llm_factory: LLMFactory | None = None,
     ) -> None:
         """``agent_factory(options, storage)`` builds each agent (default: import
-        ``options.agent_spec``). ``llm_factory(model_alias, workspace)`` builds a
-        model client for a session whose options name a ``model`` but carry no
-        ``llm``; the session owns that client and closes it.
+        ``options.agent_spec``). ``llm_factory(model_alias, workspace)`` builds
+        the model client for every session whose options carry no ``llm``;
+        ``model_alias`` is ``options.model``, or ``None`` for the factory's
+        default. The session owns that client and closes it. When the client
+        has a non-empty ``alias`` attribute, it is recorded as ``info.model``.
         """
         self.store = store
         self.llm_factory = llm_factory
@@ -180,7 +182,9 @@ class SessionRegistry:
         # parent's call stack or LLM inheritance.
         owned_llm = None
         build_options = options
-        if options.llm is None and options.model and self.llm_factory is not None:
+        if options.llm is None and self.llm_factory is not None:
+            # A None model asks the factory for its default; the session owns
+            # the client either way and closes it.
             owned_llm = self.llm_factory(options.model, options.workspace)
             build_options = options.model_copy(update={"llm": owned_llm})
         try:
@@ -196,6 +200,9 @@ class SessionRegistry:
             owned_llm=owned_llm,
             llm_factory=self.llm_factory,
         )
+        resolved = getattr(owned_llm, "alias", None)
+        if isinstance(resolved, str) and resolved:
+            session.info.model = resolved
         session._before_close = lambda: self._close_children(session.id)
         install_port(agent, session, self)
         return session
