@@ -409,3 +409,21 @@ async def test_the_port_can_be_hidden_from_the_model(registry, root_options, mak
     install_port(session.agent, session, registry, visible=False)
     assert "Create a child session" not in doc(session.agent)
     assert isinstance(session.agent.session, SessionPort)
+
+
+async def test_closed_children_are_on_disk_everywhere(registry, root_options, models):
+    models.scripts[None] = [
+        cell(
+            "c = await self.session.delegate('Gone', 'g')\n"
+            "await c.wait()\n"
+            "return_result(Done(explanation='ok'))"
+        )
+    ]
+    models.scripts["Gone"] = [done("gone")]
+    root = await registry.create(root_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    [info] = registry.children(root.id)
+    await _until(lambda: registry.get(info.id) is None)
+    [ref] = root.agent.session.children()
+    assert ref.status == "on_disk" == registry.children(root.id)[0].status
+    assert registry._ref_from_disk(info.id).status == "on_disk"
