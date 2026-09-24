@@ -248,12 +248,8 @@ class SessionRegistry:
 
     def child_ref(self, child: Session) -> ChildRef:
         """A data handle on a live child."""
-        status = _live_status(child)
         return ChildRef(
-            id=child.id,
-            name=child.name or "",
-            depth=child.depth,
-            status="running" if status == "on_disk" else status,
+            id=child.id, name=child.name or "", depth=child.depth, status=_live_status(child)
         )
 
     def _deliver(self, child: Session, update: SessionEvent) -> None:
@@ -361,7 +357,7 @@ class SessionRegistry:
 
     def _ref_from_disk(self, child_id: str) -> ChildRef:
         info = self.store.get(child_id)
-        return ChildRef(id=info.id, name=info.name or "", depth=info.depth, status="closed")
+        return ChildRef(id=info.id, name=info.name or "", depth=info.depth, status="on_disk")
 
     async def open_child(self, parent: Session, child_id: str) -> Session:
         """A child of ``parent``: the live one, or loaded from disk with inherited options."""

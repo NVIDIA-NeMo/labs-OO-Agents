@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from nooa_coder.session.port import SessionPort
 
 SessionStatus = Literal["running", "idle", "retained", "closed", "on_disk"]
-ChildStatus = Literal["running", "idle", "retained", "closed"]
+ChildStatus = SessionStatus  # a child reports the same statuses as any session
 
 
 class TaskResult(BaseModel):

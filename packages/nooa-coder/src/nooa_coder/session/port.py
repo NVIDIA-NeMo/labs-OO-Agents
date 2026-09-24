@@ -122,12 +122,7 @@ class SessionPort:
     def children(self) -> list[ChildRef]:
         """Handles on your children, live and closed."""
         return [
-            ChildRef(
-                id=info.id,
-                name=info.name or "",
-                depth=info.depth,
-                status="closed" if info.status == "on_disk" else info.status,
-            )
+            ChildRef(id=info.id, name=info.name or "", depth=info.depth, status=info.status)
             for info in self._registry.children(self._session.id)
         ]
 
