@@ -21,7 +21,7 @@ import asyncio
 
 import pytest
 
-from nooa.runtime.channels import Channel, QueueManager
+from nooa.runtime.channels import Channel, JobHandle, QueueManager
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,6 +36,20 @@ class FakeEventManager:
 
     def add(self, event) -> None:
         self.events.append(event)
+
+
+def test_spawn_docs_explain_channel_driven_waiting():
+    """QueueManager documents waiting without assuming an agent response protocol."""
+    manager_docs = QueueManager.__doc__ or ""
+    spawn_docs = QueueManager.spawn.__doc__ or ""
+    handle_docs = JobHandle.__doc__ or ""
+
+    assert "``spawn()`` is channel-driven" in manager_docs
+    assert "not a completion-waiting primitive" in manager_docs
+    assert "through ``race()`` rather than polling" in spawn_docs
+    assert "yield the current turn" in spawn_docs
+    assert "does not assume a response protocol" in spawn_docs
+    assert "not completion-waiting primitives" in handle_docs
 
 
 # ---------------------------------------------------------------------------
@@ -425,3 +439,212 @@ class TestIntegrationSpawnFlushReplaceRespawn:
         assert h.state == "cancelled"
 
         await qm.shutdown()
+
+
+class TestQueueManagerShutdownKeepDaemons:
+    """A plain shutdown() must spare daemon=True handles; only include_daemons=True ends them."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_spares_daemon_jobs_unless_included(self):
+        """A mid-session interrupt (ACP cancel() -> cancel_work()) must not
+        destroy a long-lived infrastructure producer marked daemon=True --
+        only the same "genuinely finite work" this shutdown is meant to
+        interrupt. running_work_handles() already treats daemon jobs as not
+        counting toward pending work for quiescence checks; shutdown() must
+        agree, or a stray cancel silently tears down infrastructure a user
+        never asked to stop.
+        """
+        qm = QueueManager()
+        qm.queue("infra")
+        qm.queue("work")
+
+        async def daemon_producer():
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                raise
+            return "never"
+
+        async def finite_job():
+            await asyncio.sleep(100)
+            return "never"
+
+        daemon_handle = qm.spawn(daemon_producer(), channel="infra", daemon=True)
+        work_handle = qm.spawn(finite_job(), channel="work")
+        assert daemon_handle.state == "running"
+        assert work_handle.state == "running"
+
+        await qm.shutdown()
+
+        assert daemon_handle.state == "running"
+        assert work_handle.state == "cancelled"
+        assert daemon_handle in qm.handles()
+        assert work_handle not in qm.handles()
+
+        # A real final close must still take everything down.
+        await qm.shutdown(include_daemons=True)
+        assert daemon_handle.state == "cancelled"
+        assert qm.handles() == []
+
+
+class TestQueueManagerRemoveChannelPrunesFinishedHandles:
+    @pytest.mark.asyncio
+    async def test_repeated_replace_cycles_do_not_leak_handles(self):
+        """Only shutdown() used to prune self._handles; remove_channel()
+        (called by queue(name, replace=True), e.g. an MCP reconnect loop)
+        cancelled a running job but left its handle in the list forever.
+        Any code repeatedly removing and recreating a same-named channel
+        leaked one handle per cycle for the life of the session --
+        _job_snapshots_on_owner-style code iterating handles() on every
+        queue notification would grow unbounded, and job(name)/cancel(name)
+        (which scan from the end) could still resolve correctly, but the
+        list itself never stopped growing.
+        """
+        qm = QueueManager()
+        qm.queue("reconnect")
+
+        async def producer():
+            await asyncio.sleep(100)
+            return "never"
+
+        for _ in range(20):
+            handle = qm.spawn(producer(), channel="reconnect")
+            qm.queue("reconnect", replace=True)
+            # Let the just-requested cancellation actually finish before the
+            # next cycle's remove_channel() call, matching a real reconnect
+            # loop with real awaits between attempts.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert handle.state == "cancelled"
+
+        assert len(qm.handles()) <= 2
+
+        await qm.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_remove_channel_cancel_does_not_double_cancel_during_cleanup(self):
+        """remove_channel() used to call handle._task.cancel() directly
+        without setting _cancel_called. If shutdown() (or another
+        remove_channel/cancel) reached the same still-cleaning-up handle
+        before its cancelled task finished, the repeat-cancel guard didn't
+        apply and a second CancelledError could interrupt the job's cleanup
+        mid-await.
+        """
+        qm = QueueManager()
+        qm.queue("work")
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        cleanup_completed = asyncio.Event()
+
+        async def job():
+            try:
+                await asyncio.sleep(100)
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                cleanup_completed.set()
+
+        handle = qm.spawn(job(), channel="work")
+        await asyncio.sleep(0)
+        qm.remove_channel("work")
+        await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+
+        shutdown = asyncio.create_task(qm.shutdown())
+        await asyncio.sleep(0)
+        release_cleanup.set()
+        await asyncio.wait_for(shutdown, timeout=2)
+
+        assert cleanup_completed.is_set()
+        assert handle.state == "cancelled"
+
+
+class TestJobHandleCancelIgnoresUnrelatedCancellingCount:
+    @pytest.mark.asyncio
+    async def test_cancel_still_stops_a_job_mid_unrelated_cancellation(self):
+        """JobHandle.cancel() used to check self._task.cancelling() to decide
+        whether to call task.cancel() -- but that counter is nonzero for ANY
+        reason the task's own body called .cancel() internally too (e.g. an
+        asyncio.timeout()/wait_for() the job uses, which cancels-then-
+        uncancels around a caught timeout). Calling cancel() while that
+        counter happens to be transiently nonzero for a completely unrelated
+        reason used to skip requesting cancellation entirely, hanging
+        forever on the following await.
+
+        Simulates that window directly: the job absorbs one CancelledError
+        (as its own internal timeout handling would) and keeps running,
+        leaving cancelling() nonzero until its own uncancel() call is
+        scheduled. cancel() called in that exact window must still stop it.
+        """
+        qm = QueueManager()
+        qm.queue("work")
+        started = asyncio.Event()
+        survived_first_cancel = asyncio.Event()
+        real_cancel_requested = asyncio.Event()
+
+        async def job():
+            task = asyncio.current_task()
+            assert task is not None
+            try:
+                started.set()
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                # Simulate an internal asyncio.timeout()-style absorb: accept
+                # this one, keep going, cancelling() stays nonzero until
+                # uncancel() actually runs on a later awaited step.
+                survived_first_cancel.set()
+                await real_cancel_requested.wait()
+                task.uncancel()
+                await asyncio.sleep(100)
+            return "should not reach here either"
+
+        handle = qm.spawn(job(), channel="work")
+        await asyncio.wait_for(started.wait(), timeout=2)
+        # Put the task into the exact buggy window: cancelling() > 0 for a
+        # reason unrelated to the handle.cancel() call about to happen.
+        handle._task.cancel()
+        await asyncio.wait_for(survived_first_cancel.wait(), timeout=2)
+        assert handle._task.cancelling() > 0
+
+        real_cancel_requested.set()
+        # Must not hang: cancel() must still request cancellation despite
+        # cancelling() already being nonzero for the unrelated reason above.
+        await asyncio.wait_for(handle.cancel(), timeout=2)
+        assert handle.state == "cancelled"
+
+        await qm.shutdown()
+
+
+class TestChannelFlushFireOnGet:
+    def test_flush_fire_on_get_records_discarded_items_before_they_vanish(self):
+        """A channel's on_get hook can have a durability side effect (e.g.
+        user_messages recording an accepted prompt). Plain flush() discards
+        items via a bare list clear -- on_get never fires, so an item
+        admitted into the queue but flushed before it was ever dequeued (a
+        session/cancel racing a just-submitted prompt) vanished with no
+        trace at all, not even a log line.
+        """
+        qm = QueueManager()
+        recorded: list[str] = []
+        ch = qm.queue("user_messages", on_get=recorded.append)
+        ch.put("hello")
+        ch.put("still queued when cancelled")
+
+        n = ch.flush(fire_on_get=True)
+
+        assert n == 2
+        assert recorded == ["hello", "still queued when cancelled"]
+        assert ch.qsize() == 0
+
+    def test_flush_default_still_discards_silently(self):
+        """The default (no fire_on_get) behavior is unchanged for every
+        existing caller that relies on flush() being a plain discard.
+        """
+        qm = QueueManager()
+        recorded: list[str] = []
+        ch = qm.queue("other", on_get=recorded.append)
+        ch.put("value")
+
+        n = ch.flush()
+
+        assert n == 1
+        assert recorded == []

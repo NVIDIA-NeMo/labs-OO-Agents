@@ -304,7 +304,7 @@ async def test_set_on_get_late_binds():
 
 
 # ---------------------------------------------------------------------------
-# status() — pending-count + preview rendering on the queue itself
+# status() — payload-free pending-count rendering
 # ---------------------------------------------------------------------------
 
 
@@ -313,54 +313,36 @@ def test_status_empty_queue_returns_empty_string():
     assert q.status() == ""
 
 
-def test_status_includes_name_count_and_numbered_previews():
+def test_status_reports_only_name_and_pending_count():
     q: Channel[str] = Channel("user_messages", "queue")
-    q.put("first")
-    q.put("second")
-    status = q.status()
-    lines = status.splitlines()
-    assert lines[0] == "user_messages: 2 pending"
-    assert lines[1] == "  1. first"
-    assert lines[2] == "  2. second"
+    q.put("first secret")
+    q.put("second secret")
+
+    assert q.status() == "user_messages: 2 pending"
 
 
-def test_status_flattens_newlines_and_clips_overlong_items():
+def test_status_does_not_inspect_or_mutate_payloads():
+    class Payload:
+        def __repr__(self) -> str:
+            raise AssertionError("status must not render payloads")
+
+    first = Payload()
+    second = Payload()
+    q: Channel[Payload] = Channel("jobs", "queue")
+    q.put(first)
+    q.put(second)
+
+    assert q.status() == "jobs: 2 pending"
+    assert q.snapshot() == [first, second]
+
+
+def test_output_queue_status_delegates_to_payload_free_status():
     q: Channel[str] = Channel("user_messages", "queue")
-    q.put("line1\nline2\nline3")
-    q.put("x" * 200)
-    status = q.status(max_items=3, max_chars=30)
-    # No raw newline inside preview content (only between lines).
-    preview_lines = status.splitlines()[1:]
-    for line in preview_lines:
-        # Strip "  N. " prefix; remaining content has no embedded \n.
-        assert "\n" not in line
-        assert len(line) <= len("  N. ") + 30
-    assert "↵" in status
+    q.put("private payload")
 
-
-def test_status_overflow_summary_when_more_than_max_items():
-    q: Channel[int] = Channel("jobs", "queue")
-    for i in range(7):
-        q.put(i)
-    status = q.status(max_items=3)
-    assert "jobs: 7 pending" in status
-    assert "… 4 more" in status
-
-
-def test_status_previews_non_string_items_via_pformat():
-    q: Channel[dict] = Channel("jobs", "queue")
-    q.put({"id": 42, "kind": "build"})
-    status = q.status()
-    assert "jobs: 1 pending" in status
-    assert "'id': 42" in status
-
-
-def test_output_queue_status_delegates_to_input_queue():
-    """OutputQueue exposes status() so the LLM can peek mid-turn without
-    reaching into the hidden producer-side queue."""
-    q: Channel[str] = Channel("user_messages", "queue")
-    q.put("waiting")
-    assert q.reader.status() == q.status()
+    assert q.reader.status() == "user_messages: 1 pending"
+    assert "private payload" not in q.reader.status()
+    assert q.snapshot() == ["private payload"]
 
 
 # ---------------------------------------------------------------------------

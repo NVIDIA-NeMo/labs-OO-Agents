@@ -68,6 +68,17 @@ class TestContextVarStreamWrite:
         n = stream.write("xyz")
         assert n == 3
 
+    def test_write_falls_back_to_original_when_inherited_buffer_is_closed(self):
+        stream, buf_var, original = make_stream()
+        buf = io.StringIO()
+        token = buf_var.set(buf)
+        buf.close()
+        try:
+            assert stream.write("late log") == len("late log")
+            assert original.getvalue() == "late log"
+        finally:
+            buf_var.reset(token)
+
 
 class TestContextVarStreamWritelines:
     """Tests for ContextVarStream.writelines() routing."""
@@ -87,6 +98,17 @@ class TestContextVarStreamWritelines:
         stream, buf_var, original = make_stream()
         stream.writelines(["x", "y", "z"])
         assert original.getvalue() == "xyz"
+
+    def test_writelines_falls_back_to_original_when_buffer_is_closed(self):
+        stream, buf_var, original = make_stream()
+        buf = io.StringIO()
+        token = buf_var.set(buf)
+        buf.close()
+        try:
+            stream.writelines(["late", " log"])
+            assert original.getvalue() == "late log"
+        finally:
+            buf_var.reset(token)
 
 
 class TestContextVarStreamFlush:
@@ -117,6 +139,18 @@ class TestContextVarStreamFlush:
         stream = ContextVarStream(mock_original, buf_var, "stdout")
         stream.flush()
         mock_original.flush.assert_called_once()
+
+    def test_flush_ignores_closed_inherited_buffer(self):
+        stream, buf_var, original = make_stream()
+        buf = io.StringIO()
+        token = buf_var.set(buf)
+        buf.close()
+        try:
+            stream.flush()  # must not mask late exception reporting
+            original.write("still usable")
+            assert original.getvalue() == "still usable"
+        finally:
+            buf_var.reset(token)
 
 
 class TestContextVarStreamFileno:

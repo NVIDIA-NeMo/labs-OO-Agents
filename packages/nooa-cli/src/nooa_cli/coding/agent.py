@@ -212,7 +212,7 @@ class CodingAgent(InteractiveAgent):
             await self.skills.aclose()
         finally:
             try:
-                await self.queue_manager.shutdown()
+                await self.queue_manager.shutdown(include_daemons=True)
             finally:
                 try:
                     await shell.close()
