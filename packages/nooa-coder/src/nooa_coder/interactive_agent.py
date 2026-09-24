@@ -28,6 +28,7 @@ from nooa import hidden, strategy
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
+from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
@@ -177,46 +178,8 @@ with hidden:
         _DEFAULT_LLM = FakeLLMClient()
 
 
-class AgentVars:
-    """Attribute-access proxy for an agent's persistent ``vars`` dict.
-
-    Mirrors ``TodoVars``: write ``self.v.spec = "..."`` instead of
-    ``self.vars["spec"] = "..."``. Reads and writes go straight
-    through to ``self.vars`` so snapshot serialization is unaffected.
-
-    Use for variables that need to survive across turns and across
-    sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.<id>.v`` — same shape, narrower scope.)
-
-    Values are snapshot-backed: assigning something that can't be
-    snapshot-serialized (a live client, socket, callable, ...) logs a
-    warning and is **not stored** — it won't survive ``/exit`` + resume.
-    Store serializable data (dict/str/number/Pydantic model) instead.
-    """
-
-    def __init__(self, agent: Any):
-        object.__setattr__(self, "_agent", agent)
-
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        self._agent.vars[key] = value
-
-    def __delattr__(self, key: str) -> None:
-        try:
-            del self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._agent.vars
-
-    def __repr__(self) -> str:
-        return repr(self._agent.vars)
+# Backward-compatible import name; both agent.v and todo.v use PersistentVars.
+AgentVars = PersistentVars
 
 
 @hidden
@@ -288,13 +251,15 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             del self.context["web"]
 
     @property
-    def v(self) -> AgentVars:
+    def v(self) -> PersistentVars:
         """Attribute-access proxy for ``self.vars`` — the agent's
         persistent variable dict.
 
-        Use for state that should survive across turns and sessions
-        but isn't tied to a specific todo. Snapshot-backed via
-        ``self.vars``.
+        Use for durable cross-task state such as agent identity, stable
+        preferences, environment facts, and long-running coordination. Put
+        task-specific plans, findings, artifacts, and checkpoints on the relevant
+        Todo's ``v`` proxy. Keep transient scratch data in cell locals.
+        Snapshot-backed via ``self.vars``.
 
         Usage::
 
@@ -304,12 +269,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             del self.v.cursor
 
         Compare:
-        - REPL locals → cleared between turns.
-        - ``self.v.k = v`` → snapshot-backed, survives turns + sessions.
-        - ``self.todo.<t>.v.k = v`` → same as ``self.v`` but scoped to
-          one todo.
+        - ``self.v.k = v`` → durable cross-task identity/long-running state.
+        - ``todo.v.k = v`` → durable work state scoped to one task.
+        - REPL locals → transient scratch state for the current work session.
         """
-        return AgentVars(self)
+        return PersistentVars(self)
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.

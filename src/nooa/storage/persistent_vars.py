@@ -4,10 +4,13 @@
 
 This generalizes the ``TodoVars`` proxy formerly defined in ``nooa.tools.todo``;
 it does not implement a new persistence backend. Core ``Todo.v`` uses this proxy;
-applications may opt into it for ``self.v``. ``InteractiveAgent.v`` still uses
-its separate ``AgentVars`` proxy and reserved-name rules. It lives beside ``SnapshotVars``
-so the core Todo tool does not depend on the CLI or an interactive session host.
-Snapshot storage and its owner determine when values are saved and restored.
+``InteractiveAgent.v`` uses it too — ``nooa_coder.interactive_agent.AgentVars``
+is this same class under its original name, so ``self.v`` and ``todo.v`` share
+one implementation, including the ``get``/``set``/``items``/``keys``/``clear``
+bulk-inspection API and the reserved-name rules on ``__setattr__``/
+``__delattr__`` below. It lives beside ``SnapshotVars`` so the core Todo tool
+does not depend on the CLI or an interactive session host. Snapshot storage
+and its owner determine when values are saved and restored.
 """
 
 from typing import Any

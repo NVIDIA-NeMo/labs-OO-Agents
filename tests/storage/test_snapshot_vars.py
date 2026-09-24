@@ -115,6 +115,17 @@ class TestTodoVarsIntegration:
         t.v.commits = ["abc"]
         assert t.vars["commits"] == ["abc"]
 
+    def test_agent_and_todo_vars_share_one_proxy_class(self):
+        from nooa_coder.interactive_agent import AgentVars
+
+        from nooa.storage import PersistentVars
+        from nooa.tools.todo import Todo, TodoVars
+
+        todo = Todo(title="x")
+        assert AgentVars is PersistentVars
+        assert TodoVars is PersistentVars
+        assert type(todo.v) is PersistentVars
+
     def test_todo_vars_inspection_and_cleanup_api(self):
         from nooa.agentdoc import doc
         from nooa.tools.todo import Todo, TodoVars
