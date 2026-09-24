@@ -248,7 +248,7 @@ class SessionRegistry:
         if parent is None or parent._closing or parent._closed:
             return
         kind = update.outcome_kind
-        if kind not in ("done", "need_input", "error"):
+        if kind not in ("done", "need_input", "error", "cancelled"):
             return
         ref = self.child_ref(child)
         source = f"child:{child.name or child.id}"
@@ -261,8 +261,13 @@ class SessionRegistry:
                 waiter.set_result(done)
             else:
                 self._put(parent, child.id, ChildResult(child=ref, done=done), source)
-        elif kind == "error":
-            error = str(update.outcome.get("error", "the child's turn failed"))
+        elif kind in ("error", "cancelled"):
+            # A cancelled turn ends without a result: to the parent it is a failure.
+            error = (
+                f"cancelled by {update.outcome.get('by', 'unknown')}"
+                if kind == "cancelled"
+                else str(update.outcome.get("error", "the child's turn failed"))
+            )
             if waiter is not None:
                 waiter.set_exception(ChildFailedError(error))
             else:

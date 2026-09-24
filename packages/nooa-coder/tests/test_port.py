@@ -349,3 +349,46 @@ async def test_a_result_for_a_cancelled_wait_arrives_on_delegates(registry, root
     block.set()
     await _until(lambda: len(ended) == 2)
     assert ended[1].outcome == {"explanation": "ChildResult: kid done", "result": None}
+
+
+async def test_a_child_cancelled_during_wait_fails_the_wait(registry, root_options, models):
+    started, _block = fresh_events()
+    models.scripts[None] = [
+        cell(
+            "c = await self.session.delegate('Kid', 'k')\n"
+            "self.v.cid = c.id\n"
+            "try:\n"
+            "    await c.wait()\n"
+            "except ChildFailedError as exc:\n"
+            "    return_result(Done(explanation=f'failed: {exc}'))"
+        )
+    ]
+    models.scripts["Kid"] = [cell(BLOCKING_CELL)]
+    root = await registry.create(root_options)
+    pending = asyncio.ensure_future(root.prompt("go"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    assert await registry.get(root.agent.v.cid).cancel(by="user") is True
+    assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="failed: cancelled by user")
+
+
+async def test_a_background_child_closed_mid_turn_wakes_the_parent(registry, root_options, models):
+    started, _block = fresh_events()
+    models.scripts[None] = [
+        cell(
+            "c = await self.session.delegate('Bg', 'b')\n"
+            "self.v.cid = c.id\n"
+            "return_result(Waiting(explanation='child working', on=['delegates']))"
+        ),
+        cell(
+            "[f] = notification['delegates']\n"
+            "return_result(Done(explanation=f'{type(f).__name__}: {f.error}'))"
+        ),
+    ]
+    models.scripts["Bg"] = [cell(BLOCKING_CELL)]
+    root = await registry.create(root_options)
+    pending = asyncio.ensure_future(root.prompt("go"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    await registry.close(root.agent.v.cid)
+    assert await asyncio.wait_for(pending, TIMEOUT) == Done(
+        explanation="ChildFailed: cancelled by host"
+    )
