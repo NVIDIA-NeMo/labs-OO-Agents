@@ -17,6 +17,7 @@ Reference: "Executable Code Actions Elicit Better LLM Agents" (Wang et al.)
 """
 
 import ast
+import asyncio
 import inspect
 import json
 import logging
@@ -1578,9 +1579,15 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Execute the code (pass tool_call.id for trace correlation)
         # Nested agent calls may add their events to the event manager during this execution
         with get_harness_metrics().timer("time_code_execution"):
-            result = await self._execute_code(
-                runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
-            )
+            try:
+                result = await self._execute_code(
+                    runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
+                )
+            except asyncio.CancelledError as cancel:
+                self._record_cancelled_cell(
+                    runtime, tool_call.id, tool_call_event_id, execution_count, cancel
+                )
+                raise
 
         # Determine final status
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
@@ -1777,6 +1784,44 @@ Standard Python builtins and agent instance (`self`) are available."""
         )
 
         return result
+
+    @staticmethod
+    def _record_cancelled_cell(
+        runtime: RuntimeServices,
+        tool_call_id: str,
+        tool_call_event_id: str,
+        execution_count: int,
+        cancel: asyncio.CancelledError,
+    ) -> None:
+        """Record a cell interrupted by cancellation so the model can see it.
+
+        Closes the cell's tool-call event with ``ResultStatus.CANCELLED`` (the
+        receipt text is kept, as on every other path) and emits a
+        ``PythonOutput`` with the same status and the stdout/stderr the cell
+        produced before the cancel. ``execute_code`` attaches that partial
+        output to the exception as ``execution_result``; when it is absent
+        (the cancel landed before capture started) the output is empty. The
+        caller re-raises the cancellation.
+        """
+        partial = getattr(cancel, "execution_result", None)
+        runtime.event_manager.update(
+            tool_call_event_id,
+            result=ToolResult(
+                tool_call_id=tool_call_id,
+                content=_EXECUTE_PYTHON_RECEIPT,
+                result_status=ResultStatus.CANCELLED,
+            ),
+        )
+        runtime.event_manager.add(
+            PythonOutput(
+                tool_call_id=tool_call_id,
+                execution_count=execution_count,
+                stdout=partial.stdout if partial is not None else "",
+                stderr=partial.stderr if partial is not None else "",
+                execution_status=ResultStatus.CANCELLED,
+                images=partial.images if partial is not None else [],
+            )
+        )
 
     def _handle_return_result(
         self,
