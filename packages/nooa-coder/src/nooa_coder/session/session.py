@@ -408,8 +408,34 @@ class Session:
         resolves it. A cancelled turn resolves it with
         ``TurnCancelledOutcome``; a failed turn raises ``TurnFailedError``.
         """
-        receipt = self._admit(text, channel="user_messages", source=source, want_future=True)
-        return await asyncio.shield(self._futures[receipt.item_id])
+        receipt = self._admit(text, channel="user_messages", source=source)
+        return await self.outcome(receipt.item_id)
+
+    def outcome(self, item_id: str) -> Awaitable[Outcome]:
+        """Wait for the outcome of the turn that consumes an admitted item.
+
+        Works for items from ``submit()`` and for steers: a steer a model
+        call saw resolves with that turn; one admitted again as a message
+        resolves with the turn that consumed it. ``Waiting`` outcomes keep
+        it open; a cancelled turn resolves it with ``TurnCancelledOutcome``;
+        a failed turn raises ``TurnFailedError``. ``KeyError`` if the item
+        is unknown or its turn has already ended.
+        """
+        future = self._futures.get(item_id)
+        if future is None:
+            if not self._is_pending(item_id):
+                raise KeyError(item_id)
+            future = asyncio.get_running_loop().create_future()
+            self._futures[item_id] = future
+        return asyncio.shield(future)
+
+    def _is_pending(self, item_id: str) -> bool:
+        return (
+            item_id in self._consumed
+            or item_id in self._waiting
+            or any(known == item_id for known, _, _ in self._pending_steers)
+            or any(known == item_id for entries in self._ids.values() for _, known in entries)
+        )
 
     def _admit(
         self,
@@ -418,7 +444,6 @@ class Session:
         channel: str,
         source: str,
         item_id: str | None = None,
-        want_future: bool = False,
         internal: bool = False,
         record: bool = True,
     ) -> Receipt:
@@ -443,8 +468,6 @@ class Session:
         event.item_id = item_id or str(event.id)
         if record:
             self.handle.events.add(event)
-        if want_future:
-            self._futures[event.item_id] = asyncio.get_running_loop().create_future()
         self._ids.setdefault(channel, deque()).append((item, event.item_id))
         target.put(item)
         self._emit(

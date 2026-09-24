@@ -514,3 +514,40 @@ async def test_an_agent_without_commands_has_none(make_session):
     assert session.commands() == []
     with pytest.raises(KeyError):
         await session.invoke_command("model", "")
+
+
+async def test_outcome_of_a_submitted_item(make_session):
+    session, _ = make_session(done("handled"), start=False)
+    receipt = await session.submit("do it")
+    pending = session.outcome(receipt.item_id)
+    session.start()
+    assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="handled")
+    with pytest.raises(KeyError):
+        session.outcome(receipt.item_id)  # finished: nothing left to wait for
+    with pytest.raises(KeyError):
+        session.outcome("no-such-item")
+
+
+async def test_outcome_of_steers_follows_the_turn_that_saw_them(make_session):
+    started, block = agents.fresh_events()
+    session, _ = make_session(
+        cell(agents.BLOCKING_CELL), done("saw the steer"), done("handled the late steer")
+    )
+    first = asyncio.ensure_future(session.prompt("start"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    seen = session.outcome((await session.steer("STEER-early")).item_id)
+    block.set()
+    assert await asyncio.wait_for(first, TIMEOUT) == Done(explanation="saw the steer")
+    assert await asyncio.wait_for(seen, TIMEOUT) == Done(explanation="saw the steer")
+
+    started, block = agents.fresh_events()
+    session2, _ = make_session(
+        cell(agents.BLOCKING_CELL + "return_result(Done(explanation='first'))"),
+        done("handled the late steer"),
+    )
+    first = asyncio.ensure_future(session2.prompt("start"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    late = session2.outcome((await session2.steer("STEER-late")).item_id)
+    block.set()
+    assert await asyncio.wait_for(first, TIMEOUT) == Done(explanation="first")
+    assert await asyncio.wait_for(late, TIMEOUT) == Done(explanation="handled the late steer")
