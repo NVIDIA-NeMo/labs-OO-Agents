@@ -152,7 +152,7 @@ async def test_close_goes_children_first(registry, root_options):
 
 async def test_load_of_a_live_id_attaches_to_the_same_session(registry, root_options):
     root = await registry.create(root_options)
-    assert await registry.load(root.id, root_options) is root
+    assert await registry.load(root.id) is root
 
 
 async def test_load_restores_state_and_requeues_unhandled_items(
@@ -191,7 +191,7 @@ async def test_load_restores_state_and_requeues_unhandled_items(
 
     fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=factory)
     try:
-        loaded = await fresh.load(root.id, root_options)
+        loaded = await fresh.load(root.id)
         ended = []
         loaded.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
         while not ended:
@@ -218,9 +218,7 @@ async def test_concurrent_loads_share_one_session(registry, root_options, sessio
     models = ScriptedModels()
     fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
     try:
-        first, second = await asyncio.gather(
-            fresh.load(root.id, root_options), fresh.load(root.id, root_options)
-        )
+        first, second = await asyncio.gather(fresh.load(root.id), fresh.load(root.id))
         assert first is second
         assert len(models.built) == 1
     finally:
@@ -239,13 +237,13 @@ async def test_loading_a_parent_whose_child_is_live_elsewhere_is_refused(
     elsewhere = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
     here = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
     try:
-        detached = await elsewhere.load(child.id, child.options)  # a detached child is allowed
+        detached = await elsewhere.load(child.id)  # a detached child is allowed
         assert detached.parent_id == root.id
         with pytest.raises(ChildActiveElsewhereError, match=child.id):
-            await here.load(root.id, root_options)
+            await here.load(root.id)
         assert here.sessions == {} and here._reserved == {}
         await elsewhere.close_all()
-        loaded = await here.load(root.id, root_options)
+        loaded = await here.load(root.id)
         assert loaded.id == root.id
     finally:
         await elsewhere.close_all()
@@ -402,10 +400,10 @@ async def test_prepare_on_load_sees_requeued_turns_but_not_on_attach(
         session.subscribe(seen.append)
 
     try:
-        loaded = await fresh.load(root_id, root_options, prepare=prepare)
+        loaded = await fresh.load(root_id, prepare=prepare)
         await _until_turn_ended(seen)
         assert calls == [root_id]
-        assert await fresh.load(root_id, root_options, prepare=prepare) is loaded
+        assert await fresh.load(root_id, prepare=prepare) is loaded
         assert calls == [root_id]
     finally:
         await fresh.close_all()
@@ -448,16 +446,9 @@ async def test_load_takes_options_from_the_record(registry, root_options, sessio
             "alias-w",
         )
         await fresh.close_all()
-        partial = root_options.model_construct(
-            _fields_set={"workspace", "agent_spec", "host"},
-            **{**root_options.model_dump(), "host": "acp", "model": None},
-        )
-        again = await fresh.load(child.id, partial)
-        assert (again.options.host, again.options.model, again.options.name) == (
-            "acp",
-            "alias-w",
-            "worker",
-        )
+        # Options are not merged in: only explicit keyword overrides count.
+        with pytest.raises(TypeError):
+            await fresh.load(child.id, root_options)
     finally:
         await fresh.close_all()
 

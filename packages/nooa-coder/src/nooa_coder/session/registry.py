@@ -372,13 +372,15 @@ class SessionRegistry:
             raise ChildFailedError(f"Child {child_id!r} does not exist") from exc
         if info.parent_id != parent.id:
             raise ChildFailedError(f"Session {child_id!r} is not a child of {parent.id!r}")
-        options = parent.options.inherit(
-            name=info.name,
-            model=info.model or None,
-            retain=info.retained,
-            turn_method="handle" if info.retained else "handle_batch",
+        # The record gives the child's own options; the parent passes on
+        # what it does not record (mode, depth cap) and a client it shares.
+        shared_llm = parent.options.llm if (info.model or None) == parent.options.model else None
+        return await self.load(
+            child_id,
+            permission_mode=parent.options.permission_mode,
+            max_depth=parent.options.max_depth,
+            llm=shared_llm,
         )
-        return await self.load(child_id, options)
 
     def info(self, session_id: str) -> SessionInfo:
         """Metadata of a session, live or on disk."""
@@ -390,7 +392,6 @@ class SessionRegistry:
     async def load(
         self,
         session_id: str,
-        options: SessionOptions | None = None,
         *,
         prepare: Prepare | None = None,
         **overrides: Any,
@@ -398,9 +399,9 @@ class SessionRegistry:
         """Attach to a live session, or open one from disk and resume it.
 
         The session's options come from its record (agent spec, turn
-        method, model, workspace, name, retain, host), overridden by the
-        fields the caller set explicitly on ``options`` and by
-        ``overrides`` (any ``SessionOptions`` field, e.g. ``host="acp"``).
+        method, model, workspace, name, retain, host); keyword
+        ``overrides`` (any ``SessionOptions`` field, e.g. ``host="acp"``
+        or ``llm=...``) replace those fields and nothing else does.
 
         A live id returns the same Session (the caller subscribes and reads
         ``transcript()``). Otherwise the file is opened (claim-checked by
@@ -431,9 +432,7 @@ class SessionRegistry:
         try:
             self._refuse_if_children_active_elsewhere(session_id)
             handle = self.store.open(session_id)
-            session = await self._build(
-                self._stored_options(handle.info, options, overrides), handle
-            )
+            session = await self._build(self._stored_options(handle.info, overrides), handle)
             restored = handle.storage.restore_latest_snapshot(session.agent)
             session.agent.event_manager.add(
                 TuiSessionResumed(session_id=session_id, restored=restored)
@@ -453,9 +452,7 @@ class SessionRegistry:
         self._publish(session, reservation)
         return session
 
-    def _stored_options(
-        self, info: SessionInfo, options: SessionOptions | None, overrides: dict[str, Any]
-    ) -> SessionOptions:
+    def _stored_options(self, info: SessionInfo, overrides: dict[str, Any]) -> SessionOptions:
         values: dict[str, Any] = {
             "workspace": info.workspace or ".",
             "agent_spec": info.agent,
@@ -467,8 +464,6 @@ class SessionRegistry:
         }
         if info.host:
             values["host"] = info.host
-        if options is not None:
-            values.update({name: getattr(options, name) for name in options.model_fields_set})
         values.update(overrides)
         return SessionOptions.model_validate(values)
 

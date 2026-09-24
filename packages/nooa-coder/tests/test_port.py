@@ -212,7 +212,7 @@ async def test_a_child_ref_kept_in_vars_works_after_a_reload(
     )
     fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=later)
     try:
-        loaded = await fresh.load(root.id, root_options)
+        loaded = await fresh.load(root.id)
         assert isinstance(loaded.agent.v.helper, ChildRef)
         outcome = await asyncio.wait_for(loaded.prompt("ping the helper"), TIMEOUT)
         assert isinstance(outcome, Done) and "PING" in outcome.explanation
