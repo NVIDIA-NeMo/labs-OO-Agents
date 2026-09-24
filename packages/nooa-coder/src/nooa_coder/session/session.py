@@ -31,7 +31,13 @@ from nooa.interactive import (
     Waiting,
 )
 from nooa.runtime.channels import Channel
-from nooa_coder.session.events import ItemAdmitted, ItemConsumed, TurnEnded, TurnStarted
+from nooa_coder.session.events import (
+    ItemAdmitted,
+    ItemConsumed,
+    ItemWithdrawn,
+    TurnEnded,
+    TurnStarted,
+)
 from nooa_coder.session.items import (
     AgentEventUpdate,
     CancelledUpdate,
@@ -60,6 +66,10 @@ OutcomeKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
 
 class TurnFailedError(RuntimeError):
     """The turn that consumed a prompted item failed with an error."""
+
+
+class ItemWithdrawnError(RuntimeError):
+    """The prompted item was withdrawn before any turn consumed it."""
 
 
 class SessionClosedError(RuntimeError):
@@ -288,6 +298,50 @@ class Session:
             self._admit(
                 text, channel="user_messages", source=source, item_id=item_id, internal=True
             )
+
+    def withdraw(self, receipt: Receipt) -> bool:
+        """Take back an item nothing has consumed yet; return whether it was withdrawn.
+
+        Works for queued items and for steers still in the buffer. Writes
+        ``ItemWithdrawn`` so a later load does not re-queue it; a
+        ``prompt()`` waiting on it raises ``ItemWithdrawnError``.
+        """
+        if self._closed:
+            return False
+        item_id = receipt.item_id
+        steer = next((s for s in self._pending_steers if s[0] == item_id), None)
+        if steer is not None:
+            self._pending_steers.remove(steer)
+        elif not self._remove_queued(receipt.channel, item_id):
+            return False
+        self.handle.events.add(ItemWithdrawn(item_id=item_id))
+        future = self._futures.pop(item_id, None)
+        if future is not None and not future.done():
+            future.set_exception(ItemWithdrawnError(f"Item {item_id!r} was withdrawn"))
+        return True
+
+    def _remove_queued(self, channel_name: str, item_id: str) -> bool:
+        entries = self._ids.get(channel_name)
+        channel = self.agent.queue_manager.channels().get(channel_name)
+        if not entries or channel is None:
+            return False
+        index = next((i for i, (_, known) in enumerate(entries) if known == item_id), None)
+        if index is None:
+            return False
+        obj = entries[index][0]
+        # Equal-identity items put earlier are ahead of this one in the
+        # channel (FIFO), so skip that many matches.
+        skip = sum(1 for other, _ in list(entries)[:index] if other is obj)
+        # Channel exposes no remove-by-item; edit its deque directly.
+        pending = channel._items
+        for position, queued in enumerate(pending):
+            if queued is obj:
+                if skip == 0:
+                    del pending[position]
+                    del entries[index]
+                    return True
+                skip -= 1
+        return False
 
     async def prompt(self, text: str, *, source: str = "user") -> Outcome:
         """Submit ``text`` and wait for the outcome of the turn that consumes it.

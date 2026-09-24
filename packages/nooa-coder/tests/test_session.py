@@ -13,7 +13,7 @@ from nooa_coder.session.items import (
     TurnCancelledOutcome,
     TurnEndedUpdate,
 )
-from nooa_coder.session.session import TurnFailedError
+from nooa_coder.session.session import ItemWithdrawnError, TurnFailedError
 from nooa_coder.session.store import SessionStore
 
 from nooa.context_blocks.roles import Role
@@ -342,3 +342,50 @@ async def test_a_steer_left_by_a_cancel_is_admitted_after_the_cancel(make_sessio
         ("ItemAdmitted", "user_messages"),
     ]
     assert "STEER-then-stop" in str(llm.calls[1].messages)
+
+
+async def test_withdraw_removes_a_queued_item(make_session):
+    session, llm = make_session(done("handled"), start=False)
+    first = await session.submit("KEEP-ME")
+    second = await session.submit("DROP-ME")
+    third_prompt = asyncio.ensure_future(session.prompt("DROP-ME"))  # same text, own item
+    await asyncio.sleep(0)
+    [third_id] = [
+        raw["item_id"]
+        for _, raw in _rows(session, "ItemAdmitted")
+        if raw["item_id"] not in (first.item_id, second.item_id)
+    ]
+    third = Receipt(
+        session_id=session.id, channel="user_messages", item_id=third_id, delivered="queued"
+    )
+
+    assert session.withdraw(second) is True
+    assert session.withdraw(second) is False
+    assert session.withdraw(third) is True
+    with pytest.raises(ItemWithdrawnError):
+        await asyncio.wait_for(third_prompt, TIMEOUT)
+    assert session.agent.queue_manager.get_channel("user_messages").snapshot() == ["KEEP-ME"]
+    withdrawn = [raw["item_id"] for _, raw in _rows(session, "ItemWithdrawn")]
+    assert withdrawn == [second.item_id, third.item_id]
+
+    session.start()
+    ended = []
+    session.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
+    while not ended:
+        await asyncio.sleep(0.01)
+    assert "KEEP-ME" in str(llm.calls[0].messages)
+    assert "DROP-ME" not in str(llm.calls[0].messages)
+    assert session.withdraw(first) is False  # consumed
+
+
+async def test_withdraw_a_buffered_steer(make_session):
+    started, block = agents.fresh_events()
+    session, llm = make_session(cell(agents.BLOCKING_CELL), done("done"))
+    pending = asyncio.ensure_future(session.prompt("start"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    receipt = await session.steer("STEER-withdrawn")
+    assert session.withdraw(receipt) is True
+    block.set()
+    assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="done")
+    assert "STEER-withdrawn" not in str(llm.calls[1].messages)
+    assert [raw["item_id"] for _, raw in _rows(session, "ItemWithdrawn")] == [receipt.item_id]
