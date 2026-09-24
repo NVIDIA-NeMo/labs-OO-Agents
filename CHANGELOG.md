@@ -6,6 +6,21 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Groundwork for the session tree design, in shared code:
+  - A cancelled CodeAct cell is now recorded for the model: its
+    `ToolCallEvent` closes with the new `ResultStatus.CANCELLED` and a
+    `PythonOutput` with that status carries the stdout and stderr produced
+    before the cancel. `execute_code` attaches the partial
+    `ExecutionResult` (new `cancelled` flag) to the re-raised
+    `CancelledError` as `execution_result`. The ACP bridge still shows
+    the cell as "Cancelled".
+  - `Notification.description` renders in full; session hosts will use
+    `source="steer:<who>"` for steering text.
+  - `nooa.interactive` adds the `Done`, `NeedInput` and `Waiting` turn
+    results and a `handle_batch()` turn method (`Done | Waiting`) for
+    unattended turns. `handle()` accepts the new types and still accepts
+    `RespondResult`.
+  - The bench `TaskResult` gains an optional `report` field.
 - Remove `AnthropicProviderFormatter` and `ResponsesProviderFormatter` from
   `nooa.context_blocks`, and the runtime's client-type dispatch that swapped in
   the Responses one. Neither was on the live path: every client (including
