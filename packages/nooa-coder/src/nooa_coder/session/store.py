@@ -17,7 +17,7 @@ from typing import Literal
 
 from nooa.paths import get_user_dir
 from nooa.runtime.event_manager import EventManager
-from nooa.storage.sqlite import SQLiteStorageManager, delete_sqlite_database
+from nooa.storage.sqlite import SQLiteStorageManager, _is_virtiofs, delete_sqlite_database
 from nooa_coder.session.events import (
     SESSION_EVENT_TYPES,
     SessionStarted,
@@ -67,6 +67,29 @@ class SessionTurn:
     role: Literal["user", "agent"]
     content: str
     timestamp: float = field(default_factory=time.time)
+
+
+class _ExistingSQLiteStorageManager(SQLiteStorageManager):
+    """Storage for a session file that must already exist.
+
+    ``SQLiteStorageManager`` opens with a plain ``sqlite3.connect(path)``,
+    which creates an empty database when the file is gone, so a delete
+    racing an open would leave a new empty file behind. Opening with the
+    ``mode=rw`` URI fails instead. Replace this subclass with the
+    ``must_exist`` option once #382 lands. The pragmas match the base
+    class's ``_open_connection``.
+    """
+
+    def _open_connection(self) -> sqlite3.Connection:
+        uri = f"{Path(self._db_path).resolve().as_uri()}?mode=rw"
+        connection = sqlite3.connect(uri, uri=True, check_same_thread=self._check_same_thread)
+        connection.execute("PRAGMA busy_timeout=5000")
+        if _is_virtiofs(self._db_path):
+            connection.execute("PRAGMA journal_mode=DELETE")
+        else:
+            connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
 
 
 class SessionHandle:
@@ -245,7 +268,12 @@ class SessionStore:
         info = self._read_info(path)
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
-        storage = SQLiteStorageManager(path, check_same_thread=check_same_thread)
+        try:
+            storage = _ExistingSQLiteStorageManager(path, check_same_thread=check_same_thread)
+        except sqlite3.OperationalError as exc:
+            if path.exists():
+                raise
+            raise SessionNotFoundError(f"Session {session_id!r} was not found") from exc
         return SessionHandle(self, storage, info)
 
     def get(self, session_id: str) -> SessionInfo:
