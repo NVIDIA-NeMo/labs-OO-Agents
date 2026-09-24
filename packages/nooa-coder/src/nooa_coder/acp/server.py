@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from acp import (
     PROTOCOL_VERSION,
@@ -30,8 +31,10 @@ from acp import (
     PromptResponse,
     RequestError,
     run_agent,
+    start_tool_call,
     text_block,
     update_agent_message,
+    update_tool_call,
     update_user_message,
 )
 from acp.helpers import update_available_commands
@@ -42,26 +45,31 @@ from acp.schema import (
     AvailableCommandInput,
     ClientCapabilities,
     CloseSessionResponse,
+    ElicitationFormSessionMode,
     HttpMcpServer,
     Implementation,
     ListSessionsResponse,
     McpCapabilities,
     McpServerStdio,
+    PermissionOption,
     SessionCapabilities,
     SessionCloseCapabilities,
     SessionListCapabilities,
     SessionMode,
     SessionModeState,
     SseMcpServer,
+    ToolCallUpdate,
     UnstructuredCommandInput,
 )
 from acp.schema import SessionInfo as ACPSessionInfo
 
 from nooa.errors import GenerationError
+from nooa.interactive import NeedInput
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
+from nooa_coder.acp.need_input import answer_from_content, need_input_schema
 from nooa_coder.coding.identity import CODING_AGENT, canonical_agent_spec
 from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_coder.session.items import CommandInfo, TurnCancelledOutcome
@@ -78,6 +86,12 @@ _DELETE_METHOD = "nooa/session/delete"
 
 SOURCE = "acp"
 """The source of items this adapter admits (the bridge does not echo them back)."""
+
+DECLINED = "(declined to answer)"
+"""What the agent receives when the person declines or dismisses a question."""
+DECLINED_SOURCE = "user:declined"
+
+_CANCELLED = object()  # a client request stopped by session/cancel
 
 _CONNECT_TEXT = (
     "Connecting a model provider needs the terminal for now: run `nooa connect` in a "
@@ -175,6 +189,12 @@ class CoderACPAgent:
         self._bridges: dict[str, ACPEventBridge] = {}
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
+        # Client requests (forms, permissions) a prompt is waiting on, by
+        # session: session/cancel stops them.
+        self._asks: dict[str, asyncio.Task[Any]] = {}
+        # The question each session's prompt is asking, so two prompts that
+        # returned with the same turn ask it once.
+        self._asking: dict[str, NeedInput] = {}
 
     def on_connect(self, conn: Client) -> None:
         self._conn = conn
@@ -431,16 +451,134 @@ class CoderACPAgent:
     async def _finish(
         self, session: Session, bridge: ACPEventBridge, item_id: str
     ) -> PromptResponse:
-        """Wait for the outcome of the turn that consumes ``item_id`` and map it to a stop reason."""
-        outcome = await session.outcome(item_id)
-        if isinstance(outcome, TurnCancelledOutcome):
-            # The bridge closed the open cards when the Session reported the
-            # cancel, which happens before this outcome resolves.
-            await bridge.flush()
-            return PromptResponse(stop_reason="cancelled")
-        # NeedInput: the bridge sent the question as the turn's final message.
+        """Wait for the turn that consumes ``item_id``; answer questions until it is done.
+
+        A ``NeedInput`` the client can answer (a form, or a yes/no
+        permission) is submitted and the same prompt waits for the next
+        turn; otherwise the question, already sent by the bridge as the
+        turn's final message, ends the prompt with ``end_turn``.
+        """
+        while True:
+            outcome = await session.outcome(item_id)
+            if isinstance(outcome, TurnCancelledOutcome):
+                # The bridge closed the open cards when the Session reported
+                # the cancel, which happens before this outcome resolves.
+                await bridge.flush()
+                return PromptResponse(stop_reason="cancelled")
+            if not isinstance(outcome, NeedInput) or self._asking.get(session.id) is outcome:
+                # Done; or a question another prompt of this turn is asking.
+                await bridge.flush()
+                return PromptResponse(stop_reason="end_turn")
+            self._asking[session.id] = outcome
+            try:
+                await bridge.flush()
+                answer = await self._ask(session, bridge, outcome)
+            finally:
+                if self._asking.get(session.id) is outcome:
+                    del self._asking[session.id]
+            if answer is _CANCELLED:
+                await bridge.flush()
+                return PromptResponse(stop_reason="cancelled")
+            if answer is None:
+                return PromptResponse(stop_reason="end_turn")
+            value, source = answer
+            receipt = await session.submit(value, source=source)
+            item_id = receipt.item_id
+
+    async def _ask(self, session: Session, bridge: ACPEventBridge, need: NeedInput) -> Any:
+        """Ask the client to answer ``need``: ``(item, source)``, ``None`` or ``_CANCELLED``.
+
+        A form when the client advertised ``elicitation.form`` and the
+        question flattens; else a permission request for a yes/no question;
+        else ``None`` (the question stays as text). A client error falls
+        back to ``None``.
+        """
+        conn = self._require_conn()
+        capabilities = self.client_capabilities
+        forms = (
+            capabilities is not None
+            and capabilities.elicitation is not None
+            and capabilities.elicitation.form is not None
+        )
+        schema = need_input_schema(need)
+        if forms and schema is not None:
+            mode = ElicitationFormSessionMode(session_id=session.id, requested_schema=schema)
+            response = await self._client_call(
+                session.id, conn.create_elicitation(message=need.question, mode=mode)
+            )
+            if response is None or response is _CANCELLED:
+                return response
+            if response.action == "accept":
+                return answer_from_content(need, response.content), SOURCE
+            return DECLINED, DECLINED_SOURCE
+        options = need.options or []
+        if sorted(option.lower() for option in options) == ["no", "yes"]:
+            return await self._ask_yes_no(session, bridge, need.question, options)
+        return None
+
+    async def _ask_yes_no(
+        self, session: Session, bridge: ACPEventBridge, question: str, options: list[str]
+    ) -> Any:
+        """A yes/no question as a pending card and a permission request."""
+        conn = self._require_conn()
+        yes = next(option for option in options if option.lower() == "yes")
+        no = next(option for option in options if option.lower() == "no")
+        tool_call_id = f"question-{uuid4()}"
+        bridge.publish(start_tool_call(tool_call_id, question, kind="other", status="pending"))
         await bridge.flush()
-        return PromptResponse(stop_reason="end_turn")
+        response = await self._client_call(
+            session.id,
+            conn.request_permission(
+                session_id=session.id,
+                tool_call=ToolCallUpdate(
+                    tool_call_id=tool_call_id, title=question, status="pending"
+                ),
+                options=[
+                    PermissionOption(option_id=yes, name=yes, kind="allow_once"),
+                    PermissionOption(option_id=no, name=no, kind="reject_once"),
+                ],
+            ),
+        )
+        chosen = getattr(getattr(response, "outcome", None), "option_id", None)
+        if response is _CANCELLED or response is None or chosen not in (yes, no):
+            bridge.publish(
+                update_tool_call(
+                    tool_call_id,
+                    status="failed",
+                    title="Cancelled" if response is _CANCELLED else question,
+                )
+            )
+            await bridge.flush()
+            if response is None or response is _CANCELLED:
+                return response
+            return DECLINED, DECLINED_SOURCE
+        bridge.publish(
+            update_tool_call(tool_call_id, status="completed", content=None, raw_output=chosen)
+        )
+        await bridge.flush()
+        return chosen, SOURCE
+
+    async def _client_call(self, session_id: str, request: Any) -> Any:
+        """Await a request to the client that session/cancel can stop.
+
+        Returns the response, ``_CANCELLED`` when cancelled, or ``None`` when
+        the client failed it (the caller falls back to text).
+        """
+        task = asyncio.ensure_future(request)
+        self._asks[session_id] = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if task.cancelled() and not (current is not None and current.cancelling()):
+                return _CANCELLED
+            raise
+        except Exception:
+            logger.warning("The client failed a request in session %s", session_id, exc_info=True)
+            return None
+        finally:
+            if self._asks.get(session_id) is task:
+                del self._asks[session_id]
 
     async def _turn_failed(self, bridge: ACPEventBridge, exc: TurnFailedError) -> PromptResponse:
         """Map a failed turn: generation limits are stop reasons, anything else an error."""
@@ -508,6 +646,9 @@ class CoderACPAgent:
         session = self.registry.get(session_id)
         if session is None or session_id not in self._bridges:
             return  # a notification: nothing to answer
+        ask = self._asks.get(session_id)
+        if ask is not None:
+            ask.cancel()
         await session.cancel(by="user")
 
     def _followed(self, session_id: str) -> tuple[Session, ACPEventBridge]:
