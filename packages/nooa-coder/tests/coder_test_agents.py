@@ -10,6 +10,7 @@ cell can use.
 """
 
 import asyncio
+import contextvars
 import json
 from typing import Any
 
@@ -104,3 +105,7 @@ STARTED.set()
 await BLOCK.wait()
 print("cell released")
 """
+
+
+# A context variable a test sets outside the session; cells read it.
+MARKER: contextvars.ContextVar[str] = contextvars.ContextVar("MARKER", default="unset")

@@ -1,0 +1,484 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Session: owns one agent, its turn loop and its durable record.
+
+Items go in on the agent's named queue channels (``submit``); each is
+recorded (``ItemAdmitted``) before it is queued, so nothing admitted is
+lost. The loop races the channels while idle and runs one turn when
+something arrives, calling the agent's turn method named in the options.
+Output leaves as data: session updates to subscribers and the transcript.
+"""
+
+import asyncio
+import contextvars
+import json
+import logging
+from collections import deque
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from typing import Any, Literal
+
+from pydantic import BaseModel
+
+from nooa.context_blocks.roles import Role
+from nooa.interactive import (
+    Done,
+    InteractiveAgent,
+    NeedInput,
+    RespondReason,
+    RespondResult,
+    Waiting,
+)
+from nooa.runtime.channels import Channel
+from nooa_coder.session.events import ItemAdmitted, ItemConsumed, TurnEnded, TurnStarted
+from nooa_coder.session.items import (
+    AgentEventUpdate,
+    ClosedUpdate,
+    ItemAdmittedUpdate,
+    Receipt,
+    SessionEvent,
+    SessionInfo,
+    TranscriptEntry,
+    TurnCancelledOutcome,
+    TurnEndedUpdate,
+    TurnStartedUpdate,
+    Usage,
+)
+from nooa_coder.session.options import SessionOptions
+from nooa_coder.session.store import SessionHandle
+
+logger = logging.getLogger(__name__)
+
+Outcome = Done | NeedInput | Waiting | TurnCancelledOutcome
+"""What ``prompt()`` returns."""
+
+OutcomeKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
+
+
+class TurnFailedError(RuntimeError):
+    """The turn that consumed a prompted item failed with an error."""
+
+
+class SessionClosedError(RuntimeError):
+    """The session is closed."""
+
+
+def type_name(value: Any) -> str:
+    """``module:qualname`` of a value's class, as recorded for typed re-loading."""
+    cls = type(value)
+    return f"{cls.__module__}:{cls.__qualname__}"
+
+
+def item_to_json(item: Any) -> str:
+    """Serialise an item for the durable record; items must be JSON data or pydantic."""
+    if isinstance(item, BaseModel):
+        return item.model_dump_json()
+    try:
+        return json.dumps(item)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"Session items must be JSON data or pydantic models, got {type(item).__name__}"
+        ) from exc
+
+
+def _preview(value: Any, limit: int = 120) -> str:
+    text = value if isinstance(value, str) else repr(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+class Session:
+    """One agent, its turn loop and its durable record.
+
+    Built by the registry, which calls :meth:`start` after publishing it.
+    Nobody else holds the agent.
+    """
+
+    def __init__(
+        self,
+        *,
+        options: SessionOptions,
+        agent: InteractiveAgent,
+        handle: SessionHandle,
+        owned_llm: Any = None,
+    ) -> None:
+        info = handle.info
+        self.id: str = info.id
+        self.parent_id: str | None = info.parent_id
+        self.depth: int = info.depth
+        self.name: str | None = info.name
+        self.options = options
+        self.agent = agent
+        self.handle = handle
+        self.info: SessionInfo = info.model_copy(
+            update={"status": "idle", "mode": options.permission_mode}
+        )
+        self._owned_llm = owned_llm
+        self._listeners: list[Callable[[SessionEvent], None]] = []
+        # Per channel, (item, item_id) in put order: channels hold raw
+        # objects, so this is how an item keeps its identity until consumed.
+        self._ids: dict[str, deque[tuple[Any, str]]] = {}
+        self._hooked: dict[str, Channel[Any]] = {}
+        self._futures: dict[str, asyncio.Future[Outcome]] = {}
+        self._consumed: list[str] = []  # consumed since the last turn settled
+        self._waiting: list[str] = []  # items whose prompt stays open over a Waiting
+        self._loop_task: asyncio.Task[None] | None = None
+        self._turn_task: asyncio.Task[Any] | None = None
+        self._cancel_by: str | None = None
+        self._settled = asyncio.Event()
+        self._settled.set()
+        self._close_task: asyncio.Task[None] | None = None
+        self._closing = False
+        self._closed = False
+        self._before_close: Callable[[], Awaitable[None]] | None = None
+        self._loop_context_hooks: list[Callable[[], None]] = []
+        self._unsubscribe_agent = agent.event_manager.on("*", self._on_agent_event)
+
+    # ---- lifecycle ---------------------------------------------------
+
+    def start(self) -> None:
+        """Start the turn loop.
+
+        The loop task runs in a fresh ``contextvars.Context``: a session
+        created from inside another agent's cell must not inherit that
+        agent's call stack, generation state or scoped blocks.
+        """
+        if self._loop_task is not None:
+            return
+        self._ensure_open()
+        self._loop_task = asyncio.get_running_loop().create_task(
+            self._loop(), name=f"session-loop:{self.id}", context=contextvars.Context()
+        )
+
+    async def close(self) -> None:
+        """Stop the loop and release everything the session owns. Idempotent.
+
+        Order: children first (the registry's hook), cancel a running turn,
+        stop the loop, shut down the agent's background jobs, close the
+        agent, close a model client the session created, close the store
+        handle.
+        """
+        if self._closed:
+            return
+        if self._close_task is None:
+            self._close_task = asyncio.ensure_future(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
+        self._closing = True
+        if self._before_close is not None:
+            await self._before_close()
+        await self._stop_turn(by="host")
+        if self._loop_task is not None:
+            self._loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._loop_task
+        self._resolve_all(TurnCancelledOutcome(by="host"))
+        self._unsubscribe_agent()
+        try:
+            await self.agent.queue_manager.shutdown()
+            await self.agent.aclose()
+            await self._close_owned_llm()
+        finally:
+            self.handle.close()
+            self._closed = True
+            self.info.status = "closed"
+            self._emit(ClosedUpdate(session_id=self.id))
+
+    async def _stop_turn(self, *, by: str) -> None:
+        """Cancel a running turn and wait until the loop has settled it."""
+        task = self._turn_task
+        if task is None or task.done():
+            return
+        self._cancel_by = by
+        task.cancel()
+        await self._settled.wait()
+
+    async def _close_owned_llm(self) -> None:
+        llm, self._owned_llm = self._owned_llm, None
+        if llm is None:
+            return
+        aclose = getattr(llm, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    def _ensure_open(self) -> None:
+        if self._closed or self._closing:
+            raise SessionClosedError(f"Session {self.id!r} is closed")
+
+    # ---- input -------------------------------------------------------
+
+    async def submit(
+        self, item: Any, *, channel: str = "user_messages", source: str = "user"
+    ) -> Receipt:
+        """Admit ``item`` on ``channel``: recorded first, then queued for a turn."""
+        return self._admit(item, channel=channel, source=source)
+
+    async def prompt(self, text: str, *, source: str = "user") -> Outcome:
+        """Submit ``text`` and wait for the outcome of the turn that consumes it.
+
+        A ``Waiting`` outcome keeps the wait open; the next turn's outcome
+        resolves it. A cancelled turn resolves it with
+        ``TurnCancelledOutcome``; a failed turn raises ``TurnFailedError``.
+        """
+        receipt = self._admit(text, channel="user_messages", source=source, want_future=True)
+        return await asyncio.shield(self._futures[receipt.item_id])
+
+    def _admit(
+        self,
+        item: Any,
+        *,
+        channel: str,
+        source: str,
+        item_id: str | None = None,
+        want_future: bool = False,
+    ) -> Receipt:
+        """Record the item, then put it. Synchronous so sync listeners can admit."""
+        self._ensure_open()
+        target = self.agent.queue_manager.channels().get(channel)
+        if target is None or target.mode != "queue":
+            raise ValueError(f"Session {self.id!r} has no queue channel {channel!r}")
+        self._hook(target)
+        event = ItemAdmitted(
+            channel=channel,
+            item_json=item_to_json(item),
+            item_type=type_name(item),
+            source=source,
+        )
+        event.item_id = item_id or str(event.id)
+        self.handle.events.add(event)
+        if want_future:
+            self._futures[event.item_id] = asyncio.get_running_loop().create_future()
+        self._ids.setdefault(channel, deque()).append((item, event.item_id))
+        target.put(item)
+        self._emit(
+            ItemAdmittedUpdate(
+                session_id=self.id,
+                channel=channel,
+                item_id=event.item_id,
+                source=source,
+                preview=_preview(item),
+            )
+        )
+        return Receipt(
+            session_id=self.id, channel=channel, item_id=event.item_id, delivered="queued"
+        )
+
+    def _hook(self, channel: Channel[Any]) -> None:
+        """Observe consumption on ``channel`` (the loop's race and drain, and agent ``get()``)."""
+        if self._hooked.get(channel.name) is channel:
+            return
+        # Channel keeps one on_get callback; chain any the agent installed.
+        previous = channel._on_get
+        name = channel.name
+
+        def on_get(item: Any) -> None:
+            self._on_consumed(name, item)
+            if previous is not None:
+                previous(item)
+
+        channel.set_on_get(on_get)
+        self._hooked[name] = channel
+
+    def _on_consumed(self, channel: str, item: Any) -> None:
+        entries = self._ids.get(channel)
+        if not entries:
+            return  # an item another producer put; it has no identity here
+        index = next((i for i, (obj, _) in enumerate(entries) if obj is item), None)
+        if index is None:
+            return
+        item_id = entries[index][1]
+        del entries[index]
+        if not self.handle._closed:
+            self.handle.events.add(ItemConsumed(item_id=item_id))
+        self._consumed.append(item_id)
+
+    # ---- the loop ----------------------------------------------------
+
+    async def _loop(self) -> None:
+        for hook in self._loop_context_hooks:
+            hook()
+        queues = self.agent.queue_manager
+        while not self._closing:
+            wins = await queues.race()
+            notification: dict[str, list[Any]] = {}
+            for name, item in wins:
+                notification.setdefault(name, []).append(item)
+            for name, channel in queues.channels().items():
+                if drained := channel.drain():
+                    notification.setdefault(name, []).extend(drained)
+            if not notification and not any(
+                channel.mode == "event" for channel in queues.channels().values()
+            ):
+                continue  # a wake with nothing to hand over
+            await self._run_turn(notification)
+
+    async def _run_turn(self, notification: dict[str, list[Any]]) -> None:
+        item_ids = list(self._consumed)
+        self.handle.events.add(TurnStarted(item_ids=item_ids, item_preview=_preview(notification)))
+        self._emit(TurnStartedUpdate(session_id=self.id, item_ids=item_ids))
+        self._settled.clear()
+        self._cancel_by = None
+        self.info.status = "running"
+        usage_before = self.info.usage.model_copy()
+        method = getattr(self.agent, self.options.turn_method)
+        self._turn_task = asyncio.create_task(method(notification), name=f"session-turn:{self.id}")
+        outcome: Any
+        kind: OutcomeKind
+        try:
+            outcome, kind = _classify(await self._turn_task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if (
+                self._cancel_by is None
+                or not self._turn_task.cancelled()
+                or (current is not None and current.cancelling())
+            ):
+                self._turn_task = None
+                self._settled.set()
+                raise
+            outcome, kind = TurnCancelledOutcome(by=self._cancel_by), "cancelled"
+        except Exception as exc:
+            logger.exception("Turn failed in session %s", self.id)
+            outcome, kind = TurnFailedError(f"{type(exc).__name__}: {exc}"), "error"
+        finally:
+            self._turn_task = None
+        self._settle(outcome, kind, usage_before)
+
+    def _settle(self, outcome: Any, kind: OutcomeKind, usage_before: Usage) -> None:
+        consumed, self._consumed = self._consumed, []
+        usage = _usage_delta(usage_before, self.info.usage)
+        data, result_type = _outcome_data(outcome, kind)
+        explanation = _explanation(outcome, kind)
+        self.handle.events.add(
+            TurnEnded(
+                outcome_kind=kind,
+                explanation=explanation,
+                result_json=json.dumps(data),
+                usage=usage,
+            )
+        )
+        waiting = self._waiting + consumed
+        if kind == "waiting":
+            self._waiting = waiting
+        else:
+            self._waiting = []
+            for item_id in waiting:
+                self._resolve(item_id, outcome)
+        self.info.status = "idle"
+        self._emit(
+            TurnEndedUpdate(
+                session_id=self.id,
+                outcome_kind=kind,
+                outcome=data,
+                result_type=result_type,
+                usage=usage,
+            )
+        )
+        self._settled.set()
+
+    def _resolve(self, item_id: str, outcome: Any) -> None:
+        future = self._futures.pop(item_id, None)
+        if future is None or future.done():
+            return
+        if isinstance(outcome, BaseException):
+            future.set_exception(outcome)
+        else:
+            future.set_result(outcome)
+
+    def _resolve_all(self, outcome: Outcome) -> None:
+        self._waiting = []
+        for item_id in list(self._futures):
+            self._resolve(item_id, outcome)
+
+    # ---- output ------------------------------------------------------
+
+    def subscribe(self, listener: Callable[[SessionEvent], None]) -> Callable[[], None]:
+        """Receive session updates (data only); returns an unsubscribe function."""
+        self._listeners.append(listener)
+
+        def unsubscribe() -> None:
+            with suppress(ValueError):
+                self._listeners.remove(listener)
+
+        return unsubscribe
+
+    def _emit(self, update: SessionEvent) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(update)
+            except Exception:
+                logger.warning("Session listener %r raised", listener, exc_info=True)
+
+    def _on_agent_event(self, event: Any) -> None:
+        if event._role is Role.RUNTIME_EVENT:
+            return
+        self._emit(
+            AgentEventUpdate(
+                session_id=self.id, event_id=str(event.id), event_type=event.event_type
+            )
+        )
+
+    def transcript(self, *, limit: int | None = None) -> list[TranscriptEntry]:
+        """The session's transcript as a person would see it; the last ``limit`` entries."""
+        entries = self.handle.transcript()
+        return entries if limit is None else entries[-limit:]
+
+
+def _classify(result: Any) -> tuple[Any, OutcomeKind]:
+    """Map a turn method's return value to an outcome; ``RespondResult`` is the older form."""
+    if isinstance(result, Done):
+        return result, "done"
+    if isinstance(result, NeedInput):
+        return result, "need_input"
+    if isinstance(result, Waiting):
+        return result, "waiting"
+    if isinstance(result, RespondResult):
+        if result.kind is RespondReason.DONE:
+            return Done(explanation=result.explanation), "done"
+        if result.kind is RespondReason.WAIT:
+            return Waiting(explanation=result.explanation, on=["*"]), "waiting"
+        return NeedInput(question=result.explanation), "need_input"
+    return TurnFailedError(f"turn returned {type(result).__name__}, not a turn result"), "error"
+
+
+def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str | None]:
+    """The outcome as JSON data, and the type of a pydantic ``Done.result``."""
+    if kind == "done":
+        result = outcome.result
+        result_type = type_name(result) if isinstance(result, BaseModel) else None
+        try:
+            return outcome.model_dump(mode="json"), result_type
+        except Exception:  # a result that is not data
+            return {"explanation": outcome.explanation, "result": repr(result)}, None
+    if kind == "need_input":
+        schema = (
+            outcome.answer_type.model_json_schema() if outcome.answer_type is not None else None
+        )
+        return {
+            "question": outcome.question,
+            "options": outcome.options,
+            "answer_schema": schema,
+        }, None
+    if kind == "waiting":
+        return outcome.model_dump(mode="json"), None
+    if kind == "cancelled":
+        return {"by": outcome.by}, None
+    return {"error": str(outcome)}, None
+
+
+def _explanation(outcome: Any, kind: OutcomeKind) -> str:
+    if kind in ("done", "waiting"):
+        return outcome.explanation
+    if kind == "need_input":
+        return outcome.question
+    if kind == "cancelled":
+        return f"cancelled by {outcome.by}"
+    return str(outcome)
+
+
+def _usage_delta(before: Usage, after: Usage) -> Usage:
+    return Usage(
+        input_tokens=after.input_tokens - before.input_tokens,
+        output_tokens=after.output_tokens - before.output_tokens,
+        cost_usd=after.cost_usd - before.cost_usd,
+    )

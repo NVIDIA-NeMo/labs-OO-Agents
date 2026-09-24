@@ -24,7 +24,7 @@ from nooa_coder.session.events import (
     SessionTitleUpdated,
     SessionUserMessage,
 )
-from nooa_coder.session.items import SessionInfo
+from nooa_coder.session.items import SessionInfo, TranscriptEntry
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,9 @@ _TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated", "TUISessionRename"))
 _USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
 _AGENT_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
 _TURN_EVENT_TYPES = _USER_EVENT_TYPES | _AGENT_EVENT_TYPES
+_TRANSCRIPT_EVENT_TYPES = _TURN_EVENT_TYPES | frozenset(
+    ("ItemAdmitted", "TurnEnded", "TurnCancelled")
+)
 
 
 def _normalise_workspace(workspace: str | Path) -> str:
@@ -50,6 +53,15 @@ def _connect_read_only(path: Path) -> sqlite3.Connection:
     """
     uri = f"{path.resolve().as_uri()}?mode=ro"
     return sqlite3.connect(uri, uri=True)
+
+
+def _item_text(item_json: str) -> str:
+    """Text of an admitted item: the string itself, else its JSON."""
+    try:
+        value = json.loads(item_json)
+    except (TypeError, json.JSONDecodeError):
+        return item_json
+    return value if isinstance(value, str) else item_json
 
 
 def _optional_str(value: object) -> str | None:
@@ -178,6 +190,10 @@ class SessionHandle:
 
     def turns(self) -> list[SessionTurn]:
         return self._store.load_turns(self.id)
+
+    def transcript(self) -> list[TranscriptEntry]:
+        """The session's transcript (see :meth:`SessionStore.load_transcript`)."""
+        return self._store.load_transcript(self.id)
 
     def close(self) -> None:
         if self._closed:
@@ -344,6 +360,66 @@ class SessionStore:
             except Exception:
                 logger.debug("Skipping invalid turn in %s", path, exc_info=True)
         return turns
+
+    def load_rows(
+        self, session_id: str, event_types: frozenset[str] | None = None
+    ) -> list[tuple[str, dict[str, object]]]:
+        """Raw ``(event_type, data)`` rows of a session, oldest first, read-only."""
+        return self._read_rows(self.path_for(session_id), event_types=event_types)
+
+    def load_transcript(self, session_id: str) -> list[TranscriptEntry]:
+        """What a person would see: their messages, replies, questions and cancels.
+
+        User messages are the items admitted on ``user_messages`` (and
+        steers), each shown once even when a steer was admitted again as a
+        message. Questions come from turns that ended with ``NeedInput``.
+        """
+        rows = self.load_rows(session_id, _TRANSCRIPT_EVENT_TYPES)
+        entries: list[TranscriptEntry] = []
+        seen_items: set[str] = set()
+        for event_type, raw in rows:
+            timestamp = self._timestamp(raw, fallback=0.0)
+            if event_type == "ItemAdmitted":
+                item_id = str(raw.get("item_id", ""))
+                if raw.get("channel") not in ("user_messages", "steer") or item_id in seen_items:
+                    continue
+                seen_items.add(item_id)
+                entries.append(
+                    TranscriptEntry(
+                        role="user",
+                        content=_item_text(str(raw.get("item_json", ""))),
+                        item_id=item_id,
+                        timestamp=timestamp,
+                    )
+                )
+            elif event_type in _USER_EVENT_TYPES:
+                content = raw.get("content", raw.get("text", ""))
+                entries.append(
+                    TranscriptEntry(role="user", content=str(content), timestamp=timestamp)
+                )
+            elif event_type in _AGENT_EVENT_TYPES:
+                entries.append(
+                    TranscriptEntry(
+                        role="agent", content=str(raw.get("content", "")), timestamp=timestamp
+                    )
+                )
+            elif event_type == "TurnEnded" and raw.get("outcome_kind") == "need_input":
+                entries.append(
+                    TranscriptEntry(
+                        role="question",
+                        content=str(raw.get("explanation", "")),
+                        timestamp=timestamp,
+                    )
+                )
+            elif event_type == "TurnCancelled":
+                entries.append(
+                    TranscriptEntry(
+                        role="cancelled",
+                        content=f"Stopped by {raw.get('by', '')}",
+                        timestamp=timestamp,
+                    )
+                )
+        return entries
 
     def find_by_prefix(self, prefix: str) -> list[str]:
         if not prefix or any(separator in prefix for separator in ("/", "\\", "\x00")):
