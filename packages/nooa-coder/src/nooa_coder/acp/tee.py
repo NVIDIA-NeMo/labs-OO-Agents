@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """A JSON-RPC tee: record every ACP frame in both directions to a JSON Lines log.
 
+Two forms. ``FrameLog`` is an observer on the server's own ACP connection
+(``nooa-coder --tee PATH``). The relay below wraps any server command.
+
 ``nooa-coder-tee --log PATH -- COMMAND...`` runs any agent server command
 as a child process and relays its standard input and output unchanged,
 appending one record per frame: ``{"ts": <unix time>, "dir": "in"|"out",
@@ -20,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -40,7 +44,7 @@ def open_private_log(path: Path) -> IO[str]:
 
 def frame_record(direction: str, frame: Any) -> str:
     """One log line for a frame travelling in ``direction`` (``in`` or ``out``)."""
-    return json.dumps({"ts": time.time(), "dir": direction, "frame": frame}) + "\n"
+    return json.dumps({"ts": time.time(), "dir": direction, "frame": frame}, default=str) + "\n"
 
 
 def _decode(line: bytes) -> Any:
@@ -155,3 +159,51 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+class FrameLog:
+    """The in-process tee (``nooa-coder --tee PATH``): an ACP connection observer.
+
+    Pass it to ``run_agent(..., observers=[...])``; the connection calls it
+    with every parsed frame it reads (``in``) or writes (``out``). The call
+    runs on the connection's receive loop, so it only queues the record; a
+    daemon thread writes it. When ``max_pending`` records are waiting, new
+    ones are dropped and counted in ``dropped`` rather than stalling ACP.
+    """
+
+    def __init__(self, path: Path, *, max_pending: int = 10_000) -> None:
+        self._file = open_private_log(path)
+        self._queue: queue.Queue[str | None] = queue.Queue(maxsize=max_pending)
+        self._closed = False
+        self.dropped = 0
+        self._thread = threading.Thread(target=self._write_loop, name="nooa-coder-tee", daemon=True)
+        self._thread.start()
+
+    def __call__(self, event: Any) -> None:
+        from acp.connection import StreamDirection
+
+        if self._closed:
+            return
+        direction = "in" if event.direction == StreamDirection.INCOMING else "out"
+        try:
+            self._queue.put_nowait(frame_record(direction, event.message))
+        except queue.Full:
+            self.dropped += 1
+
+    def _write_loop(self) -> None:
+        while (record := self._queue.get()) is not None:
+            try:
+                self._file.write(record)
+                self._file.flush()
+            except (OSError, ValueError):
+                return
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Write what is queued (waiting up to ``timeout`` seconds) and close the file."""
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put(None)
+        self._thread.join(timeout)
+        if not self._thread.is_alive():
+            self._file.close()
