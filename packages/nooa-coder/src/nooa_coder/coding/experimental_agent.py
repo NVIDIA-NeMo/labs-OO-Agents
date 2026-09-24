@@ -7,7 +7,7 @@ from __future__ import annotations
 import datetime  # noqa: F401 — module capability exposed to generated Python cells
 import json  # noqa: F401 — module capability exposed to generated Python cells
 import re  # noqa: F401 — module capability exposed to generated Python cells
-from typing import Any
+from typing import Annotated, Any
 
 # Optional data libraries follow the standard InteractiveAgent capability aliases.
 try:
@@ -47,7 +47,7 @@ with hidden:
     from nooa_coder.coding.conditions import require_result
 
 # CodeActV2 replaces the framework context blocks with a concise self doc.
-_V2_CONTEXT = {
+_V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
     "state": None,
     "execution_context": None,
     "context_usage": None,
