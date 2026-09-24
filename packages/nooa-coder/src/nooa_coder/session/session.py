@@ -241,22 +241,33 @@ class Session:
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
+        # Nothing here may stop the handle from closing: a failure is logged
+        # and the rest of the close goes on, so the file lock is released.
         self._closing = True
-        if self._before_close is not None:
-            await self._before_close()
-        await self._stop_turn(by="host")
-        if self._loop_task is not None:
-            self._loop_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._loop_task
+        try:
+            if self._before_close is not None:
+                await self._before_close()
+        except Exception:
+            logger.exception("Session %s: closing its children failed", self.id)
+        try:
+            await self._stop_turn(by="host")
+            if self._loop_task is not None:
+                self._loop_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._loop_task
+        except Exception:
+            logger.exception("Session %s: stopping the turn loop failed", self.id)
         self._resolve_all(TurnCancelledOutcome(by="host"))
-        await self.wait_for_checkpoint()
+        with suppress(Exception):
+            await self.wait_for_checkpoint()
         self._unsubscribe_agent()
         self._unsubscribe_steers()
         try:
             await self.agent.queue_manager.shutdown()
             await self.agent.aclose()
             await self._close_owned_llm()
+        except Exception:
+            logger.exception("Session %s: closing the agent failed", self.id)
         finally:
             self.handle.close()
             self._closed = True
@@ -536,7 +547,28 @@ class Session:
                 channel.mode == "event" for channel in queues.channels().values()
             ):
                 continue  # a wake with nothing to hand over
-            await self._run_turn(notification)
+            try:
+                await self._run_turn(notification)
+            except Exception as exc:
+                # The loop must outlive any turn: fail what the turn owed and go on.
+                logger.exception("Session %s: turn bookkeeping failed", self.id)
+                self._fail_turn(exc)
+
+    def _fail_turn(self, exc: Exception) -> None:
+        """Settle a turn whose own settling failed: its prompts get ``TurnFailedError``."""
+        self._turn_task = None
+        owed, self._waiting, self._consumed = self._waiting + self._consumed, [], []
+        error = TurnFailedError(f"{type(exc).__name__}: {exc}")
+        for item_id in owed:
+            self._resolve(item_id, error)
+        self.info.status = "idle"
+        with suppress(Exception):
+            self._emit(
+                TurnEndedUpdate(
+                    session_id=self.id, outcome_kind="error", outcome={"error": str(error)}
+                )
+            )
+        self._settled.set()
 
     async def _run_turn(self, notification: dict[str, list[Any]]) -> None:
         if self._pending_model is not None:
@@ -557,15 +589,16 @@ class Session:
             outcome, kind = _classify(await self._turn_task)
         except asyncio.CancelledError:
             current = asyncio.current_task()
-            if (
-                self._cancel_by is None
-                or not self._turn_task.cancelled()
-                or (current is not None and current.cancelling())
-            ):
+            if current is not None and current.cancelling():
+                # The loop itself is being cancelled (close): not a turn outcome.
                 self._turn_task = None
                 self._settled.set()
                 raise
-            outcome, kind = TurnCancelledOutcome(by=self._cancel_by), "cancelled"
+            if self._cancel_by is not None:
+                outcome, kind = TurnCancelledOutcome(by=self._cancel_by), "cancelled"
+            else:
+                # Something inside the turn cancelled it, not cancel().
+                outcome, kind = TurnFailedError("turn was cancelled from inside"), "error"
         except Exception as exc:
             logger.exception("Turn failed in session %s", self.id)
             outcome, kind = TurnFailedError(f"{type(exc).__name__}: {exc}"), "error"
@@ -574,7 +607,9 @@ class Session:
         self._settle(outcome, kind, usage_before)
 
     def _settle(self, outcome: Any, kind: OutcomeKind, usage_before: Usage) -> None:
-        consumed, self._consumed = self._consumed, []
+        # Items stay in self._consumed / self._waiting until the end, so a
+        # failure part way leaves them for _fail_turn to resolve.
+        consumed = list(self._consumed)
         if kind == "cancelled":
             self._record_cancel(outcome.by)
         self._admit_leftover_steers()
@@ -590,12 +625,12 @@ class Session:
             )
         )
         waiting = self._waiting + consumed
-        if kind == "waiting":
-            self._waiting = waiting
-        else:
-            self._waiting = []
+        if kind != "waiting":
             for item_id in waiting:
                 self._resolve(item_id, outcome)
+            waiting = []
+        self._waiting = waiting
+        self._consumed = [i for i in self._consumed if i not in consumed]
         if kind != "cancelled":
             self._checkpoint()
         self.info.status = "idle"
