@@ -12,6 +12,8 @@ import pytest
 from coder_test_agents import ask, cell, done, reply, wait_on
 from nooa_coder.session import session as session_module
 from nooa_coder.session.items import (
+    CommandInfo,
+    CommandResult,
     Receipt,
     TurnCancelled,
     TurnCancelledOutcome,
@@ -490,3 +492,25 @@ async def test_usage_counts_the_sessions_own_tokens(make_session):
     assert session.info.usage.cost_usd == pytest.approx(1.5)
     assert [e.usage.input_tokens for e in ended] == [200, 100]
     assert [raw["usage"]["output_tokens"] for _, raw in _rows(session, "TurnEnded")] == [40, 20]
+
+
+async def test_commands_delegate_to_the_agents_registry(make_session):
+    session, _ = make_session(agent_spec="coder_test_agents:CommandAgent", start=False)
+    assert session.commands() == [
+        CommandInfo(name="model", description="Show or switch the model", input_hint="[alias]"),
+        CommandInfo(name="clear", description="Clear", input_hint=None),
+    ]
+    result = await session.invoke_command("model", "fast")
+    assert result == CommandResult(
+        text="model is fast", output_to_agent=False, data={"alias": "fast"}
+    )
+    assert session.agent.slash_commands.invoked == [("model", "fast")]
+    with pytest.raises(KeyError):
+        await session.invoke_command("nope", "")
+
+
+async def test_an_agent_without_commands_has_none(make_session):
+    session, _ = make_session(start=False)
+    assert session.commands() == []
+    with pytest.raises(KeyError):
+        await session.invoke_command("model", "")

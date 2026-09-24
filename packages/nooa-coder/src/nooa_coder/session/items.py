@@ -184,6 +184,26 @@ class SessionInfo(BaseModel):
     usage: Usage = Field(default_factory=Usage)
 
 
+class CommandInfo(BaseModel):
+    """A slash command a session offers."""
+
+    name: str
+    description: str = ""
+    input_hint: str | None = None
+
+
+class CommandResult(BaseModel):
+    """What a slash command returned: text to show, and data for clients that know it.
+
+    ``output_to_agent`` says whether the command meant its output for the
+    agent; the host decides whether to send it on.
+    """
+
+    text: str
+    output_to_agent: bool = False
+    data: dict[str, Any] | None = None
+
+
 class _Update(BaseModel):
     session_id: str
 
