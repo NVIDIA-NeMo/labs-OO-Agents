@@ -47,9 +47,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import signal
+import socket
+import subprocess
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, NamedTuple
 
 from acp import PROTOCOL_VERSION, RequestError
@@ -57,7 +60,7 @@ from acp.connection import StreamDirection, StreamEvent
 from acp.schema import InitializeRequest, ListSessionsRequest
 from pydantic import ValidationError
 
-from nooa_coder.acp.framing import Frame, encode, read_frame
+from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_coder.acp.server import initialize_response, list_sessions
 from nooa_coder.session.store import InvalidSessionIdError, SessionNotFoundError, SessionStore
 
@@ -99,6 +102,51 @@ class WorkerProcess(NamedTuple):
 
 Spawn = Callable[[int], Awaitable[WorkerProcess]]
 Observer = Callable[[StreamEvent], Any]
+
+
+def process_spawn(command: Sequence[str]) -> Spawn:
+    """The real spawn: ``command --worker-fd N --id-base B`` on one end of a socket pair.
+
+    The worker gets its own session and process group (so the router can
+    kill everything it started), no standard input, and standard output
+    sent to standard error: only the router writes to the client's
+    standard output, and the client must see end of stream when the router
+    dies. Standard error is inherited. The router's copy of the worker's
+    end is closed right after the spawn, so the router sees end of stream
+    when the worker dies.
+    """
+
+    async def spawn(k: int) -> WorkerProcess:
+        ours, theirs = socket.socketpair()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                "--worker-fd",
+                str(theirs.fileno()),
+                "--id-base",
+                str(k << ID_SHIFT),
+                stdin=subprocess.DEVNULL,
+                stdout=2,
+                start_new_session=True,
+                pass_fds=(theirs.fileno(),),
+            )
+        except BaseException:
+            ours.close()
+            raise
+        finally:
+            theirs.close()
+        logger.info("worker %d pid %d started", k, process.pid)
+        reader, writer = await asyncio.open_unix_connection(sock=ours, limit=FRAME_LIMIT)
+
+        def kill() -> None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass  # the group is gone (PermissionError: macOS, a zombie leader)
+
+        return WorkerProcess(reader, writer, process.wait, kill, pid=process.pid)
+
+    return spawn
 
 
 class _Worker:
@@ -181,15 +229,19 @@ class Router:
             finally:
                 await self._close_client(stdout_task, writer)
 
-    async def serve_stdio(self) -> None:
+    async def serve_stdio(
+        self, *, input_fd: int | None = None, output_fd: int | None = None
+    ) -> None:
         """Serve the client on this process's standard input and output.
 
-        The first SIGTERM starts the same shutdown as end of input; a second
-        one gets the default action, so a hung shutdown can still be killed.
+        ``input_fd``/``output_fd`` are the real standard input and output
+        when the entry point reserved them for ACP
+        (``cli.reserve_stdio_for_acp``), so a stray print in the router
+        cannot reach the client. The first SIGTERM
+        starts the same shutdown as end of input; a second one gets the
+        default action, so a hung shutdown can still be killed.
         """
-        from acp.stdio import stdio_streams
-
-        from nooa_coder.acp.framing import FRAME_LIMIT
+        from nooa_coder.acp.server import open_stdio
 
         loop = asyncio.get_running_loop()
         previous = signal.getsignal(signal.SIGTERM)
@@ -206,7 +258,7 @@ class Router:
         except (NotImplementedError, RuntimeError):
             pass  # not the main thread
         try:
-            reader, writer = await stdio_streams(limit=FRAME_LIMIT)
+            reader, writer = await open_stdio(input_fd, output_fd)
             await self.serve(reader, writer)
         finally:
             if installed:

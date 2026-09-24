@@ -100,12 +100,6 @@ def test_sessions_dir_and_tee_are_passed_on(served, tmp_path):
     assert served["tee"] == tmp_path / "t.jsonl"
 
 
-def test_worker_mode_is_not_available_yet(served):
-    result = _invoke(["--model", "m", "--worker", "/tmp/socket"])
-    assert result.exit_code == 2
-    assert "--worker" in result.output
-
-
 def test_the_command_is_the_nooa_coder_plugin():
     from nooa_cli.commands import discover_commands
 
