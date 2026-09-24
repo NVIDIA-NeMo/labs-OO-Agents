@@ -7,13 +7,16 @@ no live objects. Sessions, hosts and parent agents exchange these values;
 live agents never cross.
 """
 
-from typing import Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.interactive import Done, NeedInput
+
+if TYPE_CHECKING:
+    from nooa_coder.session.port import SessionPort
 
 SessionStatus = Literal["running", "idle", "retained", "closed", "on_disk"]
 ChildStatus = Literal["running", "idle", "retained", "closed"]
@@ -57,6 +60,36 @@ class ChildRef(BaseModel):
     depth: int
     status: ChildStatus
 
+    async def wait(self) -> Done:
+        """Wait for the child's next ``Done`` and return it.
+
+        Raises ``ChildFailedError`` if the child fails or is closed first.
+        """
+        return await _port().wait_child(self.id)
+
+    async def send(self, item: Any, *, channel: str = "user_messages") -> "Receipt":
+        """Send an item (text or data) to the child on one of its channels."""
+        return await _port().send_child(self.id, item, channel=channel)
+
+    async def steer(self, text: str) -> "Receipt":
+        """Give the child's running turn extra text; queued if it is idle."""
+        return await _port().steer_child(self.id, text)
+
+    async def close(self) -> None:
+        """Close the child session (its children first)."""
+        await _port().close_child(self.id)
+
+    @property
+    def info(self) -> "SessionInfo":
+        """The child's current metadata."""
+        return _port().child_info(self.id)
+
+
+def _port() -> "SessionPort":
+    from nooa_coder.session.port import require_port
+
+    return require_port()
+
 
 class ChildFailedError(RuntimeError):
     """Raised by ``ChildRef.wait()`` when the child fails or is closed before a ``Done``."""
@@ -86,6 +119,10 @@ class ChildQuestion(BaseModel):
         """Convert a child's ``NeedInput``; its answer class becomes a JSON schema."""
         schema = need.answer_type.model_json_schema() if need.answer_type is not None else None
         return cls(child=child, question=need.question, options=need.options, answer_schema=schema)
+
+    async def answer(self, answer: Any) -> "Receipt":
+        """Send the answer to the child; shorthand for ``self.child.send(answer)``."""
+        return await self.child.send(answer)
 
 
 class ChildFailed(BaseModel):

@@ -17,13 +17,27 @@ from pathlib import Path
 from typing import Any
 
 from nooa.events import TuiSessionResumed
+from nooa.interactive import Done
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa_coder.session.events import ChildDeleted, ItemRequeued
-from nooa_coder.session.items import ChildCreatedUpdate, SessionEvent, SessionInfo, SessionStatus
+from nooa_coder.session.items import (
+    ChildCreatedUpdate,
+    ChildFailed,
+    ChildFailedError,
+    ChildQuestion,
+    ChildRef,
+    ChildResult,
+    Receipt,
+    SessionEvent,
+    SessionInfo,
+    SessionStatus,
+    TurnEndedUpdate,
+)
 from nooa_coder.session.loader import AgentFactory, default_agent_factory, load_typed
 from nooa_coder.session.options import SessionOptions
+from nooa_coder.session.port import install_port
 from nooa_coder.session.session import Session
-from nooa_coder.session.store import SessionHandle, SessionStore
+from nooa_coder.session.store import SessionHandle, SessionNotFoundError, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +65,10 @@ class SessionRegistry:
         self.sessions: dict[str, Session] = {}
         self._reserved: dict[str, asyncio.Future[Session | None]] = {}
         self._agent_factory: AgentFactory = agent_factory or default_agent_factory
+        # Parent-side delivery state, by child id.
+        self._waiters: dict[str, asyncio.Future[Done]] = {}
+        self._queued: dict[str, list[tuple[Receipt, ChildResult | ChildFailed]]] = {}
+        self._background: set[asyncio.Task[None]] = set()
 
     # ---- create ------------------------------------------------------
 
@@ -126,6 +144,7 @@ class SessionRegistry:
         agent = contextvars.Context().run(self._agent_factory, options, handle.storage)
         session = Session(options=options, agent=agent, handle=handle)
         session._before_close = lambda: self._close_children(session.id)
+        install_port(agent, session, self)
         return session
 
     def _discard(
@@ -148,13 +167,137 @@ class SessionRegistry:
     def _publish(self, session: Session, reservation: asyncio.Future[Session | None]) -> None:
         self.sessions[session.id] = session
         session.subscribe(lambda update: self._on_update(session, update))
+        if session.parent_id is not None:
+            session.subscribe(lambda update: self._deliver(session, update))
         self._reserved.pop(session.id, None)
         if not reservation.done():
             reservation.set_result(session)
 
     def _on_update(self, session: Session, update: SessionEvent) -> None:
-        if update.kind == "closed" and self.sessions.get(session.id) is session:
+        if update.kind != "closed":
+            return
+        if self.sessions.get(session.id) is session:
             del self.sessions[session.id]
+        waiter = self._waiters.pop(session.id, None)
+        if waiter is not None and not waiter.done():
+            waiter.set_exception(ChildFailedError(f"Child {session.name!r} was closed"))
+
+    # ---- child results -----------------------------------------------
+
+    def child_ref(self, child: Session) -> ChildRef:
+        """A data handle on a live child."""
+        status = _live_status(child)
+        return ChildRef(
+            id=child.id,
+            name=child.name or "",
+            depth=child.depth,
+            status="running" if status == "on_disk" else status,
+        )
+
+    def _deliver(self, child: Session, update: SessionEvent) -> None:
+        """Route a child's turn result to its live parent (a detached child keeps its own)."""
+        if not isinstance(update, TurnEndedUpdate):
+            return
+        ancestor = self.sessions.get(child.parent_id) if child.parent_id else None
+        parent = ancestor
+        while ancestor is not None:
+            ancestor.add_attributed_usage(update.usage)
+            ancestor = self.sessions.get(ancestor.parent_id) if ancestor.parent_id else None
+        if parent is None or parent._closing or parent._closed:
+            return
+        kind = update.outcome_kind
+        if kind not in ("done", "need_input", "error"):
+            return
+        ref = self.child_ref(child)
+        source = f"child:{child.name or child.id}"
+        waiter = self._waiters.pop(child.id, None)
+        if waiter is not None and waiter.done():
+            waiter = None
+        if kind == "done":
+            done = _rebuild_done(update)
+            if waiter is not None:
+                waiter.set_result(done)
+            else:
+                self._put(parent, child.id, ChildResult(child=ref, done=done), source)
+        elif kind == "error":
+            error = str(update.outcome.get("error", "the child's turn failed"))
+            if waiter is not None:
+                waiter.set_exception(ChildFailedError(error))
+            else:
+                self._put(parent, child.id, ChildFailed(child=ref, error=error), source)
+        else:
+            question = ChildQuestion(
+                child=ref,
+                question=str(update.outcome.get("question", "")),
+                options=update.outcome.get("options"),
+                answer_schema=update.outcome.get("answer_schema"),
+            )
+            if waiter is not None:
+                waiter.set_exception(
+                    ChildFailedError(
+                        f"Child {child.name!r} asked a question; answer the ChildQuestion "
+                        "that arrives on the delegates channel"
+                    )
+                )
+            parent._admit(question, channel="delegates", source=source)
+            return
+        if not child.options.retain:
+            # Not from inside this callback: closing awaits the child's own loop.
+            task = asyncio.get_running_loop().create_task(self.close(child.id))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+
+    def _put(
+        self, parent: Session, child_id: str, item: ChildResult | ChildFailed, source: str
+    ) -> None:
+        receipt = parent._admit(item, channel="delegates", source=source)
+        self._queued.setdefault(child_id, []).append((receipt, item))
+
+    def take_queued_result(self, parent: Session, child_id: str) -> Done | None:
+        """Withdraw a result of this child still queued for the parent, and return it.
+
+        Raises ``ChildFailedError`` for a queued failure.
+        """
+        queued = self._queued.get(child_id, [])
+        while queued:
+            receipt, item = queued.pop(0)
+            if parent.withdraw(receipt):
+                if isinstance(item, ChildFailed):
+                    raise ChildFailedError(item.error)
+                return item.done
+        return None
+
+    def waiter(self, child_id: str) -> asyncio.Future[Done]:
+        """The future the next ``Done`` of this child resolves (instead of a delegates item)."""
+        waiter = self._waiters.get(child_id)
+        if waiter is None or waiter.done():
+            waiter = asyncio.get_running_loop().create_future()
+            self._waiters[child_id] = waiter
+        return waiter
+
+    async def open_child(self, parent: Session, child_id: str) -> Session:
+        """A child of ``parent``: the live one, or loaded from disk with inherited options."""
+        live = self.sessions.get(child_id)
+        if live is not None:
+            return live
+        try:
+            info = self.store.get(child_id)
+        except SessionNotFoundError as exc:
+            raise ChildFailedError(f"Child {child_id!r} does not exist") from exc
+        if info.parent_id != parent.id:
+            raise ChildFailedError(f"Session {child_id!r} is not a child of {parent.id!r}")
+        options = parent.options.inherit(
+            name=info.name,
+            model=info.model or None,
+            retain=info.retained,
+            turn_method="handle" if info.retained else "handle_batch",
+        )
+        return await self.load(child_id, options)
+
+    def info(self, session_id: str) -> SessionInfo:
+        """Metadata of a session, live or on disk."""
+        live = self.sessions.get(session_id)
+        return self.live_info(live) if live is not None else self.store.get(session_id)
 
     # ---- load --------------------------------------------------------
 
@@ -330,3 +473,11 @@ def _live_status(session: Session) -> SessionStatus:
     if session.parent_id is not None and session.options.retain:
         return "retained"
     return "idle"
+
+
+def _rebuild_done(update: TurnEndedUpdate) -> Done:
+    """The child's ``Done`` rebuilt from data; a pydantic result comes back as its class."""
+    done = Done.model_validate(update.outcome)
+    if update.result_type is not None and done.result is not None:
+        done.result = load_typed(update.result_type, done.result)
+    return done
