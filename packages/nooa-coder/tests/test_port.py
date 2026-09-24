@@ -12,6 +12,7 @@ from coder_test_agents import (
     cell,
     done,
     fresh_events,
+    until,
     wait_on,
 )
 from nooa_coder.session.items import ChildRef, TaskResult
@@ -29,14 +30,6 @@ TIMEOUT = 20
 
 def _turns(registry, session_id):
     return registry.store.load_rows(session_id, frozenset({"TurnStarted"}))
-
-
-async def _until(predicate):
-    async def poll():
-        while not predicate():
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(poll(), TIMEOUT)
 
 
 async def test_the_port_is_installed_visible_and_not_snapshotted(registry, root_options, caplog):
@@ -72,7 +65,7 @@ async def test_delegate_and_wait_returns_the_childs_done(registry, root_options,
     # The throwaway child is closed after its result, which went to the
     # waiter only: the parent ran no extra turn for it.
     [child_info] = registry.children(root.id)
-    await _until(lambda: registry.get(child_info.id) is None)
+    await until(lambda: registry.get(child_info.id) is None)
     await asyncio.sleep(0.05)
     assert len(_turns(registry, root.id)) == 1
     assert root.agent.queue_manager.get_channel("delegates").qsize() == 0
@@ -301,7 +294,7 @@ async def test_waiting_turn_does_not_resolve_the_prompt(registry, root_options, 
     models.scripts[None] = [wait_on("jobs")]
     root = await registry.create(root_options)
     pending = asyncio.ensure_future(root.prompt("go"))
-    await _until(lambda: len(_turns(registry, root.id)) == 1)
+    await until(lambda: len(_turns(registry, root.id)) == 1)
     await asyncio.sleep(0.05)
     assert not pending.done()
     await root.cancel()
@@ -313,8 +306,9 @@ async def test_wait_takes_a_result_that_is_already_queued(registry, root_options
         cell(
             "child = await self.session.delegate('Quick', 'q')\n"
             "delegates = self.queue_manager.get_channel('delegates')\n"
-            "while delegates.qsize() == 0:\n"
-            "    await asyncio.sleep(0.01)\n"
+            "async with asyncio.timeout(5):\n"
+            "    while delegates.qsize() == 0:\n"
+            "        await asyncio.sleep(0.01)\n"
             "done = await child.wait()\n"
             "return_result(Done(explanation=done.explanation))"
         )
@@ -351,7 +345,7 @@ async def test_a_result_for_a_cancelled_wait_arrives_on_delegates(registry, root
     await asyncio.wait_for(first, TIMEOUT)
     assert registry._waiters == {}
     block.set()
-    await _until(lambda: len(ended) == 2)
+    await until(lambda: len(ended) == 2)
     assert ended[1].outcome == {"explanation": "ChildResult: kid done", "result": None}
 
 
@@ -423,7 +417,7 @@ async def test_closed_children_are_on_disk_everywhere(registry, root_options, mo
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     [info] = registry.children(root.id)
-    await _until(lambda: registry.get(info.id) is None)
+    await until(lambda: registry.get(info.id) is None)
     [ref] = root.agent.session.children()
     assert ref.status == "on_disk" == registry.children(root.id)[0].status
     assert registry._ref_from_disk(info.id).status == "on_disk"

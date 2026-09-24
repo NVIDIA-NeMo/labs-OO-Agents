@@ -15,6 +15,7 @@ from coder_test_agents import (
     cell,
     done,
     fresh_events,
+    until,
 )
 from nooa_coder.session.events import TurnEnded
 from nooa_coder.session.registry import (
@@ -100,8 +101,7 @@ async def test_initial_items_are_in_the_first_notification(registry, root_option
         initial_items=[("user_messages", "THE-PROMPT"), ("context", {"k": "THE-CONTEXT"})],
     )
     child.subscribe(lambda e: seen.append(e) if e.kind == "turn_ended" else None)
-    while not seen:
-        await asyncio.sleep(0.01)
+    await until(lambda: seen)
     first_call = str(models.llms["child"].calls[0].messages)
     assert "THE-PROMPT" in first_call and "THE-CONTEXT" in first_call
 
@@ -195,8 +195,7 @@ async def test_load_restores_state_and_requeues_unhandled_items(
         loaded = await fresh.load(root.id)
         ended = []
         loaded.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
-        while not ended:
-            await asyncio.sleep(0.01)
+        await until(lambda: ended)
         assert loaded.agent.v.note == "kept"
         [resumed] = resumed_events
         assert (resumed.session_id, resumed.restored) == (root.id, True)
@@ -309,8 +308,7 @@ async def test_a_given_client_is_not_rebuilt_or_closed(root_options, sessions_di
 
 
 async def _until_closed(llm):
-    while not llm.closed:
-        await asyncio.sleep(0.01)
+    await until(lambda: llm.closed)
 
 
 async def test_set_model_swaps_the_client_before_the_next_turn(root_options, sessions_dir):
@@ -416,11 +414,7 @@ async def test_prepare_on_load_sees_requeued_turns_but_not_on_attach(
 
 
 async def _until_turn_ended(seen):
-    async def poll():
-        while not any(e.kind == "turn_ended" for e in seen):
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(poll(), TIMEOUT)
+    await until(lambda: any(e.kind == "turn_ended" for e in seen))
 
 
 async def test_load_takes_options_from_the_record(registry, root_options, sessions_dir):
