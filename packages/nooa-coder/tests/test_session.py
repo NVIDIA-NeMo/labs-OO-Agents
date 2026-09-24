@@ -17,7 +17,7 @@ from nooa_coder.session.session import TurnFailedError
 from nooa_coder.session.store import SessionStore
 
 from nooa.context_blocks.roles import Role
-from nooa.events import PythonOutput, ResultStatus
+from nooa.events import Notification, PythonOutput, ResultStatus
 from nooa.interactive import Done, NeedInput
 
 TIMEOUT = 20
@@ -260,3 +260,85 @@ async def test_idle_cancel_while_waiting_closes_the_prompt_without_an_event(make
     assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="user")
     assert not [e for e in session.agent.event_manager.values() if isinstance(e, TurnCancelled)]
     assert await session.cancel() is False
+
+
+async def test_steer_during_a_turn_reaches_the_next_model_call(make_session):
+    started, block = agents.fresh_events()
+    session, llm = make_session(cell(agents.BLOCKING_CELL), done("steered"))
+    pending = asyncio.ensure_future(session.prompt("write the parser"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+
+    receipt = await session.steer("STEER-focus-on-tests")
+    assert (receipt.channel, receipt.delivered) == ("steer", "steered")
+    block.set()
+    assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="steered")
+
+    assert len(llm.calls) == 2
+    assert "STEER-focus-on-tests" not in str(llm.calls[0].messages)
+    assert "STEER-focus-on-tests" in str(llm.calls[1].messages)
+    notes = [e for e in session.agent.event_manager.values() if isinstance(e, Notification)]
+    assert [(n.source, n.description) for n in notes] == [("steer:user", "STEER-focus-on-tests")]
+    user_lines = [e.content for e in session.transcript() if e.role == "user"]
+    assert user_lines == ["write the parser", "STEER-focus-on-tests"]
+
+
+async def test_steer_after_the_last_model_call_becomes_the_next_message(make_session):
+    started, block = agents.fresh_events()
+    session, llm = make_session(
+        cell(agents.BLOCKING_CELL + "return_result(Done(explanation='first'))"),
+        done("second"),
+    )
+    turns = []
+    session.subscribe(lambda e: turns.append(e) if e.kind == "turn_ended" else None)
+    pending = asyncio.ensure_future(session.prompt("start"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+
+    receipt = await session.steer("STEER-late")
+    assert receipt.delivered == "steered"
+    block.set()
+    assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="first")
+    while len(turns) < 2:
+        await asyncio.sleep(0.01)
+
+    assert len(llm.calls) == 2
+    assert "STEER-late" not in str(llm.calls[0].messages)
+    assert str(llm.calls[1].messages).count("STEER-late") == 1
+    assert not [e for e in session.agent.event_manager.values() if isinstance(e, Notification)]
+    admitted = [
+        raw for _, raw in _rows(session, "ItemAdmitted") if raw["item_id"] == receipt.item_id
+    ]
+    assert [raw["channel"] for raw in admitted] == ["steer", "user_messages"]
+    assert [e.content for e in session.transcript() if e.role == "user"] == ["start", "STEER-late"]
+
+
+async def test_steer_while_idle_is_a_submit(make_session):
+    session, _ = make_session(start=False)
+    receipt = await session.steer("hello")
+    assert (receipt.channel, receipt.delivered) == ("user_messages", "queued")
+    assert session.agent.queue_manager.get_channel("user_messages").qsize() == 1
+
+
+async def test_a_steer_left_by_a_cancel_is_admitted_after_the_cancel(make_session):
+    started, _block = agents.fresh_events()
+    session, llm = make_session(cell(agents.BLOCKING_CELL), done("handled the steer"))
+    turns = []
+    session.subscribe(lambda e: turns.append(e) if e.kind == "turn_ended" else None)
+    pending = asyncio.ensure_future(session.prompt("start"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    receipt = await session.steer("STEER-then-stop")
+    assert await asyncio.wait_for(session.cancel(), TIMEOUT) is True
+    assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="user")
+    while len(turns) < 2:
+        await asyncio.sleep(0.01)
+
+    order = [
+        (event_type, raw.get("channel"))
+        for event_type, raw in _rows(session, "TurnCancelled", "ItemAdmitted")
+        if event_type == "TurnCancelled" or raw["item_id"] == receipt.item_id
+    ]
+    assert order == [
+        ("ItemAdmitted", "steer"),
+        ("TurnCancelled", None),
+        ("ItemAdmitted", "user_messages"),
+    ]
+    assert "STEER-then-stop" in str(llm.calls[1].messages)
