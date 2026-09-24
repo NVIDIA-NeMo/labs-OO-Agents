@@ -3,6 +3,7 @@
 """SessionRegistry: the tree of live sessions and their files."""
 
 import asyncio
+import contextlib
 import sqlite3
 
 import pytest
@@ -580,3 +581,35 @@ async def test_a_closing_parent_gets_no_new_children(registry, root_options, ses
     finally:
         root._closing = False
     assert _db_files(sessions_dir) == before
+
+
+async def test_a_steer_buffered_at_a_crash_is_requeued(
+    registry, root_options, models, sessions_dir
+):
+    started, _block = fresh_events()
+    models.scripts[None] = [cell(BLOCKING_CELL)]
+    root = await registry.create(root_options)
+    first = asyncio.ensure_future(root.prompt("start"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    receipt = await root.steer("STEER-CRASH")
+    # Crash: the loop dies without settling the turn, and the file is let go.
+    root._loop_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await root._loop_task
+    root.handle.close()
+    first.cancel()
+
+    later = ScriptedModels({None: [done("resumed")]})
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=later)
+    try:
+        loaded = await fresh.load(root.id)
+        assert await asyncio.wait_for(loaded.outcome(receipt.item_id), TIMEOUT) == Done(
+            explanation="resumed"
+        )
+        assert "STEER-CRASH" in str(later.llms[None].calls[0].messages)
+        requeued = [
+            raw["item_id"] for _, raw in fresh.store.load_rows(root.id, frozenset({"ItemRequeued"}))
+        ]
+        assert receipt.item_id in requeued
+    finally:
+        await fresh.close_all()
