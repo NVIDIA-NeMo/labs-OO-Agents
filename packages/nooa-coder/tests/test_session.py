@@ -164,8 +164,10 @@ async def test_turns_run_in_a_fresh_context(make_session):
 async def test_a_failing_turn_raises_from_prompt_and_the_loop_goes_on(make_session):
     session, llm = make_session(done("first"))
     assert await asyncio.wait_for(session.prompt("one"), TIMEOUT) == Done(explanation="first")
-    with pytest.raises(TurnFailedError):
+    with pytest.raises(TurnFailedError) as failed:
         await asyncio.wait_for(session.prompt("two"), TIMEOUT)  # no scripted response left
+    assert isinstance(failed.value.error, Exception)
+    assert failed.value.__cause__ is failed.value.error
     [_, (_, ended)] = _rows(session, "TurnEnded")
     assert ended["outcome_kind"] == "error"
 

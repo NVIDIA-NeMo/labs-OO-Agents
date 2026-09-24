@@ -505,8 +505,10 @@ async def test_a_failing_turn_record_does_not_stop_the_loop(registry, root_optio
         return add(event, **kwargs)
 
     root.handle.events.add = failing_add
-    with pytest.raises(TurnFailedError):
+    with pytest.raises(TurnFailedError) as failed:
         await asyncio.wait_for(root.prompt("one"), 5)
+    assert isinstance(failed.value.error, sqlite3.OperationalError)
+    assert failed.value.__cause__ is failed.value.error
     assert await asyncio.wait_for(root.prompt("two"), 5) == Done(explanation="second")
     await registry.close_all()
     assert not registry.store.is_active(root.id)
