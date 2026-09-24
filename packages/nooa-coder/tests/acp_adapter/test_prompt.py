@@ -279,3 +279,41 @@ async def test_a_failing_command_reports_the_failure(make_adapter, workspace, cl
     agent.slash_commands.invoke = broken
     assert (await _prompt(adapter, session_id, "/model x")).stop_reason == "end_turn"
     assert client.texts(AgentMessageChunk, session_id)[-1] == "/model failed: command exploded"
+
+
+# ---- titles ------------------------------------------------------------------
+
+
+async def test_the_first_prompt_asks_the_agent_for_a_title(coder_adapter, workspace, client):
+    from acp.schema import SessionInfoUpdate
+
+    adapter = await coder_adapter(
+        [
+            cell(
+                "await self.rename_session('Parser fix')\n"
+                "self.message('On it.')\n"
+                "return_result(Done(explanation='titled'))"
+            ),
+            reply("Second."),
+        ]
+    )
+    session_id = await _new(adapter, workspace)
+    await _prompt(adapter, session_id, "fix the parser")
+    await _prompt(adapter, session_id, "and the lexer")
+    [llm] = adapter.test_models.made
+    assert "[session-title]" in str(llm.calls[0].messages)
+    assert "[session-title]" not in str(llm.calls[1].messages[-3:])
+    titles = [u.title for u in client.updates(session_id, SessionInfoUpdate) if u.title]
+    assert titles == ["Parser fix"]
+    # The request is housekeeping: not part of the conversation.
+    entries = adapter.registry.get(session_id).transcript()
+    assert [e.content for e in entries if e.role == "user"] == ["fix the parser", "and the lexer"]
+
+
+async def test_a_session_that_has_a_title_is_not_asked_again(make_adapter, workspace):
+    models = ScriptedModels({None: [reply("Hi.")]})
+    adapter = await make_adapter(models, agent_spec="coder_test_agents:EchoAgent")
+    session_id = await _new(adapter, workspace)
+    await adapter.registry.get(session_id).set_title("Chosen", user_set=True)
+    await _prompt(adapter, session_id, "hello")
+    assert "[session-title]" not in str(models.llms[None].calls[0].messages)
