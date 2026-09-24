@@ -33,13 +33,13 @@ from acp import (
     NewSessionResponse,
     PromptResponse,
     RequestError,
-    run_agent,
     start_tool_call,
     text_block,
     update_agent_message,
     update_tool_call,
     update_user_message,
 )
+from acp.agent.connection import AgentSideConnection
 from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
 from acp.helpers import update_available_commands
 from acp.interfaces import Agent, Client
@@ -90,7 +90,7 @@ from nooa_coder.session.session import (
     SessionClosedError,
     TurnFailedError,
 )
-from nooa_coder.session.store import InvalidSessionIdError, SessionNotFoundError
+from nooa_coder.session.store import InvalidSessionIdError, SessionNotFoundError, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -368,62 +368,16 @@ class CoderACPAgent:
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
     ) -> ListSessionsResponse:
-        """Root sessions with at least one message, most recent first.
-
-        ``cwd`` keeps one workspace; without it every workspace is listed
-        (the store is per user). Sessions held by another process are left
-        out: opening them would fail. ``_meta["dev.nooa/status"]`` is
-        ``running``, ``idle`` or ``retained`` for sessions live here, else
-        ``on_disk``.
-        """
+        """Root sessions with at least one message, most recent first (see ``list_sessions``)."""
         del kwargs
-        root = self._validate_workspace(cwd, None) if cwd is not None else None
-        try:
-            offset = int(cursor) if cursor is not None else 0
-        except ValueError:
-            raise RequestError.invalid_params(
-                {"cursor": cursor, "reason": "Invalid cursor"}
-            ) from None
-        if offset < 0:
-            raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"})
-        store = self.registry.store
 
-        def scan() -> list[tuple[Any, bool]]:
-            # Pure filesystem work, one lock probe per session: off the loop.
-            return [
-                (info, store.is_active(info.id))
-                for info in store.list(workspace=root, roots_only=True)
-                if info.turn_count > 0
-            ]
+        def live(session_id: str) -> tuple[str, str | None] | None:
+            session = self.registry.get(session_id)
+            if session is None:
+                return None
+            return self.registry.live_info(session).status, session.info.title
 
-        found: list[tuple[Any, str]] = []
-        for info, active in await asyncio.to_thread(scan):
-            live = self.registry.get(info.id)
-            if live is not None:
-                status = self.registry.live_info(live).status
-                info = info.model_copy(update={"title": live.info.title or info.title})
-            elif active:
-                continue
-            else:
-                status = "on_disk"
-            workspace = info.workspace if Path(info.workspace).is_absolute() else None
-            workspace = workspace or (str(root) if root is not None else None)
-            if workspace is None:
-                continue  # ACP requires an absolute cwd for every entry
-            found.append((info.model_copy(update={"workspace": workspace}), status))
-        page = found[offset : offset + _SESSION_PAGE_SIZE]
-        sessions = [
-            ACPSessionInfo(
-                session_id=info.id,
-                cwd=info.workspace,
-                title=info.title or f"Untitled session [{info.id[:8]}]",
-                updated_at=datetime.fromtimestamp(info.last_active, UTC).isoformat(),
-                field_meta={"dev.nooa/status": status},
-            )
-            for info, status in page
-        ]
-        next_cursor = str(offset + len(page)) if len(found) > offset + len(page) else None
-        return ListSessionsResponse(sessions=sessions, next_cursor=next_cursor)
+        return await list_sessions(self.registry.store, cwd=cwd, cursor=cursor, live=live)
 
     # ---- close and delete ----------------------------------------------
 
@@ -1051,6 +1005,71 @@ def _slash_invocation(text: str) -> tuple[str, str] | None:
     return name, parts[1] if len(parts) == 2 else ""
 
 
+async def list_sessions(
+    store: SessionStore,
+    *,
+    cwd: str | None = None,
+    cursor: str | None = None,
+    live: Callable[[str], tuple[str, str | None] | None] = lambda _session_id: None,
+) -> ListSessionsResponse:
+    """Root sessions with at least one message, most recent first.
+
+    ``cwd`` keeps one workspace; without it every workspace is listed
+    (the store is per user). ``live(session_id)`` returns ``(status,
+    title)`` for a session that runs in this process (or, for the router,
+    in one of its workers), else ``None``. Sessions held by another
+    process are left out: opening them would fail. ``_meta["dev.nooa/status"]``
+    is the live status (``running``, ``idle`` or ``retained``) or ``on_disk``.
+
+    Read-only: the store is scanned without claiming any session, so the
+    router can answer ``session/list`` without a worker.
+    """
+    root = CoderACPAgent._validate_workspace(cwd, None) if cwd is not None else None
+    try:
+        offset = int(cursor) if cursor is not None else 0
+    except ValueError:
+        raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"}) from None
+    if offset < 0:
+        raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"})
+
+    def scan() -> list[tuple[Any, bool]]:
+        # Pure filesystem work, one lock probe per session: off the loop.
+        return [
+            (info, store.is_active(info.id))
+            for info in store.list(workspace=root, roots_only=True)
+            if info.turn_count > 0
+        ]
+
+    found: list[tuple[Any, str]] = []
+    for info, active in await asyncio.to_thread(scan):
+        here = live(info.id)
+        if here is not None:
+            status, title = here
+            info = info.model_copy(update={"title": title or info.title})
+        elif active:
+            continue
+        else:
+            status = "on_disk"
+        workspace = info.workspace if Path(info.workspace).is_absolute() else None
+        workspace = workspace or (str(root) if root is not None else None)
+        if workspace is None:
+            continue  # ACP requires an absolute cwd for every entry
+        found.append((info.model_copy(update={"workspace": workspace}), status))
+    page = found[offset : offset + _SESSION_PAGE_SIZE]
+    sessions = [
+        ACPSessionInfo(
+            session_id=info.id,
+            cwd=info.workspace,
+            title=info.title or f"Untitled session [{info.id[:8]}]",
+            updated_at=datetime.fromtimestamp(info.last_active, UTC).isoformat(),
+            field_meta={"dev.nooa/status": status},
+        )
+        for info, status in page
+    ]
+    next_cursor = str(offset + len(page)) if len(found) > offset + len(page) else None
+    return ListSessionsResponse(sessions=sessions, next_cursor=next_cursor)
+
+
 def _load_error(session_id: str, exc: BaseException) -> BaseException:
     """The protocol error for a failed ``registry.load``; other errors pass through."""
     if isinstance(exc, (SessionNotFoundError, InvalidSessionIdError)):
@@ -1134,6 +1153,57 @@ async def _stdio_streams(
     return reader, asyncio.StreamWriter(transport, protocol, None, loop)
 
 
+async def open_stdio(
+    input_fd: int | None = None, output_fd: int | None = None
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Streams for ACP frames: on the reserved descriptors when given, else stdin and stdout."""
+    if input_fd is not None and output_fd is not None:
+        return await _stdio_streams(input_fd, output_fd)
+    from acp.stdio import stdio_streams
+
+    return await stdio_streams(limit=DEFAULT_STDIO_BUFFER_LIMIT_BYTES)
+
+
+async def serve_connection(
+    agent: Any,
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    id_base: int | None = None,
+    observers: list[Callable[[Any], None]] | None = None,
+) -> None:
+    """Serve ACP for ``agent`` on one stream pair until the peer closes it.
+
+    Used on standard input and output (``serve``) and on a router's
+    socket (the worker). ``id_base`` is the first id of the requests this
+    side sends to the client (permission, elicitation, file and terminal
+    requests); a router gives each worker its own range so replies can be
+    routed by id alone.
+    """
+    # session/close is registered by the library as unstable. initialize()
+    # advertises the close capability, so without this flag the agent
+    # promises a method that answers "method not found".
+    conn = AgentSideConnection(
+        cast(Agent, agent),
+        writer,
+        reader,
+        listening=False,
+        use_unstable_protocol=True,
+        observers=list(observers or []),
+    )
+    if id_base is not None:
+        # acp 0.11 has no option for the first request id: every
+        # agent-to-client request takes Connection._next_request_id and
+        # increments it. Seed it before listen() so no request can go out
+        # with the library's default of 0.
+        # TODO(upstream): ask agent-client-protocol for a request-id option.
+        conn._conn._next_request_id = id_base
+    try:
+        await conn.listen()
+    finally:
+        await asyncio.shield(conn.close())
+
+
 async def serve(
     registry: SessionRegistry,
     *,
@@ -1175,19 +1245,8 @@ async def serve(
     except (NotImplementedError, RuntimeError):
         pass  # Non-Unix event loops or an embedded server outside the main thread.
     try:
-        # session/close is registered by the router as unstable. initialize()
-        # advertises the close capability, so without this flag the agent
-        # promises a method that answers "method not found".
-        streams: tuple[Any, Any] = (None, None)
-        if input_fd is not None and output_fd is not None:
-            reader, writer = await _stdio_streams(input_fd, output_fd)
-            streams = (writer, reader)
-        await run_agent(
-            cast(Agent, adapter),
-            *streams,
-            use_unstable_protocol=True,
-            observers=list(observers or []),
-        )
+        reader, writer = await open_stdio(input_fd, output_fd)
+        await serve_connection(adapter, reader, writer, observers=observers)
     except asyncio.CancelledError:
         if not terminating:
             raise
@@ -1201,4 +1260,11 @@ async def serve(
                 signal.signal(signal.SIGTERM, previous_sigterm)
 
 
-__all__ = ["CoderACPAgent", "initialize_response", "serve"]
+__all__ = [
+    "CoderACPAgent",
+    "initialize_response",
+    "list_sessions",
+    "open_stdio",
+    "serve",
+    "serve_connection",
+]
