@@ -30,6 +30,11 @@ to follow semantic versioning.
   delegation, the `create_session_agent` factory, mentions, identity and an
   experimental agent. The ACP server keeps using `nooa_coder.acp.dispatcher`
   for now.
+- `InteractiveAgent.rename_session()` sets the current session's title through
+  the host's session handle; a title the user chose is kept. `RespondReason`
+  no longer has `GET_USER_INPUT`; passing it raises a validation error that
+  points to `NEED_INPUT`. `InteractiveAgent.v` now returns the shared
+  `PersistentVars` proxy (`AgentVars` is an alias).
 - Remove `nooa.interactive` (no compatibility module). `InteractiveAgent`,
   `AgentMessage`, `AgentVars`, `RespondReason`, `RespondResult`,
   `RespondKind` and `DEFAULT_MODEL` are now in `nooa_coder.interactive_agent`;

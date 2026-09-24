@@ -94,11 +94,51 @@ def test_message_records_event_and_renders(agent):
     assert events[0].content == "**hi**"
 
 
+def test_rename_session_uses_shared_session_handle(agent, tmp_path):
+    from nooa_coder.sessions import SessionStore
+
+    with SessionStore(tmp_path).create() as handle:
+        agent._session_manager = handle
+        assert agent.rename_session('  "Debug   input"  ') == "Debug input"
+        assert handle.info.title == "Debug input"
+        assert handle.info.title_is_user_set is False
+
+
+def test_rename_session_preserves_user_selected_title(agent, tmp_path):
+    from nooa_coder.sessions import SessionStore
+
+    with SessionStore(tmp_path).create() as handle:
+        handle.set_title("My chosen title", user_set=True)
+        agent._session_manager = handle
+        assert agent.rename_session("Automatic title") == "My chosen title"
+        assert handle.info.title == "My chosen title"
+
+
+def test_rename_session_without_a_session_handle_is_an_error(agent):
+    with pytest.raises(RuntimeError, match="does not provide session renaming"):
+        agent.rename_session("Some title")
+
+
+def test_rename_session_is_model_visible_but_request_helper_is_hidden(agent):
+    rendered = str(doc(agent))
+    assert "rename_session" in rendered
+    assert "request_session_title" not in rendered
+
+
+def test_session_title_request_is_not_a_core_agent_concern(agent):
+    assert not hasattr(agent, "request_session_title")
+
+
 def test_respond_result_requires_explanation():
     result = RespondResult(kind=RespondReason.DONE, explanation="did the thing")
     assert result.kind is RespondReason.DONE
     with pytest.raises(ValidationError):
         RespondResult(kind=RespondReason.DONE, explanation="   ")
+
+
+def test_respond_result_rejects_removed_get_user_input_reason():
+    with pytest.raises(ValidationError, match="use RespondReason.NEED_INPUT"):
+        RespondResult(kind="GET_USER_INPUT", explanation="legacy reason")
 
 
 def test_install_summarizer_none_policy_is_noop(agent):

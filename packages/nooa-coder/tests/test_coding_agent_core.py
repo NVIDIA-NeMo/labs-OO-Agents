@@ -330,3 +330,30 @@ async def test_summarization_status_reports_disabled_policy(tmp_path):
         }
     finally:
         await agent.close()
+
+
+async def test_session_title_request_is_answered_by_rename_session(tmp_path):
+    """request_session_title asks the model to call rename_session; that call must work.
+
+    The host (SessionTitleRequest) queues the housekeeping prompt once per
+    attached, untitled session. The prompt names ``self.rename_session``, so
+    the method must exist on CodingAgent and write through the session handle.
+    """
+    from nooa_coder.interactive.session_title import SessionTitleRequest
+    from nooa_coder.sessions import SessionStore
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        with SessionStore(tmp_path / "sessions").create() as handle:
+            agent._session_manager = handle
+            assert SessionTitleRequest().request(agent, "fix the flaky parser test")
+            prompt = agent._system_messages_in.pop_last()
+            assert 'self.rename_session("your title")' in prompt
+            assert "fix the flaky parser test" in prompt
+
+            assert agent.rename_session("Parser test fix") == "Parser test fix"
+            assert handle.info.title == "Parser test fix"
+            # A titled session is not asked again.
+            assert not SessionTitleRequest().request(agent, "another message")
+    finally:
+        await agent.close()
