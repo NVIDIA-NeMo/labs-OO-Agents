@@ -220,6 +220,11 @@ class Router:
         stop_task = asyncio.create_task(self._stop.wait())
         try:
             await asyncio.wait({read_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            if read_task.done() and not read_task.cancelled() and read_task.exception():
+                logger.error(
+                    "The router stops: reading the client failed",
+                    exc_info=read_task.exception(),
+                )
         finally:
             read_task.cancel()
             stop_task.cancel()
@@ -477,6 +482,10 @@ class Router:
             root_id = await asyncio.to_thread(self._root_of, session_id)
         except (SessionNotFoundError, InvalidSessionIdError):
             self._fail(frame.id, RequestError.resource_not_found(session_id))
+            return
+        except Exception as exc:
+            logger.exception("Could not find the root of session %s", session_id)
+            self._fail(frame.id, RequestError.internal_error({"details": str(exc)}))
             return
         # No await from here on: the lookups and the mapping are one step, so a
         # second load of the same tree finds the worker this one chose.
