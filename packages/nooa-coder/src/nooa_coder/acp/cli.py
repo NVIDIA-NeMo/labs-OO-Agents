@@ -6,11 +6,32 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import click
+
+_acp_stdout: int | None = None
+
+
+def reserve_stdout_for_acp() -> int:
+    """Keep standard output for ACP frames only; return the descriptor frames go to.
+
+    The server's own stdout is its protocol channel, but libraries print
+    (``nooa.tracing`` prints "OTel tracing enabled ..." when it finds an
+    endpoint), and one stray line corrupts the stream. The real stdout is
+    duplicated for the ACP transport, and descriptor 1 (and so ``print``
+    and anything else writing to it, including C code) is pointed at
+    standard error. Idempotent.
+    """
+    global _acp_stdout
+    if _acp_stdout is None:
+        sys.stdout.flush()
+        _acp_stdout = os.dup(1)
+        os.dup2(2, 1)
+    return _acp_stdout
 
 
 def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str | None) -> Any:
@@ -79,6 +100,7 @@ def command(
     worker: str | None,
 ) -> None:
     """Serve the NOOA coding agent over ACP on standard input/output."""
+    reserve_stdout_for_acp()
     from nooa.secrets import load_secrets_into_env
 
     if agent_spec and legacy_agent:
@@ -123,6 +145,7 @@ def run(
     agent_factory: Any = None,
 ) -> None:
     """Serve ACP on stdio until the client leaves (the test fixture's entry point too)."""
+    acp_stdout = reserve_stdout_for_acp()
     asyncio.run(
         _serve(
             llm_factory=llm_factory,
@@ -131,6 +154,7 @@ def run(
             sessions_dir=sessions_dir,
             tee=tee,
             agent_factory=agent_factory,
+            acp_stdout=acp_stdout,
         )
     )
 
@@ -143,6 +167,7 @@ async def _serve(
     sessions_dir: Path | None,
     tee: Path | None,
     agent_factory: Any,
+    acp_stdout: int,
 ) -> None:
     from nooa_coder.acp._mcp_trace import MCPHandoffTrace
     from nooa_coder.acp.server import serve
@@ -160,7 +185,13 @@ async def _serve(
     if frame_log is not None:
         observers.append(frame_log)
     try:
-        await serve(registry, agent_spec=agent_spec, model=model, observers=observers)
+        await serve(
+            registry,
+            agent_spec=agent_spec,
+            model=model,
+            observers=observers,
+            output_fd=acp_stdout,
+        )
     finally:
         if frame_log is not None:
             frame_log.close()

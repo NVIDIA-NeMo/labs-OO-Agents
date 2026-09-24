@@ -5,7 +5,8 @@
 Runs the real server (``nooa_coder.acp.cli.run``) and the real coding
 agent with a fake model. Flags pick the model's script: ``--blocking``
 (a cell that never ends), ``--shell`` (a cell blocked in a shell command),
-``--question`` (asks which branch, then finishes); default: one message
+``--question`` (asks which branch, then finishes), ``--noisy`` (prints to
+stdout while building each session's model, as tracing does); default: one message
 and ``Done``. ``--tee PATH`` turns on the in-process tee.
 """
 
@@ -40,6 +41,9 @@ def _cell(code: str) -> LLMResponse:
 
 
 def llm_factory(alias, workspace) -> FakeLLMClient:
+    if "--noisy" in sys.argv:
+        # What nooa.tracing does when it finds an endpoint: print to stdout.
+        print("OTel tracing enabled: noise on stdout", flush=True)
     if "--shell" in sys.argv:
         # Blocks inside a real shell command, so cancellation exercises
         # ActivityShellTools.run rather than a bare asyncio wait.

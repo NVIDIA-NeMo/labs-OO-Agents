@@ -15,6 +15,8 @@ def served(monkeypatch):
     """Capture what the command would serve with, instead of serving."""
     captured: dict = {}
     monkeypatch.setattr("nooa_coder.acp.cli.run", lambda **kwargs: captured.update(kwargs))
+    # The real one repoints this process's stdout at stderr.
+    monkeypatch.setattr("nooa_coder.acp.cli.reserve_stdout_for_acp", lambda: 1)
     monkeypatch.setattr("nooa.secrets.load_secrets_into_env", lambda *a, **k: None)
     return captured
 
