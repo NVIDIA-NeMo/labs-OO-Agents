@@ -1637,6 +1637,8 @@ provides-extras = ["ast", "datascience"]
 name = "nooa-coder"
 source = { editable = "packages/nooa-coder" }
 dependencies = [
+    { name = "agent-client-protocol" },
+    { name = "click" },
     { name = "nooa", extra = ["mcp"] },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -1654,6 +1656,8 @@ ast = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-client-protocol", specifier = ">=0.11,<0.12" },
+    { name = "click", specifier = ">=8.1.0" },
     { name = "nooa", extras = ["mcp"], editable = "." },
     { name = "pydantic", specifier = ">=2.5.0" },
     { name = "pyyaml", specifier = ">=6.0" },
