@@ -158,3 +158,29 @@ async def test_rename_session_sets_the_title_through_the_port(
     assert outcome == Done(explanation="Parser fix")
     assert root.info.title == "Parser fix"
     assert coder_registry.store.get(root.id).title == "Parser fix"
+
+
+async def test_a_title_request_submitted_by_the_host_is_recorded_and_answered(
+    coder_registry, coder_options, coder_models
+):
+    """The host admits the request through the Session, so it is recorded like any item."""
+    from nooa_coder.coding.agent import session_title_request
+
+    coder_models.scripts[None] = [
+        cell(
+            "[request] = notification['system_messages']\n"
+            "assert request.startswith('[session-title]')\n"
+            "await self.rename_session('Parser fix')\n"
+            "return_result(Done(explanation='titled'))"
+        )
+    ]
+    root = await coder_registry.create(coder_options)
+    receipt = await root.submit(
+        session_title_request("fix the parser"), channel="system_messages", source="host"
+    )
+    assert await asyncio.wait_for(root.outcome(receipt.item_id), TIMEOUT) == Done(
+        explanation="titled"
+    )
+    assert root.info.title == "Parser fix"
+    [admitted] = coder_registry.store.load_rows(root.id, frozenset({"ItemAdmitted"}))
+    assert (admitted[1]["channel"], admitted[1]["source"]) == ("system_messages", "host")

@@ -333,18 +333,20 @@ async def test_summarization_status_reports_disabled_policy(tmp_path):
         await agent.aclose()
 
 
-async def test_the_session_title_request_asks_for_an_awaited_rename(tmp_path):
-    """request_session_title asks the model to await rename_session, which needs a session.
+def test_the_session_title_request_asks_for_an_awaited_rename():
+    """The title request is text a host submits; it names the awaited rename."""
+    from nooa_coder.coding.agent import session_title_request
 
-    Renaming goes through the Session port; the session-driven test is in
-    test_coding_delegation.py.
-    """
+    prompt = session_title_request("  fix the flaky parser test  ")
+    assert prompt.startswith("[session-title]")
+    assert 'await self.rename_session("your title")' in prompt
+    assert "<opening_user_message>\nfix the flaky parser test\n</opening_user_message>" in prompt
+    assert not hasattr(CodingAgent, "request_session_title")
+
+
+async def test_rename_session_needs_a_session(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
-        agent.request_session_title("fix the flaky parser test")
-        prompt = agent._system_messages_in.pop_last()
-        assert 'await self.rename_session("your title")' in prompt
-        assert "fix the flaky parser test" in prompt
         with pytest.raises(RuntimeError, match="not running in a session"):
             await agent.rename_session("Parser test fix")
     finally:

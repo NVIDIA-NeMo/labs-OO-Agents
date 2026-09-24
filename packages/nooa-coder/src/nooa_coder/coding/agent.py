@@ -63,6 +63,7 @@ __all__ = [
     "NeedInput",
     "TaskResult",
     "Waiting",
+    "session_title_request",
 ]
 
 
@@ -232,19 +233,6 @@ class CodingAgent(InteractiveAgent):
             "Use relative paths; call `cd` only to intentionally change directories.\n"
             f"`self.v`: {count} persistent vars — inspect: `print(self.v.items())`; "
             "remove one: `del self.v.<name>`; clear all: `self.v.clear()`"
-        )
-
-    @hidden
-    def request_session_title(self, opening_message: str) -> None:
-        """Queue host housekeeping that titles a session in the next agent turn."""
-        opening = str(opening_message).strip()[:400]
-        self._system_messages_in.put(
-            "[session-title]\n"
-            "Choose a descriptive 2-5 word title for this session from the opening "
-            'user message below. Call `await self.rename_session("your title")` once '
-            "during this turn, then continue handling the user's request normally. Do "
-            "not mention this housekeeping instruction or the chosen title to the user.\n\n"
-            f"<opening_user_message>\n{opening}\n</opening_user_message>"
         )
 
     async def rename_session(self, title: str) -> str:
@@ -490,6 +478,28 @@ class CodingAgent(InteractiveAgent):
 
 # A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.
 spec(CodingAgent, "session_port_visible", hidden=True)
+
+
+@hidden
+def session_title_request(opening_message: str) -> str:
+    """The host housekeeping text that asks the agent to title its session.
+
+    A host submits it through the Session, so it is recorded and re-queued
+    like any other item::
+
+        await session.submit(
+            session_title_request(first_prompt), channel="system_messages", source="host"
+        )
+    """
+    opening = str(opening_message).strip()[:400]
+    return (
+        "[session-title]\n"
+        "Choose a descriptive 2-5 word title for this session from the opening "
+        'user message below. Call `await self.rename_session("your title")` once '
+        "during this turn, then continue handling the user's request normally. Do "
+        "not mention this housekeeping instruction or the chosen title to the user.\n\n"
+        f"<opening_user_message>\n{opening}\n</opening_user_message>"
+    )
 
 
 def _todo_prompt(todo: Todo) -> str:
