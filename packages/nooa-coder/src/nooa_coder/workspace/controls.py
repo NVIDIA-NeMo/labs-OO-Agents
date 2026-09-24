@@ -61,6 +61,19 @@ class BehaviorControl:
         self._registry = command_registry
 
     @property
+    def name(self) -> str:
+        """The command name, without the slash."""
+        raise NotImplementedError
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        """Check the parsed arguments; return ``(ok, error)``."""
+        raise NotImplementedError
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        """Run the command with validated arguments."""
+        raise NotImplementedError
+
+    @property
     def skills_dirs(self):
         return getattr(self._registry, "skills_dirs", self.config.skills_dirs)
 

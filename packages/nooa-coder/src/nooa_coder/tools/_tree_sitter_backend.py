@@ -14,6 +14,9 @@ Usage (internal — called by repo_tools.py)::
     )
 """
 
+# tree-sitter is an optional extra; every use is guarded by TREE_SITTER_AVAILABLE.
+# pyright: reportMissingImports=false, reportPossiblyUnboundVariable=false
+
 from __future__ import annotations
 
 import logging

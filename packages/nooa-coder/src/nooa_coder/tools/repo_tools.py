@@ -214,7 +214,7 @@ class RepoResult(BaseModel):
     def __bool__(self) -> bool:
         return len(self.matches) > 0
 
-    def __iter__(self) -> Iterator[Match]:
+    def __iter__(self) -> Iterator[Match]:  # pyright: ignore[reportIncompatibleMethodOverride]
         return iter(self.matches)
 
     def __getitem__(self, index: int) -> Match:
@@ -347,9 +347,8 @@ def _anchor(
     ``BashSession``). Only a scripted session over its own filesystem asks
     for read-only anchors.
     """
-    if _MATCH_HAS_EDITABLE:
-        return Match(path, start, end, text, resolved_path=resolved_path, editable=editable)
-    return Match(path, start, end, text, resolved_path=resolved_path)
+    extra: dict[str, bool] = {"editable": editable} if _MATCH_HAS_EDITABLE else {}
+    return Match(path, start, end, text, resolved_path=resolved_path, **extra)
 
 
 def _line_match_from_lines(

@@ -113,9 +113,9 @@ def _resolve_configured(path: str | Path, workspace: Path) -> Path:
 def _read_project_settings(path: Path) -> Mapping[str, Any]:
     if not path.is_file():
         return {}
-    try:
-        import yaml
+    import yaml
 
+    try:
         value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         logger.warning("Failed to read coding settings %s: %s", path, exc)
@@ -127,9 +127,9 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
     """Read the pre-settings-YAML ``[tui].libs_dirs`` compatibility key."""
     if not path.is_file():
         return []
-    try:
-        import tomllib
+    import tomllib
 
+    try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         logger.warning("Failed to read legacy coding settings %s: %s", path, exc)
