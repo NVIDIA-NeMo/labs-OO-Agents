@@ -11,11 +11,16 @@ Output leaves as data: session updates to subscribers and the transcript.
 
 import asyncio
 import contextvars
+import hashlib
 import json
 import logging
+import sqlite3
+import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -31,6 +36,7 @@ from nooa.interactive import (
     Waiting,
 )
 from nooa.runtime.channels import Channel
+from nooa.storage.json_snapshot import snapshot_to_json
 from nooa_coder.session.events import (
     ItemAdmitted,
     ItemConsumed,
@@ -94,6 +100,29 @@ def item_to_json(item: Any) -> str:
         ) from exc
 
 
+def _write_snapshot(path: Path, blob: str) -> None:
+    """Insert one serialised snapshot into the session file's ``snapshots`` table.
+
+    Runs in a worker thread on its own connection. It cannot go through
+    the session's ``SQLiteStorageManager``: that one's connection belongs
+    to the event loop thread, and a second manager would try to take the
+    session's file lock, which this process already holds. The row
+    matches what ``SQLiteStorageManager.save_snapshot`` writes, so
+    ``restore_latest_snapshot`` reads it back.
+    """
+    uri = f"{path.resolve().as_uri()}?mode=rw"
+    connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    try:
+        connection.execute("PRAGMA busy_timeout=5000")
+        with connection:
+            connection.execute(
+                "INSERT INTO snapshots (snapshot_id, created_at, data) VALUES (?, ?, ?)",
+                (str(uuid.uuid4()), datetime.now(UTC).isoformat(), blob),
+            )
+    finally:
+        connection.close()
+
+
 def _preview(value: Any, limit: int = 120) -> str:
     text = value if isinstance(value, str) else repr(value)
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -146,6 +175,8 @@ class Session:
         self._before_close: Callable[[], Awaitable[None]] | None = None
         self._loop_context_hooks: list[Callable[[], None]] = []
         self._pending_steers: list[tuple[str, str, str]] = []  # (item_id, text, source)
+        self._snapshot_digest: str | None = None
+        self._checkpoint_task: asyncio.Task[None] | None = None
         self._unsubscribe_agent = agent.event_manager.on("*", self._on_agent_event)
         self._unsubscribe_steers = agent.event_manager.on("BeforeTurn", self._flush_steers)
 
@@ -189,6 +220,7 @@ class Session:
             with suppress(asyncio.CancelledError):
                 await self._loop_task
         self._resolve_all(TurnCancelledOutcome(by="host"))
+        await self.wait_for_checkpoint()
         self._unsubscribe_agent()
         self._unsubscribe_steers()
         try:
@@ -504,6 +536,8 @@ class Session:
             self._waiting = []
             for item_id in waiting:
                 self._resolve(item_id, outcome)
+        if kind != "cancelled":
+            self._checkpoint()
         self.info.status = "idle"
         self._emit(
             TurnEndedUpdate(
@@ -515,6 +549,48 @@ class Session:
             )
         )
         self._settled.set()
+
+    def _checkpoint(self) -> None:
+        """Save the agent's state if it changed since the last checkpoint.
+
+        The snapshot is serialised and hashed here, on the loop, where the
+        agent is not changing; only the write happens in a thread. Writes
+        run one after another. A failure is logged and the turn is not
+        affected; the next settled turn tries again.
+        """
+        try:
+            blob = json.dumps(snapshot_to_json(self.agent), sort_keys=True)
+        except Exception:
+            logger.warning(
+                "Session %s: checkpoint could not serialise the agent", self.id, exc_info=True
+            )
+            return
+        digest = hashlib.sha256(blob.encode()).hexdigest()
+        if digest == self._snapshot_digest:
+            return
+        self._snapshot_digest = digest
+        previous = self._checkpoint_task
+        path = self.handle.path
+
+        async def write() -> None:
+            if previous is not None:
+                with suppress(Exception):
+                    await previous
+            try:
+                await asyncio.to_thread(_write_snapshot, path, blob)
+            except Exception:
+                self._snapshot_digest = None
+                logger.warning("Session %s: checkpoint write failed", self.id, exc_info=True)
+
+        self._checkpoint_task = asyncio.get_running_loop().create_task(
+            write(), name=f"session-checkpoint:{self.id}"
+        )
+
+    async def wait_for_checkpoint(self) -> None:
+        """Wait until the checkpoint writes started so far have finished."""
+        task = self._checkpoint_task
+        if task is not None:
+            await asyncio.shield(task)
 
     def _record_cancel(self, by: str) -> None:
         """Append ``TurnCancelled`` after the interrupted cell's output, and tell listeners."""
