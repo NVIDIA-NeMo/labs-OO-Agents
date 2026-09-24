@@ -66,4 +66,6 @@ def test_approval_store_write_failure_does_not_double_close_fd(tmp_path, monkeyp
     with pytest.raises(OSError, match="replace failed"):
         store._write({"version": 1, "approvals": {}})
 
-    assert len(closed) == len(set(closed)), f"fd closed more than once: {closed}"
+    # The file object's own close does not go through os.close, so any entry
+    # here is a direct close of a descriptor os.fdopen() already owns.
+    assert closed == [], f"fd closed directly after os.fdopen took ownership: {closed}"
