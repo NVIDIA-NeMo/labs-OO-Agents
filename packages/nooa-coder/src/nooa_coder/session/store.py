@@ -42,6 +42,18 @@ def _normalise_workspace(workspace: str | Path) -> str:
     return str(Path(workspace).expanduser().resolve())
 
 
+def _optional_str(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _int(value: object, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    return default
+
+
 class InvalidSessionIdError(ValueError):
     """Raised before an unsafe or empty session ID can become a file path."""
 
@@ -176,7 +188,11 @@ class SessionStore:
         model: str = "",
         agent: str = "",
         workspace: str = "",
-        origin: str = "",
+        host: str = "",
+        parent_id: str | None = None,
+        depth: int = 0,
+        name: str | None = None,
+        retained: bool = False,
         session_id: str | None = None,
         check_same_thread: bool = True,
     ) -> SessionHandle:
@@ -191,10 +207,14 @@ class SessionStore:
         for event_type in SESSION_EVENT_TYPES:
             events.register_event_type(event_type)
         started = SessionStarted(
-            origin=origin,
+            host=host,
             model=model,
             agent=agent,
-            working_directory=workspace,
+            workspace=workspace,
+            parent_id=parent_id,
+            depth=depth,
+            name=name,
+            retained=retained,
         )
         try:
             events.add(started)
@@ -212,7 +232,11 @@ class SessionStore:
                 created_at=timestamp,
                 last_active=timestamp,
                 workspace=workspace,
-                host=origin,
+                host=host,
+                parent_id=parent_id,
+                depth=depth,
+                name=name,
+                retained=retained,
             ),
         )
 
@@ -361,14 +385,20 @@ class SessionStore:
             created_at=started_at,
             last_active=last_active,
             turn_count=turn_count,
-            workspace=str(start.get("working_directory", start.get("working_dir", ""))),
+            workspace=str(
+                start.get("workspace", start.get("working_directory", start.get("working_dir", "")))
+            ),
+            parent_id=_optional_str(start.get("parent_id")),
+            depth=_int(start.get("depth"), default=0),
+            name=_optional_str(start.get("name")),
+            retained=bool(start.get("retained", False)),
             title=title,
             title_is_user_set=title_is_user_set,
             host=str(
                 start.get(
-                    "origin",
+                    "host",
                     start.get(
-                        "host",
+                        "origin",
                         "tui" if start_event_type == "TUISessionStart" else "",
                     ),
                 )

@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """SessionStore: durable session files, their metadata and listing."""
 
+import json
+import sqlite3
+
 from nooa_coder.session.items import SessionInfo, Usage
 from nooa_coder.session.store import SessionStore
 
@@ -39,3 +42,61 @@ def test_workspace_is_recorded_and_filters_the_listing(sessions_dir, tmp_path):
         key for key, value in ids.items() if value == first
     ]
     assert store.list(workspace=tmp_path / "three") == []
+
+
+def test_tree_position_is_recorded_at_creation(sessions_dir, tmp_path):
+    store = SessionStore(sessions_dir)
+    with store.create(
+        model="m",
+        agent="pkg:Agent",
+        workspace=str(tmp_path),
+        host="headless",
+        parent_id="parent-1",
+        depth=1,
+        name="Review auth",
+        retained=True,
+    ) as handle:
+        live = handle.info
+    on_disk = store.get(live.id)
+    for info in (live, on_disk):
+        assert (info.parent_id, info.depth, info.name, info.retained, info.host) == (
+            "parent-1",
+            1,
+            "Review auth",
+            True,
+            "headless",
+        )
+        assert info.workspace == str(tmp_path)
+
+
+def test_records_written_before_the_tree_fields_still_load(sessions_dir):
+    store = SessionStore(sessions_dir)
+    with store.create(model="m", agent="a") as handle:
+        session_id, path = handle.id, handle.path
+    old = {
+        "event_type": "SessionStarted",
+        "id": "e1",
+        "metadata": {},
+        "timestamp": "2026-09-01T10:00:00",
+        "origin": "tui",
+        "model": "old-model",
+        "agent": "old:Agent",
+        "working_directory": "/work/old",
+    }
+    connection = sqlite3.connect(path)
+    with connection:
+        connection.execute(
+            "UPDATE events SET data = ? WHERE event_type = 'SessionStarted'", (json.dumps(old),)
+        )
+    connection.close()
+
+    info = store.get(session_id)
+    assert (info.model, info.agent, info.host, info.workspace) == (
+        "old-model",
+        "old:Agent",
+        "tui",
+        "/work/old",
+    )
+    assert (info.parent_id, info.depth, info.name, info.retained) == (None, 0, None, False)
+    with store.open(session_id) as handle:
+        assert handle.info.host == "tui"
