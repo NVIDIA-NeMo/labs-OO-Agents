@@ -54,9 +54,13 @@ from acp.schema import (
     PermissionOption,
     SessionCapabilities,
     SessionCloseCapabilities,
+    SessionConfigOptionSelect,
+    SessionConfigSelectOption,
     SessionListCapabilities,
     SessionMode,
     SessionModeState,
+    SetSessionConfigOptionResponse,
+    SetSessionModeResponse,
     SseMcpServer,
     ToolCallUpdate,
     UnstructuredCommandInput,
@@ -130,6 +134,17 @@ async def _close_in_order(*closers: Callable[[], Any] | None) -> None:
         raise pending
 
 
+def model_aliases() -> list[str]:
+    """The model aliases configured in the NOOA model registry, sorted."""
+    from nooa.unifiedllm.registry import MODELS, ensure_loaded
+
+    try:
+        ensure_loaded()
+    except Exception:
+        logger.warning("Could not load the model registry", exc_info=True)
+    return sorted(MODELS)
+
+
 def initialize_response(protocol_version: int) -> InitializeResponse:
     """The static answer to ``initialize``: what this agent supports.
 
@@ -189,6 +204,7 @@ class CoderACPAgent:
         self._bridges: dict[str, ACPEventBridge] = {}
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
+        self._chosen_models: dict[str, str] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
         # session: session/cancel stops them.
         self._asks: dict[str, asyncio.Task[Any]] = {}
@@ -244,7 +260,11 @@ class CoderACPAgent:
                 await bridge.close(finish_open=False)
             raise
         self._defer_bootstrap_updates(session, warnings)
-        return NewSessionResponse(session_id=session.id, modes=self._modes(session))
+        return NewSessionResponse(
+            session_id=session.id,
+            modes=self._modes(session),
+            config_options=self._config_options(session),
+        )
 
     # ---- load ----------------------------------------------------------
 
@@ -266,7 +286,9 @@ class CoderACPAgent:
             self._replay(bridge, live)
             await bridge.flush()
             self._defer_bootstrap_updates(live, [])
-            return LoadSessionResponse(modes=self._modes(live))
+            return LoadSessionResponse(
+                modes=self._modes(live), config_options=self._config_options(live)
+            )
 
         warnings: list[str] = []
         attached: list[ACPEventBridge] = []
@@ -286,7 +308,9 @@ class CoderACPAgent:
             raise _load_error(session_id, exc) from exc
         await self._bridges[session.id].flush()
         self._defer_bootstrap_updates(session, warnings)
-        return LoadSessionResponse(modes=self._modes(session))
+        return LoadSessionResponse(
+            modes=self._modes(session), config_options=self._config_options(session)
+        )
 
     # ---- list ----------------------------------------------------------
 
@@ -650,6 +674,67 @@ class CoderACPAgent:
         if ask is not None:
             ask.cancel()
         await session.cancel(by="user")
+
+    # ---- modes and models ----------------------------------------------
+
+    async def set_session_mode(
+        self, session_id: str, mode_id: str, **kwargs: Any
+    ) -> SetSessionModeResponse:
+        """Set the permission mode. Only ``auto`` exists until tools can ask first."""
+        del kwargs
+        session, _bridge = self._followed(session_id)
+        if mode_id not in {mode.id for mode in _MODES}:
+            raise RequestError.invalid_params(
+                {"modeId": mode_id, "reason": "Unknown mode; this agent offers 'auto' only"}
+            )
+        await session.set_mode(mode_id)
+        return SetSessionModeResponse()
+
+    async def set_config_option(
+        self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
+    ) -> SetSessionConfigOptionResponse:
+        """``model``: switch the session's model from its next turn on."""
+        del kwargs
+        session, _bridge = self._followed(session_id)
+        if config_id != "model" or not isinstance(value, str):
+            raise RequestError.invalid_params(
+                {"configId": config_id, "reason": "Unknown configuration option"}
+            )
+        try:
+            await session.set_model(value)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session_id) from None
+        except Exception as exc:
+            raise RequestError.invalid_params(
+                {"configId": config_id, "value": value, "reason": str(exc)}
+            ) from exc
+        self._chosen_models[session.id] = value
+        return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
+
+    def _config_options(self, session: Session) -> list[Any] | None:
+        """The model select option: the registry's aliases plus the current model."""
+        current = (
+            self._chosen_models.get(session.id)
+            or session.info.model
+            or session.options.model
+            or self._model
+        )
+        aliases = model_aliases()
+        if current and current not in aliases:
+            aliases = [current, *aliases]
+        if not current or not aliases:
+            return None
+        return [
+            SessionConfigOptionSelect(
+                id="model",
+                name="Model",
+                category="model",
+                description="The model this session uses from its next turn on.",
+                type="select",
+                current_value=current,
+                options=[SessionConfigSelectOption(value=alias, name=alias) for alias in aliases],
+            )
+        ]
 
     def _followed(self, session_id: str) -> tuple[Session, ACPEventBridge]:
         session = self.registry.get(session_id)
