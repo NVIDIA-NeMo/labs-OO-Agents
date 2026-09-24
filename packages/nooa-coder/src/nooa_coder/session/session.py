@@ -363,6 +363,7 @@ class Session:
                 item_id=event.item_id,
                 source=source,
                 preview=_preview(text),
+                text=text,
             )
         )
         return Receipt(
@@ -514,6 +515,7 @@ class Session:
                 item_id=event.item_id,
                 source=source,
                 preview=_preview(item),
+                text=item if isinstance(item, str) else event.item_json,
             )
         )
         return Receipt(

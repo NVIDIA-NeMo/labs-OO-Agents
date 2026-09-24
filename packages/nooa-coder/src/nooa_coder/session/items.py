@@ -241,6 +241,7 @@ class ItemAdmittedUpdate(_Update):
     item_id: str
     source: str
     preview: str = ""
+    text: str = ""  # the whole item: the string itself, else its JSON
 
 
 class CancelledUpdate(_Update):

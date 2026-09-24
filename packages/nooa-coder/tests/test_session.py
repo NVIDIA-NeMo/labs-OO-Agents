@@ -597,3 +597,14 @@ async def test_listeners_can_read_an_agent_event_by_its_id(make_session):
 async def _until(predicate):
     while not predicate():
         await asyncio.sleep(0.01)
+
+
+async def test_item_admitted_updates_carry_the_full_text(make_session):
+    session, _ = make_session(start=False)
+    seen = []
+    session.subscribe(lambda e: seen.append(e) if e.kind == "item_admitted" else None)
+    long_text = "word " * 100
+    await session.submit(long_text)
+    await session.submit({"k": 1}, channel="user_messages")
+    assert seen[0].text == long_text and len(seen[0].preview) < len(long_text)
+    assert seen[1].text == '{"k": 1}'
