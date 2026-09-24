@@ -9,8 +9,8 @@ import pytest
 from nooa_bench.bench_agent import BenchAgent
 from nooa_bench.rlm_bench_agent import RLMBenchAgent
 
+from nooa.agents.summarization import SummarizationConfig
 from nooa.events import Message
-from nooa.interactive import SummarizationConfig
 from nooa.runtime.middleware import LLMCallContext
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage
 

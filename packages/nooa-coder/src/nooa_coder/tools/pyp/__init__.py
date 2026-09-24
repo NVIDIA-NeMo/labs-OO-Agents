@@ -3,21 +3,21 @@
 """Async-native composable shell piping in Python with method-chaining streams."""
 
 from nooa.skill import Skill
-from nooa_cli.tools.pyp.errors import PipeError as PipeError
-from nooa_cli.tools.pyp.errors import Result as Result
-from nooa_cli.tools.pyp.errors import make_pipe_error as make_pipe_error
-from nooa_cli.tools.pyp.sources import arun as arun
-from nooa_cli.tools.pyp.sources import cat as cat
-from nooa_cli.tools.pyp.sources import empty as empty
-from nooa_cli.tools.pyp.sources import find as find
-from nooa_cli.tools.pyp.sources import glob as glob
-from nooa_cli.tools.pyp.sources import items as items
-from nooa_cli.tools.pyp.sources import lines as lines
-from nooa_cli.tools.pyp.sources import rg as rg
-from nooa_cli.tools.pyp.sources import run as run
-from nooa_cli.tools.pyp.sources import seq as seq
-from nooa_cli.tools.pyp.sources import stdin as stdin
-from nooa_cli.tools.pyp.stream import Stream as Stream
+from nooa_coder.tools.pyp.errors import PipeError as PipeError
+from nooa_coder.tools.pyp.errors import Result as Result
+from nooa_coder.tools.pyp.errors import make_pipe_error as make_pipe_error
+from nooa_coder.tools.pyp.sources import arun as arun
+from nooa_coder.tools.pyp.sources import cat as cat
+from nooa_coder.tools.pyp.sources import empty as empty
+from nooa_coder.tools.pyp.sources import find as find
+from nooa_coder.tools.pyp.sources import glob as glob
+from nooa_coder.tools.pyp.sources import items as items
+from nooa_coder.tools.pyp.sources import lines as lines
+from nooa_coder.tools.pyp.sources import rg as rg
+from nooa_coder.tools.pyp.sources import run as run
+from nooa_coder.tools.pyp.sources import seq as seq
+from nooa_coder.tools.pyp.sources import stdin as stdin
+from nooa_coder.tools.pyp.stream import Stream as Stream
 
 
 class Pyp(Skill):

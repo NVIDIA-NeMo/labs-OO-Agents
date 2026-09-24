@@ -24,13 +24,13 @@ from acp.schema import (
     UserMessageChunk,
 )
 from click.testing import CliRunner
-from nooa_acp.cli import command
-from nooa_acp.server import CodingACPAdapter
 from nooa_cli.commands import discover_commands
+from nooa_coder.acp.cli import command
+from nooa_coder.acp.server import CodingACPAdapter
+from nooa_coder.interactive_agent import RespondReason, RespondResult
 
 from nooa.context_blocks.events import ToolCallEvent
 from nooa.errors import GenerationError
-from nooa.interactive import RespondReason, RespondResult
 from nooa.skill import Skill, slash_command
 from nooa.slash_dispatch import SlashCommandResult
 from nooa.unifiedllm import FakeLLMClient
@@ -144,8 +144,8 @@ def test_acp_command_passes_the_nvidia_key_for_nvidia_models():
     with (
         patch("nooa.secrets.load_secrets_into_env"),
         patch("nooa.unifiedllm.get_llm_client") as get_llm_client,
-        patch("nooa_acp.server.serve") as serve,
-        patch("nooa_acp.cli.asyncio.run"),
+        patch("nooa_coder.acp.server.serve") as serve,
+        patch("nooa_coder.acp.cli.asyncio.run"),
     ):
         result = runner.invoke(
             command,
@@ -168,8 +168,8 @@ def test_acp_command_leaves_the_key_alone_for_other_providers():
     with (
         patch("nooa.secrets.load_secrets_into_env"),
         patch("nooa.unifiedllm.get_llm_client") as get_llm_client,
-        patch("nooa_acp.server.serve") as serve,
-        patch("nooa_acp.cli.asyncio.run"),
+        patch("nooa_coder.acp.server.serve") as serve,
+        patch("nooa_coder.acp.cli.asyncio.run"),
     ):
         result = runner.invoke(
             command,
@@ -757,7 +757,7 @@ async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
     )
 
     with patch(
-        "nooa_acp.server.MCPManager.create_stdio_server",
+        "nooa_coder.acp.server.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ) as create:
         session = await adapter.new_session(str(tmp_path), mcp_servers=[server])
@@ -794,7 +794,7 @@ async def test_adapter_connects_forwarded_http_and_sse_mcp_servers(tmp_path):
     ]
 
     with patch(
-        "nooa_acp.server.MCPManager.create_url_server",
+        "nooa_coder.acp.server.MCPManager.create_url_server",
         new=AsyncMock(side_effect=[_MCPTools(), _MCPTools()]),
     ) as create:
         session = await adapter.new_session(str(tmp_path), mcp_servers=servers)
@@ -827,11 +827,11 @@ async def test_adapter_skips_forwarded_acp_transport_mcp_server(tmp_path):
 
     with (
         patch(
-            "nooa_acp.server.MCPManager.create_stdio_server",
+            "nooa_coder.acp.server.MCPManager.create_stdio_server",
             new=AsyncMock(),
         ) as create_stdio,
         patch(
-            "nooa_acp.server.MCPManager.create_url_server",
+            "nooa_coder.acp.server.MCPManager.create_url_server",
             new=AsyncMock(),
         ) as create_url,
     ):
@@ -873,7 +873,7 @@ async def test_adapter_loads_healthy_mcp_when_another_server_fails(tmp_path):
     ]
 
     with patch(
-        "nooa_acp.server.MCPManager.create_url_server",
+        "nooa_coder.acp.server.MCPManager.create_url_server",
         new=AsyncMock(
             side_effect=[
                 RuntimeError("Could not connect: ConnectionRefusedError: refused"),
@@ -912,7 +912,7 @@ async def test_adapter_allows_independent_session_creation(tmp_path):
         await release.wait()
         return _MCPTools()
 
-    with patch("nooa_acp.server.MCPManager.create_stdio_server", side_effect=create_mcp):
+    with patch("nooa_coder.acp.server.MCPManager.create_stdio_server", side_effect=create_mcp):
         first_session = asyncio.create_task(
             adapter.new_session(str(tmp_path), mcp_servers=[server])
         )
@@ -1192,7 +1192,7 @@ async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(t
         type="http",
     )
     with patch(
-        "nooa_acp.server.MCPManager.create_url_server",
+        "nooa_coder.acp.server.MCPManager.create_url_server",
         new=AsyncMock(
             side_effect=RuntimeError(
                 "Could not connect to MCP server 'offline': ConnectionRefusedError: refused"
@@ -1242,11 +1242,11 @@ async def test_adapter_skips_duplicate_mcp_names_without_failing_startup(tmp_pat
 
     with (
         patch(
-            "nooa_acp.server.MCPManager.create_stdio_server",
+            "nooa_coder.acp.server.MCPManager.create_stdio_server",
             new=AsyncMock(return_value=_MCPTools()),
         ) as create_stdio,
         patch(
-            "nooa_acp.server.MCPManager.create_url_server",
+            "nooa_coder.acp.server.MCPManager.create_url_server",
             new=AsyncMock(return_value=_MCPTools()),
         ) as create_url,
     ):
@@ -1381,7 +1381,7 @@ async def test_mcp_server_named_like_a_core_tool_cannot_replace_it(tmp_path):
     server = McpServerStdio(name="shell", command="lookup-server", args=[], env=[])
 
     with patch(
-        "nooa_acp.server.MCPManager.create_stdio_server",
+        "nooa_coder.acp.server.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ):
         created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
@@ -1400,7 +1400,7 @@ async def test_mcp_server_with_a_reserved_name_does_not_kill_the_session(tmp_pat
     server = McpServerStdio(name="runtime", command="lookup-server", args=[], env=[])
 
     with patch(
-        "nooa_acp.server.MCPManager.create_stdio_server",
+        "nooa_coder.acp.server.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ):
         created = await adapter.new_session(str(tmp_path), mcp_servers=[server])
@@ -1423,7 +1423,7 @@ async def test_a_skipped_mcp_server_is_reported_to_the_client(tmp_path):
     server = McpServerStdio(name="shell", command="lookup-server", args=[], env=[])
 
     with patch(
-        "nooa_acp.server.MCPManager.create_stdio_server",
+        "nooa_coder.acp.server.MCPManager.create_stdio_server",
         new=AsyncMock(return_value=_MCPTools()),
     ):
         await adapter.new_session(str(tmp_path), mcp_servers=[server])

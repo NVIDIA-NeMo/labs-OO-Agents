@@ -17,7 +17,7 @@ Core contract:
 
 from __future__ import annotations
 
-from nooa_cli.tools.repo_tools import RepoTools
+from nooa_coder.tools.repo_tools import RepoTools
 
 from nooa import hidden as _hidden
 from nooa.tools.method_writing_lib import MethodWriting
@@ -35,8 +35,8 @@ with _hidden:
 
     from nooa import Agent, Context, no_trace, strategy
     from nooa.agentdoc import doc
+    from nooa.agents.summarization import SummarizationConfig, install_summarizer
     from nooa.config import CodeActConfig
-    from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.strategies import CodeActV2
     from nooa.unifiedllm import FakeLLMClient
 

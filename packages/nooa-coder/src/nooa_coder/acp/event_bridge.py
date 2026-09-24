@@ -22,18 +22,18 @@ from acp import (
 )
 from acp.interfaces import Client
 from acp.schema import ContentToolCallContent, Cost, ToolCallLocation, UsageUpdate
-from nooa_cli.coding import (
+
+from nooa.agentdoc import pformat
+from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
+from nooa.events import LLMResponse, PythonOutput
+from nooa_coder.coding import (
     CodingAgent,
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
     TerminalCommandStarted,
 )
-
-from nooa.agentdoc import pformat
-from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
-from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage
+from nooa_coder.interactive_agent import AgentMessage
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
 # the logging default sends them.

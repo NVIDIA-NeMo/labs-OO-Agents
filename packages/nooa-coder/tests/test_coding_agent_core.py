@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
+from nooa_coder.coding import CodingAgent, discover_agent_instruction_files
 
 from nooa.skill import Skill, get_slash_commands, slash_command
 from nooa.unifiedllm import FakeLLMClient
@@ -149,11 +149,11 @@ async def test_coding_agent_declares_the_host_input_channels(tmp_path):
 async def test_coding_agent_owns_session_naming(tmp_path):
     """name_session sits with the session model it feeds.
 
-    SessionHandle and SessionTitleUpdated live in nooa_cli.sessions, so the
+    SessionHandle and SessionTitleUpdated live in nooa_coder.sessions, so the
     generator belongs at this layer rather than in core, which has no notion
     of a session at all.
     """
-    from nooa.interactive import InteractiveAgent
+    from nooa_coder.interactive_agent import InteractiveAgent
 
     assert hasattr(CodingAgent, "name_session")
     assert not hasattr(InteractiveAgent, "name_session")
@@ -166,7 +166,7 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
     memory in full. The budget also has to cover the rendered text — headers,
     separators, truncation markers — or the declared total is not the real one.
     """
-    from nooa_cli.coding import instructions
+    from nooa_coder.coding import instructions
 
     (tmp_path / ".git").mkdir()
     reads: list[int | None] = []
@@ -230,7 +230,7 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
 
 
 async def test_summarization_status_reports_installed_token_budget(tmp_path):
-    from nooa.interactive import SummarizationConfig
+    from nooa.agents.summarization import SummarizationConfig
 
     agent = CodingAgent(
         llm=FakeLLMClient(),
@@ -253,7 +253,7 @@ async def test_summarization_status_reports_installed_token_budget(tmp_path):
 
 
 async def test_summarization_status_reports_disabled_policy(tmp_path):
-    from nooa.interactive import SummarizationConfig
+    from nooa.agents.summarization import SummarizationConfig
 
     agent = CodingAgent(
         llm=FakeLLMClient(),

@@ -5,9 +5,9 @@
 import asyncio
 from pathlib import Path
 
-import nooa_cli.coding.activity as activity
+import nooa_coder.coding.activity as activity
 import pytest
-from nooa_cli.coding.activity import (
+from nooa_coder.coding.activity import (
     ActivityShellTools,
     FileEdit,
     TerminalCommandFinished,

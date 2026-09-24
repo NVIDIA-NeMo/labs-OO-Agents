@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for nooa.interactive — the dispatcher-driven agent base.
+"""Tests for nooa_coder.interactive_agent — the dispatcher-driven agent base.
 
 Deeper behavioral coverage (dispatcher loop, snapshot restore, echo hooks)
 lives with the TUI package, whose BaseTUIAgent subclasses this. These tests
@@ -8,17 +8,16 @@ pin the core contract the ARC-AGI-3 example and other hosts rely on.
 """
 
 import pytest
-from pydantic import ValidationError
-
-from nooa.interactive import (
+from nooa_coder.interactive_agent import (
     AgentMessage,
     AgentVars,
     InteractiveAgent,
     RespondReason,
     RespondResult,
-    SummarizationConfig,
-    install_summarizer,
 )
+from pydantic import ValidationError
+
+from nooa.agents.summarization import SummarizationConfig, install_summarizer
 from nooa.unifiedllm import FakeLLMClient
 
 
@@ -36,7 +35,7 @@ def test_declares_only_the_user_channel(agent):
 
     Hosts declare whatever else they need. slash_commands and system_messages
     are coding-host concepts and live on CodingAgent — see
-    packages/nooa-cli/tests/test_coding_agent.py.
+    packages/nooa-coder/tests/test_coding_agent_core.py.
     """
     assert agent.queue_manager.channels().keys() == {"user_messages"}
     # Reader facade exposed under the public name; producer side hidden.

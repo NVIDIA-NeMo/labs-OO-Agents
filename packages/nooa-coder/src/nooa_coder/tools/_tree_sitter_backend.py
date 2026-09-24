@@ -7,7 +7,7 @@ using tree-sitter grammars. Falls back gracefully if grammars are unavailable.
 
 Usage (internal — called by repo_tools.py)::
 
-    from nooa_cli.tools._tree_sitter_backend import (
+    from nooa_coder.tools._tree_sitter_backend import (
         ts_extract_symbols,
         ts_find_references,
         TREE_SITTER_AVAILABLE,

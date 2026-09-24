@@ -3,7 +3,7 @@
 """Tests for workspace-aware coding host settings."""
 
 import pytest
-from nooa_cli.coding import load_coding_skills_dirs
+from nooa_coder.coding import load_coding_skills_dirs
 
 
 @pytest.fixture(autouse=True)

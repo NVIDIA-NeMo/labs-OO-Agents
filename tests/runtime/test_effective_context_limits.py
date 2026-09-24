@@ -7,9 +7,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nooa import Agent, Context
-from nooa.agents.summarization import context_budget
+from nooa.agents.summarization import (
+    SummarizationConfig,
+    apply_model_limits,
+    context_budget,
+    install_summarizer,
+)
 from nooa.events import Message
-from nooa.interactive import SummarizationConfig, apply_model_limits, install_summarizer
 from nooa.runtime.actor import _compute_reduced_max_tokens, _current_llm_var
 from nooa.runtime.middleware import LLMCallContext
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage

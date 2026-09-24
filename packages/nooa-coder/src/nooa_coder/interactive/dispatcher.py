@@ -7,10 +7,9 @@ from collections.abc import Coroutine
 from contextlib import suppress
 from typing import Any, cast
 
-from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
-
-from nooa.interactive import RespondReason, RespondResult
 from nooa.slash_dispatch import SlashCommandResult
+from nooa_coder.coding import CodingAgent, CodingSlashCommandRegistry
+from nooa_coder.interactive_agent import RespondReason, RespondResult
 
 
 class InteractiveSessionDispatcher:

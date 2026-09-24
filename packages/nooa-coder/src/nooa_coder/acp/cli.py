@@ -29,7 +29,7 @@ def command(model: str, client_type: str | None) -> None:
     """Serve the NOOA coding agent over ACP on standard input/output."""
     from nooa.secrets import load_secrets_into_env
     from nooa.unifiedllm import get_llm_client
-    from nooa_acp.server import serve
+    from nooa_coder.acp.server import serve
 
     load_secrets_into_env()
     nvidia_api_key = os.getenv("NVIDIA_API_KEY") if model.startswith("nvidia_nim/") else None

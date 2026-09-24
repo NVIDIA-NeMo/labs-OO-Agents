@@ -18,7 +18,7 @@ from typing import Literal
 from nooa.paths import get_project_dir
 from nooa.runtime.event_manager import EventManager
 from nooa.storage.sqlite import SQLiteStorageManager, delete_sqlite_database
-from nooa_cli.sessions.events import (
+from nooa_coder.sessions.events import (
     SESSION_EVENT_TYPES,
     SessionStarted,
     SessionTitleUpdated,

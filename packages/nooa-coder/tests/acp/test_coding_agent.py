@@ -5,12 +5,12 @@
 import asyncio
 from typing import Any
 
-from nooa_acp.dispatcher import InteractiveSessionDispatcher
-from nooa_cli.coding import CodingAgent
+from nooa_coder.coding import CodingAgent
+from nooa_coder.interactive.dispatcher import InteractiveSessionDispatcher
+from nooa_coder.interactive_agent import AgentMessage, RespondReason, RespondResult
 
 from nooa.context_blocks.events import ToolCallEvent
 from nooa.events import PythonOutput
-from nooa.interactive import AgentMessage, RespondReason, RespondResult
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 

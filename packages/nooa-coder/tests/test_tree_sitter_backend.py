@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from nooa_cli.tools import _tree_sitter_backend as backend
+from nooa_coder.tools import _tree_sitter_backend as backend
 
 
 def test_compile_query_uses_language_method_when_available(monkeypatch):

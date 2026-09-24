@@ -397,7 +397,7 @@ async def test_unusable_fork_has_no_standalone_fallback():
 
 
 def test_model_switch_keeps_fork_subscription():
-    from nooa.interactive import apply_model_limits
+    from nooa.agents.summarization import apply_model_limits
 
     agent = Agent(llm=FakeLLMClient())
     summarizer = TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig())

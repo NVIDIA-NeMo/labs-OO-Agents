@@ -6,7 +6,7 @@ import asyncio
 from typing import Literal
 
 import pytest
-from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
+from nooa_coder.coding import CodingAgent, CodingSlashCommandRegistry
 
 from nooa.skill import Skill, slash_command
 from nooa.slash_dispatch import CoercionError

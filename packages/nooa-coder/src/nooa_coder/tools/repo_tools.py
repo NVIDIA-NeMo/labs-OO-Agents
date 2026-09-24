@@ -254,7 +254,7 @@ def _detect_lang(path: Path) -> str:
 
 def _tree_sitter_available() -> bool:
     try:
-        from nooa_cli.tools._tree_sitter_backend import TREE_SITTER_AVAILABLE
+        from nooa_coder.tools._tree_sitter_backend import TREE_SITTER_AVAILABLE
     except ImportError:
         return False
     return TREE_SITTER_AVAILABLE
@@ -352,7 +352,7 @@ def _extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[str]
     """Extract symbol definitions from a file using tree-sitter AST (with regex fallback)."""
     # Try tree-sitter first (AST-aware, more accurate)
     try:
-        from nooa_cli.tools._tree_sitter_backend import (
+        from nooa_coder.tools._tree_sitter_backend import (
             TREE_SITTER_AVAILABLE,
             ts_extract_symbols,
         )
@@ -785,7 +785,7 @@ class RepoTools(Skill):
 
         # Try tree-sitter first for accurate AST-aware reference finding
         try:
-            from nooa_cli.tools._tree_sitter_backend import (
+            from nooa_coder.tools._tree_sitter_backend import (
                 TREE_SITTER_AVAILABLE,
                 ts_find_references,
             )

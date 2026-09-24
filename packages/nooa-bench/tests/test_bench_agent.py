@@ -558,7 +558,7 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     monkeypatch.setattr(agent_type, "_solve_task", fake_solve)
     monkeypatch.setattr(_FakeShell, "close", fake_close, raising=False)
     llm = FakeLLMClient()
-    from nooa.interactive import SummarizationConfig
+    from nooa.agents.summarization import SummarizationConfig
 
     config = SummarizationConfig(policy="none")
     agent = agent_type(llm=llm, working_dir=str(tmp_path), summarization=config)
@@ -819,7 +819,7 @@ import sys
 from nooa_bench import bench_agent
 assert bench_agent.BenchAgent
 for name in ('agent', 'activity', 'slash_commands', 'settings'):
-    assert 'nooa_cli.coding.' + name not in sys.modules, name
+    assert 'nooa_coder.coding.' + name not in sys.modules, name
 """,
         ],
         check=True,

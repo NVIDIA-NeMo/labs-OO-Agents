@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
-from nooa_cli.tools.pyp.errors import Result
+from nooa_coder.tools.pyp.errors import Result
 
 T = TypeVar("T")
 

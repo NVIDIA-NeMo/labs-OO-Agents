@@ -32,9 +32,13 @@ from pathlib import Path  # noqa: F401
 from types import SimpleNamespace
 
 import numpy as np  # noqa: F401
+from nooa_coder.interactive_agent import (  # noqa: F401
+    InteractiveAgent,
+    RespondReason,
+    RespondResult,
+)
 
 from nooa import hidden, strategy
-from nooa.interactive import InteractiveAgent, RespondReason, RespondResult  # noqa: F401
 from nooa.media import Image  # visual grid input (show()n to the LLM)
 from nooa.runtime import show  # CodeAct builtin — attach an image to the turn
 
@@ -48,8 +52,8 @@ with hidden:
     from PIL import Image as _PILImage  # PNG rendering only
 
     from nooa.agentdoc import pformat, spec
+    from nooa.agents.summarization import SummarizationConfig, install_summarizer
     from nooa.config import CodeActConfig
-    from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.runtime.channels import Channel, _ChannelReader
     from nooa.runtime.restrictions import (
         DEFAULT_BLOCKED_MODULES,

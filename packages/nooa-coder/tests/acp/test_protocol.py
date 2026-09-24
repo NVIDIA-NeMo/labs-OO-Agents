@@ -31,12 +31,12 @@ def test_protocol_subprocess_imports_this_checkout(tmp_path):
 
     from acp.transports import default_environment
 
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     result = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import json, nooa, nooa_acp; print(json.dumps([nooa.__file__, nooa_acp.__file__]))",
+            "import json, nooa, nooa_coder; print(json.dumps([nooa.__file__, nooa_coder.__file__]))",
         ],
         cwd=tmp_path,
         env=default_environment(),
@@ -46,7 +46,7 @@ def test_protocol_subprocess_imports_this_checkout(tmp_path):
     )
     assert [Path(path).resolve() for path in json.loads(result.stdout)] == [
         root / "src/nooa/__init__.py",
-        root / "packages/nooa-acp/src/nooa_acp/__init__.py",
+        root / "packages/nooa-coder/src/nooa_coder/__init__.py",
     ]
 
 

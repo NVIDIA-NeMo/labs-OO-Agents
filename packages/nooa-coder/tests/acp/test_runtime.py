@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from nooa_acp._runtime import (
+from nooa_coder.sessions.runtime import (
     SessionBusyError,
     SessionRuntime,
     SessionRuntimeClosedError,

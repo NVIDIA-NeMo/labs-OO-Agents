@@ -8,7 +8,7 @@ import subprocess
 
 import click.testing
 import pytest
-from nooa_acp.cli import command
+from nooa_coder.acp.cli import command
 
 
 @pytest.fixture
@@ -20,8 +20,8 @@ def stubbed_serve(monkeypatch):
         captured["llm_factory"] = llm_factory
         return "coroutine-placeholder"
 
-    monkeypatch.setattr("nooa_acp.server.serve", fake_serve)
-    monkeypatch.setattr("nooa_acp.cli.asyncio.run", lambda coro: coro)
+    monkeypatch.setattr("nooa_coder.acp.server.serve", fake_serve)
+    monkeypatch.setattr("nooa_coder.acp.cli.asyncio.run", lambda coro: coro)
     monkeypatch.setattr("nooa.secrets.load_secrets_into_env", lambda *a, **k: None)
     return captured
 
@@ -70,7 +70,7 @@ def _console_script() -> str:
     """Locate the installed ``nooa-acp`` console script.
 
     Deliberately fails rather than skips. Every other test in this package
-    imports ``nooa_acp``, so the package is always installed when these run; a
+    imports ``nooa_coder``, so the package is always installed when these run; a
     missing script means the ``[project.scripts]`` entry is broken, which is
     exactly the breakage this test exists to catch.
     """
@@ -86,7 +86,7 @@ def _clean_env() -> dict[str, str]:
 
 
 def test_console_script_is_installed_and_runnable():
-    # Covers the [project.scripts] -> nooa_acp.cli:main binding, which the
+    # Covers the [project.scripts] -> nooa_coder.acp.cli:main binding, which the
     # in-process CliRunner tests and the fake_agent fixture both bypass.
     result = subprocess.run(
         [_console_script(), "--help"],

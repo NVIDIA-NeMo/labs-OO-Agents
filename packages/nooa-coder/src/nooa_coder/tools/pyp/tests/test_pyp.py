@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from nooa_cli.tools.pyp.errors import PipeError, Result, make_pipe_error
-from nooa_cli.tools.pyp.sources import cat, empty, find, glob, items, lines, run, seq
-from nooa_cli.tools.pyp.stream import Stream
+from nooa_coder.tools.pyp.errors import PipeError, Result, make_pipe_error
+from nooa_coder.tools.pyp.sources import cat, empty, find, glob, items, lines, run, seq
+from nooa_coder.tools.pyp.stream import Stream
 
 # ─── Stream basics ───────────────────────────────────────────────────
 

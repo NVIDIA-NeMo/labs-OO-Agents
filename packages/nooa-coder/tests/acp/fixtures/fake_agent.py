@@ -5,7 +5,7 @@
 import asyncio
 import sys
 
-from nooa_acp.server import serve
+from nooa_coder.acp.server import serve
 
 from nooa.unifiedllm import FakeLLMClient
 

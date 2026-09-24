@@ -47,31 +47,31 @@ from acp.schema import (
 from acp.schema import (
     SessionInfo as ACPSessionInfo,
 )
-from nooa_cli.coding import (
-    CodingAgent,
-    CodingSlashCommand,
-    CodingSlashCommandRegistry,
-    load_coding_skills_dirs,
-)
-from nooa_cli.sessions import (
-    InvalidSessionIdError,
-    SessionHandle,
-    SessionNotFoundError,
-    SessionStore,
-)
 
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.unifiedllm import UnifiedLLM
-from nooa_acp._runtime import (
+from nooa_coder.acp.event_bridge import ACPEventBridge
+from nooa_coder.coding import (
+    CodingAgent,
+    CodingSlashCommand,
+    CodingSlashCommandRegistry,
+    load_coding_skills_dirs,
+)
+from nooa_coder.interactive.dispatcher import InteractiveSessionDispatcher
+from nooa_coder.sessions import (
+    InvalidSessionIdError,
+    SessionHandle,
+    SessionNotFoundError,
+    SessionStore,
+)
+from nooa_coder.sessions.runtime import (
     SessionBusyError,
     SessionRuntime,
     SessionRuntimeClosedError,
     SessionRuntimePool,
 )
-from nooa_acp.dispatcher import InteractiveSessionDispatcher
-from nooa_acp.event_bridge import ACPEventBridge
 
 logger = logging.getLogger(__name__)
 

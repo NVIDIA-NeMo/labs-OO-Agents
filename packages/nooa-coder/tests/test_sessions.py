@@ -9,11 +9,11 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 
-import nooa_cli.sessions.store as store_module
+import nooa_coder.sessions.store as store_module
 import pytest
-from nooa_cli.sessions import InvalidSessionIdError, SessionNotFoundError, SessionStore
+from nooa_coder.interactive_agent import AgentMessage
+from nooa_coder.sessions import InvalidSessionIdError, SessionNotFoundError, SessionStore
 
-from nooa.interactive import AgentMessage
 from nooa.storage import SessionAlreadyActiveError
 
 

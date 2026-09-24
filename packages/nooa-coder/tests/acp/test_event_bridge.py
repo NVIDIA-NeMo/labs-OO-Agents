@@ -15,18 +15,18 @@ from acp.schema import (
     ToolCallStart,
     UsageUpdate,
 )
-from nooa_acp.event_bridge import ACPEventBridge
-from nooa_cli.coding import (
+from nooa_coder.acp.event_bridge import ACPEventBridge
+from nooa_coder.coding import (
     CodingAgent,
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
     TerminalCommandStarted,
 )
+from nooa_coder.interactive_agent import AgentMessage
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage
 from nooa.llm_types import LLMUsage
 from nooa.unifiedllm import FakeLLMClient
 

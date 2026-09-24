@@ -14,10 +14,10 @@ def _protocol_subprocess_environment(monkeypatch):
     import acp.transports
 
     original = acp.transports.default_environment
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     sources = [root / "src"] + [
         root / "packages" / package / "src"
-        for package in ("nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench")
+        for package in ("nooa-cli", "nooa-coder", "nooa-memory", "nooa-bench")
     ]
 
     def environment():

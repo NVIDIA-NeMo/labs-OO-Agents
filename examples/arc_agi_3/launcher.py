@@ -184,7 +184,7 @@ async def _headless_dispatch(agent) -> None:
     harness's nudge/force-advance ladder and the fleet wall-clock cap already
     bound a wedged agent, and a transient LLM outage must not kill the game.
     """
-    from nooa.interactive import RespondReason
+    from nooa_coder.interactive_agent import RespondReason
 
     consecutive_errors = 0
 

@@ -14,8 +14,8 @@ from pathlib import Path
 
 from nooa.agentdoc._truncating_stream import TruncatingStringIO
 from nooa.tools._bash_session import BashSession
-from nooa_cli.tools.pyp.errors import make_pipe_error
-from nooa_cli.tools.pyp.stream import Stream
+from nooa_coder.tools.pyp.errors import make_pipe_error
+from nooa_coder.tools.pyp.stream import Stream
 
 _STDERR_CAP = 128 * 1024  # 128 KB max stderr buffered
 
