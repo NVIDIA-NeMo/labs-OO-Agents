@@ -1,35 +1,53 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Agent construction shared by native and protocol session hosts."""
+"""Build the agent and the model client for a session.
+
+``create_session_agent`` is the session registry's default agent factory:
+every session, root or child, is built through it from its
+``SessionOptions``. ``default_llm_factory`` is the model factory a host
+passes to the registry (``SessionRegistry(store, llm_factory=...)``).
+"""
 
 from __future__ import annotations
 
 import inspect
+import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from nooa.interactive import InteractiveAgent
+from nooa.unifiedllm import get_llm_client
 from nooa_coder.session.loader import load_agent_class
+from nooa_coder.workspace.options import CoderOptions, configure_session_skills
+
+if TYPE_CHECKING:
+    from nooa.storage.manager import StorageManager
+    from nooa_coder.session.options import SessionOptions
+    from nooa_coder.session.registry import LLMFactory
+
+logger = logging.getLogger(__name__)
 
 
-def create_session_agent(
-    *, llm: Any, storage: Any, options: Any, agent_cls: type | None = None
-) -> Any:
-    """Construct the configured agent with identical capabilities in each host."""
-    from types import SimpleNamespace
+def create_session_agent(options: SessionOptions, storage: StorageManager) -> InteractiveAgent:
+    """Build the agent ``options.agent_spec`` names, for ``options.workspace``.
 
+    The class is loaded with ``load_agent_class`` (``module:Class`` or a
+    ``file.py:Class`` path relative to the workspace). It gets the
+    session's ``storage`` and ``options.llm``; the registry has already
+    built that client when it has an ``llm_factory``, and this function
+    never builds one (without a client the class's own default applies).
+
+    A coding agent also gets the workspace's settings (``CoderOptions``):
+    ``cwd``, ``skills_dirs``, ``summarization`` and a ``libs_dir`` inside
+    the workspace, and then its MCP registry and configured skills
+    (``configure_session_skills``), before the registry restores any
+    snapshot. Connecting remembered MCP servers is async and is left to
+    the host's ``prepare`` hook.
+    """
     from nooa_coder.coding.agent import CodingAgent
-    from nooa_coder.coding.experimental_agent import ExperimentalCodingAgent
 
-    if agent_cls is None:
-        if options.agent_spec and not options.legacy_agent:
-            spec = options.agent_spec
-            module, separator, name = spec.rpartition(":")
-            if separator and (module.endswith(".py") or "/" in module):
-                spec = f"{Path(options.working_dir) / Path(module).expanduser()}:{name}"
-            agent_cls = load_agent_class(spec)
-        else:
-            agent_cls = CodingAgent if options.legacy_agent else ExperimentalCodingAgent
-    parameters = inspect.signature(agent_cls).parameters
+    agent_class = load_agent_class(options.agent_spec, base=options.workspace)
+    parameters = inspect.signature(agent_class).parameters
     # A CodingAgent subclass overriding __init__ to forward extra kwargs (the
     # normal extension pattern: def __init__(self, llm=None, storage=None,
     # **kwargs): super().__init__(llm=llm, storage=storage, **kwargs)) has no
@@ -37,35 +55,56 @@ def create_session_agent(
     # match against, so a name-only check silently drops per-workspace
     # isolation for it -- cwd falls back to '.' (this process's own
     # directory) instead of the session's actual workspace. Only trust a
-    # **kwargs catch-all to accept these specific names when __init__ has
-    # actually been overridden on a real CodingAgent subclass (CodingAgent's
-    # and ExperimentalCodingAgent's own **kwargs exists to relay unrelated
-    # Agent-base keywords, not these; both already expose every one of these
-    # names directly and are matched by name as before). An unrelated custom
-    # Agent loaded via --agent that happens to declare **kwargs for some
-    # other reason must not have them forced on it either.
-    overridden_subclass = issubclass(agent_cls, CodingAgent) and (
-        agent_cls.__init__ is not CodingAgent.__init__
+    # **kwargs catch-all to accept these names when __init__ has actually
+    # been overridden on a real CodingAgent subclass (CodingAgent's own
+    # **kwargs relays unrelated Agent-base keywords, and it names every one
+    # of these directly). An unrelated agent that declares **kwargs for
+    # some other reason must not have them forced on it.
+    overridden_subclass = (
+        issubclass(agent_class, CodingAgent) and agent_class.__init__ is not CodingAgent.__init__
     )
     accepts_arbitrary_kwargs = overridden_subclass and any(
         p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
     )
-    kwargs = {"llm": llm, "storage": storage}
-    # 'config' has no real consumer anywhere in this codebase today (no
-    # class declares a literal 'config' parameter) -- kept name-matched only,
-    # never forced through a **kwargs catch-all, so it stays exactly as
-    # inert as it already was for every class that does not ask for it by
-    # name, instead of starting to break them.
-    if "config" in parameters:
-        kwargs["config"] = SimpleNamespace(
-            working_dir=options.working_dir, summarization=options.summarization
-        )
-    for name, value in {
-        "cwd": options.working_dir,
-        "skills_dirs": options.skills_dirs,
-        "summarization": options.summarization,
-        "libs_dir": Path(options.working_dir) / ".nooa" / "libs",
-    }.items():
-        if name in parameters or accepts_arbitrary_kwargs:
-            kwargs[name] = value
-    return agent_cls(**kwargs)
+    wants_workspace = accepts_arbitrary_kwargs or any(
+        name in parameters for name in ("cwd", "skills_dirs", "summarization", "libs_dir")
+    )
+    coder_options = CoderOptions.load(options.workspace) if wants_workspace else None
+
+    kwargs: dict[str, Any] = {"storage": storage}
+    if options.llm is not None:
+        kwargs["llm"] = options.llm
+    if coder_options is not None:
+        workspace = Path(coder_options.working_dir)
+        for name, value in {
+            "cwd": workspace,
+            "skills_dirs": coder_options.skills_dirs,
+            "summarization": coder_options.summarization,
+            "libs_dir": workspace / ".nooa" / "libs",
+        }.items():
+            if name in parameters or accepts_arbitrary_kwargs:
+                kwargs[name] = value
+    agent = agent_class(**kwargs)
+
+    if coder_options is not None and isinstance(agent, CodingAgent):
+        for warning in configure_session_skills(agent, coder_options):
+            logger.warning("Session in %s: %s", options.workspace, warning)
+        agent.slash_commands.refresh_skill_commands()
+    return agent
+
+
+def default_llm_factory(*, workspace_default: str | None = None) -> LLMFactory:
+    """A model factory for ``SessionRegistry(llm_factory=...)``.
+
+    The registry calls it as ``factory(alias, workspace)`` for a session
+    without a client. A named alias is built with ``get_llm_client``. No
+    alias means the default model: ``workspace_default`` when given, else
+    the workspace's ``CoderOptions.default_model`` (its settings files, then
+    ``nooa.interactive.DEFAULT_MODEL``).
+    """
+
+    def make(alias: str | None, workspace: Path) -> Any:
+        name = alias or workspace_default or CoderOptions.load(workspace).default_model
+        return get_llm_client(name)
+
+    return make
