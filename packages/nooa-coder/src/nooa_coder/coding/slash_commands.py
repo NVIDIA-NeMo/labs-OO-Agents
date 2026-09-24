@@ -38,10 +38,11 @@ class CodingSlashCommand:
 
     def make_agent_message(self, args: list[str]) -> str:
         body = self.body
+        joined = " ".join(args)
+        if "$ARGUMENTS" in body:
+            # No arguments expands to nothing, never the literal placeholder.
+            return body.replace("$ARGUMENTS", joined)
         if args:
-            joined = " ".join(args)
-            if "$ARGUMENTS" in body:
-                return body.replace("$ARGUMENTS", joined)
             return f"{body}\n\nArguments: {joined}"
         return body
 

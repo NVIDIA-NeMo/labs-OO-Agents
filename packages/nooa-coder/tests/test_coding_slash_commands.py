@@ -211,3 +211,26 @@ async def test_string_args_annotation_preserves_raw_input(
     finally:
         registry.close()
         await agent.close()
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], "Review  now."),
+        (["src/app.py"], "Review src/app.py now."),
+    ],
+)
+def test_markdown_skill_arguments_placeholder_never_reaches_the_agent(args, expected):
+    """A skill body using $ARGUMENTS invoked without arguments expands it to ''."""
+    from nooa_coder.coding.slash_commands import CodingSlashCommand
+
+    command = CodingSlashCommand(name="review", description="", body="Review $ARGUMENTS now.")
+    assert command.make_agent_message(args) == expected
+
+
+def test_markdown_skill_without_placeholder_appends_arguments():
+    from nooa_coder.coding.slash_commands import CodingSlashCommand
+
+    command = CodingSlashCommand(name="review", description="", body="Review.")
+    assert command.make_agent_message([]) == "Review."
+    assert command.make_agent_message(["a", "b"]) == "Review.\n\nArguments: a b"
