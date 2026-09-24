@@ -15,7 +15,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Literal
 
-from nooa.paths import get_project_dir
+from nooa.paths import get_user_dir
 from nooa.runtime.event_manager import EventManager
 from nooa.storage.sqlite import SQLiteStorageManager, delete_sqlite_database
 from nooa_coder.session.events import (
@@ -33,6 +33,13 @@ _TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated", "TUISessionRename"))
 _USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
 _AGENT_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
 _TURN_EVENT_TYPES = _USER_EVENT_TYPES | _AGENT_EVENT_TYPES
+
+
+def _normalise_workspace(workspace: str | Path) -> str:
+    """Compare workspaces as absolute, resolved paths; empty stays empty."""
+    if not str(workspace):
+        return ""
+    return str(Path(workspace).expanduser().resolve())
 
 
 class InvalidSessionIdError(ValueError):
@@ -145,7 +152,11 @@ class SessionHandle:
 
 
 class SessionStore:
-    """Repository and factory for project-local durable coding-agent sessions.
+    """Repository and factory for durable sessions.
+
+    Sessions live in one user-level directory (``nooa.paths.get_user_dir(
+    "sessions")`` by default), not per workspace; each records the
+    workspace it was created for, and :meth:`list` can filter on it.
 
     A daemon may use read-only operations such as :meth:`list` and :meth:`get`
     for discovery. Only the process running the agent opens a
@@ -153,7 +164,7 @@ class SessionStore:
     """
 
     def __init__(self, root: str | Path | None = None) -> None:
-        self.root = Path(root) if root is not None else get_project_dir("sessions")
+        self.root = Path(root) if root is not None else get_user_dir("sessions")
 
     def path_for(self, session_id: str) -> Path:
         session_id = self._validate_id(session_id)
@@ -164,7 +175,7 @@ class SessionStore:
         *,
         model: str = "",
         agent: str = "",
-        working_directory: str = "",
+        workspace: str = "",
         origin: str = "",
         session_id: str | None = None,
         check_same_thread: bool = True,
@@ -183,7 +194,7 @@ class SessionStore:
             origin=origin,
             model=model,
             agent=agent,
-            working_directory=working_directory,
+            working_directory=workspace,
         )
         try:
             events.add(started)
@@ -200,7 +211,7 @@ class SessionStore:
                 agent=agent,
                 created_at=timestamp,
                 last_active=timestamp,
-                workspace=working_directory,
+                workspace=workspace,
                 host=origin,
             ),
         )
@@ -220,19 +231,30 @@ class SessionStore:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
         return info
 
-    def list(self, *, limit: int = 20) -> list[SessionInfo]:
-        if limit < 0:
+    def list(
+        self,
+        *,
+        limit: int | None = None,
+        workspace: str | Path | None = None,
+    ) -> list[SessionInfo]:
+        """Sessions on disk, most recently active first.
+
+        ``workspace`` keeps only sessions recorded for that directory.
+        """
+        if limit is not None and limit < 0:
             raise ValueError("limit must be non-negative")
         if limit == 0 or not self.root.exists():
             return []
+        wanted = _normalise_workspace(workspace) if workspace is not None else None
         sessions = [
             info
             for path in self.root.glob("*.db")
             if not path.stem.endswith("-memory")
             if (info := self._read_info(path)) is not None
+            if wanted is None or _normalise_workspace(info.workspace) == wanted
         ]
         sessions.sort(key=lambda info: info.last_active, reverse=True)
-        return sessions[:limit]
+        return sessions if limit is None else sessions[:limit]
 
     def load_turns(self, session_id: str) -> list[SessionTurn]:
         path = self.path_for(session_id)
