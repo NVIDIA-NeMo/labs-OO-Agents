@@ -13,25 +13,31 @@ from typing import Any
 
 import click
 
-_acp_stdout: int | None = None
+_acp_stdio: tuple[int, int] | None = None
 
 
-def reserve_stdout_for_acp() -> int:
-    """Keep standard output for ACP frames only; return the descriptor frames go to.
+def reserve_stdio_for_acp() -> tuple[int, int]:
+    """Keep standard input and output for ACP frames only; return ``(input_fd, output_fd)``.
 
-    The server's own stdout is its protocol channel, but libraries print
+    The server's own stdio is its protocol channel, but libraries print
     (``nooa.tracing`` prints "OTel tracing enabled ..." when it finds an
-    endpoint), and one stray line corrupts the stream. The real stdout is
-    duplicated for the ACP transport, and descriptor 1 (and so ``print``
-    and anything else writing to it, including C code) is pointed at
-    standard error. Idempotent.
+    endpoint), and one stray line corrupts the stream; a subprocess a cell
+    starts could likewise read the client's frames. The real descriptors
+    are duplicated for the ACP transport; descriptor 1 (so ``print`` and
+    anything else writing to it, C code included) is pointed at standard
+    error and descriptor 0 at ``/dev/null``. Idempotent.
     """
-    global _acp_stdout
-    if _acp_stdout is None:
+    global _acp_stdio
+    if _acp_stdio is None:
         sys.stdout.flush()
-        _acp_stdout = os.dup(1)
+        output_fd = os.dup(1)
         os.dup2(2, 1)
-    return _acp_stdout
+        input_fd = os.dup(0)
+        null = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(null, 0)
+        os.close(null)
+        _acp_stdio = (input_fd, output_fd)
+    return _acp_stdio
 
 
 def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str | None) -> Any:
@@ -100,7 +106,7 @@ def command(
     worker: str | None,
 ) -> None:
     """Serve the NOOA coding agent over ACP on standard input/output."""
-    reserve_stdout_for_acp()
+    reserve_stdio_for_acp()
     from nooa.secrets import load_secrets_into_env
 
     if agent_spec and legacy_agent:
@@ -145,7 +151,7 @@ def run(
     agent_factory: Any = None,
 ) -> None:
     """Serve ACP on stdio until the client leaves (the test fixture's entry point too)."""
-    acp_stdout = reserve_stdout_for_acp()
+    acp_stdin, acp_stdout = reserve_stdio_for_acp()
     asyncio.run(
         _serve(
             llm_factory=llm_factory,
@@ -154,6 +160,7 @@ def run(
             sessions_dir=sessions_dir,
             tee=tee,
             agent_factory=agent_factory,
+            acp_stdin=acp_stdin,
             acp_stdout=acp_stdout,
         )
     )
@@ -167,6 +174,7 @@ async def _serve(
     sessions_dir: Path | None,
     tee: Path | None,
     agent_factory: Any,
+    acp_stdin: int,
     acp_stdout: int,
 ) -> None:
     from nooa_coder.acp._mcp_trace import MCPHandoffTrace
@@ -190,6 +198,7 @@ async def _serve(
             agent_spec=agent_spec,
             model=model,
             observers=observers,
+            input_fd=acp_stdin,
             output_fd=acp_stdout,
         )
     finally:

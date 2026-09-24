@@ -44,6 +44,12 @@ def llm_factory(alias, workspace) -> FakeLLMClient:
     if "--noisy" in sys.argv:
         # What nooa.tracing does when it finds an endpoint: print to stdout.
         print("OTel tracing enabled: noise on stdout", flush=True)
+        # And something that reads standard input, as a shell command in a
+        # cell might: it must not take the client's frames.
+        import os
+
+        with open(os.environ["NOISY_STDIN_LOG"], "ab") as record:
+            record.write(os.read(0, 4096) or b"<eof>")
     if "--shell" in sys.argv:
         # Blocks inside a real shell command, so cancellation exercises
         # ActivityShellTools.run rather than a bare asyncio wait.
