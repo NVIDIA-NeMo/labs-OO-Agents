@@ -10,6 +10,7 @@ non-host session are read-only.
 """
 
 import base64
+import inspect
 import logging
 import re
 import shlex
@@ -330,15 +331,34 @@ def _line_match(path: Path, line_no: int) -> Match | None:
     return Match(str(path), line_no, line_no, lines[line_no - 1], resolved_path=path)
 
 
+_MATCH_HAS_EDITABLE = "editable" in inspect.signature(Match.__init__).parameters
+
+
+def _anchor(
+    path: str, start: int, end: int, text: str, resolved_path: Path, *, editable: bool
+) -> Match:
+    """Build a ``Match``; read-only anchors need a core ``Match`` with ``editable``.
+
+    ``Match(editable=...)`` comes with the core change that makes
+    ``ShellTools.replace()`` refuse read-only anchors (#382). Until that is
+    on this branch, anchors are built without the flag: they are then
+    editable host anchors, which is what they are for the coding agent,
+    whose ``RepoTools`` always shares the host filesystem (a real
+    ``BashSession``). Only a scripted session over its own filesystem asks
+    for read-only anchors.
+    """
+    if _MATCH_HAS_EDITABLE:
+        return Match(path, start, end, text, resolved_path=resolved_path, editable=editable)
+    return Match(path, start, end, text, resolved_path=resolved_path)
+
+
 def _line_match_from_lines(
     path: Path, line_no: int, lines: list[str], *, editable: bool = True
 ) -> Match | None:
     """Build a ``Match`` from already-read lines (e.g. session-fetched content)."""
     if not (1 <= line_no <= len(lines)):
         return None
-    return Match(
-        str(path), line_no, line_no, lines[line_no - 1], resolved_path=path, editable=editable
-    )
+    return _anchor(str(path), line_no, line_no, lines[line_no - 1], path, editable=editable)
 
 
 def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Match]]:
@@ -368,13 +388,8 @@ def _symbol_anchor_pairs_from_lines(
             pairs.append(
                 (
                     symbol,
-                    Match(
-                        str(path),
-                        line_no,
-                        line_no,
-                        lines[line_no - 1],
-                        resolved_path=path,
-                        editable=editable,
+                    _anchor(
+                        str(path), line_no, line_no, lines[line_no - 1], path, editable=editable
                     ),
                 )
             )
