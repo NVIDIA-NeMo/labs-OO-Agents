@@ -524,10 +524,23 @@ async def test_outcome_of_a_submitted_item(make_session):
     pending = session.outcome(receipt.item_id)
     session.start()
     assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="handled")
-    with pytest.raises(KeyError):
-        session.outcome(receipt.item_id)  # finished: nothing left to wait for
+    # A recently finished item still answers.
+    assert await session.outcome(receipt.item_id) == Done(explanation="handled")
     with pytest.raises(KeyError):
         session.outcome("no-such-item")
+
+
+async def test_outcome_after_the_turn_ended_without_an_earlier_wait(make_session):
+    session, _ = make_session(done("handled"))
+    ended = []
+    session.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
+    receipt = await session.submit("do it")
+    await asyncio.wait_for(_until(lambda: ended), TIMEOUT)
+    assert await session.outcome(receipt.item_id) == Done(explanation="handled")
+    for index in range(300):
+        session._record_finished(f"filler-{index}", Done(explanation="x"))
+    with pytest.raises(KeyError):
+        session.outcome(receipt.item_id)  # the map is bounded
 
 
 async def test_outcome_of_steers_follows_the_turn_that_saw_them(make_session):
@@ -579,3 +592,8 @@ async def test_listeners_can_read_an_agent_event_by_its_id(make_session):
     await asyncio.sleep(0)
     assert found and all(ok for _, ok in found), found
     assert "AgentMessage" in {event_type for event_type, _ in found}
+
+
+async def _until(predicate):
+    while not predicate():
+        await asyncio.sleep(0.01)
