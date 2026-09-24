@@ -13,6 +13,7 @@ import contextvars
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,7 @@ from nooa_coder.session.items import (
 from nooa_coder.session.loader import AgentFactory, default_agent_factory, load_typed
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.port import install_port
-from nooa_coder.session.session import Session
+from nooa_coder.session.session import Session, SessionClosedError
 from nooa_coder.session.store import SessionHandle, SessionNotFoundError, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -315,6 +316,27 @@ class SessionRegistry:
             waiter = asyncio.get_running_loop().create_future()
             self._waiters[child_id] = waiter
         return waiter
+
+    def drop_waiter(self, parent: Session, child_id: str, waiter: asyncio.Future[Done]) -> None:
+        """Forget a ``wait()`` that was cancelled; a result it already holds goes to delegates."""
+        if self._waiters.get(child_id) is waiter:
+            del self._waiters[child_id]
+        if not waiter.done() or waiter.cancelled() or parent._closed:
+            return
+        child = self.sessions.get(child_id)
+        ref = self.child_ref(child) if child is not None else self._ref_from_disk(child_id)
+        error = waiter.exception()
+        item: ChildResult | ChildFailed = (
+            ChildResult(child=ref, done=waiter.result())
+            if error is None
+            else ChildFailed(child=ref, error=str(error))
+        )
+        with suppress(SessionClosedError):
+            self._put(parent, child_id, item, f"child:{ref.name or child_id}")
+
+    def _ref_from_disk(self, child_id: str) -> ChildRef:
+        info = self.store.get(child_id)
+        return ChildRef(id=info.id, name=info.name or "", depth=info.depth, status="closed")
 
     async def open_child(self, parent: Session, child_id: str) -> Session:
         """A child of ``parent``: the live one, or loaded from disk with inherited options."""

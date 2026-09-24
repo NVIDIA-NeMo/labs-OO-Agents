@@ -150,7 +150,13 @@ class SessionPort:
         if registry.get(child_id) is None:
             raise ChildFailedError(f"Child {child_id!r} is not running")
         waiter = registry.waiter(child_id)
-        return await asyncio.shield(waiter)
+        try:
+            return await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            # The parent's turn was cancelled: the child's result must not
+            # vanish into an orphaned future; it goes to delegates instead.
+            registry.drop_waiter(self._session, child_id, waiter)
+            raise
 
     @hidden
     async def send_child(self, child_id: str, item: Any, *, channel: str) -> Receipt:

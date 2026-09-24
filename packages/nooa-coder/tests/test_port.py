@@ -322,3 +322,30 @@ async def test_wait_takes_a_result_that_is_already_queued(registry, root_options
     assert len(_turns(registry, root.id)) == 1
     assert root.agent.queue_manager.get_channel("delegates").qsize() == 0
     assert len(registry.store.load_rows(root.id, frozenset({"ItemWithdrawn"}))) == 1
+
+
+async def test_a_result_for_a_cancelled_wait_arrives_on_delegates(registry, root_options, models):
+    started, block = fresh_events()
+    models.scripts[None] = [
+        cell(
+            "c = await self.session.delegate('Kid', 'k', retain=True)\n"
+            "await c.wait()\n"
+            "return_result(Done(explanation='not reached'))"
+        ),
+        cell(
+            "[r] = notification['delegates']\n"
+            "return_result(Done(explanation=f'{type(r).__name__}: {r.done.explanation}'))"
+        ),
+    ]
+    models.scripts["Kid"] = [cell(BLOCKING_CELL + "return_result(Done(explanation='kid done'))")]
+    root = await registry.create(root_options)
+    first = asyncio.ensure_future(root.prompt("go"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    ended = []
+    root.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
+    assert await asyncio.wait_for(root.cancel(), TIMEOUT) is True
+    await asyncio.wait_for(first, TIMEOUT)
+    assert registry._waiters == {}
+    block.set()
+    await _until(lambda: len(ended) == 2)
+    assert ended[1].outcome == {"explanation": "ChildResult: kid done", "result": None}
