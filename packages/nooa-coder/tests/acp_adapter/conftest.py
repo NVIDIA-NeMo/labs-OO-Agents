@@ -162,3 +162,36 @@ async def coder_adapter(make_adapter):
         return adapter
 
     return make
+
+
+@pytest.fixture(autouse=True)
+def _protocol_subprocess_environment(monkeypatch):
+    """Keep this checkout's sources and test configuration in ACP subprocesses.
+
+    The library's launcher builds a sanitised environment; pass through the
+    variables that point at test directories.
+    """
+    import os
+
+    import acp.transports
+
+    original = acp.transports.default_environment
+    root = Path(__file__).resolve().parents[4]
+    sources = [root / "src", root / "packages" / "nooa-coder" / "src"]
+
+    def environment():
+        values = original()
+        values["PYTHONPATH"] = os.pathsep.join(str(path) for path in sources)
+        for name in (
+            "HOME",
+            "NEMO_OO_USER_DIR",
+            "NEMO_OO_PROJECT_DIR",
+            "NEMO_OO_SETTINGS",
+            "NOOA_SESSIONS_DIR",
+            "NOOA_ACP_MCP_TRACE",
+        ):
+            if name in os.environ:
+                values[name] = os.environ[name]
+        return values
+
+    monkeypatch.setattr(acp.transports, "default_environment", environment)

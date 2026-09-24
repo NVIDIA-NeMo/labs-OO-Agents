@@ -14,7 +14,11 @@ dependencies = [
 ]
 
 [project.scripts]
+nooa-coder = "nooa_coder.acp.cli:main"
 nooa-coder-tee = "nooa_coder.acp.tee:main"
+
+[project.entry-points."nooa_cli.commands"]
+coder = "nooa_coder.acp.cli:command"
 
 [project.optional-dependencies]
 # AST-aware code analysis for RepoTools (tree-sitter grammars).
