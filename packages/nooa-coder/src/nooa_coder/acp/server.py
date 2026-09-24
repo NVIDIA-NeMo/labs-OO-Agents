@@ -27,6 +27,7 @@ from acp import (
     InitializeResponse,
     LoadSessionResponse,
     NewSessionResponse,
+    PromptResponse,
     RequestError,
     run_agent,
     text_block,
@@ -56,14 +57,17 @@ from acp.schema import (
 )
 from acp.schema import SessionInfo as ACPSessionInfo
 
+from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
+from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
 from nooa_coder.coding.identity import CODING_AGENT, canonical_agent_spec
-from nooa_coder.session.items import CommandInfo
+from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
+from nooa_coder.session.items import CommandInfo, TurnCancelledOutcome
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import ChildActiveElsewhereError, SessionRegistry
-from nooa_coder.session.session import Session
+from nooa_coder.session.session import Session, SessionClosedError, TurnFailedError
 from nooa_coder.session.store import InvalidSessionIdError, SessionNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -71,6 +75,14 @@ logger = logging.getLogger(__name__)
 _SESSION_PAGE_SIZE = 50
 _DELETE_METHOD = "nooa/session/delete"
 """``_nooa/session/delete`` as ``ext_method`` receives it (without the underscore)."""
+
+SOURCE = "acp"
+"""The source of items this adapter admits (the bridge does not echo them back)."""
+
+_CONNECT_TEXT = (
+    "Connecting a model provider needs the terminal for now: run `nooa connect` in a "
+    "shell, then pick the new model alias here."
+)
 
 _MODES = [
     SessionMode(
@@ -366,6 +378,124 @@ class CoderACPAgent:
             *(bridge.close for bridge in bridges),
         )
 
+    # ---- prompt and cancel ---------------------------------------------
+
+    async def prompt(self, session_id: str, prompt: list[Any], **kwargs: Any) -> PromptResponse:
+        """Run a prompt; a prompt sent while a turn runs steers that turn.
+
+        Text goes in with ``steer`` (a plain submit while idle) and the
+        request waits for the outcome of the turn that consumed it. When a
+        turn is running, that turn's next model call sees the text and both
+        prompts return together; if the running turn was already finishing,
+        the text is handled by the next turn and this prompt returns with
+        that one. A ``Waiting`` outcome keeps the request open. ``/name``
+        prompts naming a session command run the command.
+        """
+        del kwargs
+        session, bridge = self._followed(session_id)
+        text = self._prompt_text(prompt)
+        try:
+            slash = _slash_invocation(text)
+            if slash is not None:
+                handled = await self._run_command(session, bridge, *slash)
+                if handled is not None:
+                    return handled
+            receipt = await session.steer(text, source=SOURCE)
+            return await self._finish(session, bridge, receipt.item_id)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session_id) from None
+        except TurnFailedError as exc:
+            return await self._turn_failed(bridge, exc)
+
+    async def _finish(
+        self, session: Session, bridge: ACPEventBridge, item_id: str
+    ) -> PromptResponse:
+        """Wait for the outcome of the turn that consumes ``item_id`` and map it to a stop reason."""
+        outcome = await session.outcome(item_id)
+        if isinstance(outcome, TurnCancelledOutcome):
+            # The bridge closed the open cards when the Session reported the
+            # cancel, which happens before this outcome resolves.
+            await bridge.flush()
+            return PromptResponse(stop_reason="cancelled")
+        # NeedInput: the bridge sent the question as the turn's final message.
+        await bridge.flush()
+        return PromptResponse(stop_reason="end_turn")
+
+    async def _turn_failed(self, bridge: ACPEventBridge, exc: TurnFailedError) -> PromptResponse:
+        """Map a failed turn: generation limits are stop reasons, anything else an error."""
+        await bridge.flush()  # includes the "Unfinished" cards for the failed turn
+        error = getattr(exc, "error", None) or exc.__cause__ or exc
+        message = str(error)
+        if isinstance(error, GenerationError):
+            if message.startswith("Empty response: the model used all available output tokens"):
+                return PromptResponse(stop_reason="max_tokens")
+            if message.startswith("Generation failed after ") and (
+                "max_iterations=" in message or "max_retries=" in message
+            ):
+                return PromptResponse(stop_reason="max_turn_requests")
+        raise RequestError(-32603, message, {"details": message}) from exc
+
+    async def _run_command(
+        self, session: Session, bridge: ACPEventBridge, name: str, raw_args: str
+    ) -> PromptResponse | None:
+        """Run ``/name args``; ``None`` when it is not a command, so the text is a prompt."""
+        if name not in {command.name for command in session.commands()}:
+            if name == "connect":
+                message = _CONNECT_TEXT
+            elif name in RESERVED_COMMAND_NAMES:
+                available = ", ".join(f"/{command.name}" for command in session.commands())
+                message = (
+                    f"NOOA /{name} is not available through ACP yet. "
+                    f"Commands here: {available or 'none'}."
+                )
+            else:
+                return None
+            return await self._say(bridge, message)
+        try:
+            result = await session.invoke_command(name, raw_args)
+        except CoercionError as exc:
+            message = f"/{name}: {exc.message}"
+            if exc.hint:
+                message += f"\n\nUsage: `/{name} {exc.hint}`"
+            return await self._say(bridge, message)
+        except (GenerationError, SessionClosedError, TurnFailedError):
+            raise
+        except Exception as exc:
+            # Command bodies are third-party code from workspace and installed
+            # skills; a failure is the command's, not a protocol error.
+            logger.warning(
+                "Slash command /%s failed in session %s", name, session.id, exc_info=True
+            )
+            return await self._say(bridge, f"/{name} failed: {exc}")
+        if result.output_to_agent and result.text:
+            channels = session.agent.queue_manager.channels()
+            channel = "slash_commands" if "slash_commands" in channels else "user_messages"
+            receipt = await session.submit(result.text, channel=channel, source=SOURCE)
+            return await self._finish(session, bridge, receipt.item_id)
+        return await self._say(bridge, result.text)
+
+    @staticmethod
+    async def _say(bridge: ACPEventBridge, message: str) -> PromptResponse:
+        if message:
+            bridge.publish(update_agent_message(text_block(message)))
+        await bridge.flush()
+        return PromptResponse(stop_reason="end_turn")
+
+    async def cancel(self, session_id: str, **kwargs: Any) -> None:
+        """Stop the running turn. The bridge closes its cards when the Session reports it."""
+        del kwargs
+        session = self.registry.get(session_id)
+        if session is None or session_id not in self._bridges:
+            return  # a notification: nothing to answer
+        await session.cancel(by="user")
+
+    def _followed(self, session_id: str) -> tuple[Session, ACPEventBridge]:
+        session = self.registry.get(session_id)
+        bridge = self._bridges.get(session_id)
+        if session is None or bridge is None:
+            raise RequestError.resource_not_found(session_id)
+        return session, bridge
+
     # ---- helpers -------------------------------------------------------
 
     def bridge(self, session_id: str) -> ACPEventBridge:
@@ -555,6 +685,24 @@ class CoderACPAgent:
             )
 
     @staticmethod
+    def _prompt_text(prompt: list[Any]) -> str:
+        parts: list[str] = []
+        for block in prompt:
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                parts.append(block.text)
+            elif block_type == "resource_link":
+                parts.append(f"Resource {block.name}: {block.uri}")
+            else:
+                raise RequestError.invalid_params(
+                    {"reason": f"Unsupported prompt content type: {block_type!r}"}
+                )
+        text = "\n\n".join(parts)
+        if not text.strip():
+            raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
+        return text
+
+    @staticmethod
     def _validate_workspace(cwd: str, additional_directories: list[str] | None) -> Path:
         if additional_directories:
             raise RequestError.invalid_params(
@@ -566,6 +714,18 @@ class CoderACPAgent:
                 {"cwd": cwd, "reason": "cwd must be an existing absolute directory"}
             )
         return root.resolve()
+
+
+def _slash_invocation(text: str) -> tuple[str, str] | None:
+    """``(name, raw_args)`` for ``/name args`` text, else ``None``. Parsing only."""
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return None
+    parts = stripped[1:].split(maxsplit=1)
+    name = parts[0].lower() if parts else ""
+    if not name:
+        return None
+    return name, parts[1] if len(parts) == 2 else ""
 
 
 def _load_error(session_id: str, exc: BaseException) -> BaseException:

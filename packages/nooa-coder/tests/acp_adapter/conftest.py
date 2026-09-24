@@ -3,6 +3,7 @@
 """Fixtures for the ACP adapter tests: an in-process fake client and adapter."""
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -112,3 +113,52 @@ async def make_adapter(sessions_dir, client):
     yield make
     for adapter in built:
         await adapter.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path_factory, monkeypatch):
+    """Keep sessions out of the developer's skills and settings (~/.agents/skills etc.)."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    monkeypatch.delenv("NEMO_OO_PROJECT_DIR", raising=False)
+    return home
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def agent_file_spec(name: str) -> str:
+    """The file spec of a class in ``fixtures/acp_test_agents.py``."""
+    return f"{FIXTURES / 'acp_test_agents.py'}:{name}"
+
+
+@pytest.fixture
+def file_spec():
+    return agent_file_spec
+
+
+@pytest.fixture
+async def coder_adapter(make_adapter):
+    """``coder_adapter(*responses)``: an adapter building real coding agents.
+
+    Sessions go through the registry's default agent factory
+    (``create_session_agent``), so workspace settings, skills and slash
+    commands apply; each session's model is a strict fake scripted with
+    ``responses`` (one list per session, in creation order).
+    """
+    from coder_test_agents import CODER_SPEC, ModelFactory
+
+    async def make(*scripts: list[Any], capabilities: Any = None) -> Any:
+        factory = ModelFactory({"fake": [list(script) for script in scripts]})
+        adapter = await make_adapter(
+            None,
+            agent_spec=CODER_SPEC,
+            llm_factory=factory,
+            model="fake",
+            capabilities=capabilities,
+        )
+        adapter.test_models = factory
+        return adapter
+
+    return make
