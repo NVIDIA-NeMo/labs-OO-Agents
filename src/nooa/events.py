@@ -164,7 +164,7 @@ class PythonOutput(EventBase):  # type: ignore[misc]
     tool_call_id: Annotated[str, Field(description="ID of the tool call that produced this output")]
     execution_status: Annotated[
         ResultStatus,
-        Field(description="Execution status (ResultStatus.COMPLETE or ResultStatus.ERROR)"),
+        Field(description="Execution status (ResultStatus.COMPLETE, ERROR or CANCELLED)"),
     ]
     execution_count: Annotated[
         int,
