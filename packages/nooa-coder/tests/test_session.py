@@ -9,12 +9,15 @@ import pytest
 from coder_test_agents import ask, cell, done, reply, wait_on
 from nooa_coder.session.items import (
     Receipt,
+    TurnCancelled,
     TurnCancelledOutcome,
     TurnEndedUpdate,
 )
 from nooa_coder.session.session import TurnFailedError
 from nooa_coder.session.store import SessionStore
 
+from nooa.context_blocks.roles import Role
+from nooa.events import PythonOutput, ResultStatus
 from nooa.interactive import Done, NeedInput
 
 TIMEOUT = 20
@@ -188,3 +191,72 @@ async def test_close_during_a_running_turn_resolves_the_prompt(make_session):
     await asyncio.wait_for(started.wait(), TIMEOUT)
     await asyncio.wait_for(session.close(), TIMEOUT)
     assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="host")
+
+
+async def test_cancel_during_a_cell_records_the_interrupted_output(make_session, sessions_dir):
+    started, _block = agents.fresh_events()
+    session, llm = make_session(cell(agents.BLOCKING_CELL), done("second turn"))
+    first = asyncio.ensure_future(session.prompt("start"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    queued = asyncio.ensure_future(session.prompt("queued meanwhile"))
+    await asyncio.sleep(0)
+    seen = []
+    session.subscribe(seen.append)
+
+    assert await asyncio.wait_for(session.cancel(), TIMEOUT) is True
+    # cancel() returns only after the cell's cancelled output is recorded.
+    events = session.agent.event_manager.values()
+    [output] = [
+        e
+        for e in events
+        if isinstance(e, PythonOutput) and e.execution_status is ResultStatus.CANCELLED
+    ]
+    assert "cell started" in output.stdout
+    [cancelled] = [e for e in events if isinstance(e, TurnCancelled)]
+    assert (cancelled.by, cancelled.interrupted) == ("user", output.tag)
+    assert events.index(cancelled) > events.index(output)
+    assert [e.kind for e in seen if e.kind in ("cancelled", "turn_ended")] == [
+        "cancelled",
+        "turn_ended",
+    ]
+    assert await asyncio.wait_for(first, TIMEOUT) == TurnCancelledOutcome(by="user")
+
+    # The item queued during the cancelled turn survives and runs next; the
+    # model sees the cancel before it.
+    assert await asyncio.wait_for(queued, TIMEOUT) == Done(explanation="second turn")
+    second_prompt = str(llm.calls[1].messages)
+    assert "TurnCancelled" in second_prompt
+    assert second_prompt.index("TurnCancelled") < second_prompt.index("queued meanwhile")
+    assert ("cancelled", "Stopped by user") in [(e.role, e.content) for e in session.transcript()]
+
+    # After a reload the event is still the model-visible TurnCancelled.
+    session_id = session.id
+    await session.close()
+    with SessionStore(sessions_dir).open(session_id) as handle:
+        [reloaded] = [e for e in handle.events.values() if e.event_type == "TurnCancelled"]
+    assert isinstance(reloaded, TurnCancelled)
+    assert reloaded._role is Role.USER
+
+
+async def test_cancel_during_a_model_call_has_no_interrupted_cell(make_session):
+    llm = agents.BlockingLLM()
+    session, _ = make_session(llm=llm)
+    pending = asyncio.ensure_future(session.prompt("start"))
+    await asyncio.wait_for(llm.entered.wait(), TIMEOUT)
+    assert await asyncio.wait_for(session.cancel(by="parent:root"), TIMEOUT) is True
+    assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="parent:root")
+    [cancelled] = [e for e in session.agent.event_manager.values() if isinstance(e, TurnCancelled)]
+    assert (cancelled.by, cancelled.interrupted) == ("parent:root", None)
+
+
+async def test_idle_cancel_while_waiting_closes_the_prompt_without_an_event(make_session):
+    session, _ = make_session(wait_on("jobs"))
+    ended = []
+    session.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
+    pending = asyncio.ensure_future(session.prompt("run the job"))
+    while not ended:
+        await asyncio.sleep(0.01)
+    assert await session.cancel() is False
+    assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="user")
+    assert not [e for e in session.agent.event_manager.values() if isinstance(e, TurnCancelled)]
+    assert await session.cancel() is False
