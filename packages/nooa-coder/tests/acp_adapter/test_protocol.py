@@ -366,3 +366,46 @@ async def test_client_shutdown_releases_sessions_for_resume(
         assert [item.session_id for item in listed.sessions] == [session.session_id]
         await connection.load_session(cwd=str(tmp_path), session_id=session.session_id)
         await connection.close_session(session.session_id)
+
+
+async def test_stray_prints_do_not_reach_the_acp_stream(tmp_path):
+    """Only JSON-RPC frames go to stdout; anything else the process prints goes to stderr."""
+    import os
+
+    from acp.transports import default_environment
+
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(_FAKE_AGENT),
+        "--noisy",
+        cwd=tmp_path,
+        env={**default_environment(), "NEMO_OO_USER_DIR": os.environ["NEMO_OO_USER_DIR"]},
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {"cwd": str(tmp_path), "mcpServers": []},
+        },
+    ]
+    lines: list[bytes] = []
+    for request in requests:
+        process.stdin.write(json.dumps(request).encode() + b"\n")
+        await process.stdin.drain()
+        while True:
+            line = await asyncio.wait_for(process.stdout.readline(), _HANG_TIMEOUT)
+            assert line, "the server closed its output"
+            lines.append(line)
+            if json.loads(line).get("id") == request["id"]:
+                break
+    process.stdin.close()
+    rest, stderr = await asyncio.wait_for(process.communicate(), _HANG_TIMEOUT)
+    assert process.returncode == 0
+    assert all(isinstance(json.loads(line), dict) for line in lines + rest.splitlines())
+    assert b"noise on stdout" in stderr

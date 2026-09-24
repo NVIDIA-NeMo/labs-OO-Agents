@@ -14,7 +14,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import signal
+import sys
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -37,6 +39,7 @@ from acp import (
     update_tool_call,
     update_user_message,
 )
+from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
 from acp.helpers import update_available_commands
 from acp.interfaces import Agent, Client
 from acp.schema import (
@@ -1017,14 +1020,55 @@ def _available_commands_update(session: Session) -> Any:
     return update_available_commands(available)
 
 
+class _WritePipeProtocol(asyncio.BaseProtocol):
+    """Flow control for the output pipe (as ``acp.stdio`` does for stdout)."""
+
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._paused = False
+        self._drain_waiter: asyncio.Future[None] | None = None
+
+    def pause_writing(self) -> None:
+        self._paused = True
+        if self._drain_waiter is None:
+            self._drain_waiter = self._loop.create_future()
+
+    def resume_writing(self) -> None:
+        self._paused = False
+        if self._drain_waiter is not None and not self._drain_waiter.done():
+            self._drain_waiter.set_result(None)
+        self._drain_waiter = None
+
+    async def _drain_helper(self) -> None:
+        if self._paused and self._drain_waiter is not None:
+            await self._drain_waiter
+
+
+async def _stdio_streams(output_fd: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Standard input, and a writer on ``output_fd`` (the reserved real stdout)."""
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader(limit=DEFAULT_STDIO_BUFFER_LIMIT_BYTES)
+    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+    protocol = _WritePipeProtocol()
+    transport, _ = await loop.connect_write_pipe(
+        lambda: protocol, os.fdopen(output_fd, "wb", buffering=0, closefd=False)
+    )
+    return reader, asyncio.StreamWriter(transport, protocol, None, loop)
+
+
 async def serve(
     registry: SessionRegistry,
     *,
     agent_spec: str | None = None,
     model: str | None = None,
     observers: list[Callable[[Any], None]] | None = None,
+    output_fd: int | None = None,
 ) -> None:
-    """Serve ACP on this process's standard input and output until the client leaves."""
+    """Serve ACP on this process's standard input and output until the client leaves.
+
+    ``output_fd`` is where frames are written when standard output was
+    reserved for ACP (``cli.reserve_stdout_for_acp``); ``None`` uses stdout.
+    """
     adapter = CoderACPAgent(registry, agent_spec=agent_spec, model=model)
     # ACP clients may terminate their subprocess instead of closing stdin.
     # Let normal teardown checkpoint sessions and release their file claims.
@@ -1054,8 +1098,13 @@ async def serve(
         # session/close is registered by the router as unstable. initialize()
         # advertises the close capability, so without this flag the agent
         # promises a method that answers "method not found".
+        streams: tuple[Any, Any] = (None, None)
+        if output_fd is not None:
+            reader, writer = await _stdio_streams(output_fd)
+            streams = (writer, reader)
         await run_agent(
             cast(Agent, adapter),
+            *streams,
             use_unstable_protocol=True,
             observers=list(observers or []),
         )
