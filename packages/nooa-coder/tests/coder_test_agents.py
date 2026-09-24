@@ -14,7 +14,13 @@ import contextvars
 import json
 from typing import Any
 
-from nooa_coder.session.items import ChildQuestion, ChildResult, TaskResult  # noqa: F401
+from nooa_coder.session.items import (  # noqa: F401
+    ChildFailed,
+    ChildFailedError,
+    ChildQuestion,
+    ChildResult,
+    TaskResult,
+)
 from nooa_coder.session.loader import default_agent_factory
 from pydantic import BaseModel
 

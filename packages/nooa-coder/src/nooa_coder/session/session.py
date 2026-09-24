@@ -104,6 +104,17 @@ def item_to_json(item: Any) -> str:
         ) from exc
 
 
+def as_data(item: Any) -> Any:
+    """A copy of ``item`` that shares nothing with the sender: data only crosses sessions.
+
+    A pydantic model is rebuilt as the same class from its JSON dump;
+    anything else must be JSON data and is copied through JSON.
+    """
+    if isinstance(item, BaseModel):
+        return type(item).model_validate(item.model_dump(mode="json"))
+    return json.loads(item_to_json(item))
+
+
 def _write_snapshot(path: Path, blob: str) -> None:
     """Insert one serialised snapshot into the session file's ``snapshots`` table.
 
@@ -177,7 +188,8 @@ class Session:
         self._closing = False
         self._closed = False
         self._before_close: Callable[[], Awaitable[None]] | None = None
-        self._loop_context_hooks: list[Callable[[], None]] = []
+        self.port: Any = None  # the agent's SessionPort, set by install_port()
+        self._loop_context_hooks: list[Callable[[], object]] = []
         self._pending_steers: list[tuple[str, str, str]] = []  # (item_id, text, source)
         self._snapshot_digest: str | None = None
         self._checkpoint_task: asyncio.Task[None] | None = None
@@ -185,6 +197,14 @@ class Session:
         self._unsubscribe_steers = agent.event_manager.on("BeforeTurn", self._flush_steers)
 
     # ---- lifecycle ---------------------------------------------------
+
+    def add_loop_context_hook(self, hook: Callable[[], object]) -> None:
+        """Run ``hook`` once at the top of the loop, inside the loop's own context.
+
+        Context variables set there are seen by every turn (each turn task
+        copies the loop's context), e.g. the port ``ChildRef`` resolves.
+        """
+        self._loop_context_hooks.append(hook)
 
     def start(self) -> None:
         """Start the turn loop.
