@@ -214,13 +214,19 @@ async def test_generation_limits_map_to_stop_reasons(
     assert (await _prompt(adapter, session_id, text)).stop_reason == stop_reason
 
 
-async def test_another_generation_error_is_an_internal_error(make_adapter, workspace, file_spec):
+@pytest.mark.parametrize(
+    ("text", "expected"), [("other", "provider rejected"), ("retries", "max_retries")]
+)
+async def test_another_generation_error_is_an_internal_error(
+    make_adapter, workspace, file_spec, text, expected
+):
+    """Repeated errors (max_retries) are a failure to report, not a turn-request limit."""
     adapter = await make_adapter(ScriptedModels(), agent_spec=file_spec("LimitAgent"))
     session_id = await _new(adapter, workspace)
     with pytest.raises(RequestError) as caught:
-        await _prompt(adapter, session_id, "other")
+        await _prompt(adapter, session_id, text)
     assert caught.value.code == -32603
-    assert "provider rejected" in str(caught.value)
+    assert expected in str(caught.value)
 
 
 # ---- slash commands ----------------------------------------------------------

@@ -9,8 +9,18 @@ from nooa.interactive import InteractiveAgent
 from nooa.unifiedllm import FakeLLMClient
 
 MESSAGES = {
-    "tokens": "Empty response: the model used all available output tokens",
-    "iterations": "Generation failed after 3 attempts (max_iterations=3)",
+    # The wording CodeActStrategy uses (nooa/strategies/codeact.py).
+    "tokens": (
+        "The model used all available output tokens before completing a tool call. "
+        "Increase `max_tokens` (16384 or more is often needed for reasoning models)."
+    ),
+    "iterations": (
+        "Generation failed after 3 iterations (max_iterations=3). Unable to complete `handle`."
+    ),
+    "retries": (
+        "Generation failed after 3 errors (max_retries=3). "
+        "Unable to generate valid code for `handle`."
+    ),
     "other": "Generation failed: the provider rejected the request",
 }
 
