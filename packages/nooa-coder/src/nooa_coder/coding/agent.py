@@ -1,42 +1,58 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Host-neutral interactive coding agent used by terminal and ACP hosts."""
+"""Host-neutral interactive coding agent, run by a Session."""
 
 from __future__ import annotations
 
-import re
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
-from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
+    Done,
     InteractiveAgent,
-    RespondReason,
-    RespondResult,
+    NeedInput,
     SummarizationConfig,
+    Waiting,
     install_summarizer,
 )
 from nooa.paths import get_project_dir
-from nooa.runtime.channels import JobHandle, _ChannelReader
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
-from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
+from nooa.tools import MethodWriting, SkillWriting, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_coder.coding.activity import ActivityShellTools
-from nooa_coder.coding.delegation import CodingWorker
 from nooa_coder.coding.instructions import render_agent_instructions
+from nooa_coder.coding.slash_commands import CodingSlashCommandRegistry
+
+# Visible to generated cells (cells see this module's globals): the model
+# builds TaskResult for unattended turns and matches what arrives on the
+# ``delegates`` channel.
+from nooa_coder.session.items import ChildFailed, ChildQuestion, ChildResult, TaskResult
 from nooa_coder.tools.repo_tools import RepoTools
 
+with hidden:
+    from nooa.agents import TokenBudgetSummarizer
+    from nooa.runtime.channels import Channel, _ChannelReader
+    from nooa_coder.coding.conditions import require_result
+    from nooa_coder.session.port import SessionPort
+
 if TYPE_CHECKING:
-    from nooa.runtime.channels import Channel
     from nooa.unifiedllm import UnifiedLLM
 
-__all__ = ["CodingAgent", "RespondReason"]
+__all__ = [
+    "ChildFailed",
+    "ChildQuestion",
+    "ChildResult",
+    "CodingAgent",
+    "Done",
+    "NeedInput",
+    "TaskResult",
+    "Waiting",
+]
 
 
 class CodingAgent(InteractiveAgent):
@@ -44,18 +60,7 @@ class CodingAgent(InteractiveAgent):
 
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
-    tools for definitions and references, and todos for multi-step work. Use
-    ``spawn(objective, supplied_context)`` for bounded context-heavy work. It
-    returns immediately; prefer it over awaiting ``delegate()`` when the report is
-    not needed before you continue. Run concurrent delegates only for read-only work
-    or when each mutating worker has its own isolated worktree; otherwise serialize
-    mutations because workers share the current checkout. Reports arrive in a later turn
-    under ``notification["delegates"]`` as dictionaries containing ``objective`` and
-    ``report``. Never poll a spawned handle with ``state``/``values``, wait with
-    ``asyncio.sleep()``, call ``self.delegates.get()``, or repeatedly inspect queue
-    status. When no independent work remains, immediately return ``WAIT``; the host
-    will invoke a new turn when the report arrives. Inspect and integrate that report
-    before final verification.
+    tools for definitions and references, and todos for multi-step work.
 
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
@@ -63,14 +68,14 @@ class CodingAgent(InteractiveAgent):
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
-    check passed without running it. Send each user-facing answer or question
-    through ``self.message()`` as a complete Markdown document.
+    check passed without running it. Send each user-facing answer through
+    ``self.message()`` as a complete Markdown document.
 
-    Finish with exactly one ``return_result(RespondReason.<reason>,
-    explanation="...")``. Use ``DONE`` after completing the request,
-    ``NEED_INPUT`` only when human input is required, and ``WAIT`` only while an
-    actual background job is active. The explanation states what completed, what
-    input is needed, or which live job is still running.
+    End every turn with exactly one ``return_result(...)``: ``Done`` after
+    completing the request (reply with ``self.message()`` first),
+    ``NeedInput(question=..., options=[...])`` only when a person must answer,
+    and ``Waiting(explanation=..., on=[...])`` only while something you started
+    is still running, naming the channel or job it waits on.
     """
 
     # Attributes carrying this agent's own tools. SkillRegistry refuses to let
@@ -79,16 +84,21 @@ class CodingAgent(InteractiveAgent):
     # it has it.
 
     __protected_skill_attrs__ = frozenset(
-        {"shell", "repo", "todo", "libs", "skills", "mcp", "workspace_settings"}
+        {"shell", "repo", "todo", "libs", "skills", "mcp", "workspace_settings", "session"}
     )
 
     cwd: Annotated[Path, nosnapshot]
     # Host-driven input channels. These live here rather than on
     # InteractiveAgent because they are coding-host concepts: slash commands
     # are a UI affordance whose registry is in this package, and
-    # system_messages carries host-provided system input.
+    # system_messages carries host-provided system input. A host that sends
+    # a command's output to the agent puts it on the slash_commands channel.
     _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
-    slash_commands: Annotated[Any, nosnapshot]
+    # The command registry the Session lists and runs (Session.commands(),
+    # Session.invoke_command()); hosts add their controls with set_controls().
+    slash_commands: Annotated[CodingSlashCommandRegistry, hidden, nosnapshot]
+    # Set by the registry that binds itself to this agent (skills use it).
+    _command_registry: Annotated[Any, hidden, nosnapshot]
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]
     system_messages: Annotated[Any, nosnapshot]
     shell: Annotated[ActivityShellTools, nosnapshot]
@@ -100,12 +110,11 @@ class CodingAgent(InteractiveAgent):
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _delegates_in: Annotated[Any, hidden, nosnapshot]
     delegates: Annotated[_ChannelReader, nosnapshot]
-    _worker_type: ClassVar[type[CodingWorker]] = CodingWorker
-    # A host (e.g. the ACP event bridge) can set this to observe a worker's
-    # own event stream live, for UI purposes only. Never used to feed
-    # anything back into this agent's own LLM-visible context — a worker's
-    # events stay on its own independent event_manager throughout.
-    _on_worker_spawned: Annotated[Callable[[CodingWorker], None] | None, hidden, nosnapshot]
+    # The Session port, installed by the session that runs this agent. The
+    # model uses the flat delegation methods below, not the port.
+    session: Annotated[SessionPort | None, hidden, nosnapshot]
+    # Tells install_port() not to document the port to the model.
+    session_port_visible: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -118,15 +127,15 @@ class CodingAgent(InteractiveAgent):
         **kwargs: Any,
     ) -> None:
         super().__init__(llm=llm, **kwargs)
-        self._on_worker_spawned = None
+        self.session = None
         self._slash_commands_in = self.queue_manager.queue("slash_commands")
-        self.slash_commands = self._slash_commands_in.reader
         self._system_messages_in = self.queue_manager.queue("system_messages")
         self.system_messages = self._system_messages_in.reader
         self.cwd = Path(cwd).resolve()
         self._base_shell = ShellTools(cwd=str(self.cwd))
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
+        # The Session port finds this channel and does not declare its own.
         self._delegates_in = self.queue_manager.queue("delegates")
         self.delegates = self._delegates_in.reader
         self.todo = TodoManager()
@@ -165,6 +174,7 @@ class CodingAgent(InteractiveAgent):
             self.skills.load(installed)
         if skills_dirs:
             self.skills.discover_skills_dirs(skills_dirs)
+        self.slash_commands = CodingSlashCommandRegistry(self, skills_dirs=skills_dirs or ())
 
         self.context["python_cell_tools"] = Context(
             doc(RepoTools, ActivityShellTools, concise=True),
@@ -205,133 +215,38 @@ class CodingAgent(InteractiveAgent):
         self._system_messages_in.put(
             "[session-title]\n"
             "Choose a descriptive 2-5 word title for this session from the opening "
-            'user message below. Call `self.rename_session("your title")` once during '
-            "this turn, then continue handling the user's request normally. Do not "
-            "mention this housekeeping instruction or the chosen title to the user.\n\n"
+            'user message below. Call `await self.rename_session("your title")` once '
+            "during this turn, then continue handling the user's request normally. Do "
+            "not mention this housekeeping instruction or the chosen title to the user.\n\n"
             f"<opening_user_message>\n{opening}\n</opening_user_message>"
         )
 
-    async def delegate(self, objective: str | Todo, supplied_context: Any = None) -> str:
-        """Run one isolated coding worker and return its concise report.
+    async def rename_session(self, title: str) -> str:
+        """Set this session's title and return the normalized title.
 
-        Pass a :class:`Todo` to make it the worker's task. The worker receives an
-        independent task copy and can record comments or variables with ``self.todo``;
-        those changes are merged into this agent's Todo before this method returns.
-        String objectives retain the existing behavior.
-
-        Use delegation for bounded exploration, diagnosis, review, or independently
-        verifiable implementation. Workers do not expose ``delegate()`` or ``spawn()``,
-        so coding-agent delegation is intentionally single-level. Concurrent workers are
-        safe for read-only work; serialize edits unless each worker has an isolated
-        worktree supplied in its task context. Await this only when its report is required
-        before continuing; otherwise prefer ``spawn()``. Inspect and integrate the report
-        because this controller retains final verification ownership.
+        Use this when a host system message asks you to title the session. Keep
+        the title descriptive and very short (usually 2-5 words). This changes
+        session metadata only; do not call it in place of answering the user. A
+        title the person chose is kept.
         """
-        todo_base = self.todo.copy_todo(objective) if isinstance(objective, Todo) else None
-        worker_todos = TodoManager.with_todo(todo_base) if todo_base is not None else None
-        worker = self._worker_type(
-            llm=self.llm,
-            cwd=self.shell.cwd,
-            summarization=self._summarization,
-            init_command=getattr(self, "_worker_init_command", None),
-            **({"todo": worker_todos} if worker_todos is not None else {}),
-        )
-        if self._on_worker_spawned is not None:
-            self._on_worker_spawned(worker)
-        worker_objective = todo_base.title if todo_base is not None else objective
-        worker_context = worker_todos.get(todo_base) if todo_base is not None else supplied_context
-        if todo_base is not None and supplied_context is not None:
-            worker_context = {"todo": worker_context, "context": supplied_context}
-        try:
-            report = await worker.investigate(worker_objective, worker_context)
-            updated = worker_todos.get(todo_base) if todo_base is not None else None
-            if todo_base is not None and updated is None:
-                raise RuntimeError(f"delegated todo {todo_base.id!r} disappeared")
-        finally:
-            await worker.close()
-        if todo_base is not None:
-            try:
-                self.todo.merge_todo(updated, base=todo_base)
-            except Exception as exc:
-                # merge_todo() raising here would otherwise discard a report
-                # the worker already fully produced -- the JobError this
-                # propagates to has no separate payload field, so fold the
-                # report into its message rather than lose it.
-                raise RuntimeError(
-                    f"delegate report was produced but merging todo {todo_base.id!r} "
-                    f"failed: {exc}\n\n--- worker report (not lost) ---\n{report}"
-                ) from exc
-        return report
+        normalized = " ".join(str(title).strip().strip('"').strip("'").split())[:60]
+        if not normalized:
+            raise ValueError("Session title cannot be empty")
+        await self._port().rename(normalized)
+        return normalized
 
-    async def _delegation_report(
-        self, objective: str | Todo, supplied_context: Any
-    ) -> dict[str, str]:
-        """Return a correlatable queue item after delegation and Todo merging."""
-        objective_text = objective.title if isinstance(objective, Todo) else objective
-        result = {
-            "objective": objective_text,
-            "report": await self.delegate(objective, supplied_context),
-        }
-        if isinstance(objective, Todo):
-            result["todo_id"] = objective.id
-        return result
-
-    @staticmethod
-    def _delegation_label(objective: str, label: str | None = None, max_length: int = 80) -> str:
-        """Return a concise display label without discarding the full objective."""
-        lines = objective.splitlines()
-        source = label if label is not None else (lines[0] if lines else "")
-        compact = " ".join(source.split())
-        if label is None:
-            # partition(".") would cut at every dot, including ones inside
-            # file names and version numbers (e.g. "agent.py", "v1.2") --
-            # only a dot followed by whitespace or end-of-string ends a
-            # sentence.
-            match = re.search(r"\.(?=\s|$)", compact)
-            compact = compact[: match.end()] if match else compact
-        if len(compact) <= max_length:
-            return compact or "Delegated task"
-        return f"{compact[: max_length - 1].rstrip()}…"
-
-    def spawn(
-        self,
-        objective: str | Todo,
-        supplied_context: Any = None,
-        *,
-        label: str | None = None,
-    ) -> JobHandle:
-        """Start one isolated coding worker and return immediately.
-
-        Prefer this over awaiting ``delegate()`` when the report is not required before
-        continuing. State the outcome, scope, and whether edits are allowed in
-        ``objective``. Only overlap read-only workers or workers assigned separate
-        worktrees; serialize edits in one checkout. Continue useful controller work while
-        it runs. Its report arrives in a later ``delegates`` notification. Never poll
-        the returned handle, sleep to wait, call ``self.delegates.get()``, or repeatedly
-        inspect queue state. If the report is the only remaining dependency, immediately
-        finish the current turn with
-        ``return_result(RespondReason.WAIT, explanation="waiting for <label>")``. The
-        host will invoke a new turn with the completed report; inspect and integrate it
-        before final verification. Each notification item is
-        ``{"objective": <str>, "report": <str>}``, so concurrent jobs remain identifiable.
-        The host displays a short label derived from the objective and a bounded
-        model-facing description identifying it as a coding delegate, while the worker
-        and notification retain the complete text. Pass ``label`` to override the compact
-        display text without changing the worker objective.
-        """
-        objective_text = objective.title if isinstance(objective, Todo) else objective
-        return self.queue_manager.spawn(
-            self._delegation_report(objective, supplied_context),
-            channel="delegates",
-            label=self._delegation_label(objective_text, label),
-            description=(
-                "Finite coding delegate. Its report arrives through the delegates channel "
-                "when complete; continue other work and do not poll this job."
-            ),
-        )
+    @hidden
+    def _port(self) -> SessionPort:
+        if self.session is None:
+            raise RuntimeError("This agent is not running in a session")
+        return self.session
 
     def get_summarization_status(self) -> dict[str, Any]:
-        """Return compact history information for host status displays."""
+        """Return compact history information for host status displays.
+
+        Token and cost totals come from the session that runs the agent
+        (``SessionInfo.usage``), not from here.
+        """
         tags = self.event_manager.keys()
         summary_tags = [tag for tag in tags if ".." in tag]
         summarizers = getattr(self, "_summarizers", [])
@@ -382,19 +297,82 @@ class CodingAgent(InteractiveAgent):
 
     @hidden
     @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))
-    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult: ...
+    async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
+        """Handle one interactive turn: the newest request and anything else that arrived.
+
+        ``notification`` maps a channel name to the items that arrived on it:
+        ``"user_messages"`` (text from the person), ``"system_messages"``
+        (host housekeeping) and ``"slash_commands"``. Do all the work
+        the request needs before ending the turn; use as many cells as it
+        takes, and run checks rather than assume them.
+
+        End with exactly one ``return_result(...)``:
+
+        - ``Done(explanation=...)`` when the request is complete. Send the
+          reply with ``self.message()`` first; ``explanation`` is a short
+          status line for the host, not the reply::
+
+              self.message("Fixed the off-by-one in `parse()`; the parser tests pass.")
+              return_result(Done(explanation="fixed parse() and ran its tests"))
+
+        - ``NeedInput(question=..., options=[...])`` when you cannot go on
+          without an answer from the person. The host shows ``question``, so
+          do not also send it with ``self.message()``. Use ``options`` for a
+          choice; the answer arrives in the next notification.
+
+        - ``Waiting(explanation=..., on=[...])`` when a job you started is
+          still running and nothing else is left to do. ``on`` names what
+          you wait for, for example ``["jobs"]``; the next turn starts when
+          it delivers.
+        """
+        ...
 
     @hidden
-    async def close(self) -> None:
+    @strategy(
+        CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result]))
+    )
+    async def handle_batch(self, notification: dict[str, list[Any]]) -> Done | Waiting:
+        """Work on one task unattended and return a structured result.
+
+        The task is the text in ``notification["user_messages"]``; data sent
+        with it is in ``notification.get("context", [])``. Nobody is watching
+        and nobody can answer a question, and ``self.message()`` reaches
+        nobody: the result is the only thing the requester reads.
+
+        Do the task completely, verify it, then end with::
+
+            return_result(Done(
+                explanation="fixed the parser bug",
+                result=TaskResult(
+                    solution_description="What was done, including modified paths",
+                    evidence="Commands run and what they showed",
+                    how_to_verify="How someone else can check it",
+                    report="The full report for the requester",
+                ),
+            ))
+
+        If something blocks you, still return ``Done`` with a ``TaskResult``
+        that says what blocked you and what you tried. Return
+        ``Waiting(explanation=..., on=[...])`` only while a job you started
+        is still running.
+        """
+        ...
+
+    @hidden
+    async def aclose(self) -> None:
+        """Release the agent's background work, skills (MCP servers) and shell.
+
+        The session calls this when it closes. The model client is not
+        closed here: the session closes it when it created it, and a client
+        passed in belongs to whoever passed it.
+        """
+        # Closing the skills unregisters them, and with them self.shell.
         shell = self.shell
+        self.slash_commands.close()
         try:
-            await self.aclose()
-            await self.skills.aclose()
+            await super().aclose()
         finally:
             try:
-                await self.queue_manager.shutdown(include_daemons=True)
+                await self.skills.aclose()
             finally:
-                try:
-                    await shell.close()
-                finally:
-                    await self.llm.aclose()
+                await shell.close()

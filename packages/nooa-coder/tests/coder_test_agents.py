@@ -253,3 +253,31 @@ async def until(predicate: Any, timeout: float = 5) -> None:
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(poll(), timeout)
+
+
+CODER_SPEC = "nooa_coder.coding.agent:CodingAgent"
+
+
+class CoderModels(ScriptedModels):
+    """An agent factory for coding-agent sessions, one strict fake model each.
+
+    Like ``ScriptedModels``, scripts are keyed by session name. The agent is
+    built for the session's workspace, with its libraries directory inside
+    that workspace so tests never touch the process's project directory.
+    """
+
+    def __call__(self, options: Any, storage: Any) -> InteractiveAgent:
+        from nooa_coder.session.loader import load_agent_class
+
+        llm = options.llm or FakeLLMClient(
+            list(self.scripts.get(options.name, [])), strict_exhaustion=True
+        )
+        self.llms[options.name] = llm
+        self.built.append(options)
+        agent_class = load_agent_class(options.agent_spec, base=options.workspace)
+        return agent_class(
+            llm=llm,
+            storage=storage,
+            cwd=options.workspace,
+            libs_dir=options.workspace / ".nooa" / "libs",
+        )
