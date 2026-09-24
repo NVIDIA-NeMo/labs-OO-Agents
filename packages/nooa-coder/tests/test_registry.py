@@ -414,3 +414,62 @@ async def _until_turn_ended(seen):
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(poll(), TIMEOUT)
+
+
+async def test_load_takes_options_from_the_record(registry, root_options, sessions_dir):
+    root = await registry.create(root_options)
+    child = await registry.create(
+        root.options.inherit(name="worker", model="alias-w", turn_method="handle_batch"),
+        parent_id=root.id,
+    )
+    await registry.close_all()
+
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
+    try:
+        loaded = await fresh.load(child.id)
+        assert (loaded.options.agent_spec, loaded.options.model, loaded.options.name) == (
+            root_options.agent_spec,
+            "alias-w",
+            "worker",
+        )
+        assert loaded.options.workspace == root_options.workspace
+        assert loaded.options.turn_method == "handle_batch"
+        assert (loaded.parent_id, loaded.depth) == (root.id, 1)
+        await fresh.close_all()
+
+        # Fields the caller sets win; the rest still come from the record.
+        batch = await fresh.load(child.id, host="acp", turn_method="handle")
+        assert (batch.options.host, batch.options.turn_method, batch.options.model) == (
+            "acp",
+            "handle",
+            "alias-w",
+        )
+        await fresh.close_all()
+        partial = root_options.model_construct(
+            _fields_set={"workspace", "agent_spec", "host"},
+            **{**root_options.model_dump(), "host": "acp", "model": None},
+        )
+        again = await fresh.load(child.id, partial)
+        assert (again.options.host, again.options.model, again.options.name) == (
+            "acp",
+            "alias-w",
+            "worker",
+        )
+    finally:
+        await fresh.close_all()
+
+
+async def test_a_throwaway_childs_turn_method_is_recorded(registry, root_options, models):
+    models.scripts[None] = [
+        cell(
+            "c = await self.session.delegate('T', 't')\n"
+            "await c.wait()\n"
+            "return_result(Done(explanation='ok'))"
+        )
+    ]
+    models.scripts["T"] = [done("t")]
+    root = await registry.create(root_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    [child] = registry.children(root.id)
+    assert child.turn_method == "handle_batch"
+    assert registry.store.get(root.id).turn_method == "handle"
