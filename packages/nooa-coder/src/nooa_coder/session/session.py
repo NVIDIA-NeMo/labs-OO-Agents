@@ -398,11 +398,13 @@ class Session:
         item_id: str | None = None,
         want_future: bool = False,
         internal: bool = False,
+        record: bool = True,
     ) -> Receipt:
         """Record the item, then put it. Synchronous so sync listeners can admit.
 
         ``internal`` admissions (steer leftovers) are allowed while the
         session is closing, so they are recorded and re-queued on a later load.
+        ``record=False`` puts an item that is already recorded (a re-queue).
         """
         if self._closed or (self._closing and not internal):
             raise SessionClosedError(f"Session {self.id!r} is closed")
@@ -417,7 +419,8 @@ class Session:
             source=source,
         )
         event.item_id = item_id or str(event.id)
-        self.handle.events.add(event)
+        if record:
+            self.handle.events.add(event)
         if want_future:
             self._futures[event.item_id] = asyncio.get_running_loop().create_future()
         self._ids.setdefault(channel, deque()).append((item, event.item_id))

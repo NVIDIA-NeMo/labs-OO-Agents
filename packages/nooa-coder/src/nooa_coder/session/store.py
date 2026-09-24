@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -17,7 +19,13 @@ from typing import Literal
 
 from nooa.paths import get_user_dir
 from nooa.runtime.event_manager import EventManager
-from nooa.storage.sqlite import SQLiteStorageManager, _is_virtiofs, delete_sqlite_database
+from nooa.storage.sqlite import (
+    SessionAlreadyActiveError,
+    SQLiteStorageManager,
+    _acquire_session_lock,
+    _is_virtiofs,
+    delete_sqlite_database,
+)
 from nooa_coder.session.events import (
     SESSION_EVENT_TYPES,
     SessionStarted,
@@ -433,6 +441,19 @@ class SessionStore:
         ]
         matches.sort(key=lambda path: path.stat().st_mtime, reverse=True)
         return [path.stem for path in matches]
+
+    def is_active(self, session_id: str) -> bool:
+        """Whether some owner (this process or another) holds the session's file lock."""
+        lock_path = self.path_for(session_id).with_suffix(".lock")
+        if not lock_path.exists():
+            return False
+        try:
+            fd = _acquire_session_lock(str(lock_path))
+        except SessionAlreadyActiveError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        return False
 
     def delete(self, session_id: str) -> bool:
         """Delete an inactive session database and its SQLite sidecars."""

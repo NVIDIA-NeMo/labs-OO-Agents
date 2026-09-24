@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 from nooa_coder.session.items import ChildQuestion, ChildResult, TaskResult  # noqa: F401
+from nooa_coder.session.loader import default_agent_factory
 from pydantic import BaseModel
 
 from nooa.interactive import Done, InteractiveAgent, NeedInput, Waiting  # noqa: F401
@@ -126,3 +127,22 @@ class BlockingLLM(FakeLLMClient):
             self.entered.set()
             await asyncio.Event().wait()
         return await super().acall(*args, **kwargs)
+
+
+class ScriptedModels:
+    """An agent factory that gives each session its own strict fake model.
+
+    Scripts are keyed by session name (``None`` for an unnamed root); a
+    session whose name has no script gets an empty strict model.
+    """
+
+    def __init__(self, scripts: dict[str | None, list[LLMResponse]] | None = None) -> None:
+        self.scripts = dict(scripts or {})
+        self.llms: dict[str | None, FakeLLMClient] = {}
+        self.built: list[Any] = []
+
+    def __call__(self, options: Any, storage: Any) -> InteractiveAgent:
+        llm = FakeLLMClient(list(self.scripts.get(options.name, [])), strict_exhaustion=True)
+        self.llms[options.name] = llm
+        self.built.append(options)
+        return default_agent_factory(options.model_copy(update={"llm": llm}), storage)

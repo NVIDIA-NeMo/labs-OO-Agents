@@ -16,13 +16,27 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from nooa.events import TuiSessionResumed
+from nooa.storage.sqlite import SessionAlreadyActiveError
+from nooa_coder.session.events import ChildDeleted, ItemRequeued
 from nooa_coder.session.items import ChildCreatedUpdate, SessionEvent, SessionInfo, SessionStatus
-from nooa_coder.session.loader import AgentFactory, default_agent_factory
+from nooa_coder.session.loader import AgentFactory, default_agent_factory, load_typed
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.session import Session
 from nooa_coder.session.store import SessionHandle, SessionStore
 
 logger = logging.getLogger(__name__)
+
+
+_REQUEUED_CHANNELS = ("user_messages", "delegates")
+
+
+class ChildActiveElsewhereError(SessionAlreadyActiveError):
+    """A child of the session being loaded is live in another registry or process.
+
+    A parent and its running children always share one registry, so the
+    parent cannot be loaded until that child is closed.
+    """
 
 
 class DepthLimitError(ValueError):
@@ -141,6 +155,123 @@ class SessionRegistry:
     def _on_update(self, session: Session, update: SessionEvent) -> None:
         if update.kind == "closed" and self.sessions.get(session.id) is session:
             del self.sessions[session.id]
+
+    # ---- load --------------------------------------------------------
+
+    async def load(self, session_id: str, options: SessionOptions) -> Session:
+        """Attach to a live session, or open one from disk and resume it.
+
+        A live id returns the same Session (the caller subscribes and reads
+        ``transcript()``). Otherwise the file is opened (claim-checked by
+        the store: ``SessionAlreadyActiveError`` if another owner has it),
+        the agent is built and its latest snapshot restored,
+        ``TuiSessionResumed`` is emitted, items admitted but never consumed
+        or withdrawn are re-queued (``ItemRequeued``), and the session is
+        published and started. Loading a child whose parent is not live is
+        allowed (a detached child: its results stay in its own transcript).
+        Loading a parent whose child is live elsewhere is refused with
+        ``ChildActiveElsewhereError``. Concurrent loads of one id share it.
+        """
+        while True:
+            live = self.sessions.get(session_id)
+            if live is not None:
+                return live
+            pending = self._reserved.get(session_id)
+            if pending is None:
+                break
+            loaded = await asyncio.shield(pending)
+            if loaded is not None:
+                return loaded
+        reservation = self._reserve(session_id)
+        handle: SessionHandle | None = None
+        try:
+            self._refuse_if_children_active_elsewhere(session_id)
+            handle = self.store.open(session_id)
+            session = self._build(options, handle)
+            restored = handle.storage.restore_latest_snapshot(session.agent)
+            session.agent.event_manager.add(
+                TuiSessionResumed(session_id=session_id, restored=restored)
+            )
+            self._requeue(session)
+            session.start()
+        except BaseException:
+            self._reserved.pop(session_id, None)
+            if not reservation.done():
+                reservation.set_result(None)
+            if handle is not None:
+                handle.close()
+            raise
+        self._publish(session, reservation)
+        return session
+
+    def _refuse_if_children_active_elsewhere(self, session_id: str) -> None:
+        on_disk = self.store.list(roots_only=False)
+        pending = [session_id]
+        while pending:
+            parent = pending.pop()
+            for info in on_disk:
+                if info.parent_id != parent:
+                    continue
+                if info.id not in self.sessions and self.store.is_active(info.id):
+                    raise ChildActiveElsewhereError(
+                        f"Session {session_id!r} has a child {info.id!r} "
+                        f"({info.name or 'unnamed'}) that is active elsewhere"
+                    )
+                pending.append(info.id)
+
+    def _requeue(self, session: Session) -> None:
+        """Put back items admitted before the last close that no turn consumed."""
+        rows = self.store.load_rows(
+            session.id, frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn"))
+        )
+        admitted: dict[str, dict[str, object]] = {}
+        finished: set[str] = set()
+        for event_type, raw in rows:
+            item_id = str(raw.get("item_id", ""))
+            if event_type == "ItemAdmitted":
+                if raw.get("channel") in _REQUEUED_CHANNELS:
+                    admitted[item_id] = raw
+            else:
+                finished.add(item_id)
+        channels = session.agent.queue_manager.channels()
+        for item_id, raw in admitted.items():
+            if item_id in finished:
+                continue
+            channel = str(raw.get("channel"))
+            if channel not in channels:
+                logger.warning(
+                    "Session %s: cannot re-queue item %s, no channel %r",
+                    session.id,
+                    item_id,
+                    channel,
+                )
+                continue
+            item = load_typed(str(raw.get("item_type", "")), str(raw.get("item_json", "null")))
+            session.handle.events.add(ItemRequeued(item_id=item_id))
+            session._admit(
+                item,
+                channel=channel,
+                source=str(raw.get("source", "")),
+                item_id=item_id,
+                record=False,
+            )
+
+    # ---- delete ------------------------------------------------------
+
+    async def delete(self, session_id: str, *, keep_files: bool = True) -> None:
+        """Close the session if live, and mark it deleted in its live parent's record.
+
+        Files are kept unless ``keep_files=False``.
+        """
+        session = self.sessions.get(session_id)
+        info = session.info if session is not None else self.store.get(session_id)
+        if session is not None:
+            await self.close(session_id)
+        parent = self.sessions.get(info.parent_id) if info.parent_id else None
+        if parent is not None:
+            parent.handle.events.add(ChildDeleted(child_id=session_id, name=info.name))
+        if not keep_files:
+            self.store.delete(session_id)
 
     # ---- queries -----------------------------------------------------
 
