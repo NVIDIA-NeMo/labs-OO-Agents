@@ -3,22 +3,29 @@
 """Session: admission, the turn loop, outcomes, events and close."""
 
 import asyncio
+import json
+import logging
+import sqlite3
 
 import coder_test_agents as agents
 import pytest
 from coder_test_agents import ask, cell, done, reply, wait_on
+from nooa_coder.session import session as session_module
 from nooa_coder.session.items import (
     Receipt,
     TurnCancelled,
     TurnCancelledOutcome,
     TurnEndedUpdate,
 )
+from nooa_coder.session.loader import default_agent_factory
+from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.session import ItemWithdrawnError, TurnFailedError
 from nooa_coder.session.store import SessionStore
 
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification, PythonOutput, ResultStatus
 from nooa.interactive import Done, NeedInput
+from nooa.storage.json_snapshot import snapshot_to_json
 
 TIMEOUT = 20
 
@@ -389,3 +396,54 @@ async def test_withdraw_a_buffered_steer(make_session):
     assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="done")
     assert "STEER-withdrawn" not in str(llm.calls[1].messages)
     assert [raw["item_id"] for _, raw in _rows(session, "ItemWithdrawn")] == [receipt.item_id]
+
+
+def _snapshot_count(path) -> int:
+    connection = sqlite3.connect(path)
+    try:
+        return connection.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    finally:
+        connection.close()
+
+
+async def test_checkpoint_is_written_only_when_the_state_changed(
+    make_session, sessions_dir, tmp_path
+):
+    session, _ = make_session(
+        done("one"),
+        done("two"),
+        cell("self.v.answer = 42\nreturn_result(Done(explanation='three'))"),
+    )
+    await asyncio.wait_for(session.prompt("one"), TIMEOUT)
+    after_one = json.dumps(snapshot_to_json(session.agent), sort_keys=True)
+    await asyncio.wait_for(session.prompt("two"), TIMEOUT)
+    after_two = json.dumps(snapshot_to_json(session.agent), sort_keys=True)
+    # Precondition: a no-op turn leaves the serialised state unchanged.
+    assert after_one == after_two
+    await session.wait_for_checkpoint()
+    assert _snapshot_count(session.handle.path) == 1
+
+    await asyncio.wait_for(session.prompt("three"), TIMEOUT)
+    await session.wait_for_checkpoint()
+    assert _snapshot_count(session.handle.path) == 2
+
+    session_id = session.id
+    await session.close()
+    with SessionStore(sessions_dir).open(session_id) as handle:
+        options = SessionOptions(workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent")
+        restored = default_agent_factory(options, handle.storage)
+        assert handle.storage.restore_latest_snapshot(restored)
+        assert restored.v.answer == 42
+
+
+async def test_checkpoint_failure_does_not_fail_the_turn(make_session, monkeypatch, caplog):
+    def broken(path, blob):
+        raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr(session_module, "_write_snapshot", broken)
+    session, _ = make_session(done("fine"))
+    with caplog.at_level(logging.WARNING, logger=session_module.__name__):
+        assert await asyncio.wait_for(session.prompt("go"), TIMEOUT) == Done(explanation="fine")
+        await session.wait_for_checkpoint()
+    assert "checkpoint" in caplog.text.lower()
+    assert _snapshot_count(session.handle.path) == 0
