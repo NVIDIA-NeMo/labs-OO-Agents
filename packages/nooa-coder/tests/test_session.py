@@ -551,3 +551,12 @@ async def test_outcome_of_steers_follows_the_turn_that_saw_them(make_session):
     block.set()
     assert await asyncio.wait_for(first, TIMEOUT) == Done(explanation="first")
     assert await asyncio.wait_for(late, TIMEOUT) == Done(explanation="handled the late steer")
+
+
+async def test_idle_cancel_leaves_items_no_turn_has_taken(make_session):
+    session, _ = make_session(start=False)
+    receipt = await session.submit("not yet taken")
+    outcome = session.outcome(receipt.item_id)
+    assert await session.cancel() is False
+    await asyncio.sleep(0)
+    assert not outcome.done()
