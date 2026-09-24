@@ -7,8 +7,12 @@ regardless of the max_string kwarg passed to pformat(). This matches the
 existing behavior of PythonOutput.stdout/stderr.
 """
 
+import pytest
+
 from nooa.agentdoc import pformat
-from nooa.events import LLMResponse, PythonOutput, ResultStatus, Summary, Task
+from nooa.config.truncation_config import TruncationConfig
+from nooa.context_blocks.formatter import XMLBlockFormatter
+from nooa.events import LLMResponse, Notification, PythonOutput, ResultStatus, Summary, Task
 
 LONG_STRING = "x" * 20_000
 MAX_STRING = 100  # Aggressively low to verify the override works
@@ -60,6 +64,25 @@ class TestEventMaxStringOverride:
         )
         rendered = pformat(event, max_string=MAX_STRING)
         assert LONG_STRING in rendered
+
+    def test_notification_description_not_truncated(self):
+        """Notification.description carries steering text — must never be truncated."""
+        event = Notification(source="steer:user", description=LONG_STRING)
+        rendered = pformat(event, max_string=MAX_STRING)
+        assert LONG_STRING in rendered
+
+    @pytest.mark.parametrize("length", [10_000, 25_000])
+    def test_notification_description_uncut_through_event_formatter(self, length: int):
+        """A long steer renders whole through the formatter the prompt builder uses.
+
+        25,000 characters is above the default ``event_format.max_string`` (10,000),
+        which is what truncated the description before it had its own spec.
+        """
+        text = "s" * length
+        event = Notification(source="steer:user", description=text)
+        rendered = XMLBlockFormatter().format_event(event, TruncationConfig().event_format)
+        assert text in rendered
+        assert "str(len=" not in rendered
 
 
 class TestOtherFieldsStillTruncated:

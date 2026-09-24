@@ -426,7 +426,7 @@ class LLMCallEnd(EventBase):  # type: ignore[misc]
 class Notification(EventBase):  # type: ignore[misc]
     """Generic "something happened" signal rendered into the LLM context.
 
-    Not tied to any specific producer. The framework never emits this
+    Not tied to any specific producer. The core runtime never emits this
     event itself — input channels emit :class:`QueueOutput` on ``put()``
     (see ``runtime/channels.py``). ``Notification`` is a user-emitted
     signal you can ``event_manager.add(...)`` yourself for long-running
@@ -438,7 +438,15 @@ class Notification(EventBase):  # type: ignore[misc]
       ``"timer:daily-cron"``. The outer dispatcher keys off this to
       decide which handler to run next.
     - ``description`` is a free-form string for the LLM; include enough
-      to make the notification self-describing in the event stream.
+      to make the notification self-describing in the event stream. It
+      renders in full (no string truncation), so a long notification is
+      never cut.
+
+    Session hosts use this event for steering text: a message a person or
+    parent sends while a turn is running is appended as
+    a ``Notification`` with ``source="steer:<who>"`` (for example
+    ``"steer:user"`` or ``"steer:parent:<name>"``) and the text as
+    ``description``, so the model sees it at its next call.
     """
 
     _role: ClassVar[Role] = Role.USER
@@ -447,7 +455,9 @@ class Notification(EventBase):  # type: ignore[misc]
         str, Field(description="Origin of the notification (e.g. 'queue:user_messages')")
     ]
     description: Annotated[
-        str, Field(description="Human-readable description of what happened")
+        str,
+        spec(max_string=None),
+        Field(description="Human-readable description of what happened"),
     ] = ""
 
 
