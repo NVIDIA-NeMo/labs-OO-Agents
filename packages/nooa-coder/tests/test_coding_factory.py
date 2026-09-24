@@ -73,7 +73,7 @@ async def _close(agent):
 
 async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace, sessions_dir):
     llm = FakeLLMClient()
-    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    registry = SessionRegistry(SessionStore(sessions_dir))
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=llm))
         agent = root.agent
@@ -146,9 +146,7 @@ def test_legacy_coding_agent_specs_load_the_moved_class(spec):
 
 async def test_a_child_with_another_model_gets_its_own_client(workspace, sessions_dir):
     models = ModelFactory({"other": [[cell(CHILD_RESULT)]]})
-    registry = SessionRegistry(
-        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=models
-    )
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=models)
     parent_llm = FakeLLMClient(
         [
             cell(
@@ -165,6 +163,7 @@ async def test_a_child_with_another_model_gets_its_own_client(workspace, session
         assert [alias for alias, _ in models.calls] == ["other"]
         [child] = registry.children(root.id)
         assert child.model == "other"
+
         # The child's session created that client, so it closes it; the
         # throwaway child is closed in the background after its result.
         async def closed():
@@ -195,7 +194,7 @@ async def test_skills_are_configured_before_a_snapshot_is_restored(
         order.append("restore")
         return restore(self, agent)
 
-    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    registry = SessionRegistry(SessionStore(sessions_dir))
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         session_id = root.id

@@ -34,7 +34,7 @@ from nooa_coder.session.items import (
     SessionStatus,
     TurnEndedUpdate,
 )
-from nooa_coder.session.loader import AgentFactory, default_agent_factory, load_typed
+from nooa_coder.session.loader import AgentFactory, load_typed
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.port import install_port
 from nooa_coder.session.session import Session, SessionClosedError
@@ -80,9 +80,11 @@ class SessionRegistry:
         agent_factory: AgentFactory | None = None,
         llm_factory: LLMFactory | None = None,
     ) -> None:
-        """``agent_factory(options, storage)`` builds each agent (default: import
-        ``options.agent_spec``). ``llm_factory(model_alias, workspace)`` builds
-        the model client for every session whose options carry no ``llm``;
+        """``agent_factory(options, storage)`` builds each agent (default: the
+        coding agent's ``create_session_agent``, which loads
+        ``options.agent_spec`` and gives a coding agent its workspace
+        settings). ``llm_factory(model_alias, workspace)`` builds the model
+        client for every session whose options carry no ``llm``;
         ``model_alias`` is ``options.model``, or ``None`` for the factory's
         default. The session owns that client and closes it. When the client
         has a non-empty ``alias`` attribute, it is recorded as ``info.model``.
@@ -91,7 +93,11 @@ class SessionRegistry:
         self.llm_factory = llm_factory
         self.sessions: dict[str, Session] = {}
         self._reserved: dict[str, asyncio.Future[Session | None]] = {}
-        self._agent_factory: AgentFactory = agent_factory or default_agent_factory
+        if agent_factory is None:
+            from nooa_coder.coding.factory import create_session_agent
+
+            agent_factory = create_session_agent
+        self._agent_factory: AgentFactory = agent_factory
         # Parent-side delivery state, by (parent id, child id): only the
         # child's own parent can wait for or take its results.
         self._waiters: dict[tuple[str, str], asyncio.Future[Done]] = {}
