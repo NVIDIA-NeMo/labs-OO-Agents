@@ -143,3 +143,91 @@ async def test_dispatch_exit_without_a_result_settles_the_foreground_with_turn_a
     error = completion.exception()
     assert isinstance(error, TurnAbandoned)
     assert "before the turn produced a result" in error.reason
+
+
+class _BlockingAgent:
+    """A real queue manager and a handle() that runs until it is cancelled."""
+
+    def __init__(self) -> None:
+        from nooa.runtime.channels import QueueManager
+
+        self.queue_manager = QueueManager()
+        self._user_messages_in = self.queue_manager.queue("user_messages")
+        self.cwd = None
+        self.started = asyncio.Event()
+
+    async def handle(self, notification: dict[str, list[Any]]) -> Any:
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+async def _start_foreground_turn() -> tuple[LocalAgentRunner, _BlockingAgent, asyncio.Task[Any]]:
+    agent = _BlockingAgent()
+    runner = LocalAgentRunner(agent, emit_text=lambda text: None, agent_id="blocking-agent")
+    waiter = asyncio.create_task(runner.submit_and_wait("do the thing"))
+    await asyncio.wait_for(agent.started.wait(), timeout=5)
+    assert runner.in_handle
+    return runner, agent, waiter
+
+
+async def _expect_turn_cancelled(waiter: asyncio.Task[Any]) -> None:
+    # Before the fix the dispatch task's done callback settled the foreground
+    # with a bare CancelledError before cancel_work() could settle it with
+    # TurnCancelled, so the waiter was cancelled instead.
+    done, _ = await asyncio.wait({waiter}, timeout=5)
+    assert done, "submit_and_wait() did not settle"
+    assert not waiter.cancelled(), "submit_and_wait() raised a bare CancelledError"
+    assert isinstance(waiter.exception(), TurnCancelled)
+
+
+@pytest.mark.asyncio
+async def test_cancel_work_during_a_real_dispatch_raises_turn_cancelled(monkeypatch):
+    runner, _, waiter = await _start_foreground_turn()
+    calls = []
+    real_cancel_work = runner.cancel_work
+
+    async def counting_cancel_work() -> None:
+        calls.append(1)
+        await real_cancel_work()
+
+    monkeypatch.setattr(runner, "cancel_work", counting_cancel_work)
+    try:
+        await runner.cancel_work()
+        await _expect_turn_cancelled(waiter)
+        # submit_and_wait()'s own CancelledError path must not cancel again.
+        assert len(calls) == 1
+    finally:
+        runner.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_during_a_real_dispatch_raises_turn_cancelled():
+    runner, _, waiter = await _start_foreground_turn()
+    try:
+        assert runner.interrupt()
+        await _expect_turn_cancelled(waiter)
+    finally:
+        runner.close()
+
+
+@pytest.mark.asyncio
+async def test_swap_agent_during_a_real_dispatch_raises_turn_cancelled():
+    runner, _, waiter = await _start_foreground_turn()
+    try:
+        await runner.swap_agent(_BlockingAgent())
+        await _expect_turn_cancelled(waiter)
+    finally:
+        runner.close()
+
+
+@pytest.mark.asyncio
+async def test_external_task_cancellation_still_reports_cancelled_error():
+    """Only a cancel requested through the runner becomes TurnCancelled."""
+    runner, _, waiter = await _start_foreground_turn()
+    try:
+        runner.task.cancel()
+        done, _ = await asyncio.wait({waiter}, timeout=5)
+        assert done
+        assert waiter.cancelled()
+    finally:
+        runner.close()

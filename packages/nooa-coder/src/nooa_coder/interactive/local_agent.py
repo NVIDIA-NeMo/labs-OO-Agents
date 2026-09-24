@@ -755,6 +755,10 @@ class LocalAgentRunner:
             if task is not self._task:
                 return
             notify_cancelled = self._notify_cancelled
+            # Every runner-initiated cancel (cancel_turn/cancel_work, interrupt,
+            # swap_agent, shutdown) goes through request_cancel() or
+            # _request_cancel_on_owner(), which set this flag first.
+            runner_cancelled = self._cancel_requested
             self._cancel_requested = False
             self._notify_cancelled = False
             self._source_task = None
@@ -777,7 +781,14 @@ class LocalAgentRunner:
                 self._finish_foreground(
                     error=TurnAbandoned("dispatcher exited before the turn produced a result")
                 )
+        elif runner_cancelled:
+            # This callback can run before cancel_work() reaches its own
+            # _finish_foreground(TurnCancelled()); settle with the typed outcome
+            # here so submit_and_wait() never sees a bare CancelledError for a
+            # cancel the runner asked for.
+            self._finish_foreground(error=TurnCancelled())
         else:
+            # Someone outside the runner cancelled the dispatch task.
             self._finish_foreground(error=asyncio.CancelledError())
         self._changed()
         if self._suspend_restart or self._lifecycle_state != "active":
