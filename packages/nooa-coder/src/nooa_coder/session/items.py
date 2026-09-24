@@ -277,6 +277,13 @@ class ChildCreatedUpdate(_Update):
     retained: bool
 
 
+class UsageChangedUpdate(_Update):
+    """Usage attributed from children changed; ``usage`` is the new total."""
+
+    kind: Literal["usage_changed"] = "usage_changed"
+    usage: Usage
+
+
 class ClosedUpdate(_Update):
     """The session closed."""
 
@@ -299,6 +306,7 @@ SessionEvent = Annotated[
     | TitleChangedUpdate
     | ModeChangedUpdate
     | ChildCreatedUpdate
+    | UsageChangedUpdate
     | ClosedUpdate
     | AgentEventUpdate,
     Field(discriminator="kind"),

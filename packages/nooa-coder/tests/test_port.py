@@ -281,9 +281,13 @@ async def test_usage_rolls_up_to_every_ancestor(registry, root_options, models):
     ]
     models.scripts["Leaf"] = [done("leaf ok", usage=usage)]
     root = await registry.create(root_options)
+    changes = []
+    root.subscribe(lambda e: changes.append(e.usage) if e.kind == "usage_changed" else None)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert root.info.usage.attributed_input_tokens == 10
     assert root.info.usage.input_tokens == 0
+    # One update per child turn that carried usage: the leaf's, then Mid's.
+    assert [u.attributed_input_tokens for u in changes] == [5, 10]
 
 
 async def test_child_ref_methods_need_a_turn():
