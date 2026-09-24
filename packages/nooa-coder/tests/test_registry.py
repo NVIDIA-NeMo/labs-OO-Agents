@@ -309,3 +309,36 @@ async def test_a_given_client_is_not_rebuilt_or_closed(root_options, sessions_di
 async def _until_closed(llm):
     while not llm.closed:
         await asyncio.sleep(0.01)
+
+
+async def test_set_model_swaps_the_client_before_the_next_turn(root_options, sessions_dir):
+    started, block = fresh_events()
+    factory = ModelFactory(
+        {
+            "alias-a": [[cell(BLOCKING_CELL + "return_result(Done(explanation='on a'))")]],
+            "alias-b": [[done("on b")]],
+        }
+    )
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    try:
+        root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
+        first = asyncio.ensure_future(root.prompt("one"))
+        await asyncio.wait_for(started.wait(), TIMEOUT)
+        await root.set_model("alias-b")  # during a turn: takes effect at the next one
+        assert len(factory.made) == 1
+        block.set()
+        assert await asyncio.wait_for(first, TIMEOUT) == Done(explanation="on a")
+        assert await asyncio.wait_for(root.prompt("two"), TIMEOUT) == Done(explanation="on b")
+        old, new = factory.made
+        assert (old.closed, new.closed) == (True, False)
+        assert root.agent.llm is new
+        assert (root.info.model, root.options.model) == ("alias-b", "alias-b")
+    finally:
+        await registry.close_all()
+    assert new.closed
+
+
+async def test_set_model_needs_an_llm_factory(registry, root_options):
+    root = await registry.create(root_options)
+    with pytest.raises(RuntimeError, match="llm_factory"):
+        await root.set_model("alias-b")

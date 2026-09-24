@@ -167,7 +167,13 @@ class SessionRegistry:
             if owned_llm is not None and hasattr(owned_llm, "close"):
                 owned_llm.close()
             raise
-        session = Session(options=options, agent=agent, handle=handle, owned_llm=owned_llm)
+        session = Session(
+            options=options,
+            agent=agent,
+            handle=handle,
+            owned_llm=owned_llm,
+            llm_factory=self.llm_factory,
+        )
         session._before_close = lambda: self._close_children(session.id)
         install_port(agent, session, self)
         return session

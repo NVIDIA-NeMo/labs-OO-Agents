@@ -34,6 +34,7 @@ from nooa.interactive import (
     RespondReason,
     RespondResult,
     Waiting,
+    apply_model_limits,
 )
 from nooa.llm_types import LLMResponse
 from nooa.runtime.channels import Channel
@@ -159,6 +160,7 @@ class Session:
         agent: InteractiveAgent,
         handle: SessionHandle,
         owned_llm: Any = None,
+        llm_factory: Callable[[str | None, Path], Any] | None = None,
     ) -> None:
         info = handle.info
         self.id: str = info.id
@@ -172,6 +174,8 @@ class Session:
             update={"status": "idle", "mode": options.permission_mode}
         )
         self._owned_llm = owned_llm
+        self._llm_factory = llm_factory
+        self._pending_model: str | None = None
         self._listeners: list[Callable[[SessionEvent], None]] = []
         # Per channel, (item, item_id) in put order: channels hold raw
         # objects, so this is how an item keeps its identity until consumed.
@@ -533,6 +537,8 @@ class Session:
             await self._run_turn(notification)
 
     async def _run_turn(self, notification: dict[str, list[Any]]) -> None:
+        if self._pending_model is not None:
+            await self._apply_pending_model()
         item_ids = list(self._consumed)
         self.handle.events.add(TurnStarted(item_ids=item_ids, item_preview=_preview(notification)))
         self._emit(TurnStartedUpdate(session_id=self.id, item_ids=item_ids))
@@ -718,6 +724,37 @@ class Session:
         self.info.title = title
         self.info.title_is_user_set = self.info.title_is_user_set or user_set
         self._emit(TitleChangedUpdate(session_id=self.id, title=title, user_set=user_set))
+
+    async def set_model(self, alias: str) -> None:
+        """Switch the model from the next turn on.
+
+        The alias is kept until the loop starts its next turn; there the
+        new client is built with the registry's ``llm_factory`` and swapped
+        in, and the old one is closed if this session created it. A running
+        turn keeps its model.
+        """
+        if self._llm_factory is None:
+            raise RuntimeError("set_model() needs the registry's llm_factory to build clients")
+        self._ensure_open()
+        self._pending_model = alias
+
+    async def _apply_pending_model(self) -> None:
+        alias, self._pending_model = self._pending_model, None
+        if alias is None or self._llm_factory is None:
+            return
+        try:
+            client = self._llm_factory(alias, self.options.workspace)
+        except Exception:
+            logger.warning(
+                "Session %s: could not build a client for %r", self.id, alias, exc_info=True
+            )
+            return
+        self.agent.set_llm(client)
+        apply_model_limits(self.agent)
+        await self._close_owned_llm()
+        self._owned_llm = client
+        self.options = self.options.model_copy(update={"model": alias, "llm": None})
+        self.info.model = alias
 
     async def set_mode(self, mode: str) -> None:
         """Record the permission mode (``auto`` or ``ask``); nothing enforces it yet."""
