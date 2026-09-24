@@ -24,12 +24,21 @@ client (permission, elicitation, file and terminal requests) use ids from `B`
 upwards, with `B = k << 32` for worker `k`. The router sends each reply to the
 worker whose id range contains the reply's id.
 
-The shared options are `--model` (or `NOOA_MODEL`), `--client-type`,
-`--agent` or `--legacy-agent`, `--sessions-dir` and `--tee`. The router starts
+The shared options are `--model` (or `NOOA_MODEL`, required), `--client-type`,
+`--agent` or `--legacy-agent`, `--sessions-dir` (or `NOOA_SESSIONS_DIR`) and
+`--tee`. The router starts
 each worker by re-running its own command line (`sys.orig_argv`) with
 `--worker-fd` and `--id-base` added. A worker therefore runs the same
 installation with the same options. `--tee` on the router records the traffic
 between the client and the router (see `docs/acp-tee.md`). Workers ignore it.
+The MCP handoff trace (`NOOA_ACP_MCP_TRACE`) is also written by the router
+only.
+
+In the router and in single-process mode, the entry point keeps standard input
+and output for ACP frames only. It duplicates the real descriptors for the
+transport, points descriptor 0 at `/dev/null` and descriptor 1 at standard
+error, so a stray `print` or a subprocess started from a cell cannot corrupt
+or consume the client's stream.
 
 ## Lifetime
 
