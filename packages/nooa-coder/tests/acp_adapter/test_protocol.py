@@ -369,7 +369,10 @@ async def test_client_shutdown_releases_sessions_for_resume(
 
 
 async def test_stray_prints_do_not_reach_the_acp_stream(tmp_path):
-    """Only JSON-RPC frames go to stdout; anything else the process prints goes to stderr."""
+    """Only JSON-RPC frames go to stdout; anything else the process prints goes to stderr.
+
+    Likewise only the transport reads standard input.
+    """
     import os
 
     from acp.transports import default_environment
@@ -379,7 +382,11 @@ async def test_stray_prints_do_not_reach_the_acp_stream(tmp_path):
         str(_FAKE_AGENT),
         "--noisy",
         cwd=tmp_path,
-        env={**default_environment(), "NEMO_OO_USER_DIR": os.environ["NEMO_OO_USER_DIR"]},
+        env={
+            **default_environment(),
+            "NEMO_OO_USER_DIR": os.environ["NEMO_OO_USER_DIR"],
+            "NOISY_STDIN_LOG": str(tmp_path / "stdin-read.bin"),
+        },
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -409,3 +416,5 @@ async def test_stray_prints_do_not_reach_the_acp_stream(tmp_path):
     assert process.returncode == 0
     assert all(isinstance(json.loads(line), dict) for line in lines + rest.splitlines())
     assert b"noise on stdout" in stderr
+    # Standard input is the client's: the process's own readers see nothing.
+    assert (tmp_path / "stdin-read.bin").read_bytes() == b"<eof>"

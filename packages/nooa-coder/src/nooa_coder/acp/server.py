@@ -16,7 +16,6 @@ import inspect
 import logging
 import os
 import signal
-import sys
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -1069,11 +1068,16 @@ class _WritePipeProtocol(asyncio.BaseProtocol):
             await self._drain_waiter
 
 
-async def _stdio_streams(output_fd: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """Standard input, and a writer on ``output_fd`` (the reserved real stdout)."""
+async def _stdio_streams(
+    input_fd: int, output_fd: int
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """A reader on ``input_fd`` and a writer on ``output_fd`` (the reserved real stdio)."""
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader(limit=DEFAULT_STDIO_BUFFER_LIMIT_BYTES)
-    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+    await loop.connect_read_pipe(
+        lambda: asyncio.StreamReaderProtocol(reader),
+        os.fdopen(input_fd, "rb", buffering=0, closefd=False),
+    )
     protocol = _WritePipeProtocol()
     transport, _ = await loop.connect_write_pipe(
         lambda: protocol, os.fdopen(output_fd, "wb", buffering=0, closefd=False)
@@ -1087,12 +1091,14 @@ async def serve(
     agent_spec: str | None = None,
     model: str | None = None,
     observers: list[Callable[[Any], None]] | None = None,
+    input_fd: int | None = None,
     output_fd: int | None = None,
 ) -> None:
     """Serve ACP on this process's standard input and output until the client leaves.
 
-    ``output_fd`` is where frames are written when standard output was
-    reserved for ACP (``cli.reserve_stdout_for_acp``); ``None`` uses stdout.
+    ``input_fd`` and ``output_fd`` are the descriptors frames are read from
+    and written to when stdio was reserved for ACP
+    (``cli.reserve_stdio_for_acp``); ``None`` uses the process's stdio.
     """
     adapter = CoderACPAgent(registry, agent_spec=agent_spec, model=model)
     # ACP clients may terminate their subprocess instead of closing stdin.
@@ -1124,8 +1130,8 @@ async def serve(
         # advertises the close capability, so without this flag the agent
         # promises a method that answers "method not found".
         streams: tuple[Any, Any] = (None, None)
-        if output_fd is not None:
-            reader, writer = await _stdio_streams(output_fd)
+        if input_fd is not None and output_fd is not None:
+            reader, writer = await _stdio_streams(input_fd, output_fd)
             streams = (writer, reader)
         await run_agent(
             cast(Agent, adapter),
