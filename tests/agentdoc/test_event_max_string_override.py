@@ -98,3 +98,22 @@ class TestOtherFieldsStillTruncated:
         rendered = pformat(event, max_string=MAX_STRING)
         # doc field should be truncated — full string should NOT appear
         assert LONG_STRING not in rendered
+
+
+class TestNotificationValue:
+    def test_value_renders_with_default_limits_and_stays_reachable(self):
+        """Notification.value is an object payload: the default renderer shows it
+        like any other field, and the full object stays on the event."""
+        from nooa.agentdoc import pformat
+
+        payload = {"kind": "review-request", "files": ["a.py", "b.py"]}
+        event = Notification(
+            source="steer:parent:reviewer", description="Review these files", value=payload
+        )
+        rendered = pformat(event)
+        assert "Review these files" in rendered
+        assert "review-request" in rendered  # rendered like any other field
+        assert event.value is payload
+
+    def test_value_defaults_to_none(self):
+        assert Notification(source="steer:user", description="hi").value is None

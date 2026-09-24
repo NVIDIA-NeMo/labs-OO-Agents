@@ -442,11 +442,17 @@ class Notification(EventBase):  # type: ignore[misc]
       renders in full (no string truncation), so a long notification is
       never cut.
 
-    Session hosts use this event for steering text: a message a person or
-    parent sends while a turn is running is appended as
-    a ``Notification`` with ``source="steer:<who>"`` (for example
-    ``"steer:user"`` or ``"steer:parent:<name>"``) and the text as
-    ``description``, so the model sees it at its next call.
+    - ``value`` is an optional data payload for when the signal carries an
+      object the agent will act on, not just text about it. It renders
+      through the default event renderer under its normal limits, and the
+      full object stays reachable as ``event_manager.get(tag).value``.
+
+    Session hosts use this event for steering: a message a person or
+    parent sends while a turn is running is appended as a ``Notification``
+    with ``source="steer:<who>"`` (for example ``"steer:user"`` or
+    ``"steer:parent:<name>"``), the text as ``description`` and, when the
+    sender passed an object rather than text, that object as ``value``, so
+    the model sees it at its next call.
     """
 
     _role: ClassVar[Role] = Role.USER
@@ -457,8 +463,12 @@ class Notification(EventBase):  # type: ignore[misc]
     description: Annotated[
         str,
         spec(max_string=None),
-        Field(description="Human-readable description of what happened"),
+        Field(description="Human-readable description"),
     ] = ""
+    value: Annotated[
+        Any,
+        Field(description="Optional data payload; full object via event_manager.get(tag).value"),
+    ] = None
 
 
 class Summary(EventBase):  # type: ignore[misc]
