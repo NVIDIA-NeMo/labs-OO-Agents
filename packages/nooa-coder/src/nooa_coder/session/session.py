@@ -275,7 +275,9 @@ class Session:
         """
         task = self._turn_task
         if task is None or task.done():
-            self._resolve_all(TurnCancelledOutcome(by=by))
+            waiting, self._waiting = self._waiting, []
+            for item_id in waiting:
+                self._resolve(item_id, TurnCancelledOutcome(by=by))
             return False
         await self._stop_turn(by=by)
         return True
