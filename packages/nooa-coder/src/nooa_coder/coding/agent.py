@@ -1,0 +1,395 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Host-neutral interactive coding agent used by terminal and ACP hosts."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+
+from nooa import Context, hidden, strategy
+from nooa.agentdoc import doc, spec
+from nooa.agents import TokenBudgetSummarizer
+from nooa.agents.summarization import SummarizationConfig, install_summarizer
+from nooa.config import CodeActConfig, PredictConfig
+from nooa.paths import get_project_dir
+from nooa.runtime.channels import JobHandle, _ChannelReader
+from nooa.skill_registry import SkillRegistry
+from nooa.storage.markers import nosnapshot
+from nooa.strategies import CodeActStrategy, PredictStrategy
+from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
+from nooa.tools.shell_tools import ShellTools
+from nooa_coder.coding.activity import ActivityShellTools
+from nooa_coder.coding.delegation import CodingWorker
+from nooa_coder.coding.instructions import render_agent_instructions
+from nooa_coder.interactive_agent import InteractiveAgent, RespondReason, RespondResult
+from nooa_coder.tools.repo_tools import RepoTools
+
+if TYPE_CHECKING:
+    from nooa.runtime.channels import Channel
+    from nooa.unifiedllm import UnifiedLLM
+
+__all__ = ["CodingAgent", "RespondReason"]
+
+
+class CodingAgent(InteractiveAgent):
+    """You are a careful software-development agent working in one local repository.
+
+    Inspect repository instructions and relevant code before editing. Preserve
+    unrelated worktree changes. Use the shell for files and commands, the repo
+    tools for definitions and references, and todos for multi-step work. Use
+    ``spawn(objective, supplied_context)`` for bounded context-heavy work. It
+    returns immediately; prefer it over awaiting ``delegate()`` when the report is
+    not needed before you continue. Run concurrent delegates only for read-only work
+    or when each mutating worker has its own isolated worktree; otherwise serialize
+    mutations because workers share the current checkout. Reports arrive in a later turn
+    under ``notification["delegates"]`` as dictionaries containing ``objective`` and
+    ``report``. Never poll a spawned handle with ``state``/``values``, wait with
+    ``asyncio.sleep()``, call ``self.delegates.get()``, or repeatedly inspect queue
+    status. When no independent work remains, immediately return ``WAIT``; the host
+    will invoke a new turn when the report arrives. Inspect and integrate that report
+    before final verification.
+
+    For multi-step work, activate the current Todo. Keep its title and description
+    aligned with the current understanding, and append comments for material findings,
+    decisions, completed steps, and verification—not routine narration.
+
+    Work until the newest request is complete or genuinely needs user input. Use
+    as many execution cells as necessary, inspect each result, and never claim a
+    check passed without running it. Send each user-facing answer or question
+    through ``self.message()`` as a complete Markdown document.
+
+    Finish with exactly one ``return_result(RespondReason.<reason>,
+    explanation="...")``. Use ``DONE`` after completing the request,
+    ``NEED_INPUT`` only when human input is required, and ``WAIT`` only while an
+    actual background job is active. The explanation states what completed, what
+    input is needed, or which live job is still running.
+    """
+
+    # Attributes carrying this agent's own tools. SkillRegistry refuses to let
+    # a later skill — a workspace SKILL.md, a client-forwarded MCP server —
+    # take one over, which would remove the tool while the model is still told
+    # it has it.
+
+    __protected_skill_attrs__ = frozenset(
+        {"shell", "repo", "todo", "libs", "skills", "mcp", "workspace_settings"}
+    )
+
+    cwd: Annotated[Path, nosnapshot]
+    # Host-driven input channels. These live here rather than on
+    # InteractiveAgent because they are coding-host concepts: slash commands
+    # are a UI affordance whose registry is in this package, and
+    # system_messages carries host-provided system input.
+    _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
+    slash_commands: Annotated[Any, nosnapshot]
+    _system_messages_in: Annotated[Channel, hidden, nosnapshot]
+    system_messages: Annotated[Any, nosnapshot]
+    shell: Annotated[ActivityShellTools, nosnapshot]
+    repo: Annotated[RepoTools, nosnapshot]
+    todo: TodoManager
+    libs: Annotated[SkillWriting, nosnapshot]
+    skills: Annotated[SkillRegistry, nosnapshot]
+    _base_shell: Annotated[ShellTools, hidden, nosnapshot]
+    _summarizers: Annotated[list[Any], hidden, nosnapshot]
+    _delegates_in: Annotated[Any, hidden, nosnapshot]
+    delegates: Annotated[_ChannelReader, nosnapshot]
+    _worker_type: ClassVar[type[CodingWorker]] = CodingWorker
+    # A host (e.g. the ACP event bridge) can set this to observe a worker's
+    # own event stream live, for UI purposes only. Never used to feed
+    # anything back into this agent's own LLM-visible context — a worker's
+    # events stay on its own independent event_manager throughout.
+    _on_worker_spawned: Annotated[Callable[[CodingWorker], None] | None, hidden, nosnapshot]
+
+    def __init__(
+        self,
+        llm: UnifiedLLM | None = None,
+        *,
+        cwd: str | Path = ".",
+        summarization: SummarizationConfig | None = None,
+        skills_dirs: list[Path] | None = None,
+        libs_dir: Path | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(llm=llm, **kwargs)
+        self._on_worker_spawned = None
+        self._slash_commands_in = self.queue_manager.queue("slash_commands")
+        self.slash_commands = self._slash_commands_in.reader
+        self._system_messages_in = self.queue_manager.queue("system_messages")
+        self.system_messages = self._system_messages_in.reader
+        self.cwd = Path(cwd).resolve()
+        self._base_shell = ShellTools(cwd=str(self.cwd))
+        self.shell = ActivityShellTools(self._base_shell, self.event_manager)
+        self.repo = RepoTools(root=self.cwd, session=self.shell.session)
+        self._delegates_in = self.queue_manager.queue("delegates")
+        self.delegates = self._delegates_in.reader
+        self.todo = TodoManager()
+        # Libraries live at <project>/.nooa/libs. get_project_dir() resolves
+        # that per process, which is what a one-workspace host like the TUI
+        # wants. A host serving several workspaces at once must say which
+        # project it means, or every session shares one directory — and
+        # SkillWriting puts it on sys.path and activates local.*, so that
+        # would expose one workspace's agent-authored code to another.
+
+        self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
+
+        self.skills = SkillRegistry(self)
+        self.skills.register("nemo.shell", self.shell)
+        self.skills.register("nemo.repo", self.repo)
+        self.skills.register("nemo.todo", self.todo)
+        self.skills.register("nemo.libwriting", self.libs)
+        self.skills.register("nemo.methodwriting", MethodWriting())
+        self.skills.activate(
+            ["nemo.shell", "nemo.repo", "nemo.todo", "nemo.libwriting", "nemo.methodwriting"]
+        )
+        # Installed ``nooa.skills`` entry points are part of the shared host
+        # surface. Load them so hosts can expose ``@slash_command`` methods,
+        # but leave them inactive until the user opts in with ``/skills``.
+        # Memory integration is deferred; do not auto-load its entry point.
+        # Also ignore the retired web publisher entry point in older installed
+        # package metadata.
+        loaded = set(self.skills.loaded())
+        installed = []
+        for name in self.skills.discovered():
+            attr_name = name.rsplit(".", 1)[-1].replace("-", "_")
+            if name in {"nemo.memory", "nemo.web"} or name in loaded or hasattr(self, attr_name):
+                continue
+            installed.append(name)
+        if installed:
+            self.skills.load(installed)
+        if skills_dirs:
+            self.skills.discover_skills_dirs(skills_dirs)
+
+        self.context["python_cell_tools"] = Context(
+            doc(RepoTools, ActivityShellTools, concise=True),
+            prefix=True,
+        )
+        self.context["todo_status"] = Context(expr="self.todo.status()")
+        self.context["coding_state"] = Context(expr="self._coding_state_context()")
+        self.context["context_usage"] = Context(
+            expr="self.context_stats.format() if self.context_stats else ''"
+        )
+        instructions = render_agent_instructions(self.cwd)
+        if instructions:
+            self.context["repository_instructions"] = Context(instructions, prefix=True)
+        spec(self, "context", hidden=False)
+        spec(self, "events", hidden=False)
+
+        self._summarization = summarization or SummarizationConfig()
+        install_summarizer(self._summarization, self)
+
+    def _coding_state_context(self) -> str:
+        """Describe coding-specific state without exposing stored values."""
+        from html import escape
+
+        cwd = str(self.shell.cwd).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+        cwd = escape(cwd[:159] + "…" if len(cwd) > 160 else cwd, quote=False)
+        count = len(self.vars)
+        return (
+            f"Working directory (already active for `self.shell`; persists across cells and turns): {cwd}\n"
+            "Use relative paths; call `cd` only to intentionally change directories.\n"
+            f"`self.v`: {count} persistent vars — inspect: `print(self.v.items())`; "
+            "remove one: `del self.v.<name>`; clear all: `self.v.clear()`"
+        )
+
+    @hidden
+    def request_session_title(self, opening_message: str) -> None:
+        """Queue host housekeeping that titles a session in the next agent turn."""
+        opening = str(opening_message).strip()[:400]
+        self._system_messages_in.put(
+            "[session-title]\n"
+            "Choose a descriptive 2-5 word title for this session from the opening "
+            'user message below. Call `self.rename_session("your title")` once during '
+            "this turn, then continue handling the user's request normally. Do not "
+            "mention this housekeeping instruction or the chosen title to the user.\n\n"
+            f"<opening_user_message>\n{opening}\n</opening_user_message>"
+        )
+
+    async def delegate(self, objective: str | Todo, supplied_context: Any = None) -> str:
+        """Run one isolated coding worker and return its concise report.
+
+        Pass a :class:`Todo` to make it the worker's task. The worker receives an
+        independent task copy and can record comments or variables with ``self.todo``;
+        those changes are merged into this agent's Todo before this method returns.
+        String objectives retain the existing behavior.
+
+        Use delegation for bounded exploration, diagnosis, review, or independently
+        verifiable implementation. Workers do not expose ``delegate()`` or ``spawn()``,
+        so coding-agent delegation is intentionally single-level. Concurrent workers are
+        safe for read-only work; serialize edits unless each worker has an isolated
+        worktree supplied in its task context. Await this only when its report is required
+        before continuing; otherwise prefer ``spawn()``. Inspect and integrate the report
+        because this controller retains final verification ownership.
+        """
+        todo_base = self.todo.copy_todo(objective) if isinstance(objective, Todo) else None
+        worker_todos = TodoManager.with_todo(todo_base) if todo_base is not None else None
+        worker = self._worker_type(
+            llm=self.llm,
+            cwd=self.shell.cwd,
+            summarization=self._summarization,
+            init_command=getattr(self, "_worker_init_command", None),
+            **({"todo": worker_todos} if worker_todos is not None else {}),
+        )
+        if self._on_worker_spawned is not None:
+            self._on_worker_spawned(worker)
+        worker_objective = todo_base.title if todo_base is not None else objective
+        worker_context = worker_todos.get(todo_base) if todo_base is not None else supplied_context
+        if todo_base is not None and supplied_context is not None:
+            worker_context = {"todo": worker_context, "context": supplied_context}
+        try:
+            report = await worker.investigate(worker_objective, worker_context)
+            updated = worker_todos.get(todo_base) if todo_base is not None else None
+            if todo_base is not None and updated is None:
+                raise RuntimeError(f"delegated todo {todo_base.id!r} disappeared")
+        finally:
+            await worker.close()
+        if todo_base is not None:
+            try:
+                self.todo.merge_todo(updated, base=todo_base)
+            except Exception as exc:
+                # merge_todo() raising here would otherwise discard a report
+                # the worker already fully produced -- the JobError this
+                # propagates to has no separate payload field, so fold the
+                # report into its message rather than lose it.
+                raise RuntimeError(
+                    f"delegate report was produced but merging todo {todo_base.id!r} "
+                    f"failed: {exc}\n\n--- worker report (not lost) ---\n{report}"
+                ) from exc
+        return report
+
+    async def _delegation_report(
+        self, objective: str | Todo, supplied_context: Any
+    ) -> dict[str, str]:
+        """Return a correlatable queue item after delegation and Todo merging."""
+        objective_text = objective.title if isinstance(objective, Todo) else objective
+        result = {
+            "objective": objective_text,
+            "report": await self.delegate(objective, supplied_context),
+        }
+        if isinstance(objective, Todo):
+            result["todo_id"] = objective.id
+        return result
+
+    @staticmethod
+    def _delegation_label(objective: str, label: str | None = None, max_length: int = 80) -> str:
+        """Return a concise display label without discarding the full objective."""
+        lines = objective.splitlines()
+        source = label if label is not None else (lines[0] if lines else "")
+        compact = " ".join(source.split())
+        if label is None:
+            # partition(".") would cut at every dot, including ones inside
+            # file names and version numbers (e.g. "agent.py", "v1.2") --
+            # only a dot followed by whitespace or end-of-string ends a
+            # sentence.
+            match = re.search(r"\.(?=\s|$)", compact)
+            compact = compact[: match.end()] if match else compact
+        if len(compact) <= max_length:
+            return compact or "Delegated task"
+        return f"{compact[: max_length - 1].rstrip()}…"
+
+    def spawn(
+        self,
+        objective: str | Todo,
+        supplied_context: Any = None,
+        *,
+        label: str | None = None,
+    ) -> JobHandle:
+        """Start one isolated coding worker and return immediately.
+
+        Prefer this over awaiting ``delegate()`` when the report is not required before
+        continuing. State the outcome, scope, and whether edits are allowed in
+        ``objective``. Only overlap read-only workers or workers assigned separate
+        worktrees; serialize edits in one checkout. Continue useful controller work while
+        it runs. Its report arrives in a later ``delegates`` notification. Never poll
+        the returned handle, sleep to wait, call ``self.delegates.get()``, or repeatedly
+        inspect queue state. If the report is the only remaining dependency, immediately
+        finish the current turn with
+        ``return_result(RespondReason.WAIT, explanation="waiting for <label>")``. The
+        host will invoke a new turn with the completed report; inspect and integrate it
+        before final verification. Each notification item is
+        ``{"objective": <str>, "report": <str>}``, so concurrent jobs remain identifiable.
+        The host displays a short label derived from the objective and a bounded
+        model-facing description identifying it as a coding delegate, while the worker
+        and notification retain the complete text. Pass ``label`` to override the compact
+        display text without changing the worker objective.
+        """
+        objective_text = objective.title if isinstance(objective, Todo) else objective
+        return self.queue_manager.spawn(
+            self._delegation_report(objective, supplied_context),
+            channel="delegates",
+            label=self._delegation_label(objective_text, label),
+            description=(
+                "Finite coding delegate. Its report arrives through the delegates channel "
+                "when complete; continue other work and do not poll this job."
+            ),
+        )
+
+    def get_summarization_status(self) -> dict[str, Any]:
+        """Return compact history information for host status displays."""
+        tags = self.event_manager.keys()
+        summary_tags = [tag for tag in tags if ".." in tag]
+        summarizers = getattr(self, "_summarizers", [])
+        summarizer = summarizers[0] if summarizers else None
+        config = getattr(summarizer, "config", None) if summarizer else None
+        pending = getattr(summarizer, "_pending_task", None) if summarizer else None
+        automatic = bool(getattr(summarizer, "_automatic_context_budget", False))
+        declared_policy = getattr(summarizer, "policy", None) if summarizer else None
+        policy = (
+            declared_policy
+            if isinstance(declared_policy, str) and declared_policy
+            else "token_budget"
+            if isinstance(summarizer, TokenBudgetSummarizer)
+            else "custom"
+            if summarizer is not None
+            else "none"
+        )
+        stats = self.context_stats
+        return {
+            "active_events": len(tags),
+            "summary_count": len(summary_tags),
+            "summary_tags": summary_tags,
+            "has_summarizer": summarizer is not None,
+            "policy": policy,
+            "current_tokens": getattr(stats, "prompt_tokens", 0) if stats else 0,
+            "max_tokens": getattr(config, "max_tokens", 0) if config else 0,
+            "threshold_fraction": (
+                getattr(summarizer, "_automatic_context_budget_percent", None)
+                if automatic
+                else None
+            ),
+            "preserve_recent": getattr(config, "preserve_recent", 0) if config else 0,
+            "compaction_pending": pending is not None,
+            "compaction_ready": bool(
+                pending is not None
+                and pending.done()
+                and getattr(summarizer, "_pending_summary", None)
+                and getattr(summarizer, "_pending_range", None)
+            ),
+        }
+
+    @hidden
+    @strategy(PredictStrategy(PredictConfig(output_serialization="tool_call")))
+    async def name_session(self, user_message: str) -> str:
+        """Generate an ultra-short 2-5 word session title for the conversation
+        opened by the given user message."""
+        ...
+
+    @hidden
+    @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))
+    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult: ...
+
+    @hidden
+    async def close(self) -> None:
+        shell = self.shell
+        try:
+            await self.aclose()
+            await self.skills.aclose()
+        finally:
+            try:
+                await self.queue_manager.shutdown(include_daemons=True)
+            finally:
+                try:
+                    await shell.close()
+                finally:
+                    await self.llm.aclose()
