@@ -83,9 +83,9 @@ class WorkspaceSettings(Skill):
         self._legacy_agent = options.legacy_agent
 
     def _options(self):
-        from .options import SessionOptions
+        from .options import CoderOptions
 
-        options = SessionOptions.load(self._workspace)
+        options = CoderOptions.load(self._workspace)
         options.agent_spec = self._agent_spec
         options.legacy_agent = self._legacy_agent
         return options

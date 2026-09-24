@@ -23,14 +23,14 @@ def _warn_ignored_agent_spec() -> None:
     logger.warning(
         "Ignoring coding.agent_spec and tui.agent_spec in all settings layers "
         "(including user and project settings); select custom agents explicitly "
-        "through the host CLI or SessionOptions overrides"
+        "through the host CLI or CoderOptions overrides"
     )
 
 
 def behavior_fields() -> frozenset[str]:
-    from .options import SessionOptions
+    from .options import CoderOptions
 
-    return frozenset(SessionOptions.model_fields) - {
+    return frozenset(CoderOptions.model_fields) - {
         "working_dir",
         "legacy_agent",
         "skills_dirs",
@@ -45,7 +45,7 @@ def load_settings_data(workspace: str | Path | None = None) -> dict[str, Any]:
 
 def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
     """Resolve legacy aliases and partial nested overrides identically for both hosts."""
-    from .options import SessionOptions
+    from .options import CoderOptions
 
     values: dict[str, Any] = {}
     agent = data.get("agent", {})
@@ -73,7 +73,7 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
         # forget_mcp() writes ``name: null`` to mask an inherited definition;
         # a masked server is simply absent from the resolved options.
         values["mcp_servers"] = {k: v for k, v in servers.items() if v is not None}
-    return SessionOptions(**values).model_dump(exclude_unset=True)
+    return CoderOptions(**values).model_dump(exclude_unset=True)
 
 
 def canonical_setting_path(path: tuple[str, ...]) -> tuple[str, ...]:
