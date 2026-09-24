@@ -193,3 +193,31 @@ class CommandAgent(InteractiveAgent, llm=FakeLLMClient()):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.slash_commands = FakeSlashCommands()
+
+
+class TrackedLLM(FakeLLMClient):
+    """A strict fake model that records whether it was closed."""
+
+    def __init__(self, alias: str, responses: list[LLMResponse]) -> None:
+        super().__init__(responses, strict_exhaustion=True)
+        self.alias = alias
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class ModelFactory:
+    """An ``llm_factory``: builds a TrackedLLM per call, scripted by alias."""
+
+    def __init__(self, scripts: dict[str, list[list[LLMResponse]]] | None = None) -> None:
+        self.scripts = {alias: list(queue) for alias, queue in (scripts or {}).items()}
+        self.made: list[TrackedLLM] = []
+        self.calls: list[tuple[str | None, Any]] = []
+
+    def __call__(self, alias: str | None, workspace: Any) -> TrackedLLM:
+        self.calls.append((alias, workspace))
+        queue = self.scripts.get(alias or "", [])
+        llm = TrackedLLM(alias or "", queue.pop(0) if queue else [])
+        self.made.append(llm)
+        return llm
