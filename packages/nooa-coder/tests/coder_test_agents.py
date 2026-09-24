@@ -109,3 +109,20 @@ print("cell released")
 
 # A context variable a test sets outside the session; cells read it.
 MARKER: contextvars.ContextVar[str] = contextvars.ContextVar("MARKER", default="unset")
+
+
+class BlockingLLM(FakeLLMClient):
+    """A fake model whose call number ``block_on`` never returns until cancelled."""
+
+    def __init__(self, responses: list[LLMResponse] | None = None, *, block_on: int = 1) -> None:
+        super().__init__(responses or [], strict_exhaustion=True)
+        self.block_on = block_on
+        self.entered = asyncio.Event()
+        self._seen = 0
+
+    async def acall(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        self._seen += 1
+        if self._seen == self.block_on:
+            self.entered.set()
+            await asyncio.Event().wait()
+        return await super().acall(*args, **kwargs)

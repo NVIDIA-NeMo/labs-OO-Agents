@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from nooa.context_blocks.roles import Role
+from nooa.events import PythonOutput, ResultStatus
 from nooa.interactive import (
     Done,
     InteractiveAgent,
@@ -33,12 +34,14 @@ from nooa.runtime.channels import Channel
 from nooa_coder.session.events import ItemAdmitted, ItemConsumed, TurnEnded, TurnStarted
 from nooa_coder.session.items import (
     AgentEventUpdate,
+    CancelledUpdate,
     ClosedUpdate,
     ItemAdmittedUpdate,
     Receipt,
     SessionEvent,
     SessionInfo,
     TranscriptEntry,
+    TurnCancelled,
     TurnCancelledOutcome,
     TurnEndedUpdate,
     TurnStartedUpdate,
@@ -124,6 +127,7 @@ class Session:
         self._loop_task: asyncio.Task[None] | None = None
         self._turn_task: asyncio.Task[Any] | None = None
         self._cancel_by: str | None = None
+        self._interrupted: PythonOutput | None = None
         self._settled = asyncio.Event()
         self._settled.set()
         self._close_task: asyncio.Task[None] | None = None
@@ -183,6 +187,23 @@ class Session:
             self._closed = True
             self.info.status = "closed"
             self._emit(ClosedUpdate(session_id=self.id))
+
+    async def cancel(self, *, by: str = "user") -> bool:
+        """Stop the running turn; return whether one was running.
+
+        Returns only after the turn has settled: the interrupted cell's
+        cancelled output and a ``TurnCancelled`` event are in the agent's
+        events, so the model sees at its next turn that it was stopped.
+        Queued items are kept and the loop goes on. With no turn running,
+        prompts left open by a ``Waiting`` are closed with
+        ``TurnCancelledOutcome`` and no event is written.
+        """
+        task = self._turn_task
+        if task is None or task.done():
+            self._resolve_all(TurnCancelledOutcome(by=by))
+            return False
+        await self._stop_turn(by=by)
+        return True
 
     async def _stop_turn(self, *, by: str) -> None:
         """Cancel a running turn and wait until the loop has settled it."""
@@ -318,6 +339,7 @@ class Session:
         self._emit(TurnStartedUpdate(session_id=self.id, item_ids=item_ids))
         self._settled.clear()
         self._cancel_by = None
+        self._interrupted = None
         self.info.status = "running"
         usage_before = self.info.usage.model_copy()
         method = getattr(self.agent, self.options.turn_method)
@@ -346,6 +368,8 @@ class Session:
 
     def _settle(self, outcome: Any, kind: OutcomeKind, usage_before: Usage) -> None:
         consumed, self._consumed = self._consumed, []
+        if kind == "cancelled":
+            self._record_cancel(outcome.by)
         usage = _usage_delta(usage_before, self.info.usage)
         data, result_type = _outcome_data(outcome, kind)
         explanation = _explanation(outcome, kind)
@@ -375,6 +399,13 @@ class Session:
             )
         )
         self._settled.set()
+
+    def _record_cancel(self, by: str) -> None:
+        """Append ``TurnCancelled`` after the interrupted cell's output, and tell listeners."""
+        interrupted = self._interrupted.tag if self._interrupted is not None else None
+        self._interrupted = None
+        self.agent.event_manager.add(TurnCancelled(by=by, interrupted=interrupted))
+        self._emit(CancelledUpdate(session_id=self.id, by=by, interrupted=interrupted))
 
     def _resolve(self, item_id: str, outcome: Any) -> None:
         future = self._futures.pop(item_id, None)
@@ -412,6 +443,16 @@ class Session:
     def _on_agent_event(self, event: Any) -> None:
         if event._role is Role.RUNTIME_EVENT:
             return
+        if (
+            isinstance(event, PythonOutput)
+            and event.execution_status is ResultStatus.CANCELLED
+            and self._turn_task is not None
+            and self._interrupted is None
+        ):
+            # The first cancelled cell output of this turn. Handlers run
+            # before the event gets its tag, so keep the event and read the
+            # tag when the turn settles.
+            self._interrupted = event
         self._emit(
             AgentEventUpdate(
                 session_id=self.id, event_id=str(event.id), event_type=event.event_type
