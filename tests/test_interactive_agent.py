@@ -98,9 +98,9 @@ def test_turn_results_require_their_text():
 
 def test_need_input_takes_options_or_schema_not_both():
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
-    assert NeedInput(question="How many?", schema_json=schema).schema_json == schema
+    assert NeedInput(question="How many?", answer_schema=schema).answer_schema == schema
     with pytest.raises(ValidationError):
-        NeedInput(question="How many?", options=["1", "2"], schema_json=schema)
+        NeedInput(question="How many?", options=["1", "2"], answer_schema=schema)
 
 
 def _cell(code: str, call_id: str) -> LLMResponse:

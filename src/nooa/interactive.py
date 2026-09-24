@@ -57,7 +57,6 @@ from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: 
 # the agent's REPL — hide it so doc(self) / exec_globals don't advertise it.
 with hidden:
     import os
-    import warnings
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -116,36 +115,29 @@ class Done(BaseModel):
     _check_explanation = field_validator("explanation")(_non_blank)
 
 
-# The field is named schema_json on purpose (design §4.4). It replaces
-# pydantic's deprecated BaseModel.schema_json() method on this class only,
-# so pydantic's "shadows an attribute" warning and pyright's override check
-# are silenced here.
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", message='Field name "schema_json"', category=UserWarning)
+class NeedInput(BaseModel):
+    """Turn result: a question the agent cannot continue without.
 
-    class NeedInput(BaseModel):
-        """Turn result: a question the agent cannot continue without.
+    ``question`` is the question itself; the host shows it to the person,
+    so do not also send it with ``self.message()``. Set ``options`` for a
+    single choice, or ``answer_schema`` (a flat JSON schema) for a typed
+    answer, or neither for free text. The answer arrives in the next
+    notification.
+    """
 
-        ``question`` is the question itself; the host shows it to the person,
-        so do not also send it with ``self.message()``. Set ``options`` for a
-        single choice, or ``schema_json`` (a flat JSON schema) for a typed
-        answer, or neither for free text. The answer arrives in the next
-        notification.
-        """
+    question: str = Field(description="The question to show the person")
+    options: list[str] | None = Field(default=None, description="Choices for a single choice")
+    answer_schema: dict[str, Any] | None = Field(
+        default=None, description="Flat JSON schema for a typed answer"
+    )
 
-        question: str = Field(description="The question to show the person")
-        options: list[str] | None = Field(default=None, description="Choices for a single choice")
-        schema_json: dict[str, Any] | None = Field(  # pyright: ignore[reportIncompatibleMethodOverride]
-            default=None, description="Flat JSON schema for a typed answer"
-        )
+    _check_question = field_validator("question")(_non_blank)
 
-        _check_question = field_validator("question")(_non_blank)
-
-        @model_validator(mode="after")
-        def _one_answer_shape(self) -> "NeedInput":
-            if self.options is not None and self.schema_json is not None:
-                raise ValueError("set options or schema_json, not both")
-            return self
+    @model_validator(mode="after")
+    def _one_answer_shape(self) -> "NeedInput":
+        if self.options is not None and self.answer_schema is not None:
+            raise ValueError("set options or answer_schema, not both")
+        return self
 
 
 class Waiting(BaseModel):
