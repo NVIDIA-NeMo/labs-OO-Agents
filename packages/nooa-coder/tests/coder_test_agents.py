@@ -12,7 +12,7 @@ cell can use.
 import asyncio
 import contextvars
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 from nooa_coder.session.items import (  # noqa: F401
     ChildFailed,
@@ -237,3 +237,9 @@ class SelfCancelAgent(InteractiveAgent, llm=FakeLLMClient()):
             inner.cancel()
             await inner
         return Done(explanation="finished")
+
+
+class HiddenPortAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """An agent that exposes delegation its own way, so the port is hidden from the model."""
+
+    session_port_visible: ClassVar[bool] = False

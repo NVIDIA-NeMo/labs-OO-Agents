@@ -15,7 +15,7 @@ from coder_test_agents import (
     wait_on,
 )
 from nooa_coder.session.items import ChildRef, TaskResult
-from nooa_coder.session.port import SessionPort, current_port
+from nooa_coder.session.port import SessionPort, current_port, install_port
 from nooa_coder.session.registry import SessionRegistry
 from nooa_coder.session.store import SessionStore
 
@@ -396,3 +396,16 @@ async def test_a_background_child_closed_mid_turn_wakes_the_parent(registry, roo
     assert await asyncio.wait_for(pending, TIMEOUT) == Done(
         explanation="ChildFailed: cancelled by host"
     )
+
+
+async def test_the_port_can_be_hidden_from_the_model(registry, root_options, make_session):
+    hidden = await registry.create(
+        root_options.model_copy(update={"agent_spec": "coder_test_agents:HiddenPortAgent"})
+    )
+    assert isinstance(hidden.agent.session, SessionPort)
+    assert "Create a child session" not in doc(hidden.agent)
+
+    session, _ = make_session(start=False)
+    install_port(session.agent, session, registry, visible=False)
+    assert "Create a child session" not in doc(session.agent)
+    assert isinstance(session.agent.session, SessionPort)
