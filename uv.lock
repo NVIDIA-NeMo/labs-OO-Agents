@@ -1575,6 +1575,7 @@ dependencies = [
     { name = "click" },
     { name = "nooa" },
     { name = "nooa-cli" },
+    { name = "nooa-coder" },
 ]
 
 [package.metadata]
@@ -1582,6 +1583,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "nooa", editable = "." },
     { name = "nooa-cli", editable = "packages/nooa-cli" },
+    { name = "nooa-coder", editable = "packages/nooa-coder" },
 ]
 
 [[package]]
