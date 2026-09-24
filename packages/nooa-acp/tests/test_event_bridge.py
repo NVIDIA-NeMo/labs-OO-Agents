@@ -548,3 +548,44 @@ async def test_a_dead_pump_fails_flush_instead_of_hanging(tmp_path):
     # And teardown must not hang either.
     await asyncio.wait_for(bridge.close(), timeout=5)
     await agent.close()
+
+
+async def test_bridge_shows_partial_output_on_cancelled_card(tmp_path):
+    """A cancelled cell's stdout/stderr (recorded by core as a CANCELLED
+    PythonOutput) stays visible on the card fail_open_tools closes."""
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="call-1",
+            name="execute_python",
+            arguments={"code": "print('half'); await asyncio.sleep(30)"},
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="call-1",
+            execution_status=ResultStatus.CANCELLED,
+            execution_count=1,
+            stdout="half\n",
+        )
+    )
+    await bridge.flush()
+    await bridge.fail_open_tools("Stopped at your request.", title="Cancelled")
+    await bridge.flush()
+
+    progress = [
+        cast(ToolCallProgress, update)
+        for _, update in client.updates
+        if isinstance(update, ToolCallProgress)
+    ]
+    assert len(progress) == 1  # the CANCELLED output did not close the card early
+    assert progress[0].title == "Cancelled"
+    assert progress[0].status == "failed"
+    assert progress[0].content is not None
+    output = _content_text(cast(ContentToolCallContent, progress[0].content[1]))
+    assert output == "```text\nhalf\n\nStopped at your request.\n```"
+    await bridge.close()
+    await agent.close()

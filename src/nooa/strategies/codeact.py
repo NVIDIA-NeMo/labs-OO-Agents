@@ -2717,10 +2717,16 @@ Standard Python builtins and agent instance (`self`) are available."""
             ),
         )
 
-        # Execute the code
-        result = await self._execute_code(
-            runtime, code, builtins, session, method_name, tool_call_id=prefill_id
-        )
+        # Execute the code. A cancel here is recorded exactly like a cancel in a
+        # model-written cell: the partial output is appended, the synthetic
+        # tool-call event is left as written, and the cancel is re-raised.
+        try:
+            result = await self._execute_code(
+                runtime, code, builtins, session, method_name, tool_call_id=prefill_id
+            )
+        except asyncio.CancelledError as cancel:
+            self._record_cancelled_cell(runtime, prefill_id, execution_count, cancel)
+            raise
 
         # Merge captured locals into session (persists for next steps and LLM turns)
         if result.captured_locals:

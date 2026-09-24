@@ -151,6 +151,30 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     ] = 0
 
 
+def _json_safe(value: Any) -> Any:
+    """Return ``value`` if pydantic-core can JSON-encode it, else a bounded ``pformat`` string.
+
+    Used by ``Any``-typed event fields (``PythonOutput.value``,
+    ``Notification.value``) so ``model_dump_json()`` (the SQLite event store)
+    never raises ``PydanticSerializationError`` on an arbitrary object such as a
+    coroutine, a lock or a user class. ``to_json`` is probed first so
+    pydantic-native types (datetime, UUID, Decimal, set, ...) still round-trip
+    structurally; only genuinely un-encodable objects fall back to ``pformat``,
+    bounded by ``FormatConfig`` defaults since this hook cannot reach the live
+    ``TruncationConfig``.
+    """
+    if value is None:
+        return value
+    try:
+        to_json(value)
+    except (PydanticSerializationError, TypeError, ValueError):
+        from nooa.agentdoc import pformat
+        from nooa.config.truncation_config import FormatConfig
+
+        return pformat(value, **FormatConfig().model_dump())
+    return value
+
+
 class PythonOutput(EventBase):  # type: ignore[misc]
     """Output from execute_python - appears as user message in events.
 
@@ -195,27 +219,8 @@ class PythonOutput(EventBase):  # type: ignore[misc]
 
     @field_serializer("value")
     def _serialize_value(self, value: Any, _info: Any) -> Any:
-        """Render values pydantic-core can't JSON-encode as a bounded ``pformat`` string.
-
-        ``value`` is ``Any`` + ``arbitrary_types_allowed``, so a cell can return an
-        object with no pydantic-core JSON serializer (e.g. a ``CancelledError`` from
-        an awaited Task, a coroutine, a lock). ``model_dump_json()`` (the SQLite
-        event store) would then raise ``PydanticSerializationError`` and wedge the
-        turn. We probe with ``to_json`` so pydantic-native types (datetime, UUID,
-        Decimal, set, ...) still round-trip structurally, and only fall back to
-        ``pformat`` — bounded by ``FormatConfig`` defaults, since this hook can't
-        reach the live ``TruncationConfig`` — for genuinely un-encodable objects.
-        """
-        if value is None:
-            return value
-        try:
-            to_json(value)
-        except (PydanticSerializationError, TypeError, ValueError):
-            from nooa.agentdoc import pformat
-            from nooa.config.truncation_config import FormatConfig
-
-            return pformat(value, **FormatConfig().model_dump())
-        return value
+        """See :func:`_json_safe`."""
+        return _json_safe(value)
 
 
 class BeforeTurn(EventBase):  # type: ignore[misc]
@@ -469,6 +474,13 @@ class Notification(EventBase):  # type: ignore[misc]
         Any,
         Field(description="Optional data payload; full object via event_manager.get(tag).value"),
     ] = None
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @field_serializer("value")
+    def _serialize_value(self, value: Any, _info: Any) -> Any:
+        """See :func:`_json_safe`: persist an arbitrary payload without raising."""
+        return _json_safe(value)
 
 
 class Summary(EventBase):  # type: ignore[misc]

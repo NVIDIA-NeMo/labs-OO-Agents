@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from nooa import Agent, strategy
+from nooa.config.strategy_config import CodeActConfig
 from nooa.context_blocks.events import ToolCallEvent
 from nooa.events import PythonOutput, ResultStatus
 from nooa.strategies.codeact import CodeActStrategy
@@ -80,9 +81,10 @@ async def test_cancel_during_cell_records_cancelled_output():
 
     calls = [e for e in events if isinstance(e, ToolCallEvent) and e.tool_call_id == "call_cell"]
     assert len(calls) == 1
-    # The tool-call event is not rewritten on cancel: it keeps whatever it had
-    # when the cell started running. The appended PythonOutput is the record.
-    assert calls[0].result is None or calls[0].result.result_status is not ResultStatus.CANCELLED
+    # The tool-call event is not rewritten on cancel: it keeps the RUNNING
+    # receipt it had when the cell started. The appended PythonOutput is the record.
+    assert calls[0].result is not None
+    assert calls[0].result.result_status is ResultStatus.RUNNING
 
 
 class _BlockingLLM(FakeLLMClient):
@@ -112,3 +114,48 @@ async def test_cancel_during_model_call_emits_no_python_output():
     events = agent.event_manager.values()
     assert not [e for e in events if isinstance(e, PythonOutput)]
     assert not [e for e in events if isinstance(e, ToolCallEvent)]
+
+
+class _BlockingPrefill:
+    """Prefill plugin whose step prints, signals, then blocks until cancelled."""
+
+    def get_code(self, call, config=None) -> str:  # noqa: ANN001 - Prefill protocol
+        return _CELL
+
+
+class PrefillWorker(Agent, llm=FakeLLMClient()):
+    @strategy(CodeActStrategy(config=CodeActConfig(prefill=_BlockingPrefill())))
+    async def work(self) -> str:
+        """Do the work."""
+        ...
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_prefill_cell_records_cancelled_output():
+    """A prefill step runs before the model loop; a cancel there is recorded the
+    same way as a cancel in a model-written cell."""
+    global CELL_STARTED, CELL_BLOCKER
+    CELL_STARTED = asyncio.Event()
+    CELL_BLOCKER = asyncio.Event()
+    agent = PrefillWorker(llm=FakeLLMClient([]))
+
+    task = asyncio.create_task(agent.work())
+    await asyncio.wait_for(CELL_STARTED.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    events = agent.event_manager.values()
+    outputs = [e for e in events if isinstance(e, PythonOutput)]
+    assert len(outputs) == 1
+    output = outputs[0]
+    assert output.tool_call_id.startswith("prefill_")
+    assert output.execution_status is ResultStatus.CANCELLED
+    assert "partial stdout" in output.stdout
+    assert "partial stderr" in output.stderr
+    calls = [
+        e for e in events if isinstance(e, ToolCallEvent) and e.tool_call_id == output.tool_call_id
+    ]
+    assert len(calls) == 1
+    assert calls[0].result is not None
+    assert calls[0].result.result_status is ResultStatus.RUNNING

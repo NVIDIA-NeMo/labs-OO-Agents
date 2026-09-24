@@ -117,3 +117,15 @@ class TestNotificationValue:
 
     def test_value_defaults_to_none(self):
         assert Notification(source="steer:user", description="hi").value is None
+
+    def test_value_persists_when_not_json_encodable(self):
+        """The SQLite store calls model_dump_json(); an arbitrary object must not raise."""
+
+        class Opaque:
+            def __repr__(self) -> str:
+                return "Opaque<42>"
+
+        event = Notification(source="steer:user", description="carry this", value=Opaque())
+        dumped = event.model_dump_json()
+        assert "Opaque<42>" in dumped
+        assert event.value.__class__ is Opaque  # the live object is untouched
