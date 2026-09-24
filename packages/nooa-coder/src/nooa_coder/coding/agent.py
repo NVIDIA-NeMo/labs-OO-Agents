@@ -22,16 +22,24 @@ from nooa.paths import get_project_dir
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
-from nooa.tools import MethodWriting, SkillWriting, TodoManager
+from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_coder.coding.activity import ActivityShellTools
 from nooa_coder.coding.instructions import render_agent_instructions
 from nooa_coder.coding.slash_commands import CodingSlashCommandRegistry
 
 # Visible to generated cells (cells see this module's globals): the model
-# builds TaskResult for unattended turns and matches what arrives on the
-# ``delegates`` channel.
-from nooa_coder.session.items import ChildFailed, ChildQuestion, ChildResult, TaskResult
+# builds TaskResult for unattended turns, matches what arrives on the
+# ``delegates`` channel and catches the delegation errors.
+from nooa_coder.session.items import (
+    ChildFailed,
+    ChildFailedError,
+    ChildQuestion,
+    ChildRef,
+    ChildResult,
+    TaskResult,
+)
+from nooa_coder.session.registry import DepthLimitError
 from nooa_coder.tools.repo_tools import RepoTools
 
 with hidden:
@@ -45,9 +53,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ChildFailed",
+    "ChildFailedError",
     "ChildQuestion",
+    "ChildRef",
     "ChildResult",
     "CodingAgent",
+    "DepthLimitError",
     "Done",
     "NeedInput",
     "TaskResult",
@@ -61,6 +72,21 @@ class CodingAgent(InteractiveAgent):
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
     tools for definitions and references, and todos for multi-step work.
+
+    Delegate bounded, context-heavy work (exploration, diagnosis, review, an
+    independently verifiable change) to a child session with its own history:
+    ``done = await self.delegate(description, prompt)`` waits for it and returns
+    its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
+    ``await self.spawn(description, prompt)`` starts one and returns at once; when
+    nothing else is left, end the turn with
+    ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives in a later
+    turn under ``notification["delegates"]``: a ``ChildResult`` (``item.done``), a
+    ``ChildQuestion`` from a retained child (``await item.answer(...)``) or a
+    ``ChildFailed`` (``item.error``). Never predict or make up a pending child's
+    result, poll, or sleep to wait. Children share this checkout: run concurrent
+    children only for read-only work and serialize edits. Children can delegate
+    in turn only down to a fixed depth; past it ``DepthLimitError`` is raised.
+    Inspect and verify what a child reports before relying on it.
 
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
@@ -235,6 +261,90 @@ class CodingAgent(InteractiveAgent):
         await self._port().rename(normalized)
         return normalized
 
+    async def delegate(
+        self,
+        description: str,
+        prompt: str | Todo,
+        *,
+        context: Any = None,
+        model: str | None = None,
+    ) -> Done:
+        """Run a child session on ``prompt``, wait for it, and return its ``Done``.
+
+        The child is a new session of this agent with its own history, working
+        unattended in this checkout; it is closed after it returns. It must end
+        with a ``TaskResult``, so ``done.result.report`` (plus
+        ``solution_description``, ``evidence`` and ``how_to_verify``) is its
+        report; ``done.explanation`` is its one-line status. Use this only when
+        you need the report before continuing; otherwise use ``spawn()``.
+
+        Pass a ``Todo`` as ``prompt`` to hand over that task: the child gets its
+        title, description and comments as the prompt, and the report is added
+        to the Todo as a comment when the child returns.
+
+        Raises ``ChildFailedError`` when the child's turn fails or it is closed
+        first, and ``DepthLimitError`` when a child would exceed the depth
+        limit; catch them to report or recover.
+
+        Args:
+            description: Short label (2-6 words); the child's name and title.
+            prompt: The full task: outcome, scope, whether edits are allowed.
+            context: Optional data (a pydantic model or JSON data) sent with it.
+            model: Model alias for the child; yours when omitted.
+        """
+        todo = prompt if isinstance(prompt, Todo) else None
+        text = _todo_prompt(todo) if todo is not None else str(prompt)
+        child = await self._port().delegate(
+            description, text, context=context, model=model, retain=False
+        )
+        done = await child.wait()
+        if isinstance(done.result, dict):
+            try:
+                done.result = TaskResult.model_validate(done.result)
+            except ValueError:
+                pass
+        if todo is not None:
+            self.todo.comment(todo, f"Delegated to {description!r}: {_report_text(done)}")
+        return done
+
+    async def spawn(
+        self,
+        description: str,
+        prompt: str | Todo,
+        *,
+        context: Any = None,
+        model: str | None = None,
+        retain: bool = False,
+    ) -> ChildRef:
+        """Start a child session on ``prompt`` and return its ``ChildRef`` at once.
+
+        Keep working, and when only the child's outcome is left end the turn
+        with ``Waiting(explanation=..., on=["delegates"])``. The outcome arrives
+        in a later turn under ``notification["delegates"]`` as a ``ChildResult``
+        (``item.done.result`` is a ``TaskResult``), a ``ChildQuestion`` or a
+        ``ChildFailed``; ``item.child.id`` matches the returned ref, which you
+        can keep in ``self.v``. A ``Todo`` prompt is sent as text; comment on
+        the Todo yourself when the result arrives.
+
+        Args:
+            description: Short label (2-6 words); the child's name and title.
+            prompt: The full task: outcome, scope, whether edits are allowed.
+            context: Optional data (a pydantic model or JSON data) sent with it.
+            model: Model alias for the child; yours when omitted.
+            retain: ``False``: unattended, returns a ``TaskResult`` and closes.
+                ``True``: a conversation partner that may ask questions
+                (``ChildQuestion``) and takes more messages with
+                ``await ref.send(text)``; close it with ``await ref.close()``.
+        """
+        text = _todo_prompt(prompt) if isinstance(prompt, Todo) else str(prompt)
+        return await self._port().delegate(
+            description, text, context=context, model=model, retain=retain
+        )
+
+    def children(self) -> list[ChildRef]:
+        """Handles on the child sessions you started, running and closed."""
+        return self._port().children()
+
     @hidden
     def _port(self) -> SessionPort:
         if self.session is None:
@@ -376,3 +486,27 @@ class CodingAgent(InteractiveAgent):
                 await self.skills.aclose()
             finally:
                 await shell.close()
+
+
+def _todo_prompt(todo: Todo) -> str:
+    """A Todo as the text a child works from: title, description, comments."""
+    lines = [f"Task: {todo.title}"]
+    if todo.description:
+        lines += ["", todo.description]
+    if todo.comments:
+        lines += ["", "Notes so far:"]
+        lines += [f"- {comment.body}" for comment in todo.comments]
+    return "\n".join(lines)
+
+
+def _report_text(done: Done) -> str:
+    """The report in a child's Done: the TaskResult's report, else its summary fields."""
+    result = done.result
+    if isinstance(result, TaskResult):
+        if result.report.strip():
+            return result.report
+        return (
+            f"{result.solution_description}\nEvidence: {result.evidence}\n"
+            f"How to verify: {result.how_to_verify}"
+        )
+    return done.explanation
