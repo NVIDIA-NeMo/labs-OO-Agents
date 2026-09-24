@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prompt-size guards for the coding agents' first model call.
 
-Installed ``nooa.skills`` entry points are loaded into the agent, so their
-docs change the prompt with whatever happens to be installed. Discovery is
-patched to nothing, which leaves the agent's own tools only.
+Installed ``nooa.skills`` entry points are loaded into the agent, and the
+user's skill directories under the home directory are discovered, so both
+change the prompt with whatever this machine has. Discovery is patched to
+nothing and ``HOME`` points at an empty directory, which leaves the agent's
+own tools only.
 
 The limits are the sizes measured when this guard was added (2026-09-24),
 rounded up to the next 100 characters, with the workspace path (which
@@ -32,19 +34,23 @@ RESULT = (
 
 # (spec, turn method): (system prompt chars, all message chars)
 LIMITS = {
-    (CODER, "handle"): (19_800, 23_600),  # measured 19,772 / 23,571
-    (CODER, "handle_batch"): (19_800, 23_300),  # measured 19,772 / 23,295
-    (EXPERIMENTAL, "handle"): (11_200, 13_400),  # measured 11,170 / 13,343
-    (EXPERIMENTAL, "handle_batch"): (11_200, 13_700),  # measured 11,170 / 13,696
+    (CODER, "handle"): (19_800, 23_500),  # measured 19,732 / 23,477
+    (CODER, "handle_batch"): (19_800, 23_300),  # measured 19,732 / 23,201
+    (EXPERIMENTAL, "handle"): (11_200, 13_300),  # measured 11,124 / 13,297
+    (EXPERIMENTAL, "handle_batch"): (11_200, 13_700),  # measured 11,124 / 13,650
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
 
 
 @pytest.fixture(autouse=True)
-def _no_installed_skills(monkeypatch):
+def _no_installed_skills(monkeypatch, tmp_path):
     monkeypatch.setattr("nooa.skill_registry.entry_points", lambda *, group: [])
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    # User skill directories (~/.claude/skills and the like) join the prompt.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
 
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
