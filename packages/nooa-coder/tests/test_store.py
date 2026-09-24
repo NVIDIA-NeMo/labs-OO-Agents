@@ -18,3 +18,24 @@ def test_store_returns_the_single_session_info_model(sessions_dir):
     assert isinstance(info, SessionInfo)
     assert (info.id, info.model, info.agent) == (session_id, "m", "pkg:Agent")
     assert [i.id for i in store.list()] == [session_id]
+
+
+def test_default_directory_is_the_user_level_sessions_dir(_user_dir):
+    store = SessionStore()
+    assert store.root == _user_dir / "sessions"
+    with store.create() as handle:
+        assert handle.path.parent == _user_dir / "sessions"
+
+
+def test_workspace_is_recorded_and_filters_the_listing(sessions_dir, tmp_path):
+    store = SessionStore(sessions_dir)
+    first, second = tmp_path / "one", tmp_path / "two"
+    with store.create(workspace=str(first)) as a, store.create(workspace=str(second)) as b:
+        ids = {a.id: first, b.id: second}
+    assert {info.id: info.workspace for info in store.list()} == {
+        key: str(value) for key, value in ids.items()
+    }
+    assert [info.id for info in store.list(workspace=first)] == [
+        key for key, value in ids.items() if value == first
+    ]
+    assert store.list(workspace=tmp_path / "three") == []
