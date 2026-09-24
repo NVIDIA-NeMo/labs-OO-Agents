@@ -538,7 +538,10 @@ class SessionRegistry:
     async def close_all(self) -> None:
         """Close every live session, deepest first."""
         for session in sorted(self.sessions.values(), key=lambda s: s.depth, reverse=True):
-            await session.close()
+            try:
+                await session.close()
+            except Exception:
+                logger.exception("Closing session %s failed", session.id)
 
 
 def _live_status(session: Session) -> SessionStatus:

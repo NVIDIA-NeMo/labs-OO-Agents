@@ -3,6 +3,7 @@
 """SessionRegistry: the tree of live sessions and their files."""
 
 import asyncio
+import sqlite3
 
 import pytest
 from coder_test_agents import (
@@ -14,11 +15,13 @@ from coder_test_agents import (
     done,
     fresh_events,
 )
+from nooa_coder.session.events import TurnEnded
 from nooa_coder.session.registry import (
     ChildActiveElsewhereError,
     DepthLimitError,
     SessionRegistry,
 )
+from nooa_coder.session.session import TurnFailedError
 from nooa_coder.session.store import SessionStore
 
 from nooa.interactive import Done
@@ -473,3 +476,51 @@ async def test_a_throwaway_childs_turn_method_is_recorded(registry, root_options
     [child] = registry.children(root.id)
     assert child.turn_method == "handle_batch"
     assert registry.store.get(root.id).turn_method == "handle"
+
+
+async def test_a_turn_cancelled_from_inside_fails_and_the_loop_goes_on(root_options, sessions_dir):
+    registry = SessionRegistry(SessionStore(sessions_dir))
+    options = root_options.model_copy(update={"agent_spec": "coder_test_agents:SelfCancelAgent"})
+    root = await registry.create(options)
+    with pytest.raises(TurnFailedError, match="cancelled from inside"):
+        await asyncio.wait_for(root.prompt("one"), 5)
+    assert not root._loop_task.done()
+    assert await asyncio.wait_for(root.prompt("two"), 5) == Done(explanation="finished")
+    [first, _] = [raw for _, raw in registry.store.load_rows(root.id, frozenset({"TurnEnded"}))]
+    assert first["outcome_kind"] == "error"
+    await registry.close_all()
+    assert not registry.store.is_active(root.id)
+
+
+async def test_a_failing_turn_record_does_not_stop_the_loop(registry, root_options, models):
+    models.scripts[None] = [done("first"), done("second")]
+    root = await registry.create(root_options)
+    add = root.handle.events.add
+    failures = []
+
+    def failing_add(event, **kwargs):
+        if isinstance(event, TurnEnded) and not failures:
+            failures.append(event)
+            raise sqlite3.OperationalError("database is locked")
+        return add(event, **kwargs)
+
+    root.handle.events.add = failing_add
+    with pytest.raises(TurnFailedError):
+        await asyncio.wait_for(root.prompt("one"), 5)
+    assert await asyncio.wait_for(root.prompt("two"), 5) == Done(explanation="second")
+    await registry.close_all()
+    assert not registry.store.is_active(root.id)
+
+
+async def test_close_all_goes_on_when_one_close_fails(registry, root_options):
+    first = await registry.create(root_options)
+    second = await registry.create(root_options)
+
+    async def broken():
+        raise RuntimeError("children could not close")
+
+    first._before_close = broken
+    await registry.close_all()
+    assert first._closed and second._closed
+    assert not registry.store.is_active(first.id)
+    assert not registry.store.is_active(second.id)

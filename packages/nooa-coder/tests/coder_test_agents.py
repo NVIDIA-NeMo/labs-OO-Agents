@@ -221,3 +221,16 @@ class ModelFactory:
         llm = TrackedLLM(alias or "", queue.pop(0) if queue else [])
         self.made.append(llm)
         return llm
+
+
+class SelfCancelAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """Its first turn is cancelled from inside (not by Session.cancel()); later turns finish."""
+
+    async def handle(self, notification: dict[str, list[Any]]) -> Done:
+        if "cancelled_once" not in self.vars:
+            self.vars["cancelled_once"] = True
+            inner = asyncio.ensure_future(asyncio.sleep(10))
+            await asyncio.sleep(0)
+            inner.cancel()
+            await inner
+        return Done(explanation="finished")
