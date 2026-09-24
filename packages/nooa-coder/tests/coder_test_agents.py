@@ -217,8 +217,9 @@ class ModelFactory:
 
     def __call__(self, alias: str | None, workspace: Any) -> TrackedLLM:
         self.calls.append((alias, workspace))
-        queue = self.scripts.get(alias or "", [])
-        llm = TrackedLLM(alias or "", queue.pop(0) if queue else [])
+        resolved = alias or "default-model"  # None means the factory's default
+        queue = self.scripts.get(resolved, [])
+        llm = TrackedLLM(resolved, queue.pop(0) if queue else [])
         self.made.append(llm)
         return llm
 

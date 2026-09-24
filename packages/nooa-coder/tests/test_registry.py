@@ -557,3 +557,16 @@ async def test_a_failed_agent_build_closes_the_owned_client(root_options, sessio
     [llm] = factory.made
     assert llm.closed
     assert _db_files(sessions_dir) == []
+
+
+async def test_the_factorys_default_client_is_owned_too(root_options, sessions_dir):
+    factory = ModelFactory({"default-model": [[done("default")]]})
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    root = await registry.create(root_options)  # no model: the factory's default
+    [llm] = factory.made
+    assert factory.calls == [(None, root_options.workspace)]
+    assert root.agent.llm is llm
+    assert root.info.model == "default-model"
+    assert await asyncio.wait_for(root.prompt("go"), 5) == Done(explanation="default")
+    await registry.close_all()
+    assert llm.closed
