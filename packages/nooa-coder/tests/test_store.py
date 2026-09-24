@@ -4,6 +4,7 @@
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 from nooa_coder.session.items import SessionInfo, Usage
@@ -125,4 +126,34 @@ def test_open_racing_a_delete_raises_and_creates_no_file(sessions_dir, monkeypat
 
     with pytest.raises(SessionNotFoundError):
         store.open(session_id)
+    assert not path.exists()
+
+
+def test_readers_work_while_the_session_is_open(sessions_dir):
+    store = SessionStore(sessions_dir)
+    with store.create(model="m") as handle:
+        handle.set_title("live title")
+        assert store.get(handle.id).title == "live title"
+        assert [info.id for info in store.list()] == [handle.id]
+
+
+def test_readers_racing_a_delete_create_no_file(sessions_dir, tmp_path, monkeypatch):
+    """Readers open read-only, so a file deleted under them is not recreated."""
+    store = SessionStore(sessions_dir)
+    with store.create() as handle:
+        session_id, path = handle.id, handle.path
+    store.delete(session_id)
+    other = tmp_path / "other"
+    other.write_text("x")
+    real_stat = Path.stat
+
+    with monkeypatch.context() as patch:
+        # Both readers check the file first; make the check pass as if the
+        # delete landed just after it.
+        patch.setattr(Path, "exists", lambda self: True)
+        patch.setattr(
+            Path, "stat", lambda self, **kw: real_stat(other if self == path else self, **kw)
+        )
+        assert store._read_info(path) is None
+        assert store._read_rows(path) == []
     assert not path.exists()
