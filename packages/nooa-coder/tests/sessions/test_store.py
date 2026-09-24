@@ -665,3 +665,37 @@ def test_liveness_probe_does_not_break_a_real_opener(tmp_path):
             t.join()
 
     assert not failures, failures
+
+
+@pytest.mark.parametrize("reader", ["load_turns", "load_recent_turns", "read_info"])
+def test_readers_never_create_a_database_deleted_under_them(tmp_path, monkeypatch, reader):
+    """A delete() between a reader's existence check and its connect leaves no file.
+
+    ``sqlite3.connect(str(path))`` creates a missing database, so the race
+    used to resurrect an empty ``<id>.db`` that list() then had to skip.
+    """
+    from pathlib import Path
+
+    store = SessionStore(tmp_path)
+    store.create(session_id="gone").close()
+    assert store.delete("gone") is True
+    path = store.path_for("gone")
+    assert not path.exists()
+
+    # Simulate the delete landing after the existence/stat check.
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    if reader == "read_info":
+        real_stat = Path.stat
+
+        def stat(self, *args, **kwargs):
+            if self == path:
+                return real_stat(tmp_path)
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", stat)
+        assert store._read_info(path) is None
+    else:
+        assert getattr(store, reader)("gone") == []
+
+    monkeypatch.undo()
+    assert not path.exists()

@@ -27,6 +27,16 @@ from nooa_coder.sessions.events import (
 
 logger = logging.getLogger(__name__)
 
+
+def _connect_read_only(path: Path) -> sqlite3.Connection:
+    """Open *path* read-only; never create it.
+
+    ``sqlite3.connect(str(path))`` creates a missing file, so a reader racing
+    a concurrent delete() would leave a stray empty ``<id>.db`` behind.
+    """
+    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+
+
 _START_EVENT_TYPES = frozenset(("SessionStarted", "TUISessionStart"))
 _TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated", "TUISessionRename"))
 _USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
@@ -267,7 +277,7 @@ class SessionStore:
         if not path.exists():
             return []
         try:
-            connection = sqlite3.connect(str(path))
+            connection = _connect_read_only(path)
             try:
                 placeholders = ", ".join("?" for _ in _TURN_EVENT_TYPES)
                 rows = connection.execute(
@@ -334,7 +344,7 @@ class SessionStore:
             return None
 
         try:
-            connection = sqlite3.connect(str(path))
+            connection = _connect_read_only(path)
             try:
                 start_row = connection.execute(
                     "SELECT event_type, data FROM events "
@@ -424,7 +434,7 @@ class SessionStore:
         if not path.exists():
             return []
         try:
-            connection = sqlite3.connect(str(path))
+            connection = _connect_read_only(path)
             try:
                 if event_types:
                     placeholders = ", ".join("?" for _ in event_types)
