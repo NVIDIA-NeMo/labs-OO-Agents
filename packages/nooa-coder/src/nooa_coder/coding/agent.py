@@ -488,6 +488,10 @@ class CodingAgent(InteractiveAgent):
                 await shell.close()
 
 
+# A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.
+spec(CodingAgent, "session_port_visible", hidden=True)
+
+
 def _todo_prompt(todo: Todo) -> str:
     """A Todo as the text a child works from: title, description, comments."""
     lines = [f"Task: {todo.title}"]
