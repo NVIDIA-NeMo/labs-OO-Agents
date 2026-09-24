@@ -302,9 +302,10 @@ def build_approval_request(
     if transport in ("sse", "streamable-http"):
         target = _safe_http_target(config.get("url"))
     else:
-        command = config.get("command")
-        args = config.get("args")
-        invocation = shlex.join([command, *(args or [])])
+        # Validated above: a stdio server has a string command and string args.
+        command: str = config["command"]
+        arguments: list[str] = config.get("args") or []
+        invocation = shlex.join([command, *arguments])
         target = _safe_preview(invocation)
     return MCPApprovalRequest(
         server_name=server_name,

@@ -7,11 +7,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from difflib import unified_diff
 from functools import wraps
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, cast
 from uuid import uuid4
 
 from pydantic import Field
@@ -418,7 +418,8 @@ class ActivityShellTools(Skill):
                 )
             raise
         finally:
-            await stream.aclose()
+            # run_stream() is an async generator; its declared type is the iterator.
+            await cast("AsyncGenerator[Any, None]", stream).aclose()
 
     @wraps(ShellTools.read)
     async def read(
