@@ -60,3 +60,37 @@ async def test_kill_tolerates_a_group_that_is_gone(tmp_path):
     worker.kill()
     worker.kill()
     worker.writer.close()
+
+
+async def test_a_worker_whose_socket_cannot_be_opened_is_killed(monkeypatch):
+    import signal
+
+    from nooa_coder.acp import router
+
+    started = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def recording_exec(*args, **kwargs):
+        process = await real_exec(*args, **kwargs)
+        started.append(process)
+        return process
+
+    async def broken_connection(*args, **kwargs):
+        raise OSError("cannot open the socket")
+
+    monkeypatch.setattr(router.asyncio, "create_subprocess_exec", recording_exec)
+    monkeypatch.setattr(router.asyncio, "open_unix_connection", broken_connection)
+    spawn = process_spawn([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        await asyncio.wait_for(spawn(1), TIMEOUT)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("the spawn should fail")
+    [process] = started
+    try:
+        assert await asyncio.wait_for(process.wait(), 10) == -signal.SIGKILL
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()

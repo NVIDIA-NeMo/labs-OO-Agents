@@ -136,13 +136,20 @@ def process_spawn(command: Sequence[str]) -> Spawn:
         finally:
             theirs.close()
         logger.info("worker %d pid %d started", k, process.pid)
-        reader, writer = await asyncio.open_unix_connection(sock=ours, limit=FRAME_LIMIT)
 
         def kill() -> None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass  # the group is gone (PermissionError: macOS, a zombie leader)
+
+        try:
+            reader, writer = await asyncio.open_unix_connection(sock=ours, limit=FRAME_LIMIT)
+        except BaseException:
+            # Nobody else knows this worker yet; do not leave it running.
+            kill()
+            ours.close()
+            raise
 
         return WorkerProcess(reader, writer, process.wait, kill, pid=process.pid)
 
