@@ -597,13 +597,21 @@ class ExecutionResult(BaseModel):
         default=0,
         description="Number of wrapper lines before user code (for traceback adjustment)",
     )
+    cancelled: bool = Field(
+        default=False,
+        description=(
+            "True for the partial result of a cell interrupted by asyncio cancellation. "
+            "execute_code() re-raises the CancelledError and attaches this result to it "
+            "as ``execution_result``; stdout/stderr hold the output produced before the cancel"
+        ),
+    )
 
     model_config = {"arbitrary_types_allowed": True}
 
     @property
     def success(self) -> bool:
-        """True if execution completed without error."""
-        return self.error is None
+        """True if execution completed without error and was not cancelled."""
+        return self.error is None and not self.cancelled
 
     @property
     def has_return(self) -> bool:
