@@ -5,8 +5,9 @@
 import json
 import sqlite3
 
+import pytest
 from nooa_coder.session.items import SessionInfo, Usage
-from nooa_coder.session.store import SessionStore
+from nooa_coder.session.store import SessionNotFoundError, SessionStore
 
 
 def test_store_returns_the_single_session_info_model(sessions_dir):
@@ -100,3 +101,28 @@ def test_records_written_before_the_tree_fields_still_load(sessions_dir):
     assert (info.parent_id, info.depth, info.name, info.retained) == (None, 0, None, False)
     with store.open(session_id) as handle:
         assert handle.info.host == "tui"
+
+
+def test_open_of_a_deleted_session_raises_and_creates_no_file(sessions_dir):
+    store = SessionStore(sessions_dir)
+    with store.create() as handle:
+        session_id, path = handle.id, handle.path
+    assert store.delete(session_id)
+
+    with pytest.raises(SessionNotFoundError):
+        store.open(session_id)
+    assert not path.exists()
+
+
+def test_open_racing_a_delete_raises_and_creates_no_file(sessions_dir, monkeypatch):
+    """The file disappears between the metadata read and the connection."""
+    store = SessionStore(sessions_dir)
+    with store.create() as handle:
+        session_id, path = handle.id, handle.path
+        info = handle.info
+    store.delete(session_id)
+    monkeypatch.setattr(store, "_read_info", lambda _path: info)
+
+    with pytest.raises(SessionNotFoundError):
+        store.open(session_id)
+    assert not path.exists()
