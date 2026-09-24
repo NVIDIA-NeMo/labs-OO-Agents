@@ -64,6 +64,7 @@ from nooa_coder.session.items import (
     TurnEndedUpdate,
     TurnStartedUpdate,
     Usage,
+    UsageChangedUpdate,
 )
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.store import SessionHandle
@@ -832,11 +833,14 @@ class Session:
         self._emit(ModeChangedUpdate(session_id=self.id, mode=mode))
 
     def add_attributed_usage(self, usage: Usage) -> None:
-        """Add a child's own usage to this session's attributed totals."""
+        """Add a child's own usage to this session's attributed totals, and tell listeners."""
+        if not (usage.input_tokens or usage.output_tokens or usage.cost_usd):
+            return
         totals = self.info.usage
         totals.attributed_input_tokens += usage.input_tokens
         totals.attributed_output_tokens += usage.output_tokens
         totals.attributed_cost_usd += usage.cost_usd
+        self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
 
     def _count_usage(self, response: LLMResponse) -> None:
         usage = response.usage
