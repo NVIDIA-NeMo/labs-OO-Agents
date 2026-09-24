@@ -9,7 +9,7 @@ import logging
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -24,6 +24,7 @@ from nooa_coder.session.events import (
     SessionTitleUpdated,
     SessionUserMessage,
 )
+from nooa_coder.session.items import SessionInfo
 
 logger = logging.getLogger(__name__)
 
@@ -40,22 +41,6 @@ class InvalidSessionIdError(ValueError):
 
 class SessionNotFoundError(FileNotFoundError):
     """Raised when a durable session does not exist or lacks start metadata."""
-
-
-@dataclass(frozen=True, slots=True)
-class SessionInfo:
-    """Host-neutral metadata used by session lists and resume flows."""
-
-    id: str
-    model: str
-    agent: str
-    started_at: float
-    last_active: float
-    turn_count: int = 0
-    working_directory: str = ""
-    title: str | None = None
-    title_is_user_set: bool = False
-    origin: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +80,7 @@ class SessionHandle:
     @property
     def info(self) -> SessionInfo:
         with self._metadata_lock:
-            return self._info
+            return self._info.model_copy()
 
     @property
     def storage(self) -> SQLiteStorageManager:
@@ -117,11 +102,12 @@ class SessionHandle:
         event = SessionTitleUpdated(title=title, user_set=user_set)
         self._events.add(event)
         with self._metadata_lock:
-            self._info = replace(
-                self._info,
-                title=title,
-                title_is_user_set=self._info.title_is_user_set or user_set,
-                last_active=event.timestamp.timestamp(),
+            self._info = self._info.model_copy(
+                update={
+                    "title": title,
+                    "title_is_user_set": self._info.title_is_user_set or user_set,
+                    "last_active": event.timestamp.timestamp(),
+                }
             )
 
     def record_user_message(self, content: str) -> tuple[str, SessionUserMessage]:
@@ -130,10 +116,11 @@ class SessionHandle:
         event = SessionUserMessage(content=content)
         tag = self._events.add(event)
         with self._metadata_lock:
-            self._info = replace(
-                self._info,
-                turn_count=self._info.turn_count + 1,
-                last_active=event.timestamp.timestamp(),
+            self._info = self._info.model_copy(
+                update={
+                    "turn_count": self._info.turn_count + 1,
+                    "last_active": event.timestamp.timestamp(),
+                }
             )
         return tag, event
 
@@ -211,10 +198,10 @@ class SessionStore:
                 id=session_id,
                 model=model,
                 agent=agent,
-                started_at=timestamp,
+                created_at=timestamp,
                 last_active=timestamp,
-                working_directory=working_directory,
-                origin=origin,
+                workspace=working_directory,
+                host=origin,
             ),
         )
 
@@ -349,13 +336,13 @@ class SessionStore:
             id=path.stem,
             model=str(start.get("model", "")),
             agent=str(start.get("agent", start.get("agent_cls", ""))),
-            started_at=started_at,
+            created_at=started_at,
             last_active=last_active,
             turn_count=turn_count,
-            working_directory=str(start.get("working_directory", start.get("working_dir", ""))),
+            workspace=str(start.get("working_directory", start.get("working_dir", ""))),
             title=title,
             title_is_user_set=title_is_user_set,
-            origin=str(
+            host=str(
                 start.get(
                     "origin",
                     start.get(
