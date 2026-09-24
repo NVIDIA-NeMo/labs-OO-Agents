@@ -249,16 +249,23 @@ def _run_router(
 ) -> None:
     import logging
 
+    from nooa_coder.acp._mcp_trace import MCPHandoffTrace
     from nooa_coder.acp.router import Router, process_spawn
     from nooa_coder.acp.tee import FrameLog
     from nooa_coder.session.store import SessionStore
 
     _configure_logging("nooa-coder router")
+    # Both observe the client's side, which only the router sees whole.
+    observers: list[Any] = []
+    if (trace := MCPHandoffTrace.from_env()) is not None:
+        observers.append(trace)
     frame_log = FrameLog(tee) if tee is not None else None
+    if frame_log is not None:
+        observers.append(frame_log)
     router = Router(
         spawn=process_spawn(list(sys.orig_argv)),
         store=SessionStore(sessions_dir),
-        observers=[frame_log] if frame_log is not None else None,
+        observers=observers,
     )
     try:
         asyncio.run(router.serve_stdio(input_fd=acp_stdin, output_fd=acp_stdout))
@@ -278,15 +285,14 @@ def _run_worker(
     sessions_dir: Path | None,
     agent_factory: Any,
 ) -> None:
-    # --tee is ignored here: the router records the client's side.
-    from nooa_coder.acp._mcp_trace import MCPHandoffTrace
+    # --tee and NOOA_ACP_MCP_TRACE are ignored here: the router records the
+    # client's side.
     from nooa_coder.acp.server import CoderACPAgent
     from nooa_coder.acp.worker import run_worker
     from nooa_coder.session.registry import SessionRegistry
     from nooa_coder.session.store import SessionStore
 
     _configure_logging(f"nooa-coder worker {id_base >> 32}")
-    trace = MCPHandoffTrace.from_env()
 
     def make_agent() -> CoderACPAgent:
         registry = SessionRegistry(
@@ -298,7 +304,6 @@ def _run_worker(
         fd,
         id_base=id_base,
         make_agent=make_agent,
-        observers=[trace] if trace is not None else None,
     )
 
 
