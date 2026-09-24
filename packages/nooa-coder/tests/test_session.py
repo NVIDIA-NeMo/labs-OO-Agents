@@ -3,6 +3,7 @@
 """Session: admission, the turn loop, outcomes, events and close."""
 
 import asyncio
+import inspect
 import json
 import logging
 import sqlite3
@@ -608,3 +609,34 @@ async def test_item_admitted_updates_carry_the_full_text(make_session):
     await session.submit({"k": 1}, channel="user_messages")
     assert seen[0].text == long_text and len(seen[0].preview) < len(long_text)
     assert seen[1].text == '{"k": 1}'
+
+
+def test_unused_store_api_is_gone():
+    from nooa_coder.session import store
+
+    assert not hasattr(store, "SessionTurn")
+    assert not hasattr(store.SessionStore, "load_turns")
+    assert not hasattr(store.SessionHandle, "record_user_message")
+    assert not hasattr(store.SessionHandle, "turns")
+    assert "check_same_thread" not in inspect.signature(store.SessionStore.create).parameters
+    assert "check_same_thread" not in inspect.signature(store.SessionStore.open).parameters
+
+
+async def test_old_user_message_records_still_show_in_the_transcript(make_session):
+    from nooa_coder.session.events import SessionUserMessage
+
+    session, _ = make_session(start=False)
+    session.handle.events.add(SessionUserMessage(content="from an older host"))
+    assert [(e.role, e.content) for e in session.transcript()] == [("user", "from an older host")]
+
+
+async def test_commands_need_the_coding_registry_shape(make_session):
+    session, _ = make_session(agent_spec="coder_test_agents:CommandAgent", start=False)
+
+    class ListOnly:
+        def list(self):
+            return []
+
+    session.agent.slash_commands = ListOnly()
+    with pytest.raises(AttributeError):
+        session.commands()

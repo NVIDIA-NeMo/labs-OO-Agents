@@ -752,22 +752,20 @@ class Session:
     def commands(self) -> list[CommandInfo]:
         """Slash commands of the agent's ``slash_commands`` registry, if it has one.
 
-        The registry is duck-typed: ``list()`` (or ``commands()``) returns
-        objects with ``name``, ``description`` and ``input_hint`` (or
-        ``argument_hint``).
+        The registry has the coding agent's shape (``CodingSlashCommandRegistry``):
+        ``commands()`` returns objects with ``name``, ``description`` and
+        ``argument_hint``, and ``invoke(name, raw_args)`` runs one.
         """
         registry = getattr(self.agent, "slash_commands", None)
         if registry is None:
             return []
-        lister = getattr(registry, "list", None) or registry.commands
         return [
             CommandInfo(
                 name=str(command.name),
-                description=str(getattr(command, "description", "") or ""),
-                input_hint=getattr(command, "input_hint", None)
-                or getattr(command, "argument_hint", None),
+                description=str(command.description or ""),
+                input_hint=command.argument_hint,
             )
-            for command in lister()
+            for command in registry.commands()
         ]
 
     async def invoke_command(self, name: str, raw_args: str) -> CommandResult:

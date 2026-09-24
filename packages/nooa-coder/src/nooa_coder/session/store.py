@@ -9,13 +9,10 @@ import json
 import logging
 import os
 import sqlite3
-import time
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import Literal
 
 from nooa.paths import get_user_dir
 from nooa.runtime.event_manager import EventManager
@@ -30,7 +27,6 @@ from nooa_coder.session.events import (
     SESSION_EVENT_TYPES,
     SessionStarted,
     SessionTitleUpdated,
-    SessionUserMessage,
 )
 from nooa_coder.session.items import SessionInfo, TranscriptEntry
 
@@ -90,13 +86,6 @@ class InvalidSessionIdError(ValueError):
 
 class SessionNotFoundError(FileNotFoundError):
     """Raised when a durable session does not exist or lacks start metadata."""
-
-
-@dataclass(frozen=True, slots=True)
-class SessionTurn:
-    role: Literal["user", "agent"]
-    content: str
-    timestamp: float = field(default_factory=time.time)
 
 
 class _ExistingSQLiteStorageManager(SQLiteStorageManager):
@@ -182,23 +171,6 @@ class SessionHandle:
                 }
             )
 
-    def record_user_message(self, content: str) -> tuple[str, SessionUserMessage]:
-        """Persist raw user text before dispatching its agent turn."""
-        self._ensure_open()
-        event = SessionUserMessage(content=content)
-        tag = self._events.add(event)
-        with self._metadata_lock:
-            self._info = self._info.model_copy(
-                update={
-                    "turn_count": self._info.turn_count + 1,
-                    "last_active": event.timestamp.timestamp(),
-                }
-            )
-        return tag, event
-
-    def turns(self) -> list[SessionTurn]:
-        return self._store.load_turns(self.id)
-
     def transcript(self) -> list[TranscriptEntry]:
         """The session's transcript (see :meth:`SessionStore.load_transcript`)."""
         return self._store.load_transcript(self.id)
@@ -252,7 +224,6 @@ class SessionStore:
         retained: bool = False,
         turn_method: str = "handle",
         session_id: str | None = None,
-        check_same_thread: bool = True,
     ) -> SessionHandle:
         session_id = self._validate_id(session_id or str(uuid.uuid4()))
         self.root.mkdir(parents=True, exist_ok=True)
@@ -260,7 +231,7 @@ class SessionStore:
         if path.exists():
             raise FileExistsError(f"Session {session_id!r} already exists")
 
-        storage = SQLiteStorageManager(path, check_same_thread=check_same_thread)
+        storage = SQLiteStorageManager(path)
         events = EventManager(backend=storage.event_backend)
         for event_type in SESSION_EVENT_TYPES:
             events.register_event_type(event_type)
@@ -300,13 +271,13 @@ class SessionStore:
             ),
         )
 
-    def open(self, session_id: str, *, check_same_thread: bool = True) -> SessionHandle:
+    def open(self, session_id: str) -> SessionHandle:
         path = self.path_for(session_id)
         info = self._read_info(path)
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
         try:
-            storage = _ExistingSQLiteStorageManager(path, check_same_thread=check_same_thread)
+            storage = _ExistingSQLiteStorageManager(path)
         except sqlite3.OperationalError as exc:
             if path.exists():
                 raise
@@ -348,29 +319,6 @@ class SessionStore:
         ]
         sessions.sort(key=lambda info: info.last_active, reverse=True)
         return sessions if limit is None else sessions[:limit]
-
-    def load_turns(self, session_id: str) -> list[SessionTurn]:
-        path = self.path_for(session_id)
-        rows = self._read_rows(path, event_types=_TURN_EVENT_TYPES)
-        turns: list[SessionTurn] = []
-        for event_type, raw in rows:
-            try:
-                if event_type in _USER_EVENT_TYPES:
-                    content = raw.get("content", raw.get("text", ""))
-                    role: Literal["user", "agent"] = "user"
-                else:
-                    content = raw.get("content", "")
-                    role = "agent"
-                turns.append(
-                    SessionTurn(
-                        role=role,
-                        content=str(content),
-                        timestamp=self._timestamp(raw, fallback=time.time()),
-                    )
-                )
-            except Exception:
-                logger.debug("Skipping invalid turn in %s", path, exc_info=True)
-        return turns
 
     def load_rows(
         self, session_id: str, event_types: frozenset[str] | None = None
