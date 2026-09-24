@@ -81,3 +81,57 @@ def test_named_parameters_still_work_without_kwargs(tmp_path):
         agent_cls=CodingAgent,
     )
     assert agent.cwd == workspace.resolve()
+
+
+_ANNOTATED_AGENT_FILE = """\
+from __future__ import annotations
+
+from nooa import Agent
+
+
+class {helper}:
+    pass
+
+
+class {name}(Agent):
+    helper: {helper} | None = None
+"""
+
+
+def _resolve_own_annotation(cls: type, name: str) -> str:
+    """Resolve one string annotation the way typing does: via sys.modules[cls.__module__]."""
+    import sys
+    import typing
+
+    hint = eval(cls.__dict__["__annotations__"][name], vars(sys.modules[cls.__module__]))
+    (helper,) = [arg for arg in typing.get_args(hint) if arg is not type(None)]
+    return f"{helper.__module__}.{helper.__qualname__}"
+
+
+def test_file_agents_get_distinct_modules_and_keep_resolving_annotations(tmp_path):
+    """A second file-based agent must not replace the first one's sys.modules entry.
+
+    Postponed annotations resolve through ``sys.modules[cls.__module__]``; with
+    one shared module name the first class's annotations pointed at the second
+    file's namespace and ``get_type_hints`` failed.
+    """
+    import sys
+
+    from nooa_coder.coding.factory import load_agent_class
+
+    first = tmp_path / "one" / "agent.py"
+    second = tmp_path / "two" / "agent.py"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_text(_ANNOTATED_AGENT_FILE.format(name="FirstAgent", helper="FirstHelper"))
+    second.write_text(_ANNOTATED_AGENT_FILE.format(name="SecondAgent", helper="SecondHelper"))
+
+    first_cls = load_agent_class(f"{first}:FirstAgent")
+    second_cls = load_agent_class(f"{second}:SecondAgent")
+
+    assert first_cls.__module__ != second_cls.__module__
+    assert sys.modules[first_cls.__module__].FirstAgent is first_cls
+    assert _resolve_own_annotation(first_cls, "helper") == first_cls.__module__ + ".FirstHelper"
+    assert _resolve_own_annotation(second_cls, "helper") == second_cls.__module__ + ".SecondHelper"
+    # The same unchanged file loads once, so repeated specs share one class.
+    assert load_agent_class(f"{first}:FirstAgent") is first_cls

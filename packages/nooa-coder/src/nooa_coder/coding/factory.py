@@ -4,9 +4,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+
+# Loaded file-based agent modules by resolved path: (mtime_ns, module).
+_FILE_AGENT_MODULES: dict[Path, tuple[int, ModuleType]] = {}
 
 
 def create_session_agent(
@@ -86,8 +91,6 @@ def load_agent_class(spec: str) -> type:
         AttributeError: If the class name is not found in the module.
     """
     import importlib
-    import importlib.util
-    import sys
 
     from nooa_coder.coding.identity import canonical_agent_spec
 
@@ -107,31 +110,7 @@ def load_agent_class(spec: str) -> type:
         file_path = Path(module_part).expanduser().resolve()
         if not file_path.exists():
             raise FileNotFoundError(f"Agent module file not found: {file_path}")
-
-        parent_str = str(file_path.parent)
-        inserted = False
-        if parent_str not in sys.path:
-            sys.path.insert(0, parent_str)
-            inserted = True
-
-        try:
-            mod_spec = importlib.util.spec_from_file_location("_nooa_custom_agent", file_path)
-            if mod_spec is None or mod_spec.loader is None:
-                raise ImportError(f"Cannot load module from {file_path}")
-            module = importlib.util.module_from_spec(mod_spec)
-            # Some code (dataclasses with postponed annotations, typing.get_type_hints)
-            # resolves a class's string annotations via sys.modules[cls.__module__];
-            # that lookup fails unless the module is registered before exec_module()
-            # runs the file's class definitions.
-            sys.modules[mod_spec.name] = module
-            try:
-                mod_spec.loader.exec_module(module)  # type: ignore[union-attr]
-            except BaseException:
-                sys.modules.pop(mod_spec.name, None)
-                raise
-        finally:
-            if inserted:
-                sys.path.remove(parent_str)
+        module = _load_agent_file(file_path)
     else:
         module = importlib.import_module(module_part)
 
@@ -152,3 +131,54 @@ def load_agent_class(spec: str) -> type:
         pass  # Can't validate without nooa; proceed anyway
 
     return cls
+
+
+def _load_agent_file(file_path: Path) -> ModuleType:
+    """Import an agent file under a module name unique to its resolved path.
+
+    Each file gets its own ``sys.modules`` entry, so loading a second file
+    does not replace the first one's entry (classes resolve string
+    annotations through ``sys.modules[cls.__module__]``). Loading the same
+    unchanged file again returns the same module, and so the same classes.
+    """
+    import importlib.util
+    import sys
+
+    mtime = file_path.stat().st_mtime_ns
+    cached = _FILE_AGENT_MODULES.get(file_path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    digest = hashlib.sha256(str(file_path).encode()).hexdigest()[:16]
+    module_name = f"_nooa_custom_agent_{digest}"
+    parent_str = str(file_path.parent)
+    inserted = False
+    if parent_str not in sys.path:
+        sys.path.insert(0, parent_str)
+        inserted = True
+
+    try:
+        mod_spec = importlib.util.spec_from_file_location(module_name, file_path)
+        if mod_spec is None or mod_spec.loader is None:
+            raise ImportError(f"Cannot load module from {file_path}")
+        module = importlib.util.module_from_spec(mod_spec)
+        # Some code (dataclasses with postponed annotations, typing.get_type_hints)
+        # resolves a class's string annotations via sys.modules[cls.__module__];
+        # that lookup fails unless the module is registered before exec_module()
+        # runs the file's class definitions.
+        previous = sys.modules.get(module_name)
+        sys.modules[module_name] = module
+        try:
+            mod_spec.loader.exec_module(module)  # type: ignore[union-attr]
+        except BaseException:
+            # A failed reload of an edited file keeps the last good version.
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+            raise
+    finally:
+        if inserted:
+            sys.path.remove(parent_str)
+    _FILE_AGENT_MODULES[file_path] = (mtime, module)
+    return module
