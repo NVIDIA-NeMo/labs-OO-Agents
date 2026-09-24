@@ -5,14 +5,14 @@ dynamic = ["version"]
 description = "Coding benchmark agents, Harbor runner and trajectory analysis for the NOOA framework"
 license = {text = "Apache-2.0"}
 readme = "README.md"
-# Matches nooa and nooa-cli (both >=3.12,<3.14), which this depends on.
+# Matches nooa and nooa-coder (both >=3.12,<3.14), which this depends on.
 # Without the upper bound, installing on 3.14 fails with a confusing
 # "could not find a version that satisfies nooa" instead of a clean
 # "requires a different Python".
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "nooa",
-    "nooa-cli",
+    "nooa-coder",
     "click>=8.1",
 ]
 
@@ -26,7 +26,7 @@ nemo-harbor = "nooa_bench.runner:main"
 
 [tool.uv.sources]
 nooa = { workspace = true }
-nooa-cli = { workspace = true }
+nooa-coder = { workspace = true }
 
 [build-system]
 requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]

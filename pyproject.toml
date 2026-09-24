@@ -57,6 +57,7 @@ trace-explorer = "nooa.trace_explorer:main"
 eval_pipeline = { workspace = true }
 nooa-cli = { workspace = true }
 nooa-acp = { workspace = true }
+nooa-coder = { workspace = true }
 nooa-memory = { workspace = true }
 nooa-bench = { workspace = true }
 
@@ -70,6 +71,7 @@ members = [
     "util/eval_pipeline",
     "packages/nooa-cli",
     "packages/nooa-acp",
+    "packages/nooa-coder",
     "packages/nooa-memory",
     "packages/nooa-bench",
 ]
@@ -88,10 +90,12 @@ members = [
 cli = ["nooa-cli"]
 memory = ["nooa-memory"]
 bench = ["nooa-bench"]
-acp = ["nooa-acp"]
+coder = ["nooa-coder"]
+acp = ["nooa-coder"]
 # ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
 # Install with `pip install "nooa[arc]"` (or `uv sync --extra arc`).
 arc = [
+    "nooa-coder",     # solver_agent subclasses nooa_coder.interactive_agent.InteractiveAgent
     "arc-agi>=0.9.8",
     "arcengine>=0.9.3",
     "pillow>=10.0",   # visual grid-as-image feature (solver_agent)
@@ -139,7 +143,8 @@ nemo-relay = [
 ]
 
 # CLI ships as a separate package: `uv add nooa-cli`.
-# Data-science stack for the LLM REPL: `uv add nooa-cli[datascience]`.
+# Coding agent and ACP server ship as `uv add nooa-coder`.
+# Data-science stack for the LLM REPL: `uv add nooa-coder[datascience]`.
 
 [build-system]
 requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]
@@ -189,9 +194,10 @@ dev = [
     "httpx[socks]>=0.28.1",
     "opentelemetry-exporter-otlp-proto-http>=1.39.1",
     "eval_pipeline",
-    # Workspace packages — keep acp + bench + cli + memory installed/editable in dev sync
+    # Workspace packages — keep acp + bench + cli + coder + memory installed/editable in dev sync
     "nooa-cli",
     "nooa-acp",
+    "nooa-coder",
     "nooa-memory",
     "nooa-bench",
     "pre-commit>=4.5.0",
@@ -221,13 +227,14 @@ testpaths = [
     "tests/tracing",
     "tests/test_mcp",
     "packages/nooa-cli/tests",
-    "packages/nooa-acp/tests",
+    "packages/nooa-coder/tests",
     "packages/nooa-bench/tests",
     "tests/trace_explorer",
 ]
 pythonpath = [
     "src",
     "packages/nooa-cli/src",
+    "packages/nooa-coder/src",
 ]
 addopts = "-v --tb=short --import-mode=importlib -m 'not integration and not stress and not sandbox'"
 markers = [
@@ -246,7 +253,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src/nooa", "packages/nooa-cli/src/nooa_cli"]
+source = ["src/nooa", "packages/nooa-cli/src/nooa_cli", "packages/nooa-coder/src/nooa_coder"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
@@ -321,6 +328,7 @@ venv = ".venv"
 extraPaths = [
     "src",
     "packages/nooa-cli/src",
+    "packages/nooa-coder/src",
 ]
 include = [
     "src",
