@@ -32,3 +32,21 @@ def test_no_module_imports_the_cli_or_acp_packages():
         for path in sources
     }
     assert {path: names for path, names in offenders.items() if names} == {}
+
+
+def test_the_coding_modules_use_no_retired_turn_or_worker_types():
+    """The coding agent is on the Session layer: no RespondResult, no CodingWorker.
+
+    session/session.py still accepts a RespondResult from older agents; that
+    compatibility belongs to the Session layer and is not checked here.
+    """
+    root = Path(nooa_coder.__file__).parent
+    retired = ("RespondResult", "RespondReason", "CodingWorker")
+    hits = [
+        f"{path.relative_to(root)}: {name}"
+        for package in ("coding", "tools", "workspace")
+        for path in sorted((root / package).rglob("*.py"))
+        for name in retired
+        if name in path.read_text()
+    ]
+    assert hits == []
