@@ -601,3 +601,16 @@ async def test_end_of_input_stops_every_worker(harness):
     for worker in harness.workers.values():
         assert worker.eof.is_set()
         assert worker.killed  # the process group is always killed after the wait
+
+
+async def test_a_load_sent_while_close_is_answered_keeps_the_session(harness):
+    await harness.initialize()
+    session_id = await harness.new_session()
+    close = await harness.request("session/close", {"sessionId": session_id})
+    load = await harness.request("session/load", {"sessionId": session_id, "cwd": "/tmp"})
+    assert (await harness.response(close)).message["result"] == {}
+    assert "result" in (await harness.response(load)).message
+    frame = await harness.call("session/prompt", {"sessionId": session_id, "prompt": []})
+    assert frame.message["result"] == {"stopReason": "end_turn"}
+    assert harness.spawned == [1]
+    assert not harness.workers[1].eof.is_set()

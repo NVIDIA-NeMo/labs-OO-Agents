@@ -668,6 +668,10 @@ class Router:
                 session_id = new_id
         elif method == "session/load" and not ok and pending.mapped and session_id is not None:
             self._unmap(session_id, worker)
+        elif method == "session/load" and ok and session_id is not None and not worker.stopping:
+            # A close answered while this load was in flight unmapped the id;
+            # the load succeeded, so the session is open on this worker again.
+            self._map(session_id, worker)
         elif method in ("session/close", _DELETE_METHOD) and ok and session_id is not None:
             ids = list(worker.sessions) if session_id == worker.root_id else [session_id]
             for each in ids:
