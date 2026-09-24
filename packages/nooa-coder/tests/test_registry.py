@@ -21,7 +21,7 @@ from nooa_coder.session.registry import (
     DepthLimitError,
     SessionRegistry,
 )
-from nooa_coder.session.session import TurnFailedError
+from nooa_coder.session.session import SessionClosedError, TurnFailedError
 from nooa_coder.session.store import SessionStore
 
 from nooa.interactive import Done
@@ -568,3 +568,15 @@ async def test_the_factorys_default_client_is_owned_too(root_options, sessions_d
     assert await asyncio.wait_for(root.prompt("go"), 5) == Done(explanation="default")
     await registry.close_all()
     assert llm.closed
+
+
+async def test_a_closing_parent_gets_no_new_children(registry, root_options, sessions_dir):
+    root = await registry.create(root_options)
+    before = _db_files(sessions_dir)
+    root._closing = True  # as while its close() is closing its children
+    try:
+        with pytest.raises(SessionClosedError):
+            await registry.create(root.options.inherit(name="late"), parent_id=root.id)
+    finally:
+        root._closing = False
+    assert _db_files(sessions_dir) == before
