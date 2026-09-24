@@ -108,3 +108,22 @@ def test_explicit_role_arguments_win_over_argv(roles, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["fake_agent.py", "--single-process"])
     cli.run(llm_factory=_factory, single_process=False)
     assert list(roles) == ["router"]
+
+
+def test_the_cli_module_imports_nothing_heavy_at_load_time():
+    """Importing the command must not import nooa: every nooa command would pay for it.
+
+    Only module-level imports count; imports under ``if TYPE_CHECKING:``
+    and inside functions run later or never.
+    """
+    import ast
+
+    tree = ast.parse(Path(cli.__file__).read_text())
+    loaded: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            loaded.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            loaded.append(node.module)
+    heavy = [name for name in loaded if name.split(".")[0] in ("nooa", "nooa_coder", "acp")]
+    assert heavy == []
