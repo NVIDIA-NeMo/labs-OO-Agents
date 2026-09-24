@@ -10,7 +10,7 @@ pin the core contract the ARC-AGI-3 example and other hosts rely on.
 import json
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from nooa import hidden, strategy
 from nooa.events import PythonOutput, ResultStatus
@@ -86,21 +86,29 @@ def test_respond_result_requires_explanation():
 
 def test_turn_results_require_their_text():
     assert Done(explanation=" finished ").explanation == "finished"
-    assert Waiting(explanation="job ci-42").explanation == "job ci-42"
+    assert Waiting(explanation="job ci-42", on=["jobs:ci-42"]).on == ["jobs:ci-42"]
     assert NeedInput(question="Which branch?", options=["main", "dev"]).options == ["main", "dev"]
     with pytest.raises(ValidationError):
         Done(explanation="  ")
     with pytest.raises(ValidationError):
-        Waiting(explanation="")
+        Waiting(explanation="", on=["jobs"])
+    with pytest.raises(ValidationError):
+        Waiting(explanation="waiting", on=[])
+    with pytest.raises(ValidationError):
+        Waiting(explanation="waiting", on=[" "])
     with pytest.raises(ValidationError):
         NeedInput(question=" ")
 
 
-def test_need_input_takes_options_or_schema_not_both():
-    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
-    assert NeedInput(question="How many?", answer_schema=schema).answer_schema == schema
+def test_need_input_takes_options_or_answer_type_not_both():
+    class HowMany(BaseModel):
+        n: int
+
+    assert NeedInput(question="How many?", answer_type=HowMany).answer_type is HowMany
     with pytest.raises(ValidationError):
-        NeedInput(question="How many?", options=["1", "2"], answer_schema=schema)
+        NeedInput(question="How many?", options=["1", "2"], answer_type=HowMany)
+    with pytest.raises(ValidationError):
+        NeedInput(question="How many?", answer_type=int)  # type: ignore[arg-type]
 
 
 def _cell(code: str, call_id: str) -> LLMResponse:
@@ -130,7 +138,7 @@ _NOTIFICATION = {"user_messages": ["hi"]}
     [
         ('return_result(Done(explanation="finished"))', Done),
         ('return_result(NeedInput(question="Which branch?"))', NeedInput),
-        ('return_result(Waiting(explanation="waiting for job ci-42"))', Waiting),
+        ('return_result(Waiting(explanation="waiting for job ci-42", on=["jobs:ci-42"]))', Waiting),
         (
             'return_result(RespondResult(kind=RespondReason.DONE, explanation="finished"))',
             RespondResult,

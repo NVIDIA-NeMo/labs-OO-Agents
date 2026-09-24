@@ -120,36 +120,52 @@ class NeedInput(BaseModel):
 
     ``question`` is the question itself; the host shows it to the person,
     so do not also send it with ``self.message()``. Set ``options`` for a
-    single choice, or ``answer_schema`` (a flat JSON schema) for a typed
-    answer, or neither for free text. The answer arrives in the next
-    notification.
+    single choice, or ``answer_type`` (a pydantic model class whose fields
+    are simple values: str, int, float, bool, or a list of str) for a typed
+    answer, or neither for free text. The host turns ``answer_type`` into a
+    form and the answer arrives in the next notification as an instance of
+    it.
     """
 
     question: str = Field(description="The question to show the person")
     options: list[str] | None = Field(default=None, description="Choices for a single choice")
-    answer_schema: dict[str, Any] | None = Field(
-        default=None, description="Flat JSON schema for a typed answer"
+    answer_type: type[BaseModel] | None = Field(
+        default=None,
+        description="Pydantic model class with simple fields; the answer comes back as an instance",
     )
 
     _check_question = field_validator("question")(_non_blank)
 
     @model_validator(mode="after")
     def _one_answer_shape(self) -> "NeedInput":
-        if self.options is not None and self.answer_schema is not None:
-            raise ValueError("set options or answer_schema, not both")
+        if self.options is not None and self.answer_type is not None:
+            raise ValueError("set options or answer_type, not both")
         return self
 
 
 class Waiting(BaseModel):
     """Turn result: waiting on a background job or queue, not on a person.
 
-    ``explanation`` names what is being waited on. The host keeps the
-    request open and runs the next turn when that arrives.
+    ``on`` lists what is being waited on by name: a queue channel
+    (``"delegates"``, ``"jobs"``), a spawned job's label, a subagent's name.
+    ``explanation`` says why. The host keeps the request open and runs the
+    next turn when one of them delivers.
     """
 
-    explanation: str = Field(description="What is being waited on and why")
+    explanation: str = Field(description="Why the turn is waiting")
+    on: list[str] = Field(
+        min_length=1, description="Names of the channels, jobs or subagents being waited on"
+    )
 
     _check_explanation = field_validator("explanation")(_non_blank)
+
+    @field_validator("on")
+    @classmethod
+    def _names_not_blank(cls, value: list[str]) -> list[str]:
+        cleaned = [name.strip() for name in value]
+        if any(not name for name in cleaned):
+            raise ValueError("names in 'on' must not be blank")
+        return cleaned
 
 
 class RespondReason(StrEnum):
@@ -546,14 +562,17 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. ``question`` is the question; the host shows it, so do
           not also send it with ``message()``. Add ``options=[...]`` for a
-          single choice. The answer arrives in the next notification::
+          single choice, or ``answer_type=SomeModel`` (a pydantic class you
+          define with simple fields) for a typed answer. The answer arrives
+          in the next notification::
 
               return_result(NeedInput(question="Which branch should I push to?", options=["main", "dev"]))
 
-        - ``Waiting(explanation=...)`` — waiting on a background job or
-          queue, not on a person. Name the job and why::
+        - ``Waiting(explanation=..., on=[...])`` — waiting on a background
+          job or queue, not on a person. ``on`` names what you wait for:
+          a channel, a job label, a subagent::
 
-              return_result(Waiting(explanation="waiting for pytest job ci-42 before reporting results"))
+              return_result(Waiting(explanation="tests running before I report", on=["jobs:ci-42"]))
 
         ``RespondResult`` is the older form and is still accepted.
 
@@ -597,7 +616,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         - ``Done(explanation=...)`` — the work is finished, or cannot go
           further. If something blocks you, say what in ``explanation``.
           Set ``result`` when the task asks for a structured result.
-        - ``Waiting(explanation=...)`` — waiting on a background job or
-          queue you started. Name the job.
+        - ``Waiting(explanation=..., on=[...])`` — waiting on a background
+          job or queue you started. ``on`` names it.
         """
         ...
