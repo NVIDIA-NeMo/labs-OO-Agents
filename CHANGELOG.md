@@ -47,6 +47,20 @@ to follow semantic versioning.
     options taken from the session's record.
   - Sessions live in the user directory (`~/.config/nooa/sessions`), not
     per project; the store is adapted from `nooa_cli.sessions`.
+  - The coding agent runs on it: `nooa_coder.coding.agent:CodingAgent`
+    (the agent spec hosts name) ends turns with `Done`/`NeedInput`/
+    `Waiting`; its `handle_batch` must return a `TaskResult`. The model
+    delegates with `delegate()` (a throwaway child, awaited, returning the
+    child's `Done`), `spawn()` and `children()`; `rename_session()` is
+    async. `ExperimentalCodingAgent` (CodeActV2) follows the same rules.
+    The workspace settings, MCP registry and skill controls moved in as
+    `nooa_coder.workspace` (`CoderOptions`), and the repository tools as
+    `nooa_coder.tools`.
+  - The registry builds agents with `create_session_agent` by default
+    (workspace settings and skills for coding agents); hosts pass
+    `default_llm_factory()` as the registry's `llm_factory`. Agent specs
+    may name a file (`./agent.py:Class`, relative to the workspace), and
+    the older `nooa_cli.*` coding-agent specs still load.
 
 - Groundwork for the session tree design, in shared code:
   - A cancelled CodeAct cell is now recorded for the model: an appended
