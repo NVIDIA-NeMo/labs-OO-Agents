@@ -40,6 +40,11 @@ to follow semantic versioning.
     `ChildResult`, `ChildQuestion` or `ChildFailed` on the `delegates`
     channel. Children with `retain=False` run unattended (`handle_batch`).
   - `open_tree()` runs a tree in-process for headless use.
+  - For hosts: `Session.outcome(item_id)`, `commands()` and
+    `invoke_command()` (through an agent's `slash_commands` registry),
+    `set_model()` (applied before the next turn, with the registry's
+    `llm_factory`), a `prepare` hook on `create()`/`load()`, and `load()`
+    options taken from the session's record.
   - Sessions live in the user directory (`~/.config/nooa/sessions`), not
     per project; the store is adapted from `nooa_cli.sessions`.
 
