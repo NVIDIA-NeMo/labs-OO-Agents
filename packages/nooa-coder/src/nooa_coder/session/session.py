@@ -21,7 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from nooa.context_blocks.roles import Role
-from nooa.events import PythonOutput, ResultStatus
+from nooa.events import Notification, PythonOutput, ResultStatus
 from nooa.interactive import (
     Done,
     InteractiveAgent,
@@ -135,7 +135,9 @@ class Session:
         self._closed = False
         self._before_close: Callable[[], Awaitable[None]] | None = None
         self._loop_context_hooks: list[Callable[[], None]] = []
+        self._pending_steers: list[tuple[str, str, str]] = []  # (item_id, text, source)
         self._unsubscribe_agent = agent.event_manager.on("*", self._on_agent_event)
+        self._unsubscribe_steers = agent.event_manager.on("BeforeTurn", self._flush_steers)
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -178,6 +180,7 @@ class Session:
                 await self._loop_task
         self._resolve_all(TurnCancelledOutcome(by="host"))
         self._unsubscribe_agent()
+        self._unsubscribe_steers()
         try:
             await self.agent.queue_manager.shutdown()
             await self.agent.aclose()
@@ -234,6 +237,58 @@ class Session:
         """Admit ``item`` on ``channel``: recorded first, then queued for a turn."""
         return self._admit(item, channel=channel, source=source)
 
+    async def steer(self, text: str, *, source: str = "user") -> Receipt:
+        """Give the running turn extra text; while idle this is ``submit(text)``.
+
+        During a turn the text waits in a buffer that is flushed into a
+        ``Notification`` (``source="steer:<source>"``) right before the
+        turn's next model call, so the model reads it in order with its own
+        cell output. If no model call comes (the turn was already
+        finishing), the text is admitted on ``user_messages`` when the turn
+        settles, with the same ``item_id``, and the next turn handles it.
+        A steer is never lost.
+        """
+        self._ensure_open()
+        task = self._turn_task
+        if task is None or task.done():
+            return self._admit(text, channel="user_messages", source=source)
+        event = ItemAdmitted(
+            channel="steer", item_json=item_to_json(text), item_type=type_name(text), source=source
+        )
+        event.item_id = str(event.id)
+        self.handle.events.add(event)
+        self._pending_steers.append((event.item_id, text, source))
+        self._emit(
+            ItemAdmittedUpdate(
+                session_id=self.id,
+                channel="steer",
+                item_id=event.item_id,
+                source=source,
+                preview=_preview(text),
+            )
+        )
+        return Receipt(
+            session_id=self.id, channel="steer", item_id=event.item_id, delivered="steered"
+        )
+
+    def _flush_steers(self, _event: Any) -> None:
+        """``BeforeTurn`` handler: hand buffered steers to the coming model call."""
+        if not self._pending_steers or self._turn_task is None:
+            return
+        steers, self._pending_steers = self._pending_steers, []
+        for item_id, text, source in steers:
+            self.agent.event_manager.add(Notification(source=f"steer:{source}", description=text))
+            self.handle.events.add(ItemConsumed(item_id=item_id))
+            self._consumed.append(item_id)
+
+    def _admit_leftover_steers(self) -> None:
+        """Steers no model call saw become ordinary messages for the next turn."""
+        steers, self._pending_steers = self._pending_steers, []
+        for item_id, text, source in steers:
+            self._admit(
+                text, channel="user_messages", source=source, item_id=item_id, internal=True
+            )
+
     async def prompt(self, text: str, *, source: str = "user") -> Outcome:
         """Submit ``text`` and wait for the outcome of the turn that consumes it.
 
@@ -252,9 +307,15 @@ class Session:
         source: str,
         item_id: str | None = None,
         want_future: bool = False,
+        internal: bool = False,
     ) -> Receipt:
-        """Record the item, then put it. Synchronous so sync listeners can admit."""
-        self._ensure_open()
+        """Record the item, then put it. Synchronous so sync listeners can admit.
+
+        ``internal`` admissions (steer leftovers) are allowed while the
+        session is closing, so they are recorded and re-queued on a later load.
+        """
+        if self._closed or (self._closing and not internal):
+            raise SessionClosedError(f"Session {self.id!r} is closed")
         target = self.agent.queue_manager.channels().get(channel)
         if target is None or target.mode != "queue":
             raise ValueError(f"Session {self.id!r} has no queue channel {channel!r}")
@@ -370,6 +431,7 @@ class Session:
         consumed, self._consumed = self._consumed, []
         if kind == "cancelled":
             self._record_cancel(outcome.by)
+        self._admit_leftover_steers()
         usage = _usage_delta(usage_before, self.info.usage)
         data, result_type = _outcome_data(outcome, kind)
         explanation = _explanation(outcome, kind)
