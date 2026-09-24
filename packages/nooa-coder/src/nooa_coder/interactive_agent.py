@@ -25,7 +25,6 @@ from typing import Annotated, Any, ClassVar, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from nooa import hidden, strategy
-from nooa.agentdoc import doc
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
@@ -39,7 +38,6 @@ with hidden:
     from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
     from nooa.runtime.producers_skill import ProducersSkill
     from nooa.strategies import CodeActStrategy
-    from nooa.tools.web_publisher import WebPublisher
 
 # Standard library — all visible in REPL
 import asyncio  # noqa: F401
@@ -277,17 +275,17 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         self.context["queues"] = Context(expr="self.queue_manager.status()")
         if os.environ.get("NEMO_OO_RICH_URL"):
-            from nooa.tools.web_publisher import RichOutput
+            import logging
 
-            self.event_manager.register_event_type(RichOutput)
-            self.web: Annotated[WebPublisher, nosnapshot] = WebPublisher(
-                event_manager=self.event_manager
+            logging.getLogger(__name__).warning(
+                "NEMO_OO_RICH_URL no longer auto-attaches a web publisher to interactive agents."
             )
-            # The WebPublisher's doc is static across the session, so
-            # it goes into the cacheable prefix with the system prompt.
-            from nooa import Context
+        self.event_manager.on("SessionResumed", self._remove_legacy_web_context)
 
-            self.context["web"] = Context(doc(self.web), prefix=True)
+    def _remove_legacy_web_context(self, event: Any) -> None:
+        """Retire WebPublisher instructions carried by older session snapshots."""
+        if "web" in self.context and "WebPublisher" in str(self.context["web"]):
+            del self.context["web"]
 
     @property
     def v(self) -> AgentVars:

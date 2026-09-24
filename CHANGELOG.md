@@ -29,6 +29,10 @@ to follow semantic versioning.
 - `nooa-acp` is now a tombstone package: no code, no scripts, no entry points,
   and a single dependency on `nooa-coder`, so `uv add nooa-acp` keeps
   installing the ACP server. The `nooa_acp` module no longer exists.
+- Remove `WebPublisher` (`nooa.tools.web_publisher`, including its
+  `RichOutput` event) and the `nemo.web` skill entry point. Sessions saved with
+  `RichOutput` events still load: unknown event types are read back as
+  `Metadata`.
 - Remove `AnthropicProviderFormatter` and `ResponsesProviderFormatter` from
   `nooa.context_blocks`, and the runtime's client-type dispatch that swapped in
   the Responses one. Neither was on the live path: every client (including
