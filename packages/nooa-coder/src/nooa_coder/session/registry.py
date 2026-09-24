@@ -483,7 +483,11 @@ class SessionRegistry:
                 pending.append(info.id)
 
     def _requeue(self, session: Session) -> None:
-        """Put back items admitted before the last close that no turn consumed."""
+        """Put back items admitted before the last close that no turn consumed.
+
+        That includes steers no model call saw (on ``user_messages``); a
+        steer a model call saw was marked consumed.
+        """
         rows = self.store.load_rows(
             session.id, frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn"))
         )
@@ -492,7 +496,11 @@ class SessionRegistry:
         for event_type, raw in rows:
             item_id = str(raw.get("item_id", ""))
             if event_type == "ItemAdmitted":
-                if raw.get("channel") in _REQUEUED_CHANNELS:
+                if raw.get("channel") == "steer":
+                    # A steer still buffered when the process stopped: no model
+                    # call saw it, so it comes back as the message it is.
+                    admitted[item_id] = {**raw, "channel": "user_messages"}
+                elif raw.get("channel") in _REQUEUED_CHANNELS:
                     admitted[item_id] = raw
             else:
                 finished.add(item_id)
