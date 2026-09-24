@@ -106,9 +106,11 @@ class SessionRegistry:
 
         Two phases: the id is reserved (not visible), the file, agent and
         Session are built and ``initial_items`` admitted, then the session
-        is published and started. ``prepare(session)`` runs after the
-        build and before the session starts or is visible, so a host can
-        attach listeners and tools before any turn runs. A failure before
+        is published and started. ``prepare(session)`` runs right after
+        the build, before the initial items are admitted and before the
+        session starts or is visible, so a host can attach listeners (which
+        then see those items' ``item_admitted`` updates) and tools before
+        any turn runs. A failure before
         publishing (including in ``prepare``) closes and deletes what was
         built and drops the reservation.
         """
@@ -140,10 +142,10 @@ class SessionRegistry:
                 session_id=session_id,
             )
             session = await self._build(options, handle)
-            for channel, item in initial_items:
-                session._admit(item, channel=channel, source=initial_source)
             if prepare is not None:
                 await prepare(session)
+            for channel, item in initial_items:
+                session._admit(item, channel=channel, source=initial_source)
             session.start()
         except BaseException:
             await self._close_half_built(session)
@@ -413,7 +415,7 @@ class SessionRegistry:
         allowed (a detached child: its results stay in its own transcript).
         Loading a parent whose child is live elsewhere is refused with
         ``ChildActiveElsewhereError``. Concurrent loads of one id share it.
-        ``prepare(session)`` runs after the re-queue and before the session
+        ``prepare(session)`` runs before the re-queue and before the session
         starts or is visible (not when attaching to a live session).
         """
         while True:
@@ -437,9 +439,9 @@ class SessionRegistry:
             session.agent.event_manager.add(
                 TuiSessionResumed(session_id=session_id, restored=restored)
             )
-            self._requeue(session)
             if prepare is not None:
                 await prepare(session)
+            self._requeue(session)
             session.start()
         except BaseException:
             await self._close_half_built(session)

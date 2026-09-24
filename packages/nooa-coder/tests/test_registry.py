@@ -362,7 +362,8 @@ async def test_prepare_runs_before_publish_and_start(registry, root_options, mod
         prepare=prepare,
     )
     await _until_turn_ended(seen)
-    assert [e.kind for e in seen if e.kind in ("turn_started", "turn_ended")] == [
+    assert [e.kind for e in seen if e.kind in ("item_admitted", "turn_started", "turn_ended")] == [
+        "item_admitted",
         "turn_started",
         "turn_ended",
     ]
@@ -402,6 +403,8 @@ async def test_prepare_on_load_sees_requeued_turns_but_not_on_attach(
     try:
         loaded = await fresh.load(root_id, prepare=prepare)
         await _until_turn_ended(seen)
+        [admitted] = [e for e in seen if e.kind == "item_admitted"]
+        assert admitted.channel == "user_messages"
         assert calls == [root_id]
         assert await fresh.load(root_id, prepare=prepare) is loaded
         assert calls == [root_id]
