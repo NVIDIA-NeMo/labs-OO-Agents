@@ -560,3 +560,20 @@ async def test_idle_cancel_leaves_items_no_turn_has_taken(make_session):
     assert await session.cancel() is False
     await asyncio.sleep(0)
     assert not outcome.done()
+
+
+async def test_listeners_can_read_an_agent_event_by_its_id(make_session):
+    session, _ = make_session(reply("hi"), start=False)
+    found = []
+
+    def listener(update):
+        if update.kind == "agent_event":
+            event = session.agent.event_manager.get(update.event_id)
+            found.append((update.event_type, event is not None and event.tag is not None))
+
+    session.subscribe(listener)
+    session.start()
+    await asyncio.wait_for(session.prompt("hello"), TIMEOUT)
+    await asyncio.sleep(0)
+    assert found and all(ok for _, ok in found), found
+    assert "AgentMessage" in {event_type for event_type, _ in found}

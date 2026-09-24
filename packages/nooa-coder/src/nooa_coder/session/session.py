@@ -850,11 +850,16 @@ class Session:
             # before the event gets its tag, so keep the event and read the
             # tag when the turn settles.
             self._interrupted = event
-        self._emit(
-            AgentEventUpdate(
-                session_id=self.id, event_id=str(event.id), event_type=event.event_type
-            )
+        update = AgentEventUpdate(
+            session_id=self.id, event_id=str(event.id), event_type=event.event_type
         )
+        # Handlers run before the event manager stores the event; tell
+        # listeners on the next loop step, when event_manager.get(event_id)
+        # finds it.
+        try:
+            asyncio.get_running_loop().call_soon(self._emit, update)
+        except RuntimeError:  # no running loop: nothing to defer to
+            self._emit(update)
 
     def transcript(self, *, limit: int | None = None) -> list[TranscriptEntry]:
         """The session's transcript as a person would see it; the last ``limit`` entries."""
