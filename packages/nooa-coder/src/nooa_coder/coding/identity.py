@@ -6,9 +6,12 @@ CODING_AGENT = "nooa_coder.coding.agent:CodingAgent"
 EXPERIMENTAL_CODING_AGENT = "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent"
 LEGACY_AGENT_SPECS = {
     "nooa_cli.tui.agent:TUIAgent": CODING_AGENT,
-    "nooa_coder.coding.legacy_agent:TUIAgent": CODING_AGENT,
+    "nooa_cli.coding.legacy_agent:TUIAgent": CODING_AGENT,
     "nooa_cli.tui.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
-    "nooa_coder.coding.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
+    "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
+    # Spellings from before the coding agent moved to nooa-coder.
+    "nooa_cli.coding.agent:CodingAgent": CODING_AGENT,
+    "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_CODING_AGENT,
 }
 
 

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """create_session_agent() must forward workspace-scoping kwargs correctly."""
 
+import pytest
 from nooa_coder.coding.agent import CodingAgent
 from nooa_coder.coding.factory import create_session_agent
 from nooa_coder.interactive.options import SessionOptions
@@ -135,3 +136,23 @@ def test_file_agents_get_distinct_modules_and_keep_resolving_annotations(tmp_pat
     assert _resolve_own_annotation(second_cls, "helper") == second_cls.__module__ + ".SecondHelper"
     # The same unchanged file loads once, so repeated specs share one class.
     assert load_agent_class(f"{first}:FirstAgent") is first_cls
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("nooa_cli.tui.agent:TUIAgent", "CodingAgent"),
+        ("nooa_cli.coding.legacy_agent:TUIAgent", "CodingAgent"),
+        ("nooa_cli.coding.agent:CodingAgent", "CodingAgent"),
+        ("nooa_cli.tui.experimental_agent:ExperimentalTUIAgent", "ExperimentalCodingAgent"),
+        ("nooa_cli.coding.experimental_agent:ExperimentalTUIAgent", "ExperimentalCodingAgent"),
+        ("nooa_cli.coding.experimental_agent:ExperimentalCodingAgent", "ExperimentalCodingAgent"),
+    ],
+)
+def test_legacy_agent_specs_load_the_moved_classes(spec, expected):
+    """Saved specs from nooa_cli keep loading after the move to nooa_coder."""
+    from nooa_coder.coding.factory import load_agent_class
+
+    cls = load_agent_class(spec)
+    assert cls.__name__ == expected
+    assert cls.__module__.startswith("nooa_coder.coding.")
