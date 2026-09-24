@@ -17,6 +17,7 @@ members = [
     "nooa-acp",
     "nooa-bench",
     "nooa-cli",
+    "nooa-coder",
     "nooa-memory",
 ]
 
@@ -1415,6 +1416,9 @@ bench = [
 cli = [
     { name = "nooa-cli" },
 ]
+coder = [
+    { name = "nooa-coder" },
+]
 mcp = [
     { name = "mcp" },
 ]
@@ -1490,6 +1494,7 @@ requires-dist = [
     { name = "nooa-acp", marker = "extra == 'acp'", editable = "packages/nooa-acp" },
     { name = "nooa-bench", marker = "extra == 'bench'", editable = "packages/nooa-bench" },
     { name = "nooa-cli", marker = "extra == 'cli'", editable = "packages/nooa-cli" },
+    { name = "nooa-coder", marker = "extra == 'coder'", editable = "packages/nooa-coder" },
     { name = "nooa-memory", marker = "extra == 'memory'", editable = "packages/nooa-memory" },
     { name = "openinference-instrumentation", marker = "extra == 'tracing'", specifier = ">=0.1.42" },
     { name = "openinference-instrumentation-litellm", specifier = ">=0.1.30" },
@@ -1505,7 +1510,7 @@ requires-dist = [
     { name = "rich", marker = "extra == 'arc'", specifier = ">=13.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'viewer'", specifier = ">=0.20.0" },
 ]
-provides-extras = ["acp", "arc", "bench", "cli", "mcp", "memory", "nemo-relay", "sandbox", "tracing", "viewer"]
+provides-extras = ["acp", "arc", "bench", "cli", "coder", "mcp", "memory", "nemo-relay", "sandbox", "tracing", "viewer"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1625,6 +1630,20 @@ requires-dist = [
     { name = "tree-sitter-typescript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
 ]
 provides-extras = ["ast", "datascience"]
+
+[[package]]
+name = "nooa-coder"
+source = { editable = "packages/nooa-coder" }
+dependencies = [
+    { name = "nooa" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "nooa", editable = "." },
+    { name = "pydantic", specifier = ">=2.5.0" },
+]
 
 [[package]]
 name = "nooa-memory"
