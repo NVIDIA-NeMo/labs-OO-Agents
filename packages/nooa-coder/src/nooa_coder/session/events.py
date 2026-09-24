@@ -9,14 +9,23 @@ from nooa.context_blocks.roles import Role
 
 
 class SessionStarted(Metadata):
-    """Identity and environment recorded once when a session is created."""
+    """Identity, environment and tree position recorded once when a session is created.
+
+    Records written before the session tree carry ``origin`` and
+    ``working_directory`` instead of ``host`` and ``workspace``; the store
+    reads either (``Metadata`` keeps unknown fields).
+    """
 
     _role: ClassVar[Role] = Role.METADATA
 
-    origin: str = ""
+    host: str = ""
     model: str = ""
     agent: str = ""
-    working_directory: str = ""
+    workspace: str = ""
+    parent_id: str | None = None
+    depth: int = 0
+    name: str | None = None
+    retained: bool = False
 
 
 class SessionTitleUpdated(Metadata):
