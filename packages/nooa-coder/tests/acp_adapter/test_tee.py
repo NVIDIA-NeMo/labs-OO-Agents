@@ -150,3 +150,69 @@ def test_relay_records_a_frame_that_is_not_json_as_text(tmp_path, line):
         ("in", "not json"),
         ("out", "not json"),
     ]
+
+
+# ---- the in-process observer (nooa-coder --tee) ------------------------------
+
+
+def test_observer_records_frames_in_both_directions(tmp_path):
+    from acp.connection import StreamDirection, StreamEvent
+    from nooa_coder.acp.tee import FrameLog
+
+    log = tmp_path / "tee.jsonl"
+    tee = FrameLog(log)
+    request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    response = {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}
+    tee(StreamEvent(StreamDirection.INCOMING, request))
+    tee(StreamEvent(StreamDirection.OUTGOING, response))
+    tee.close()
+
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [(record["dir"], record["frame"]) for record in records] == [
+        ("in", request),
+        ("out", response),
+    ]
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+def test_observer_narrows_an_existing_log_to_the_owner(tmp_path):
+    from nooa_coder.acp.tee import FrameLog
+
+    log = tmp_path / "tee.jsonl"
+    log.write_text("")
+    log.chmod(0o644)
+    FrameLog(log).close()
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+def test_observer_drops_frames_instead_of_blocking_when_its_queue_is_full(tmp_path, monkeypatch):
+    """The observer runs on the connection's receive loop; a slow disk must not stall it."""
+    import threading
+
+    from acp.connection import StreamDirection, StreamEvent
+    from nooa_coder.acp import tee as tee_module
+
+    release = threading.Event()
+    original = tee_module.FrameLog._write_loop
+
+    def stalled_writer(self):
+        release.wait()
+        original(self)
+
+    monkeypatch.setattr(tee_module.FrameLog, "_write_loop", stalled_writer)
+    tee = tee_module.FrameLog(tmp_path / "tee.jsonl", max_pending=1)
+    for index in range(3):
+        tee(StreamEvent(StreamDirection.INCOMING, {"id": index}))
+    assert tee.dropped == 2
+    release.set()
+    tee.close()
+    records = [json.loads(line) for line in (tmp_path / "tee.jsonl").read_text().splitlines()]
+    assert [record["frame"] for record in records] == [{"id": 0}]
+
+
+def test_observer_close_is_idempotent(tmp_path):
+    from nooa_coder.acp.tee import FrameLog
+
+    tee = FrameLog(tmp_path / "tee.jsonl")
+    tee.close()
+    tee.close()
