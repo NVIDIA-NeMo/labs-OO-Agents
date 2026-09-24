@@ -131,6 +131,13 @@ def as_data(item: Any) -> Any:
     return json.loads(item_to_json(item))
 
 
+async def _aclose(client: Any) -> None:
+    """Close a model client if it has ``aclose()``."""
+    aclose = getattr(client, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
+
 def _write_snapshot(path: Path, blob: str) -> None:
     """Insert one serialised snapshot into the session file's ``snapshots`` table.
 
@@ -188,7 +195,7 @@ class Session:
         )
         self._owned_llm = owned_llm
         self._llm_factory = llm_factory
-        self._pending_model: str | None = None
+        self._pending_model: tuple[str, Any] | None = None  # (alias, built client)
         self._listeners: list[Callable[[SessionEvent], None]] = []
         # Per channel, (item, item_id) in put order: channels hold raw
         # objects, so this is how an item keeps its identity until consumed.
@@ -272,6 +279,10 @@ class Session:
         except Exception:
             logger.exception("Session %s: stopping the turn loop failed", self.id)
         self._resolve_all(TurnCancelledOutcome(by="host"))
+        pending, self._pending_model = self._pending_model, None
+        if pending is not None:
+            with suppress(Exception):
+                await _aclose(pending[1])
         with suppress(Exception):
             await self.wait_for_checkpoint()
         self._unsubscribe_agent()
@@ -318,11 +329,7 @@ class Session:
 
     async def _close_owned_llm(self) -> None:
         llm, self._owned_llm = self._owned_llm, None
-        if llm is None:
-            return
-        aclose = getattr(llm, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        await _aclose(llm)
 
     def _ensure_open(self) -> None:
         if self._closed or self._closing:
@@ -797,27 +804,25 @@ class Session:
     async def set_model(self, alias: str) -> None:
         """Switch the model from the next turn on.
 
-        The alias is kept until the loop starts its next turn; there the
-        new client is built with the registry's ``llm_factory`` and swapped
-        in, and the old one is closed if this session created it. A running
-        turn keeps its model.
+        The client is built now with the registry's ``llm_factory``, so a
+        bad alias fails here. The loop swaps it in right before the next
+        turn and closes the old client if this session created it; a
+        running turn keeps its model. A second call before that turn
+        replaces (and closes) the first pending client.
         """
         if self._llm_factory is None:
             raise RuntimeError("set_model() needs the registry's llm_factory to build clients")
         self._ensure_open()
-        self._pending_model = alias
+        client = self._llm_factory(alias, self.options.workspace)
+        previous, self._pending_model = self._pending_model, (alias, client)
+        if previous is not None:
+            await _aclose(previous[1])
 
     async def _apply_pending_model(self) -> None:
-        alias, self._pending_model = self._pending_model, None
-        if alias is None or self._llm_factory is None:
+        pending, self._pending_model = self._pending_model, None
+        if pending is None:
             return
-        try:
-            client = self._llm_factory(alias, self.options.workspace)
-        except Exception:
-            logger.warning(
-                "Session %s: could not build a client for %r", self.id, alias, exc_info=True
-            )
-            return
+        alias, client = pending
         self.agent.set_llm(client)
         apply_model_limits(self.agent)
         await self._close_owned_llm()

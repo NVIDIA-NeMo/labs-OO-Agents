@@ -217,6 +217,8 @@ class ModelFactory:
 
     def __call__(self, alias: str | None, workspace: Any) -> TrackedLLM:
         self.calls.append((alias, workspace))
+        if alias == "bad-alias":
+            raise ValueError("unknown model alias 'bad-alias'")
         resolved = alias or "default-model"  # None means the factory's default
         queue = self.scripts.get(resolved, [])
         llm = TrackedLLM(resolved, queue.pop(0) if queue else [])

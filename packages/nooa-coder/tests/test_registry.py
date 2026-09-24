@@ -325,8 +325,10 @@ async def test_set_model_swaps_the_client_before_the_next_turn(root_options, ses
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
         first = asyncio.ensure_future(root.prompt("one"))
         await asyncio.wait_for(started.wait(), TIMEOUT)
-        await root.set_model("alias-b")  # during a turn: takes effect at the next one
-        assert len(factory.made) == 1
+        await root.set_model("alias-b")  # built now; swapped in at the next turn
+        assert len(factory.made) == 2 and root.agent.llm is factory.made[0]
+        with pytest.raises(ValueError, match="bad-alias"):
+            await root.set_model("bad-alias")  # fails at the call
         block.set()
         assert await asyncio.wait_for(first, TIMEOUT) == Done(explanation="on a")
         assert await asyncio.wait_for(root.prompt("two"), TIMEOUT) == Done(explanation="on b")
