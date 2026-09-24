@@ -145,6 +145,28 @@ async def test_cancel_closes_the_cards_before_the_prompt_answers_cancelled(
     assert order.index("AgentMessageChunk") < order.index("response")
 
 
+async def test_stop_also_stops_a_prompt_that_steered_the_turn(make_adapter, workspace, client):
+    """A steer the model has not seen yet must not run as a new turn after Stop."""
+    started, _block = fresh_events()
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Should not run.")]})
+    adapter = await make_adapter(models)
+    session_id = await _new(adapter, workspace)
+    first = asyncio.create_task(adapter.prompt(session_id, [text_block("do the first thing")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    second = asyncio.create_task(adapter.prompt(session_id, [text_block("also do this")]))
+    await asyncio.sleep(0.05)
+    await adapter.cancel(session_id)
+    responses = await asyncio.wait_for(asyncio.gather(first, second), TIMEOUT)
+    assert [response.stop_reason for response in responses] == ["cancelled", "cancelled"]
+    await asyncio.sleep(0.2)  # a re-admitted steer would start a turn now
+    session = adapter.registry.get(session_id)
+    assert session.info.status == "idle"
+    assert len(models.llms[None].calls) == 1
+    entries = session.transcript()
+    assert [entry.role for entry in entries][-1] == "cancelled"
+    assert "Should not run." not in client.texts(AgentMessageChunk, session_id)
+
+
 async def test_cancel_without_a_turn_is_harmless_and_the_session_goes_on(make_adapter, workspace):
     adapter = await make_adapter(ScriptedModels({None: [reply("Still here.")]}))
     session_id = await _new(adapter, workspace)

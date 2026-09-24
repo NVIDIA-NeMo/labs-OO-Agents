@@ -79,10 +79,15 @@ from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
 from nooa_coder.acp.need_input import answer_from_content, need_input_schema
 from nooa_coder.coding.identity import CODING_AGENT, canonical_agent_spec
 from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
-from nooa_coder.session.items import CommandInfo, TurnCancelledOutcome
+from nooa_coder.session.items import CommandInfo, Receipt, TurnCancelledOutcome
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import ChildActiveElsewhereError, SessionRegistry
-from nooa_coder.session.session import Session, SessionClosedError, TurnFailedError
+from nooa_coder.session.session import (
+    ItemWithdrawnError,
+    Session,
+    SessionClosedError,
+    TurnFailedError,
+)
 from nooa_coder.session.store import InvalidSessionIdError, SessionNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -208,6 +213,8 @@ class CoderACPAgent:
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
         self._chosen_models: dict[str, str] = {}
+        # Receipts of prompts that steered a running turn, by session.
+        self._steers: dict[str, list[Receipt]] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
         # session: session/cancel stops them.
         self._asks: dict[str, asyncio.Task[Any]] = {}
@@ -450,7 +457,20 @@ class CoderACPAgent:
                     return handled
             await self._request_title(session, text)
             receipt = await session.steer(text, source=SOURCE)
-            return await self._finish(session, bridge, receipt.item_id)
+            steered = receipt.delivered == "steered"
+            if steered:
+                # Stop must withdraw it if the model has not seen it yet;
+                # otherwise it would run as a new turn after the cancel.
+                self._steers.setdefault(session_id, []).append(receipt)
+            try:
+                return await self._finish(session, bridge, receipt.item_id)
+            finally:
+                if steered:
+                    with suppress(ValueError):
+                        self._steers.get(session_id, []).remove(receipt)
+        except ItemWithdrawnError:
+            await bridge.flush()
+            return PromptResponse(stop_reason="cancelled")
         except SessionClosedError:
             raise RequestError.resource_not_found(session_id) from None
         except TurnFailedError as exc:
@@ -676,6 +696,10 @@ class CoderACPAgent:
         ask = self._asks.get(session_id)
         if ask is not None:
             ask.cancel()
+        # Steers the model has not read yet stop with the turn; the prompts
+        # that sent them return "cancelled" (withdraw fails for one it read).
+        for receipt in self._steers.pop(session_id, []):
+            session.withdraw(receipt)
         await session.cancel(by="user")
 
     # ---- modes and models ----------------------------------------------
