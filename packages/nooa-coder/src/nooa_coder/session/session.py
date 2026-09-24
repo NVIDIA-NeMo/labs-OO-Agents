@@ -78,7 +78,16 @@ _MODES = ("auto", "ask")
 
 
 class TurnFailedError(RuntimeError):
-    """The turn that consumed a prompted item failed with an error."""
+    """The turn that consumed a prompted item failed with an error.
+
+    ``error`` is the original exception (also chained as ``__cause__``),
+    or ``None`` when there was none (a turn that returned no turn result).
+    """
+
+    def __init__(self, message: str, error: BaseException | None = None) -> None:
+        super().__init__(message)
+        self.error = error
+        self.__cause__ = error
 
 
 class ItemWithdrawnError(RuntimeError):
@@ -558,7 +567,7 @@ class Session:
         """Settle a turn whose own settling failed: its prompts get ``TurnFailedError``."""
         self._turn_task = None
         owed, self._waiting, self._consumed = self._waiting + self._consumed, [], []
-        error = TurnFailedError(f"{type(exc).__name__}: {exc}")
+        error = TurnFailedError(f"{type(exc).__name__}: {exc}", exc)
         for item_id in owed:
             self._resolve(item_id, error)
         self.info.status = "idle"
@@ -587,7 +596,7 @@ class Session:
         kind: OutcomeKind
         try:
             outcome, kind = _classify(await self._turn_task)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             current = asyncio.current_task()
             if current is not None and current.cancelling():
                 # The loop itself is being cancelled (close): not a turn outcome.
@@ -598,10 +607,11 @@ class Session:
                 outcome, kind = TurnCancelledOutcome(by=self._cancel_by), "cancelled"
             else:
                 # Something inside the turn cancelled it, not cancel().
-                outcome, kind = TurnFailedError("turn was cancelled from inside"), "error"
+                outcome = TurnFailedError("turn was cancelled from inside", exc)
+                kind = "error"
         except Exception as exc:
             logger.exception("Turn failed in session %s", self.id)
-            outcome, kind = TurnFailedError(f"{type(exc).__name__}: {exc}"), "error"
+            outcome, kind = TurnFailedError(f"{type(exc).__name__}: {exc}", exc), "error"
         finally:
             self._turn_task = None
         self._settle(outcome, kind, usage_before)
