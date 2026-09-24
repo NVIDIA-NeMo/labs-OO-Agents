@@ -7,9 +7,12 @@ no live objects. Sessions, hosts and parent agents exchange these values;
 live agents never cross.
 """
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
+
+from nooa.context_blocks import EventBase
+from nooa.context_blocks.roles import Role
 
 SessionStatus = Literal["running", "idle", "retained", "closed", "on_disk"]
 
@@ -49,3 +52,20 @@ class SessionInfo(BaseModel):
     last_active: float = 0.0
     turn_count: int = 0
     usage: Usage = Field(default_factory=Usage)
+
+
+class TurnCancelled(EventBase):
+    """A person, a parent or the host stopped the turn before it finished.
+
+    Appended to the agent's events when a cancel takes effect, after the
+    interrupted cell's output, so the model sees at its next turn that it
+    was stopped rather than that a cell failed. ``by`` says who stopped it
+    (``"user"``, ``"parent:<name>"``, ``"host"``); ``interrupted`` is the
+    tag of the interrupted cell's ``PythonOutput``, or ``None`` when the
+    turn was stopped between cells (for example during a model call).
+    """
+
+    _role: ClassVar[Role] = Role.USER
+
+    by: str
+    interrupted: str | None = None

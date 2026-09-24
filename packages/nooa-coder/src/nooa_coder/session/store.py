@@ -385,7 +385,9 @@ class SessionStore:
                 ).fetchall()
                 turn_count = int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?)",
+                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?) "
+                        "OR (event_type = 'ItemAdmitted' "
+                        "AND json_extract(data, '$.channel') = 'user_messages')",
                         tuple(_USER_EVENT_TYPES),
                     ).fetchone()[0]
                 )
