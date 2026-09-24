@@ -340,11 +340,7 @@ class CodingAgent(InteractiveAgent):
         return self.session
 
     def get_summarization_status(self) -> dict[str, Any]:
-        """Return compact history information for host status displays.
-
-        Token and cost totals come from the session that runs the agent
-        (``SessionInfo.usage``), not from here.
-        """
+        """Return compact history information for host status displays."""
         tags = self.event_manager.keys()
         summary_tags = [tag for tag in tags if ".." in tag]
         summarizers = getattr(self, "_summarizers", [])
@@ -400,7 +396,8 @@ class CodingAgent(InteractiveAgent):
 
         ``notification`` maps a channel name to the items that arrived on it:
         ``"user_messages"`` (text from the person), ``"system_messages"``
-        (host housekeeping) and ``"slash_commands"``. Do all the work
+        (host housekeeping), ``"slash_commands"`` (command output sent to you)
+        and ``"delegates"`` (results of children you spawned). Do all the work
         the request needs before ending the turn; use as many cells as it
         takes, and run checks rather than assume them.
 
@@ -502,6 +499,7 @@ def session_title_request(opening_message: str) -> str:
     )
 
 
+@hidden
 def _todo_prompt(todo: Todo) -> str:
     """A Todo as the text a child works from: title, description, comments."""
     lines = [f"Task: {todo.title}"]
@@ -513,6 +511,7 @@ def _todo_prompt(todo: Todo) -> str:
     return "\n".join(lines)
 
 
+@hidden
 def _report_text(done: Done) -> str:
     """The report in a child's Done: the TaskResult's report, else its summary fields."""
     result = done.result

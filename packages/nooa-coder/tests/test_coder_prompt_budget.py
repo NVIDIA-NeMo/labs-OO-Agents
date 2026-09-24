@@ -34,10 +34,10 @@ RESULT = (
 
 # (spec, turn method): (system prompt chars, all message chars)
 LIMITS = {
-    (CODER, "handle"): (19_800, 23_500),  # measured 19,732 / 23,477
-    (CODER, "handle_batch"): (19_800, 23_300),  # measured 19,732 / 23,201
-    (EXPERIMENTAL, "handle"): (11_200, 13_300),  # measured 11,124 / 13,297
-    (EXPERIMENTAL, "handle_batch"): (11_200, 13_700),  # measured 11,124 / 13,650
+    (CODER, "handle"): (19_300, 23_100),  # measured 19,292 / 23,089
+    (CODER, "handle_batch"): (19_300, 22_800),  # measured 19,292 / 22,733
+    (EXPERIMENTAL, "handle"): (10_900, 13_100),  # measured 10,831 / 13,004
+    (EXPERIMENTAL, "handle_batch"): (10_900, 13_400),  # measured 10,831 / 13,357
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
