@@ -524,3 +524,36 @@ async def test_close_all_goes_on_when_one_close_fails(registry, root_options):
     assert first._closed and second._closed
     assert not registry.store.is_active(first.id)
     assert not registry.store.is_active(second.id)
+
+
+async def test_a_failed_prepare_closes_the_half_built_session(root_options, sessions_dir):
+    factory = ModelFactory()
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    closed = []
+
+    async def prepare(session):
+        async def on_close():
+            closed.append(session.id)
+
+        session.agent.event_manager.on_close(on_close)
+        raise RuntimeError("bridge failed")
+
+    with pytest.raises(RuntimeError, match="bridge failed"):
+        await registry.create(root_options.model_copy(update={"model": "alias-a"}), prepare=prepare)
+    [llm] = factory.made
+    assert len(closed) == 1 and llm.closed
+    assert _db_files(sessions_dir) == []
+    assert not registry.store.is_active(closed[0])
+
+
+async def test_a_failed_agent_build_closes_the_owned_client(root_options, sessions_dir):
+    factory = ModelFactory()
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    failing = root_options.model_copy(
+        update={"model": "alias-a", "agent_spec": "coder_test_agents:FailingAgent"}
+    )
+    with pytest.raises(RuntimeError, match="construction failed"):
+        await registry.create(failing)
+    [llm] = factory.made
+    assert llm.closed
+    assert _db_files(sessions_dir) == []

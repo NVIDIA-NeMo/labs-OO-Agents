@@ -123,6 +123,7 @@ class SessionRegistry:
         session_id = str(uuid.uuid4())
         reservation = self._reserve(session_id)
         handle: SessionHandle | None = None
+        session: Session | None = None
         try:
             handle = self.store.create(
                 model=options.model or "",
@@ -136,13 +137,14 @@ class SessionRegistry:
                 turn_method=options.turn_method,
                 session_id=session_id,
             )
-            session = self._build(options, handle)
+            session = await self._build(options, handle)
             for channel, item in initial_items:
                 session._admit(item, channel=channel, source=initial_source)
             if prepare is not None:
                 await prepare(session)
             session.start()
         except BaseException:
+            await self._close_half_built(session)
             self._discard(session_id, handle, reservation)
             raise
         self._publish(session, reservation)
@@ -163,7 +165,16 @@ class SessionRegistry:
         self._reserved[session_id] = reservation
         return reservation
 
-    def _build(self, options: SessionOptions, handle: SessionHandle) -> Session:
+    async def _close_half_built(self, session: Session | None) -> None:
+        """Close a session that was built but never published (agent, client, handle)."""
+        if session is None:
+            return
+        try:
+            await asyncio.shield(session.close())
+        except Exception:
+            logger.exception("Closing the half-built session %s failed", session.id)
+
+    async def _build(self, options: SessionOptions, handle: SessionHandle) -> Session:
         # Build the agent outside the caller's context: a child is created
         # from inside its parent's cell, and the agent must not inherit the
         # parent's call stack or LLM inheritance.
@@ -175,8 +186,8 @@ class SessionRegistry:
         try:
             agent = contextvars.Context().run(self._agent_factory, build_options, handle.storage)
         except BaseException:
-            if owned_llm is not None and hasattr(owned_llm, "close"):
-                owned_llm.close()
+            if owned_llm is not None and hasattr(owned_llm, "aclose"):
+                await asyncio.shield(owned_llm.aclose())
             raise
         session = Session(
             options=options,
@@ -409,10 +420,13 @@ class SessionRegistry:
                 return loaded
         reservation = self._reserve(session_id)
         handle: SessionHandle | None = None
+        session: Session | None = None
         try:
             self._refuse_if_children_active_elsewhere(session_id)
             handle = self.store.open(session_id)
-            session = self._build(self._stored_options(handle.info, options, overrides), handle)
+            session = await self._build(
+                self._stored_options(handle.info, options, overrides), handle
+            )
             restored = handle.storage.restore_latest_snapshot(session.agent)
             session.agent.event_manager.add(
                 TuiSessionResumed(session_id=session_id, restored=restored)
@@ -422,6 +436,7 @@ class SessionRegistry:
                 await prepare(session)
             session.start()
         except BaseException:
+            await self._close_half_built(session)
             self._reserved.pop(session_id, None)
             if not reservation.done():
                 reservation.set_result(None)
