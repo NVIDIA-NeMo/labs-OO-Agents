@@ -7,10 +7,14 @@ The router starts its workers from ``sys.orig_argv``, so workers run this
 file too and get the same fake model. Options starting with ``--fixture-``
 are this file's own and are not passed to ``nooa-coder``:
 
+- ``--fixture-noisy``: print to standard output while the router module is
+  imported (in the router, after start-up) and while each session's model is
+  built (in the worker), as ``nooa.tracing`` does when it finds an endpoint.
 - ``--fixture-hot``: every turn runs a cell that writes the file named by
   ``NOOA_FIXTURE_MARKER`` and then blocks the event loop for two minutes.
 """
 
+import importlib.abc
 import sys
 from pathlib import Path
 
@@ -28,8 +32,21 @@ time.sleep(120)
 """
 
 
+class _NoisyImport(importlib.abc.MetaPathFinder):
+    def find_spec(self, name: str, path: object, target: object = None) -> None:
+        if name == "nooa_coder.acp.router":
+            print("stray output while importing the router", flush=True)
+        return None
+
+
+if "--fixture-noisy" in sys.argv:
+    sys.meta_path.insert(0, _NoisyImport())
+
+
 def llm_factory(alias: str | None, workspace: Path) -> FakeLLMClient:
     del alias, workspace
+    if "--fixture-noisy" in sys.argv:
+        print("stray output while building a model", flush=True)
     if "--fixture-hot" in sys.argv:
         return FakeLLMClient([cell(HOT_CELL)])
     return FakeLLMClient([reply("Hi there.") for _ in range(20)])

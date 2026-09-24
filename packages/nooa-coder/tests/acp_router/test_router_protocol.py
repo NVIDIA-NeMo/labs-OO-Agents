@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 from acp import PROTOCOL_VERSION
-from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
+from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode
 from nooa_coder.session.store import SessionStore
 
 FAKE_AGENT = Path(__file__).parent / "fixtures" / "fake_agent.py"
@@ -36,6 +36,7 @@ class Server:
         self.process = process
         self.inbox: list[Frame] = []
         self.stderr: list[str] = []
+        self.stray: list[bytes] = []  # stdout lines that are not JSON-RPC objects
         self._next_id = 0
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
@@ -92,11 +93,30 @@ class Server:
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
-            frame = await asyncio.wait_for(read_frame(self.process.stdout), max(remaining, 0.01))
+            frame = await asyncio.wait_for(self._next_frame(), max(remaining, 0.01))
             assert frame is not None, "".join(self.stderr[-30:])
             self.inbox.append(frame)
             if frame.is_response and frame.id == request_id:
                 return frame
+
+    async def _next_frame(self) -> Frame | None:
+        """The next JSON-RPC frame; any other stdout line is kept in ``stray``."""
+        assert self.process.stdout is not None
+        while True:
+            try:
+                line = await self.process.stdout.readuntil(b"\n")
+            except asyncio.IncompleteReadError as exc:
+                if exc.partial.strip():
+                    self.stray.append(exc.partial)
+                return None
+            try:
+                message = json.loads(line)
+            except ValueError:
+                message = None
+            if not isinstance(message, dict):
+                self.stray.append(line)
+                continue
+            return Frame(line, message)
 
     async def call(self, method: str, params: Any) -> Frame:
         return await self.response(await self.request(method, params))
@@ -379,3 +399,20 @@ async def test_sigterm_stops_the_router_and_its_workers(servers, workspace):
     while not _gone(worker) and time.monotonic() < deadline:
         await asyncio.sleep(0.1)
     assert _gone(worker)
+
+
+async def test_stray_prints_in_the_router_and_workers_stay_off_the_acp_stream(servers, workspace):
+    """The router reserves stdout for ACP, as single-process mode does.
+
+    With ``--fixture-noisy`` the router prints while importing its router
+    module (after start-up) and each worker prints while building a model.
+    """
+    server = await servers("router", "--fixture-noisy")
+    await server.initialize()
+    session_id = await server.new_session(workspace)
+    assert (await server.prompt(session_id)).message["result"] == {"stopReason": "end_turn"}
+    assert await server.finish() == 0
+    assert server.stray == []
+    noise = "".join(server.stderr)
+    assert "stray output while importing the router" in noise
+    assert "stray output while building a model" in noise
