@@ -219,3 +219,40 @@ def test_the_default_llm_factory_uses_the_workspace_default_model(workspace, mon
     assert make("named", workspace) == "named"
     assert default_llm_factory(workspace_default="fixed")(None, workspace) == "fixed"
     assert built == ["ws-model", "named", "fixed"]
+
+
+async def test_a_host_registry_builds_the_workspace_default_model(
+    workspace, sessions_dir, monkeypatch
+):
+    """default_llm_factory() as the registry's llm_factory, for a session without a model."""
+    import nooa_coder.coding.factory as factory
+    from coder_test_agents import TrackedLLM
+
+    (workspace / ".nooa").mkdir()
+    (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")
+    built: list[TrackedLLM] = []
+
+    def fake_client(alias):
+        built.append(TrackedLLM(alias, []))
+        return built[-1]
+
+    monkeypatch.setattr(factory, "get_llm_client", fake_client)
+    make = default_llm_factory()
+    aliases: list[str | None] = []
+
+    def spy(alias, path):
+        aliases.append(alias)
+        return make(alias, path)
+
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=spy)
+    try:
+        root = await registry.create(_options(workspace, sessions_dir))
+        assert aliases == [None]
+        [client] = built
+        assert client.alias == "ws-model"
+        assert root.agent.llm is client
+        assert root.info.model == "ws-model"
+        await registry.close(root.id)
+        assert client.closed is True
+    finally:
+        await registry.close_all()

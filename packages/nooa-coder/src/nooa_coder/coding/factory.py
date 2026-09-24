@@ -33,9 +33,11 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
 
     The class is loaded with ``load_agent_class`` (``module:Class`` or a
     ``file.py:Class`` path relative to the workspace). It gets the
-    session's ``storage`` and ``options.llm``; the registry has already
-    built that client when it has an ``llm_factory``, and this function
-    never builds one (without a client the class's own default applies).
+    session's ``storage`` and ``options.llm``. This function never builds a
+    client: a registry with an ``llm_factory`` calls it for every session
+    whose options carry no ``llm`` (alias ``options.model``, ``None`` for the
+    default model) and passes the result here. Without an ``llm_factory``
+    and without ``options.llm``, the class's own default client applies.
 
     A coding agent also gets the workspace's settings (``CoderOptions``):
     ``cwd``, ``skills_dirs``, ``summarization`` and a ``libs_dir`` inside
