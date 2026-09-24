@@ -130,3 +130,17 @@ def test_the_console_script_requires_a_model(monkeypatch):
 
 def test_help_mentions_the_tee():
     assert "--tee" in _invoke(["--help"]).output
+
+
+@pytest.mark.parametrize("module", ["nooa_coder.acp.cli", "nooa_coder.acp.tee"])
+def test_the_entry_points_import_without_the_framework(module):
+    """`nooa` loads every plugin command at startup; this one must stay light."""
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", f"import sys; import {module}; assert 'nooa' not in sys.modules"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
