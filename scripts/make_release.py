@@ -59,7 +59,7 @@ GATE_MODELS = [
 GATE_RUNS = 3
 GATE_PARALLEL = 40
 CAPABILITY_CONFIG = Path("tests/capability/config.yaml")
-PACKAGES = ["nooa", "nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench"]
+PACKAGES = ["nooa", "nooa-cli", "nooa-coder", "nooa-acp", "nooa-memory", "nooa-bench"]
 REPORT_PATH = REPO / "tmp" / "release-check" / "capability-report.md"
 GITHUB_REPO = "NVIDIA-NeMo/labs-OO-Agents"
 TAG_RE = re.compile(r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$")
@@ -556,7 +556,7 @@ def build_and_smoke(
                 [
                     str(python),
                     "-c",
-                    "import nooa, nooa_acp, nooa_cli, nooa_memory, nooa_bench; print(nooa.__version__)",
+                    "import nooa, nooa_cli, nooa_coder, nooa_memory, nooa_bench; print(nooa.__version__)",
                 ],
                 text=True,
                 capture_output=True,
@@ -572,14 +572,15 @@ def build_and_smoke(
             ok(f"CLI version OK ({cli.stdout.strip()})")
             # Mirror publish.yml: a wheel can import cleanly and still ship a
             # broken [project.scripts] entry point.
-            entry = subprocess.run(
-                [str(venv / "bin" / "nooa-acp"), "--help"],
-                text=True,
-                capture_output=True,
-            )
-            if entry.returncode != 0:
-                die(f"nooa-acp entry point failed:\n{entry.stderr}")
-            ok("nooa-acp entry point OK")
+            for script in ("nooa-coder", "nooa-acp"):
+                entry = subprocess.run(
+                    [str(venv / "bin" / script), "--help"],
+                    text=True,
+                    capture_output=True,
+                )
+                if entry.returncode != 0:
+                    die(f"{script} entry point failed:\n{entry.stderr}")
+                ok(f"{script} entry point OK")
 
     artifacts = [
         {"path": str(path.relative_to(REPO)), "sha256": sha256(path)}

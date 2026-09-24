@@ -6,6 +6,29 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Add the `nooa-coder` package (module `nooa_coder`), which now holds the
+  coding agent, durable sessions, and the ACP server. Code moved without
+  behavior changes:
+  - `nooa_cli.coding`, `nooa_cli.tools` (`RepoTools`, `pyp`) and
+    `nooa_cli.sessions` -> `nooa_coder.coding`, `nooa_coder.tools`,
+    `nooa_coder.sessions`. The `nemo.repo` skill entry point and the `ast`
+    and `datascience` extras move from `nooa-cli` to `nooa-coder`.
+  - `nooa_acp.server`, `nooa_acp.event_bridge` and `nooa_acp.cli` ->
+    `nooa_coder.acp.*`; `nooa_acp._runtime` -> `nooa_coder.sessions.runtime`;
+    `nooa_acp.dispatcher` -> `nooa_coder.interactive.dispatcher`.
+    `nooa-coder` installs the `nooa-coder` and `nooa-acp` console scripts
+    (same program) and the `nooa acp` command.
+  - `nooa-cli` now depends only on `nooa`; `nooa-bench` depends on
+    `nooa-coder` instead of `nooa-cli`. New `nooa[coder]` extra; `nooa[acp]`
+    now installs `nooa-coder`, and `nooa[arc]` adds it.
+- Remove `nooa.interactive` (no compatibility module). `InteractiveAgent`,
+  `AgentMessage`, `AgentVars`, `RespondReason`, `RespondResult`,
+  `RespondKind` and `DEFAULT_MODEL` are now in `nooa_coder.interactive_agent`;
+  `SummarizationConfig`, `install_summarizer` and `apply_model_limits` are now
+  in `nooa.agents.summarization`.
+- `nooa-acp` is now a tombstone package: no code, no scripts, no entry points,
+  and a single dependency on `nooa-coder`, so `uv add nooa-acp` keeps
+  installing the ACP server. The `nooa_acp` module no longer exists.
 - Remove `AnthropicProviderFormatter` and `ResponsesProviderFormatter` from
   `nooa.context_blocks`, and the runtime's client-type dispatch that swapped in
   the Responses one. Neither was on the live path: every client (including

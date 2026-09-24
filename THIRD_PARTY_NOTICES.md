@@ -67,7 +67,7 @@ Source/Homepage: https://github.com/yaml/pyyaml
 
 ---
 
-## `nooa-acp`
+## `nooa-coder`
 
 agent-client-protocol - Apache License 2.0
 Attribution Statements: NVIDIA includes `agent-client-protocol` under the Apache License 2.0 for use with NVIDIA OO Agents.
@@ -89,8 +89,17 @@ Attribution Statements: NVIDIA includes `nooa` under the Apache License 2.0 for 
 License Text(https://spdx.org/licenses/Apache-2.0.html)
 Source/Homepage: https://github.com/NVIDIA-NeMo/labs-OO-Agents
 
-nooa-cli - Apache License 2.0
-Attribution Statements: NVIDIA includes `nooa-cli` under the Apache License 2.0 for use with NVIDIA OO Agents.
+pyyaml - MIT License
+Attribution Statements: NVIDIA includes `pyyaml` under the MIT License for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/MIT.html)
+Source/Homepage: https://github.com/yaml/pyyaml
+
+---
+
+## `nooa-acp`
+
+nooa-coder - Apache License 2.0
+Attribution Statements: NVIDIA includes `nooa-coder` under the Apache License 2.0 for use with NVIDIA OO Agents.
 License Text(https://spdx.org/licenses/Apache-2.0.html)
 Source/Homepage: https://github.com/NVIDIA-NeMo/labs-OO-Agents
 
@@ -108,8 +117,8 @@ Attribution Statements: NVIDIA includes `nooa` under the Apache License 2.0 for 
 License Text(https://spdx.org/licenses/Apache-2.0.html)
 Source/Homepage: https://github.com/NVIDIA-NeMo/labs-OO-Agents
 
-nooa-cli - Apache License 2.0
-Attribution Statements: NVIDIA includes `nooa-cli` under the Apache License 2.0 for use with NVIDIA OO Agents.
+nooa-coder - Apache License 2.0
+Attribution Statements: NVIDIA includes `nooa-coder` under the Apache License 2.0 for use with NVIDIA OO Agents.
 License Text(https://spdx.org/licenses/Apache-2.0.html)
 Source/Homepage: https://github.com/NVIDIA-NeMo/labs-OO-Agents
 
@@ -266,7 +275,7 @@ Source/Homepage: https://github.com/NVIDIA-NeMo/labs-OO-Agents
 
 ---
 
-## `nooa-cli[ast]`
+## `nooa-coder[ast]`
 
 tree-sitter - MIT License
 Attribution Statements: NVIDIA includes `tree-sitter` under the MIT License for use with NVIDIA OO Agents.
@@ -300,7 +309,7 @@ Source/Homepage: https://github.com/tree-sitter/tree-sitter-typescript
 
 ---
 
-## `nooa-cli[datascience]`
+## `nooa-coder[datascience]`
 
 numpy - BSD 3-Clause License
 Attribution Statements: NVIDIA includes `numpy` under the BSD 3-Clause License for use with NVIDIA OO Agents.

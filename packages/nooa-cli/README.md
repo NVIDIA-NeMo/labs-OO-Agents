@@ -6,12 +6,9 @@ CLI for [nemo-oo-agents](https://github.com/NVIDIA-NeMo/labs-OO-Agents). Ships t
 
 ```bash
 uv add nooa-cli
-
-# ...with numpy/pandas/plotly/scipy/sklearn pre-loaded into the LLM REPL
-uv add "nooa-cli[datascience]"
 ```
 
-`nooa-cli` automatically pulls in matching `nemo-oo-agents` (the core framework). The `[datascience]` extra adds libraries the LLM can use in REPL-generated code.
+`nooa-cli` automatically pulls in matching `nemo-oo-agents` (the core framework).
 
 ## Usage
 
@@ -22,11 +19,12 @@ nooa eval ...         # eval pipeline runner
 nooa traces ...       # inspect/manage trace files
 ```
 
-Install the separate `nooa-acp` package to add the `nooa acp` plugin command and
-run the NOOA coding agent from an ACP-compatible client:
+Install the separate `nooa-coder` package to add the `nooa acp` plugin command and
+run the NOOA coding agent from an ACP-compatible client (`nooa-acp` still works
+as a package name; it now only depends on `nooa-coder`):
 
 ```bash
-uv add nooa-acp
+uv add nooa-coder
 export NOOA_MODEL=nvidia_nim/nvidia/nemotron-3-super-120b-a12b
 export NVIDIA_API_KEY=nvapi-...
 uv run nooa-acp
@@ -36,8 +34,6 @@ See the main repo [README](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/ma
 
 ## Interactive coding sessions
 
-`nooa_cli.sessions` owns durable coding-agent session identity, metadata, and
-conversation replay shared by CLI hosts such as the native TUI and ACP. The
-process running an agent owns the writable session handle; other hosts attach
-through their transport or use read-only discovery. Generic event and SQLite
-storage primitives remain in the core `nooa` package.
+The coding agent, its tools, and durable coding-agent sessions live in the
+[`nooa-coder`](../nooa-coder/README.md) package. `nooa-cli` depends only on the
+core `nooa` package.
