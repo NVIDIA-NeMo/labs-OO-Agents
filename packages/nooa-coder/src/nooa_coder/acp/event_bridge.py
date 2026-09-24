@@ -1,16 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Translate observational NOOA events into ACP session updates."""
+"""Translate a Session's updates and its agent's events into ACP session updates.
+
+One bridge per session id per adapter. It listens in two places: the
+Session's updates (``subscribe``: titles, modes, turn ends, cancels,
+children, admitted items, close) and the agent's own event stream (tool
+cells, messages, file edits, terminal commands, model responses), which
+carries runtime events the Session's passthrough leaves out. Both are
+synchronous, so updates reach the client in the order things happened.
+"""
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from acp import (
@@ -19,12 +28,18 @@ from acp import (
     tool_content,
     tool_diff_content,
     update_agent_message,
+    update_agent_thought_text,
+    update_plan,
     update_tool_call,
+    update_user_message_text,
 )
+from acp.helpers import plan_entry
 from acp.interfaces import Client
 from acp.schema import (
     ContentToolCallContent,
     Cost,
+    CurrentModeUpdate,
+    PlanEntry,
     SessionInfoUpdate,
     ToolCallLocation,
     UsageUpdate,
@@ -40,9 +55,15 @@ from nooa_coder.coding.activity import (
     TerminalCommandOutput,
     TerminalCommandStarted,
 )
-from nooa_coder.coding.agent import CodingAgent
-from nooa_coder.session.events import SessionTitleUpdated
-from nooa_coder.session.store import SessionHandle
+from nooa_coder.session.items import (
+    CancelledUpdate,
+    ChildCreatedUpdate,
+    ItemAdmittedUpdate,
+    ModeChangedUpdate,
+    SessionInfo,
+    TitleChangedUpdate,
+    TurnEndedUpdate,
+)
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
 # the logging default sends them.
@@ -53,6 +74,24 @@ _STOP = object()
 # Bound on a rendered Out[n] value; large results belong in the agent's
 # context, not repeated in full inside a client tool card.
 _MAX_VALUE_CHARS = 10_000
+
+OWN_SOURCES = frozenset({"acp", "user:declined"})
+"""Item sources this adapter admits itself; the client already shows those."""
+
+_ECHOED_CHANNELS = frozenset({"user_messages", "steer"})
+
+ToolKey = tuple[str, str]
+"""An open tool card: (id of the session that ran it, its tool call id)."""
+
+
+class BridgedSession(Protocol):
+    """What the bridge needs from a Session."""
+
+    id: str
+    agent: Any
+    info: SessionInfo
+
+    def subscribe(self, listener: Callable[[Any], None]) -> Callable[[], None]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,49 +114,129 @@ def _python_content(code: str, output: str | None = None) -> list[ContentToolCal
     return content
 
 
+def cancel_text(by: str) -> str:
+    """What the conversation says when a turn was stopped by ``by``."""
+    return "Stopped at your request." if by == "user" else f"Stopped by {by}."
+
+
+def question_text(question: str, options: list[str] | None) -> str:
+    """A ``NeedInput`` question as the agent's final message of the turn."""
+    if not options:
+        return question
+    return question + "\n\n" + "\n".join(f"- {option}" for option in options)
+
+
+def _json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
 class ACPEventBridge:
-    def __init__(self, agent: CodingAgent, client: Client, session_id: str) -> None:
-        self.agent = agent
+    """Send one session's activity to an ACP client, in order, through one pump task.
+
+    ``resolve_child(child_id)`` finds a live child Session; when given, the
+    tool cards of this session's children (and theirs) are mirrored into
+    this session with ids ``"{child_id}:{tool_call_id}"``.
+    """
+
+    def __init__(
+        self,
+        session: BridgedSession,
+        client: Client,
+        *,
+        resolve_child: Callable[[str], BridgedSession | None] | None = None,
+        own_sources: frozenset[str] = OWN_SOURCES,
+    ) -> None:
+        self.session = session
+        self.agent = session.agent
         self.client = client
-        self.session_id = session_id
+        self.session_id = session.id
+        self._resolve_child = resolve_child
+        self._own_sources = own_sources
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._error: Exception | None = None
         # Set when the pump exits on a BaseException it cannot handle. Nothing
         # resolves flush markers after that, so flush must fail rather than wait.
         self._pump_failure: BaseException | None = None
         self._closed = False
-        self._open_tools: set[str] = set()
-        self._python_source: dict[str, str] = {}
-        self._terminal_output: dict[str, str] = {}
+        self._close_task: asyncio.Task[None] | None = None
+        self._open_tools: set[ToolKey] = set()
+        self._python_source: dict[ToolKey, str] = {}
+        self._terminal_output: dict[ToolKey, str] = {}
         self._cost_usd = 0.0
-        self._unsubscribers: list[Callable[[], None]] = self._subscribe(agent.event_manager)
-        # A delegated/spawned CodingWorker gets its own independent
-        # event_manager (kept off this agent's own, so a worker's turn-by-
-        # turn activity never leaks into the controller's LLM context — only
-        # its final report does, via delegate()/spawn()). Without this hook
-        # none of that live activity — tool cards, diffs, cost — ever
-        # reached the ACP client; the delegation feature ran invisibly.
-        agent._on_worker_spawned = lambda worker: self._unsubscribers.extend(
-            self._subscribe(worker.event_manager, is_worker=True)
-        )
+        self._used: int | None = None  # input tokens of the latest model call
+        self._plan: list[PlanEntry] = []
+        self._children: list[dict[str, Any]] = []
+        self._mirrors: dict[str, list[Callable[[], None]]] = {}
+        self._unsubscribers: list[Callable[[], None]] = [
+            *self._subscribe_agent(self.agent.event_manager, source=None),
+            session.subscribe(self._on_session_update),
+        ]
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
 
-    def _subscribe(
-        self, event_manager: Any, *, is_worker: bool = False
+    # ---- subscriptions -----------------------------------------------
+
+    def _subscribe_agent(
+        self, event_manager: Any, *, source: str | None
     ) -> list[Callable[[], None]]:
-        """Wire this bridge's handlers onto one EventManager (agent or worker)."""
-        return [
-            event_manager.on("AgentMessage", self._on_agent_message),
-            event_manager.on("ToolCallEvent", self._on_tool_call),
-            event_manager.on("PythonOutput", self._on_python_output),
-            event_manager.on(
-                "LLMResponse", lambda event: self._on_llm_response(event, is_worker=is_worker)
-            ),
-            event_manager.on("FileEdit", self._on_file_edit),
-            event_manager.on("TerminalCommandStarted", self._on_terminal_started),
-            event_manager.on("TerminalCommandOutput", self._on_terminal_output),
-            event_manager.on("TerminalCommandFinished", self._on_terminal_finished),
+        """Wire the handlers onto one agent's events.
+
+        ``source`` is ``None`` for this session's own agent, else the id of
+        a child whose tool cards are mirrored (cards only: a child's
+        messages, thoughts and usage are not this conversation's).
+        """
+        handlers: list[tuple[str, Callable[[Any], None]]] = [
+            ("ToolCallEvent", lambda event: self._on_tool_call(event, source)),
+            ("PythonOutput", lambda event: self._on_python_output(event, source)),
+            ("FileEdit", lambda event: self._on_file_edit(event, source)),
+            ("TerminalCommandStarted", lambda event: self._on_terminal_started(event, source)),
+            ("TerminalCommandOutput", lambda event: self._on_terminal_output(event, source)),
+            ("TerminalCommandFinished", lambda event: self._on_terminal_finished(event, source)),
         ]
+        if source is None:
+            handlers += [
+                ("AgentMessage", self._on_agent_message),
+                ("LLMResponse", self._on_llm_response),
+            ]
+        return [event_manager.on(event_type, handler) for event_type, handler in handlers]
+
+    def _mirror(self, child: BridgedSession) -> None:
+        """Mirror a child's tool cards (and its own children's) into this session."""
+        if child.id in self._mirrors or self._closed:
+            return
+
+        def on_child_update(update: Any) -> None:
+            kind = getattr(update, "kind", None)
+            if kind == "child_created" and self._resolve_child is not None:
+                grandchild = self._resolve_child(update.child_id)
+                if grandchild is not None:
+                    self._mirror(grandchild)
+            elif kind == "closed":
+                self._unmirror(child.id)
+
+        self._mirrors[child.id] = [
+            *self._subscribe_agent(child.agent.event_manager, source=child.id),
+            child.subscribe(on_child_update),
+        ]
+
+    def _unmirror(self, child_id: str) -> None:
+        for unsubscribe in self._mirrors.pop(child_id, []):
+            unsubscribe()
+        self._fail_tools(
+            [key for key in self._open_tools if key[0] == child_id],
+            "The subagent ended before this finished.",
+            title="Unfinished",
+        )
+
+    # ---- keys --------------------------------------------------------
+
+    def _key(self, tool_call_id: str, source: str | None) -> ToolKey:
+        return (source or self.session_id, tool_call_id)
+
+    def _wire_id(self, key: ToolKey) -> str:
+        session_id, tool_call_id = key
+        return tool_call_id if session_id == self.session_id else f"{session_id}:{tool_call_id}"
+
+    # ---- queue -------------------------------------------------------
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
@@ -131,33 +250,81 @@ class ACPEventBridge:
         """Queue bootstrap metadata without poisoning the live event stream."""
         self._enqueue(_BestEffortUpdate(update))
 
-    def watch_session(self, handle: SessionHandle) -> None:
-        """Forward durable metadata changes from the session's event manager."""
+    # ---- session updates ---------------------------------------------
 
-        def on_title(event: EventBase) -> None:
-            if not isinstance(event, SessionTitleUpdated):
-                return
+    def _on_session_update(self, update: Any) -> None:
+        if isinstance(update, ItemAdmittedUpdate):
+            if update.channel in _ECHOED_CHANNELS and update.source not in self._own_sources:
+                text = getattr(update, "text", "") or update.preview
+                self._enqueue(update_user_message_text(text))
+        elif isinstance(update, TitleChangedUpdate):
             self._enqueue(
                 SessionInfoUpdate(
                     session_update="session_info_update",
-                    title=event.title,
-                    # event.timestamp is naive local time (EventBase's
-                    # default_factory=datetime.now); list_sessions() reports
-                    # UTC-aware timestamps for the same conceptual field, so a
-                    # live update and a later list_sessions() call disagreed
-                    # by the local UTC offset and used different formats.
-                    updated_at=event.timestamp.astimezone(UTC).isoformat(),
+                    title=update.title,
+                    updated_at=datetime.now(UTC).isoformat(),
                 )
             )
+        elif isinstance(update, ModeChangedUpdate):
+            self._enqueue(
+                CurrentModeUpdate(session_update="current_mode_update", current_mode_id=update.mode)
+            )
+        elif isinstance(update, CancelledUpdate):
+            # Before the prompt's future resolves: the Session emits this first,
+            # so the cards are closed before the prompt answers "cancelled".
+            self.fail_open_tools(cancel_text(update.by), title="Cancelled")
+            self._enqueue(update_agent_message(text_block(cancel_text(update.by))))
+        elif isinstance(update, TurnEndedUpdate):
+            self._on_turn_ended(update)
+        elif isinstance(update, ChildCreatedUpdate):
+            self._on_child_created(update)
+        elif getattr(update, "kind", None) == "usage_changed":
+            self._publish_usage()
+        elif getattr(update, "kind", None) == "closed":
+            self._close_task = self._close_task or asyncio.ensure_future(self._close())
 
-        self._unsubscribers.append(handle.events.on("SessionTitleUpdated", on_title))
+    def _on_turn_ended(self, update: TurnEndedUpdate) -> None:
+        if update.outcome_kind == "need_input":
+            # Rendered once per turn, here; the prompt that owns the consumed
+            # item decides whether to also open a form.
+            question = str(update.outcome.get("question", ""))
+            options = update.outcome.get("options")
+            self._enqueue(update_agent_message(text_block(question_text(question, options))))
+        elif update.outcome_kind == "error":
+            # A turn ending on an error does not always write the PythonOutput
+            # for a cell it announced; close its card rather than leave it
+            # spinning.
+            self.fail_open_tools("Did not finish.", title="Unfinished")
+        self._publish_plan()
+
+    def _on_child_created(self, update: ChildCreatedUpdate) -> None:
+        self._children.append(
+            {
+                "sessionId": update.child_id,
+                "name": update.name,
+                "depth": update.depth,
+                "retained": update.retained,
+            }
+        )
+        self._enqueue(
+            SessionInfoUpdate(
+                session_update="session_info_update",
+                field_meta={"dev.nooa/children": list(self._children)},
+            )
+        )
+        if self._resolve_child is not None:
+            child = self._resolve_child(update.child_id)
+            if child is not None:
+                self._mirror(child)
+
+    # ---- agent events ------------------------------------------------
 
     def _on_agent_message(self, event: EventBase) -> None:
         if not isinstance(event, AgentMessage):
             return
         self._enqueue(update_agent_message(text_block(event.content)))
 
-    def _on_tool_call(self, event: EventBase) -> None:
+    def _on_tool_call(self, event: EventBase, source: str | None) -> None:
         if (
             not isinstance(event, ToolCallEvent)
             or event.name not in {"execute_python", "python_cell"}
@@ -171,11 +338,12 @@ class ACPEventBridge:
         code = event.arguments.get("code", "")
         if not isinstance(code, str):
             code = repr(code)
-        self._open_tools.add(event.tool_call_id)
-        self._python_source[event.tool_call_id] = code
+        key = self._key(event.tool_call_id, source)
+        self._open_tools.add(key)
+        self._python_source[key] = code
         self._enqueue(
             start_tool_call(
-                event.tool_call_id,
+                self._wire_id(key),
                 "Running Python",
                 # Zed 1.14 treats every ``execute`` tool as a terminal card.
                 # A plain-content execute card has neither a terminal nor an
@@ -187,38 +355,52 @@ class ACPEventBridge:
             )
         )
 
-    def _on_python_output(self, event: EventBase) -> None:
-        if not isinstance(event, PythonOutput) or event.tool_call_id not in self._open_tools:
+    def _on_python_output(self, event: EventBase, source: str | None) -> None:
+        if not isinstance(event, PythonOutput):
             return
-        self._open_tools.discard(event.tool_call_id)
-        code = self._python_source.pop(event.tool_call_id, "")
-        parts = [
-            part.rstrip() for part in (event.stdout, event.stderr, event.error) if part.strip()
-        ]
-        # A cell whose last line is a bare expression produces no stdout: the
-        # result arrives as ``value`` and codeact shows it to the model as
-        # Out[n]. Without this the client is told there was no output while the
-        # agent is reasoning from one.
-        if event.value is not None:
-            rendered = pformat(event.value, max_string=_MAX_VALUE_CHARS, unquote_strings=True)
-            parts.append(f"Out[{event.execution_count}]: {rendered}")
-        output = "\n".join(parts) or "Completed."
-        status: Literal["failed", "completed"] = (
-            "failed" if event.execution_status is ResultStatus.ERROR else "completed"
-        )
-        self._enqueue(
-            update_tool_call(
-                event.tool_call_id,
-                title="Python failed" if status == "failed" else "Ran Python",
-                status=status,
-                content=_python_content(code, output),
+        key = self._key(event.tool_call_id, source)
+        if key in self._open_tools:
+            self._open_tools.discard(key)
+            code = self._python_source.pop(key, "")
+            parts = [
+                part.rstrip() for part in (event.stdout, event.stderr, event.error) if part.strip()
+            ]
+            # A cell whose last line is a bare expression produces no stdout:
+            # the result arrives as ``value`` and codeact shows it to the model
+            # as Out[n]. Without this the client is told there was no output
+            # while the agent is reasoning from one.
+            if event.value is not None:
+                rendered = pformat(event.value, max_string=_MAX_VALUE_CHARS, unquote_strings=True)
+                parts.append(f"Out[{event.execution_count}]: {rendered}")
+            cancelled = event.execution_status is ResultStatus.CANCELLED
+            output = "\n".join(parts) or ("Cancelled." if cancelled else "Completed.")
+            status: Literal["failed", "completed"] = (
+                "failed"
+                if event.execution_status in (ResultStatus.ERROR, ResultStatus.CANCELLED)
+                else "completed"
             )
-        )
+            title = (
+                "Cancelled"
+                if cancelled
+                else "Python failed"
+                if status == "failed"
+                else "Ran Python"
+            )
+            self._enqueue(
+                update_tool_call(
+                    self._wire_id(key),
+                    title=title,
+                    status=status,
+                    content=_python_content(code, output),
+                )
+            )
+        if source is None:
+            self._publish_plan()
 
-    def _on_file_edit(self, event: EventBase) -> None:
+    def _on_file_edit(self, event: EventBase, source: str | None) -> None:
         if not isinstance(event, FileEdit):
             return
-        tool_call_id = f"file-edit-{uuid4()}"
+        tool_call_id = self._wire_id(self._key(f"file-edit-{uuid4()}", source))
         path = event.path
         title = f"{'Created' if event.operation == 'create' else 'Edited'} {Path(path).name}"
         if event.content_complete:
@@ -238,14 +420,15 @@ class ACPEventBridge:
             )
         )
 
-    def _on_terminal_started(self, event: EventBase) -> None:
+    def _on_terminal_started(self, event: EventBase, source: str | None) -> None:
         if not isinstance(event, TerminalCommandStarted):
             return
-        self._open_tools.add(event.command_id)
-        self._terminal_output[event.command_id] = ""
+        key = self._key(event.command_id, source)
+        self._open_tools.add(key)
+        self._terminal_output[key] = ""
         self._enqueue(
             start_tool_call(
-                event.command_id,
+                self._wire_id(key),
                 f"$ {event.command}",
                 kind="execute",
                 status="in_progress",
@@ -256,27 +439,31 @@ class ACPEventBridge:
             )
         )
 
-    def _on_terminal_output(self, event: EventBase) -> None:
-        if not isinstance(event, TerminalCommandOutput) or event.command_id not in self._open_tools:
+    def _on_terminal_output(self, event: EventBase, source: str | None) -> None:
+        if not isinstance(event, TerminalCommandOutput):
+            return
+        key = self._key(event.command_id, source)
+        if key not in self._open_tools:
             return
         chunk = event.stdout
         if event.stderr:
             chunk += ("\n" if chunk and not chunk.endswith("\n") else "") + event.stderr
-        output = self._terminal_output.get(event.command_id, "") + chunk
-        self._terminal_output[event.command_id] = output
+        output = self._terminal_output.get(key, "") + chunk
+        self._terminal_output[key] = output
         self._enqueue(
             update_tool_call(
-                event.command_id,
+                self._wire_id(key),
                 status="in_progress",
                 content=[tool_content(text_block(output))],
             )
         )
 
-    def _on_terminal_finished(self, event: EventBase) -> None:
+    def _on_terminal_finished(self, event: EventBase, source: str | None) -> None:
         if not isinstance(event, TerminalCommandFinished):
             return
-        self._open_tools.discard(event.command_id)
-        output = self._terminal_output.pop(event.command_id, "")
+        key = self._key(event.command_id, source)
+        self._open_tools.discard(key)
+        output = self._terminal_output.pop(key, "")
         # ACP has no cancelled status, so a stopped command is still "failed" —
         # but it must read as the user's own action, not as a crash.
         reason = "Cancelled by user." if event.cancelled else event.error
@@ -290,7 +477,7 @@ class ACPEventBridge:
         )
         self._enqueue(
             update_tool_call(
-                event.command_id,
+                self._wire_id(key),
                 status="failed" if failed else "completed",
                 content=[tool_content(text_block(output or "Completed."))],
                 raw_output={
@@ -301,32 +488,69 @@ class ACPEventBridge:
             )
         )
 
-    def _on_llm_response(self, event: EventBase, *, is_worker: bool = False) -> None:
+    def _on_llm_response(self, event: EventBase) -> None:
         if not isinstance(event, LLMResponse):
             return
+        reasoning = event.reasoning
+        if reasoning:
+            self._enqueue(update_agent_thought_text(reasoning))
         usage = event.usage
         if usage is None:
             return
         self._cost_usd += usage.cost_usd
-        if is_worker:
-            # A worker's own small, isolated usage has nothing to do with the
-            # controller's context window; publishing it here would overwrite
-            # the client's usage display with an unrelated, much smaller
-            # number, making it look like compaction happened when it didn't.
-            # Its cost is still summed above -- only the used/size display is
-            # controller-only.
+        self._used = usage.input_tokens
+        self._publish_usage()
+
+    # ---- derived updates ---------------------------------------------
+
+    def _publish_usage(self) -> None:
+        """Context use and cost (own plus what children spent) as a usage update."""
+        context_window = getattr(getattr(self.agent, "llm", None), "context_window", None)
+        if context_window is None or self._used is None:
             return
-        context_window = getattr(self.agent.llm, "context_window", None)
-        if context_window is None:
-            return
+        attributed = self.session.info.usage.attributed_cost_usd
+        meta: dict[str, Any] | None = None
+        status = getattr(self.agent, "get_summarization_status", None)
+        if callable(status):
+            try:
+                meta = {"dev.nooa/context": _json_safe(status())}
+            except Exception:
+                logger.debug("Could not read the context status", exc_info=True)
         self._enqueue(
             UsageUpdate(
                 session_update="usage_update",
-                used=usage.input_tokens,
-                size=max(context_window, usage.input_tokens),
-                cost=Cost(amount=self._cost_usd, currency="USD"),
+                used=self._used,
+                size=max(context_window, self._used),
+                cost=Cost(amount=self._cost_usd + attributed, currency="USD"),
+                field_meta=meta,
             )
         )
+
+    def _publish_plan(self) -> None:
+        """Send the agent's todos as an ACP plan when they changed."""
+        todo: Any = getattr(self.agent, "todo", None)
+        if not callable(getattr(todo, "list_todos", None)):
+            return
+        active = todo.active() if callable(getattr(todo, "active", None)) else None
+        entries = [
+            plan_entry(
+                item.title,
+                status=(
+                    "completed"
+                    if item.status == "done"
+                    else "in_progress"
+                    if active is not None and item.id == active.id
+                    else "pending"
+                ),
+            )
+            for item in todo.list_todos()
+        ]
+        if entries == self._plan:
+            return
+        self._plan = entries
+        self._enqueue(update_plan(entries))
+
+    # ---- pump --------------------------------------------------------
 
     def _stopped_error(self, cause: BaseException) -> RuntimeError:
         error = RuntimeError("ACP event bridge stopped")
@@ -413,15 +637,11 @@ class ACPEventBridge:
             return
         raise self._stopped_error(self._pump_failure or RuntimeError("pump exited"))
 
-    async def fail_open_tools(self, reason: str, *, title: str | None = None) -> None:
-        """Close out open tool calls, titling them with what actually happened.
-
-        The title is the collapsed-card text, so it is the only thing a user
-        sees without expanding. A fixed "Python interrupted" made a deliberate
-        cancellation read as a technical failure.
-        """
-        for tool_call_id in tuple(self._open_tools):
-            code = self._python_source.pop(tool_call_id, None)
+    def _fail_tools(self, keys: list[ToolKey], reason: str, *, title: str | None) -> None:
+        for key in keys:
+            self._open_tools.discard(key)
+            self._terminal_output.pop(key, None)
+            code = self._python_source.pop(key, None)
             content = (
                 _python_content(code, reason)
                 if code is not None
@@ -429,27 +649,53 @@ class ACPEventBridge:
             )
             self._enqueue(
                 update_tool_call(
-                    tool_call_id,
+                    self._wire_id(key),
                     title=title or ("Python interrupted" if code is not None else None),
                     status="failed",
                     content=content,
                 )
             )
-        self._open_tools.clear()
-        self._python_source.clear()
-        self._terminal_output.clear()
 
-    async def close(self) -> None:
-        if self._closed:
-            return
+    def fail_open_tools(self, reason: str, *, title: str | None = None) -> None:
+        """Close out open tool calls, titling them with what actually happened.
+
+        The title is the collapsed-card text, so it is the only thing a user
+        sees without expanding. A fixed "Python interrupted" made a deliberate
+        cancellation read as a technical failure.
+        """
+        self._fail_tools(sorted(self._open_tools), reason, title=title)
+
+    async def close(self, *, finish_open: bool = True) -> None:
+        """Stop listening and sending. Idempotent.
+
+        ``finish_open`` closes cards still open as "Unfinished"; a bridge
+        detached from a session that goes on running leaves them alone.
+        """
+        if self._close_task is None:
+            self._close_task = asyncio.ensure_future(self._close(finish_open=finish_open))
+        await asyncio.shield(self._close_task)
+
+    async def wait_closed(self) -> None:
+        """Wait until a close started by the session's ``closed`` update has finished."""
+        while self._close_task is None:
+            await asyncio.sleep(0)
+        await asyncio.shield(self._close_task)
+
+    async def _close(self, *, finish_open: bool = True) -> None:
         for unsubscribe in self._unsubscribers:
             unsubscribe()
+        self._unsubscribers.clear()
+        for child_id in list(self._mirrors):
+            for unsubscribe in self._mirrors.pop(child_id):
+                unsubscribe()
         # A turn that ended before its PythonOutput — an exception escaping the
         # strategy, say — leaves cards in_progress and their source retained.
-        # fail_open_tools is otherwise only reached from session/cancel, so this
-        # is the sole purge on an ordinary close.
-        with suppress(Exception):
-            await self.fail_open_tools("Session closed before this finished.", title="Unfinished")
+        if finish_open:
+            self.fail_open_tools("Session closed before this finished.", title="Unfinished")
+        else:
+            self._open_tools.clear()
+            self._python_source.clear()
+            self._terminal_output.clear()
         with suppress(Exception):
             await self.flush()
         self._closed = True

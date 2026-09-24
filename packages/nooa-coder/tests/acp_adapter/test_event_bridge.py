@@ -8,12 +8,17 @@ from typing import Any, cast
 import pytest
 from acp.schema import (
     AgentMessageChunk,
+    AgentPlanUpdate,
+    AgentThoughtChunk,
     ContentToolCallContent,
+    CurrentModeUpdate,
     FileEditToolCallContent,
+    SessionInfoUpdate,
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
     UsageUpdate,
+    UserMessageChunk,
 )
 from nooa_coder.acp.event_bridge import ACPEventBridge
 from nooa_coder.coding import (
@@ -23,12 +28,45 @@ from nooa_coder.coding import (
     TerminalCommandOutput,
     TerminalCommandStarted,
 )
+from nooa_coder.session.items import (
+    CancelledUpdate,
+    ChildCreatedUpdate,
+    ClosedUpdate,
+    ItemAdmittedUpdate,
+    ModeChangedUpdate,
+    SessionInfo,
+    TitleChangedUpdate,
+    TurnEndedUpdate,
+)
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
-from nooa.llm_types import LLMUsage
+from nooa.llm_types import AssistantReasoning, LLMUsage
 from nooa.unifiedllm import FakeLLMClient
+
+
+class _FakeSession:
+    """The part of a Session the bridge uses: its id, agent, info and updates."""
+
+    def __init__(self, agent: Any, session_id: str = "session-1") -> None:
+        self.id = session_id
+        self.agent = agent
+        self.info = SessionInfo(id=session_id)
+        self.listeners: list[Any] = []
+
+    def subscribe(self, listener: Any) -> Any:
+        self.listeners.append(listener)
+
+        def unsubscribe() -> None:
+            if listener in self.listeners:
+                self.listeners.remove(listener)
+
+        return unsubscribe
+
+    def emit(self, update: Any) -> None:
+        for listener in list(self.listeners):
+            listener(update)
 
 
 class _RecordingClient:
@@ -48,7 +86,7 @@ def _content_text(content: ContentToolCallContent) -> str:
 async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(AgentMessage(content="Final answer"))
     agent.event_manager.add(
@@ -131,7 +169,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
 async def test_bridge_marks_failed_python_output(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(
@@ -170,7 +208,7 @@ async def test_bridge_marks_failed_python_output(tmp_path):
 async def test_bridge_retains_python_source_when_interrupted(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(
@@ -179,7 +217,7 @@ async def test_bridge_retains_python_source_when_interrupted(tmp_path):
             arguments={"code": "await asyncio.sleep(30)"},
         )
     )
-    await bridge.fail_open_tools("User canceled")
+    bridge.fail_open_tools("User canceled")
     await bridge.flush()
 
     progress = next(
@@ -204,7 +242,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     cast(Any, llm)._context_window = None
     agent = CodingAgent(llm=llm, cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(AgentMessage(content="alive"))
     agent.event_manager.add(
@@ -228,7 +266,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     # and cannot tell "the guard works" from "usage never fires".
     sized = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     sized_client = _RecordingClient()
-    sized_bridge = ACPEventBridge(sized, sized_client, "session-2")  # type: ignore[arg-type]
+    sized_bridge = ACPEventBridge(_FakeSession(sized, "session-2"), sized_client)  # type: ignore[arg-type]
     sized.event_manager.add(
         LLMResponse(usage=LLMUsage(input_tokens=40, output_tokens=10, cost_usd=0.25))
     )
@@ -241,7 +279,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
 async def test_bridge_emits_structured_file_edit(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
     path = str(tmp_path / "example.py")
 
     agent.event_manager.add(
@@ -279,7 +317,7 @@ async def test_bridge_emits_structured_file_edit(tmp_path):
 async def test_bridge_emits_terminal_lifecycle(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
         TerminalCommandStarted(
@@ -331,7 +369,7 @@ class _BlockingClient(_RecordingClient):
 async def test_cancelled_flush_does_not_stop_update_pump(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _BlockingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
     agent.event_manager.add(AgentMessage(content="First"))
     flush_task = asyncio.create_task(bridge.flush())
     await asyncio.wait_for(client.started.wait(), timeout=1)
@@ -373,7 +411,7 @@ async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
             self.updates.append(update)
 
     client = _FlakyClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     # Turn 1: the write fails, and the turn is told about it.
     agent.event_manager.add(AgentMessage(content="first turn"))
@@ -395,7 +433,7 @@ async def test_a_cancelled_command_reads_as_cancellation_not_a_crash(tmp_path):
     """The client must see the user's action, not a Python exception name."""
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
         TerminalCommandStarted(
@@ -427,7 +465,7 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
     """
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="t1", name="execute_python", arguments={"code": "1 + 1"})
@@ -456,7 +494,7 @@ async def test_synthetic_text_replies_are_not_rendered_as_python_runs(tmp_path):
     """
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(
@@ -476,13 +514,13 @@ async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
     """Closing the bridge must not leave a card spinning or state retained."""
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="t3", name="execute_python", arguments={"code": "boom"})
     )
     await bridge.flush()
-    assert bridge._open_tools == {"t3"}
+    assert bridge._open_tools == {("session-1", "t3")}
 
     await bridge.close()
     assert bridge._open_tools == set()
@@ -507,13 +545,13 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
     """
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="t9", name="execute_python", arguments={"code": "sleep(60)"})
     )
     await bridge.flush()
-    await bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
+    bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
     await bridge.flush()
 
     progress = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
@@ -536,7 +574,7 @@ async def test_a_dead_pump_fails_flush_instead_of_hanging(tmp_path):
         async def session_update(self, session_id: str, update: object, **kwargs) -> None:
             raise asyncio.CancelledError()
 
-    bridge = ACPEventBridge(agent, _DyingClient(), "session-1")  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent), _DyingClient())  # type: ignore[arg-type]
     agent.event_manager.add(AgentMessage(content="first"))
 
     # Must be the specific error flush() raises. pytest.raises(BaseException)
@@ -550,48 +588,258 @@ async def test_a_dead_pump_fails_flush_instead_of_hanging(tmp_path):
     await agent.aclose()
 
 
-async def test_bridge_observes_a_delegated_workers_own_events(tmp_path):
-    """A delegated/spawned CodingWorker gets its own independent event_manager
-    (kept off the controller's, so a worker's turn-by-turn activity never
-    leaks into the controller's LLM context -- only its final report does).
-    Without CodingAgent._on_worker_spawned wired to the bridge, none of that
-    live activity -- tool cards, diffs, cost -- ever reached the ACP client;
-    the delegation feature ran invisibly. Exercises the actual hook
-    CodingAgent.delegate() calls, using a fake worker rather than a real
-    (slow, LLM-driven) delegate() call.
-    """
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
-    client = _RecordingClient()
-    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
-    assert agent._on_worker_spawned is not None
+def _content_text_or_none(update: AgentMessageChunk) -> str | None:
+    block = update.content
+    return getattr(block, "text", None)
 
-    class _FakeWorker:
-        def __init__(self) -> None:
-            self.event_manager = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path).event_manager
 
-    worker = _FakeWorker()
-    agent._on_worker_spawned(worker)
+# ---- the bridge on the Session's updates -------------------------------------
 
-    # Emitted on the WORKER's own event_manager, not the controller's --
-    # this must still reach the bridge.
-    worker.event_manager.add(AgentMessage(content="worker says hi"))
-    await bridge.flush()
 
-    texts = [
-        _content_text_or_none(update)
+def _types(client: _RecordingClient) -> list[type]:
+    return [type(update) for _, update in client.updates]
+
+
+def _messages(client: _RecordingClient) -> list[str]:
+    return [
+        cast(TextContentBlock, update.content).text
         for _, update in client.updates
         if isinstance(update, AgentMessageChunk)
     ]
-    assert "worker says hi" in texts
 
-    # The controller's own context must stay untouched by the worker's event:
-    # nothing was ever added to the controller's own event_manager.
-    assert agent.event_manager.keys() == []
 
+@pytest.fixture
+async def bridged(tmp_path):
+    """A coding agent behind a fake session, bridged to a recording client."""
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    session = _FakeSession(agent)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    yield agent, session, client, bridge
     await bridge.close()
     await agent.aclose()
 
 
-def _content_text_or_none(update: AgentMessageChunk) -> str | None:
-    block = update.content
-    return getattr(block, "text", None)
+async def test_title_changes_become_session_info_updates(bridged):
+    _agent, session, client, bridge = bridged
+    session.emit(TitleChangedUpdate(session_id="session-1", title="Fix the parser", user_set=False))
+    await bridge.flush()
+    [info] = [update for _, update in client.updates if isinstance(update, SessionInfoUpdate)]
+    assert info.title == "Fix the parser"
+    assert info.updated_at is not None and info.updated_at.endswith("+00:00")
+
+
+async def test_mode_changes_become_current_mode_updates(bridged):
+    _agent, session, client, bridge = bridged
+    session.emit(ModeChangedUpdate(session_id="session-1", mode="auto"))
+    await bridge.flush()
+    [update] = [u for _, u in client.updates if isinstance(u, CurrentModeUpdate)]
+    assert update.current_mode_id == "auto"
+
+
+async def test_a_cancelled_cell_is_a_failed_card_titled_cancelled_with_its_output(bridged):
+    agent, _session, client, bridge = bridged
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="t1", name="execute_python", arguments={"code": "work()"})
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="t1",
+            execution_status=ResultStatus.CANCELLED,
+            execution_count=1,
+            stdout="step 1 done\n",
+        )
+    )
+    await bridge.flush()
+    [progress] = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
+    assert progress.status == "failed"
+    assert progress.title == "Cancelled"
+    assert "step 1 done" in str(progress.content)
+
+
+async def test_the_cancelled_update_closes_open_cards_before_saying_so(bridged, tmp_path):
+    agent, session, client, bridge = bridged
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="t1", name="execute_python", arguments={"code": "sleep()"})
+    )
+    agent.event_manager.add(
+        TerminalCommandStarted(command_id="cmd-1", command="sleep 30", working_directory="/")
+    )
+    session.emit(CancelledUpdate(session_id="session-1", by="user"))
+    await bridge.flush()
+    closed = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
+    assert {(u.tool_call_id, u.status, u.title) for u in closed} == {
+        ("t1", "failed", "Cancelled"),
+        ("cmd-1", "failed", "Cancelled"),
+    }
+    assert _types(client)[-1] is AgentMessageChunk
+    assert _messages(client) == ["Stopped at your request."]
+    assert bridge._open_tools == set()
+
+
+async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
+    _agent, session, client, bridge = bridged
+    session.emit(
+        TurnEndedUpdate(
+            session_id="session-1",
+            outcome_kind="need_input",
+            outcome={"question": "Which branch?", "options": ["main", "dev"]},
+        )
+    )
+    await bridge.flush()
+    assert _messages(client) == ["Which branch?\n\n- main\n- dev"]
+
+
+async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):
+    agent, session, client, bridge = bridged
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="t1", name="execute_python", arguments={"code": "x"})
+    )
+    session.emit(
+        TurnEndedUpdate(session_id="session-1", outcome_kind="error", outcome={"error": "boom"})
+    )
+    await bridge.flush()
+    [progress] = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
+    assert (progress.status, progress.title) == ("failed", "Unfinished")
+
+
+async def test_reasoning_becomes_thought_chunks(bridged):
+    agent, _session, client, bridge = bridged
+    agent.event_manager.add(
+        LLMResponse(
+            parts=[AssistantReasoning(text="Check the tests first.")],
+            usage=LLMUsage(input_tokens=5, output_tokens=5),
+        )
+    )
+    await bridge.flush()
+    [thought] = [u for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
+    assert cast(TextContentBlock, thought.content).text == "Check the tests first."
+
+
+async def test_todo_changes_become_plan_updates_after_a_cell(bridged):
+    agent, _session, client, bridge = bridged
+
+    def cell(tool_call_id: str) -> None:
+        agent.event_manager.add(
+            ToolCallEvent(tool_call_id=tool_call_id, name="execute_python", arguments={"code": ""})
+        )
+        agent.event_manager.add(
+            PythonOutput(
+                tool_call_id=tool_call_id,
+                execution_status=ResultStatus.COMPLETE,
+                execution_count=1,
+            )
+        )
+
+    cell("t0")  # no todos yet: no plan
+    first = agent.todo.add("Read the parser")
+    second = agent.todo.add("Fix the bug")
+    agent.todo.activate(second)
+    agent.todo.done(first)
+    cell("t1")
+    cell("t2")  # unchanged: no second plan
+    await bridge.flush()
+    plans = [u for _, u in client.updates if isinstance(u, AgentPlanUpdate)]
+    assert len(plans) == 1
+    assert [(entry.content, entry.status) for entry in plans[0].entries] == [
+        ("Read the parser", "completed"),
+        ("Fix the bug", "in_progress"),
+    ]
+
+
+async def test_messages_from_other_senders_are_echoed_as_user_chunks(bridged):
+    _agent, session, client, bridge = bridged
+    for channel, source in (
+        ("user_messages", "acp"),  # this adapter's own prompt: the client shows it already
+        ("user_messages", "user:declined"),
+        ("delegates", "child:helper"),
+        ("user_messages", "parent:root"),
+        ("steer", "tui"),
+    ):
+        session.emit(
+            ItemAdmittedUpdate(
+                session_id="session-1",
+                channel=channel,
+                item_id=f"{channel}-{source}",
+                source=source,
+                preview=f"from {source}",
+            )
+        )
+    await bridge.flush()
+    echoed = [
+        cast(TextContentBlock, u.content).text
+        for _, u in client.updates
+        if isinstance(u, UserMessageChunk)
+    ]
+    assert echoed == ["from parent:root", "from tui"]
+
+
+async def test_tool_cards_of_a_child_are_mirrored_under_the_childs_id(tmp_path):
+    parent_agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    child_agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    parent = _FakeSession(parent_agent, "parent")
+    child = _FakeSession(child_agent, "child-1")
+    client = _RecordingClient()
+    bridge = ACPEventBridge(
+        parent,  # type: ignore[arg-type]
+        client,  # type: ignore[arg-type]
+        resolve_child=lambda child_id: child if child_id == "child-1" else None,
+    )
+    parent.emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child-1", name="helper", depth=1, retained=False
+        )
+    )
+    # The same tool call id in parent and child are different cards.
+    for agent in (parent_agent, child_agent):
+        agent.event_manager.add(
+            ToolCallEvent(tool_call_id="c1", name="execute_python", arguments={"code": "x"})
+        )
+    child_agent.event_manager.add(
+        PythonOutput(tool_call_id="c1", execution_status=ResultStatus.COMPLETE, execution_count=1)
+    )
+    # A child's own messages are not the parent's conversation.
+    child_agent.event_manager.add(AgentMessage(content="child chatter"))
+    await bridge.flush()
+
+    [info] = [u for _, u in client.updates if isinstance(u, SessionInfoUpdate)]
+    assert info.field_meta == {
+        "dev.nooa/children": [
+            {"sessionId": "child-1", "name": "helper", "depth": 1, "retained": False}
+        ]
+    }
+    starts = [u.tool_call_id for _, u in client.updates if isinstance(u, ToolCallStart)]
+    assert starts == ["c1", "child-1:c1"]
+    finished = [u.tool_call_id for _, u in client.updates if isinstance(u, ToolCallProgress)]
+    assert finished == ["child-1:c1"]
+    assert bridge._open_tools == {("parent", "c1")}
+    assert _messages(client) == []
+
+    # When the child closes, the parent stops mirroring it.
+    child.emit(ClosedUpdate(session_id="child-1"))
+    assert child.listeners == []
+    await bridge.close()
+    await parent_agent.aclose()
+    await child_agent.aclose()
+
+
+async def test_the_bridge_unsubscribes_when_its_session_closes(bridged):
+    agent, session, client, bridge = bridged
+    session.emit(ClosedUpdate(session_id="session-1"))
+    await asyncio.wait_for(bridge.wait_closed(), 5)
+    assert session.listeners == []
+    agent.event_manager.add(AgentMessage(content="after close"))
+    await asyncio.sleep(0)
+    assert "after close" not in _messages(client)
+
+
+async def test_usage_includes_cost_attributed_from_children(bridged):
+    agent, session, client, bridge = bridged
+    session.info.usage.attributed_cost_usd = 1.0
+    agent.event_manager.add(
+        LLMResponse(usage=LLMUsage(input_tokens=40, output_tokens=10, cost_usd=0.25))
+    )
+    await bridge.flush()
+    [usage] = [u for _, u in client.updates if isinstance(u, UsageUpdate)]
+    assert usage.cost is not None and usage.cost.amount == 1.25
+    assert usage.field_meta is not None and "dev.nooa/context" in usage.field_meta
