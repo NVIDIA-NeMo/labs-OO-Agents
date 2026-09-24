@@ -174,11 +174,11 @@ class FakeSlashCommands:
     def __init__(self) -> None:
         self.invoked: list[tuple[str, str]] = []
 
-    def list(self) -> list[_Command]:
-        return [
+    def commands(self) -> tuple[_Command, ...]:
+        return (
             _Command("model", "Show or switch the model", "[alias]"),
             _Command("clear", "Clear", None),
-        ]
+        )
 
     async def invoke(self, name: str, raw_args: str) -> _CommandOutput:
         if name not in ("model", "clear"):
