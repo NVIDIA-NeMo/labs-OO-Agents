@@ -42,6 +42,16 @@ def _normalise_workspace(workspace: str | Path) -> str:
     return str(Path(workspace).expanduser().resolve())
 
 
+def _connect_read_only(path: Path) -> sqlite3.Connection:
+    """Open a session file for reading only.
+
+    Read-only mode never creates the file, so a reader racing a delete
+    fails instead of leaving an empty database behind.
+    """
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    return sqlite3.connect(uri, uri=True)
+
+
 def _optional_str(value: object) -> str | None:
     return None if value is None else str(value)
 
@@ -355,7 +365,7 @@ class SessionStore:
             return None
 
         try:
-            connection = sqlite3.connect(str(path))
+            connection = _connect_read_only(path)
             try:
                 start_row = connection.execute(
                     "SELECT event_type, data FROM events "
@@ -454,7 +464,7 @@ class SessionStore:
         if not path.exists():
             return []
         try:
-            connection = sqlite3.connect(str(path))
+            connection = _connect_read_only(path)
             try:
                 if event_types:
                     placeholders = ", ".join("?" for _ in event_types)
