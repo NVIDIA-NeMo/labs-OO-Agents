@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+import re
 
 import pytest
 from coder_test_agents import CODER_SPEC, CoderModels, TrackedLLM, cell, reply
@@ -131,9 +132,16 @@ async def test_the_model_sees_the_turn_types_but_not_the_port(
     root = await coder_registry.create(coder_options)
     outcome = await asyncio.wait_for(root.prompt("check"), TIMEOUT)
     assert outcome == Done(explanation="ChildResult,ChildQuestion,ChildFailed:b")
-    rendered = doc(root.agent)
-    assert "self.session" not in rendered
-    assert "SessionPort" not in rendered
+    for rendered in (doc(type(root.agent)), doc(root.agent)):
+        fields = {
+            line.split(":", 1)[0].strip()
+            for line in rendered.splitlines()
+            if re.match(r"^    \w+:", line)
+        }
+        assert {"shell", "todo", "delegates"} <= fields  # the check sees the fields
+        assert "session" not in fields
+        assert "session_port_visible" not in fields
+        assert "SessionPort" not in rendered
 
 
 async def test_a_coding_session_round_trips_its_todos_without_skip_warnings(
