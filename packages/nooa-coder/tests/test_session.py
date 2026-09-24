@@ -25,6 +25,7 @@ from nooa_coder.session.store import SessionStore
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification, PythonOutput, ResultStatus
 from nooa.interactive import Done, NeedInput
+from nooa.llm_types import LLMUsage
 from nooa.storage.json_snapshot import snapshot_to_json
 
 TIMEOUT = 20
@@ -447,3 +448,45 @@ async def test_checkpoint_failure_does_not_fail_the_turn(make_session, monkeypat
         await session.wait_for_checkpoint()
     assert "checkpoint" in caplog.text.lower()
     assert _snapshot_count(session.handle.path) == 0
+
+
+async def test_a_user_set_title_wins_over_agent_titles(make_session, sessions_dir):
+    session, _ = make_session(start=False)
+    seen = []
+    session.subscribe(
+        lambda e: seen.append((e.title, e.user_set)) if e.kind == "title_changed" else None
+    )
+    await session.set_title("agent title")
+    await session.set_title("My title", user_set=True)
+    await session.set_title("later agent title")
+    assert (session.info.title, session.info.title_is_user_set) == ("My title", True)
+    assert seen == [("agent title", False), ("My title", True)]
+    assert SessionStore(sessions_dir).get(session.id).title == "My title"
+    await session.set_title("renamed by the user", user_set=True)
+    assert session.info.title == "renamed by the user"
+
+
+async def test_set_mode_records_the_mode_and_tells_listeners(make_session):
+    session, _ = make_session(start=False)
+    seen = []
+    session.subscribe(lambda e: seen.append(e.mode) if e.kind == "mode_changed" else None)
+    assert session.info.mode == "auto"
+    await session.set_mode("ask")
+    assert (session.info.mode, seen) == ("ask", ["ask"])
+    with pytest.raises(ValueError):
+        await session.set_mode("yolo")
+
+
+async def test_usage_counts_the_sessions_own_tokens(make_session):
+    usage = LLMUsage(input_tokens=100, output_tokens=20, cost_usd=0.5)
+    session, _ = make_session(
+        cell("x = 1", usage=usage), done("one", usage=usage), done("two", usage=usage)
+    )
+    ended = []
+    session.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
+    await asyncio.wait_for(session.prompt("one"), TIMEOUT)
+    await asyncio.wait_for(session.prompt("two"), TIMEOUT)
+    assert (session.info.usage.input_tokens, session.info.usage.output_tokens) == (300, 60)
+    assert session.info.usage.cost_usd == pytest.approx(1.5)
+    assert [e.usage.input_tokens for e in ended] == [200, 100]
+    assert [raw["usage"]["output_tokens"] for _, raw in _rows(session, "TurnEnded")] == [40, 20]

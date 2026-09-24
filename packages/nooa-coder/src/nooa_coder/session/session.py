@@ -35,6 +35,7 @@ from nooa.interactive import (
     RespondResult,
     Waiting,
 )
+from nooa.llm_types import LLMResponse
 from nooa.runtime.channels import Channel
 from nooa.storage.json_snapshot import snapshot_to_json
 from nooa_coder.session.events import (
@@ -49,9 +50,11 @@ from nooa_coder.session.items import (
     CancelledUpdate,
     ClosedUpdate,
     ItemAdmittedUpdate,
+    ModeChangedUpdate,
     Receipt,
     SessionEvent,
     SessionInfo,
+    TitleChangedUpdate,
     TranscriptEntry,
     TurnCancelled,
     TurnCancelledOutcome,
@@ -68,6 +71,7 @@ Outcome = Done | NeedInput | Waiting | TurnCancelledOutcome
 """What ``prompt()`` returns."""
 
 OutcomeKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
+_MODES = ("auto", "ask")
 
 
 class TurnFailedError(RuntimeError):
@@ -613,6 +617,40 @@ class Session:
         for item_id in list(self._futures):
             self._resolve(item_id, outcome)
 
+    # ---- title, mode, usage -----------------------------------------
+
+    async def set_title(self, title: str, *, user_set: bool = False) -> None:
+        """Set the title. Once a person has set one, titles from the agent are ignored."""
+        if not user_set and self.info.title_is_user_set:
+            return
+        self.handle.set_title(title, user_set=user_set)
+        self.info.title = title
+        self.info.title_is_user_set = self.info.title_is_user_set or user_set
+        self._emit(TitleChangedUpdate(session_id=self.id, title=title, user_set=user_set))
+
+    async def set_mode(self, mode: str) -> None:
+        """Record the permission mode (``auto`` or ``ask``); nothing enforces it yet."""
+        if mode not in _MODES:
+            raise ValueError(f"Unknown permission mode {mode!r}; expected one of {_MODES}")
+        self.info.mode = mode
+        self._emit(ModeChangedUpdate(session_id=self.id, mode=mode))
+
+    def add_attributed_usage(self, usage: Usage) -> None:
+        """Add a child's own usage to this session's attributed totals."""
+        totals = self.info.usage
+        totals.attributed_input_tokens += usage.input_tokens
+        totals.attributed_output_tokens += usage.output_tokens
+        totals.attributed_cost_usd += usage.cost_usd
+
+    def _count_usage(self, response: LLMResponse) -> None:
+        usage = response.usage
+        if usage is None:
+            return
+        totals = self.info.usage
+        totals.input_tokens += usage.input_tokens
+        totals.output_tokens += usage.output_tokens
+        totals.cost_usd += usage.cost_usd
+
     # ---- output ------------------------------------------------------
 
     def subscribe(self, listener: Callable[[SessionEvent], None]) -> Callable[[], None]:
@@ -635,6 +673,8 @@ class Session:
     def _on_agent_event(self, event: Any) -> None:
         if event._role is Role.RUNTIME_EVENT:
             return
+        if isinstance(event, LLMResponse):
+            self._count_usage(event)
         if (
             isinstance(event, PythonOutput)
             and event.execution_status is ResultStatus.CANCELLED
