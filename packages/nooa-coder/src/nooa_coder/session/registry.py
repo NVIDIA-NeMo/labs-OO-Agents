@@ -119,6 +119,8 @@ class SessionRegistry:
             parent = self.sessions.get(parent_id)
             if parent is None:
                 raise KeyError(f"Parent session {parent_id!r} is not live here")
+            if parent._closing or parent._closed:
+                raise SessionClosedError(f"Parent session {parent_id!r} is closing")
         depth = parent.depth + 1 if parent is not None else 0
         if depth > options.max_depth:
             raise DepthLimitError(
