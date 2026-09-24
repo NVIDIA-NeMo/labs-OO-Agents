@@ -143,6 +143,10 @@ class ACPEventBridge:
     def _on_python_output(self, event: EventBase) -> None:
         if not isinstance(event, PythonOutput) or event.tool_call_id not in self._open_tools:
             return
+        # Core now records a cancelled cell. Leave its card open so cancel()'s
+        # fail_open_tools closes it as "Cancelled", exactly as before.
+        if event.execution_status is ResultStatus.CANCELLED:
+            return
         self._open_tools.discard(event.tool_call_id)
         code = self._python_source.pop(event.tool_call_id, "")
         parts = [
