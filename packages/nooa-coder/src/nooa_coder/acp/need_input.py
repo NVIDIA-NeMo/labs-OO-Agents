@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""A ``NeedInput`` question as an ACP elicitation form, and the answer back.
+
+ACP forms take flat primitive properties only (string, number, integer,
+boolean, and multi-select arrays of strings), so a pydantic
+``model_json_schema()`` cannot be passed through. ``need_input_schema``
+builds the form directly and returns ``None`` for anything it cannot
+flatten; the host then asks in free text.
+"""
+
+import types
+from typing import Any, Literal, Union, get_args, get_origin
+
+from acp.schema import (
+    ElicitationBooleanPropertySchema,
+    ElicitationIntegerPropertySchema,
+    ElicitationMultiSelectPropertySchema,
+    ElicitationNumberPropertySchema,
+    ElicitationSchema,
+    ElicitationStringPropertySchema,
+    UntitledMultiSelectItems,
+)
+from pydantic import ValidationError
+from pydantic.fields import FieldInfo
+
+from nooa.interactive import NeedInput
+
+_ANSWER = "answer"
+
+
+def need_input_schema(need: NeedInput) -> ElicitationSchema | None:
+    """The form for a question, or ``None`` when its ``answer_type`` is not flat.
+
+    - ``options``: one required string property ``answer`` with an ``enum``,
+      titled with the question.
+    - neither ``options`` nor ``answer_type``: one required string ``answer``.
+    - ``answer_type``: one property per field. ``str``, ``int``, ``float``
+      and ``bool`` are string, integer, number and boolean; a ``Literal``
+      of strings is a string with an ``enum``; ``list[Literal[...]]`` of
+      strings is a multi-select array; ``X | None`` is ``X`` and not
+      required. Any other field type gives ``None``.
+    """
+    if need.options is not None:
+        return ElicitationSchema(
+            properties={
+                _ANSWER: ElicitationStringPropertySchema(
+                    type="string", title=need.question, enum=list(need.options)
+                )
+            },
+            required=[_ANSWER],
+        )
+    if need.answer_type is None:
+        return ElicitationSchema(
+            properties={
+                _ANSWER: ElicitationStringPropertySchema(type="string", title=need.question)
+            },
+            required=[_ANSWER],
+        )
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, field in need.answer_type.model_fields.items():
+        annotation, optional = _unwrap_optional(field.annotation)
+        prop = _property(annotation, field, name)
+        if prop is None:
+            return None
+        properties[name] = prop
+        if field.is_required() and not optional:
+            required.append(name)
+    return ElicitationSchema(title=need.question, properties=properties, required=required)
+
+
+def answer_from_content(need: NeedInput, content: dict[str, Any] | None) -> Any:
+    """The item to submit for an accepted form.
+
+    The chosen option or the text for ``options`` and free-text questions;
+    an ``answer_type`` instance for typed ones (the raw content when it does
+    not validate, so the agent still sees what the person entered).
+    """
+    content = dict(content or {})
+    if need.answer_type is None:
+        return str(content.get(_ANSWER, ""))
+    try:
+        return need.answer_type.model_validate(content)
+    except ValidationError:
+        return content
+
+
+def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
+    if get_origin(annotation) in (Union, types.UnionType):
+        members = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if len(members) == 1 and len(members) < len(get_args(annotation)):
+            return members[0], True
+    return annotation, False
+
+
+def _string_literals(annotation: Any) -> list[str] | None:
+    if get_origin(annotation) is not Literal:
+        return None
+    values = get_args(annotation)
+    if not values or not all(isinstance(value, str) for value in values):
+        return None
+    return list(values)
+
+
+def _property(annotation: Any, field: FieldInfo, name: str) -> Any:
+    title = field.title or name.replace("_", " ").title()
+    common: dict[str, Any] = {"title": title, "description": field.description}
+    default = None if field.is_required() else field.default
+    if annotation is bool:
+        return ElicitationBooleanPropertySchema(
+            type="boolean", default=default if isinstance(default, bool) else None, **common
+        )
+    if annotation is int:
+        return ElicitationIntegerPropertySchema(
+            type="integer",
+            default=default if isinstance(default, int) and not isinstance(default, bool) else None,
+            **common,
+        )
+    if annotation is float:
+        return ElicitationNumberPropertySchema(
+            type="number",
+            default=default if isinstance(default, (int, float)) else None,
+            **common,
+        )
+    if annotation is str:
+        return ElicitationStringPropertySchema(
+            type="string", default=default if isinstance(default, str) else None, **common
+        )
+    if (choices := _string_literals(annotation)) is not None:
+        return ElicitationStringPropertySchema(
+            type="string",
+            enum=choices,
+            default=default if isinstance(default, str) else None,
+            **common,
+        )
+    if get_origin(annotation) is list:
+        (item,) = get_args(annotation) or (None,)
+        if (choices := _string_literals(item)) is not None:
+            return ElicitationMultiSelectPropertySchema(
+                type="array",
+                items=UntitledMultiSelectItems(type="string", enum=choices),
+                **common,
+            )
+    return None
+
+
+__all__ = ["answer_from_content", "need_input_schema"]
