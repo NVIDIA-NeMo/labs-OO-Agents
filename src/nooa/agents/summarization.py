@@ -26,7 +26,9 @@ import contextvars
 import json
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
+
+from pydantic import BaseModel, Field
 
 from nooa.agent import Agent
 from nooa.agentdoc import hidden
@@ -941,3 +943,93 @@ class MethodSummarizer(SummarizationAgent):
         # Root calls typically don't have a parent generation context
         # This is a heuristic - could be refined based on actual context
         return event.turn_number == 1 and event.is_final
+
+
+class SummarizationConfig(BaseModel):
+    """Configuration for history summarization.
+
+    ``max_tokens=None`` uses ``threshold_fraction`` of the usable input window
+    (model window minus the effective reply reserve), resolved for each completed
+    request. Set an explicit integer to pin a threshold across model switches.
+    """
+
+    policy: Literal["token_budget", "none"] = "token_budget"
+    max_tokens: int | None = None
+    threshold_fraction: float = Field(default=0.75, gt=0, lt=1)
+    preserve_recent: int = 10
+    target_chars: int = 4000
+
+
+# Summarizer trigger as a fraction of the LLM's context window. This is the
+# ONLY budget managed here — event-pile truncation is enforced at the
+# runtime level (see ActorRuntime._build_messages) and adapts to whichever
+# LLM is actually resolved for each call (including per-call overrides).
+_SUMMARIZER_BUDGET_PCT = 0.75
+
+
+def _summarizer_budget(
+    llm: "UnifiedLLM",
+    fallback_reserve: int = 0,
+    *,
+    threshold_fraction: float = _SUMMARIZER_BUDGET_PCT,
+) -> int:
+    """Resolve the summarizer trigger from the LLM's usable input window.
+
+    Falls back to 100K when the LLM doesn't expose ``context_window`` so
+    we still have a functional threshold.
+    """
+    return context_budget(llm, threshold_fraction, fallback_reserve=fallback_reserve)
+
+
+def apply_model_limits(agent: Agent) -> None:
+    """Sync automatic summarizers against the selected model's usable window.
+
+    Call after a model switch so the summarizer threshold moves with the
+    new context window. Runtime-level event truncation picks up the new
+    window automatically on the next ``_build_messages`` call.
+    """
+    for summarizer in getattr(agent, "_summarizers", []):
+        if not getattr(summarizer, "_automatic_context_budget", False):
+            continue
+        summarizer_max = _summarizer_budget(
+            agent.llm,
+            agent._truncation.response_reserve_tokens,
+            threshold_fraction=summarizer._automatic_context_budget_percent,
+        )
+        current = summarizer.config
+        summarizer.config = current.model_copy(update={"max_tokens": summarizer_max})
+
+
+def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
+    """Install a summarizer on the agent based on configuration.
+
+    Args:
+        config: Summarization configuration. ``config.max_tokens=None`` follows
+            ``threshold_fraction`` (75% by default) of each request's usable input window.
+        agent: Agent to install summarizer on (inherits LLM, attaches to history)
+    """
+    if config.policy == "none":
+        return
+
+    from nooa.config.summarizer_config import TokenBudgetConfig
+
+    summarizer_max = (
+        config.max_tokens
+        if config.max_tokens is not None
+        else _summarizer_budget(
+            agent.llm,
+            agent._truncation.response_reserve_tokens,
+            threshold_fraction=config.threshold_fraction,
+        )
+    )
+
+    summarizer = TokenBudgetSummarizer.install(
+        agent,
+        config=TokenBudgetConfig(
+            max_tokens=summarizer_max,
+            preserve_recent=config.preserve_recent,
+            target_chars=config.target_chars,
+        ),
+    )
+    summarizer._automatic_context_budget = config.max_tokens is None
+    summarizer._automatic_context_budget_percent = config.threshold_fraction
