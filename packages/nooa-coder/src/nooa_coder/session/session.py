@@ -49,6 +49,8 @@ from nooa_coder.session.items import (
     AgentEventUpdate,
     CancelledUpdate,
     ClosedUpdate,
+    CommandInfo,
+    CommandResult,
     ItemAdmittedUpdate,
     ModeChangedUpdate,
     Receipt,
@@ -639,6 +641,49 @@ class Session:
         self._waiting = []
         for item_id in list(self._futures):
             self._resolve(item_id, outcome)
+
+    # ---- slash commands ----------------------------------------------
+
+    def commands(self) -> list[CommandInfo]:
+        """Slash commands of the agent's ``slash_commands`` registry, if it has one.
+
+        The registry is duck-typed: ``list()`` (or ``commands()``) returns
+        objects with ``name``, ``description`` and ``input_hint`` (or
+        ``argument_hint``).
+        """
+        registry = getattr(self.agent, "slash_commands", None)
+        if registry is None:
+            return []
+        lister = getattr(registry, "list", None) or registry.commands
+        return [
+            CommandInfo(
+                name=str(command.name),
+                description=str(getattr(command, "description", "") or ""),
+                input_hint=getattr(command, "input_hint", None)
+                or getattr(command, "argument_hint", None),
+            )
+            for command in lister()
+        ]
+
+    async def invoke_command(self, name: str, raw_args: str) -> CommandResult:
+        """Run a slash command through the agent's registry; ``KeyError`` if unknown."""
+        registry = getattr(self.agent, "slash_commands", None)
+        if registry is None:
+            raise KeyError(name)
+        result = await registry.invoke(name, raw_args)
+        value = getattr(result, "value", None)
+        if isinstance(value, BaseModel):
+            data: dict[str, Any] | None = value.model_dump(mode="json")
+        elif isinstance(value, dict):
+            data = json.loads(item_to_json(value))
+        else:
+            data = None
+        text = getattr(result, "text", None)
+        return CommandResult(
+            text=str(text) if text is not None else str(result),
+            output_to_agent=bool(getattr(result, "output_to_agent", False)),
+            data=data,
+        )
 
     # ---- title, mode, usage -----------------------------------------
 

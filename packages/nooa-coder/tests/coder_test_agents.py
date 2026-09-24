@@ -152,3 +152,44 @@ class ScriptedModels:
         self.llms[options.name] = llm
         self.built.append(options)
         return default_agent_factory(options.model_copy(update={"llm": llm}), storage)
+
+
+class _Command:
+    def __init__(self, name: str, description: str, argument_hint: str | None) -> None:
+        self.name = name
+        self.description = description
+        self.argument_hint = argument_hint
+
+
+class _CommandOutput:
+    def __init__(self, text: str, value: Any, output_to_agent: bool) -> None:
+        self.text = text
+        self.value = value
+        self.output_to_agent = output_to_agent
+
+
+class FakeSlashCommands:
+    """A slash command registry shaped like the coding agent's (duck-typed)."""
+
+    def __init__(self) -> None:
+        self.invoked: list[tuple[str, str]] = []
+
+    def list(self) -> list[_Command]:
+        return [
+            _Command("model", "Show or switch the model", "[alias]"),
+            _Command("clear", "Clear", None),
+        ]
+
+    async def invoke(self, name: str, raw_args: str) -> _CommandOutput:
+        if name not in ("model", "clear"):
+            raise KeyError(name)
+        self.invoked.append((name, raw_args))
+        return _CommandOutput(f"model is {raw_args or 'default'}", {"alias": raw_args}, False)
+
+
+class CommandAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """An agent with a slash command registry."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.slash_commands = FakeSlashCommands()
