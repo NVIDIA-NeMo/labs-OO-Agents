@@ -132,6 +132,7 @@ class SessionRegistry:
                 depth=depth,
                 name=options.name,
                 retained=options.retain,
+                turn_method=options.turn_method,
                 session_id=session_id,
             )
             session = self._build(options, handle)
@@ -342,9 +343,19 @@ class SessionRegistry:
     # ---- load --------------------------------------------------------
 
     async def load(
-        self, session_id: str, options: SessionOptions, *, prepare: Prepare | None = None
+        self,
+        session_id: str,
+        options: SessionOptions | None = None,
+        *,
+        prepare: Prepare | None = None,
+        **overrides: Any,
     ) -> Session:
         """Attach to a live session, or open one from disk and resume it.
+
+        The session's options come from its record (agent spec, turn
+        method, model, workspace, name, retain, host), overridden by the
+        fields the caller set explicitly on ``options`` and by
+        ``overrides`` (any ``SessionOptions`` field, e.g. ``host="acp"``).
 
         A live id returns the same Session (the caller subscribes and reads
         ``transcript()``). Otherwise the file is opened (claim-checked by
@@ -374,7 +385,7 @@ class SessionRegistry:
         try:
             self._refuse_if_children_active_elsewhere(session_id)
             handle = self.store.open(session_id)
-            session = self._build(options, handle)
+            session = self._build(self._stored_options(handle.info, options, overrides), handle)
             restored = handle.storage.restore_latest_snapshot(session.agent)
             session.agent.event_manager.add(
                 TuiSessionResumed(session_id=session_id, restored=restored)
@@ -392,6 +403,25 @@ class SessionRegistry:
             raise
         self._publish(session, reservation)
         return session
+
+    def _stored_options(
+        self, info: SessionInfo, options: SessionOptions | None, overrides: dict[str, Any]
+    ) -> SessionOptions:
+        values: dict[str, Any] = {
+            "workspace": info.workspace or ".",
+            "agent_spec": info.agent,
+            "model": info.model or None,
+            "turn_method": info.turn_method,
+            "name": info.name,
+            "retain": info.retained,
+            "sessions_dir": self.store.root,
+        }
+        if info.host:
+            values["host"] = info.host
+        if options is not None:
+            values.update({name: getattr(options, name) for name in options.model_fields_set})
+        values.update(overrides)
+        return SessionOptions.model_validate(values)
 
     def _refuse_if_children_active_elsewhere(self, session_id: str) -> None:
         on_disk = self.store.list(roots_only=False)

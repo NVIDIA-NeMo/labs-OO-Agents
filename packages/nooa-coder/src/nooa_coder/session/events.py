@@ -29,6 +29,7 @@ class SessionStarted(Metadata):
     depth: int = 0
     name: str | None = None
     retained: bool = False
+    turn_method: str = "handle"
 
 
 class SessionTitleUpdated(Metadata):

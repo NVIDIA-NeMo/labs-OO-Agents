@@ -178,6 +178,7 @@ class SessionInfo(BaseModel):
     mode: str = "auto"
     status: SessionStatus = "on_disk"
     retained: bool = False
+    turn_method: str = "handle"
     created_at: float = 0.0
     last_active: float = 0.0
     turn_count: int = 0

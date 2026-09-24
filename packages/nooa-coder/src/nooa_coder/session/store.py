@@ -250,6 +250,7 @@ class SessionStore:
         depth: int = 0,
         name: str | None = None,
         retained: bool = False,
+        turn_method: str = "handle",
         session_id: str | None = None,
         check_same_thread: bool = True,
     ) -> SessionHandle:
@@ -272,6 +273,7 @@ class SessionStore:
             depth=depth,
             name=name,
             retained=retained,
+            turn_method=turn_method,
         )
         try:
             events.add(started)
@@ -294,6 +296,7 @@ class SessionStore:
                 depth=depth,
                 name=name,
                 retained=retained,
+                turn_method=turn_method,
             ),
         )
 
@@ -533,6 +536,7 @@ class SessionStore:
             depth=_int(start.get("depth"), default=0),
             name=_optional_str(start.get("name")),
             retained=bool(start.get("retained", False)),
+            turn_method=str(start.get("turn_method") or "handle"),
             title=title,
             title_is_user_set=title_is_user_set,
             host=str(
