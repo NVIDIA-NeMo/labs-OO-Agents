@@ -5,7 +5,15 @@
 import asyncio
 
 import pytest
-from coder_test_agents import BLOCKING_CELL, ScriptedModels, cell, done, fresh_events
+from coder_test_agents import (
+    BLOCKING_CELL,
+    ModelFactory,
+    ScriptedModels,
+    TrackedLLM,
+    cell,
+    done,
+    fresh_events,
+)
 from nooa_coder.session.registry import (
     ChildActiveElsewhereError,
     DepthLimitError,
@@ -255,3 +263,49 @@ async def test_delete_closes_keeps_files_and_leaves_a_tombstone(
     other = await registry.create(root.options.inherit(name="other"), parent_id=root.id)
     await registry.delete(other.id, keep_files=False)
     assert not (sessions_dir / f"{other.id}.db").exists()
+
+
+async def test_the_llm_factory_builds_owned_clients(root_options, sessions_dir):
+    factory = ModelFactory(
+        {
+            "alias-a": [
+                [
+                    cell(
+                        "c = await self.session.delegate('Other', 'x', model='alias-b')\n"
+                        "await c.wait()\n"
+                        "return_result(Done(explanation='ok'))"
+                    )
+                ]
+            ],
+            "alias-b": [[done("child ok")]],
+        }
+    )
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    try:
+        root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
+        [root_llm] = factory.made
+        assert root.agent.llm is root_llm
+        assert factory.calls == [("alias-a", root_options.workspace)]
+        assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+        child_llm = factory.made[1]
+        assert (child_llm.alias, factory.calls[1][0]) == ("alias-b", "alias-b")
+        await asyncio.wait_for(_until_closed(child_llm), TIMEOUT)  # throwaway child closed
+        assert not root_llm.closed
+    finally:
+        await registry.close_all()
+    assert root_llm.closed
+
+
+async def test_a_given_client_is_not_rebuilt_or_closed(root_options, sessions_dir):
+    factory = ModelFactory()
+    given = TrackedLLM("given", [])
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    root = await registry.create(root_options.model_copy(update={"model": "alias-a", "llm": given}))
+    assert root.agent.llm is given and factory.calls == []
+    await registry.close_all()
+    assert not given.closed
+
+
+async def _until_closed(llm):
+    while not llm.closed:
+        await asyncio.sleep(0.01)

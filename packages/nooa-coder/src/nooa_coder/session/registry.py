@@ -12,7 +12,7 @@ import asyncio
 import contextvars
 import logging
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,9 @@ from nooa_coder.session.store import SessionHandle, SessionNotFoundError, Sessio
 
 logger = logging.getLogger(__name__)
 
+LLMFactory = Callable[[str | None, Path], Any]
+"""Builds a model client from a model-registry alias and the session's workspace."""
+
 
 _REQUEUED_CHANNELS = ("user_messages", "delegates")
 
@@ -60,8 +63,20 @@ class DepthLimitError(ValueError):
 class SessionRegistry:
     """Creates, finds, lists and closes the sessions of one process."""
 
-    def __init__(self, store: SessionStore, *, agent_factory: AgentFactory | None = None) -> None:
+    def __init__(
+        self,
+        store: SessionStore,
+        *,
+        agent_factory: AgentFactory | None = None,
+        llm_factory: LLMFactory | None = None,
+    ) -> None:
+        """``agent_factory(options, storage)`` builds each agent (default: import
+        ``options.agent_spec``). ``llm_factory(model_alias, workspace)`` builds a
+        model client for a session whose options name a ``model`` but carry no
+        ``llm``; the session owns that client and closes it.
+        """
         self.store = store
+        self.llm_factory = llm_factory
         self.sessions: dict[str, Session] = {}
         self._reserved: dict[str, asyncio.Future[Session | None]] = {}
         self._agent_factory: AgentFactory = agent_factory or default_agent_factory
@@ -141,8 +156,18 @@ class SessionRegistry:
         # Build the agent outside the caller's context: a child is created
         # from inside its parent's cell, and the agent must not inherit the
         # parent's call stack or LLM inheritance.
-        agent = contextvars.Context().run(self._agent_factory, options, handle.storage)
-        session = Session(options=options, agent=agent, handle=handle)
+        owned_llm = None
+        build_options = options
+        if options.llm is None and options.model and self.llm_factory is not None:
+            owned_llm = self.llm_factory(options.model, options.workspace)
+            build_options = options.model_copy(update={"llm": owned_llm})
+        try:
+            agent = contextvars.Context().run(self._agent_factory, build_options, handle.storage)
+        except BaseException:
+            if owned_llm is not None and hasattr(owned_llm, "close"):
+                owned_llm.close()
+            raise
+        session = Session(options=options, agent=agent, handle=handle, owned_llm=owned_llm)
         session._before_close = lambda: self._close_children(session.id)
         install_port(agent, session, self)
         return session
