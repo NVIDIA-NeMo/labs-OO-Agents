@@ -368,7 +368,9 @@ class MCPControl(BehaviorControl):
             return ControlResult.ok(
                 ControlTable(
                     columns=["Server", "Approval", "Connection"], rows=rows, title="MCP servers"
-                )
+                ),
+                # The person also sees each server's endpoint and transport.
+                ControlMessage(registry.status(verbose=True)),
             )
         name = args[1]
         # Registry APIs accept globs; approval commands name one exact definition.
