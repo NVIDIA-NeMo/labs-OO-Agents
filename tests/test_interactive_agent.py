@@ -13,6 +13,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from nooa import hidden, strategy
+from nooa.context_blocks import ToolCallEvent
 from nooa.events import PythonOutput, ResultStatus
 from nooa.interactive import (
     AgentMessage,
@@ -146,6 +147,38 @@ def test_need_input_takes_options_or_answer_type_not_both():
         NeedInput(question="How many?", options=["1", "2"], answer_type=HowMany)
     with pytest.raises(ValidationError):
         NeedInput(question="How many?", answer_type=int)  # type: ignore[arg-type]
+
+
+class _Opaque:
+    """An object pydantic cannot turn into JSON."""
+
+
+def test_done_result_serialises_when_it_holds_an_arbitrary_object():
+    """return_result(result="<name>") puts the live object into the tool-call event."""
+    event = ToolCallEvent(
+        tool_call_id="c1",
+        name="return_result",
+        arguments={"result": Done(explanation="finished", result=_Opaque())},
+    )
+    assert "_Opaque" in event.model_dump_json()
+    assert json.loads(Done(explanation="x", result={"a": 1}).model_dump_json())["result"] == {
+        "a": 1
+    }
+
+
+def test_need_input_answer_type_serialises_as_a_class_name():
+    class HowMany(BaseModel):
+        n: int
+
+    event = ToolCallEvent(
+        tool_call_id="c1",
+        name="return_result",
+        arguments={"result": NeedInput(question="How many?", answer_type=HowMany)},
+    )
+    dumped = json.loads(event.model_dump_json())
+    answer_type = dumped["arguments"]["result"]["answer_type"]
+    assert answer_type == f"{__name__}:{HowMany.__qualname__}"
+    assert json.loads(NeedInput(question="Why?").model_dump_json())["answer_type"] is None
 
 
 def test_need_input_options_must_not_be_empty():

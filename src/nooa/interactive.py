@@ -24,7 +24,7 @@ interactive hosts such as the TUI and ACP.
 from enum import StrEnum
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from nooa import hidden, strategy
 from nooa.agentdoc import doc
@@ -39,6 +39,7 @@ with hidden:
     from nooa import Agent
     from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
+    from nooa.events import _json_safe
     from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
     from nooa.runtime.producers_skill import ProducersSkill
     from nooa.strategies import CodeActStrategy
@@ -127,6 +128,11 @@ class Done(BaseModel):
     _check_explanation = field_validator("explanation")(_non_blank)
     _check_message = field_validator("message")(_blank_to_none)
 
+    @field_serializer("result", when_used="json")
+    def _serialize_result(self, value: Any) -> Any:
+        """Keep JSON dumps (the event store) from raising on an arbitrary object."""
+        return _json_safe(value)
+
 
 class NeedInput(BaseModel):
     """Turn result: a question the agent cannot continue without.
@@ -154,6 +160,11 @@ class NeedInput(BaseModel):
     )
 
     _check_question = field_validator("question")(_non_blank)
+
+    @field_serializer("answer_type", when_used="json")
+    def _serialize_answer_type(self, value: type[BaseModel] | None) -> str | None:
+        """A class cannot be JSON-encoded; record it as ``module:qualname``."""
+        return None if value is None else f"{value.__module__}:{value.__qualname__}"
 
     @model_validator(mode="after")
     def _one_answer_shape(self) -> "NeedInput":
