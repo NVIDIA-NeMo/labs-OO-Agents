@@ -380,7 +380,11 @@ class ACPEventBridge:
         """
         for tool_call_id in tuple(self._open_tools):
             code = self._python_source.pop(tool_call_id, None)
+            # Output shown before the close: a cancelled cell's partial output, or
+            # what a terminal command streamed so far.
             partial = self._cancelled_output.pop(tool_call_id, None)
+            if partial is None:
+                partial = self._terminal_output.pop(tool_call_id, "").rstrip("\n")
             output = f"{partial}\n\n{reason}" if partial else reason
             content = (
                 _python_content(code, output)

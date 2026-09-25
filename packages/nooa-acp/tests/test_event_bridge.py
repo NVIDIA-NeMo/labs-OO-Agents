@@ -589,3 +589,30 @@ async def test_bridge_shows_partial_output_on_cancelled_card(tmp_path):
     assert output == "```text\nhalf\n\nStopped at your request.\n```"
     await bridge.close()
     await agent.close()
+
+
+async def test_bridge_keeps_streamed_terminal_output_on_force_closed_card(tmp_path):
+    """A terminal command still running when fail_open_tools closes its card keeps
+    the output it streamed, with the reason below it."""
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        TerminalCommandStarted(
+            command_id="cmd-1", command="make build", working_directory=str(tmp_path)
+        )
+    )
+    agent.event_manager.add(TerminalCommandOutput(command_id="cmd-1", stdout="step 1 of 3\n"))
+    await bridge.flush()
+    await bridge.fail_open_tools("Stopped at your request.", title="Cancelled")
+    await bridge.flush()
+
+    closed = cast(ToolCallProgress, client.updates[-1][1])
+    assert closed.title == "Cancelled"
+    assert closed.status == "failed"
+    assert closed.content is not None
+    text = cast(ContentToolCallContent, closed.content[0]).content.text
+    assert text == "step 1 of 3\n\nStopped at your request."
+    await bridge.close()
+    await agent.close()
