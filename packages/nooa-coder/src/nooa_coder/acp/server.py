@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from string import Formatter
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -102,6 +103,13 @@ logger = logging.getLogger(__name__)
 _SESSION_PAGE_SIZE = 50
 _DELETE_METHOD = "nooa/session/delete"
 """``_nooa/session/delete`` as ``ext_method`` receives it (without the underscore)."""
+_INJECT_METHOD = "nooa/session/inject"
+_REVOKE_METHOD = "nooa/session/revoke_inject"
+INJECT_CAPABILITY = {"dev.nooa/inject": {"queue": {}, "steer": {}, "revoke": {}}}
+"""``agentCapabilities._meta`` for ``_nooa/session/inject`` and ``revoke_inject``.
+
+They follow the ACP RFD for message injection (agent-client-protocol PR #1261).
+"""
 
 SOURCE = "acp"
 """The source of items this adapter admits (the bridge does not echo them back)."""
@@ -224,6 +232,7 @@ def initialize_response(protocol_version: int) -> InitializeResponse:
                 list=SessionListCapabilities(),
                 close=SessionCloseCapabilities(),
             ),
+            field_meta=INJECT_CAPABILITY,
         ),
         auth_methods=[],
         agent_info=Implementation(
@@ -270,8 +279,11 @@ class CoderACPAgent:
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
         self._chosen_models: dict[str, str] = {}
-        # Receipts of prompts that steered a running turn, by session.
-        self._steers: dict[str, list[Receipt]] = {}
+        # Receipts of prompts still waiting for their turn, by session: Stop
+        # answers them "cancelled" and withdraws the ones not yet consumed.
+        self._prompts: dict[str, list[Receipt]] = {}
+        # Receipts of injected messages, by session and item id, for revoke.
+        self._injects: dict[str, dict[str, Receipt]] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
         # session: session/cancel stops them.
         self._asks: dict[str, asyncio.Task[Any]] = {}
@@ -464,11 +476,17 @@ class CoderACPAgent:
         return CloseSessionResponse()
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """``_nooa/session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
+        """``_nooa/session/inject``, ``revoke_inject`` (see ``_inject``) and ``delete``.
+
+        ``_nooa/session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
 
         ``cwd`` names the workspace whose store holds the session; without
         it the stores of the workspaces this connection has named are searched.
         """
+        if method == _INJECT_METHOD:
+            return await self._inject(params)
+        if method == _REVOKE_METHOD:
+            return self._revoke_inject(params)
         if method != _DELETE_METHOD:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
@@ -492,6 +510,48 @@ class CoderACPAgent:
             await bridge.close()
         return {}
 
+    async def _inject(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``_nooa/session/inject``: ``{sessionId, mode: "queue"|"steer", prompt|text}``.
+
+        ``queue`` submits the message; ``steer`` hands it to the running
+        turn's next model call (queued when there is none). Answers
+        ``{messageId, delivered: "queued"|"steered"}`` at once. An injected
+        message is not a prompt request: Stop leaves it queued.
+        """
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str):
+            raise RequestError.invalid_params({"reason": "sessionId must be a string"})
+        mode = params.get("mode")
+        if mode not in ("queue", "steer"):
+            raise RequestError.invalid_params({"mode": mode, "reason": "mode is queue or steer"})
+        text = params.get("text")
+        if not isinstance(text, str):
+            blocks = params.get("prompt")
+            if not isinstance(blocks, list) or not all(isinstance(b, dict) for b in blocks):
+                raise RequestError.invalid_params({"reason": "prompt or text is required"})
+            text = self._prompt_text([SimpleNamespace(**block) for block in blocks])
+        elif not text.strip():
+            raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
+        session, _bridge = self._followed(session_id)
+        try:
+            if mode == "steer":
+                receipt = await session.steer(text, source=SOURCE)
+            else:
+                receipt = await session.submit(text, source=SOURCE)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session_id) from None
+        self._injects.setdefault(session_id, {})[receipt.item_id] = receipt
+        return {"messageId": receipt.item_id, "delivered": receipt.delivered}
+
+    def _revoke_inject(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``_nooa/session/revoke_inject``: ``{sessionId, messageId}`` -> ``{revoked}``."""
+        session_id, message_id = params.get("sessionId"), params.get("messageId")
+        if not isinstance(session_id, str) or not isinstance(message_id, str):
+            raise RequestError.invalid_params({"reason": "sessionId and messageId are strings"})
+        session, _bridge = self._followed(session_id)
+        receipt = self._injects.get(session_id, {}).pop(message_id, None)
+        return {"revoked": receipt is not None and session.withdraw(receipt)}
+
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
         del method, params
 
@@ -510,15 +570,16 @@ class CoderACPAgent:
     # ---- prompt and cancel ---------------------------------------------
 
     async def prompt(self, session_id: str, prompt: list[Any], **kwargs: Any) -> PromptResponse:
-        """Run a prompt; a prompt sent while a turn runs steers that turn.
+        """Run a prompt; a prompt sent while a turn runs is queued behind it.
 
-        Text goes in with ``steer`` (a plain submit while idle) and the
-        request waits for the outcome of the turn that consumed it. When a
-        turn is running, that turn's next model call sees the text and both
-        prompts return together; if the running turn was already finishing,
-        the text is handled by the next turn and this prompt returns with
-        that one. A ``Waiting`` outcome keeps the request open. ``/name``
-        prompts naming a session command run the command.
+        The text is submitted on ``user_messages`` and the request waits for
+        the outcome of the turn that consumes it: the next turn, or the
+        running one if the model takes the pending message from its queue
+        (the queues context block lists it). A ``Waiting`` outcome keeps the
+        request open. Stop answers a waiting prompt ``cancelled`` and
+        withdraws its message if no turn took it. ``/name`` prompts naming a
+        session command run the command. To steer a running turn, clients
+        use ``_nooa/session/inject`` with ``mode: "steer"``.
         """
         del kwargs
         session, bridge = self._followed(session_id)
@@ -530,18 +591,13 @@ class CoderACPAgent:
                 if handled is not None:
                     return handled
             await self._request_title(session, text)
-            receipt = await session.steer(text, source=SOURCE)
-            steered = receipt.delivered == "steered"
-            if steered:
-                # Stop must withdraw it if the model has not seen it yet;
-                # otherwise it would run as a new turn after the cancel.
-                self._steers.setdefault(session_id, []).append(receipt)
+            receipt = await session.submit(text, source=SOURCE)
+            self._prompts.setdefault(session_id, []).append(receipt)
             try:
                 return await self._finish(session, bridge, receipt.item_id)
             finally:
-                if steered:
-                    with suppress(ValueError):
-                        self._steers.get(session_id, []).remove(receipt)
+                with suppress(ValueError):
+                    self._prompts.get(session_id, []).remove(receipt)
         except ItemWithdrawnError:
             await bridge.flush()
             return PromptResponse(stop_reason="cancelled")
@@ -779,9 +835,10 @@ class CoderACPAgent:
         ask = self._asks.get(session_id)
         if ask is not None:
             ask.cancel()
-        # Steers the model has not read yet stop with the turn; the prompts
-        # that sent them return "cancelled" (withdraw fails for one it read).
-        for receipt in self._steers.pop(session_id, []):
+        # A prompt request must be answered: a prompt whose message no turn
+        # took is withdrawn and returns "cancelled"; the one the running turn
+        # took returns "cancelled" with it. Injected messages stay queued.
+        for receipt in self._prompts.pop(session_id, []):
             session.withdraw(receipt)
         await session.cancel(by="user")
 

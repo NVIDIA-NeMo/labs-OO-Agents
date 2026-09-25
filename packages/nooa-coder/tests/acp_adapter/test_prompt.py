@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""session/prompt and session/cancel over the Session: stop reasons, steer, commands."""
+"""session/prompt and session/cancel over the Session: stop reasons, queueing, commands."""
 
 import asyncio
+from typing import Any
 
 import pytest
 from acp import RequestError, resource_link_block, text_block
@@ -100,23 +101,36 @@ async def _until(predicate) -> None:
         await asyncio.sleep(0.01)
 
 
-async def test_a_second_prompt_during_a_turn_steers_it_and_both_return_together(
-    make_adapter, workspace
-):
+async def test_a_second_prompt_during_a_turn_is_queued_for_its_own_turn(make_adapter, workspace):
+    """A queue is a queue: the running turn sees the message pending, not injected."""
     started, block = fresh_events()
-    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Did both.")]})
+    models = ScriptedModels(
+        {None: [cell(BLOCKING_CELL), reply("Did the first."), reply("Did the second.")]}
+    )
     adapter = await make_adapter(models)
     session_id = await _new(adapter, workspace)
-    first = asyncio.create_task(adapter.prompt(session_id, [text_block("do the first thing")]))
+    finished: list[str] = []
+
+    async def run(text: str, label: str) -> Any:
+        response = await adapter.prompt(session_id, [text_block(text)])
+        finished.append(label)
+        return response
+
+    first = asyncio.create_task(run("do the first thing", "first"))
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    second = asyncio.create_task(adapter.prompt(session_id, [text_block("also do the second")]))
+    second = asyncio.create_task(run("also do the second", "second"))
     await asyncio.sleep(0.05)
     block.set()
     responses = await asyncio.wait_for(asyncio.gather(first, second), TIMEOUT)
     assert [response.stop_reason for response in responses] == ["end_turn", "end_turn"]
-    # The running turn's next model call saw the steer.
-    assert "also do the second" in str(models.llms[None].calls[1].messages)
-    assert len(models.llms[None].calls) == 2
+    assert finished == ["first", "second"]
+    calls = models.llms[None].calls
+    assert len(calls) == 3
+    # The running turn's next model call lists it as pending, once, in the queues block.
+    during = str(calls[1].messages)
+    assert "user_messages: 1 pending" in during
+    assert during.count("also do the second") == 1
+    assert "also do the second" in str(calls[2].messages)
 
 
 async def test_cancel_closes_the_cards_before_the_prompt_answers_cancelled(
@@ -146,8 +160,10 @@ async def test_cancel_closes_the_cards_before_the_prompt_answers_cancelled(
     assert order.index("AgentMessageChunk") < order.index("response")
 
 
-async def test_stop_also_stops_a_prompt_that_steered_the_turn(make_adapter, workspace, client):
-    """A steer the model has not seen yet must not run as a new turn after Stop."""
+async def test_stop_answers_a_queued_prompt_cancelled_and_withdraws_it(
+    make_adapter, workspace, client
+):
+    """A prompt request must be answered: Stop cancels it and its item never runs."""
     started, _block = fresh_events()
     models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Should not run.")]})
     adapter = await make_adapter(models)
@@ -159,7 +175,7 @@ async def test_stop_also_stops_a_prompt_that_steered_the_turn(make_adapter, work
     await adapter.cancel(session_id)
     responses = await asyncio.wait_for(asyncio.gather(first, second), TIMEOUT)
     assert [response.stop_reason for response in responses] == ["cancelled", "cancelled"]
-    await asyncio.sleep(0.2)  # a re-admitted steer would start a turn now
+    await asyncio.sleep(0.2)  # a queued item left behind would start a turn now
     session = adapter.session(session_id)
     assert session.info.status == "idle"
     assert len(models.llms[None].calls) == 1
@@ -416,3 +432,91 @@ async def test_a_session_that_has_a_title_is_not_asked_again(make_adapter, works
     await adapter.session(session_id).set_title("Chosen", user_set=True)
     await _prompt(adapter, session_id, "hello")
     assert "[session-title]" not in str(models.llms[None].calls[0].messages)
+
+
+# ---- _nooa/session/inject ------------------------------------------------------
+
+
+async def _inject(adapter, session_id, mode, text):
+    return await adapter.ext_method(
+        "nooa/session/inject",
+        {"sessionId": session_id, "mode": mode, "prompt": [{"type": "text", "text": text}]},
+    )
+
+
+async def test_inject_is_advertised_for_the_router_too():
+    from acp import PROTOCOL_VERSION
+    from nooa_coder.acp.server import initialize_response
+
+    meta = initialize_response(PROTOCOL_VERSION).agent_capabilities.field_meta
+    assert meta == {"dev.nooa/inject": {"queue": {}, "steer": {}, "revoke": {}}}
+
+
+async def test_inject_queue_starts_a_turn_when_idle(make_adapter, workspace, client):
+    adapter = await make_adapter(ScriptedModels({None: [reply("Got it.")]}))
+    session_id = await _new(adapter, workspace)
+    answer = await _inject(adapter, session_id, "queue", "note this")
+    assert answer["delivered"] == "queued" and answer["messageId"]
+    await client.wait_for(lambda: "Got it." in client.texts(AgentMessageChunk, session_id))
+
+
+async def test_inject_steer_reaches_the_running_turns_next_model_call(make_adapter, workspace):
+    started, block = fresh_events()
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Adjusted.")]})
+    adapter = await make_adapter(models)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("start")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    answer = await adapter.ext_method(
+        "nooa/session/inject", {"sessionId": session_id, "mode": "steer", "text": "use tabs"}
+    )
+    assert answer["delivered"] == "steered"
+    block.set()
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
+    assert "use tabs" in str(models.llms[None].calls[1].messages)
+    assert len(models.llms[None].calls) == 2
+
+
+async def test_revoke_takes_back_a_queued_inject(make_adapter, workspace):
+    started, block = fresh_events()
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Only the first.")]})
+    adapter = await make_adapter(models)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("start")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    answer = await _inject(adapter, session_id, "queue", "never mind this")
+    revoke = {"sessionId": session_id, "messageId": answer["messageId"]}
+    assert await adapter.ext_method("nooa/session/revoke_inject", revoke) == {"revoked": True}
+    assert await adapter.ext_method("nooa/session/revoke_inject", revoke) == {"revoked": False}
+    block.set()
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
+    await asyncio.sleep(0.2)  # a queued item would start a turn now
+    assert len(models.llms[None].calls) == 2
+
+
+async def test_a_queued_inject_survives_cancel(make_adapter, workspace, client):
+    started, _block = fresh_events()
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Handled the note.")]})
+    adapter = await make_adapter(models)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("start")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    await _inject(adapter, session_id, "queue", "a note for later")
+    await adapter.cancel(session_id)
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "cancelled"
+    await client.wait_for(
+        lambda: "Handled the note." in client.texts(AgentMessageChunk, session_id)
+    )
+
+
+async def test_inject_checks_its_params(make_adapter, workspace):
+    adapter = await make_adapter(ScriptedModels())
+    session_id = await _new(adapter, workspace)
+    for params in (
+        {"sessionId": session_id, "mode": "shout", "text": "x"},
+        {"sessionId": session_id, "mode": "queue"},
+    ):
+        with pytest.raises(RequestError):
+            await adapter.ext_method("nooa/session/inject", params)
+    with pytest.raises(RequestError):
+        await _inject(adapter, "no-such-session", "queue", "x")

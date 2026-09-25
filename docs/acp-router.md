@@ -58,6 +58,32 @@ the workspaces the client has already named in this connection (in
 same named workspaces are searched, and the router passes the `cwd` from the
 session's record on to the worker.
 
+## Messages during a turn
+
+There are three ways to send the agent text while a turn runs, following the
+ACP RFD for message injection
+([agent-client-protocol PR #1261](https://github.com/agentclientprotocol/agent-client-protocol/pull/1261)):
+
+1. **`session/prompt`** queues the text. The running turn sees it as a pending
+   user message in its queues context block and may take it; otherwise the
+   next turn handles it. The request returns when the turn that took it
+   ends, so two prompts return in order, each with its own stop reason.
+   `session/cancel` answers a prompt whose text no turn took with
+   `cancelled` and withdraws the text.
+2. **`_nooa/session/inject`** with `{sessionId, mode: "queue", prompt}` (or
+   `text`) queues the text and answers at once with
+   `{messageId, delivered: "queued"}`. An injected message is not a prompt
+   request, so `session/cancel` leaves it queued.
+3. **`_nooa/session/inject`** with `mode: "steer"` hands the text to the
+   running turn's next model call (`delivered: "steered"`), or queues it when
+   no model call is coming.
+
+`_nooa/session/revoke_inject` with `{sessionId, messageId}` takes back an
+injected message that nothing has taken yet and answers `{revoked: true}`.
+`initialize` advertises both in
+`agentCapabilities._meta["dev.nooa/inject"] = {"queue": {}, "steer": {}, "revoke": {}}`,
+from the router as well as in single-process mode.
+
 ## Lifetime
 
 - A worker runs in its own session and process group. Its standard input is

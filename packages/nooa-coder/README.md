@@ -20,4 +20,10 @@ state when it can be restored. `NOOA_SESSIONS_DIR`, or an explicit
 for all workspaces instead. A `SessionRegistry` serves one such directory;
 a subagent's session goes in its root's.
 
+Over ACP, a `session/prompt` sent during a turn is queued, not steered.
+`_nooa/session/inject` queues or steers a message without a prompt request,
+and `_nooa/session/revoke_inject` takes one back; see `docs/acp-router.md`
+("Messages during a turn") and the ACP RFD for message injection
+(agent-client-protocol PR #1261).
+
 The design is tracked in issue #388.
