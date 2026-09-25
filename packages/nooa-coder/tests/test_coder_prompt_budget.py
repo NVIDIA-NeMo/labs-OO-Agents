@@ -41,7 +41,7 @@ LIMITS = {
     (CODER, "handle"): (11_500, 15_200),  # measured 11,279 / 14,879
     (CODER, "handle_batch"): (11_500, 14_800),  # measured 11,279 / 14,523
     (EXPERIMENTAL, "handle"): (11_200, 13_700),  # measured 11,162 / 13,627
-    (EXPERIMENTAL, "handle_batch"): (11_200, 14_000),  # measured 11,162 / 13,980
+    (EXPERIMENTAL, "handle_batch"): (11_200, 14_300),  # measured 11,162 / 14,006 (P2a port docs)
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
