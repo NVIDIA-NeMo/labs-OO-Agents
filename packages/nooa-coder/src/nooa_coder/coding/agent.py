@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
-from nooa import Context, hidden, strategy
+from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
@@ -224,6 +224,7 @@ class CodingAgent(InteractiveAgent):
         self._summarization = summarization or SummarizationConfig()
         install_summarizer(self._summarization, self)
 
+    @no_trace
     def _coding_state_context(self) -> str:
         """Describe coding-specific state without exposing stored values."""
         from html import escape
