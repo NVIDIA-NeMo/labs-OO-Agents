@@ -28,7 +28,7 @@ from nooa_coder.session.events import (
     SessionStarted,
     SessionTitleUpdated,
 )
-from nooa_coder.session.items import SessionInfo, TranscriptEntry
+from nooa_coder.session.items import SessionInfo, TranscriptEntry, Usage
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ class SessionHandle:
     @property
     def info(self) -> SessionInfo:
         with self._metadata_lock:
-            return self._info.model_copy()
+            return self._info.model_copy(deep=True)
 
     @property
     def storage(self) -> SQLiteStorageManager:
@@ -170,6 +170,11 @@ class SessionHandle:
                     "last_active": event.timestamp.timestamp(),
                 }
             )
+
+    def update_usage(self, usage: Usage) -> None:
+        """Set the session's usage totals (a copy) as ``info`` reports them."""
+        with self._metadata_lock:
+            self._info = self._info.model_copy(update={"usage": usage.model_copy()})
 
     def transcript(self) -> list[TranscriptEntry]:
         """The session's transcript (see :meth:`SessionStore.load_transcript`)."""
@@ -442,6 +447,12 @@ class SessionStore:
                 last_row = connection.execute(
                     "SELECT data FROM events ORDER BY insertion_order DESC LIMIT 1"
                 ).fetchone()
+                usage_row = connection.execute(
+                    "SELECT COALESCE(SUM(json_extract(data, '$.usage.input_tokens')), 0), "
+                    "COALESCE(SUM(json_extract(data, '$.usage.output_tokens')), 0), "
+                    "COALESCE(SUM(json_extract(data, '$.usage.cost_usd')), 0.0) "
+                    "FROM events WHERE event_type = 'TurnEnded'"
+                ).fetchone()
             finally:
                 connection.close()
         except (OSError, sqlite3.Error):
@@ -487,6 +498,13 @@ class SessionStore:
             turn_method=str(start.get("turn_method") or "handle"),
             title=title,
             title_is_user_set=title_is_user_set,
+            # The session's own usage, summed from its turns; usage
+            # attributed from children is only known while it is live.
+            usage=Usage(
+                input_tokens=int(usage_row[0]),
+                output_tokens=int(usage_row[1]),
+                cost_usd=float(usage_row[2]),
+            ),
             host=str(
                 start.get(
                     "host",

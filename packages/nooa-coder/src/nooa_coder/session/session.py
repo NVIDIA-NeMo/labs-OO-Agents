@@ -201,8 +201,10 @@ class Session:
         self.options = options
         self.agent = agent
         self.handle = handle
+        # A deep copy: the Session owns its usage totals and pushes them to
+        # the handle, whose metadata other threads read under its lock.
         self.info: SessionInfo = info.model_copy(
-            update={"status": "idle", "mode": options.permission_mode}
+            update={"status": "idle", "mode": options.permission_mode}, deep=True
         )
         self._owned_llm = owned_llm
         # Clients this session built and swapped out while another live
@@ -936,6 +938,7 @@ class Session:
         totals.attributed_input_tokens += usage.input_tokens
         totals.attributed_output_tokens += usage.output_tokens
         totals.attributed_cost_usd += usage.cost_usd
+        self.handle.update_usage(totals)
         self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
 
     def _count_usage(self, response: LLMResponse) -> None:
@@ -946,6 +949,7 @@ class Session:
         totals.input_tokens += usage.input_tokens
         totals.output_tokens += usage.output_tokens
         totals.cost_usd += usage.cost_usd
+        self.handle.update_usage(totals)
 
     # ---- output ------------------------------------------------------
 
