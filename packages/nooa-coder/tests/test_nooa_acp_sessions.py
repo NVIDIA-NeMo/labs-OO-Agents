@@ -85,7 +85,7 @@ async def test_a_snapshot_that_cannot_be_restored_still_loads(tmp_path, caplog):
     try:
         with caplog.at_level(logging.WARNING, logger="nooa_coder.session.registry"):
             session = await registry.load(session_id, llm=FakeLLMClient([]))
-        assert f"Session {session_id}: could not restore its saved state" in caplog.text
+        assert f"Session {session_id}: could not restore its latest saved state" in caplog.text
         [user, note] = session.transcript()
         assert (user.role, user.content) == ("user", "please remember the plan")
         assert note.role == "note"
@@ -106,3 +106,28 @@ async def test_an_old_session_with_a_relative_working_directory_is_listed(tmp_pa
     [info] = store.list(workspace=workspace)
     assert info.id == session_id
     assert store.list(workspace=tmp_path / "elsewhere") == [info]
+
+
+async def test_an_unreadable_latest_snapshot_falls_back_to_the_one_before(tmp_path, caplog):
+    """A damaged file loses its newest pages first; the previous snapshot still counts."""
+    workspace = _workspace(tmp_path)
+    session_id = _old_session(workspace)
+    path = sessions_root(workspace) / f"{session_id}.db"
+    with closing(sqlite3.connect(path)) as db, db:
+        # A second, newer snapshot that cannot be read back.
+        db.execute(
+            "INSERT INTO snapshots (snapshot_id, created_at, data) VALUES (?, ?, ?)",
+            ("newest", "2099-01-01T00:00:00+00:00", "damaged"),
+        )
+
+    registry = SessionRegistry(SessionStore(sessions_root(workspace)))
+    try:
+        with caplog.at_level(logging.WARNING, logger="nooa_coder.session.registry"):
+            session = await registry.load(session_id, llm=FakeLLMClient([]))
+        assert "restored an older snapshot" in caplog.text
+        [user, note] = session.transcript()
+        assert user.role == "user"
+        assert "restored the older snapshot" in note.content
+        assert _TODO in session.agent.todo.status()
+    finally:
+        await registry.close_all()
