@@ -417,13 +417,15 @@ async def test_closing_in_order_lets_a_cancellation_through_at_once():
     release.set()
 
 
-async def test_a_session_the_client_never_wrote_to_leaves_no_file(make_adapter, workspace):
-    """Opened and closed again, a session is not worth a file: it would list nothing."""
+async def test_a_closed_empty_session_can_still_be_loaded_until_shutdown(make_adapter, workspace):
+    """session/close keeps the file: a client may load the id again in the same run."""
     adapter = await make_adapter(ScriptedModels())
     session_id = (await adapter.new_session(cwd=str(workspace), mcp_servers=[])).session_id
     path = SessionStore(sessions_root(workspace)).path_for(session_id)
-    assert path.exists()
     await adapter.close_session(session_id)
+    assert path.exists()
+    await adapter.load_session(cwd=str(workspace), session_id=session_id)
+    await adapter.close()
     assert not path.exists()
 
 
