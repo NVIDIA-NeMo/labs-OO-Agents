@@ -96,7 +96,7 @@ async def test_commands_are_advertised_after_the_new_session_response(
     await client.wait_for(lambda: client.updates(response.session_id, AvailableCommandsUpdate))
     [commands] = client.updates(response.session_id, AvailableCommandsUpdate)
     names = [command.name for command in commands.available_commands]
-    assert {"mcp", "skills"} <= set(names)
+    assert {"mcp", "skills", "trace-url"} <= set(names)
 
 
 async def test_startup_warnings_are_sent_as_an_agent_message(make_adapter, workspace, client):

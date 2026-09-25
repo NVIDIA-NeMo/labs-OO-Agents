@@ -389,9 +389,53 @@ class MCPControl(BehaviorControl):
         )
 
 
+class TraceUrlControl(BehaviorControl):
+    """Show the viewer URL of the current trace session."""
+
+    @property
+    def name(self) -> str:
+        return "trace-url"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/trace-url": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if args:
+            return False, "Usage: /trace-url"
+        return True, None
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        """The URL from ``OTLP_ENDPOINT`` without its ``/v1/traces`` or ``/v1`` suffix.
+
+        The trace session is the one ``nooa.tracing`` holds in this context;
+        nooa-coder does not set one per ACP session, so it is the process's
+        default session when tracing was set up.
+        """
+        import os
+        import urllib.parse
+
+        try:
+            from nooa.tracing import get_session
+        except ImportError:
+            return ControlResult.err("Tracing package not installed.")
+        session_name = get_session()
+        if not session_name:
+            return ControlResult.err("No active trace session.")
+        base = os.environ.get("OTLP_ENDPOINT", "http://localhost:5001/v1/traces").rstrip("/")
+        for suffix in ("/v1/traces", "/v1"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        return ControlResult.ok(
+            ControlMessage(f"{base}/traces/view?session_id={urllib.parse.quote(session_name)}")
+        )
+
+
 CONTROL_TYPES = {
     "skills": SkillsControl,
     "mcp": MCPControl,
+    "trace-url": TraceUrlControl,
 }
 
 
@@ -414,6 +458,7 @@ def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_regis
                 argument_hint={
                     "skills": "<list|commands|add DIR|activate ID|deactivate ID>",
                     "mcp": "[status|approve NAME [CODE]|revoke NAME]",
+                    "trace-url": "",
                 }[control.name],
                 output_to_agent=False,
                 is_control=True,

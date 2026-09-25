@@ -270,6 +270,19 @@ async def test_host_controls_answer_as_text(coder_adapter, workspace, client):
     assert "Skills" in client.texts(AgentMessageChunk, session_id)[-1]
 
 
+async def test_trace_url_answers_with_the_viewer_url(coder_adapter, workspace, client, monkeypatch):
+    import nooa.tracing
+
+    monkeypatch.setattr(nooa.tracing, "get_session", lambda: "trace-1")
+    monkeypatch.setenv("OTLP_ENDPOINT", "http://viewer:5001/v1/traces")
+    adapter = await coder_adapter([])
+    session_id = await _new(adapter, workspace)
+    assert (await _prompt(adapter, session_id, "/trace-url")).stop_reason == "end_turn"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == (
+        "http://viewer:5001/traces/view?session_id=trace-1"
+    )
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
