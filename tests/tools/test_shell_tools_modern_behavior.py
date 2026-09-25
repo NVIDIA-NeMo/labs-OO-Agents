@@ -267,3 +267,53 @@ async def test_replace_match_at_eof_preserves_missing_newline(sh, tmp_path):
     match = await sh.read("f.py", (2, 2))
     await sh.replace(match, "b = 20")
     assert (tmp_path / "f.py").read_text() == "a = 1\nb = 20"
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+async def test_run_with_cwd_runs_there_and_leaves_the_shell_directory(sh, tmp_path, absolute):
+    (tmp_path / "sub" / "deeper").mkdir(parents=True)
+    home = sh.cwd
+    target = str((tmp_path / "sub").resolve()) if absolute else "sub"
+    try:
+        r = await sh.run("pwd", cwd=target)
+        assert r.success
+        assert r.stdout == str((tmp_path / "sub").resolve())
+        # A cd inside the scoped command does not move the shell either.
+        r = await sh.run("cd deeper && pwd", cwd=target)
+        assert r.stdout.endswith("deeper")
+        assert sh.cwd == home
+        assert (await sh.run("pwd")).stdout == str(home)
+    finally:
+        await sh.close()
+
+
+async def test_run_with_a_missing_cwd_fails_without_running_the_command(sh, tmp_path):
+    try:
+        r = await sh.run("touch marker; echo ran", cwd="missing")
+        assert not r.success
+        assert "missing" in r.stderr
+        assert "ran" not in r.stdout
+        assert not (tmp_path / "marker").exists()
+        assert (await sh.run("pwd")).stdout == str(sh.cwd)
+    finally:
+        await sh.close()
+
+
+async def test_run_stream_with_cwd_runs_there(sh, tmp_path):
+    (tmp_path / "sub").mkdir()
+    try:
+        events = [event async for event in sh.run_stream("pwd", cwd="sub")]
+        out = "".join(event.text for event in events if event.kind == "stdout")
+        assert out.strip() == str((tmp_path / "sub").resolve())
+        assert events[-1].returncode == 0
+    finally:
+        await sh.close()
+
+
+def test_run_documents_cwd_for_the_model():
+    from nooa.agentdoc import doc
+
+    rendered = doc(ShellTools.run)
+    assert "cwd: str | Path | None = None" in rendered
+    assert "cwd: Directory for this command only" in rendered
+    assert "run(command, stdin=, timeout=, cwd=)" in doc(ShellTools)
