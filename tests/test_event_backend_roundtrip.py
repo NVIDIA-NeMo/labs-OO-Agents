@@ -476,6 +476,42 @@ def test_python_output_none_value_is_preserved(backend):
     assert retrieved.value is None
 
 
+@pytest.mark.parametrize(
+    "value",
+    [None, "text", 3, 2.5, True, [1, "a", None], (1, 2), {"a": [1, {"b": False}]}],
+)
+def test_json_safe_skips_the_probe_for_plain_json_values(monkeypatch, value):
+    """Plain JSON values are returned as they are, without a trial ``to_json`` dump."""
+    import nooa.events as events
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("to_json should not be called for a plain JSON value")
+
+    monkeypatch.setattr(events, "to_json", fail)
+    assert events._json_safe(value) is value
+
+
+def test_json_safe_still_probes_other_values(monkeypatch):
+    """Anything else is still probed: native types pass, unencodable ones fall back."""
+    import asyncio
+    import datetime
+
+    import nooa.events as events
+
+    calls: list[object] = []
+    real = events.to_json
+
+    def counting(value, *args, **kwargs):
+        calls.append(value)
+        return real(value, *args, **kwargs)
+
+    monkeypatch.setattr(events, "to_json", counting)
+    stamp = datetime.datetime(2020, 1, 2)
+    assert events._json_safe(stamp) is stamp
+    assert "CancelledError" in events._json_safe([1, asyncio.CancelledError()])
+    assert len(calls) == 2
+
+
 def test_python_output_rich_diagnostic_roundtrip_preserves_every_channel(backend):
     """Source-aware failures must survive the backend used by resumed sessions."""
     diagnostic = (

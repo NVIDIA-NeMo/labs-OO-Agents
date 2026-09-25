@@ -151,6 +151,39 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     ] = 0
 
 
+_PLAIN_JSON_SCALARS = (str, int, float, bool)
+_PLAIN_JSON_MAX_DEPTH = 32
+_PLAIN_JSON_MAX_ITEMS = 10_000
+
+
+def _is_plain_json(value: Any) -> bool:
+    """True if ``value`` is built only from plain JSON types, checked within fixed bounds.
+
+    Exact types only (a ``str`` subclass or enum still takes the probe), dict
+    keys must be ``str``, and the walk gives up (returns False) past
+    ``_PLAIN_JSON_MAX_DEPTH`` levels or ``_PLAIN_JSON_MAX_ITEMS`` values.
+    """
+    budget = _PLAIN_JSON_MAX_ITEMS
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        budget -= 1
+        if budget < 0 or depth > _PLAIN_JSON_MAX_DEPTH:
+            return False
+        kind = type(item)
+        if item is None or kind in _PLAIN_JSON_SCALARS:
+            continue
+        if kind is dict:
+            if any(type(key) is not str for key in item):
+                return False
+            stack.extend((child, depth + 1) for child in item.values())
+        elif kind is list or kind is tuple:
+            stack.extend((child, depth + 1) for child in item)
+        else:
+            return False
+    return True
+
+
 def _json_safe(value: Any) -> Any:
     """Return ``value`` if pydantic-core can JSON-encode it, else a bounded ``pformat`` string.
 
@@ -161,9 +194,10 @@ def _json_safe(value: Any) -> Any:
     pydantic-native types (datetime, UUID, Decimal, set, ...) still round-trip
     structurally; only genuinely un-encodable objects fall back to ``pformat``,
     bounded by ``FormatConfig`` defaults since this hook cannot reach the live
-    ``TruncationConfig``.
+    ``TruncationConfig``. Plain JSON values skip the probe, so the common case
+    is not dumped twice.
     """
-    if value is None:
+    if _is_plain_json(value):
         return value
     try:
         to_json(value)
