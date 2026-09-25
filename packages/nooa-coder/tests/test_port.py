@@ -15,7 +15,7 @@ from coder_test_agents import (
     until,
     wait_on,
 )
-from nooa_coder.session.items import ChildRef, TaskResult
+from nooa_coder.session.items import ChildFailedError, ChildRef, ChildResult, TaskResult
 from nooa_coder.session.port import SessionPort, current_port, install_port
 from nooa_coder.session.registry import SessionRegistry
 from nooa_coder.session.store import SessionStore
@@ -426,3 +426,71 @@ async def test_closed_children_are_on_disk_everywhere(registry, root_options, mo
     [ref] = root.agent.session.children()
     assert ref.status == "on_disk" == registry.children(root.id)[0].status
     assert registry._ref_from_disk(info.id).status == "on_disk"
+
+
+# ---- ownership: only the parent acts on its child ------------------------
+
+
+async def _two_roots_and_a_child(registry, root_options):
+    root = await registry.create(root_options)
+    other = await registry.create(root_options.model_copy(update={"name": "other"}))
+    child = await registry.create(root.options.inherit(name="kid", retain=True), parent_id=root.id)
+    return root, other, child
+
+
+async def test_a_session_cannot_act_on_another_sessions_live_child(registry, root_options):
+    root, other, child = await _two_roots_and_a_child(registry, root_options)
+    port = other.agent.session
+    with pytest.raises(ChildFailedError, match="not a child"):
+        await port.send_child(child.id, "hijack", channel="user_messages")
+    with pytest.raises(ChildFailedError, match="not a child"):
+        await port.steer_child(child.id, "hijack")
+    with pytest.raises(ChildFailedError, match="not a child"):
+        await port.wait_child(child.id)
+    with pytest.raises(ChildFailedError, match="not a child"):
+        port.child_info(child.id)
+    with pytest.raises(ChildFailedError, match="not a child"):
+        await port.close_child(child.id)
+    assert registry.get(child.id) is child
+    assert registry.store.load_rows(child.id, frozenset({"ItemAdmitted"})) == []
+    assert registry._waiters == {}
+    # The real parent still can.
+    assert root.agent.session.child_info(child.id).id == child.id
+    await root.agent.session.close_child(child.id)
+    assert registry.get(child.id) is None
+
+
+async def test_a_wrong_owner_cannot_take_the_parents_queued_result(registry, root_options):
+    root, other, child = await _two_roots_and_a_child(registry, root_options)
+    ref = registry.child_ref(child)
+    registry._put(root, child.id, ChildResult(child=ref, done=Done(explanation="for root")), "t")
+    with pytest.raises(ChildFailedError, match="not a child"):
+        registry.take_queued_result(other, child.id)
+    assert list(registry._queued) == [(root.id, child.id)]
+    assert root.agent.queue_manager.get_channel("delegates").qsize() == 1
+    assert await root.agent.session.wait_child(child.id) == Done(explanation="for root")
+
+
+async def test_waiters_are_per_parent(registry, root_options):
+    root, other, child = await _two_roots_and_a_child(registry, root_options)
+    with pytest.raises(ChildFailedError, match="not a child"):
+        registry.waiter(other, child.id)
+    waiter = registry.waiter(root, child.id)
+    assert registry._waiters == {(root.id, child.id): waiter}
+
+
+async def test_a_child_ref_is_bound_to_its_parent(registry, root_options):
+    root, other, child = await _two_roots_and_a_child(registry, root_options)
+    ref = registry.child_ref(child)
+    assert ref.parent_id == root.id
+    [listed] = root.agent.session.children()
+    assert listed.parent_id == root.id
+    token = current_port.set(other.agent.session)
+    try:
+        with pytest.raises(ChildFailedError, match="belongs to"):
+            await ref.send("hijack")
+        with pytest.raises(ChildFailedError, match="belongs to"):
+            await ref.close()
+    finally:
+        current_port.reset(token)
+    assert registry.get(child.id) is child

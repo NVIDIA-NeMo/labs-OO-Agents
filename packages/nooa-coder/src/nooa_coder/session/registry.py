@@ -38,7 +38,12 @@ from nooa_coder.session.loader import AgentFactory, default_agent_factory, load_
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.port import install_port
 from nooa_coder.session.session import Session, SessionClosedError
-from nooa_coder.session.store import SessionHandle, SessionNotFoundError, SessionStore
+from nooa_coder.session.store import (
+    InvalidSessionIdError,
+    SessionHandle,
+    SessionNotFoundError,
+    SessionStore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +91,10 @@ class SessionRegistry:
         self.sessions: dict[str, Session] = {}
         self._reserved: dict[str, asyncio.Future[Session | None]] = {}
         self._agent_factory: AgentFactory = agent_factory or default_agent_factory
-        # Parent-side delivery state, by child id.
-        self._waiters: dict[str, asyncio.Future[Done]] = {}
-        self._queued: dict[str, list[tuple[Receipt, ChildResult | ChildFailed]]] = {}
+        # Parent-side delivery state, by (parent id, child id): only the
+        # child's own parent can wait for or take its results.
+        self._waiters: dict[tuple[str, str], asyncio.Future[Done]] = {}
+        self._queued: dict[tuple[str, str], list[tuple[Receipt, ChildResult | ChildFailed]]] = {}
         self._background: set[asyncio.Task[None]] = set()
 
     # ---- create ------------------------------------------------------
@@ -242,7 +248,9 @@ class SessionRegistry:
             return
         if self.sessions.get(session.id) is session:
             del self.sessions[session.id]
-        waiter = self._waiters.pop(session.id, None)
+        if session.parent_id is None:
+            return
+        waiter = self._waiters.pop((session.parent_id, session.id), None)
         if waiter is not None and not waiter.done():
             waiter.set_exception(ChildFailedError(f"Child {session.name!r} was closed"))
 
@@ -251,8 +259,29 @@ class SessionRegistry:
     def child_ref(self, child: Session) -> ChildRef:
         """A data handle on a live child."""
         return ChildRef(
-            id=child.id, name=child.name or "", depth=child.depth, status=_live_status(child)
+            id=child.id,
+            name=child.name or "",
+            depth=child.depth,
+            status=_live_status(child),
+            parent_id=child.parent_id,
         )
+
+    def check_owner(self, parent: Session, child_id: str) -> None:
+        """Raise ``ChildFailedError`` unless ``child_id`` is a child of ``parent``.
+
+        The child's recorded parent decides, for a live child and one on
+        disk alike: holding a child's id is not enough to act on it.
+        """
+        live = self.sessions.get(child_id)
+        if live is not None:
+            owner = live.parent_id
+        else:
+            try:
+                owner = self.store.get(child_id).parent_id
+            except (SessionNotFoundError, InvalidSessionIdError) as exc:
+                raise ChildFailedError(f"Child {child_id!r} does not exist") from exc
+        if owner != parent.id:
+            raise ChildFailedError(f"Session {child_id!r} is not a child of {parent.id!r}")
 
     def _deliver(self, child: Session, update: SessionEvent) -> None:
         """Route a child's turn result to its live parent (a detached child keeps its own)."""
@@ -270,7 +299,7 @@ class SessionRegistry:
             return
         ref = self.child_ref(child)
         source = f"child:{child.name or child.id}"
-        waiter = self._waiters.pop(child.id, None)
+        waiter = self._waiters.pop((parent.id, child.id), None)
         if waiter is not None and waiter.done():
             waiter = None
         if kind == "done":
@@ -316,14 +345,17 @@ class SessionRegistry:
         self, parent: Session, child_id: str, item: ChildResult | ChildFailed, source: str
     ) -> None:
         receipt = parent._admit(item, channel="delegates", source=source)
-        self._queued.setdefault(child_id, []).append((receipt, item))
+        self._queued.setdefault((parent.id, child_id), []).append((receipt, item))
 
     def take_queued_result(self, parent: Session, child_id: str) -> Done | None:
         """Withdraw a result of this child still queued for the parent, and return it.
 
-        Raises ``ChildFailedError`` for a queued failure.
+        Raises ``ChildFailedError`` for a queued failure, or when ``child_id``
+        is not a child of ``parent``.
         """
-        queued = self._queued.get(child_id, [])
+        self.check_owner(parent, child_id)
+        key = (parent.id, child_id)
+        queued = self._queued.get(key, [])
         while queued:
             receipt, item = queued.pop(0)
             if parent.withdraw(receipt):
@@ -332,18 +364,26 @@ class SessionRegistry:
                 return item.done
         return None
 
-    def waiter(self, child_id: str) -> asyncio.Future[Done]:
-        """The future the next ``Done`` of this child resolves (instead of a delegates item)."""
-        waiter = self._waiters.get(child_id)
+    def waiter(self, parent: Session, child_id: str) -> asyncio.Future[Done]:
+        """The future the next ``Done`` of this child of ``parent`` resolves.
+
+        It takes the place of a delegates item.
+
+        Raises ``ChildFailedError`` when ``child_id`` is not a child of ``parent``.
+        """
+        self.check_owner(parent, child_id)
+        key = (parent.id, child_id)
+        waiter = self._waiters.get(key)
         if waiter is None or waiter.done():
             waiter = asyncio.get_running_loop().create_future()
-            self._waiters[child_id] = waiter
+            self._waiters[key] = waiter
         return waiter
 
     def drop_waiter(self, parent: Session, child_id: str, waiter: asyncio.Future[Done]) -> None:
         """Forget a ``wait()`` that was cancelled; a result it already holds goes to delegates."""
-        if self._waiters.get(child_id) is waiter:
-            del self._waiters[child_id]
+        key = (parent.id, child_id)
+        if self._waiters.get(key) is waiter:
+            del self._waiters[key]
         if not waiter.done() or waiter.cancelled() or parent._closed:
             return
         child = self.sessions.get(child_id)
@@ -359,19 +399,24 @@ class SessionRegistry:
 
     def _ref_from_disk(self, child_id: str) -> ChildRef:
         info = self.store.get(child_id)
-        return ChildRef(id=info.id, name=info.name or "", depth=info.depth, status="on_disk")
+        return ChildRef(
+            id=info.id,
+            name=info.name or "",
+            depth=info.depth,
+            status="on_disk",
+            parent_id=info.parent_id,
+        )
 
     async def open_child(self, parent: Session, child_id: str) -> Session:
-        """A child of ``parent``: the live one, or loaded from disk with inherited options."""
+        """A child of ``parent``: the live one, or loaded from disk with inherited options.
+
+        Raises ``ChildFailedError`` when ``child_id`` is not a child of ``parent``.
+        """
+        self.check_owner(parent, child_id)
         live = self.sessions.get(child_id)
         if live is not None:
             return live
-        try:
-            info = self.store.get(child_id)
-        except SessionNotFoundError as exc:
-            raise ChildFailedError(f"Child {child_id!r} does not exist") from exc
-        if info.parent_id != parent.id:
-            raise ChildFailedError(f"Session {child_id!r} is not a child of {parent.id!r}")
+        info = self.store.get(child_id)
         # The record gives the child's own options; the parent passes on
         # what it does not record (mode, depth cap) and a client it shares.
         shared_llm = parent.options.llm if (info.model or None) == parent.options.model else None
@@ -582,6 +627,11 @@ class SessionRegistry:
         session = self.sessions.get(session_id)
         if session is not None:
             await session.close()
+
+    async def close_child(self, parent: Session, child_id: str) -> None:
+        """Close ``parent``'s child; ``ChildFailedError`` if it is not ``parent``'s."""
+        self.check_owner(parent, child_id)
+        await self.close(child_id)
 
     async def _close_children(self, parent_id: str) -> None:
         for child in [s for s in self.sessions.values() if s.parent_id == parent_id]:
