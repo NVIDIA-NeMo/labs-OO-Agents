@@ -247,6 +247,23 @@ def _role_from_argv(argv: list[str]) -> tuple[bool, int | None, int | None]:
     return "--single-process" in argv, value("--worker-fd"), value("--id-base")
 
 
+def llm_config_summary() -> str:
+    """One line naming the LLM configuration files in force, for the start-up log.
+
+    Answers "where is it loading the model configuration from?" without a
+    debugger: the layered chain (bundled, user, project, then the
+    ``NEMO_OO_LLM_CONFIG`` paths, highest priority last) and whether the
+    environment variable is set.
+    """
+    from nooa.llm_config import llm_config_chain
+
+    paths = [str(path) for path in llm_config_chain()]
+    listed = ", ".join(paths) if paths else "none found"
+    env = os.environ.get("NEMO_OO_LLM_CONFIG")
+    source = f"NEMO_OO_LLM_CONFIG={env}" if env else "NEMO_OO_LLM_CONFIG not set"
+    return f"LLM configuration (lowest priority first): {listed}; {source}"
+
+
 def _run_router(
     *, sessions_dir: Path | None, tee: Path | None, acp_stdin: int, acp_stdout: int
 ) -> None:
@@ -289,12 +306,15 @@ def _run_worker(
 ) -> None:
     # --tee and NOOA_ACP_MCP_TRACE are ignored here: the router records the
     # client's side.
+    import logging
+
     from nooa_coder.acp.server import CoderACPAgent
     from nooa_coder.acp.worker import run_worker
     from nooa_coder.session.registry import SessionRegistry
     from nooa_coder.session.store import SessionStore
 
     _configure_logging(f"nooa-coder worker {id_base >> 32}")
+    logging.getLogger("nooa_coder.acp").info(llm_config_summary())
 
     def new_registry(store: SessionStore) -> SessionRegistry:
         return SessionRegistry(store, agent_factory=agent_factory, llm_factory=llm_factory)
