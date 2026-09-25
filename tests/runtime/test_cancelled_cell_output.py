@@ -68,3 +68,44 @@ async def test_completed_cell_is_not_marked_cancelled(test_agent):
     result = await test_agent.runtime.execute_code("print('hi')", validate=False)
     assert result.cancelled is False
     assert result.success is True
+
+
+_OUTER_CELL = """\
+print("outer before inner")
+await runtime.execute_code(
+    inner_code,
+    wrap_in_function=True,
+    validate=False,
+    builtins={"started": started, "blocker": blocker},
+)
+"""
+
+
+@pytest.mark.asyncio
+async def test_nested_cancel_keeps_the_innermost_partial_result(test_agent):
+    """One CancelledError passes through both frames; the inner cell's output wins."""
+    started = asyncio.Event()
+    blocker = asyncio.Event()
+    task = asyncio.create_task(
+        test_agent.runtime.execute_code(
+            _OUTER_CELL,
+            wrap_in_function=True,
+            validate=False,
+            builtins={
+                "runtime": test_agent.runtime,
+                "inner_code": _CELL,
+                "started": started,
+                "blocker": blocker,
+            },
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await task
+
+    partial = excinfo.value.execution_result
+    assert "before cancel" in partial.stdout
+    assert "warning before cancel" in partial.stderr
+    assert "outer before inner" not in partial.stdout

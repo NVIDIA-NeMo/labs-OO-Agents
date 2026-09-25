@@ -1819,8 +1819,13 @@ class ActorRuntime:
             # a partial result from the buffers captured so far and attach it to
             # the exception, so the strategy can show the model what ran. The
             # buffers are still open here (they close in the finally below). The
-            # cancellation itself is re-raised unchanged.
-            if stdout_buffer is not None and stderr_buffer is not None:
+            # cancellation itself is re-raised unchanged. Nested execute_code calls
+            # see the same exception; the innermost cell sets it first and keeps it.
+            if (
+                stdout_buffer is not None
+                and stderr_buffer is not None
+                and getattr(error, "execution_result", None) is None
+            ):
                 error.execution_result = ExecutionResult(  # type: ignore[attr-defined]
                     stdout=stdout_buffer.getvalue(),
                     stderr=stderr_buffer.getvalue(),
