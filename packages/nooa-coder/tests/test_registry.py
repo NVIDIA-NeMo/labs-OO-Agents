@@ -438,6 +438,45 @@ async def test_set_model_keeps_a_client_a_child_still_uses(root_options, session
     assert old.closed and new.closed
 
 
+@pytest.mark.parametrize("error", [RuntimeError("aclose failed"), asyncio.CancelledError()])
+async def test_the_owned_client_closes_when_the_agent_close_fails(
+    root_options, sessions_dir, monkeypatch, error
+):
+    factory = ModelFactory()
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
+
+    async def broken_aclose():
+        raise error
+
+    # Agent.aclose() awaits the event manager's aclose(), which can raise.
+    monkeypatch.setattr(root.agent.event_manager, "aclose", broken_aclose)
+    await asyncio.wait_for(registry.close(root.id), TIMEOUT)
+    [llm] = factory.made
+    assert llm.closed
+    assert root.handle._closed and root.info.status == "closed"
+    assert registry.get(root.id) is None
+
+
+async def test_a_failing_handle_close_still_closes_the_session(registry, root_options):
+    root = await registry.create(root_options)
+    real_close = root.handle.close
+    closed = []
+    root.subscribe(lambda e: closed.append(e) if e.kind == "closed" else None)
+
+    def broken_close():
+        raise sqlite3.OperationalError("database is locked")
+
+    root.handle.close = broken_close
+    try:
+        await asyncio.wait_for(registry.close(root.id), TIMEOUT)
+        await asyncio.wait_for(root.close(), TIMEOUT)  # idempotent: no cached error
+        assert len(closed) == 1 and root.info.status == "closed"
+        assert registry.get(root.id) is None
+    finally:
+        real_close()
+
+
 async def test_set_model_needs_an_llm_factory(registry, root_options):
     root = await registry.create(root_options)
     with pytest.raises(RuntimeError, match="llm_factory"):
