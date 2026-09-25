@@ -346,7 +346,12 @@ async def test_a_result_for_a_cancelled_wait_arrives_on_delegates(registry, root
     assert registry._waiters == {}
     block.set()
     await until(lambda: len(ended) == 2)
-    assert ended[1].outcome == {"explanation": "ChildResult: kid done", "result": None}
+    assert ended[1].outcome == {
+        "explanation": "ChildResult: kid done",
+        "result": None,
+        "message": None,
+        "evidence": [],
+    }
 
 
 async def test_a_child_cancelled_during_wait_fails_the_wait(registry, root_options, models):
