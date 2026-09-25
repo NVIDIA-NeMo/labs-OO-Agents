@@ -32,7 +32,7 @@ def _cell(code: str) -> LLMResponse:
         tool_calls=[
             ToolCall(
                 id=f"call_{uuid.uuid4().hex[:8]}",
-                name="execute_python",
+                name="python_cell",
                 arguments=json.dumps({"code": code}),
             )
         ],

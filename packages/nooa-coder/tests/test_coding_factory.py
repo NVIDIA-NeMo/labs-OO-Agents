@@ -5,7 +5,7 @@
 import asyncio
 
 import pytest
-from coder_test_agents import CODER_SPEC, ModelFactory, cell
+from coder_test_agents import CODER_SPEC, CellLLM, ModelFactory, cell
 from nooa_coder.coding.agent import CodingAgent
 from nooa_coder.coding.factory import create_session_agent, default_llm_factory
 from nooa_coder.session.options import SessionOptions
@@ -255,14 +255,13 @@ def test_legacy_coding_agent_specs_load_the_moved_class(spec):
 async def test_a_child_with_another_model_gets_its_own_client(workspace, sessions_dir):
     models = ModelFactory({"other": [[cell(CHILD_RESULT)]]})
     registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=models)
-    parent_llm = FakeLLMClient(
+    parent_llm = CellLLM(
         [
             cell(
                 "done = await self.delegate('Other', 'use the other model', model='other')\n"
                 "return_result(Done(explanation=done.result.report))"
             )
-        ],
-        strict_exhaustion=True,
+        ]
     )
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=parent_llm))
