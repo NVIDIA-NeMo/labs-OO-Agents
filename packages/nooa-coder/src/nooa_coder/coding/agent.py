@@ -72,10 +72,9 @@ class CodingAgent(InteractiveAgent):
 
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
-    tools for definitions and references, and todos for multi-step work. The
-    shell's directory is the working directory: ``cd`` moves both
-    ``self.shell`` and ``self.repo``, and relative paths resolve against it.
-    The repository root is the boundary for repo searches and result paths.
+    tools for definitions and references, and todos for multi-step work.
+    ``cd`` moves ``self.shell`` and ``self.repo`` together; the repository
+    root bounds repo searches.
 
     Delegate bounded, context-heavy work (exploration, diagnosis, review, an
     independently verifiable change) to a child session with its own history:
