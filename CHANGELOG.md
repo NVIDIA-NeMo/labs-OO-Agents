@@ -7,10 +7,10 @@ to follow semantic versioning.
 ## [Unreleased]
 
 - Groundwork for the session tree design, in shared code:
-  - A cancelled CodeAct cell is now recorded for the model: its
-    `ToolCallEvent` closes with the new `ResultStatus.CANCELLED` and a
-    `PythonOutput` with that status carries the stdout and stderr produced
-    before the cancel. `execute_code` attaches the partial
+  - A cancelled CodeAct cell is now recorded for the model: an appended
+    `PythonOutput` with the new `ResultStatus.CANCELLED` carries the stdout
+    and stderr produced before the cancel. The cell's `ToolCallEvent` is
+    left as it was written. `execute_code` attaches the partial
     `ExecutionResult` (new `cancelled` flag) to the re-raised
     `CancelledError` as `execution_result`. The ACP bridge still shows
     the cell as "Cancelled".
