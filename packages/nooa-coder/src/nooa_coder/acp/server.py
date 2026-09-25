@@ -18,7 +18,7 @@ import os
 import re
 import signal
 from collections.abc import Callable, Iterable
-from contextlib import suppress
+from contextlib import AbstractContextManager, nullcontext, suppress
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -346,6 +346,7 @@ class CoderACPAgent:
         attached: list[ACPEventBridge] = []
 
         async def prepare(session: Session) -> None:
+            _trace_as(session)
             attached.append(self._attach(session))
             warnings.extend(await self._prepare_agent(session, mcp_servers))
 
@@ -392,6 +393,7 @@ class CoderACPAgent:
         attached: list[ACPEventBridge] = []
 
         async def prepare(session: Session) -> None:
+            _trace_as(session)
             bridge = self._attach(session)
             attached.append(bridge)
             self._replay(bridge, session)
@@ -731,7 +733,8 @@ class CoderACPAgent:
                 return None
             return await self._say(bridge, message)
         try:
-            result = await session.invoke_command(name, raw_args)
+            with _trace_scope(session):
+                result = await session.invoke_command(name, raw_args)
         except CoercionError as exc:
             message = f"/{name}: {exc.message}"
             if exc.hint:
@@ -1068,6 +1071,30 @@ class CoderACPAgent:
                 {"cwd": cwd, "reason": "cwd must be an existing absolute directory"}
             )
         return root.resolve()
+
+
+def _trace_as(session: Session) -> None:
+    """Make the ACP session id the trace session of the session's turns.
+
+    Turns run in the session's own loop context, so the id is set there by
+    a loop hook, and also in the calling request's context. A subagent's
+    session has no hook and so no trace session of its own yet.
+    """
+    try:
+        from nooa.tracing import set_session
+    except ImportError:
+        return
+    session.add_loop_context_hook(lambda: set_session(session.id))
+    set_session(session.id)
+
+
+def _trace_scope(session: Session) -> AbstractContextManager[object]:
+    """The session's trace session for a command run in a request's context."""
+    try:
+        from nooa.tracing import session_scope
+    except ImportError:
+        return nullcontext()
+    return session_scope(session.id)
 
 
 def _slash_invocation(text: str) -> tuple[str, str] | None:
