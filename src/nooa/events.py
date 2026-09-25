@@ -151,6 +151,64 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     ] = 0
 
 
+_PLAIN_JSON_SCALARS = (str, int, float, bool)
+_PLAIN_JSON_MAX_DEPTH = 32
+_PLAIN_JSON_MAX_ITEMS = 10_000
+
+
+def _is_plain_json(value: Any) -> bool:
+    """True if ``value`` is built only from plain JSON types, checked within fixed bounds.
+
+    Exact types only (a ``str`` subclass or enum still takes the probe), dict
+    keys must be ``str``, and the walk gives up (returns False) past
+    ``_PLAIN_JSON_MAX_DEPTH`` levels or ``_PLAIN_JSON_MAX_ITEMS`` values.
+    """
+    budget = _PLAIN_JSON_MAX_ITEMS
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        budget -= 1
+        if budget < 0 or depth > _PLAIN_JSON_MAX_DEPTH:
+            return False
+        kind = type(item)
+        if item is None or kind in _PLAIN_JSON_SCALARS:
+            continue
+        if kind is dict:
+            if any(type(key) is not str for key in item):
+                return False
+            stack.extend((child, depth + 1) for child in item.values())
+        elif kind is list or kind is tuple:
+            stack.extend((child, depth + 1) for child in item)
+        else:
+            return False
+    return True
+
+
+def _json_safe(value: Any) -> Any:
+    """Return ``value`` if pydantic-core can JSON-encode it, else a bounded ``pformat`` string.
+
+    Used by ``Any``-typed event fields (``PythonOutput.value``,
+    ``Notification.value``) so ``model_dump_json()`` (the SQLite event store)
+    never raises ``PydanticSerializationError`` on an arbitrary object such as a
+    coroutine, a lock or a user class. ``to_json`` is probed first so
+    pydantic-native types (datetime, UUID, Decimal, set, ...) still round-trip
+    structurally; only genuinely un-encodable objects fall back to ``pformat``,
+    bounded by ``FormatConfig`` defaults since this hook cannot reach the live
+    ``TruncationConfig``. Plain JSON values skip the probe, so the common case
+    is not dumped twice.
+    """
+    if _is_plain_json(value):
+        return value
+    try:
+        to_json(value)
+    except (PydanticSerializationError, TypeError, ValueError):
+        from nooa.agentdoc import pformat
+        from nooa.config.truncation_config import FormatConfig
+
+        return pformat(value, **FormatConfig().model_dump())
+    return value
+
+
 class PythonOutput(EventBase):  # type: ignore[misc]
     """Output from execute_python - appears as user message in events.
 
@@ -164,7 +222,7 @@ class PythonOutput(EventBase):  # type: ignore[misc]
     tool_call_id: Annotated[str, Field(description="ID of the tool call that produced this output")]
     execution_status: Annotated[
         ResultStatus,
-        Field(description="Execution status (ResultStatus.COMPLETE or ResultStatus.ERROR)"),
+        Field(description="Execution status (ResultStatus.COMPLETE, ERROR or CANCELLED)"),
     ]
     execution_count: Annotated[
         int,
@@ -195,27 +253,8 @@ class PythonOutput(EventBase):  # type: ignore[misc]
 
     @field_serializer("value")
     def _serialize_value(self, value: Any, _info: Any) -> Any:
-        """Render values pydantic-core can't JSON-encode as a bounded ``pformat`` string.
-
-        ``value`` is ``Any`` + ``arbitrary_types_allowed``, so a cell can return an
-        object with no pydantic-core JSON serializer (e.g. a ``CancelledError`` from
-        an awaited Task, a coroutine, a lock). ``model_dump_json()`` (the SQLite
-        event store) would then raise ``PydanticSerializationError`` and wedge the
-        turn. We probe with ``to_json`` so pydantic-native types (datetime, UUID,
-        Decimal, set, ...) still round-trip structurally, and only fall back to
-        ``pformat`` — bounded by ``FormatConfig`` defaults, since this hook can't
-        reach the live ``TruncationConfig`` — for genuinely un-encodable objects.
-        """
-        if value is None:
-            return value
-        try:
-            to_json(value)
-        except (PydanticSerializationError, TypeError, ValueError):
-            from nooa.agentdoc import pformat
-            from nooa.config.truncation_config import FormatConfig
-
-            return pformat(value, **FormatConfig().model_dump())
-        return value
+        """See :func:`_json_safe`."""
+        return _json_safe(value)
 
 
 class BeforeTurn(EventBase):  # type: ignore[misc]
@@ -426,7 +465,7 @@ class LLMCallEnd(EventBase):  # type: ignore[misc]
 class Notification(EventBase):  # type: ignore[misc]
     """Generic "something happened" signal rendered into the LLM context.
 
-    Not tied to any specific producer. The framework never emits this
+    Not tied to any specific producer. The core runtime never emits this
     event itself — input channels emit :class:`QueueOutput` on ``put()``
     (see ``runtime/channels.py``). ``Notification`` is a user-emitted
     signal you can ``event_manager.add(...)`` yourself for long-running
@@ -438,7 +477,22 @@ class Notification(EventBase):  # type: ignore[misc]
       ``"timer:daily-cron"``. The outer dispatcher keys off this to
       decide which handler to run next.
     - ``description`` is a free-form string for the LLM; include enough
-      to make the notification self-describing in the event stream.
+      to make the notification self-describing in the event stream. It
+      renders up to 20,000 chars uncut — well above the default event
+      render limit (10,000) so a typical steering message is never cut,
+      but still bounded against an unbounded forwarded payload.
+
+    - ``value`` is an optional data payload for when the signal carries an
+      object the agent will act on, not just text about it. It renders
+      through the default event renderer under its normal limits, and the
+      full object stays reachable as ``event_manager.get(tag).value``.
+
+    Session hosts use this event for steering: a message a person or
+    parent sends while a turn is running is appended as a ``Notification``
+    with ``source="steer:<who>"`` (for example ``"steer:user"`` or
+    ``"steer:parent:<name>"``), the text as ``description`` and, when the
+    sender passed an object rather than text, that object as ``value``, so
+    the model sees it at its next call.
     """
 
     _role: ClassVar[Role] = Role.USER
@@ -447,8 +501,21 @@ class Notification(EventBase):  # type: ignore[misc]
         str, Field(description="Origin of the notification (e.g. 'queue:user_messages')")
     ]
     description: Annotated[
-        str, Field(description="Human-readable description of what happened")
+        str,
+        spec(max_string=20_000),
+        Field(description="Human-readable description"),
     ] = ""
+    value: Annotated[
+        Any,
+        Field(description="Optional data payload; full object via event_manager.get(tag).value"),
+    ] = None
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @field_serializer("value")
+    def _serialize_value(self, value: Any, _info: Any) -> Any:
+        """See :func:`_json_safe`: persist an arbitrary payload without raising."""
+        return _json_safe(value)
 
 
 class Summary(EventBase):  # type: ignore[misc]
@@ -587,13 +654,21 @@ class ExecutionResult(BaseModel):
         default=0,
         description="Number of wrapper lines before user code (for traceback adjustment)",
     )
+    cancelled: bool = Field(
+        default=False,
+        description=(
+            "True for the partial result of a cell interrupted by asyncio cancellation. "
+            "execute_code() re-raises the CancelledError and attaches this result to it "
+            "as ``execution_result``; stdout/stderr hold the output produced before the cancel"
+        ),
+    )
 
     model_config = {"arbitrary_types_allowed": True}
 
     @property
     def success(self) -> bool:
-        """True if execution completed without error."""
-        return self.error is None
+        """True if execution completed without error and was not cancelled."""
+        return self.error is None and not self.cancelled
 
     @property
     def has_return(self) -> bool:

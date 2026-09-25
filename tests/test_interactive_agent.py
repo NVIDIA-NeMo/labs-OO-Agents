@@ -7,19 +7,28 @@ lives with the TUI package, whose BaseTUIAgent subclasses this. These tests
 pin the core contract the ARC-AGI-3 example and other hosts rely on.
 """
 
-import pytest
-from pydantic import ValidationError
+import json
 
+import pytest
+from pydantic import BaseModel, ValidationError
+
+from nooa import hidden, strategy
+from nooa.context_blocks import ToolCallEvent
+from nooa.events import PythonOutput, ResultStatus
 from nooa.interactive import (
     AgentMessage,
     AgentVars,
+    Done,
     InteractiveAgent,
+    NeedInput,
     RespondReason,
     RespondResult,
     SummarizationConfig,
+    Waiting,
     install_summarizer,
 )
-from nooa.unifiedllm import FakeLLMClient
+from nooa.strategies import CodeActStrategy
+from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 
 class _Host(InteractiveAgent, llm=FakeLLMClient()):
@@ -74,6 +83,237 @@ def test_respond_result_requires_explanation():
     assert result.kind is RespondReason.DONE
     with pytest.raises(ValidationError):
         RespondResult(kind=RespondReason.DONE, explanation="   ")
+
+
+def test_turn_results_require_their_text():
+    assert Done(explanation=" finished ").explanation == "finished"
+    assert Waiting(explanation="job ci-42", on=["jobs:ci-42"]).on == ["jobs:ci-42"]
+    assert NeedInput(question="Which branch?", options=["main", "dev"]).options == ["main", "dev"]
+    with pytest.raises(ValidationError):
+        Done(explanation="  ")
+    with pytest.raises(ValidationError):
+        Waiting(explanation="", on=["jobs"])
+    with pytest.raises(ValidationError):
+        Waiting(explanation="waiting", on=[])
+    with pytest.raises(ValidationError):
+        Waiting(explanation="waiting", on=[" "])
+    with pytest.raises(ValidationError):
+        NeedInput(question=" ")
+
+
+def test_done_carries_an_optional_reply_and_evidence():
+    done = Done(explanation="answered", message="  Here is the answer.  ")
+    assert done.message == "Here is the answer."
+    assert Done(explanation="answered", message="   ").message is None
+    assert Done(explanation="answered").message is None
+    first, second = Done(explanation="a"), Done(explanation="b")
+    first.evidence.append("pytest tests/x.py: 24 passed")
+    assert second.evidence == []
+    assert Done(explanation="a", evidence=["ruff: clean"]).evidence == ["ruff: clean"]
+
+
+def test_waiting_carries_an_optional_user_line():
+    waiting = Waiting(message="  Tests are running.  ", explanation="ci", on=["jobs:ci-42"])
+    assert waiting.message == "Tests are running."
+    assert Waiting(message=" ", explanation="ci", on=["jobs:ci-42"]).message is None
+    assert Waiting(explanation="ci", on=["jobs:ci-42"]).message is None
+
+
+def test_need_input_reason_is_optional():
+    assert NeedInput(question="Which branch?").reason is None
+    asked = NeedInput(question="Which branch?", reason="Pushing to the wrong one is hard to undo.")
+    assert asked.reason == "Pushing to the wrong one is hard to undo."
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: RespondResult(kind=RespondReason.DONE, explanation="  "),
+        lambda: Done(explanation=" "),
+        lambda: Waiting(explanation="waiting", on=["jobs", " "]),
+    ],
+)
+def test_blank_text_is_rejected_with_one_message(build):
+    with pytest.raises(ValidationError, match="Value error, must not be blank"):
+        build()
+
+
+def test_need_input_takes_options_or_answer_type_not_both():
+    class HowMany(BaseModel):
+        n: int
+
+    assert NeedInput(question="How many?", answer_type=HowMany).answer_type is HowMany
+    with pytest.raises(ValidationError):
+        NeedInput(question="How many?", options=["1", "2"], answer_type=HowMany)
+    with pytest.raises(ValidationError):
+        NeedInput(question="How many?", answer_type=int)  # type: ignore[arg-type]
+
+
+class _Opaque:
+    """An object pydantic cannot turn into JSON."""
+
+
+def test_done_result_serialises_when_it_holds_an_arbitrary_object():
+    """return_result(result="<name>") puts the live object into the tool-call event."""
+    event = ToolCallEvent(
+        tool_call_id="c1",
+        name="return_result",
+        arguments={"result": Done(explanation="finished", result=_Opaque())},
+    )
+    assert "_Opaque" in event.model_dump_json()
+    assert json.loads(Done(explanation="x", result={"a": 1}).model_dump_json())["result"] == {
+        "a": 1
+    }
+
+
+def test_need_input_answer_type_serialises_as_a_class_name():
+    class HowMany(BaseModel):
+        n: int
+
+    event = ToolCallEvent(
+        tool_call_id="c1",
+        name="return_result",
+        arguments={"result": NeedInput(question="How many?", answer_type=HowMany)},
+    )
+    dumped = json.loads(event.model_dump_json())
+    answer_type = dumped["arguments"]["result"]["answer_type"]
+    assert answer_type == f"{__name__}:{HowMany.__qualname__}"
+    assert json.loads(NeedInput(question="Why?").model_dump_json())["answer_type"] is None
+
+
+def test_need_input_options_must_not_be_empty():
+    assert NeedInput(question="Anything else?").options is None
+    with pytest.raises(ValidationError):
+        NeedInput(question="Which branch?", options=[])
+
+
+def _cell(code: str, call_id: str) -> LLMResponse:
+    return LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[
+            ToolCall(id=call_id, name="execute_python", arguments=json.dumps({"code": code}))
+        ],
+        finish_reason="tool_calls",
+    )
+
+
+def _cell_errors(agent: InteractiveAgent) -> list[str]:
+    return [
+        e.stderr + e.error
+        for e in agent.event_manager.values()
+        if isinstance(e, PythonOutput) and e.execution_status is ResultStatus.ERROR
+    ]
+
+
+_NOTIFICATION = {"user_messages": ["hi"]}
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ('return_result(Done(explanation="finished"))', Done),
+        ('return_result(NeedInput(question="Which branch?"))', NeedInput),
+        ('return_result(Waiting(explanation="waiting for job ci-42", on=["jobs:ci-42"]))', Waiting),
+        (
+            'return_result(RespondResult(kind=RespondReason.DONE, explanation="finished"))',
+            RespondResult,
+        ),
+    ],
+)
+async def test_handle_accepts_each_turn_result(code, expected):
+    agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
+    result = await agent.handle(_NOTIFICATION)
+    assert type(result) is expected
+
+
+async def test_handle_returns_the_reply_in_done():
+    code = 'return_result(Done(message="Here it is.", explanation="answered", evidence=["ran it"]))'
+    agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
+    result = await agent.handle(_NOTIFICATION)
+    assert result == Done(message="Here it is.", explanation="answered", evidence=["ran it"])
+    assert result.message == "Here it is."
+
+
+async def test_handle_returns_the_user_line_in_waiting():
+    code = 'return_result(Waiting(message="Tests are running.", explanation="ci", on=["jobs:ci"]))'
+    agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
+    result = await agent.handle(_NOTIFICATION)
+    assert result == Waiting(message="Tests are running.", explanation="ci", on=["jobs:ci"])
+    assert result.message == "Tests are running."
+
+
+async def test_handle_rejects_other_results():
+    llm = FakeLLMClient(
+        [
+            _cell('return_result("just text")', "c1"),
+            _cell('return_result(Done(explanation="finished"))', "c2"),
+        ]
+    )
+    agent = _Host(llm=llm)
+    assert isinstance(await agent.handle(_NOTIFICATION), Done)
+    [error] = _cell_errors(agent)
+    assert "return_result validation error" in error
+
+
+async def test_handle_batch_rejects_need_input_and_names_allowed_types():
+    llm = FakeLLMClient(
+        [
+            _cell('return_result(NeedInput(question="Which branch?"))', "c1"),
+            _cell('return_result(Done(explanation="blocked: branch not given"))', "c2"),
+        ]
+    )
+    agent = _Host(llm=llm)
+    result = await agent.handle_batch(_NOTIFICATION)
+    assert result == Done(explanation="blocked: branch not given")
+    [error] = _cell_errors(agent)
+    assert "return_result validation error" in error
+    assert "Done | " in error and "Waiting" in error
+    assert "NeedInput" in error  # names what was returned
+
+
+class _NarrowHost(InteractiveAgent, llm=FakeLLMClient()):
+    """Host whose turns always finish."""
+
+    @hidden
+    @strategy(CodeActStrategy())
+    async def handle(self, notification: dict[str, list]) -> Done:
+        """Answer the question in one turn; SUBCLASS_HANDLE_DOC."""
+        ...
+
+
+async def test_model_sees_the_subclass_handle_docstring_and_annotation():
+    llm = FakeLLMClient([_cell('return_result(Done(explanation="answered"))', "c1")])
+    agent = _NarrowHost(llm=llm)
+    assert isinstance(await agent.handle(_NOTIFICATION), Done)
+
+    prompt = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert "SUBCLASS_HANDLE_DOC" in prompt
+    assert "Handle one interactive turn." not in prompt
+    [return_tool] = [t for t in llm.calls[0].tools or [] if t.name == "return_result"]
+    assert "Expected return type: Done." in return_tool.description
+
+
+async def test_handle_docs_put_the_reply_in_done_message():
+    llm = FakeLLMClient([_cell('return_result(Done(explanation="finished"))', "c1")])
+    await _Host(llm=llm).handle(_NOTIFICATION)
+
+    prompt = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert "return_result(Done(message=" in prompt
+    assert "exactly one terminal result" in prompt
+    assert "return_result(Waiting(message=" in prompt
+
+
+async def test_model_sees_the_base_handle_batch_annotation():
+    llm = FakeLLMClient([_cell('return_result(Done(explanation="finished"))', "c1")])
+    agent = _Host(llm=llm)
+    await agent.handle_batch(_NOTIFICATION)
+
+    prompt = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert "Handle one unattended turn." in prompt
+    assert "Waiting(message=..., explanation=..., on=[...])" in prompt
+    [return_tool] = [t for t in llm.calls[0].tools or [] if t.name == "return_result"]
+    assert "Expected return type: Done | Waiting." in return_tool.description
 
 
 def test_install_summarizer_none_policy_is_noop(agent):

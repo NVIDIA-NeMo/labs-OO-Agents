@@ -72,6 +72,7 @@ class ResultStatus(StrEnum):
     RUNNING = "running"
     COMPLETE = "complete"
     ERROR = "error"
+    CANCELLED = "cancelled"  # interrupted by asyncio cancellation (e.g. a user cancel)
 
 
 # === Base Event ===

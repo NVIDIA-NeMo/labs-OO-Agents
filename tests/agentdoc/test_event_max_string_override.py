@@ -7,8 +7,12 @@ regardless of the max_string kwarg passed to pformat(). This matches the
 existing behavior of PythonOutput.stdout/stderr.
 """
 
+import pytest
+
 from nooa.agentdoc import pformat
-from nooa.events import LLMResponse, PythonOutput, ResultStatus, Summary, Task
+from nooa.config.truncation_config import TruncationConfig
+from nooa.context_blocks.formatter import XMLBlockFormatter
+from nooa.events import LLMResponse, Notification, PythonOutput, ResultStatus, Summary, Task
 
 LONG_STRING = "x" * 20_000
 MAX_STRING = 100  # Aggressively low to verify the override works
@@ -61,6 +65,40 @@ class TestEventMaxStringOverride:
         rendered = pformat(event, max_string=MAX_STRING)
         assert LONG_STRING in rendered
 
+    def test_notification_description_not_truncated_up_to_its_own_cap(self):
+        """Notification.description carries steering text — uncut up to its 20,000-char cap."""
+        event = Notification(source="steer:user", description=LONG_STRING)
+        rendered = pformat(event, max_string=MAX_STRING)
+        assert LONG_STRING in rendered
+
+    def test_notification_description_truncated_past_its_own_cap(self):
+        """Past 20,000 chars, description is bounded rather than rendering an unbounded payload."""
+        text = "x" * 20_001
+        event = Notification(source="steer:user", description=text)
+        rendered = pformat(event, max_string=MAX_STRING)
+        assert text not in rendered
+        assert "str(len=20001" in rendered
+
+    @pytest.mark.parametrize("length", [10_000, 20_000])
+    def test_notification_description_uncut_through_event_formatter(self, length: int):
+        """A steer up to the 20,000-char cap renders whole through the formatter the
+        prompt builder uses — above the default ``event_format.max_string`` (10,000),
+        which is what truncated the description before it had its own spec.
+        """
+        text = "s" * length
+        event = Notification(source="steer:user", description=text)
+        rendered = XMLBlockFormatter().format_event(event, TruncationConfig().event_format)
+        assert text in rendered
+        assert "str(len=" not in rendered
+
+    def test_notification_description_truncated_through_event_formatter_past_its_cap(self):
+        """A steer past the 20,000-char cap is bounded, not rendered in full."""
+        text = "s" * 20_001
+        event = Notification(source="steer:user", description=text)
+        rendered = XMLBlockFormatter().format_event(event, TruncationConfig().event_format)
+        assert text not in rendered
+        assert "str(len=20001" in rendered
+
 
 class TestOtherFieldsStillTruncated:
     """Fields without spec(max_string=None) should still respect the limit."""
@@ -75,3 +113,34 @@ class TestOtherFieldsStillTruncated:
         rendered = pformat(event, max_string=MAX_STRING)
         # doc field should be truncated — full string should NOT appear
         assert LONG_STRING not in rendered
+
+
+class TestNotificationValue:
+    def test_value_renders_with_default_limits_and_stays_reachable(self):
+        """Notification.value is an object payload: the default renderer shows it
+        like any other field, and the full object stays on the event."""
+        from nooa.agentdoc import pformat
+
+        payload = {"kind": "review-request", "files": ["a.py", "b.py"]}
+        event = Notification(
+            source="steer:parent:reviewer", description="Review these files", value=payload
+        )
+        rendered = pformat(event)
+        assert "Review these files" in rendered
+        assert "review-request" in rendered  # rendered like any other field
+        assert event.value is payload
+
+    def test_value_defaults_to_none(self):
+        assert Notification(source="steer:user", description="hi").value is None
+
+    def test_value_persists_when_not_json_encodable(self):
+        """The SQLite store calls model_dump_json(); an arbitrary object must not raise."""
+
+        class Opaque:
+            def __repr__(self) -> str:
+                return "Opaque<42>"
+
+        event = Notification(source="steer:user", description="carry this", value=Opaque())
+        dumped = event.model_dump_json()
+        assert "Opaque<42>" in dumped
+        assert event.value.__class__ is Opaque  # the live object is untouched
