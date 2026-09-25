@@ -427,6 +427,48 @@ class SessionStore:
         sessions.sort(key=lambda info: info.last_active, reverse=True)
         return sessions if limit is None else sessions[:limit]
 
+    def snapshot_ids(self, session_id: str) -> list[str]:
+        """Snapshot ids newest first, reading past a damaged table tail.
+
+        The ordered query needs the whole index; when the file is damaged it
+        fails, and the rows are then probed one by one by rowid, so the
+        snapshots that are still readable are found.
+        """
+        path = self.path_for(session_id)
+        try:
+            connection = _connect_read_only(path)
+        except sqlite3.Error:
+            return []
+        try:
+            try:
+                rows = connection.execute(
+                    "SELECT snapshot_id FROM snapshots ORDER BY created_at DESC"
+                ).fetchall()
+                return [str(row[0]) for row in rows]
+            except sqlite3.DatabaseError:
+                pass
+            found: list[tuple[str, str]] = []
+            misses = 0
+            rowid = 0
+            while misses < 50:
+                rowid += 1
+                try:
+                    row = connection.execute(
+                        "SELECT snapshot_id, created_at FROM snapshots WHERE rowid = ?", (rowid,)
+                    ).fetchone()
+                except sqlite3.DatabaseError:
+                    misses += 1
+                    continue
+                if row is None:
+                    misses += 1
+                    continue
+                misses = 0
+                found.append((str(row[1]), str(row[0])))
+            found.sort(reverse=True)
+            return [snapshot_id for _created, snapshot_id in found]
+        finally:
+            connection.close()
+
     def load_rows(
         self, session_id: str, event_types: frozenset[str] | None = None
     ) -> list[tuple[str, dict[str, object]]]:

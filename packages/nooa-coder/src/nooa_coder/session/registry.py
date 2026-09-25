@@ -9,6 +9,7 @@ never by an agent; an agent reaches the registry only through its port.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import logging
 import uuid
@@ -259,17 +260,48 @@ class SessionRegistry:
                     after_restore()
         except Exception as exc:
             logger.warning(
-                "Session %s: could not restore its saved state; going on from an empty state",
-                handle.id,
-                exc_info=True,
+                "Session %s: could not restore its latest saved state", handle.id, exc_info=True
             )
-            handle.events.add(SnapshotRestoreFailed(error=f"{type(exc).__name__}: {exc}"))
+            agent, restored, note = await self._restore_older(agent, options, handle, exc)
+            handle.events.add(SnapshotRestoreFailed(error=note))
+        agent.event_manager.add(TuiSessionResumed(session_id=handle.id, restored=restored))
+        return agent
+
+    async def _restore_older(
+        self, agent: Any, options: SessionOptions, handle: SessionHandle, latest_error: Exception
+    ) -> tuple[Any, bool, str]:
+        """Try older snapshots, newest first, on a fresh agent each time.
+
+        A damaged file usually loses its newest pages first, so the snapshot
+        before the latest is often intact. Returns the agent to use, whether
+        anything was restored, and the note for the transcript.
+        """
+        failed = f"{type(latest_error).__name__}: {latest_error}"
+        latest = None
+        with contextlib.suppress(Exception):
+            latest = handle.storage.get_latest_snapshot_id()
+        for snapshot_id in self.store.snapshot_ids(handle.id):
+            if snapshot_id == latest:
+                continue
             await agent.queue_manager.shutdown()
             await agent.aclose()
             agent = contextvars.Context().run(self._agent_factory, options, handle.storage)
-            restored = False
-        agent.event_manager.add(TuiSessionResumed(session_id=handle.id, restored=restored))
-        return agent
+            try:
+                handle.storage.restore_snapshot(snapshot_id, agent)
+            except Exception:
+                logger.warning(
+                    "Session %s: snapshot %s could not be restored either",
+                    handle.id,
+                    snapshot_id,
+                    exc_info=True,
+                )
+                continue
+            logger.warning("Session %s: restored an older snapshot %s", handle.id, snapshot_id)
+            return agent, True, f"{failed}; restored the older snapshot {snapshot_id} instead"
+        await agent.queue_manager.shutdown()
+        await agent.aclose()
+        agent = contextvars.Context().run(self._agent_factory, options, handle.storage)
+        return agent, False, failed
 
     def _discard(
         self,
