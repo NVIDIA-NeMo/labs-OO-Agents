@@ -36,7 +36,7 @@ try:
 except ImportError:
     pass
 
-from nooa import Context, hidden, strategy
+from nooa import hidden, strategy
 from nooa.agentdoc import doc  # noqa: F401 — used by dynamic context expressions
 from nooa.config import CodeActConfig
 from nooa.interactive import Done, NeedInput, Waiting
@@ -44,15 +44,11 @@ from nooa.strategies import CodeActV2
 from nooa_coder.coding.agent import CodingAgent
 
 with hidden:
+    from nooa_coder.coding.agent import _V2_CONTEXT
     from nooa_coder.coding.conditions import require_result
 
-# CodeActV2 replaces the framework context blocks with a concise self doc.
-_V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
-    "state": None,
-    "execution_context": None,
-    "context_usage": None,
-    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
-}
+# The stable agent's context overrides, without the context-usage block.
+_EXPERIMENTAL_CONTEXT: Annotated[dict[str, Any], hidden] = {**_V2_CONTEXT, "context_usage": None}
 
 
 class ExperimentalCodingAgent(CodingAgent):
@@ -101,7 +97,7 @@ class ExperimentalCodingAgent(CodingAgent):
     """
 
     @hidden
-    @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
+    @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_EXPERIMENTAL_CONTEXT)
     async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
         """Handle the newest request and anything else that arrived.
 
@@ -120,7 +116,7 @@ class ExperimentalCodingAgent(CodingAgent):
     @hidden
     @strategy(
         CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
-        context=_V2_CONTEXT,
+        context=_EXPERIMENTAL_CONTEXT,
     )
     async def handle_batch(self, notification: dict[str, list[Any]]) -> Done | Waiting:
         """Work on one task unattended and return a structured result.
