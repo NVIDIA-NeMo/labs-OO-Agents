@@ -182,10 +182,7 @@ class Waiting(BaseModel):
     @field_validator("on")
     @classmethod
     def _names_not_blank(cls, value: list[str]) -> list[str]:
-        cleaned = [name.strip() for name in value]
-        if any(not name for name in cleaned):
-            raise ValueError("names in 'on' must not be blank")
-        return cleaned
+        return [_non_blank(name) for name in value]
 
 
 class RespondReason(StrEnum):
@@ -248,13 +245,7 @@ class RespondResult(BaseModel):
         description=("Required: why handle() returned, or what the dispatcher is waiting for."),
     )
 
-    @field_validator("explanation")
-    @classmethod
-    def _explanation_must_not_be_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("explanation is required")
-        return value
+    _check_explanation = field_validator("explanation")(_non_blank)
 
     model_config = {"arbitrary_types_allowed": True}
 

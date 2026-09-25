@@ -124,6 +124,19 @@ def test_need_input_reason_is_optional():
     assert asked.reason == "Pushing to the wrong one is hard to undo."
 
 
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: RespondResult(kind=RespondReason.DONE, explanation="  "),
+        lambda: Done(explanation=" "),
+        lambda: Waiting(explanation="waiting", on=["jobs", " "]),
+    ],
+)
+def test_blank_text_is_rejected_with_one_message(build):
+    with pytest.raises(ValidationError, match="Value error, must not be blank"):
+        build()
+
+
 def test_need_input_takes_options_or_answer_type_not_both():
     class HowMany(BaseModel):
         n: int
