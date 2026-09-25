@@ -31,6 +31,13 @@ class SessionStarted(Metadata):
     retained: bool = False
     turn_method: str = "handle"
     mode: str = "auto"
+    utc_offset: float | None = None
+    """Seconds east of UTC of the writer's local time at creation.
+
+    Event timestamps are naive local times (``EventBase`` uses
+    ``datetime.now()``); the store reads them with this offset, so every
+    reader gets the same epoch whatever its own time zone.
+    """
 
 
 class SessionModeChanged(Metadata):

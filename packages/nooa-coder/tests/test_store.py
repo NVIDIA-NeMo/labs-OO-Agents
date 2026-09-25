@@ -224,3 +224,44 @@ def test_turn_count_counts_admitted_user_messages(sessions_dir):
             )
         session_id = handle.id
     assert store.get(session_id).turn_count == 2
+
+
+@pytest.fixture
+def local_tz(monkeypatch):
+    """Set the process's local time zone; restored after the test."""
+    import time
+
+    def set_tz(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+
+    yield set_tz
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_timestamps_do_not_depend_on_the_readers_time_zone(sessions_dir, local_tz):
+    import time
+
+    from nooa_coder.session import events
+
+    local_tz("America/Los_Angeles")
+    store = SessionStore(sessions_dir)
+    before = time.time()
+    with store.create() as handle:
+        handle.events.add(
+            events.ItemAdmitted(channel="user_messages", item_id="i1", item_json='"hi"', source="u")
+        )
+        session_id = handle.id
+        created = handle.info.created_at
+    after = time.time()
+    assert before - 1 <= created <= after + 1  # the true epoch, as the writer computed it
+
+    info = store.get(session_id)
+    [entry] = store.load_transcript(session_id)
+    local_tz("Asia/Tokyo")
+    moved = store.get(session_id)
+    [moved_entry] = store.load_transcript(session_id)
+    assert info.created_at == moved.created_at == pytest.approx(created, abs=1e-3)
+    assert entry.timestamp == moved_entry.timestamp
+    assert before - 1 <= moved_entry.timestamp <= after + 1

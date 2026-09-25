@@ -10,7 +10,7 @@ import logging
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
@@ -81,6 +81,14 @@ def _int(value: object, *, default: int) -> int:
     if isinstance(value, int):
         return value
     return default
+
+
+def _utc_offset(start: dict[str, object]) -> float | None:
+    """The writer's UTC offset recorded in a session's start event, if any."""
+    value = start.get("utc_offset")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 class InvalidSessionIdError(ValueError):
@@ -254,6 +262,7 @@ class SessionStore:
         if path.exists():
             raise FileExistsError(f"Session {session_id!r} already exists")
 
+        offset = datetime.now().astimezone().utcoffset()
         storage = SQLiteStorageManager(path)
         events = EventManager(backend=storage.event_backend)
         for event_type in SESSION_EVENT_TYPES:
@@ -269,6 +278,7 @@ class SessionStore:
             retained=retained,
             turn_method=turn_method,
             mode=mode,
+            utc_offset=offset.total_seconds() if offset is not None else None,
         )
         try:
             events.add(started)
@@ -358,11 +368,13 @@ class SessionStore:
         steers), each shown once even when a steer was admitted again as a
         message. Questions come from turns that ended with ``NeedInput``.
         """
-        rows = self.load_rows(session_id, _TRANSCRIPT_EVENT_TYPES)
+        rows = self.load_rows(session_id, _TRANSCRIPT_EVENT_TYPES | _START_EVENT_TYPES)
+        start = next((raw for event_type, raw in rows if event_type in _START_EVENT_TYPES), {})
+        offset = _utc_offset(start)
         entries: list[TranscriptEntry] = []
         seen_items: set[str] = set()
         for event_type, raw in rows:
-            timestamp = self._timestamp(raw, fallback=0.0)
+            timestamp = self._timestamp(raw, fallback=0.0, utc_offset=offset)
             if event_type == "ItemAdmitted":
                 item_id = str(raw.get("item_id", ""))
                 if raw.get("channel") not in ("user_messages", "steer") or item_id in seen_items:
@@ -488,12 +500,15 @@ class SessionStore:
         if start is None:
             return None
         start_event_type = str(start_row[0])
-        started_at = self._timestamp(start, fallback=fallback)
+        offset = _utc_offset(start)
+        started_at = self._timestamp(start, fallback=fallback, utc_offset=offset)
         last_active = fallback
         if last_row is not None:
             last = self._decode_data(last_row[0], path)
             if last is not None:
-                last_active = max(last_active, self._timestamp(last, fallback=fallback))
+                last_active = max(
+                    last_active, self._timestamp(last, fallback=fallback, utc_offset=offset)
+                )
 
         mode = str(start.get("mode") or "auto")
         model = str(start.get("model", ""))
@@ -601,15 +616,27 @@ class SessionStore:
         return rows
 
     @staticmethod
-    def _timestamp(raw: dict[str, object], *, fallback: float) -> float:
+    def _timestamp(
+        raw: dict[str, object], *, fallback: float, utc_offset: float | None = None
+    ) -> float:
+        """Epoch seconds of an event's timestamp.
+
+        A naive timestamp is the writer's local time: it is read with the
+        writer's recorded ``utc_offset``, so the result does not depend on
+        the reader's time zone. Files written before the offset was
+        recorded fall back to the reader's local time.
+        """
         value = raw.get("timestamp")
         if isinstance(value, (int, float)):
             return float(value)
         if isinstance(value, str):
             try:
-                return datetime.fromisoformat(value).timestamp()
+                parsed = datetime.fromisoformat(value)
             except ValueError:
-                pass
+                return fallback
+            if parsed.tzinfo is None and utc_offset is not None:
+                parsed = parsed.replace(tzinfo=timezone(timedelta(seconds=utc_offset)))
+            return parsed.timestamp()
         return fallback
 
     @staticmethod
