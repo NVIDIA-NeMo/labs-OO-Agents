@@ -513,3 +513,13 @@ async def test_the_turn_prompt_has_cell_state_and_no_state_dump(tmp_path, method
     assert "<state " not in rendered and "<state>" not in rendered
     # The stable agent keeps the context-usage block; it drives compaction.
     assert "<context_usage" in rendered
+
+
+async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
+    """Stable tool docs sit in the leading system message, not the trailing context."""
+    messages = await _first_call_messages(tmp_path, "handle")
+    assert messages[0]["role"] == "system"
+    assert "<python_cell_tools>" in str(messages[0]["content"])
+    envelope = str(messages[-1]["content"])
+    assert envelope.lstrip().startswith("<context>")
+    assert "<python_cell_tools" not in envelope
