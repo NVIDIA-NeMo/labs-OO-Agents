@@ -1179,7 +1179,8 @@ async def list_sessions(
     ``cwd`` lists that workspace's sessions from ``store_for(cwd)``.
     Without it, every session in the ``known`` stores is listed: sessions
     are stored per workspace and there is no index of every workspace, so
-    the caller passes the stores of the workspaces it has seen.
+    the caller passes the stores of the workspaces it has seen. Before any
+    workspace is named, the server's own working directory is the workspace.
     ``live(session_id)`` returns ``(status,
     title)`` for a session that runs in this process (or, for the router,
     in one of its workers), else ``None``. Sessions held by another
@@ -1202,6 +1203,10 @@ async def list_sessions(
     else:
         # Workspaces sharing one directory give the same store more than once.
         stores = list({store.root.resolve(): store for store in known}.values())
+        if not stores:
+            # Pool 1.0.16 lists without ``cwd`` before it opens any session;
+            # the client starts the server in the directory it works in.
+            stores = [store_for(Path.cwd())]
 
     def scan() -> list[tuple[Any, bool]]:
         # Pure filesystem work, one lock probe per session: off the loop.
