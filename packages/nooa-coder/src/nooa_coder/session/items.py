@@ -272,6 +272,7 @@ class SessionInfo(BaseModel):
     created_at: float = 0.0
     last_active: float = 0.0
     turn_count: int = 0
+    reply_count: int = 0
     usage: Usage = Field(default_factory=Usage)
 
 

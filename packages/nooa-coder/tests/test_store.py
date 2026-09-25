@@ -277,3 +277,15 @@ def test_timestamps_do_not_depend_on_the_readers_time_zone(sessions_dir, local_t
     assert info.created_at == moved.created_at == pytest.approx(created, abs=1e-3)
     assert entry.timestamp == moved_entry.timestamp
     assert before - 1 <= moved_entry.timestamp <= after + 1
+
+
+def test_create_records_the_workspace_as_a_resolved_absolute_path(tmp_path, monkeypatch):
+    from nooa_coder.session.store import SessionStore, sessions_root
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    store = SessionStore(sessions_root(workspace))
+    with store.create(workspace="../ws") as handle:
+        pass
+    assert store.get(handle.id).workspace == str(workspace.resolve())

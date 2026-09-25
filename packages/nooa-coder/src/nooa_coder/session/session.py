@@ -751,6 +751,7 @@ class Session:
                 usage=usage,
             )
         )
+        self.info.reply_count += 1  # as the store counts it
         waiting = self._waiting + consumed
         if kind != "waiting":
             for item_id in waiting:

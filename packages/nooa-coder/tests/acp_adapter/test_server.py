@@ -292,9 +292,10 @@ async def test_list_without_cwd_covers_only_workspaces_this_process_serves(
     """There is no index of every workspace, so a session no request led here is not listed."""
     unseen = tmp_path / "unseen"
     with SessionStore(sessions_root(unseen)).create(workspace=str(unseen)) as handle:
-        from nooa_coder.session.events import SessionUserMessage
+        from nooa_coder.session.events import SessionUserMessage, TurnEnded
 
         handle.events.add(SessionUserMessage(content="hello"))
+        handle.events.add(TurnEnded(outcome_kind="done"))
     models = ScriptedModels()
     adapter = await make_adapter(models)
     served = await _finished_session(adapter, workspace, models)
@@ -414,3 +415,26 @@ async def test_closing_in_order_lets_a_cancellation_through_at_once():
     assert task in done and task.cancelled()
     await asyncio.wait_for(second_started.wait(), 2)
     release.set()
+
+
+async def test_a_session_the_client_never_wrote_to_leaves_no_file(make_adapter, workspace):
+    """Opened and closed again, a session is not worth a file: it would list nothing."""
+    adapter = await make_adapter(ScriptedModels())
+    session_id = (await adapter.new_session(cwd=str(workspace), mcp_servers=[])).session_id
+    path = SessionStore(sessions_root(workspace)).path_for(session_id)
+    assert path.exists()
+    await adapter.close_session(session_id)
+    assert not path.exists()
+
+
+async def test_closing_the_adapter_removes_empty_sessions_and_keeps_used_ones(
+    make_adapter, workspace
+):
+    models = ScriptedModels()
+    adapter = await make_adapter(models)
+    used = await _finished_session(adapter, workspace, models)
+    empty = (await adapter.new_session(cwd=str(workspace), mcp_servers=[])).session_id
+    store = SessionStore(sessions_root(workspace))
+    await adapter.close()
+    assert store.path_for(used).exists()
+    assert not store.path_for(empty).exists()

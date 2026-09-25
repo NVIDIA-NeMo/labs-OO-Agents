@@ -471,6 +471,7 @@ class CoderACPAgent:
             return CloseSessionResponse()
         if session is not None:
             await session.close()
+            _discard_if_empty(session)
         if bridge is not None:
             await bridge.close()
         return CloseSessionResponse()
@@ -562,10 +563,18 @@ class CoderACPAgent:
         await asyncio.gather(*self._background, return_exceptions=True)
         bridges = list(self._bridges.values())
         self._bridges.clear()
+        empty = [
+            session
+            for registry in self._registries.values()
+            for session in registry.sessions.values()
+            if session.parent_id is None and session.info.turn_count == 0
+        ]
         await _close_in_order(
             *(registry.close_all for registry in self._registries.values()),
             *(bridge.close for bridge in bridges),
         )
+        for session in empty:
+            _discard_if_empty(session)
 
     # ---- prompt and cancel ---------------------------------------------
 
@@ -1176,7 +1185,8 @@ async def list_sessions(
 ) -> ListSessionsResponse:
     """Root sessions with at least one message, most recent first.
 
-    ``cwd`` lists that workspace's sessions from ``store_for(cwd)``.
+    Listed: root sessions with a message the agent answered, or a title a
+    person set. ``cwd`` lists that workspace's sessions from ``store_for(cwd)``.
     Without it, every session in the ``known`` stores is listed: sessions
     are stored per workspace and there is no index of every workspace, so
     the caller passes the stores of the workspaces it has seen. Before any
@@ -1208,19 +1218,21 @@ async def list_sessions(
             # the client starts the server in the directory it works in.
             stores = [store_for(Path.cwd())]
 
-    def scan() -> list[tuple[Any, bool]]:
+    def scan() -> list[tuple[Any, SessionStore, bool]]:
         # Pure filesystem work, one lock probe per session: off the loop.
+        # A session the agent never answered and nobody named is noise from
+        # a failed first turn; it is not listed.
         infos = [
             (info, store)
             for store in stores
             for info in store.list(workspace=root, roots_only=True)
-            if info.turn_count > 0
+            if info.turn_count > 0 and (info.reply_count > 0 or info.title_is_user_set)
         ]
         infos.sort(key=lambda pair: pair[0].last_active, reverse=True)
-        return [(info, store.is_active(info.id)) for info, store in infos]
+        return [(info, store, store.is_active(info.id)) for info, store in infos]
 
     found: list[tuple[Any, str]] = []
-    for info, active in await asyncio.to_thread(scan):
+    for info, store, active in await asyncio.to_thread(scan):
         here = live(info.id)
         if here is not None:
             status, title = here
@@ -1229,10 +1241,14 @@ async def list_sessions(
             continue
         else:
             status = "on_disk"
+        # ACP requires an absolute cwd for every entry. The old TUI recorded
+        # the directory as typed ("../"), so fall back to the request's cwd,
+        # then to the directory the store belongs to.
         workspace = info.workspace if Path(info.workspace).is_absolute() else None
         workspace = workspace or (str(root) if root is not None else None)
+        workspace = workspace or (str(store.workspace) if store.workspace is not None else None)
         if workspace is None:
-            continue  # ACP requires an absolute cwd for every entry
+            continue
         found.append((info.model_copy(update={"workspace": workspace}), status))
     page = found[offset : offset + _SESSION_PAGE_SIZE]
     sessions = [
@@ -1247,6 +1263,20 @@ async def list_sessions(
     ]
     next_cursor = str(offset + len(page)) if len(found) > offset + len(page) else None
     return ListSessionsResponse(sessions=sessions, next_cursor=next_cursor)
+
+
+def _discard_if_empty(session: Session) -> None:
+    """A closed root session the client never wrote to leaves no file behind.
+
+    Clients open sessions they then abandon (a picker, a restart); without
+    this the store fills with files that list nothing.
+    """
+    if session.parent_id is not None or session.info.turn_count > 0:
+        return
+    try:
+        session.handle.store.delete(session.id)
+    except Exception:
+        logger.warning("Session %s: could not remove its empty file", session.id, exc_info=True)
 
 
 def _load_error(session_id: str, exc: BaseException) -> BaseException:

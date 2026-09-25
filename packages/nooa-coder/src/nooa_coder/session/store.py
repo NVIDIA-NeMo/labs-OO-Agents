@@ -198,6 +198,10 @@ class SessionHandle:
         self._closed = False
 
     @property
+    def store(self) -> SessionStore:
+        return self._store
+
+    @property
     def id(self) -> str:
         return self._info.id
 
@@ -292,6 +296,13 @@ class SessionStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
+    @property
+    def workspace(self) -> Path | None:
+        """The workspace of a ``<workspace>/.nooa/sessions`` store; ``None`` for a shared directory."""
+        if self.root.name == "sessions" and self.root.parent.name == ".nooa":
+            return self.root.parent.parent
+        return None
+
     def path_for(self, session_id: str) -> Path:
         session_id = self._validate_id(session_id)
         return self.root / f"{session_id}.db"
@@ -312,6 +323,9 @@ class SessionStore:
         session_id: str | None = None,
     ) -> SessionHandle:
         session_id = self._validate_id(session_id or str(uuid.uuid4()))
+        # Recorded as a resolved absolute path: a relative one ("../", as the
+        # old TUI wrote) names no directory once the process has moved.
+        workspace = _normalise_workspace(workspace)
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(session_id)
         if path.exists():
@@ -543,6 +557,12 @@ class SessionStore:
                         tuple(_USER_EVENT_TYPES),
                     ).fetchone()[0]
                 )
+                reply_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?, 'TurnEnded')",
+                        tuple(_AGENT_EVENT_TYPES),
+                    ).fetchone()[0]
+                )
                 last_row = connection.execute(
                     "SELECT data FROM events ORDER BY insertion_order DESC LIMIT 1"
                 ).fetchone()
@@ -602,6 +622,7 @@ class SessionStore:
             created_at=started_at,
             last_active=last_active,
             turn_count=turn_count,
+            reply_count=reply_count,
             usage=usage,
             workspace=str(
                 start.get("workspace", start.get("working_directory", start.get("working_dir", "")))
