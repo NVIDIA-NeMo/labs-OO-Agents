@@ -204,6 +204,11 @@ class Session:
             update={"status": "idle", "mode": options.permission_mode}
         )
         self._owned_llm = owned_llm
+        # Clients this session built and swapped out while another live
+        # session (a child) still used them; closed when this one closes.
+        self._retired_llms: list[Any] = []
+        # Whether another live session uses a client; the registry sets it.
+        self.llm_in_use: Callable[[Any], bool] = lambda _llm: False
         self._llm_factory = llm_factory
         self._pending_model: tuple[str, Any] | None = None  # (alias, built client)
         self._listeners: list[Callable[[SessionEvent], None]] = []
@@ -339,7 +344,9 @@ class Session:
 
     async def _close_owned_llm(self) -> None:
         llm, self._owned_llm = self._owned_llm, None
-        await _aclose(llm)
+        retired, self._retired_llms = self._retired_llms, []
+        for client in (*retired, llm):
+            await _aclose(client)
 
     def _ensure_open(self) -> None:
         if self._closed or self._closing:
@@ -900,9 +907,14 @@ class Session:
         alias, client = pending
         self.agent.set_llm(client)
         apply_model_limits(self.agent)
-        await self._close_owned_llm()
-        self._owned_llm = client
-        self.options = self.options.model_copy(update={"model": alias, "llm": None})
+        old, self._owned_llm = self._owned_llm, client
+        if old is not None:
+            if self.llm_in_use(old):
+                self._retired_llms.append(old)  # a child shares it: close it with this session
+            else:
+                await _aclose(old)
+        # New same-model children share the new client.
+        self.options = self.options.model_copy(update={"model": alias, "llm": client})
         self.info.model = alias
 
     async def set_mode(self, mode: str) -> None:
