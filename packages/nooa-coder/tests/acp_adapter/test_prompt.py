@@ -135,7 +135,8 @@ async def test_cancel_closes_the_cards_before_the_prompt_answers_cancelled(
     assert response.stop_reason == "cancelled"
     [started_card] = client.updates(session_id, ToolCallStart)
     failed = [u for u in client.updates(session_id, ToolCallProgress) if u.status == "failed"]
-    assert [(u.tool_call_id, u.title) for u in failed] == [(started_card.tool_call_id, "Cancelled")]
+    assert [u.tool_call_id for u in failed] == [started_card.tool_call_id]
+    assert failed[0].title == started_card.title + " (cancelled)"
     assert "cell started" in str(failed[0].content)  # partial output kept
     assert client.texts(AgentMessageChunk, session_id)[-1] == "Stopped at your request.\n"
     order = [

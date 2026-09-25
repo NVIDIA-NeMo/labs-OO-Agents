@@ -153,7 +153,8 @@ async def test_a_session_runs_a_turn_over_stdio(tmp_path):
     assert isinstance(source.content, TextContentBlock)
     assert source.content.text.startswith("```python\n")
     completed = next(u for _, u in client.updates if isinstance(u, ToolCallProgress))
-    assert completed.title == "Ran Python"
+    assert completed.title == started.title
+    assert completed.title.startswith("python: ")
     assert "NOOA ACP smoke test passed.\n" in client.texts()
 
 
@@ -177,7 +178,7 @@ async def test_cancellation_finishes_open_tools_and_says_so(tmp_path):
         if isinstance(update, ToolCallProgress) and update.status == "failed"
     )
     assert failed.tool_call_id == started.tool_call_id
-    assert failed.title == "Cancelled"
+    assert failed.title == started.title + " (cancelled)"
     assert "Stopped at your request.\n" in client.texts()
 
 

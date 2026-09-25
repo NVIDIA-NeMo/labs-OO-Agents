@@ -137,7 +137,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     started = cast(ToolCallStart, updates[1])
     assert started.kind == "other"
     assert started.status == "in_progress"
-    assert started.raw_input is None
+    assert started.raw_input == {"code": "print('hello')"}
     assert started.content is not None
     assert len(started.content) == 1
     source = _content_text(cast(ContentToolCallContent, started.content[0]))
@@ -151,7 +151,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     }
 
     completed = cast(ToolCallProgress, updates[2])
-    assert completed.title == "Ran Python"
+    assert completed.title == "python: print('hello')"
     assert completed.status == "completed"
     assert completed.content is not None
     assert len(completed.content) == 2
@@ -162,6 +162,40 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     usage = cast(UsageUpdate, updates[3])
     assert usage.cost is not None
     assert usage.cost.amount == 0.25
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_the_python_card_names_its_code_like_the_shell_card(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    long_line = "total = " + " + ".join(str(n) for n in range(40))
+    code = f"\n\n  {long_line}\nprint(total)\n"
+
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="call-1", name="execute_python", arguments={"code": code})
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="call-1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="780\n",
+        )
+    )
+    await bridge.flush()
+
+    started = next(u for _, u in client.updates if isinstance(u, ToolCallStart))
+    assert started.raw_input == {"code": code}
+    assert started.title == "python: " + long_line[:79] + "…"
+    completed = next(u for _, u in client.updates if isinstance(u, ToolCallProgress))
+    assert completed.raw_input == {"code": code}
+    assert completed.title == started.title
+    assert completed.content is not None and len(completed.content) == 2
+    assert _content_text(cast(ContentToolCallContent, completed.content[1])) == (
+        "```text\n780\n```"
+    )
     await bridge.close()
     await agent.aclose()
 
@@ -193,7 +227,7 @@ async def test_bridge_marks_failed_python_output(tmp_path):
         for _, update in client.updates
         if isinstance(update, ToolCallProgress)
     )
-    assert progress.title == "Python failed"
+    assert progress.title == "python: raise RuntimeError('boom') (failed)"
     assert progress.status == "failed"
     assert progress.content is not None
     assert len(progress.content) == 2
@@ -225,7 +259,7 @@ async def test_bridge_retains_python_source_when_interrupted(tmp_path):
         for _, update in client.updates
         if isinstance(update, ToolCallProgress)
     )
-    assert progress.title == "Python interrupted"
+    assert progress.title == "python: await asyncio.sleep(30) (interrupted)"
     assert progress.status == "failed"
     assert progress.content is not None
     assert len(progress.content) == 2
@@ -626,7 +660,7 @@ async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
         if isinstance(update, ToolCallProgress) and update.tool_call_id == "t3"
     ]
     assert closing and closing[-1].status == "failed", client.updates
-    assert closing[-1].title == "Unfinished"
+    assert closing[-1].title.endswith(" (unfinished)")
 
 
 async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
@@ -648,7 +682,7 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
     await bridge.flush()
 
     progress = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
-    assert progress[-1].title == "Cancelled"
+    assert progress[-1].title == "python: sleep(60) (cancelled)"
     await bridge.close()
 
 
@@ -766,7 +800,7 @@ async def test_a_cancelled_cell_is_a_failed_card_titled_cancelled_with_its_outpu
     await bridge.flush()
     [progress] = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
     assert progress.status == "failed"
-    assert progress.title == "Cancelled"
+    assert progress.title == "python: work() (cancelled)"
     assert "step 1 done" in str(progress.content)
 
 
@@ -782,7 +816,7 @@ async def test_the_cancelled_update_closes_open_cards_before_saying_so(bridged, 
     await bridge.flush()
     closed = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
     assert {(u.tool_call_id, u.status, u.title) for u in closed} == {
-        ("t1", "failed", "Cancelled"),
+        ("t1", "failed", "python: sleep() (cancelled)"),
         ("cmd-1", "failed", "Cancelled"),
     }
     assert _types(client)[-1] is AgentMessageChunk
@@ -813,7 +847,7 @@ async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):
     )
     await bridge.flush()
     [progress] = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
-    assert (progress.status, progress.title) == ("failed", "Unfinished")
+    assert (progress.status, progress.title) == ("failed", "python: x (unfinished)")
 
 
 async def test_reasoning_becomes_thought_chunks(bridged):
