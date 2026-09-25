@@ -42,8 +42,10 @@ from nooa_coder.session.events import (
     ItemWithdrawn,
     TurnEnded,
     TurnStarted,
+    UsageAttributed,
 )
 from nooa_coder.session.items import (
+    USAGE_FIELDS,
     AgentEventUpdate,
     CancelledUpdate,
     ClosedUpdate,
@@ -576,6 +578,8 @@ class Session:
         event.item_id = item_id or str(event.id)
         if record:
             self.handle.events.add(event)
+            if channel == "user_messages":
+                self.info.turn_count += 1  # as the store counts it
         self._ids.setdefault(channel, deque()).append((item, event.item_id))
         target.put(item)
         self._emit(
@@ -966,14 +970,23 @@ class Session:
         self.options = self.options.model_copy(update={"permission_mode": mode})
         self._emit(ModeChangedUpdate(session_id=self.id, mode=mode))
 
-    def add_attributed_usage(self, usage: Usage) -> None:
-        """Add a child's own usage to this session's attributed totals, and tell listeners."""
-        if not (usage.input_tokens or usage.output_tokens or usage.cost_usd):
+    def add_attributed_usage(self, usage: Usage, *, child_id: str = "") -> None:
+        """Add a child's own usage to this session's attributed totals, and tell listeners.
+
+        The addition is recorded (``UsageAttributed``) so a load rebuilds it.
+        """
+        own = usage.own()
+        if not any(getattr(own, name) for name in USAGE_FIELDS):
             return
         totals = self.info.usage
-        totals.attributed_input_tokens += usage.input_tokens
-        totals.attributed_output_tokens += usage.output_tokens
-        totals.attributed_cost_usd += usage.cost_usd
+        for name in USAGE_FIELDS:
+            attributed = f"attributed_{name}"
+            setattr(totals, attributed, getattr(totals, attributed) + getattr(own, name))
+        try:
+            self.handle.events.add(UsageAttributed(child_id=child_id, usage=own))
+        except Exception:
+            # A closed handle must not break the child's delivery.
+            logger.warning("Session %s: could not record a child's usage", self.id, exc_info=True)
         self.handle.update_usage(totals)
         self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
 
@@ -982,9 +995,8 @@ class Session:
         if usage is None:
             return
         totals = self.info.usage
-        totals.input_tokens += usage.input_tokens
-        totals.output_tokens += usage.output_tokens
-        totals.cost_usd += usage.cost_usd
+        for name in USAGE_FIELDS:
+            setattr(totals, name, getattr(totals, name) + (getattr(usage, name, 0) or 0))
         self.handle.update_usage(totals)
 
     # ---- output ------------------------------------------------------
@@ -1074,8 +1086,4 @@ def _explanation(outcome: Any, kind: OutcomeKind) -> str:
 
 
 def _usage_delta(before: Usage, after: Usage) -> Usage:
-    return Usage(
-        input_tokens=after.input_tokens - before.input_tokens,
-        output_tokens=after.output_tokens - before.output_tokens,
-        cost_usd=after.cost_usd - before.cost_usd,
-    )
+    return Usage(**{name: getattr(after, name) - getattr(before, name) for name in USAGE_FIELDS})

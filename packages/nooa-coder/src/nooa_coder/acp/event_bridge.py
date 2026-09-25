@@ -58,6 +58,7 @@ from nooa_coder.coding.activity import (
     TerminalCommandStarted,
 )
 from nooa_coder.session.items import (
+    USAGE_FIELDS,
     CancelledUpdate,
     ChildCreatedUpdate,
     ItemAdmittedUpdate,
@@ -592,16 +593,24 @@ class ACPEventBridge:
     # ---- derived updates ---------------------------------------------
 
     def _publish_usage(self) -> None:
-        """Context use and cost (own plus what children spent) as a usage update."""
+        """Context use and cost (own plus what children spent) as a usage update.
+
+        ACP's usage update has no token counts beyond the context in use, so
+        the session's totals (own plus children's, cached and reasoning
+        tokens included) go in ``_meta["dev.nooa/usage"]``.
+        """
         context_window = getattr(getattr(self.agent, "llm", None), "context_window", None)
         if context_window is None or self._used is None:
             return
         attributed = self.session.info.usage.attributed_cost_usd
-        meta: dict[str, Any] | None = None
+        totals = self.session.info.usage.with_attributed().model_dump(
+            include={name for name in USAGE_FIELDS if name != "cost_usd"}
+        )
+        meta: dict[str, Any] = {"dev.nooa/usage": totals}
         status = getattr(self.agent, "get_summarization_status", None)
         if callable(status):
             try:
-                meta = {"dev.nooa/context": _json_safe(status())}
+                meta["dev.nooa/context"] = _json_safe(status())
             except Exception:
                 logger.debug("Could not read the context status", exc_info=True)
         self._enqueue(

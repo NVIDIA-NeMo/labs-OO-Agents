@@ -432,10 +432,61 @@ class TraceUrlControl(BehaviorControl):
         )
 
 
+_USAGE_ROWS = (
+    ("Total tokens", "total_tokens"),
+    ("Input tokens", "input_tokens"),
+    ("Output tokens", "output_tokens"),
+    ("Cached input tokens (cache reads)", "cached_input_tokens"),
+    ("Cache-write input tokens", "cache_write_input_tokens"),
+    ("Reasoning tokens", "reasoning_tokens"),
+)
+
+
+class UsageControl(BehaviorControl):
+    """Token usage for this session so far."""
+
+    @property
+    def name(self) -> str:
+        return "usage"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/usage": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if args:
+            return False, "Usage: /usage"
+        return True, None
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        """This session's own totals; with subagents, a second block that adds theirs."""
+        port = getattr(self.agent, "session", None)
+        if port is None or not callable(getattr(port, "usage", None)):
+            return ControlResult.err("Token usage is not available: this agent has no session.")
+        usage = port.usage()
+        info = port.info() if callable(getattr(port, "info", None)) else None
+        lines = ["This session", *_usage_lines(usage.own())]
+        if usage.has_attributed():
+            lines += ["", "Including subagents", *_usage_lines(usage.with_attributed())]
+        if info is not None:
+            lines += ["", f"Turns: {info.turn_count}"]
+        body = "\n".join(lines)
+        return ControlResult.ok(ControlMessage(f"```text\n{body}\n```"))
+
+
+def _usage_lines(usage: Any) -> list[str]:
+    width = max(len(label) for label, _ in _USAGE_ROWS)
+    lines = [f"  {label:<{width}}  {getattr(usage, field):>12,}" for label, field in _USAGE_ROWS]
+    if usage.cost_usd:
+        lines.append(f"  {'Cost (USD)':<{width}}  {usage.cost_usd:>12.4f}")
+    return lines
+
+
 CONTROL_TYPES = {
     "skills": SkillsControl,
     "mcp": MCPControl,
     "trace-url": TraceUrlControl,
+    "usage": UsageControl,
 }
 
 
@@ -459,6 +510,7 @@ def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_regis
                     "skills": "<list|commands|add DIR|activate ID|deactivate ID>",
                     "mcp": "[status|approve NAME [CODE]|revoke NAME]",
                     "trace-url": "",
+                    "usage": "",
                 }[control.name],
                 output_to_agent=False,
                 is_control=True,

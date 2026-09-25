@@ -162,6 +162,18 @@ class ChildDeleted(Metadata):
     name: str | None = None
 
 
+class UsageAttributed(Metadata):
+    """A child's own usage from one of its turns, added to this session's attributed totals.
+
+    Recorded in every ancestor, so a load rebuilds the attributed totals.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    child_id: str = ""
+    usage: Usage = Field(default_factory=Usage)
+
+
 class SnapshotRestoreFailed(Metadata):
     """The saved agent state could not be restored when the session was loaded."""
 
@@ -186,6 +198,7 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     ChildDeleted,
     TurnCancelled,
     SnapshotRestoreFailed,
+    UsageAttributed,
 )
 """Event types registered on every session's storage backend.
 
