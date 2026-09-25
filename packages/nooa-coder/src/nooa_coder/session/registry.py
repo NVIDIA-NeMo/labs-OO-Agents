@@ -58,10 +58,11 @@ _REQUEUED_CHANNELS = ("user_messages", "delegates")
 
 
 class ChildActiveElsewhereError(SessionAlreadyActiveError):
-    """A child of the session being loaded is live in another registry or process.
+    """Part of the loaded session's tree is live in another registry or process.
 
-    A parent and its running children always share one registry, so the
-    parent cannot be loaded until that child is closed.
+    A parent and its running children always share one registry, so a
+    parent cannot be loaded while one of its descendants is live
+    elsewhere, and a child cannot be loaded while one of its ancestors is.
     """
 
 
@@ -456,8 +457,8 @@ class SessionRegistry:
         or withdrawn are re-queued (``ItemRequeued``), and the session is
         published and started. Loading a child whose parent is not live is
         allowed (a detached child: its results stay in its own transcript).
-        Loading a parent whose child is live elsewhere is refused with
-        ``ChildActiveElsewhereError``. Concurrent loads of one id share it.
+        Loading a parent whose descendant is live elsewhere, or a child
+        whose ancestor is, is refused with ``ChildActiveElsewhereError``. Concurrent loads of one id share it.
         ``prepare(session)`` runs before the re-queue and before the session
         starts or is visible (not when attaching to a live session).
         """
@@ -475,8 +476,11 @@ class SessionRegistry:
         handle: SessionHandle | None = None
         session: Session | None = None
         try:
-            self._refuse_if_children_active_elsewhere(session_id)
             handle = self.store.open(session_id)
+            # Checked with this session's file lock held: another registry
+            # that opens a relative checks after taking its own lock too, so
+            # of two overlapping loads at least one sees the other.
+            self._refuse_if_tree_active_elsewhere(session_id, handle.info.parent_id)
             session = await self._build(self._stored_options(handle.info, overrides), handle)
             restored = handle.storage.restore_latest_snapshot(session.agent)
             session.agent.event_manager.add(
@@ -512,7 +516,24 @@ class SessionRegistry:
         values.update(overrides)
         return SessionOptions.model_validate(values)
 
-    def _refuse_if_children_active_elsewhere(self, session_id: str) -> None:
+    def _refuse_if_tree_active_elsewhere(self, session_id: str, parent_id: str | None) -> None:
+        """Raise ``ChildActiveElsewhereError`` if an ancestor or a descendant is live elsewhere."""
+
+        def elsewhere(other_id: str) -> bool:
+            local = other_id in self.sessions or other_id in self._reserved
+            return not local and self.store.is_active(other_id)
+
+        seen = {session_id}
+        while parent_id is not None and parent_id not in seen:
+            seen.add(parent_id)
+            if elsewhere(parent_id):
+                raise ChildActiveElsewhereError(
+                    f"Session {session_id!r} has an ancestor {parent_id!r} that is active elsewhere"
+                )
+            try:
+                parent_id = self.store.get(parent_id).parent_id
+            except SessionNotFoundError:
+                break
         on_disk = self.store.list(roots_only=False)
         pending = [session_id]
         while pending:
@@ -520,7 +541,7 @@ class SessionRegistry:
             for info in on_disk:
                 if info.parent_id != parent:
                     continue
-                if info.id not in self.sessions and self.store.is_active(info.id):
+                if elsewhere(info.id):
                     raise ChildActiveElsewhereError(
                         f"Session {session_id!r} has a child {info.id!r} "
                         f"({info.name or 'unnamed'}) that is active elsewhere"

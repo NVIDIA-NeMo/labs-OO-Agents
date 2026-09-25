@@ -250,6 +250,63 @@ async def test_loading_a_parent_whose_child_is_live_elsewhere_is_refused(
         await here.close_all()
 
 
+async def test_a_child_opened_elsewhere_between_check_and_open_is_caught(
+    registry, root_options, sessions_dir, monkeypatch
+):
+    root = await registry.create(root_options)
+    child = await registry.create(
+        root.options.inherit(name="child", retain=True), parent_id=root.id
+    )
+    await registry.close_all()
+
+    here = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
+    elsewhere = SessionStore(sessions_dir)
+    held = []
+    real_open = here.store.open
+
+    def open_after_the_other_process(session_id):
+        # The other process opens the child right after this one checked.
+        if not held:
+            held.append(elsewhere.open(child.id))
+        return real_open(session_id)
+
+    monkeypatch.setattr(here.store, "open", open_after_the_other_process)
+    try:
+        with pytest.raises(ChildActiveElsewhereError, match=child.id):
+            await here.load(root.id)
+        assert here.sessions == {} and here._reserved == {}
+        assert not here.store.is_active(root.id)
+    finally:
+        for handle in held:
+            handle.close()
+        await here.close_all()
+
+
+async def test_a_child_cannot_be_loaded_while_its_parent_is_live_elsewhere(
+    registry, root_options, sessions_dir
+):
+    root = await registry.create(root_options)
+    child = await registry.create(
+        root.options.inherit(name="child", retain=True), parent_id=root.id
+    )
+    grandchild = await registry.create(
+        child.options.inherit(name="grandchild", retain=True), parent_id=child.id
+    )
+    await registry.close(child.id)  # the root stays live in `registry`
+
+    other = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
+    try:
+        with pytest.raises(ChildActiveElsewhereError, match=root.id):
+            await other.load(child.id)
+        with pytest.raises(ChildActiveElsewhereError, match=root.id):
+            await other.load(grandchild.id)
+        assert other.sessions == {}
+        # The registry that has the parent live can open it.
+        assert (await registry.open_child(root, child.id)).id == child.id
+    finally:
+        await other.close_all()
+
+
 async def test_delete_closes_keeps_files_and_leaves_a_tombstone(
     registry, root_options, sessions_dir
 ):
