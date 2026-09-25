@@ -450,6 +450,22 @@ async def test_checkpoint_failure_does_not_fail_the_turn(make_session, monkeypat
     assert _snapshot_count(session.handle.path) == 0
 
 
+async def test_the_checkpoint_writer_waits_for_the_storage_lock(make_session):
+    """The off-loop write and the loop's own writes never hold the file's write lock together."""
+    session, _ = make_session(cell("self.v.answer = 1\nreturn_result(Done(explanation='x'))"))
+    lock = session.handle.storage._db_lock
+    lock.acquire()  # as a loop-side write in progress holds it
+    try:
+        await asyncio.wait_for(session.prompt("go"), TIMEOUT)
+        await asyncio.sleep(0.2)
+        assert _snapshot_count(session.handle.path) == 0
+        assert not session._checkpoint_task.done()
+    finally:
+        lock.release()
+    await asyncio.wait_for(session.wait_for_checkpoint(), TIMEOUT)
+    assert _snapshot_count(session.handle.path) == 1
+
+
 async def test_a_user_set_title_wins_over_agent_titles(make_session, sessions_dir):
     session, _ = make_session(start=False)
     seen = []

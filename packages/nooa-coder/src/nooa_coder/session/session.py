@@ -146,7 +146,8 @@ def _write_snapshot(path: Path, blob: str) -> None:
     to the event loop thread, and a second manager would try to take the
     session's file lock, which this process already holds. The row
     matches what ``SQLiteStorageManager.save_snapshot`` writes, so
-    ``restore_latest_snapshot`` reads it back.
+    ``restore_latest_snapshot`` reads it back. The caller holds the
+    storage manager's lock (see ``Session._checkpoint``).
     """
     uri = f"{path.resolve().as_uri()}?mode=rw"
     connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
@@ -697,13 +698,23 @@ class Session:
         self._snapshot_digest = digest
         previous = self._checkpoint_task
         path = self.handle.path
+        # The storage manager's lock serialises every write to this file in
+        # this process (the loop's event writes all take it). Holding it
+        # here means the two connections never contend for SQLite's write
+        # lock: the loop never waits in the busy handler or gets "database
+        # is locked"; at worst a loop-side write waits for this one insert.
+        db_lock = self.handle.storage._db_lock
+
+        def write_locked() -> None:
+            with db_lock:
+                _write_snapshot(path, blob)
 
         async def write() -> None:
             if previous is not None:
                 with suppress(Exception):
                     await previous
             try:
-                await asyncio.to_thread(_write_snapshot, path, blob)
+                await asyncio.to_thread(write_locked)
             except Exception:
                 self._snapshot_digest = None
                 logger.warning("Session %s: checkpoint write failed", self.id, exc_info=True)
