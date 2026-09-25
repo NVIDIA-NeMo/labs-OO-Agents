@@ -312,6 +312,31 @@ async def test_each_session_is_its_own_trace_session(coder_adapter, workspace, c
         )
 
 
+_HOOKS_CELL = (
+    "from nooa.runtime.hooks import get_hooks\n"
+    "self.message(type(get_hooks()).__name__)\n"
+    "return_result(Done(explanation='hooked'))"
+)
+
+
+async def test_turns_run_with_the_tracing_hooks_registered(
+    coder_adapter, workspace, client, monkeypatch
+):
+    """The loop runs in a fresh context; the hooks tracing registered must reach it."""
+    import nooa.tracing
+    from nooa.runtime.hooks import set_hooks
+
+    class Hooks:
+        pass
+
+    monkeypatch.setattr(nooa.tracing, "_hooks", Hooks())
+    set_hooks(None)
+    adapter = await coder_adapter([cell(_HOOKS_CELL)])
+    session_id = await _new(adapter, workspace)
+    await _prompt(adapter, session_id, "hooked?")
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Hooks"
+
+
 async def test_usage_answers_with_the_token_totals(coder_adapter, workspace, client):
     from nooa.unifiedllm import LLMUsage
 

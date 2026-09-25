@@ -1142,15 +1142,25 @@ def _trace_as(session: Session) -> None:
     """Make the ACP session id the trace session of the session's turns.
 
     Turns run in the session's own loop context, so the id is set there by
-    a loop hook, and also in the calling request's context. A subagent's
-    session has no hook and so no trace session of its own yet.
+    a loop hook, and also in the calling request's context. The loop's
+    context is a fresh one, so the tracing hooks (kept in a context variable
+    where tracing was enabled) are registered there too; without that the
+    turns produce no spans at all. A subagent's session has no hook and so
+    no trace session of its own yet.
     """
     try:
-        from nooa.tracing import set_session
+        import nooa.tracing as tracing
     except ImportError:
         return
-    session.add_loop_context_hook(lambda: set_session(session.id))
-    set_session(session.id)
+
+    def enter() -> None:
+        tracing.set_session(session.id)
+        register_hooks = getattr(tracing, "_re_register_hooks", None)
+        if register_hooks is not None:
+            register_hooks()
+
+    session.add_loop_context_hook(enter)
+    tracing.set_session(session.id)
 
 
 def _trace_scope(session: Session) -> AbstractContextManager[object]:
