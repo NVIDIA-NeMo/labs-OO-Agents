@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # coder_test_agents
 
-from coder_test_agents import cell, reply  # noqa: E402
+from coder_test_agents import CellLLM, cell, reply  # noqa: E402
 from nooa_coder.acp import cli  # noqa: E402
 
 from nooa.unifiedllm import FakeLLMClient  # noqa: E402
@@ -44,12 +44,14 @@ if "--fixture-noisy" in sys.argv:
 
 
 def llm_factory(alias: str | None, workspace: Path) -> FakeLLMClient:
+    # CellLLM runs scripted cells in whichever Python tool the agent offers
+    # (python_cell on CodeActV2), so the fixture drives the real CodingAgent.
     del alias, workspace
     if "--fixture-noisy" in sys.argv:
         print("stray output while building a model", flush=True)
     if "--fixture-hot" in sys.argv:
-        return FakeLLMClient([cell(HOT_CELL)])
-    return FakeLLMClient([reply("Hi there.") for _ in range(20)])
+        return CellLLM([cell(HOT_CELL)], strict_exhaustion=False)
+    return CellLLM([reply("Hi there.") for _ in range(20)], strict_exhaustion=False)
 
 
 if __name__ == "__main__":
