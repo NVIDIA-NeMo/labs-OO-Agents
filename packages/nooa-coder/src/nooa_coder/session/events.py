@@ -84,6 +84,18 @@ class ItemWithdrawn(Metadata):
     item_id: str = ""
 
 
+class ItemDiscarded(Metadata):
+    """An admitted item left its channel unconsumed and not withdrawn.
+
+    Code flushed or cleared the channel, took the item back with
+    ``pop_last()``, or removed the channel. A later load does not re-queue it.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    item_id: str = ""
+
+
 class ItemRequeued(Metadata):
     """An item admitted but never consumed was put back on its channel after a load."""
 
@@ -133,6 +145,7 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     ItemAdmitted,
     ItemConsumed,
     ItemWithdrawn,
+    ItemDiscarded,
     ItemRequeued,
     TurnStarted,
     TurnEnded,

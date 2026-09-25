@@ -22,7 +22,12 @@ from nooa_coder.session.items import (
 )
 from nooa_coder.session.loader import default_agent_factory
 from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.session import ItemWithdrawnError, TurnFailedError
+from nooa_coder.session.session import (
+    ItemDiscardedError,
+    ItemWithdrawnError,
+    SessionClosedError,
+    TurnFailedError,
+)
 from nooa_coder.session.store import SessionStore
 
 from nooa.context_blocks.roles import Role
@@ -397,6 +402,62 @@ async def test_withdraw_a_buffered_steer(make_session):
     assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="done")
     assert "STEER-withdrawn" not in str(llm.calls[1].messages)
     assert [raw["item_id"] for _, raw in _rows(session, "ItemWithdrawn")] == [receipt.item_id]
+
+
+async def test_a_flushed_item_fails_its_outcome_and_is_not_requeued(make_session, sessions_dir):
+    session, _ = make_session(start=False)
+    receipt = await session.submit("FLUSHED")
+    pending = asyncio.ensure_future(session.outcome(receipt.item_id))
+    await asyncio.sleep(0)
+    assert session.agent.queue_manager.get_channel("user_messages").flush() == 1
+    with pytest.raises(ItemDiscardedError):
+        await asyncio.wait_for(pending, TIMEOUT)
+    assert [raw["item_id"] for _, raw in _rows(session, "ItemDiscarded")] == [receipt.item_id]
+    assert session.withdraw(receipt) is False
+
+    from coder_test_agents import ScriptedModels
+    from nooa_coder.session.registry import SessionRegistry
+
+    await session.close()
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
+    try:
+        await fresh.load(session.id)
+        assert fresh.store.load_rows(session.id, frozenset({"ItemRequeued"})) == []
+    finally:
+        await fresh.close_all()
+
+
+async def test_an_item_on_a_removed_channel_fails_its_outcome(make_session):
+    session, _ = make_session(start=False)
+    session.agent.queue_manager.queue("jobs")
+    receipt = await session.submit({"job": 1}, channel="jobs")
+    pending = asyncio.ensure_future(session.outcome(receipt.item_id))
+    await asyncio.sleep(0)
+    session.agent.queue_manager.remove_channel("jobs")
+    with pytest.raises(ItemDiscardedError):
+        await asyncio.wait_for(pending, TIMEOUT)
+
+
+async def test_the_loop_survives_a_flush_while_it_waits(make_session):
+    session, _ = make_session(done("still here"))
+    await asyncio.sleep(0.05)  # the loop is racing the channels
+    session.agent.queue_manager.get_channel("user_messages").flush()
+    await asyncio.sleep(0.05)
+    assert await asyncio.wait_for(session.prompt("go"), TIMEOUT) == Done(explanation="still here")
+
+
+async def test_a_loop_with_no_channels_left_closes_the_session(make_session):
+    session, _ = make_session()
+    closed = []
+    session.subscribe(lambda e: closed.append(e) if e.kind == "closed" else None)
+    await asyncio.sleep(0.05)
+    queues = session.agent.queue_manager
+    for name in list(queues.channels()):
+        queues.remove_channel(name)
+    await until(lambda: closed)
+    assert session.info.status == "closed"
+    with pytest.raises(SessionClosedError):
+        await session.submit("late")
 
 
 def _snapshot_count(path) -> int:
