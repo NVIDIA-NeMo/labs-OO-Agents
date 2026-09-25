@@ -473,3 +473,8 @@ def test_the_repo_tool_docs_offer_cwd():
     rendered = str(doc(RepoTools, concise=True))
     assert rendered.count("cwd") >= 2
     assert "defaults to the shell's current directory" in rendered
+
+
+def test_context_block_helpers_are_not_traced():
+    """Evaluating a dynamic context block is prompt rendering, not agent work: no span."""
+    assert getattr(CodingAgent._coding_state_context, "_no_trace", False) is True
