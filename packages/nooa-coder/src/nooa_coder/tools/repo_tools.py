@@ -589,33 +589,47 @@ class RepoTools(Skill):
         path: Annotated[str, spec(description="File or directory to inspect")] = ".",
         query: Annotated[str, spec(description="Optional symbol-name substring filter")] = "",
         max_results: Annotated[int, spec(description="Maximum result lines")] = 50,
+        cwd: Annotated[
+            str | Path | None,
+            spec(
+                description=(
+                    "Directory relative paths resolve against for this call; "
+                    "defaults to the shell's current directory"
+                )
+            ),
+        ] = None,
     ) -> RepoResult:
-        """Find definitions under a file or directory.
+        """Find definitions under a file or directory; ``cwd`` defaults to the shell's current directory.
 
         Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
+        ``cwd`` (absolute, or relative to the shell's directory) does not move
+        the shell; results are still shown relative to ``root``.
         """
-        resolved = self._resolve(path)
+        base = self._base(cwd)
+        resolved = self._resolve(path, base)
         if not await self._path_exists(resolved):
             diagnostic = PathResolutionError(
                 "symbols",
                 path,
                 resolved,
-                base_name="self.repo.cwd",
-                base_path=self.cwd,
+                base_name="cwd" if cwd is not None else "self.repo.cwd",
+                base_path=base,
                 reason="not_found",
             )
             return RepoResult(query=path, lines=[], diagnostic=diagnostic)
         query_lower = query.lower()
 
         if await self._path_is_file(resolved):
-            file_result = await self._filemap(path, max_symbols=max_results if not query else 500)
+            file_result = await self._filemap(
+                str(resolved), max_symbols=max_results if not query else 500
+            )
             if file_result.diagnostic is not None:
                 diagnostic = PathResolutionError(
                     "symbols",
                     path,
                     resolved,
-                    base_name="self.repo.cwd",
-                    base_path=self.cwd,
+                    base_name="cwd" if cwd is not None else "self.repo.cwd",
+                    base_path=base,
                     reason="unreadable",
                     detail=file_result.diagnostic,
                 )
@@ -635,7 +649,9 @@ class RepoTools(Skill):
             )
 
         if query:
-            symbol_result = await self._search_symbol(query, path=path, max_results=max_results)
+            symbol_result = await self._search_symbol(
+                query, path=str(resolved), max_results=max_results
+            )
             return RepoResult(
                 query=query,
                 lines=symbol_result.matches,
@@ -644,7 +660,7 @@ class RepoTools(Skill):
                 truncated=symbol_result.truncated,
             )
 
-        map_result = await self._repo_map(paths=[path], max_files=max_results)
+        map_result = await self._repo_map(paths=[str(resolved)], max_files=max_results)
         anchors = map_result.anchors[:max_results]
         return RepoResult(
             query=path,
@@ -659,23 +675,35 @@ class RepoTools(Skill):
         name: Annotated[str, spec(description="Symbol or qualified name to find references for")],
         path: Annotated[str, spec(description="File or directory to search")] = ".",
         max_results: Annotated[int, spec(description="Maximum result lines")] = 50,
+        cwd: Annotated[
+            str | Path | None,
+            spec(
+                description=(
+                    "Directory relative paths resolve against for this call; "
+                    "defaults to the shell's current directory"
+                )
+            ),
+        ] = None,
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
         Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
+        ``cwd`` (absolute, or relative to the shell's directory) does not move
+        the shell; results are still shown relative to ``root``.
         """
-        resolved = self._resolve(path)
+        base = self._base(cwd)
+        resolved = self._resolve(path, base)
         if not await self._path_exists(resolved):
             diagnostic = PathResolutionError(
                 "refs",
                 path,
                 resolved,
-                base_name="self.repo.cwd",
-                base_path=self.cwd,
+                base_name="cwd" if cwd is not None else "self.repo.cwd",
+                base_path=base,
                 reason="not_found",
             )
             return RepoResult(query=name, lines=[], diagnostic=diagnostic)
-        result = await self._search_references(name, path=path, max_results=max_results)
+        result = await self._search_references(name, path=str(resolved), max_results=max_results)
         return RepoResult(
             query=name,
             lines=result.matches,
@@ -1229,7 +1257,14 @@ class RepoTools(Skill):
             yield fpath
             count += 1
 
-    def _resolve(self, path: str) -> Path:
+    def _base(self, cwd: str | Path | None) -> Path:
+        """The base for one call: ``cwd`` (relative to the shell's directory), else ``cwd``."""
+        if cwd is None:
+            return self.cwd
+        base = Path(cwd)
+        return base if base.is_absolute() else self.cwd / base
+
+    def _resolve(self, path: str, base: Path | None = None) -> Path:
         """Resolve a path relative to ``cwd`` (the shell's current directory).
 
         An absolute ``path`` (or one that walks out via ``..``) is returned
@@ -1238,7 +1273,7 @@ class RepoTools(Skill):
         session's ``ShellTools.run()``, no narrower.
         """
         p = Path(path)
-        return p if p.is_absolute() else self.cwd / p
+        return p if p.is_absolute() else (base or self.cwd) / p
 
 
 if _MATCH_HAS_EDITABLE:
