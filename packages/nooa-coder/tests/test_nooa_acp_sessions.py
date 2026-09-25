@@ -24,11 +24,14 @@ from nooa.unifiedllm import FakeLLMClient
 _TODO = "carry the plan over"
 
 
-def _old_session(workspace, agent_name="CodingAgent"):
+def _old_session(workspace, agent_name="CodingAgent", working_directory=None):
     """Write a session the way ``packages/nooa-acp`` does: message, then snapshot."""
     store = OldSessionStore(workspace / ".nooa" / "sessions")
     with store.create(
-        model="fake", agent=agent_name, working_directory=str(workspace), origin="acp"
+        model="fake",
+        agent=agent_name,
+        working_directory=working_directory or str(workspace),
+        origin="acp",
     ) as handle:
         handle.record_user_message("please remember the plan")
         agent = OldCodingAgent(
@@ -91,3 +94,15 @@ async def test_a_snapshot_that_cannot_be_restored_still_loads(tmp_path, caplog):
         assert registry.get(session_id) is session
     finally:
         await registry.close_all()
+
+
+@pytest.mark.parametrize("recorded", ["../", ".", "../../dev/"])
+async def test_an_old_session_with_a_relative_working_directory_is_listed(tmp_path, recorded):
+    """The old TUI recorded the directory as typed; a relative record hides nothing."""
+    workspace = _workspace(tmp_path)
+    session_id = _old_session(workspace, "TUIAgent", working_directory=recorded)
+    store = SessionStore(sessions_root(workspace))
+
+    [info] = store.list(workspace=workspace)
+    assert info.id == session_id
+    assert store.list(workspace=tmp_path / "elsewhere") == [info]

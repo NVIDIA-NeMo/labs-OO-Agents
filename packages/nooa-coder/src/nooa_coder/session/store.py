@@ -66,6 +66,19 @@ def _normalise_workspace(workspace: str | Path) -> str:
     return str(Path(workspace).expanduser().resolve())
 
 
+def _workspace_matches(recorded: str | Path, wanted: str) -> bool:
+    """Whether a session's recorded workspace is ``wanted`` (a normalised path).
+
+    The old TUI recorded the directory as typed, so ``../`` or ``.`` is
+    common; a relative record names no directory and cannot be compared, and
+    hiding the session would be worse than listing it.
+    """
+    text = str(recorded)
+    if text and not Path(text).expanduser().is_absolute():
+        return True
+    return _normalise_workspace(text) == wanted
+
+
 def _connect_read_only(path: Path) -> sqlite3.Connection:
     """Open a session file for reading only.
 
@@ -392,7 +405,7 @@ class SessionStore:
             if not path.stem.endswith("-memory")
             if (info := self._read_info(path)) is not None
             if not roots_only or info.parent_id is None
-            if wanted is None or _normalise_workspace(info.workspace) == wanted
+            if wanted is None or _workspace_matches(info.workspace, wanted)
         ]
         sessions.sort(key=lambda info: info.last_active, reverse=True)
         return sessions if limit is None else sessions[:limit]
