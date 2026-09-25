@@ -42,6 +42,7 @@ from nooa.storage.json_snapshot import snapshot_to_json
 from nooa_coder.session.events import (
     ItemAdmitted,
     ItemConsumed,
+    ItemDiscarded,
     ItemWithdrawn,
     TurnEnded,
     TurnStarted,
@@ -96,6 +97,14 @@ class TurnFailedError(RuntimeError):
 
 class ItemWithdrawnError(RuntimeError):
     """The prompted item was withdrawn before any turn consumed it."""
+
+
+class ItemDiscardedError(RuntimeError):
+    """The item left its channel before any turn consumed it, without a withdraw.
+
+    Agent or host code flushed or cleared the channel, took the item back
+    with ``pop_last()``, or removed the channel.
+    """
 
 
 class SessionClosedError(RuntimeError):
@@ -532,19 +541,28 @@ class Session:
         )
 
     def _hook(self, channel: Channel[Any]) -> None:
-        """Observe consumption on ``channel`` (the loop's race and drain, and agent ``get()``)."""
+        """Observe ``channel``: consumption (the loop's race and drain, agent ``get()``)
+        and items dropped unconsumed (flush, clear, ``pop_last()``, channel removed).
+        """
         if self._hooked.get(channel.name) is channel:
             return
-        # Channel keeps one on_get callback; chain any the agent installed.
-        previous = channel._on_get
+        # Channel keeps one callback of each kind; chain any the agent installed.
+        previous_get = channel._on_get
+        previous_discard = channel._on_discard
         name = channel.name
 
         def on_get(item: Any) -> None:
             self._on_consumed(name, item)
-            if previous is not None:
-                previous(item)
+            if previous_get is not None:
+                previous_get(item)
+
+        def on_discard(items: list[Any]) -> None:
+            self._on_discarded(name, items)
+            if previous_discard is not None:
+                previous_discard(items)
 
         channel.set_on_get(on_get)
+        channel.set_on_discard(on_discard)
         self._hooked[name] = channel
 
     def _on_consumed(self, channel: str, item: Any) -> None:
@@ -560,6 +578,27 @@ class Session:
             self.handle.events.add(ItemConsumed(item_id=item_id))
         self._consumed.append(item_id)
 
+    def _on_discarded(self, channel: str, items: list[Any]) -> None:
+        """Items left ``channel`` unconsumed: record it and fail their outcomes."""
+        entries = self._ids.get(channel)
+        for item in items:
+            if not entries:
+                return
+            index = next((i for i, (obj, _) in enumerate(entries) if obj is item), None)
+            if index is None:
+                continue  # an item another producer put; it has no identity here
+            item_id = entries[index][1]
+            del entries[index]
+            if not self.handle._closed:
+                self.handle.events.add(ItemDiscarded(item_id=item_id))
+            self._resolve(
+                item_id,
+                ItemDiscardedError(
+                    f"Item {item_id!r} was dropped from channel {channel!r} before any turn "
+                    "consumed it"
+                ),
+            )
+
     # ---- the loop ----------------------------------------------------
 
     async def _loop(self) -> None:
@@ -567,7 +606,21 @@ class Session:
             hook()
         queues = self.agent.queue_manager
         while not self._closing:
-            wins = await queues.race()
+            try:
+                wins = await queues.race()
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise  # the loop itself is being cancelled (close)
+                # A raced channel was flushed or removed, which cancels its
+                # waiters: race again over the channels that are left.
+                continue
+            except Exception as exc:
+                # No channel left to wait on (race() raises ValueError):
+                # nothing can reach this session any more.
+                logger.exception("Session %s: the turn loop cannot wait for input", self.id)
+                self._end_loop(exc)
+                return
             notification: dict[str, list[Any]] = {}
             for name, item in wins:
                 notification.setdefault(name, []).append(item)
@@ -584,6 +637,19 @@ class Session:
                 # The loop must outlive any turn: fail what the turn owed and go on.
                 logger.exception("Session %s: turn bookkeeping failed", self.id)
                 self._fail_turn(exc)
+
+    def _end_loop(self, exc: Exception) -> None:
+        """The loop cannot go on: fail every open outcome and close the session."""
+        error = TurnFailedError(
+            f"The session's turn loop stopped: {type(exc).__name__}: {exc}", exc
+        )
+        self._waiting = []
+        for item_id in list(self._futures):
+            self._resolve(item_id, error)
+        if self._close_task is None:
+            self._close_task = asyncio.get_running_loop().create_task(
+                self._close(), name=f"session-close:{self.id}"
+            )
 
     def _fail_turn(self, exc: Exception) -> None:
         """Settle a turn whose own settling failed: its prompts get ``TurnFailedError``."""

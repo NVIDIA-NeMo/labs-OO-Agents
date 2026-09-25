@@ -534,7 +534,8 @@ class SessionRegistry:
         steer a model call saw was marked consumed.
         """
         rows = self.store.load_rows(
-            session.id, frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn"))
+            session.id,
+            frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn", "ItemDiscarded")),
         )
         admitted: dict[str, dict[str, object]] = {}
         finished: set[str] = set()
