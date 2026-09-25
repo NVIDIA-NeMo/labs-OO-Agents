@@ -95,7 +95,10 @@ to follow semantic versioning.
     workspace, or without `cwd` of every workspace the client has named,
     with `_meta["dev.nooa/status"]`), close, and delete through
     the `_nooa/session/delete` extension method. Turns: a prompt sent
-    during a turn steers it and both return together; `Waiting` keeps the
+    during a turn is queued and returns with the turn that takes it;
+    `_nooa/session/inject` queues or steers a message and
+    `_nooa/session/revoke_inject` takes it back (after the ACP RFD in
+    agent-client-protocol PR #1261); `Waiting` keeps the
     prompt open; cancel closes open tool cards as "Cancelled" before the
     prompt answers `cancelled`; generation limits map to `max_tokens` and
     `max_turn_requests`. A `NeedInput` question is the turn's final
