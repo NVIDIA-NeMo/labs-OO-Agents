@@ -227,14 +227,24 @@ async def harness(tmp_path):
     await harness.close()
 
 
-def _stored(harness: Harness, *, parent_id: str | None = None, turns: int = 0) -> str:
+def _stored(
+    harness: Harness,
+    *,
+    parent_id: str | None = None,
+    turns: int = 0,
+    workspace: str | None = None,
+    answered: bool = True,
+) -> str:
+    """A session on disk with ``turns`` user messages, each answered unless told otherwise."""
     handle = harness.store.create(
-        agent="a:B", workspace=harness.cwd, host="acp", parent_id=parent_id
+        agent="a:B", workspace=workspace or harness.cwd, host="acp", parent_id=parent_id
     )
-    from nooa_coder.session.events import SessionUserMessage
+    from nooa_coder.session.events import SessionUserMessage, TurnEnded
 
     for _ in range(turns):
         handle.events.add(SessionUserMessage(content="hello"))
+        if answered:
+            handle.events.add(TurnEnded(outcome_kind="done"))
     handle.close()
     return handle.id
 
@@ -723,3 +733,30 @@ async def test_a_failure_in_the_input_loop_is_logged_and_ends_the_router(harness
         record.exc_info and "handler exploded" in str(record.exc_info[1])
         for record in caplog.records
     )
+
+
+async def test_session_list_gives_a_relative_recorded_workspace_the_store_directory(
+    harness, monkeypatch
+):
+    """The old TUI recorded "../"; the entry's cwd is the directory the store belongs to."""
+    import nooa_coder.session.store as store_module
+
+    # create() resolves the workspace now; write the record as the old TUI did.
+    monkeypatch.setattr(store_module, "_normalise_workspace", lambda workspace: str(workspace))
+    old = _stored(harness, turns=1, workspace="../")
+    monkeypatch.undo()
+    monkeypatch.chdir(harness.cwd)
+    for params in ({}, {"cwd": harness.cwd}):
+        frame = await harness.call("session/list", params)
+        [entry] = frame.message["result"]["sessions"]
+        assert (entry["sessionId"], entry["cwd"]) == (old, str(Path(harness.cwd).resolve()))
+
+
+async def test_session_list_leaves_out_sessions_the_agent_never_answered(harness):
+    answered = _stored(harness, turns=1)
+    _stored(harness, turns=1, answered=False)  # a failed first turn: noise
+    named = _stored(harness, turns=1, answered=False)
+    with harness.store.open(named) as handle:
+        handle.set_title("Kept by name", user_set=True)
+    frame = await harness.call("session/list", {"cwd": harness.cwd})
+    assert {e["sessionId"] for e in frame.message["result"]["sessions"]} == {answered, named}
