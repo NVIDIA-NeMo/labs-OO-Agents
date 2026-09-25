@@ -60,6 +60,39 @@ class Answer(BaseModel):
 _counter = 0
 
 
+class CellLLM(FakeLLMClient):
+    """A strict fake model whose scripted cells run in the Python tool the agent offers.
+
+    ``cell()`` scripts an ``execute_python`` call. Agents on CodeActV2 (the
+    coding agents) offer ``python_cell`` instead, so a scripted call is renamed
+    to it when that is the Python tool in the request.
+    """
+
+    def __init__(self, responses: list[LLMResponse] | None = None, **kwargs: Any) -> None:
+        kwargs.setdefault("strict_exhaustion", True)
+        super().__init__(responses or [], **kwargs)
+
+    def _scripted_call(self, messages: Any, tools: Any, output_model: Any, kwargs: Any) -> Any:
+        offered = {getattr(tool, "name", None) for tool in tools or []}
+        queue = self._response_queue
+        if queue and "python_cell" in offered and "execute_python" not in offered:
+            head = queue[0]
+            if any(call.name == "execute_python" for call in head.tool_calls or []):
+                queue[0] = LLMResponse(
+                    raw_response=None,
+                    content=head.content,
+                    tool_calls=[
+                        ToolCall(id=call.id, name="python_cell", arguments=call.arguments)
+                        if call.name == "execute_python"
+                        else call
+                        for call in head.tool_calls
+                    ],
+                    finish_reason=head.finish_reason,
+                    usage=head.usage,
+                )
+        return super()._scripted_call(messages, tools, output_model, kwargs)
+
+
 def cell(code: str, *, usage: LLMUsage | None = None) -> LLMResponse:
     """One model response that runs ``code`` in an ``execute_python`` cell."""
     global _counter
@@ -148,7 +181,7 @@ class ScriptedModels:
         self.built: list[Any] = []
 
     def __call__(self, options: Any, storage: Any) -> InteractiveAgent:
-        llm = FakeLLMClient(list(self.scripts.get(options.name, [])), strict_exhaustion=True)
+        llm = CellLLM(list(self.scripts.get(options.name, [])))
         self.llms[options.name] = llm
         self.built.append(options)
         return default_agent_factory(options.model_copy(update={"llm": llm}), storage)
@@ -195,11 +228,11 @@ class CommandAgent(InteractiveAgent, llm=FakeLLMClient()):
         self.slash_commands = FakeSlashCommands()
 
 
-class TrackedLLM(FakeLLMClient):
+class TrackedLLM(CellLLM):
     """A strict fake model that records whether it was closed."""
 
     def __init__(self, alias: str, responses: list[LLMResponse]) -> None:
-        super().__init__(responses, strict_exhaustion=True)
+        super().__init__(responses)
         self.alias = alias
         self.closed = False
 
@@ -269,9 +302,7 @@ class CoderModels(ScriptedModels):
     def __call__(self, options: Any, storage: Any) -> InteractiveAgent:
         from nooa_coder.session.loader import load_agent_class
 
-        llm = options.llm or FakeLLMClient(
-            list(self.scripts.get(options.name, [])), strict_exhaustion=True
-        )
+        llm = options.llm or CellLLM(list(self.scripts.get(options.name, [])))
         self.llms[options.name] = llm
         self.built.append(options)
         agent_class = load_agent_class(options.agent_spec, base=options.workspace)
