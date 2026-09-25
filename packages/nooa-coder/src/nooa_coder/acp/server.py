@@ -471,7 +471,6 @@ class CoderACPAgent:
             return CloseSessionResponse()
         if session is not None:
             await session.close()
-            _discard_if_empty(session)
         if bridge is not None:
             await bridge.close()
         return CloseSessionResponse()
@@ -1266,10 +1265,11 @@ async def list_sessions(
 
 
 def _discard_if_empty(session: Session) -> None:
-    """A closed root session the client never wrote to leaves no file behind.
+    """At shutdown, a root session the client never wrote to leaves no file.
 
     Clients open sessions they then abandon (a picker, a restart); without
-    this the store fills with files that list nothing.
+    this the store fills with files that list nothing. Only at shutdown: a
+    client may close a fresh session and load it again by id meanwhile.
     """
     if session.parent_id is not None or session.info.turn_count > 0:
         return
