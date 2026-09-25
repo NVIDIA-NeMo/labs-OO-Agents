@@ -50,7 +50,7 @@ from acp.schema import (
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage
+from nooa.interactive import AgentMessage, Done, NeedInput, RespondResult, Waiting
 from nooa_coder.coding.activity import (
     FileEdit,
     TerminalCommandFinished,
@@ -72,6 +72,9 @@ from nooa_coder.session.items import (
 logger = logging.getLogger(__name__)
 
 _STOP = object()
+
+# Values of return_result(...): the turn's result, not a cell's output.
+_TURN_RESULTS = (Done, NeedInput, Waiting, RespondResult)
 
 # Bound on a rendered Out[n] value; large results belong in the agent's
 # context, not repeated in full inside a client tool card.
@@ -414,8 +417,9 @@ class ACPEventBridge:
             # A cell whose last line is a bare expression produces no stdout:
             # the result arrives as ``value`` and codeact shows it to the model
             # as Out[n]. Without this the client is told there was no output
-            # while the agent is reasoning from one.
-            if event.value is not None:
+            # while the agent is reasoning from one. A turn result from
+            # return_result(...) is not output: the turn's own messages show it.
+            if event.value is not None and not isinstance(event.value, _TURN_RESULTS):
                 rendered = pformat(event.value, max_string=_MAX_VALUE_CHARS, unquote_strings=True)
                 parts.append(f"Out[{event.execution_count}]: {rendered}")
             cancelled = event.execution_status is ResultStatus.CANCELLED

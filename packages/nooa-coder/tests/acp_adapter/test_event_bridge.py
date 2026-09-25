@@ -41,7 +41,7 @@ from nooa_coder.session.items import (
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage
+from nooa.interactive import AgentMessage, Done, NeedInput, RespondResult, Waiting
 from nooa.llm_types import AssistantReasoning, LLMUsage
 from nooa.unifiedllm import FakeLLMClient
 
@@ -541,6 +541,42 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
     rendered = "".join(str(update) for _, update in client.updates)
     assert "Out[3]: 42" in rendered, rendered
     assert "Completed." not in rendered
+    await bridge.close()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        NeedInput(question="Which branch?", options=["main", "dev"]),
+        Done(explanation="finished"),
+        Waiting(explanation="job running", on=["jobs"]),
+        RespondResult(kind="DONE", explanation="answered"),
+    ],
+    ids=["need_input", "done", "waiting", "respond_result"],
+)
+async def test_a_turn_result_is_not_shown_as_out(tmp_path, value):
+    """``return_result(...)`` ends the turn; its value is not output for the card."""
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="t1", name="execute_python", arguments={"code": "return_result(x)"}
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="t1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=2,
+            value=value,
+        )
+    )
+    await bridge.flush()
+
+    rendered = "".join(str(update) for _, update in client.updates)
+    assert "Out[" not in rendered, rendered
     await bridge.close()
 
 
