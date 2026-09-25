@@ -868,9 +868,14 @@ class CoderACPAgent:
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse:
-        """``model``: switch the session's model from its next turn on."""
+        """``model``: switch the model from the next turn on; ``reasoning``: the level."""
         del kwargs
         session, _bridge = self._followed(session_id)
+        if config_id == "reasoning" and isinstance(value, str):
+            self._set_reasoning(session, value)
+            return SetSessionConfigOptionResponse(
+                config_options=self._config_options(session) or []
+            )
         if config_id != "model" or not isinstance(value, str):
             raise RequestError.invalid_params(
                 {"configId": config_id, "reason": "Unknown configuration option"}
@@ -886,8 +891,31 @@ class CoderACPAgent:
         self._chosen_models[session.id] = value
         return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
 
+    @staticmethod
+    def _set_reasoning(session: Session, level: str) -> None:
+        """Select a reasoning level the session's current client declares.
+
+        The level applies from the next model call on. It lives on the
+        client, so switching the model later starts from that alias's
+        default again; the option shows what the current client will do.
+        """
+        client = session.agent.llm
+        levels = getattr(client, "reasoning_levels", None) or ()
+        if level not in levels:
+            allowed = ", ".join(levels) if levels else "none for this model"
+            raise RequestError.invalid_params(
+                {
+                    "configId": "reasoning",
+                    "value": level,
+                    "reason": f"Unknown reasoning level; allowed: {allowed}",
+                }
+            )
+        client.reasoning_level = level
+
     def _config_options(self, session: Session) -> list[Any] | None:
-        """The model select option: the registry's aliases plus the current model."""
+        """The model select option (the registry's aliases plus the current model),
+        and a reasoning option when the current client declares levels."""
+        options: list[Any] = []
         current = (
             self._chosen_models.get(session.id)
             or session.info.model
@@ -897,19 +925,49 @@ class CoderACPAgent:
         aliases = model_aliases()
         if current and current not in aliases:
             aliases = [current, *aliases]
-        if not current or not aliases:
-            return None
-        return [
-            SessionConfigOptionSelect(
-                id="model",
-                name="Model",
-                category="model",
-                description="The model this session uses from its next turn on.",
-                type="select",
-                current_value=current,
-                options=[SessionConfigSelectOption(value=alias, name=alias) for alias in aliases],
+        if current and aliases:
+            options.append(
+                SessionConfigOptionSelect(
+                    id="model",
+                    name="Model",
+                    category="model",
+                    description="The model this session uses from its next turn on.",
+                    type="select",
+                    current_value=current,
+                    options=[
+                        SessionConfigSelectOption(value=alias, name=alias) for alias in aliases
+                    ],
+                )
             )
-        ]
+        reasoning = self._reasoning_option(session)
+        if reasoning is not None:
+            options.append(reasoning)
+        return options or None
+
+    @staticmethod
+    def _reasoning_option(session: Session) -> Any | None:
+        """The reasoning select option: the client's declared levels, or nothing.
+
+        Offered only when the client declares levels and either a level was
+        chosen or the route has a default; otherwise there is no honest
+        current value to show.
+        """
+        client = getattr(session.agent, "llm", None)
+        levels = tuple(getattr(client, "reasoning_levels", None) or ())
+        current = getattr(client, "reasoning_level", None) or getattr(
+            client, "reasoning_default", None
+        )
+        if not levels or current not in levels:
+            return None
+        return SessionConfigOptionSelect(
+            id="reasoning",
+            name="Reasoning",
+            category="thought_level",
+            description="How much the model reasons before answering, from its next call on.",
+            type="select",
+            current_value=current,
+            options=[SessionConfigSelectOption(value=level, name=level) for level in levels],
+        )
 
     def _followed(self, session_id: str) -> tuple[Session, ACPEventBridge]:
         session = self.session(session_id)
