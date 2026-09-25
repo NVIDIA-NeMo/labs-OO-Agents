@@ -271,6 +271,31 @@ async def test_host_controls_answer_as_text(coder_adapter, workspace, client):
     assert "Skills" in client.texts(AgentMessageChunk, session_id)[-1]
 
 
+_TRACE_CELL = (
+    "from nooa.tracing import get_session\n"
+    "self.message(str(get_session()))\n"
+    "return_result(Done(explanation='traced'))"
+)
+
+
+async def test_each_session_is_its_own_trace_session(coder_adapter, workspace, client, monkeypatch):
+    """The adapter names the trace session after the ACP session: turns and /trace-url."""
+    import nooa.tracing
+
+    monkeypatch.setenv("OTLP_ENDPOINT", "http://viewer:5001/v1/traces")
+    adapter = await coder_adapter([cell(_TRACE_CELL)], [cell(_TRACE_CELL)])
+    first = await _new(adapter, workspace)
+    assert nooa.tracing.get_session() == first
+    second = await _new(adapter, workspace)
+    for session_id in (first, second):
+        await _prompt(adapter, session_id, "which trace?")
+        assert client.texts(AgentMessageChunk, session_id)[-1] == session_id
+        await _prompt(adapter, session_id, "/trace-url")
+        assert client.texts(AgentMessageChunk, session_id)[-1] == (
+            f"http://viewer:5001/traces/view?session_id={session_id}"
+        )
+
+
 async def test_usage_answers_with_the_token_totals(coder_adapter, workspace, client):
     from nooa.unifiedllm import LLMUsage
 

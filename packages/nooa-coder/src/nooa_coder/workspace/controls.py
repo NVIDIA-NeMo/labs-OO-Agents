@@ -409,8 +409,8 @@ class TraceUrlControl(BehaviorControl):
         """The URL from ``OTLP_ENDPOINT`` without its ``/v1/traces`` or ``/v1`` suffix.
 
         The trace session is the one ``nooa.tracing`` holds in this context;
-        nooa-coder does not set one per ACP session, so it is the process's
-        default session when tracing was set up.
+        the ACP adapter sets it to the ACP session id for the session's
+        turns and for the commands it runs.
         """
         import os
         import urllib.parse
