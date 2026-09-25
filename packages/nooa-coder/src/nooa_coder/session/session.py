@@ -430,9 +430,12 @@ class Session:
             return False
         item_id = receipt.item_id
         steer = next((s for s in self._pending_steers if s[0] == item_id), None)
+        # A steer no model call saw was admitted again on user_messages
+        # with the same id: look for it there too.
+        channels = [receipt.channel] + (["user_messages"] if receipt.channel == "steer" else [])
         if steer is not None:
             self._pending_steers.remove(steer)
-        elif not self._remove_queued(receipt.channel, item_id):
+        elif not any(self._remove_queued(name, item_id) for name in channels):
             return False
         self.handle.events.add(ItemWithdrawn(item_id=item_id))
         self._resolve(item_id, ItemWithdrawnError(f"Item {item_id!r} was withdrawn"))
