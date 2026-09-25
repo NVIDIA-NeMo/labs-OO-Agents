@@ -193,15 +193,59 @@ class TranscriptEntry(BaseModel):
     timestamp: float
 
 
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+    "cost_usd",
+)
+"""A session's own usage fields; each has an ``attributed_`` twin for its children.
+
+The names match ``nooa.llm_types.LLMUsage``, which a model response carries.
+"""
+
+
 class Usage(BaseModel):
-    """Token and cost totals: the session's own and those attributed from its children."""
+    """Token and cost totals: the session's own and those attributed from its children.
+
+    ``cached_input_tokens`` are input tokens read from the provider's prompt
+    cache, ``cache_write_input_tokens`` those written to it, and
+    ``reasoning_tokens`` output tokens spent on reasoning.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
     cost_usd: float = 0.0
     attributed_input_tokens: int = 0
     attributed_output_tokens: int = 0
+    attributed_cached_input_tokens: int = 0
+    attributed_cache_write_input_tokens: int = 0
+    attributed_reasoning_tokens: int = 0
+    attributed_total_tokens: int = 0
     attributed_cost_usd: float = 0.0
+
+    def own(self) -> "Usage":
+        """Only this session's own totals."""
+        return Usage(**{name: getattr(self, name) for name in USAGE_FIELDS})
+
+    def with_attributed(self) -> "Usage":
+        """Own plus attributed totals, as own totals."""
+        return Usage(
+            **{
+                name: getattr(self, name) + getattr(self, f"attributed_{name}")
+                for name in USAGE_FIELDS
+            }
+        )
+
+    def has_attributed(self) -> bool:
+        return any(getattr(self, f"attributed_{name}") for name in USAGE_FIELDS)
 
 
 class SessionInfo(BaseModel):

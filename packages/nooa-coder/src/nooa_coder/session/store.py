@@ -29,7 +29,7 @@ from nooa_coder.session.events import (
     SessionStarted,
     SessionTitleUpdated,
 )
-from nooa_coder.session.items import SessionInfo, TranscriptEntry, Usage
+from nooa_coder.session.items import USAGE_FIELDS, SessionInfo, TranscriptEntry, Usage
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,31 @@ def _utc_offset(start: dict[str, object]) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+_USAGE_SUMS = ", ".join(
+    f"COALESCE(SUM(json_extract(data, '$.usage.{name}')), 0)" for name in USAGE_FIELDS
+)
+
+
+def _stored_usage(connection: sqlite3.Connection) -> Usage:
+    """Usage over the whole session, from its records.
+
+    Own totals are the sum of each ``TurnEnded``'s usage; attributed totals
+    the sum of the ``UsageAttributed`` records its children's turns left.
+    """
+    own = connection.execute(
+        f"SELECT {_USAGE_SUMS} FROM events WHERE event_type = 'TurnEnded'"
+    ).fetchone()
+    attributed = connection.execute(
+        f"SELECT {_USAGE_SUMS} FROM events WHERE event_type = 'UsageAttributed'"
+    ).fetchone()
+    values: dict[str, float] = {}
+    for index, name in enumerate(USAGE_FIELDS):
+        cast = float if name == "cost_usd" else int
+        values[name] = cast(own[index] or 0)
+        values[f"attributed_{name}"] = cast(attributed[index] or 0)
+    return Usage.model_validate(values)
 
 
 class InvalidSessionIdError(ValueError):
@@ -513,12 +538,7 @@ class SessionStore:
                     "ORDER BY insertion_order",
                     _SETTING_EVENT_TYPES,
                 ).fetchall()
-                usage_row = connection.execute(
-                    "SELECT COALESCE(SUM(json_extract(data, '$.usage.input_tokens')), 0), "
-                    "COALESCE(SUM(json_extract(data, '$.usage.output_tokens')), 0), "
-                    "COALESCE(SUM(json_extract(data, '$.usage.cost_usd')), 0.0) "
-                    "FROM events WHERE event_type = 'TurnEnded'"
-                ).fetchone()
+                usage = _stored_usage(connection)
             finally:
                 connection.close()
         except (OSError, sqlite3.Error):
@@ -569,6 +589,7 @@ class SessionStore:
             created_at=started_at,
             last_active=last_active,
             turn_count=turn_count,
+            usage=usage,
             workspace=str(
                 start.get("workspace", start.get("working_directory", start.get("working_dir", "")))
             ),
@@ -579,13 +600,6 @@ class SessionStore:
             turn_method=str(start.get("turn_method") or "handle"),
             title=title,
             title_is_user_set=title_is_user_set,
-            # The session's own usage, summed from its turns; usage
-            # attributed from children is only known while it is live.
-            usage=Usage(
-                input_tokens=int(usage_row[0]),
-                output_tokens=int(usage_row[1]),
-                cost_usd=float(usage_row[2]),
-            ),
             host=str(
                 start.get(
                     "host",

@@ -184,6 +184,11 @@ class SessionPort:
         await self._registry.close_child(self._session, child_id)
 
     @hidden
+    def info(self) -> SessionInfo:
+        """This session's metadata, with its live status."""
+        return self._registry.live_info(self._session)
+
+    @hidden
     def child_info(self, child_id: str) -> SessionInfo:
         """A child's metadata."""
         self._registry.check_owner(self._session, child_id)

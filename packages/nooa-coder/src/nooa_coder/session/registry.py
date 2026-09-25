@@ -343,7 +343,7 @@ class SessionRegistry:
         ancestor = self.sessions.get(child.parent_id) if child.parent_id else None
         parent = ancestor
         while ancestor is not None:
-            ancestor.add_attributed_usage(update.usage)
+            ancestor.add_attributed_usage(update.usage, child_id=child.id)
             ancestor = self.sessions.get(ancestor.parent_id) if ancestor.parent_id else None
         if parent is None or parent._closing or parent._closed:
             return

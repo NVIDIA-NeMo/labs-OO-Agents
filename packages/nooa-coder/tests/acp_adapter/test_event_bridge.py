@@ -166,6 +166,28 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     await agent.aclose()
 
 
+async def test_the_usage_update_carries_the_token_totals(tmp_path):
+    from nooa_coder.session.items import Usage
+
+    llm = FakeLLMClient()
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent, "session-1")
+    session.info.usage = Usage(
+        input_tokens=40, cached_input_tokens=30, attributed_cached_input_tokens=5
+    )
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    agent.event_manager.add(LLMResponse(usage=LLMUsage(input_tokens=40, cached_input_tokens=30)))
+    await bridge.flush()
+
+    [update] = [u for _, u in client.updates if isinstance(u, UsageUpdate)]
+    assert update.field_meta is not None
+    totals = update.field_meta["dev.nooa/usage"]
+    assert (totals["input_tokens"], totals["cached_input_tokens"]) == (40, 35)
+    await bridge.close()
+    await agent.aclose()
+
+
 async def test_the_python_card_names_its_code_like_the_shell_card(tmp_path):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()

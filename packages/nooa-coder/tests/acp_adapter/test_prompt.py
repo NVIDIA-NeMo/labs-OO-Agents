@@ -271,6 +271,20 @@ async def test_host_controls_answer_as_text(coder_adapter, workspace, client):
     assert "Skills" in client.texts(AgentMessageChunk, session_id)[-1]
 
 
+async def test_usage_answers_with_the_token_totals(coder_adapter, workspace, client):
+    from nooa.unifiedllm import LLMUsage
+
+    adapter = await coder_adapter(
+        [reply("Hi.", usage=LLMUsage(input_tokens=11, output_tokens=2, cached_input_tokens=7))]
+    )
+    session_id = await _new(adapter, workspace)
+    await _prompt(adapter, session_id, "hello")
+    assert (await _prompt(adapter, session_id, "/usage")).stop_reason == "end_turn"
+    text = client.texts(AgentMessageChunk, session_id)[-1]
+    assert "This session" in text
+    assert "Cached input tokens (cache reads)" in text and "Turns: 1" in text
+
+
 async def test_trace_url_answers_with_the_viewer_url(coder_adapter, workspace, client, monkeypatch):
     import nooa.tracing
 
