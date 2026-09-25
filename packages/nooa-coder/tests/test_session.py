@@ -569,6 +569,24 @@ async def test_usage_counts_the_sessions_own_tokens(make_session):
     assert [raw["usage"]["output_tokens"] for _, raw in _rows(session, "TurnEnded")] == [40, 20]
 
 
+async def test_usage_reaches_the_handle_and_the_store(make_session, sessions_dir):
+    usage = LLMUsage(input_tokens=100, output_tokens=20, cost_usd=0.5)
+    session, _ = make_session(done("one", usage=usage))
+    await asyncio.wait_for(session.prompt("one"), TIMEOUT)
+    child_usage = session.info.usage.model_copy(
+        update={"input_tokens": 7, "output_tokens": 3, "cost_usd": 0.25}
+    )
+    session.add_attributed_usage(child_usage)
+    own = session.info.usage
+    handle_usage = session.handle.info.usage
+    assert handle_usage is not own  # a copy taken under the handle's lock
+    assert handle_usage == own
+    assert (handle_usage.input_tokens, handle_usage.attributed_input_tokens) == (100, 7)
+    stored = SessionStore(sessions_dir).get(session.id).usage
+    assert (stored.input_tokens, stored.output_tokens) == (100, 20)
+    assert stored.cost_usd == pytest.approx(0.5)
+
+
 async def test_commands_delegate_to_the_agents_registry(make_session):
     session, _ = make_session(agent_spec="coder_test_agents:CommandAgent", start=False)
     assert session.commands() == [
