@@ -77,7 +77,7 @@ class CodingAgent(InteractiveAgent):
         *,
         cwd: str | Path = ".",
         summarization: SummarizationConfig | None = None,
-        skills_dirs: list[Path] | None = None,
+        skills_dirs: list[Path] | dict[str, list[Path]] | None = None,
         libs_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
@@ -97,7 +97,13 @@ class CodingAgent(InteractiveAgent):
         # project it means, or every session shares one directory — and
         # SkillWriting puts it on sys.path and activates local.*, so that
         # would expose one workspace's agent-authored code to another.
-        self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
+        is_workspace_default = libs_dir is None
+        default_libs_dir = get_project_dir("libs")
+        self.libs = SkillWriting(
+            self,
+            path=libs_dir or default_libs_dir,
+            load_existing=not is_workspace_default,
+        )
 
         self.skills = SkillRegistry(self)
         self.skills.register("nemo.shell", self.shell)
@@ -120,8 +126,30 @@ class CodingAgent(InteractiveAgent):
             installed.append(name)
         if installed:
             self.skills.load(installed)
+            
+        self.untrusted_workspace_skills = []
+        if is_workspace_default:
+            self.untrusted_workspace_skills.append(default_libs_dir)
+            
         if skills_dirs:
-            self.skills.discover_skills_dirs(skills_dirs)
+            if isinstance(skills_dirs, dict):
+                # Phase 3: Flip the default. Do not load untrusted workspace paths automatically.
+                workspace_dirs = skills_dirs.get("workspace", [])
+                if workspace_dirs:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info("Workspace trust: Gating discovered skill roots: %s", workspace_dirs)
+                    self.untrusted_workspace_skills.extend(workspace_dirs)
+                    
+                    # Continue discovering inert SKILL.md skills in untrusted workspace dirs
+                    if hasattr(self.skills, "discover_text_skills_dirs"):
+                        self.skills.discover_text_skills_dirs(workspace_dirs)
+                
+                # Only load trusted dirs automatically
+                trusted_dirs = skills_dirs.get("trusted", [])
+                self.skills.discover_skills_dirs(trusted_dirs)
+            else:
+                self.skills.discover_skills_dirs(skills_dirs)
 
         self.context["python_tools"] = Context(
             doc(RepoTools, ActivityShellTools),

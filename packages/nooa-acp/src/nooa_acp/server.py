@@ -431,6 +431,16 @@ class CodingACPAdapter:
                 commands,
                 startup_warnings=(*mcp_warnings, *registration_warnings),
             )
+            
+            # Phase 3 & 4: Workspace Trust Prompt
+            # If agent.untrusted_workspace_skills is populated, we need to prompt the user
+            # via session/request_permission before calling agent.skills.discover_skills_dirs
+            # and then reloading the agent's skills.
+            if hasattr(agent, "untrusted_workspace_skills") and agent.untrusted_workspace_skills:
+                # TODO: Implement session/request_permission via self._client and wait for user's decision.
+                # If accepted, we should also implement Phase 4 (Content-hashed trust) to detect future changes.
+                logger.info("Workspace has untrusted skills. Prompt implementation deferred.")
+
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
