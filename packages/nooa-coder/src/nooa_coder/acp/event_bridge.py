@@ -160,11 +160,14 @@ def cancel_text(by: str) -> str:
     return "Stopped at your request." if by == "user" else f"Stopped by {by}."
 
 
-def question_text(question: str, options: list[str] | None) -> str:
-    """A ``NeedInput`` question as the agent's final message of the turn."""
-    if not options:
-        return question
-    return question + "\n\n" + "\n".join(f"- {option}" for option in options)
+def question_text(question: str, options: list[str] | None, reason: str | None = None) -> str:
+    """A ``NeedInput`` question as the agent's final message of the turn; its reason last."""
+    text = question
+    if options:
+        text += "\n\n" + "\n".join(f"- {option}" for option in options)
+    if reason:
+        text += "\n\n" + reason
+    return text
 
 
 def _json_safe(value: Any) -> Any:
@@ -354,7 +357,12 @@ class ACPEventBridge:
             # item decides whether to also open a form.
             question = str(update.outcome.get("question", ""))
             options = update.outcome.get("options")
-            self._enqueue(update_agent_message(text_block(question_text(question, options))))
+            reason = update.outcome.get("reason")
+            self._enqueue(
+                update_agent_message(
+                    text_block(question_text(question, options, str(reason) if reason else None))
+                )
+            )
         elif update.outcome_kind == "error":
             # A turn ending on an error does not always write the PythonOutput
             # for a cell it announced; close its card rather than leave it

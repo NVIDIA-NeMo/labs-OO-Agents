@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification, PythonOutput, ResultStatus
 from nooa.interactive import (
+    AgentMessage,
     Done,
     InteractiveAgent,
     NeedInput,
@@ -224,6 +225,8 @@ class Session:
         self._turn_task: asyncio.Task[Any] | None = None
         self._cancel_by: str | None = None
         self._interrupted: PythonOutput | None = None
+        # Agent message texts sent in the running turn (see _send_result_message).
+        self._turn_messages: set[str] = set()
         self._settled = asyncio.Event()
         self._settled.set()
         self._close_task: asyncio.Task[None] | None = None
@@ -682,12 +685,17 @@ class Session:
         self._interrupted = None
         self.info.status = "running"
         usage_before = self.info.usage.model_copy()
+        self._turn_messages = set()
         method = getattr(self.agent, self.options.turn_method)
         self._turn_task = asyncio.create_task(method(notification), name=f"session-turn:{self.id}")
         outcome: Any
         kind: OutcomeKind
         try:
             outcome, kind = _classify(await self._turn_task)
+            if self._send_result_message(outcome):
+                # Listeners hear of agent events one loop step later; let
+                # this message's update go out before turn_ended.
+                await asyncio.sleep(0)
         except asyncio.CancelledError as exc:
             current = asyncio.current_task()
             if current is not None and current.cancelling():
@@ -707,6 +715,23 @@ class Session:
         finally:
             self._turn_task = None
         self._settle(outcome, kind, usage_before)
+
+    def _send_result_message(self, outcome: Any) -> bool:
+        """Show a ``Done``/``Waiting`` message as an agent message, inside the turn.
+
+        It goes through ``agent.message()`` like any reply, before the turn
+        is recorded as ended; text the turn already sent is not sent again.
+        Returns whether it sent one.
+        """
+        text = getattr(outcome, "message", None) if isinstance(outcome, Done | Waiting) else None
+        if not text or text in self._turn_messages:
+            return False
+        send = getattr(self.agent, "message", None)
+        if callable(send):
+            send(text)
+        else:
+            self.agent.event_manager.add(AgentMessage(content=text))
+        return True
 
     def _settle(self, outcome: Any, kind: OutcomeKind, usage_before: Usage) -> None:
         # Items stay in self._consumed / self._waiting until the end, so a
@@ -984,6 +1009,8 @@ class Session:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)
+        if isinstance(event, AgentMessage) and self._turn_task is not None:
+            self._turn_messages.add(event.content)
         if (
             isinstance(event, PythonOutput)
             and event.execution_status is ResultStatus.CANCELLED
@@ -1048,6 +1075,7 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
         return {
             "question": outcome.question,
             "options": outcome.options,
+            "reason": getattr(outcome, "reason", None),
             "answer_schema": schema,
         }, None
     if kind == "waiting":
