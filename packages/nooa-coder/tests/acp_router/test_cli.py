@@ -127,3 +127,18 @@ def test_the_cli_module_imports_nothing_heavy_at_load_time():
             loaded.append(node.module)
     heavy = [name for name in loaded if name.split(".")[0] in ("nooa", "nooa_coder", "acp")]
     assert heavy == []
+
+
+def test_llm_config_summary_names_the_files_and_the_env_var(tmp_path, monkeypatch):
+    """The worker logs where the model configuration comes from at start-up."""
+    from nooa_coder.acp.cli import llm_config_summary
+
+    config = tmp_path / "llm_config.yaml"
+    config.write_text("models: {}\n")
+    monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(config))
+    summary = llm_config_summary()
+    assert str(config.resolve()) in summary
+    assert f"NEMO_OO_LLM_CONFIG={config}" in summary
+
+    monkeypatch.delenv("NEMO_OO_LLM_CONFIG")
+    assert "NEMO_OO_LLM_CONFIG not set" in llm_config_summary()
