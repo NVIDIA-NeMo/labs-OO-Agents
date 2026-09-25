@@ -145,7 +145,9 @@ class NeedInput(BaseModel):
     reason: str | None = Field(
         default=None, description="Why progress is not possible or not desirable without it"
     )
-    options: list[str] | None = Field(default=None, description="Choices for a single choice")
+    options: list[str] | None = Field(
+        default=None, min_length=1, description="Choices for a single choice"
+    )
     answer_type: type[BaseModel] | None = Field(
         default=None,
         description="Pydantic model class with simple fields; the answer comes back as an instance",

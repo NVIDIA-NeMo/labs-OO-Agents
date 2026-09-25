@@ -148,6 +148,12 @@ def test_need_input_takes_options_or_answer_type_not_both():
         NeedInput(question="How many?", answer_type=int)  # type: ignore[arg-type]
 
 
+def test_need_input_options_must_not_be_empty():
+    assert NeedInput(question="Anything else?").options is None
+    with pytest.raises(ValidationError):
+        NeedInput(question="Which branch?", options=[])
+
+
 def _cell(code: str, call_id: str) -> LLMResponse:
     return LLMResponse(
         raw_response=None,
