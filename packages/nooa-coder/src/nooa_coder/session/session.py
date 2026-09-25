@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification
 from nooa.interactive import (
+    AgentMessage,
     Done,
     InteractiveAgent,
     NeedInput,
@@ -206,6 +207,7 @@ class Session:
         self._recording_error: BaseException | None = None
         self._started = False
         self._usage_before: Usage = self.info.usage.model_copy()
+        self._turn_messages: set[str] = set()
         self._close_task: asyncio.Task[None] | None = None
         self._closing = False
         self._closed = False
@@ -685,6 +687,7 @@ class Session:
         self.info.status = "running"
 
     def _on_turn_began(self, _event: Any) -> None:
+        self._turn_messages.clear()
         self._emit(TurnStartedUpdate(session_id=self.id, item_ids=list(self._consumed)))
 
     def _on_turn_settled(self, event: TurnSettled) -> None:
@@ -736,6 +739,23 @@ class Session:
                 )
             )
 
+    def _send_result_message(self, outcome: Any) -> bool:
+        """Show a ``Done``/``Waiting`` message as an agent message, inside the turn.
+
+        It goes through ``agent.message()`` like any reply, before the turn
+        is recorded as ended; text the turn already sent is not sent again.
+        Returns whether it sent one.
+        """
+        text = getattr(outcome, "message", None) if isinstance(outcome, Done | Waiting) else None
+        if not text or text in self._turn_messages:
+            return False
+        send = getattr(self.agent, "message", None)
+        if callable(send):
+            send(text)
+        else:
+            self.agent.event_manager.add(AgentMessage(content=text))
+        return True
+
     def _settle(self, event: TurnSettled) -> None:
         # Items stay in self._consumed / self._waiting until the end, so a
         # failure part way leaves them for _fail_turn to resolve.
@@ -750,6 +770,7 @@ class Session:
             outcome = TurnFailedError(event.message, event.error)
         else:
             outcome = event.result
+        self._send_result_message(outcome)
         consumed = list(self._consumed)
         if self._recording_error is None:
             self._admit_leftover_steers()
@@ -1023,6 +1044,8 @@ class Session:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)
+        if isinstance(event, AgentMessage) and self.agent.turns.in_turn:
+            self._turn_messages.add(event.content)
         update = AgentEventUpdate(
             session_id=self.id, event_id=str(event.id), event_type=event.event_type
         )
@@ -1030,6 +1053,9 @@ class Session:
         # listeners on the next loop step, when event_manager.get(event_id)
         # finds it.
         try:
+            if isinstance(event, AgentMessage):
+            self._emit(update)
+        else:
             asyncio.get_running_loop().call_soon(self._emit, update)
         except RuntimeError:  # no running loop: nothing to defer to
             self._emit(update)
@@ -1066,6 +1092,7 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
         return {
             "question": outcome.question,
             "options": outcome.options,
+            "reason": getattr(outcome, "reason", None),
             "answer_schema": schema,
         }, None
     if kind == "waiting":

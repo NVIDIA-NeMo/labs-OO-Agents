@@ -769,3 +769,49 @@ async def test_commands_need_the_coding_registry_shape(make_session):
     session.agent.slash_commands = ListOnly()
     with pytest.raises(AttributeError):
         session.commands()
+
+
+def _order(session, kinds=("agent_event", "turn_ended")):
+    """Session updates of the given kinds, as (kind, event_type) pairs, in order."""
+    seen = []
+    session.subscribe(
+        lambda e: seen.append((e.kind, getattr(e, "event_type", None))) if e.kind in kinds else None
+    )
+    return seen
+
+
+def _agent_lines(session):
+    return [e.content for e in session.transcript() if e.role == "agent"]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "return_result(Done(explanation='x', message='All set.'))",
+        # Already sent with self.message() in this turn: not sent again.
+        "self.message('All set.')\nreturn_result(Done(explanation='x', message='All set.'))",
+    ],
+    ids=["message_only", "sent_earlier_too"],
+)
+async def test_a_done_message_is_sent_once_before_the_turn_ends(make_session, code):
+    session, _ = make_session(cell(code))
+    seen = _order(session)
+    await asyncio.wait_for(session.prompt("go"), TIMEOUT)
+    assert _agent_lines(session) == ["All set."]
+    messages = [i for i, (_, t) in enumerate(seen) if t == "AgentMessage"]
+    assert len(messages) == 1
+    assert messages[0] < seen.index(("turn_ended", None))
+
+
+async def test_a_waiting_message_is_sent_before_the_turn_ends(make_session):
+    session, _ = make_session(
+        cell(
+            "return_result(Waiting(explanation='w', message='Tests are still running.', "
+            "on=['jobs']))"
+        )
+    )
+    seen = _order(session)
+    await session.submit("go")
+    await until(lambda: ("turn_ended", None) in seen)
+    assert _agent_lines(session) == ["Tests are still running."]
+    assert seen.index(("agent_event", "AgentMessage")) < seen.index(("turn_ended", None))

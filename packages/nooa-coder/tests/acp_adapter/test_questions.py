@@ -147,6 +147,42 @@ async def test_without_forms_other_questions_end_the_turn_as_text(make_adapter, 
     assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev\n\n"
 
 
+async def test_a_questions_reason_follows_it(make_adapter, workspace, client):
+    models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    "return_result(NeedInput(question='Which branch?', options=['main', 'dev'], "
+                    "reason='Both have the fix.'))"
+                )
+            ]
+        }
+    )
+    adapter = await make_adapter(models)
+    session_id, _ = await _run(adapter, workspace)
+    assert client.texts(AgentMessageChunk, session_id)[-1] == (
+        "Which branch?\n\n- main\n- dev\n\nBoth have the fix."
+    )
+
+
+async def test_a_done_message_reaches_the_client_before_the_prompt_answers(
+    make_adapter, workspace, client
+):
+    models = ScriptedModels(
+        {None: [cell("return_result(Done(explanation='x', message='All set.'))")]}
+    )
+    adapter = await make_adapter(models)
+    session_id, response = await _run(adapter, workspace)
+    client.log.append(("response", "prompt", response))
+    assert client.texts(AgentMessageChunk, session_id) == ["All set."]
+    kinds = [
+        "message" if entry[0] == "update" and isinstance(entry[2], AgentMessageChunk) else entry[0]
+        for entry in client.log
+        if entry[0] == "response" or isinstance(entry[2], AgentMessageChunk)
+    ]
+    assert kinds == ["message", "response"]
+
+
 async def test_cancel_while_a_form_is_open_ends_the_prompt_cancelled(
     make_adapter, workspace, client
 ):
