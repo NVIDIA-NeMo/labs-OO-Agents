@@ -100,6 +100,23 @@ def test_turn_results_require_their_text():
         NeedInput(question=" ")
 
 
+def test_done_carries_an_optional_reply_and_evidence():
+    done = Done(explanation="answered", message="  Here is the answer.  ")
+    assert done.message == "Here is the answer."
+    assert Done(explanation="answered", message="   ").message is None
+    assert Done(explanation="answered").message is None
+    first, second = Done(explanation="a"), Done(explanation="b")
+    first.evidence.append("pytest tests/x.py: 24 passed")
+    assert second.evidence == []
+    assert Done(explanation="a", evidence=["ruff: clean"]).evidence == ["ruff: clean"]
+
+
+def test_need_input_reason_is_optional():
+    assert NeedInput(question="Which branch?").reason is None
+    asked = NeedInput(question="Which branch?", reason="Pushing to the wrong one is hard to undo.")
+    assert asked.reason == "Pushing to the wrong one is hard to undo."
+
+
 def test_need_input_takes_options_or_answer_type_not_both():
     class HowMany(BaseModel):
         n: int
@@ -151,6 +168,14 @@ async def test_handle_accepts_each_turn_result(code, expected):
     assert type(result) is expected
 
 
+async def test_handle_returns_the_reply_in_done():
+    code = 'return_result(Done(message="Here it is.", explanation="answered", evidence=["ran it"]))'
+    agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
+    result = await agent.handle(_NOTIFICATION)
+    assert result == Done(message="Here it is.", explanation="answered", evidence=["ran it"])
+    assert result.message == "Here it is."
+
+
 async def test_handle_rejects_other_results():
     llm = FakeLLMClient(
         [
@@ -200,6 +225,15 @@ async def test_model_sees_the_subclass_handle_docstring_and_annotation():
     assert "Handle one interactive turn." not in prompt
     [return_tool] = [t for t in llm.calls[0].tools or [] if t.name == "return_result"]
     assert "Expected return type: Done." in return_tool.description
+
+
+async def test_handle_docs_put_the_reply_in_done_message():
+    llm = FakeLLMClient([_cell('return_result(Done(explanation="finished"))', "c1")])
+    await _Host(llm=llm).handle(_NOTIFICATION)
+
+    prompt = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert "return_result(Done(message=" in prompt
+    assert "exactly one terminal result" in prompt
 
 
 async def test_model_sees_the_base_handle_batch_annotation():

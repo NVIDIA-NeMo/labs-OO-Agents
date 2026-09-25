@@ -100,19 +100,34 @@ def _non_blank(value: str) -> str:
 class Done(BaseModel):
     """Turn result: the work for this turn is finished.
 
-    ``explanation`` is a short status line for the host, not the reply to
-    the user; send the reply with ``self.message()`` first. ``result`` is
-    set only when a delegated objective or benchmark task completes; it is
-    then a ``TaskResult`` (defined with the bench and session code, so it is
-    typed ``Any`` here).
+    ``message`` is the preferred way to answer the user on a turn that
+    handled a user message: put the reply here and the host shows it.
+    ``self.message()`` remains for text you want to show before the turn
+    ends. ``explanation`` stays a short status line. ``evidence`` is
+    optional: short factual lines a reviewer can check, used when you
+    verified something. ``result`` is set only when a delegated objective
+    or benchmark task completes; it is then a ``TaskResult`` (defined with
+    the bench and session code, so it is typed ``Any`` here).
     """
 
     explanation: str = Field(description="Status line saying what was finished; not the reply")
+    message: str | None = Field(default=None, description="The reply to show the user")
+    evidence: list[str] = Field(
+        default_factory=list,
+        description='Short checkable facts, e.g. "pytest tests/x.py: 24 passed"',
+    )
     result: Any | None = Field(
         default=None, description="TaskResult when a delegated or bench task completes"
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
+
+    @field_validator("message")
+    @classmethod
+    def _blank_message_is_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
 
 
 class NeedInput(BaseModel):
@@ -124,10 +139,14 @@ class NeedInput(BaseModel):
     are simple values: str, int, float, bool, or a list of str) for a typed
     answer, or neither for free text. The host turns ``answer_type`` into a
     form and the answer arrives in the next notification as an instance of
-    it.
+    it. ``reason`` optionally says in one sentence why progress is not
+    possible or not desirable without the answer.
     """
 
     question: str = Field(description="The question to show the person")
+    reason: str | None = Field(
+        default=None, description="Why progress is not possible or not desirable without it"
+    )
     options: list[str] | None = Field(default=None, description="Choices for a single choice")
     answer_type: type[BaseModel] | None = Field(
         default=None,
@@ -550,21 +569,25 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         ## Returning
 
-        End the turn with exactly one ``return_result(...)`` of one of these:
+        A turn has exactly one terminal result: the value you return.
+        Everything else is intermediate. End the turn with one
+        ``return_result(...)`` of one of these:
 
-        - ``Done(explanation=...)`` — the request is complete. Send the
-          reply to the user with ``self.message()`` first; ``explanation``
-          is a short status line the host records, not the reply::
+        - ``Done(message=..., explanation=...)`` — the request is complete.
+          ``message`` is the reply the host shows the user; ``explanation``
+          is a short status line. Add ``evidence=[...]`` for checks you ran::
 
-              self.message("Added the flag and its test; all tests pass.")
-              return_result(Done(explanation="implemented the flag and verified focused tests"))
+              return_result(Done(message="Added the flag and its test.", explanation="added flag"))
+
+          Use ``self.message()`` only for text to show before the turn ends.
 
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. ``question`` is the question; the host shows it, so do
           not also send it with ``message()``. Add ``options=[...]`` for a
           single choice, or ``answer_type=SomeModel`` (a pydantic class you
           define with simple fields) for a typed answer. The answer arrives
-          in the next notification::
+          in the next notification. ``reason`` optionally says why you
+          need it::
 
               return_result(NeedInput(question="Which branch should I push to?", options=["main", "dev"]))
 
@@ -611,7 +634,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         error. Unpack ``notification`` (channel name → list of items) and
         do all the work.
 
-        End with exactly one ``return_result(...)``:
+        A turn has exactly one terminal result: the value you return.
+        Everything else is intermediate. End with one ``return_result(...)``:
 
         - ``Done(explanation=...)`` — the work is finished, or cannot go
           further. If something blocks you, say what in ``explanation``.
