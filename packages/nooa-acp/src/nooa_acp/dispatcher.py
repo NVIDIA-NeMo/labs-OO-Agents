@@ -5,12 +5,14 @@
 import asyncio
 from collections.abc import Coroutine
 from contextlib import suppress
-from typing import Any, cast
+from typing import Any
 
 from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
 
-from nooa.interactive import RespondReason, RespondResult
+from nooa.interactive import Done, NeedInput, RespondReason, RespondResult, Waiting
 from nooa.slash_dispatch import SlashCommandResult
+
+TurnResult = Done | NeedInput | Waiting | RespondResult
 
 
 class InteractiveSessionDispatcher:
@@ -24,7 +26,7 @@ class InteractiveSessionDispatcher:
     def active(self) -> bool:
         return self._cancelling or (self._active_task is not None and not self._active_task.done())
 
-    async def submit(self, text: str) -> RespondResult | None:
+    async def submit(self, text: str) -> TurnResult | None:
         self._ensure_idle()
         self.agent.queue_manager.get_channel("user_messages").put(text)
         return await self._run_active(self._dispatch())
@@ -34,10 +36,10 @@ class InteractiveSessionDispatcher:
         commands: CodingSlashCommandRegistry,
         name: str,
         raw_args: str,
-    ) -> tuple[SlashCommandResult, RespondResult | None] | None:
+    ) -> tuple[SlashCommandResult, TurnResult | None] | None:
         """Invoke and, when requested, dispatch a slash command as one cancellable turn."""
 
-        async def _invoke() -> tuple[SlashCommandResult, RespondResult | None]:
+        async def _invoke() -> tuple[SlashCommandResult, TurnResult | None]:
             result = await commands.invoke(name, raw_args)
             if not result.output_to_agent:
                 return result, None
@@ -68,7 +70,7 @@ class InteractiveSessionDispatcher:
             if self._active_task is task:
                 self._active_task = None
 
-    async def _dispatch(self) -> RespondResult:
+    async def _dispatch(self) -> TurnResult:
         while True:
             wins = await self.agent.queue_manager.race()
             notification: dict[str, list[Any]] = {}
@@ -78,9 +80,12 @@ class InteractiveSessionDispatcher:
                 if drained := channel.drain():
                     notification.setdefault(name, []).extend(drained)
 
-            result = cast(RespondResult, await self.agent.handle(notification))
-            if result.kind is not RespondReason.WAIT:
-                return result
+            result = await self.agent.handle(notification)
+            # Keep the prompt open while the turn waits on a job or queue; both
+            # the typed Waiting and the older RespondResult(kind=WAIT) mean that.
+            if isinstance(result, Waiting) or getattr(result, "kind", None) is RespondReason.WAIT:
+                continue
+            return result
 
     async def cancel(self) -> bool:
         """Cancel the foreground turn and background jobs without closing the session."""

@@ -10,7 +10,7 @@ from nooa_cli.coding import CodingAgent
 
 from nooa.context_blocks.events import ToolCallEvent
 from nooa.events import PythonOutput
-from nooa.interactive import AgentMessage, RespondReason, RespondResult
+from nooa.interactive import AgentMessage, Done, RespondReason, RespondResult, Waiting
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 
@@ -148,4 +148,30 @@ async def test_dispatcher_cancels_background_jobs(tmp_path):
     assert await asyncio.wait_for(prompt_task, timeout=1) is None
     assert agent.job is not None
     assert agent.job.state == "cancelled"
+    await dispatcher.close()
+
+
+class _TypedResultAgent(CodingAgent):
+    """Returns the newer turn results: Waiting on the first turn, then Done."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.handle_calls = 0
+
+    async def handle(self, notification: dict[str, list[Any]]) -> Done | Waiting:
+        self.handle_calls += 1
+        if self.handle_calls == 1:
+            self.queue_manager.get_channel("system_messages").put("job finished")
+            return Waiting(explanation="waiting for job", on=["system_messages"])
+        return Done(message="All done.", explanation="job finished")
+
+
+async def test_dispatcher_accepts_the_typed_turn_results(tmp_path):
+    agent = _TypedResultAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    dispatcher = InteractiveSessionDispatcher(agent)
+
+    result = await dispatcher.submit("wait for the job")
+
+    assert result == Done(message="All done.", explanation="job finished")
+    assert agent.handle_calls == 2
     await dispatcher.close()
