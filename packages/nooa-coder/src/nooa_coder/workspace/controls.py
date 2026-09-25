@@ -427,9 +427,10 @@ class TraceUrlControl(BehaviorControl):
             if base.endswith(suffix):
                 base = base[: -len(suffix)]
                 break
-        return ControlResult.ok(
-            ControlMessage(f"{base}/traces/view?session_id={urllib.parse.quote(session_name)}")
-        )
+        url = f"{base}/traces/view?session_id={urllib.parse.quote(session_name)}"
+        # A bare URL on its own is not rendered by every ACP client (Pool 1.0.16
+        # shows nothing); a text fence is, and keeps the URL copyable.
+        return ControlResult.ok(ControlMessage(f"Trace viewer:\n```text\n{url}\n```"))
 
 
 _USAGE_ROWS = (

@@ -27,14 +27,17 @@ async def test_the_url_names_the_trace_session_on_the_viewer(monkeypatch, endpoi
     monkeypatch.setenv("OTLP_ENDPOINT", endpoint)
     result = await _control().invoke("")
     assert result.success
-    assert str(result) == f"{base}/traces/view?session_id=run%201/a"
+    assert str(result) == f"Trace viewer:\n```text\n{base}/traces/view?session_id=run%201/a\n```"
 
 
 async def test_the_default_viewer_is_local(monkeypatch):
     monkeypatch.setattr(nooa.tracing, "get_session", lambda: "abc")
     monkeypatch.delenv("OTLP_ENDPOINT", raising=False)
     result = await _control().invoke("")
-    assert str(result) == "http://localhost:5001/traces/view?session_id=abc"
+    assert (
+        str(result)
+        == "Trace viewer:\n```text\nhttp://localhost:5001/traces/view?session_id=abc\n```"
+    )
 
 
 async def test_without_a_trace_session_it_says_so(monkeypatch):
