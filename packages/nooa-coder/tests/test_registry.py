@@ -397,6 +397,47 @@ async def test_set_model_swaps_the_client_before_the_next_turn(root_options, ses
     assert new.closed
 
 
+async def test_a_same_model_child_shares_the_parents_client(root_options, sessions_dir):
+    factory = ModelFactory()
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    try:
+        root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
+        [root_llm] = factory.made
+        kid = await registry.create(
+            root.options.inherit(name="kid", retain=True), parent_id=root.id
+        )
+        assert kid.agent.llm is root_llm and len(factory.calls) == 1
+        await registry.close(kid.id)
+        assert not root_llm.closed  # the child did not own it
+        reopened = await registry.open_child(root, kid.id)
+        assert reopened.agent.llm is root_llm and len(factory.calls) == 1
+        other = await registry.create(
+            root.options.inherit(name="other", model="alias-b"), parent_id=root.id
+        )
+        assert other.agent.llm is not root_llm and len(factory.calls) == 2
+    finally:
+        await registry.close_all()
+    assert root_llm.closed
+
+
+async def test_set_model_keeps_a_client_a_child_still_uses(root_options, sessions_dir):
+    factory = ModelFactory({"alias-b": [[done("on b")]]})
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    try:
+        root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
+        kid = await registry.create(
+            root.options.inherit(name="kid", retain=True), parent_id=root.id
+        )
+        await root.set_model("alias-b")
+        assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="on b")
+        old, new = factory.made
+        assert kid.agent.llm is old and not old.closed
+        assert root.agent.llm is new
+    finally:
+        await registry.close_all()
+    assert old.closed and new.closed
+
+
 async def test_set_model_needs_an_llm_factory(registry, root_options):
     root = await registry.create(root_options)
     with pytest.raises(RuntimeError, match="llm_factory"):

@@ -204,8 +204,10 @@ class SessionRegistry:
             if owned_llm is not None and hasattr(owned_llm, "aclose"):
                 await asyncio.shield(owned_llm.aclose())
             raise
+        # The Session keeps the options with the client, so a same-model
+        # child (options.inherit) shares it instead of building another.
         session = Session(
-            options=options,
+            options=build_options,
             agent=agent,
             handle=handle,
             owned_llm=owned_llm,
@@ -215,6 +217,9 @@ class SessionRegistry:
         if isinstance(resolved, str) and resolved:
             session.info.model = resolved
         session._before_close = lambda: self._close_children(session.id)
+        session.llm_in_use = lambda llm: any(
+            other is not session and other.options.llm is llm for other in self.sessions.values()
+        )
         install_port(agent, session, self)
         return session
 
