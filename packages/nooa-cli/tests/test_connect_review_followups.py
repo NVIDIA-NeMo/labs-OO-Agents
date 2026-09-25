@@ -62,7 +62,7 @@ def test_wizard_saves_endpoint_limits_not_catalogue(tmp_path, monkeypatch):
     assert entry["context_window"] == 100000
     assert entry["max_tokens"] == 16000
     assert "endpoint input limit" in result.output
-    assert entry["provenance"]["endpoint_limits"]["max_input_tokens"] == 100000
+    assert "provenance" not in entry
 
 
 @pytest.mark.parametrize("cached", [(12, 0), (0, 0)])
@@ -196,7 +196,7 @@ def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeyp
     assert "route may be slow" in result.output
     assert "private server detail" not in result.output
     entry = yaml.safe_load(target.read_text())["models"]["local"]
-    assert entry["provenance"]["tokens_charged_to_budget"] == 4 * 712 + 8192 + 512
+    assert "provenance" not in entry
 
 
 @pytest.mark.parametrize("correct", [True, False])

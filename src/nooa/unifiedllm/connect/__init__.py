@@ -1636,6 +1636,11 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     unrelated entries and comments remain intact. The final replace is atomic.
     """
     entry = configure_entry(entry)
+    # Persist discovered settings only. Probe evidence, request bodies, catalogue
+    # data and warnings belong to the connect session (surfaces via
+    # ``nooa connect check --json``); embedding them here would write the whole
+    # history of the connect call into the registry.
+    entry.pop("provenance", None)
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Lock a stable sidecar inode, not the registry inode replaced atomically.

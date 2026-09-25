@@ -276,9 +276,27 @@ def test_write_replaces_hand_written_alias_preserving_neighbors(tmp_path):
     assert text.startswith("# human notes\n")
     assert "  other: {model_name: openai/other} # keep this\n" in text
     assert "settings: true # keep this too\n" in text
-    assert yaml.safe_load(text)["models"]["local"] == connect.configure_entry(
-        {"model_name": "openai/new"}
-    )
+    expected = connect.configure_entry({"model_name": "openai/new"})
+    expected.pop("provenance", None)  # connect evidence never reaches the registry
+    assert yaml.safe_load(text)["models"]["local"] == expected
+
+
+def test_write_persists_settings_without_connect_history(tmp_path):
+    """The registry captures discovered settings, not the connect call's history."""
+    entry = make_plan().entry
+    entry["provenance"]["probes"]["routing"] = {
+        "outcome": "accepted",
+        "request": {
+            "input": [{"role": "user", "content": "Compute 17 * 19. Reply with the number."}]
+        },
+    }
+    entry["provenance"]["catalogue"] = {"url": "https://example.test", "id": "provider/model"}
+    path = tmp_path / "llm_config.yaml"
+    connect.write(entry, path, alias="local")
+    saved = yaml.safe_load(path.read_text())["models"]["local"]
+    assert "provenance" not in saved
+    assert saved["model_name"] == entry["model_name"]
+    assert saved["max_tokens"] == entry["max_tokens"]
 
 
 @pytest.mark.parametrize(
@@ -325,7 +343,8 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
     monkeypatch.setattr(layered_config, "get_project_dir", lambda name: project / name)
     monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)
     assert llm_config.llm_config_chain() == [manual]
-    assert yaml.safe_load(manual.read_text())["models"]["local"] == make_plan().entry
+    persisted = {k: v for k, v in make_plan().entry.items() if k != "provenance"}
+    assert yaml.safe_load(manual.read_text())["models"]["local"] == persisted
 
 
 @pytest.mark.parametrize(
@@ -574,9 +593,9 @@ def test_comment_only_registry_and_quoted_alias_round_trip(tmp_path):
     connect.write({"model_name": "openai/m"}, path, alias="off")
     connect.write({"model_name": "openai/n"}, path, alias="off")
     assert path.read_text().startswith("# Keep this note\n")
-    assert yaml.safe_load(path.read_text())["models"] == {
-        "off": connect.configure_entry({"model_name": "openai/n"})
-    }
+    expected = connect.configure_entry({"model_name": "openai/n"})
+    expected.pop("provenance", None)
+    assert yaml.safe_load(path.read_text())["models"] == {"off": expected}
 
 
 @pytest.mark.asyncio

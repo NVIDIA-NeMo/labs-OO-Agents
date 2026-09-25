@@ -345,9 +345,8 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
     if mode == "missing":
         assert result.output.index(warning) < result.output.index("Write model entry")
         assert "Try another API format or review the server's reasoning settings" in result.output
-        probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
-        assert probes["level:high"]["outcome"] == "accepted"
-        assert probes["level:high"]["reasoning_observed"] is False
+        entry = yaml.safe_load(path.read_text())["models"]["local"]
+        assert "provenance" not in entry  # evidence stays in the session
 
 
 def test_offline_cli_needs_no_key_and_writes_generated_registry(tmp_path, monkeypatch):
@@ -400,7 +399,7 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["api_base"] == "https://new.example/v1"
     assert entry["model_name"] == "openai/new-model"
-    assert entry["provenance"]["tokens_charged_to_budget"] == 6 * 712
+    assert "provenance" not in entry  # budget accounting stays in the session
 
 
 @pytest.mark.parametrize("yes", [False, True])
@@ -580,7 +579,7 @@ def test_full_yaml_preview_is_explicit_and_does_not_change_saved_entry(
         assert result.output.index("provenance:") < result.output.index("Write model entry")
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["model_name"] == "openai/wire/model"
-    assert all(p["outcome"] == "not_probed" for p in entry["provenance"]["probes"].values())
+    assert "provenance" not in entry  # preview shows it; the registry never stores it
 
 
 def test_declining_final_write_leaves_no_file(tmp_path):
@@ -912,7 +911,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     if recover:
         entry = yaml.safe_load(path.read_text())["models"]["local"]
         assert entry["api_key_env"] == "CONNECT_GOOD"
-        assert entry["provenance"]["tokens_charged_to_budget"] == 6 * 712 + 32768 + 512
+        assert "provenance" not in entry
         assert "test-secret" not in path.read_text()
     else:
         assert not path.exists()
@@ -1002,10 +1001,8 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
-    provenance = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]
-    assert provenance["tokens_charged_to_budget"] == 2136
-    assert provenance["probes"]["routing"]["outcome"] == "not_probed"
-    assert provenance["probes"]["tools"]["outcome"] == "not_probed"
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert "provenance" not in entry
     assert "approved budget is too small" in result.output
     assert "setup is incomplete; budget exhausted before routing" in result.output
     assert result.output.index("approved budget is too small") < result.output.index(
@@ -1140,21 +1137,12 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch
         if action == "edit":
             assert "Enter a positive whole number" in result.output
         assert entry["context_window"] == (128000 if action == "keep_context" else 64000)
-        assert entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 2048
         assert entry["reasoning_levels"] == {
             "low": {"reasoning_effort": "low"},
             "medium": {"reasoning_effort": "medium"},
         }
         assert entry["reasoning_default"] == "medium"
-        for field in (
-            "context_window",
-            "max_output_tokens",
-            "reasoning_levels",
-            "reasoning_default",
-        ):
-            assert entry["provenance"][field]["source"] == "user"
-        probes = entry["provenance"]["probes"]
-        assert set(probes) == {"routing", "tools", "level:low", "level:medium"}
+        assert "provenance" not in entry  # edit sources and probe plans stay in the session
 
 
 def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monkeypatch):
@@ -1205,8 +1193,8 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     # Routing is rechecked at the configured cap; tools and all six levels run.
     # The session seed is also attempted; this minimal mock lacks a finish reason.
     assert len(bodies) == 11
-    probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
-    assert all(record["outcome"] == "accepted" for record in probes.values())
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert "provenance" not in entry  # outcomes were checked on the wire; see bodies
 
 
 def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch):

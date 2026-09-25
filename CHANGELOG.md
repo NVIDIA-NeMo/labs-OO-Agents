@@ -6,6 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Connect no longer writes its session history into `llm_config.yaml`. Saved
+  aliases now contain only the discovered runtime settings; the whole
+  `provenance` block — probe requests and outcomes, token accounting,
+  catalogue metadata, limits, warnings — stays in the connect session
+  (visible via `--show-config` previews and `--stage` JSON) and never
+  reaches the registry. Existing verbose configs remain loadable; the next
+  save of an alias compacts it. A typical entry shrinks from ~550 lines to
+  ~40.
 - Remove `AnthropicProviderFormatter` and `ResponsesProviderFormatter` from
   `nooa.context_blocks`, and the runtime's client-type dispatch that swapped in
   the Responses one. Neither was on the live path: every client (including
