@@ -516,8 +516,11 @@ class RepoTools(Skill):
         r = await self.repo.symbols("src/", query="Handler")
         await self.shell.replace(r[0], new_code)
 
-    ``root`` sets the default base for relative paths and result display; it
-    is not a security boundary. Both an absolute ``path=`` argument and a
+    ``cwd`` is the base for relative paths: the wired session's current
+    directory, so a ``cd`` through ``self.shell`` moves these tools too
+    (``root`` without a session). ``root`` is the repository root: where
+    whole-tree searches start and what result paths are shown relative
+    to. Neither is a security boundary. Both an absolute ``path=`` argument and a
     shared ``session`` give the same filesystem access ``ShellTools.run()``
     already has in that session (host, or a Gym-seeded sandbox). Callers that
     need to keep an agent inside a tree must not wire a ``session`` (or
@@ -543,16 +546,26 @@ class RepoTools(Skill):
 
     def __repr__(self) -> str:
         session = "shared" if self._session is not None else "none"
-        return f"RepoTools(root={str(self._root)!r}, session={session}, has_rg={self._has_rg!r})"
+        return (
+            f"RepoTools(root={str(self._root)!r}, cwd={str(self.cwd)!r}, "
+            f"session={session}, has_rg={self._has_rg!r})"
+        )
 
     @property
     @hidden
     def root(self) -> Path:
-        """Default base for relative paths and result display.
+        """The repository root: start of whole-tree searches and base for result display.
 
         Not a security boundary — see the class docstring.
         """
         return self._root
+
+    @property
+    @hidden
+    def cwd(self) -> Path:
+        """Base for relative paths: the shared session's current directory, else ``root``."""
+        cwd = getattr(self._session, "cwd", None) if self._session is not None else None
+        return Path(cwd) if cwd else self._root
 
     @property
     @hidden
@@ -587,8 +600,8 @@ class RepoTools(Skill):
                 "symbols",
                 path,
                 resolved,
-                base_name="self.repo.root",
-                base_path=self._root,
+                base_name="self.repo.cwd",
+                base_path=self.cwd,
                 reason="not_found",
             )
             return RepoResult(query=path, lines=[], diagnostic=diagnostic)
@@ -601,8 +614,8 @@ class RepoTools(Skill):
                     "symbols",
                     path,
                     resolved,
-                    base_name="self.repo.root",
-                    base_path=self._root,
+                    base_name="self.repo.cwd",
+                    base_path=self.cwd,
                     reason="unreadable",
                     detail=file_result.diagnostic,
                 )
@@ -657,8 +670,8 @@ class RepoTools(Skill):
                 "refs",
                 path,
                 resolved,
-                base_name="self.repo.root",
-                base_path=self._root,
+                base_name="self.repo.cwd",
+                base_path=self.cwd,
                 reason="not_found",
             )
             return RepoResult(query=name, lines=[], diagnostic=diagnostic)
@@ -750,7 +763,7 @@ class RepoTools(Skill):
             return None
         fpath = Path(path_text)
         if not fpath.is_absolute():
-            fpath = self._root / fpath
+            fpath = self.cwd / fpath
         line_no = int(m.group(1))
         if cache is None:
             lines = await self._read_lines(fpath)
@@ -784,7 +797,7 @@ class RepoTools(Skill):
         Shows definitions but not their bodies.
 
         Args:
-            path: File path (relative to repo root).
+            path: File path (relative to ``cwd``, the shell's directory).
             max_symbols: Maximum symbols to show (default: 200).
 
         Returns:
@@ -848,7 +861,7 @@ class RepoTools(Skill):
         Files are sorted by relevance (recently modified first).
 
         Args:
-            paths: Specific directories to map (default: repo root).
+            paths: Specific directories to map (default: ``cwd``).
             depth: Directory depth to scan (default: 3).
             max_files: Maximum files to include (default: 50).
             max_symbols_per_file: Max symbols per file in the map (default: 20).
@@ -965,7 +978,7 @@ class RepoTools(Skill):
 
         Args:
             name: Symbol name or partial name to search for.
-            path: Directory to search (default: repo root).
+            path: Directory to search (default: ``cwd``).
             max_results: Maximum results (default: 50).
 
         Returns:
@@ -1061,7 +1074,7 @@ class RepoTools(Skill):
 
         Args:
             name: Symbol name or qualified name (e.g. 'TraceExplorer.from_file').
-            path: Directory to search (default: repo root).
+            path: Directory to search (default: ``cwd``).
             max_results: Maximum results (default: 50).
 
         Returns:
@@ -1217,7 +1230,7 @@ class RepoTools(Skill):
             count += 1
 
     def _resolve(self, path: str) -> Path:
-        """Resolve a path relative to the repo root.
+        """Resolve a path relative to ``cwd`` (the shell's current directory).
 
         An absolute ``path`` (or one that walks out via ``..``) is returned
         as given, not clamped to ``self._root`` — intentional, see the class
@@ -1225,7 +1238,7 @@ class RepoTools(Skill):
         session's ``ShellTools.run()``, no narrower.
         """
         p = Path(path)
-        return p if p.is_absolute() else self._root / p
+        return p if p.is_absolute() else self.cwd / p
 
 
 if _MATCH_HAS_EDITABLE:

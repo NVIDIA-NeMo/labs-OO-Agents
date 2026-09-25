@@ -72,7 +72,10 @@ class CodingAgent(InteractiveAgent):
 
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
-    tools for definitions and references, and todos for multi-step work.
+    tools for definitions and references, and todos for multi-step work. The
+    shell's directory is the working directory: ``cd`` moves both
+    ``self.shell`` and ``self.repo``, and relative paths resolve against it.
+    The repository root is the boundary for repo searches and result paths.
 
     Delegate bounded, context-heavy work (exploration, diagnosis, review, an
     independently verifiable change) to a child session with its own history:
@@ -226,11 +229,15 @@ class CodingAgent(InteractiveAgent):
         """Describe coding-specific state without exposing stored values."""
         from html import escape
 
-        cwd = str(self.shell.cwd).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
-        cwd = escape(cwd[:159] + "…" if len(cwd) > 160 else cwd, quote=False)
+        def shown(path: object) -> str:
+            text = str(path).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+            return escape(text[:159] + "…" if len(text) > 160 else text, quote=False)
+
+        cwd, root = shown(self.shell.cwd), shown(self.repo.root)
         count = len(self.vars)
         return (
-            f"Working directory (already active for `self.shell`; persists across cells and turns): {cwd}\n"
+            f"Working directory (already active for `self.shell` and `self.repo`; persists across cells and turns): {cwd}\n"
+            f"Repository root (the boundary for repo searches): {root}\n"
             "Use relative paths; call `cd` only to intentionally change directories.\n"
             f"`self.v`: {count} persistent vars — inspect: `print(self.v.items())`; "
             "remove one: `del self.v.<name>`; clear all: `self.v.clear()`"
@@ -422,6 +429,11 @@ class CodingAgent(InteractiveAgent):
           still running and nothing else is left to do. ``on`` names what
           you wait for, for example ``["jobs"]``; the next turn starts when
           it delivers.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
         """
         ...
 
@@ -453,6 +465,11 @@ class CodingAgent(InteractiveAgent):
         that says what blocked you and what you tried. Return
         ``Waiting(explanation=..., on=[...])`` only while a job you started
         is still running.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
         """
         ...
 

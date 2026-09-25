@@ -385,3 +385,57 @@ def test_the_handle_prompt_names_every_input_channel():
         for channel in ("user_messages", "system_messages", "slash_commands", "delegates"):
             assert f'"{channel}"' in text, (cls.__name__, channel)
     assert "SessionInfo" not in (CodingAgent.get_summarization_status.__doc__ or "")
+
+
+async def test_cd_moves_the_repo_tools_with_the_shell(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        await agent.shell.run("cd sub")
+        assert agent.shell.cwd == sub.resolve()
+        assert agent.repo.cwd == agent.shell.cwd
+        assert agent.repo.root == tmp_path.resolve()
+        result = await agent.repo.symbols("x.py")
+        assert result.diagnostic is None
+        assert "only_in_sub" in str(result)
+        assert f"cwd={str(sub.resolve())!r}" in repr(agent.repo)
+        assert f"root={str(tmp_path.resolve())!r}" in repr(agent.repo)
+    finally:
+        await agent.aclose()
+
+
+async def test_the_state_block_shows_the_shell_directory_and_the_repo_root(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "process-cwd"
+    elsewhere.mkdir()
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=repo)
+    try:
+        await agent.shell.run("cd pkg")
+        rendered = agent._coding_state_context()
+        assert str((repo / "pkg").resolve()) in rendered
+        assert f"Repository root (the boundary for repo searches): {repo.resolve()}" in rendered
+        assert str(elsewhere) not in rendered
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("method", ["handle", "handle_batch"])
+async def test_the_turn_prompt_says_locals_last_one_call(tmp_path, method):
+    from nooa import build_prompt_data
+    from nooa.prompts import render_prompt_data
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        data = await build_prompt_data(getattr(agent, method), {"user_messages": ["hi"]})
+        rendered = " ".join(render_prompt_data(data).split())
+        assert (
+            "Python locals live for one method call; when the call returns they are gone. "
+            "Anything you need later goes in ``self.v`` (durable, snapshot-backed) or the todo "
+            "list. Do not rely on a variable from an earlier call."
+        ) in rendered
+    finally:
+        await agent.aclose()
