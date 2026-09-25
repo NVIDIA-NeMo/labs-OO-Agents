@@ -274,7 +274,7 @@ async def test_session_list_is_answered_from_the_store_without_a_worker(harness)
     assert harness.spawned == []
 
 
-async def test_session_list_reads_the_store_of_each_cwd(harness, tmp_path):
+async def test_session_list_reads_the_store_of_each_cwd(harness, tmp_path, monkeypatch):
     other = tmp_path / "other"
     other.mkdir()
     here = _stored(harness, turns=1)
@@ -285,7 +285,10 @@ async def test_session_list_reads_the_store_of_each_cwd(harness, tmp_path):
         frame = await harness.call("session/list", params)
         return [entry["sessionId"] for entry in frame.message["result"]["sessions"]]
 
-    assert await listed({}) == []  # no workspace named yet: no index to read
+    # No workspace named yet (Pool lists before session/new, without cwd):
+    # the server's own working directory is the workspace.
+    monkeypatch.chdir(harness.cwd)
+    assert await listed({}) == [here]
     assert await listed({"cwd": str(other)}) == [elsewhere]
     assert await listed({"cwd": harness.cwd}) == [here]
     assert set(await listed({})) == {here, elsewhere}
