@@ -109,6 +109,11 @@ class ExperimentalCodingAgent(CodingAgent):
         (``"user_messages"``, ``"system_messages"``, ``"slash_commands"``,
         ``"delegates"``). End with ``Done``, ``NeedInput`` or ``Waiting`` as the
         class instructions say.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
         """
         ...
 
@@ -128,6 +133,11 @@ class ExperimentalCodingAgent(CodingAgent):
         If something blocks you, still return ``Done`` with a ``TaskResult`` that says
         what blocked you. Return ``Waiting(explanation=..., on=[...])`` only while a job
         you started is still running.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
         """
         ...
 
