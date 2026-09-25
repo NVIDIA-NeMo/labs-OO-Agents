@@ -40,6 +40,24 @@ transport, points descriptor 0 at `/dev/null` and descriptor 1 at standard
 error, so a stray `print` or a subprocess started from a cell cannot corrupt
 or consume the client's stream.
 
+## Where sessions live
+
+Each workspace keeps its sessions in `<workspace>/.nooa/sessions`, the
+directory the `nooa-acp` server and the TUI use, so sessions they wrote are
+listed and can be loaded. A subagent's session file sits next to its root's.
+`--sessions-dir DIR` (or `NOOA_SESSIONS_DIR`) puts the sessions of all
+workspaces in one shared directory instead; each session records its
+workspace, so `session/list` with a `cwd` still shows only that workspace.
+
+The request's `cwd` picks the store: `session/new`, `session/load` and
+`session/list` read and write the store of their `cwd`. There is no index of
+every workspace yet, so `session/list` without a `cwd` lists the stores of
+the workspaces the client has already named in this connection (in
+`session/new`, `session/load`, `session/list` or a delete). The
+`_nooa/session/delete` extension takes an optional `cwd`; without it, the
+same named workspaces are searched, and the router passes the `cwd` from the
+session's record on to the worker.
+
 ## Lifetime
 
 - A worker runs in its own session and process group. Its standard input is

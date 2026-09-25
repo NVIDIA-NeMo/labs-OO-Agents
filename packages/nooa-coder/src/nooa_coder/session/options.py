@@ -15,7 +15,10 @@ class SessionOptions(BaseModel):
     already-built client (tests inject a fake one); it is never
     serialised. When it is ``None`` and the registry has an ``llm_factory``,
     the registry builds a client for ``model`` (``None`` means the
-    factory's default) and the session owns it.
+    factory's default) and the session owns it. ``sessions_dir`` is one
+    directory for the sessions of every workspace; ``None`` (the default)
+    means ``<workspace>/.nooa/sessions`` unless ``NOOA_SESSIONS_DIR`` is set
+    (see ``sessions_root``).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

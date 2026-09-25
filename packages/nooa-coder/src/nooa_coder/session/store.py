@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
-from nooa.paths import get_user_dir
 from nooa.runtime.event_manager import EventManager
 from nooa.storage.sqlite import (
     SessionAlreadyActiveError,
@@ -41,8 +40,23 @@ _USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
 _AGENT_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
 _TURN_EVENT_TYPES = _USER_EVENT_TYPES | _AGENT_EVENT_TYPES
 _TRANSCRIPT_EVENT_TYPES = _TURN_EVENT_TYPES | frozenset(
-    ("ItemAdmitted", "TurnEnded", "TurnCancelled")
+    ("ItemAdmitted", "TurnEnded", "TurnCancelled", "SnapshotRestoreFailed")
 )
+
+
+def sessions_root(workspace: Path, override: Path | None = None) -> Path:
+    """The directory a workspace's sessions live in.
+
+    ``override`` if given, else ``$NOOA_SESSIONS_DIR`` if set (one shared
+    directory for all workspaces), else ``<workspace>/.nooa/sessions``, where
+    the ``nooa-acp`` server and the TUI keep them.
+    """
+    if override is not None:
+        return Path(override)
+    shared = os.environ.get("NOOA_SESSIONS_DIR")
+    if shared:
+        return Path(shared).expanduser()
+    return Path(workspace) / ".nooa" / "sessions"
 
 
 def _normalise_workspace(workspace: str | Path) -> str:
@@ -225,17 +239,20 @@ class SessionHandle:
 class SessionStore:
     """Repository and factory for durable sessions.
 
-    Sessions live in one user-level directory (``nooa.paths.get_user_dir(
-    "sessions")`` by default), not per workspace; each records the
-    workspace it was created for, and :meth:`list` can filter on it.
+    ``root`` is one directory of session files, normally
+    ``sessions_root(workspace)``: the workspace's ``.nooa/sessions``, or one
+    directory shared by all workspaces when ``NOOA_SESSIONS_DIR`` or an
+    explicit override names it. Each session records the workspace it was
+    created for, and :meth:`list` can filter on it (a shared directory
+    needs that).
 
     A daemon may use read-only operations such as :meth:`list` and :meth:`get`
     for discovery. Only the process running the agent opens a
     :class:`SessionHandle` for writes.
     """
 
-    def __init__(self, root: str | Path | None = None) -> None:
-        self.root = Path(root) if root is not None else get_user_dir("sessions")
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
 
     def path_for(self, session_id: str) -> Path:
         session_id = self._validate_id(session_id)
@@ -367,6 +384,7 @@ class SessionStore:
         User messages are the items admitted on ``user_messages`` (and
         steers), each shown once even when a steer was admitted again as a
         message. Questions come from turns that ended with ``NeedInput``.
+        A ``note`` says a load could not restore the saved agent state.
         """
         rows = self.load_rows(session_id, _TRANSCRIPT_EVENT_TYPES | _START_EVENT_TYPES)
         start = next((raw for event_type, raw in rows if event_type in _START_EVENT_TYPES), {})
@@ -412,6 +430,17 @@ class SessionStore:
                     TranscriptEntry(
                         role="cancelled",
                         content=f"Stopped by {raw.get('by', '')}",
+                        timestamp=timestamp,
+                    )
+                )
+            elif event_type == "SnapshotRestoreFailed":
+                entries.append(
+                    TranscriptEntry(
+                        role="note",
+                        content=(
+                            f"The saved agent state could not be restored "
+                            f"({raw.get('error', '')}); the session went on from an empty state."
+                        ),
                         timestamp=timestamp,
                     )
                 )

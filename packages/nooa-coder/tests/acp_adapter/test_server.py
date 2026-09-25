@@ -22,7 +22,7 @@ from coder_test_agents import (
     reply,
 )
 from nooa_coder.acp.server import initialize_response
-from nooa_coder.session.store import SessionStore
+from nooa_coder.session.store import SessionStore, sessions_root
 
 TIMEOUT = 30
 _RESOURCE_NOT_FOUND = -32002
@@ -119,7 +119,7 @@ async def _finished_session(adapter, workspace, models, text="hello"):
     """A session that ran one turn replying "Hi there.", then was closed."""
     models.scripts[None] = [reply("Hi there.")]
     response = await adapter.new_session(str(workspace))
-    session = adapter.registry.get(response.session_id)
+    session = adapter.session(response.session_id)
     await asyncio.wait_for(session.prompt(text, source="acp"), TIMEOUT)
     await adapter.close_session(response.session_id)
     return response.session_id
@@ -142,19 +142,19 @@ async def test_load_replays_the_transcript_before_answering(make_adapter, worksp
     assert replay == [("UserMessageChunk", "hello\n"), ("AgentMessageChunk", "Hi there.\n")]
     assert client.log[-1][0] == "response"
     assert response.modes is not None and response.modes.current_mode_id == "auto"
-    assert adapter.registry.get(session_id) is not None
-    assert adapter.registry.get(session_id).info.host == "acp"
+    assert adapter.session(session_id) is not None
+    assert adapter.session(session_id).info.host == "acp"
 
 
 async def test_load_of_a_live_session_attaches_to_the_same_session(make_adapter, workspace, client):
     models = ScriptedModels({None: [reply("Hi there.")]})
     adapter = await make_adapter(models)
     response = await adapter.new_session(str(workspace))
-    session = adapter.registry.get(response.session_id)
+    session = adapter.session(response.session_id)
     await asyncio.wait_for(session.prompt("hello", source="acp"), TIMEOUT)
 
     await adapter.load_session(str(workspace), response.session_id)
-    assert adapter.registry.get(response.session_id) is session
+    assert adapter.session(response.session_id) is session
     assert "hello\n" in client.texts(UserMessageChunk, response.session_id)
 
 
@@ -164,7 +164,7 @@ async def test_loading_a_session_twice_sends_each_later_update_once(
     models = ScriptedModels({None: [reply("Hi there."), reply("Second answer.")]})
     adapter = await make_adapter(models)
     response = await adapter.new_session(str(workspace))
-    session = adapter.registry.get(response.session_id)
+    session = adapter.session(response.session_id)
     await asyncio.wait_for(session.prompt("hello", source="acp"), TIMEOUT)
     await adapter.load_session(str(workspace), response.session_id)
     await adapter.load_session(str(workspace), response.session_id)
@@ -182,7 +182,7 @@ async def test_load_prepares_before_a_requeued_item_runs(
     started, _block = fresh_events()
     first = await make_adapter(ScriptedModels({None: [cell(BLOCKING_CELL)]}))
     response = await first.new_session(str(workspace))
-    session = first.registry.get(response.session_id)
+    session = first.session(response.session_id)
     await session.submit("block", source="acp")
     await asyncio.wait_for(started.wait(), TIMEOUT)
     await session.submit("run this later", source="acp")  # queued behind the turn
@@ -229,7 +229,7 @@ async def test_list_shows_roots_with_turns_and_their_status(make_adapter, worksp
     empty = await adapter.new_session(str(workspace))
     models.scripts[None] = [reply("Live.")]
     live = await adapter.new_session(str(workspace))
-    await asyncio.wait_for(adapter.registry.get(live.session_id).prompt("hi", source="acp"), 30)
+    await asyncio.wait_for(adapter.session(live.session_id).prompt("hi", source="acp"), 30)
 
     listed = await adapter.list_sessions(cwd=str(workspace))
     by_id = {session.session_id: session for session in listed.sessions}
@@ -265,6 +265,65 @@ async def test_list_without_cwd_covers_every_workspace(make_adapter, workspace, 
     ]
 
 
+async def test_each_workspace_keeps_its_sessions_in_its_own_directory(
+    make_adapter, workspace, tmp_path
+):
+    other = tmp_path / "other"
+    other.mkdir()
+    models = ScriptedModels()
+    adapter = await make_adapter(models)
+    first = await _finished_session(adapter, workspace, models)
+    second = await _finished_session(adapter, other, models)
+    assert SessionStore(workspace / ".nooa" / "sessions").path_for(first).exists()
+    assert SessionStore(other / ".nooa" / "sessions").path_for(second).exists()
+    assert [s.session_id for s in (await adapter.list_sessions(cwd=str(workspace))).sessions] == [
+        first
+    ]
+    # Each session loads from the store of the cwd it is loaded with.
+    await adapter.load_session(str(other), second)
+    with pytest.raises(RequestError) as caught:
+        await adapter.load_session(str(other), first)
+    assert caught.value.code == _RESOURCE_NOT_FOUND
+
+
+async def test_list_without_cwd_covers_only_workspaces_this_process_serves(
+    make_adapter, workspace, tmp_path
+):
+    """There is no index of every workspace, so a session no request led here is not listed."""
+    unseen = tmp_path / "unseen"
+    with SessionStore(sessions_root(unseen)).create(workspace=str(unseen)) as handle:
+        from nooa_coder.session.events import SessionUserMessage
+
+        handle.events.add(SessionUserMessage(content="hello"))
+    models = ScriptedModels()
+    adapter = await make_adapter(models)
+    served = await _finished_session(adapter, workspace, models)
+    assert [s.session_id for s in (await adapter.list_sessions()).sessions] == [served]
+    unseen.mkdir(exist_ok=True)
+    assert [s.session_id for s in (await adapter.list_sessions(cwd=str(unseen))).sessions] == [
+        handle.id
+    ]
+
+
+async def test_nooa_sessions_dir_holds_the_sessions_of_every_workspace(
+    make_adapter, workspace, tmp_path, monkeypatch
+):
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("NOOA_SESSIONS_DIR", str(shared))
+    other = tmp_path / "other"
+    other.mkdir()
+    models = ScriptedModels()
+    adapter = await make_adapter(models)
+    first = await _finished_session(adapter, workspace, models)
+    second = await _finished_session(adapter, other, models)
+    assert {info.id for info in SessionStore(shared).list()} == {first, second}
+    assert not (workspace / ".nooa" / "sessions").exists()
+    assert [s.session_id for s in (await adapter.list_sessions(cwd=str(other))).sessions] == [
+        second
+    ]
+    assert {s.session_id for s in (await adapter.list_sessions()).sessions} == {first, second}
+
+
 async def test_list_pages_with_a_cursor(make_adapter, workspace, monkeypatch):
     from nooa_coder.acp import server
 
@@ -288,7 +347,7 @@ async def test_close_releases_the_session(make_adapter, workspace, sessions_dir)
     adapter = await make_adapter(ScriptedModels())
     response = await adapter.new_session(str(workspace))
     await adapter.close_session(response.session_id)
-    assert adapter.registry.get(response.session_id) is None
+    assert adapter.session(response.session_id) is None
     assert not SessionStore(sessions_dir).is_active(response.session_id)
     with pytest.raises(RequestError) as caught:
         await adapter.close_session(response.session_id)

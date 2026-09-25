@@ -12,6 +12,8 @@ LEGACY_AGENT_SPECS = {
     # Spellings from before the coding agent moved to nooa-coder.
     "nooa_cli.coding.agent:CodingAgent": CODING_AGENT,
     "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_CODING_AGENT,
+    # What the nooa-acp server records as a session's agent.
+    "CodingAgent": CODING_AGENT,
 }
 
 

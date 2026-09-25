@@ -29,7 +29,7 @@ def _models() -> ScriptedModels:
 async def _parent_with_child(adapter, workspace, client):
     session_id = (await adapter.new_session(str(workspace))).session_id
     await asyncio.wait_for(adapter.prompt(session_id, [text_block("start")]), TIMEOUT)
-    [child] = adapter.registry.children(session_id)
+    [child] = adapter.registry_for(workspace).children(session_id)
     await client.wait_for(
         lambda: any(
             u.status == "completed" and u.tool_call_id.startswith(child.id)
@@ -65,15 +65,15 @@ async def test_loading_a_child_follows_it_and_closing_it_only_detaches(
 ):
     adapter = await make_adapter(_models())
     session_id, child_id = await _parent_with_child(adapter, workspace, client)
-    child = adapter.registry.get(child_id)
+    child = adapter.session(child_id)
     assert child is not None
 
     await adapter.load_session(str(workspace), child_id)
-    assert adapter.registry.get(child_id) is child
+    assert adapter.session(child_id) is child
     assert "CHILD-PROMPT\n" in client.texts(UserMessageChunk, child_id)
 
     await adapter.close_session(child_id)
-    assert adapter.registry.get(child_id) is child  # still running under its parent
+    assert adapter.session(child_id) is child  # still running under its parent
     await adapter.load_session(str(workspace), child_id)  # and can be followed again
 
 

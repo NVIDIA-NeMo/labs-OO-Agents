@@ -68,6 +68,11 @@ Then start Pool in the repository you want to work on:
 pool --agent-server nooa-coder
 ```
 
+Sessions are stored in the workspace Pool was started in, under
+`.nooa/sessions`, next to the sessions of the older `nooa-acp` server. Add
+`--sessions-dir DIR` (or set `NOOA_SESSIONS_DIR`) to keep the sessions of all
+workspaces in one directory.
+
 Without `--tee` the server records nothing. To record a different server, put
 `python -m nooa_coder.acp.tee --log PATH --` in front of its command in the same way
 (with `uv run --project ...` in front when the server runs from a checkout).
