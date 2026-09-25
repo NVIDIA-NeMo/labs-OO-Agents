@@ -25,6 +25,8 @@ from nooa.storage.sqlite import (
 )
 from nooa_coder.session.events import (
     SESSION_EVENT_TYPES,
+    SessionModeChanged,
+    SessionModelChanged,
     SessionStarted,
     SessionTitleUpdated,
 )
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 _START_EVENT_TYPES = frozenset(("SessionStarted", "TUISessionStart"))
 _TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated", "TUISessionRename"))
+_SETTING_EVENT_TYPES = ("SessionModeChanged", "SessionModelChanged")
 _USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
 _AGENT_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
 _TURN_EVENT_TYPES = _USER_EVENT_TYPES | _AGENT_EVENT_TYPES
@@ -171,6 +174,20 @@ class SessionHandle:
                 }
             )
 
+    def set_mode(self, mode: str) -> None:
+        """Persist a permission mode and update this handle's current metadata."""
+        self._ensure_open()
+        self._events.add(SessionModeChanged(mode=mode))
+        with self._metadata_lock:
+            self._info = self._info.model_copy(update={"mode": mode})
+
+    def set_model(self, model: str) -> None:
+        """Persist a model alias and update this handle's current metadata."""
+        self._ensure_open()
+        self._events.add(SessionModelChanged(model=model))
+        with self._metadata_lock:
+            self._info = self._info.model_copy(update={"model": model})
+
     def update_usage(self, usage: Usage) -> None:
         """Set the session's usage totals (a copy) as ``info`` reports them."""
         with self._metadata_lock:
@@ -228,6 +245,7 @@ class SessionStore:
         name: str | None = None,
         retained: bool = False,
         turn_method: str = "handle",
+        mode: str = "auto",
         session_id: str | None = None,
     ) -> SessionHandle:
         session_id = self._validate_id(session_id or str(uuid.uuid4()))
@@ -250,6 +268,7 @@ class SessionStore:
             name=name,
             retained=retained,
             turn_method=turn_method,
+            mode=mode,
         )
         try:
             events.add(started)
@@ -273,6 +292,7 @@ class SessionStore:
                 name=name,
                 retained=retained,
                 turn_method=turn_method,
+                mode=mode,
             ),
         )
 
@@ -447,6 +467,11 @@ class SessionStore:
                 last_row = connection.execute(
                     "SELECT data FROM events ORDER BY insertion_order DESC LIMIT 1"
                 ).fetchone()
+                setting_rows = connection.execute(
+                    "SELECT event_type, data FROM events WHERE event_type IN (?, ?) "
+                    "ORDER BY insertion_order",
+                    _SETTING_EVENT_TYPES,
+                ).fetchall()
                 usage_row = connection.execute(
                     "SELECT COALESCE(SUM(json_extract(data, '$.usage.input_tokens')), 0), "
                     "COALESCE(SUM(json_extract(data, '$.usage.output_tokens')), 0), "
@@ -470,6 +495,17 @@ class SessionStore:
             if last is not None:
                 last_active = max(last_active, self._timestamp(last, fallback=fallback))
 
+        mode = str(start.get("mode") or "auto")
+        model = str(start.get("model", ""))
+        for event_type, data in setting_rows:
+            raw = self._decode_data(data, path)
+            if raw is None:
+                continue
+            if event_type == "SessionModeChanged" and raw.get("mode"):
+                mode = str(raw["mode"])
+            elif event_type == "SessionModelChanged" and raw.get("model"):
+                model = str(raw["model"])
+
         title: str | None = None
         title_is_user_set = False
         for (data,) in title_rows:
@@ -483,7 +519,8 @@ class SessionStore:
 
         return SessionInfo(
             id=path.stem,
-            model=str(start.get("model", "")),
+            model=model,
+            mode=mode,
             agent=str(start.get("agent", start.get("agent_cls", ""))),
             created_at=started_at,
             last_active=last_active,

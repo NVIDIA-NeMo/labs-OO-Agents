@@ -896,12 +896,15 @@ class Session:
         bad alias fails here. The loop swaps it in right before the next
         turn and closes the old client if this session created it; a
         running turn keeps its model. A second call before that turn
-        replaces (and closes) the first pending client.
+        replaces (and closes) the first pending client. The alias is
+        recorded at once, so a load resumes on it.
         """
         if self._llm_factory is None:
             raise RuntimeError("set_model() needs the registry's llm_factory to build clients")
         self._ensure_open()
         client = self._llm_factory(alias, self.options.workspace)
+        # Recorded now: a load before the next turn resumes on this model.
+        self.handle.set_model(alias)
         previous, self._pending_model = self._pending_model, (alias, client)
         if previous is not None:
             await _aclose(previous[1])
@@ -924,10 +927,17 @@ class Session:
         self.info.model = alias
 
     async def set_mode(self, mode: str) -> None:
-        """Record the permission mode (``auto`` or ``ask``); nothing enforces it yet."""
+        """Record the permission mode (``auto`` or ``ask``); nothing enforces it yet.
+
+        It is persisted, so a load restores it, and children created after
+        this call inherit it.
+        """
         if mode not in _MODES:
             raise ValueError(f"Unknown permission mode {mode!r}; expected one of {_MODES}")
+        self.handle.set_mode(mode)
         self.info.mode = mode
+        # Children created from now on inherit it.
+        self.options = self.options.model_copy(update={"permission_mode": mode})
         self._emit(ModeChangedUpdate(session_id=self.id, mode=mode))
 
     def add_attributed_usage(self, usage: Usage) -> None:

@@ -30,6 +30,23 @@ class SessionStarted(Metadata):
     name: str | None = None
     retained: bool = False
     turn_method: str = "handle"
+    mode: str = "auto"
+
+
+class SessionModeChanged(Metadata):
+    """The session's permission mode changed (``set_mode``); a load restores it."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    mode: str = ""
+
+
+class SessionModelChanged(Metadata):
+    """The session's model alias changed (``set_model``); a load restores it."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    model: str = ""
 
 
 class SessionTitleUpdated(Metadata):
@@ -141,6 +158,8 @@ class ChildDeleted(Metadata):
 SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     SessionStarted,
     SessionTitleUpdated,
+    SessionModeChanged,
+    SessionModelChanged,
     SessionUserMessage,
     ItemAdmitted,
     ItemConsumed,

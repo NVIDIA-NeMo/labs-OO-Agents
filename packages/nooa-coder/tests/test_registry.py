@@ -477,6 +477,31 @@ async def test_a_failing_handle_close_still_closes_the_session(registry, root_op
         real_close()
 
 
+async def test_mode_and_model_changes_survive_a_reload(root_options, sessions_dir):
+    factory = ModelFactory()
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    try:
+        root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
+        await root.set_mode("ask")
+        await root.set_model("alias-b")
+        kid = await registry.create(root.options.inherit(name="kid"), parent_id=root.id)
+    finally:
+        await registry.close_all()
+    stored = registry.store.get(root.id)
+    assert (stored.mode, stored.model) == ("ask", "alias-b")
+    assert registry.store.get(kid.id).mode == "ask"  # inherited at creation, and recorded
+
+    fresh_factory = ModelFactory()
+    fresh = SessionRegistry(SessionStore(sessions_dir), llm_factory=fresh_factory)
+    try:
+        loaded = await fresh.load(root.id)
+        assert (loaded.options.permission_mode, loaded.info.mode) == ("ask", "ask")
+        assert (loaded.options.model, loaded.info.model) == ("alias-b", "alias-b")
+        assert fresh_factory.calls[0][0] == "alias-b"
+    finally:
+        await fresh.close_all()
+
+
 async def test_set_model_needs_an_llm_factory(registry, root_options):
     root = await registry.create(root_options)
     with pytest.raises(RuntimeError, match="llm_factory"):
