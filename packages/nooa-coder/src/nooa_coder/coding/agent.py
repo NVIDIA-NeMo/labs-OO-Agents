@@ -21,7 +21,7 @@ from nooa.interactive import (
 from nooa.paths import get_project_dir
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
-from nooa.strategies import CodeActStrategy, PredictStrategy
+from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_coder.coding.activity import ActivityShellTools
@@ -65,6 +65,15 @@ __all__ = [
     "Waiting",
     "session_title_request",
 ]
+
+# CodeActV2 replaces the framework context blocks with a concise self doc: the
+# ``state`` dump and the execution-context stub go, and the strategy adds its
+# own compact ``python_cell_state`` block.
+_V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
+    "state": None,
+    "execution_context": None,
+    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
+}
 
 
 class CodingAgent(InteractiveAgent):
@@ -400,7 +409,7 @@ class CodingAgent(InteractiveAgent):
         ...
 
     @hidden
-    @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))
+    @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
     async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
         """Handle one interactive turn: the newest request and anything else that arrived.
 
@@ -439,7 +448,8 @@ class CodingAgent(InteractiveAgent):
 
     @hidden
     @strategy(
-        CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result]))
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
+        context=_V2_CONTEXT,
     )
     async def handle_batch(self, notification: dict[str, list[Any]]) -> Done | Waiting:
         """Work on one task unattended and return a structured result.

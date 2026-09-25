@@ -17,7 +17,6 @@ prompt must raise a limit here on purpose.
 import asyncio
 
 import pytest
-from coder_test_agents import cell
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import SessionRegistry
 from nooa_coder.session.store import SessionStore
@@ -36,14 +35,13 @@ RESULT = (
 # Measured after PR 0, then raised on tree/4-router: the state block names the
 # repository root, the class says ``cd`` moves shell and repo tools, the turn
 # methods say locals last one method call, and the repo tools take ``cwd``.
+# Lowered when CodingAgent moved to CodeActV2 (2026-09-25; was 19,827 / 23,935
+# for handle): measured values plus about 2% headroom.
 LIMITS = {
-    # After main's #415 rendered import lines from the declared module (about
-    # 430 characters): measured values plus headroom; the coding agent's
-    # system limit stops at the bench cap.
-    (CODER, "handle"): (20_000, 24_250),  # measured 19,959 / 23,756
-    (CODER, "handle_batch"): (20_000, 23_900),  # measured 19,959 / 23,400
-    (EXPERIMENTAL, "handle"): (11_800, 14_000),  # measured 11,543 / 13,716
-    (EXPERIMENTAL, "handle_batch"): (11_800, 14_350),  # measured 11,543 / 14,069
+    (CODER, "handle"): (11_500, 15_200),  # measured 11,279 / 14,879
+    (CODER, "handle_batch"): (11_500, 14_800),  # measured 11,279 / 14,523
+    (EXPERIMENTAL, "handle"): (11_200, 13_700),  # measured 11,162 / 13,627
+    (EXPERIMENTAL, "handle_batch"): (11_200, 14_000),  # measured 11,162 / 13,980
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -62,7 +60,7 @@ def _no_installed_skills(monkeypatch, tmp_path):
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
 async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
     code = RESULT if method == "handle_batch" else "return_result(Done(explanation='x'))"
-    response = cell(code) if spec == CODER else python_cell(code, "call_1")
+    response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
