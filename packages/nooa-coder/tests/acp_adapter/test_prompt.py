@@ -308,7 +308,7 @@ async def test_each_session_is_its_own_trace_session(coder_adapter, workspace, c
         assert client.texts(AgentMessageChunk, session_id)[-1] == session_id
         await _prompt(adapter, session_id, "/trace-url")
         assert client.texts(AgentMessageChunk, session_id)[-1] == (
-            f"http://viewer:5001/traces/view?session_id={session_id}"
+            f"Trace viewer:\n```text\nhttp://viewer:5001/traces/view?session_id={session_id}\n```"
         )
 
 
@@ -335,7 +335,7 @@ async def test_trace_url_answers_with_the_viewer_url(coder_adapter, workspace, c
     session_id = await _new(adapter, workspace)
     assert (await _prompt(adapter, session_id, "/trace-url")).stop_reason == "end_turn"
     assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "http://viewer:5001/traces/view?session_id=trace-1"
+        "Trace viewer:\n```text\nhttp://viewer:5001/traces/view?session_id=trace-1\n```"
     )
 
 
