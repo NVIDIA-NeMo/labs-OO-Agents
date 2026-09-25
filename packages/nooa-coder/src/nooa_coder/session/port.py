@@ -122,7 +122,13 @@ class SessionPort:
     def children(self) -> list[ChildRef]:
         """Handles on your children, live and closed."""
         return [
-            ChildRef(id=info.id, name=info.name or "", depth=info.depth, status=info.status)
+            ChildRef(
+                id=info.id,
+                name=info.name or "",
+                depth=info.depth,
+                status=info.status,
+                parent_id=info.parent_id,
+            )
             for info in self._registry.children(self._session.id)
         ]
 
@@ -138,14 +144,18 @@ class SessionPort:
 
     @hidden
     async def wait_child(self, child_id: str) -> Done:
-        """Next ``Done`` of a child; raises ``ChildFailedError`` on failure or close."""
+        """Next ``Done`` of a child; raises ``ChildFailedError`` on failure or close.
+
+        Also raises ``ChildFailedError`` when ``child_id`` is not this
+        session's child.
+        """
         registry = self._registry
         queued = registry.take_queued_result(self._session, child_id)
         if queued is not None:
             return queued
         if registry.get(child_id) is None:
             raise ChildFailedError(f"Child {child_id!r} is not running")
-        waiter = registry.waiter(child_id)
+        waiter = registry.waiter(self._session, child_id)
         try:
             return await asyncio.shield(waiter)
         except asyncio.CancelledError:
@@ -171,11 +181,12 @@ class SessionPort:
     @hidden
     async def close_child(self, child_id: str) -> None:
         """Close a child session."""
-        await self._registry.close(child_id)
+        await self._registry.close_child(self._session, child_id)
 
     @hidden
     def child_info(self, child_id: str) -> SessionInfo:
         """A child's metadata."""
+        self._registry.check_owner(self._session, child_id)
         return self._registry.info(child_id)
 
 

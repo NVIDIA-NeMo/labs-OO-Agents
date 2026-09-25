@@ -52,43 +52,52 @@ class ChildRef(BaseModel):
     methods find the parent's port at call time from the running turn, so
     a ``ChildRef`` kept in ``self.v`` still works after a checkpoint and a
     reload, and one that arrives in a ``ChildResult`` can be acted on
-    directly (``item.child.send(...)``).
+    directly (``item.child.send(...)``). Only the child's parent can use
+    it: ``parent_id`` is that parent, and the methods raise
+    ``ChildFailedError`` in any other session.
     """
 
     id: str
     name: str
     depth: int
     status: ChildStatus
+    parent_id: str | None = None
 
     async def wait(self) -> Done:
         """Wait for the child's next ``Done`` and return it.
 
         Raises ``ChildFailedError`` if the child fails or is closed first.
         """
-        return await _port().wait_child(self.id)
+        return await _port(self).wait_child(self.id)
 
     async def send(self, item: Any, *, channel: str = "user_messages") -> "Receipt":
         """Send an item (text or data) to the child on one of its channels."""
-        return await _port().send_child(self.id, item, channel=channel)
+        return await _port(self).send_child(self.id, item, channel=channel)
 
     async def steer(self, text: str) -> "Receipt":
         """Give the child's running turn extra text; queued if it is idle."""
-        return await _port().steer_child(self.id, text)
+        return await _port(self).steer_child(self.id, text)
 
     async def close(self) -> None:
         """Close the child session (its children first)."""
-        await _port().close_child(self.id)
+        await _port(self).close_child(self.id)
 
     @property
     def info(self) -> "SessionInfo":
         """The child's current metadata."""
-        return _port().child_info(self.id)
+        return _port(self).child_info(self.id)
 
 
-def _port() -> "SessionPort":
+def _port(ref: ChildRef) -> "SessionPort":
+    """The running turn's port, if its session is ``ref``'s parent."""
     from nooa_coder.session.port import require_port
 
-    return require_port()
+    port = require_port()
+    if ref.parent_id is not None and ref.parent_id != port.id:
+        raise ChildFailedError(
+            f"Child {ref.id!r} belongs to session {ref.parent_id!r}, not to {port.id!r}"
+        )
+    return port
 
 
 class ChildFailedError(RuntimeError):
