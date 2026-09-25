@@ -97,6 +97,10 @@ def _non_blank(value: str) -> str:
     return value
 
 
+def _blank_to_none(value: str | None) -> str | None:
+    return None if value is None else (value.strip() or None)
+
+
 class Done(BaseModel):
     """Turn result: the work for this turn is finished.
 
@@ -121,13 +125,7 @@ class Done(BaseModel):
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
-
-    @field_validator("message")
-    @classmethod
-    def _blank_message_is_none(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return value.strip() or None
+    _check_message = field_validator("message")(_blank_to_none)
 
 
 class NeedInput(BaseModel):
@@ -167,16 +165,19 @@ class Waiting(BaseModel):
 
     ``on`` lists what is being waited on by name: a queue channel
     (``"delegates"``, ``"jobs"``), a spawned job's label, a subagent's name.
-    ``explanation`` says why. The host keeps the request open and runs the
+    ``explanation`` says why, for the host. ``message`` is an optional line
+    the host shows the user. The host keeps the request open and runs the
     next turn when one of them delivers.
     """
 
     explanation: str = Field(description="Why the turn is waiting")
+    message: str | None = Field(default=None, description="Line to show the user while waiting")
     on: list[str] = Field(
         min_length=1, description="Names of the channels, jobs or subagents being waited on"
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
+    _check_message = field_validator("message")(_blank_to_none)
 
     @field_validator("on")
     @classmethod
@@ -591,11 +592,12 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
               return_result(NeedInput(question="Which branch should I push to?", options=["main", "dev"]))
 
-        - ``Waiting(explanation=..., on=[...])`` — waiting on a background
-          job or queue, not on a person. ``on`` names what you wait for:
-          a channel, a job label, a subagent::
+        - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
+          background job or queue, not on a person. ``message`` is shown to
+          the user; ``on`` names what you wait for: a channel, a job label,
+          a subagent::
 
-              return_result(Waiting(explanation="tests running before I report", on=["jobs:ci-42"]))
+              return_result(Waiting(message="Tests are running; I will report when they finish.", explanation="tests running", on=["jobs:ci-42"]))
 
         ``RespondResult`` is the older form and is still accepted.
 
@@ -640,7 +642,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         - ``Done(explanation=...)`` — the work is finished, or cannot go
           further. If something blocks you, say what in ``explanation``.
           Set ``result`` when the task asks for a structured result.
-        - ``Waiting(explanation=..., on=[...])`` — waiting on a background
-          job or queue you started. ``on`` names it.
+        - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
+          background job or queue you started. ``on`` names it.
         """
         ...

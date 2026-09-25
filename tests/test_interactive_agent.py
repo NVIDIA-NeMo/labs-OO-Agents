@@ -111,6 +111,13 @@ def test_done_carries_an_optional_reply_and_evidence():
     assert Done(explanation="a", evidence=["ruff: clean"]).evidence == ["ruff: clean"]
 
 
+def test_waiting_carries_an_optional_user_line():
+    waiting = Waiting(message="  Tests are running.  ", explanation="ci", on=["jobs:ci-42"])
+    assert waiting.message == "Tests are running."
+    assert Waiting(message=" ", explanation="ci", on=["jobs:ci-42"]).message is None
+    assert Waiting(explanation="ci", on=["jobs:ci-42"]).message is None
+
+
 def test_need_input_reason_is_optional():
     assert NeedInput(question="Which branch?").reason is None
     asked = NeedInput(question="Which branch?", reason="Pushing to the wrong one is hard to undo.")
@@ -176,6 +183,14 @@ async def test_handle_returns_the_reply_in_done():
     assert result.message == "Here it is."
 
 
+async def test_handle_returns_the_user_line_in_waiting():
+    code = 'return_result(Waiting(message="Tests are running.", explanation="ci", on=["jobs:ci"]))'
+    agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
+    result = await agent.handle(_NOTIFICATION)
+    assert result == Waiting(message="Tests are running.", explanation="ci", on=["jobs:ci"])
+    assert result.message == "Tests are running."
+
+
 async def test_handle_rejects_other_results():
     llm = FakeLLMClient(
         [
@@ -234,6 +249,7 @@ async def test_handle_docs_put_the_reply_in_done_message():
     prompt = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
     assert "return_result(Done(message=" in prompt
     assert "exactly one terminal result" in prompt
+    assert "return_result(Waiting(message=" in prompt
 
 
 async def test_model_sees_the_base_handle_batch_annotation():
@@ -243,6 +259,7 @@ async def test_model_sees_the_base_handle_batch_annotation():
 
     prompt = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
     assert "Handle one unattended turn." in prompt
+    assert "Waiting(message=..., explanation=..., on=[...])" in prompt
     [return_tool] = [t for t in llm.calls[0].tools or [] if t.name == "return_result"]
     assert "Expected return type: Done | Waiting." in return_tool.description
 
