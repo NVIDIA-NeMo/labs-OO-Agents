@@ -25,7 +25,9 @@ def test_save_preserves_indentation_and_neighbor_comments(tmp_path, indent, alia
     connect.write({"model_name": "openai/new"}, path, alias=alias)
     text = path.read_text()
     expected = yaml.safe_load(source)
-    expected["models"][alias] = connect.configure_entry({"model_name": "openai/new"})
+    expected_entry = connect.configure_entry({"model_name": "openai/new"})
+    expected_entry.pop("provenance", None)
+    expected["models"][alias] = expected_entry
     assert yaml.safe_load(text) == expected
     assert neighbor in text
     assert "# Unrelated configuration\nsettings: true\n" in text
