@@ -289,3 +289,50 @@ def test_create_records_the_workspace_as_a_resolved_absolute_path(tmp_path, monk
     with store.create(workspace="../ws") as handle:
         pass
     assert store.get(handle.id).workspace == str(workspace.resolve())
+
+
+def _claim(store, session_id, pid):
+    claim_dir = store.path_for(session_id).with_suffix(".active")
+    claim_dir.mkdir()
+    (claim_dir / "owner-abc.json").write_text(json.dumps({"token": "abc", "pid": pid}))
+
+
+def _dead_pid():
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid  # finished and reaped: no such process
+
+
+def test_a_tui_claim_with_a_live_process_marks_the_session_active(tmp_path):
+    """The TUI claims a session through <id>.active/owner-*.json, not the file lock."""
+    import os
+
+    from nooa_coder.session.store import SessionStore
+
+    from nooa.storage.sqlite import SessionAlreadyActiveError
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    assert store.is_active(handle.id) is False
+    _claim(store, handle.id, os.getpid())
+    assert store.is_active(handle.id) is True
+    assert store.claim_owner(handle.id) == os.getpid()
+    with pytest.raises(SessionAlreadyActiveError) as excinfo:
+        store.open(handle.id)
+    assert excinfo.value.owner_pid == os.getpid()
+
+
+def test_a_tui_claim_whose_process_is_gone_does_not_block(tmp_path):
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    _claim(store, handle.id, _dead_pid())
+    assert store.is_active(handle.id) is False
+    with store.open(handle.id):
+        pass
