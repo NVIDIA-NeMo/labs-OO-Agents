@@ -78,6 +78,7 @@ async def test_cancel_during_cell_records_cancelled_output():
     assert "partial stdout" in output.stdout
     assert "never printed" not in output.stdout
     assert "partial stderr" in output.stderr
+    assert "prefill" not in output.metadata
 
     calls = [e for e in events if isinstance(e, ToolCallEvent) and e.tool_call_id == "call_cell"]
     assert len(calls) == 1
@@ -159,3 +160,6 @@ async def test_cancel_during_prefill_cell_records_cancelled_output():
     assert len(calls) == 1
     assert calls[0].result is not None
     assert calls[0].result.result_status is ResultStatus.RUNNING
+    # Tagged like a completed prefill output, so counts that skip prefill skip it too.
+    assert output.metadata["prefill"] is True
+    assert output.metadata["prefill_type"] == calls[0].metadata["prefill_type"]

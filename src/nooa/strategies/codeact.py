@@ -1584,7 +1584,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
                 )
             except asyncio.CancelledError as cancel:
-                self._record_cancelled_cell(runtime, tool_call.id, execution_count, cancel)
+                self._record_cancelled_cell(runtime, tool_call.id, execution_count, cancel, {})
                 raise
 
         # Determine final status
@@ -1789,6 +1789,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         tool_call_id: str,
         execution_count: int,
         cancel: asyncio.CancelledError,
+        metadata: dict[str, Any],
     ) -> None:
         """Record a cell interrupted by cancellation so the model can see it.
 
@@ -1799,7 +1800,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         is empty. The cell's tool-call event is left exactly as it was written:
         a cancel is a later fact about the turn, recorded by appending, not by
         rewriting an earlier event (which would also invalidate cached prompt
-        prefixes). The caller re-raises the cancellation.
+        prefixes). ``metadata`` is the tag the cell's normal ``PythonOutput``
+        would carry (the prefill tag for a prefill step). The caller re-raises
+        the cancellation.
         """
         partial = getattr(cancel, "execution_result", None)
         runtime.event_manager.add(
@@ -1810,6 +1813,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 stderr=partial.stderr if partial is not None else "",
                 execution_status=ResultStatus.CANCELLED,
                 images=partial.images if partial is not None else [],
+                metadata=metadata,
             )
         )
 
@@ -2725,7 +2729,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                 runtime, code, builtins, session, method_name, tool_call_id=prefill_id
             )
         except asyncio.CancelledError as cancel:
-            self._record_cancelled_cell(runtime, prefill_id, execution_count, cancel)
+            self._record_cancelled_cell(
+                runtime,
+                prefill_id,
+                execution_count,
+                cancel,
+                {"prefill": True, "prefill_type": prefill_type},
+            )
             raise
 
         # Merge captured locals into session (persists for next steps and LLM turns)
