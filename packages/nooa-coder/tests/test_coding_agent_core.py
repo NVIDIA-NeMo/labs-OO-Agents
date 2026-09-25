@@ -439,3 +439,37 @@ async def test_the_turn_prompt_says_locals_last_one_call(tmp_path, method):
         ) in rendered
     finally:
         await agent.aclose()
+
+
+async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
+    (tmp_path / "caller.py").write_text("from sub.x import only_in_sub\nonly_in_sub()\n")
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        relative = await agent.repo.symbols("x.py", cwd="sub")
+        assert relative.diagnostic is None and "only_in_sub" in str(relative)
+        assert "sub/x.py" in str(relative)  # still shown relative to the root
+        absolute = await agent.repo.symbols("x.py", cwd=str(sub))
+        assert "only_in_sub" in str(absolute)
+        assert agent.shell.cwd == tmp_path.resolve()  # the shell did not move
+        assert agent.repo.cwd == tmp_path.resolve()
+        missing = await agent.repo.symbols("x.py")
+        assert missing.diagnostic is not None
+        refs = await agent.repo.refs("only_in_sub", cwd=str(tmp_path))
+        assert "caller.py" in str(refs)
+        refs_sub = await agent.repo.refs("only_in_sub", ".", cwd="sub")
+        assert "caller.py" not in str(refs_sub)
+    finally:
+        await agent.aclose()
+
+
+def test_the_repo_tool_docs_offer_cwd():
+    from nooa_coder.tools.repo_tools import RepoTools
+
+    from nooa.agentdoc import doc
+
+    rendered = str(doc(RepoTools, concise=True))
+    assert rendered.count("cwd") >= 2
+    assert "defaults to the shell's current directory" in rendered
