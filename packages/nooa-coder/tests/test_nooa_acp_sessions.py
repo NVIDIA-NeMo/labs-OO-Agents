@@ -3,7 +3,8 @@
 """Sessions written by the ``nooa-acp`` server are found and loaded by nooa-coder.
 
 The old server keeps each workspace's sessions in ``<workspace>/.nooa/sessions``
-and records the agent as the bare name ``CodingAgent``. Only this test
+and records the agent as the bare name ``CodingAgent`` (the old TUI wrote
+``TUIAgent``). Only this test
 imports ``nooa_cli``; the package source must not.
 """
 
@@ -11,6 +12,7 @@ import logging
 import sqlite3
 from contextlib import closing
 
+import pytest
 from nooa_cli.coding import CodingAgent as OldCodingAgent
 from nooa_cli.sessions.store import SessionStore as OldSessionStore
 from nooa_coder.coding.agent import CodingAgent
@@ -22,11 +24,11 @@ from nooa.unifiedllm import FakeLLMClient
 _TODO = "carry the plan over"
 
 
-def _old_session(workspace):
+def _old_session(workspace, agent_name="CodingAgent"):
     """Write a session the way ``packages/nooa-acp`` does: message, then snapshot."""
     store = OldSessionStore(workspace / ".nooa" / "sessions")
     with store.create(
-        model="fake", agent="CodingAgent", working_directory=str(workspace), origin="acp"
+        model="fake", agent=agent_name, working_directory=str(workspace), origin="acp"
     ) as handle:
         handle.record_user_message("please remember the plan")
         agent = OldCodingAgent(
@@ -46,9 +48,10 @@ def _workspace(tmp_path):
     return workspace
 
 
-async def test_an_old_session_is_listed_and_loads_with_its_state(tmp_path):
+@pytest.mark.parametrize("agent_name", ["CodingAgent", "TUIAgent"])
+async def test_an_old_session_is_listed_and_loads_with_its_state(tmp_path, agent_name):
     workspace = _workspace(tmp_path)
-    session_id = _old_session(workspace)
+    session_id = _old_session(workspace, agent_name)
     store = SessionStore(sessions_root(workspace))
 
     [info] = store.list(workspace=workspace)
