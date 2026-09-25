@@ -12,6 +12,7 @@ Output leaves as data: session updates to subscribers and the transcript.
 import asyncio
 import contextvars
 import hashlib
+import inspect
 import json
 import logging
 import sqlite3
@@ -277,42 +278,45 @@ class Session:
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
-        # Nothing here may stop the handle from closing: a failure is logged
-        # and the rest of the close goes on, so the file lock is released.
+        # Every step has its own guard: a failure (or a CancelledError out
+        # of a step) is logged and the close goes on, so the model client is
+        # closed, the file lock released and ClosedUpdate emitted whatever
+        # failed before.
         self._closing = True
-        try:
-            if self._before_close is not None:
-                await self._before_close()
-        except Exception:
-            logger.exception("Session %s: closing its children failed", self.id)
-        try:
-            await self._stop_turn(by="host")
-            if self._loop_task is not None:
-                self._loop_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self._loop_task
-        except Exception:
-            logger.exception("Session %s: stopping the turn loop failed", self.id)
+        await self._close_step("closing its children", self._before_close)
+        await self._close_step("stopping the turn loop", self._stop_loop)
         self._resolve_all(TurnCancelledOutcome(by="host"))
         pending, self._pending_model = self._pending_model, None
         if pending is not None:
-            with suppress(Exception):
-                await _aclose(pending[1])
-        with suppress(Exception):
-            await self.wait_for_checkpoint()
-        self._unsubscribe_agent()
-        self._unsubscribe_steers()
+            await self._close_step("closing the pending model client", lambda: _aclose(pending[1]))
+        await self._close_step("waiting for the checkpoint", self.wait_for_checkpoint)
+        await self._close_step("unsubscribing from agent events", self._unsubscribe_agent)
+        await self._close_step("unsubscribing the steer flush", self._unsubscribe_steers)
+        await self._close_step("stopping the agent's jobs", self.agent.queue_manager.shutdown)
+        await self._close_step("closing the agent", self.agent.aclose)
+        await self._close_step("closing its model client", self._close_owned_llm)
+        await self._close_step("closing its record", self.handle.close)
+        self._closed = True
+        self.info.status = "closed"
+        self._emit(ClosedUpdate(session_id=self.id))
+
+    async def _close_step(self, what: str, step: Callable[[], object] | None) -> None:
+        """Run one close step (sync or async); log a failure instead of raising it."""
+        if step is None:
+            return
         try:
-            await self.agent.queue_manager.shutdown()
-            await self.agent.aclose()
-            await self._close_owned_llm()
-        except Exception:
-            logger.exception("Session %s: closing the agent failed", self.id)
-        finally:
-            self.handle.close()
-            self._closed = True
-            self.info.status = "closed"
-            self._emit(ClosedUpdate(session_id=self.id))
+            result = step()
+            if inspect.isawaitable(result):
+                await result
+        except (Exception, asyncio.CancelledError):
+            logger.exception("Session %s: %s failed", self.id, what)
+
+    async def _stop_loop(self) -> None:
+        await self._stop_turn(by="host")
+        if self._loop_task is not None:
+            self._loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._loop_task
 
     async def cancel(self, *, by: str = "user") -> bool:
         """Stop the running turn; return whether one was running.
@@ -346,7 +350,7 @@ class Session:
         llm, self._owned_llm = self._owned_llm, None
         retired, self._retired_llms = self._retired_llms, []
         for client in (*retired, llm):
-            await _aclose(client)
+            await self._close_step("closing a model client", lambda c=client: _aclose(c))
 
     def _ensure_open(self) -> None:
         if self._closed or self._closing:
