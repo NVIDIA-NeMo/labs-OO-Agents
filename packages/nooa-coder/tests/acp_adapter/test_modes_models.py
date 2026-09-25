@@ -94,3 +94,48 @@ async def test_unknown_config_options_are_invalid(make_adapter, workspace):
     session_id = (await adapter.new_session(str(workspace))).session_id
     with pytest.raises(RequestError):
         await adapter.set_config_option("temperature", session_id, "hot")
+
+
+class _LeveledModels(ScriptedModels):
+    """Scripted agents whose client declares reasoning levels (low by default)."""
+
+    def __call__(self, options, storage):
+        from nooa.unifiedllm.reasoning import ReasoningConfig
+
+        agent = super().__call__(options, storage)
+        agent.llm._reasoning_config = ReasoningConfig(
+            levels={"low": {"reasoning_effort": "low"}, "high": {"reasoning_effort": "high"}},
+            default="low",
+        )
+        return agent
+
+
+async def test_the_reasoning_option_lists_the_client_levels(make_adapter, workspace):
+    adapter = await make_adapter(_LeveledModels(), model="fast")
+    response = await adapter.new_session(str(workspace))
+    by_id = {option.id: option for option in response.config_options or []}
+    assert set(by_id) == {"model", "reasoning"}
+    reasoning = by_id["reasoning"]
+    assert reasoning.current_value == "low"
+    assert [choice.value for choice in reasoning.options] == ["low", "high"]
+
+
+async def test_choosing_a_reasoning_level_applies_to_the_client(make_adapter, workspace):
+    adapter = await make_adapter(_LeveledModels(), model="fast")
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    response = await adapter.set_config_option("reasoning", session_id, "high")
+    reasoning = next(option for option in response.config_options if option.id == "reasoning")
+    assert reasoning.current_value == "high"
+    assert adapter.session(session_id).agent.llm.reasoning_level == "high"
+    with pytest.raises(RequestError) as excinfo:
+        await adapter.set_config_option("reasoning", session_id, "max")
+    assert excinfo.value.code == -32602
+    assert "allowed: low, high" in str(excinfo.value.data)
+
+
+async def test_no_reasoning_option_without_declared_levels(make_adapter, workspace):
+    adapter = await make_adapter(ScriptedModels(), model="fast")
+    response = await adapter.new_session(str(workspace))
+    assert [option.id for option in response.config_options or []] == ["model"]
+    with pytest.raises(RequestError):
+        await adapter.set_config_option("reasoning", response.session_id, "high")
