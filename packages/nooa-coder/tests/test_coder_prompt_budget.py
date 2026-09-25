@@ -48,8 +48,8 @@ LIMITS = {
     ),  # measured 11,049 / 13,222 after PR 0 (shell cwd=, result-field docs)
     (EXPERIMENTAL, "handle_batch"): (
         11_100,
-        13_600,
-    ),  # measured 11,049 / 13,575 after PR 0 (shell cwd=, result-field docs)
+        13_900,
+    ),  # measured 13,608 after the P2a ownership/usage fixes
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
