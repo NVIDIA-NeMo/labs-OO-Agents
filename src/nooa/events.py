@@ -444,8 +444,9 @@ class Notification(EventBase):  # type: ignore[misc]
       decide which handler to run next.
     - ``description`` is a free-form string for the LLM; include enough
       to make the notification self-describing in the event stream. It
-      renders in full (no string truncation), so a long notification is
-      never cut.
+      renders up to 20,000 chars uncut — well above the default event
+      render limit (10,000) so a typical steering message is never cut,
+      but still bounded against an unbounded forwarded payload.
 
     - ``value`` is an optional data payload for when the signal carries an
       object the agent will act on, not just text about it. It renders
@@ -467,7 +468,7 @@ class Notification(EventBase):  # type: ignore[misc]
     ]
     description: Annotated[
         str,
-        spec(max_string=None),
+        spec(max_string=20_000),
         Field(description="Human-readable description"),
     ] = ""
     value: Annotated[

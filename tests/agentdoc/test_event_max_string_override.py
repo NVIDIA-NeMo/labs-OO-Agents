@@ -65,17 +65,24 @@ class TestEventMaxStringOverride:
         rendered = pformat(event, max_string=MAX_STRING)
         assert LONG_STRING in rendered
 
-    def test_notification_description_not_truncated(self):
-        """Notification.description carries steering text — must never be truncated."""
+    def test_notification_description_not_truncated_up_to_its_own_cap(self):
+        """Notification.description carries steering text — uncut up to its 20,000-char cap."""
         event = Notification(source="steer:user", description=LONG_STRING)
         rendered = pformat(event, max_string=MAX_STRING)
         assert LONG_STRING in rendered
 
-    @pytest.mark.parametrize("length", [10_000, 25_000])
-    def test_notification_description_uncut_through_event_formatter(self, length: int):
-        """A long steer renders whole through the formatter the prompt builder uses.
+    def test_notification_description_truncated_past_its_own_cap(self):
+        """Past 20,000 chars, description is bounded rather than rendering an unbounded payload."""
+        text = "x" * 20_001
+        event = Notification(source="steer:user", description=text)
+        rendered = pformat(event, max_string=MAX_STRING)
+        assert text not in rendered
+        assert "str(len=20001" in rendered
 
-        25,000 characters is above the default ``event_format.max_string`` (10,000),
+    @pytest.mark.parametrize("length", [10_000, 20_000])
+    def test_notification_description_uncut_through_event_formatter(self, length: int):
+        """A steer up to the 20,000-char cap renders whole through the formatter the
+        prompt builder uses — above the default ``event_format.max_string`` (10,000),
         which is what truncated the description before it had its own spec.
         """
         text = "s" * length
@@ -83,6 +90,14 @@ class TestEventMaxStringOverride:
         rendered = XMLBlockFormatter().format_event(event, TruncationConfig().event_format)
         assert text in rendered
         assert "str(len=" not in rendered
+
+    def test_notification_description_truncated_through_event_formatter_past_its_cap(self):
+        """A steer past the 20,000-char cap is bounded, not rendered in full."""
+        text = "s" * 20_001
+        event = Notification(source="steer:user", description=text)
+        rendered = XMLBlockFormatter().format_event(event, TruncationConfig().event_format)
+        assert text not in rendered
+        assert "str(len=20001" in rendered
 
 
 class TestOtherFieldsStillTruncated:
