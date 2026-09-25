@@ -65,6 +65,19 @@ def _normalise_workspace(workspace: str | Path) -> str:
     return str(Path(workspace).expanduser().resolve())
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` is a running process on this host (permission errors count as alive)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _workspace_matches(recorded: str | Path, wanted: str) -> bool:
     """Whether a session's recorded workspace is ``wanted`` (a normalised path).
 
@@ -362,6 +375,14 @@ class SessionStore:
         info = self._read_info(path)
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
+        owner = self.claim_owner(session_id)
+        if owner is not None:
+            raise SessionAlreadyActiveError(
+                f"Session {session_id!r} is active in another process (pid {owner}, "
+                "TUI claim). Close it there first.",
+                session_id=session_id,
+                owner_pid=owner,
+            )
         try:
             storage = SQLiteStorageManager(path, check_same_thread=False, must_exist=True)
         except sqlite3.OperationalError as exc:
@@ -494,7 +515,14 @@ class SessionStore:
         return [path.stem for path in matches]
 
     def is_active(self, session_id: str) -> bool:
-        """Whether some owner (this process or another) holds the session's file lock."""
+        """Whether another owner holds the session: the file lock, or a live claim.
+
+        The TUI marks a session it runs with a ``<id>.active/owner-*.json``
+        claim naming its process instead of the file lock; a claim whose
+        process is alive on this host counts as active.
+        """
+        if self.claim_owner(session_id) is not None:
+            return True
         lock_path = self.path_for(session_id).with_suffix(".lock")
         if not lock_path.exists():
             return False
@@ -505,6 +533,22 @@ class SessionStore:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
         return False
+
+    def claim_owner(self, session_id: str) -> int | None:
+        """The pid of a live process claiming the session through ``<id>.active/``, else None."""
+        claim_dir = self.path_for(session_id).with_suffix(".active")
+        try:
+            owners = list(claim_dir.glob("owner-*.json"))
+        except OSError:
+            return None
+        for owner_path in owners:
+            try:
+                pid = json.loads(owner_path.read_text()).get("pid")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(pid, int) and pid > 0 and _pid_alive(pid):
+                return pid
+        return None
 
     def delete(self, session_id: str) -> bool:
         """Delete an inactive session database and its SQLite sidecars."""
