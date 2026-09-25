@@ -303,49 +303,51 @@ class SessionRegistry:
         waiter = self._waiters.pop((parent.id, child.id), None)
         if waiter is not None and waiter.done():
             waiter = None
-        if kind == "done":
-            done = _rebuild_done(update)
-            if waiter is not None:
-                waiter.set_result(done)
-            else:
-                self._put(parent, child.id, ChildResult(child=ref, done=done), source)
-        elif kind in ("error", "cancelled"):
-            # A cancelled turn ends without a result: to the parent it is a failure.
-            error = (
-                f"cancelled by {update.outcome.get('by', 'unknown')}"
-                if kind == "cancelled"
-                else str(update.outcome.get("error", "the child's turn failed"))
-            )
-            if waiter is not None:
-                waiter.set_exception(ChildFailedError(error))
-            else:
-                self._put(parent, child.id, ChildFailed(child=ref, error=error), source)
-        else:
-            question = ChildQuestion(
-                child=ref,
-                question=str(update.outcome.get("question", "")),
-                options=update.outcome.get("options"),
-                answer_schema=update.outcome.get("answer_schema"),
-            )
-            if waiter is not None:
-                waiter.set_exception(
-                    ChildFailedError(
-                        f"Child {child.name!r} asked a question; answer the ChildQuestion "
-                        "that arrives on the delegates channel"
-                    )
+        try:
+            if kind == "done":
+                done = _rebuild_done(update)
+                if waiter is not None:
+                    waiter.set_result(done)
+                else:
+                    self._put(parent, child.id, ChildResult(child=ref, done=done), source)
+            elif kind in ("error", "cancelled"):
+                # A cancelled turn ends without a result: to the parent it is a failure.
+                error = (
+                    f"cancelled by {update.outcome.get('by', 'unknown')}"
+                    if kind == "cancelled"
+                    else str(update.outcome.get("error", "the child's turn failed"))
                 )
-            parent._admit(question, channel="delegates", source=source)
-            return
-        if not child.options.retain:
-            # Not from inside this callback: closing awaits the child's own loop.
-            task = asyncio.get_running_loop().create_task(self.close(child.id))
-            self._background.add(task)
-            task.add_done_callback(self._background.discard)
+                if waiter is not None:
+                    waiter.set_exception(ChildFailedError(error))
+                else:
+                    self._put(parent, child.id, ChildFailed(child=ref, error=error), source)
+            else:
+                question = ChildQuestion(
+                    child=ref,
+                    question=str(update.outcome.get("question", "")),
+                    options=update.outcome.get("options"),
+                    answer_schema=update.outcome.get("answer_schema"),
+                )
+                if waiter is not None:
+                    waiter.set_exception(
+                        ChildFailedError(
+                            f"Child {child.name!r} asked a question; answer the ChildQuestion "
+                            "that arrives on the delegates channel"
+                        )
+                    )
+                _admit_delegate(parent, question, source)
+        finally:
+            # A finished throwaway child is closed even if its delivery failed.
+            if kind != "need_input" and not child.options.retain:
+                # Not from inside this callback: closing awaits the child's own loop.
+                task = asyncio.get_running_loop().create_task(self.close(child.id))
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
 
     def _put(
         self, parent: Session, child_id: str, item: ChildResult | ChildFailed, source: str
     ) -> None:
-        receipt = parent._admit(item, channel="delegates", source=source)
+        receipt = _admit_delegate(parent, item, source)
         self._queued.setdefault((parent.id, child_id), []).append((receipt, item))
 
     def take_queued_result(self, parent: Session, child_id: str) -> Done | None:
@@ -666,6 +668,18 @@ class SessionRegistry:
                 await session.close()
             except Exception:
                 logger.exception("Closing session %s failed", session.id)
+
+
+def _admit_delegate(parent: Session, item: Any, source: str) -> Receipt:
+    """Admit a child's item on the parent's ``delegates`` channel.
+
+    The channel is re-created if the parent's agent removed it, so a
+    child's result is never lost to a ``remove_channel("delegates")``.
+    """
+    queues = parent.agent.queue_manager
+    if "delegates" not in queues.channels():
+        queues.queue("delegates")
+    return parent._admit(item, channel="delegates", source=source)
 
 
 def _live_status(session: Session) -> SessionStatus:

@@ -494,3 +494,39 @@ async def test_a_child_ref_is_bound_to_its_parent(registry, root_options):
     finally:
         current_port.reset(token)
     assert registry.get(child.id) is child
+
+
+# ---- delivery survives a removed delegates channel -----------------------
+
+
+async def test_a_result_arrives_after_the_agent_removed_delegates(registry, root_options, models):
+    models.scripts[None] = [
+        cell("[r] = notification['delegates']\nreturn_result(Done(explanation=r.done.explanation))")
+    ]
+    models.scripts["Kid"] = [done("kid done")]
+    root = await registry.create(root_options)
+    ended = []
+    root.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
+    root.agent.queue_manager.remove_channel("delegates")
+    child = await registry.create(
+        root.options.inherit(name="Kid"), parent_id=root.id, initial_items=[("user_messages", "go")]
+    )
+    await until(lambda: ended, TIMEOUT)
+    assert ended[0].outcome["explanation"] == "kid done"
+    await until(lambda: registry.get(child.id) is None, TIMEOUT)
+
+
+async def test_a_failed_delivery_still_closes_a_finished_throwaway_child(
+    registry, root_options, models, monkeypatch
+):
+    models.scripts["Kid"] = [done("kid done")]
+    root = await registry.create(root_options)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("delivery failed")
+
+    monkeypatch.setattr(registry, "_put", broken)
+    child = await registry.create(
+        root.options.inherit(name="Kid"), parent_id=root.id, initial_items=[("user_messages", "go")]
+    )
+    await until(lambda: registry.get(child.id) is None, TIMEOUT)
