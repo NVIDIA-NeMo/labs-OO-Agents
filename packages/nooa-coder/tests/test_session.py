@@ -460,6 +460,24 @@ async def test_a_loop_with_no_channels_left_closes_the_session(make_session):
         await session.submit("late")
 
 
+async def test_withdraw_a_steer_that_became_a_message(make_session):
+    session, _ = make_session(start=False)
+    session._turn_task = asyncio.ensure_future(asyncio.sleep(10))  # a turn is running
+    try:
+        receipt = await session.steer("TOO-LATE")
+    finally:
+        session._turn_task.cancel()
+        session._turn_task = None
+    pending = asyncio.ensure_future(session.outcome(receipt.item_id))
+    session._admit_leftover_steers()  # the turn settled before any model call saw it
+    channel = session.agent.queue_manager.get_channel("user_messages")
+    assert channel.snapshot() == ["TOO-LATE"]
+    assert session.withdraw(receipt) is True
+    assert channel.snapshot() == []
+    with pytest.raises(ItemWithdrawnError):
+        await asyncio.wait_for(pending, TIMEOUT)
+
+
 def _snapshot_count(path) -> int:
     connection = sqlite3.connect(path)
     try:
