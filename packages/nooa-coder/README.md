@@ -12,6 +12,14 @@ Status: pre-release. The package is part of the workspace but is not published
 yet, and its API may change until the hosts switch over to it. The ACP
 adapter and the benchmark host move onto it in later changes.
 
+Sessions are stored per workspace, in `<workspace>/.nooa/sessions`
+(`sessions_root(workspace)`), where the `nooa-acp` server and the TUI keep
+theirs; sessions they wrote are listed and load, with their saved agent
+state when it can be restored. `NOOA_SESSIONS_DIR`, or an explicit
+`SessionOptions.sessions_dir` / `--sessions-dir`, names one shared directory
+for all workspaces instead. A `SessionRegistry` serves one such directory;
+a subagent's session goes in its root's.
+
 The design is tracked in issue #388.
 
 

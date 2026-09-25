@@ -73,12 +73,18 @@ def workspace(tmp_path):
 
 
 @pytest.fixture
+def sessions_dir(workspace):
+    """Where the ``workspace`` fixture's sessions live by default."""
+    return workspace / ".nooa" / "sessions"
+
+
+@pytest.fixture
 def client():
     return FakeClient()
 
 
 @pytest.fixture
-async def make_adapter(sessions_dir, client):
+async def make_adapter(client):
     """Build a ``CoderACPAgent`` over a registry of scripted-model agents.
 
     ``make_adapter(models, agent_spec=..., capabilities=...)`` returns the
@@ -88,7 +94,6 @@ async def make_adapter(sessions_dir, client):
     from acp import PROTOCOL_VERSION
     from nooa_coder.acp.server import CoderACPAgent
     from nooa_coder.session.registry import SessionRegistry
-    from nooa_coder.session.store import SessionStore
 
     built: list[Any] = []
 
@@ -101,10 +106,10 @@ async def make_adapter(sessions_dir, client):
         model: str | None = None,
         client_: Any = None,
     ) -> Any:
-        registry = SessionRegistry(
-            SessionStore(sessions_dir), agent_factory=models, llm_factory=llm_factory
-        )
-        adapter = CoderACPAgent(registry, agent_spec=agent_spec, model=model)
+        def new_registry(store: Any) -> SessionRegistry:
+            return SessionRegistry(store, agent_factory=models, llm_factory=llm_factory)
+
+        adapter = CoderACPAgent(new_registry, agent_spec=agent_spec, model=model)
         adapter.on_connect(client_ or client)
         await adapter.initialize(PROTOCOL_VERSION, client_capabilities=capabilities)
         built.append(adapter)

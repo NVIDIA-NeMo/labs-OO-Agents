@@ -162,6 +162,14 @@ class ChildDeleted(Metadata):
     name: str | None = None
 
 
+class SnapshotRestoreFailed(Metadata):
+    """The saved agent state could not be restored when the session was loaded."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    error: str = ""
+
+
 SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     SessionStarted,
     SessionTitleUpdated,
@@ -177,6 +185,7 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     TurnEnded,
     ChildDeleted,
     TurnCancelled,
+    SnapshotRestoreFailed,
 )
 """Event types registered on every session's storage backend.
 

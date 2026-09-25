@@ -20,7 +20,7 @@ from typing import Any
 from nooa.events import TuiSessionResumed
 from nooa.interactive import Done
 from nooa.storage.sqlite import SessionAlreadyActiveError
-from nooa_coder.session.events import ChildDeleted
+from nooa_coder.session.events import ChildDeleted, SnapshotRestoreFailed
 from nooa_coder.session.items import (
     ChildCreatedUpdate,
     ChildFailed,
@@ -71,7 +71,14 @@ class DepthLimitError(ValueError):
 
 
 class SessionRegistry:
-    """Creates, finds, lists and closes the sessions of one process."""
+    """Creates, finds, lists and closes the sessions of one process.
+
+    A registry serves one store: one workspace's ``.nooa/sessions``
+    directory, or the one directory ``NOOA_SESSIONS_DIR`` names for every
+    workspace (see ``sessions_root``). Children go in their root's store,
+    so a whole tree sits in one directory. A host serving several
+    workspaces keeps one registry per store.
+    """
 
     def __init__(
         self,
@@ -194,7 +201,9 @@ class SessionRegistry:
         except Exception:
             logger.exception("Closing the half-built session %s failed", session.id)
 
-    async def _build(self, options: SessionOptions, handle: SessionHandle) -> Session:
+    async def _build(
+        self, options: SessionOptions, handle: SessionHandle, *, restore: bool = False
+    ) -> Session:
         # Build the agent outside the caller's context: a child is created
         # from inside its parent's cell, and the agent must not inherit the
         # parent's call stack or LLM inheritance.
@@ -207,6 +216,8 @@ class SessionRegistry:
             build_options = options.model_copy(update={"llm": owned_llm})
         try:
             agent = contextvars.Context().run(self._agent_factory, build_options, handle.storage)
+            if restore:
+                agent = await self._restore(agent, build_options, handle)
         except BaseException:
             if owned_llm is not None and hasattr(owned_llm, "aclose"):
                 await asyncio.shield(owned_llm.aclose())
@@ -230,6 +241,35 @@ class SessionRegistry:
             session.info.model = resolved
         install_port(agent, session, self)
         return session
+
+    async def _restore(self, agent: Any, options: SessionOptions, handle: SessionHandle) -> Any:
+        """Restore the latest snapshot into ``agent``; on failure, a fresh agent.
+
+        A snapshot that cannot be restored (from an older agent class, or
+        damaged) does not stop the load: a warning is logged, a
+        ``SnapshotRestoreFailed`` note goes in the transcript, and the
+        session goes on with a newly built agent, since the failed restore
+        may have changed part of the first one.
+        """
+        try:
+            restored = handle.storage.restore_latest_snapshot(agent)
+            if restored:
+                after_restore = getattr(agent, "after_restore", None)
+                if callable(after_restore):
+                    after_restore()
+        except Exception as exc:
+            logger.warning(
+                "Session %s: could not restore its saved state; going on from an empty state",
+                handle.id,
+                exc_info=True,
+            )
+            handle.events.add(SnapshotRestoreFailed(error=f"{type(exc).__name__}: {exc}"))
+            await agent.queue_manager.shutdown()
+            await agent.aclose()
+            agent = contextvars.Context().run(self._agent_factory, options, handle.storage)
+            restored = False
+        agent.event_manager.add(TuiSessionResumed(session_id=handle.id, restored=restored))
+        return agent
 
     def _discard(
         self,
@@ -470,9 +510,10 @@ class SessionRegistry:
         A live id returns the same Session (the caller subscribes and reads
         ``transcript()``). Otherwise the file is opened (claim-checked by
         the store: ``SessionAlreadyActiveError`` if another owner has it),
-        the agent is built and its latest snapshot restored (then the
-        agent's ``after_restore()`` runs, if it has one),
-        ``TuiSessionResumed`` is emitted, items admitted but never consumed
+        the agent is built and its latest snapshot restored (a snapshot
+        that fails to restore leaves a fresh agent and a note in the
+        transcript, see ``_restore``; after a restore the agent's
+        ``after_restore()`` runs, if it has one), ``TuiSessionResumed`` is emitted, items admitted but never consumed
         or withdrawn are re-queued (``ItemRequeued``), and the session is
         published and started. Loading a child whose parent is not live is
         allowed (a detached child: its results stay in its own transcript).
@@ -500,13 +541,8 @@ class SessionRegistry:
             # that opens a relative checks after taking its own lock too, so
             # of two overlapping loads at least one sees the other.
             self._refuse_if_tree_active_elsewhere(session_id, handle.info.parent_id)
-            session = await self._build(self._stored_options(handle.info, overrides), handle)
-            restored = handle.storage.restore_latest_snapshot(session.agent)
-            after_restore = getattr(session.agent, "after_restore", None)
-            if restored and callable(after_restore):
-                after_restore()
-            session.agent.event_manager.add(
-                TuiSessionResumed(session_id=session_id, restored=restored)
+            session = await self._build(
+                self._stored_options(handle.info, overrides), handle, restore=True
             )
             if prepare is not None:
                 await prepare(session)

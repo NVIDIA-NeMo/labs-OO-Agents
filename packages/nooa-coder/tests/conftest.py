@@ -7,15 +7,21 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _user_dir(tmp_path, monkeypatch):
-    """Point the user-level NOOA directory (and so the default sessions dir) at tmp_path."""
+    """Keep user-level settings in tmp_path and sessions in their workspace.
+
+    Sessions live in ``<workspace>/.nooa/sessions`` unless ``NOOA_SESSIONS_DIR``
+    names one shared directory; a developer's setting must not leak in.
+    """
     user_dir = tmp_path / "user"
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
+    monkeypatch.delenv("NOOA_SESSIONS_DIR", raising=False)
     return user_dir
 
 
 @pytest.fixture
 def sessions_dir(tmp_path):
-    return tmp_path / "sessions"
+    """Where sessions of the ``tmp_path`` workspace live by default."""
+    return tmp_path / ".nooa" / "sessions"
 
 
 @pytest.fixture
@@ -48,7 +54,6 @@ async def make_session(sessions_dir, tmp_path):
             agent_spec=agent_spec,
             llm=llm,
             turn_method=turn_method,
-            sessions_dir=sessions_dir,
         )
         handle = store.create(agent=agent_spec, workspace=str(tmp_path), host=options.host)
         agent = default_agent_factory(options, handle.storage)
@@ -81,9 +86,7 @@ async def registry(sessions_dir, models):
 
 
 @pytest.fixture
-def root_options(tmp_path, sessions_dir):
+def root_options(tmp_path):
     from nooa_coder.session.options import SessionOptions
 
-    return SessionOptions(
-        workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent", sessions_dir=sessions_dir
-    )
+    return SessionOptions(workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent")

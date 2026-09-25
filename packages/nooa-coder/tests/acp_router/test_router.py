@@ -15,6 +15,7 @@ import socket
 import time
 import warnings
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,7 +23,7 @@ from acp import PROTOCOL_VERSION
 from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_coder.acp.router import INIT_REQUEST_ID, Router, WorkerProcess
 from nooa_coder.acp.server import initialize_response
-from nooa_coder.session.store import SessionStore
+from nooa_coder.session.store import SessionStore, sessions_root
 
 TIMEOUT = 10
 BASE = 1 << 32
@@ -140,14 +141,15 @@ class FakeWorker:
 class Harness:
     """A router serving a raw client, spawning ``FakeWorker``s."""
 
-    def __init__(self, store: SessionStore) -> None:
-        self.store = store
+    def __init__(self, workspace: Path) -> None:
+        self.cwd = str(workspace)
+        self.store = SessionStore(sessions_root(workspace))
         self.handlers: dict[str, Handler] = {}
         self.workers: dict[int, FakeWorker] = {}
         self.spawn_delay: dict[int, float] = {}
         self.spawn_error: dict[int, BaseException] = {}
         self.spawned: list[int] = []
-        self.router = Router(spawn=self._spawn, store=store)
+        self.router = Router(spawn=self._spawn)
         self.inbox: list[Frame] = []
         self._next_id = 0
 
@@ -205,8 +207,8 @@ class Harness:
     async def initialize_request_only(self) -> None:
         await self.request("initialize", {"protocolVersion": PROTOCOL_VERSION})
 
-    async def new_session(self, cwd: str = "/tmp") -> str:
-        frame = await self.call("session/new", {"cwd": cwd, "mcpServers": []})
+    async def new_session(self, cwd: str | None = None) -> str:
+        frame = await self.call("session/new", {"cwd": cwd or self.cwd, "mcpServers": []})
         return frame.message["result"]["sessionId"]
 
     async def close(self) -> None:
@@ -216,15 +218,19 @@ class Harness:
 
 
 @pytest.fixture
-async def harness(sessions_dir):
-    harness = Harness(SessionStore(sessions_dir))
+async def harness(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = Harness(workspace)
     await harness.start()
     yield harness
     await harness.close()
 
 
-def _stored(store: SessionStore, *, parent_id: str | None = None, turns: int = 0) -> str:
-    handle = store.create(agent="a:B", workspace="/tmp", host="acp", parent_id=parent_id)
+def _stored(harness: Harness, *, parent_id: str | None = None, turns: int = 0) -> str:
+    handle = harness.store.create(
+        agent="a:B", workspace=harness.cwd, host="acp", parent_id=parent_id
+    )
     from nooa_coder.session.events import SessionUserMessage
 
     for _ in range(turns):
@@ -259,12 +265,40 @@ async def test_authenticate_and_unknown_methods_are_method_not_found(harness):
 
 
 async def test_session_list_is_answered_from_the_store_without_a_worker(harness):
-    listed = _stored(harness.store, turns=1)
-    _stored(harness.store)  # no messages: not listed
-    frame = await harness.call("session/list", {})
+    listed = _stored(harness, turns=1)
+    _stored(harness)  # no messages: not listed
+    frame = await harness.call("session/list", {"cwd": harness.cwd})
     sessions = frame.message["result"]["sessions"]
     assert [entry["sessionId"] for entry in sessions] == [listed]
     assert sessions[0]["_meta"] == {"dev.nooa/status": "on_disk"}
+    assert harness.spawned == []
+
+
+async def test_session_list_reads_the_store_of_each_cwd(harness, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    here = _stored(harness, turns=1)
+    there = Harness(other)
+    elsewhere = _stored(there, turns=1)
+
+    async def listed(params: dict[str, Any]) -> list[str]:
+        frame = await harness.call("session/list", params)
+        return [entry["sessionId"] for entry in frame.message["result"]["sessions"]]
+
+    assert await listed({}) == []  # no workspace named yet: no index to read
+    assert await listed({"cwd": str(other)}) == [elsewhere]
+    assert await listed({"cwd": harness.cwd}) == [here]
+    assert set(await listed({})) == {here, elsewhere}
+    assert not (Path(harness.cwd) / ".nooa" / "sessions" / f"{elsewhere}.db").exists()
+
+
+async def test_a_load_reads_the_store_of_its_cwd(harness, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    session_id = _stored(harness)
+    await harness.initialize()
+    frame = await harness.call("session/load", {"sessionId": session_id, "cwd": str(other)})
+    assert frame.message["error"]["code"] == -32002
     assert harness.spawned == []
 
 
@@ -452,7 +486,7 @@ async def test_a_spawn_in_progress_does_not_delay_another_sessions_cancel(harnes
     await harness.initialize()
     running = await harness.new_session()
     harness.spawn_delay[2] = 3.0
-    pending_new = await harness.request("session/new", {"cwd": "/tmp", "mcpServers": []})
+    pending_new = await harness.request("session/new", {"cwd": harness.cwd, "mcpServers": []})
     await asyncio.sleep(0.05)
     started = time.monotonic()
     await harness.notify("session/cancel", {"sessionId": running})
@@ -466,12 +500,12 @@ async def test_a_spawn_in_progress_does_not_delay_another_sessions_cancel(harnes
 
 
 async def test_loading_a_child_goes_to_the_worker_of_its_root(harness):
-    root = _stored(harness.store)
-    child = _stored(harness.store, parent_id=root)
-    grandchild = _stored(harness.store, parent_id=child)
+    root = _stored(harness)
+    child = _stored(harness, parent_id=root)
+    grandchild = _stored(harness, parent_id=child)
     await harness.initialize()
     for session_id in (root, grandchild):
-        frame = await harness.call("session/load", {"sessionId": session_id, "cwd": "/tmp"})
+        frame = await harness.call("session/load", {"sessionId": session_id, "cwd": harness.cwd})
         assert "result" in frame.message
     assert harness.spawned == [1]
     loads = [f.session_id for f in harness.workers[1].received if f.method == "session/load"]
@@ -481,19 +515,19 @@ async def test_loading_a_child_goes_to_the_worker_of_its_root(harness):
 
 
 async def test_a_child_whose_root_is_not_live_gets_its_own_worker_and_keeps_it(harness):
-    root = _stored(harness.store)
-    child = _stored(harness.store, parent_id=root)
+    root = _stored(harness)
+    child = _stored(harness, parent_id=root)
     await harness.initialize()
-    await harness.call("session/load", {"sessionId": child, "cwd": "/tmp"})
-    await harness.call("session/load", {"sessionId": root, "cwd": "/tmp"})
+    await harness.call("session/load", {"sessionId": child, "cwd": harness.cwd})
+    await harness.call("session/load", {"sessionId": root, "cwd": harness.cwd})
     assert harness.spawned == [1]  # the tree stays in one worker
 
 
 async def test_concurrent_loads_of_one_session_spawn_once(harness):
-    session_id = _stored(harness.store)
+    session_id = _stored(harness)
     await harness.initialize()
-    first = await harness.request("session/load", {"sessionId": session_id, "cwd": "/tmp"})
-    second = await harness.request("session/load", {"sessionId": session_id, "cwd": "/tmp"})
+    first = await harness.request("session/load", {"sessionId": session_id, "cwd": harness.cwd})
+    second = await harness.request("session/load", {"sessionId": session_id, "cwd": harness.cwd})
     for request_id in (first, second):
         assert "result" in (await harness.response(request_id)).message
     assert harness.spawned == [1]
@@ -502,7 +536,7 @@ async def test_concurrent_loads_of_one_session_spawn_once(harness):
 
 async def test_loading_an_unknown_session_is_resource_not_found_without_a_worker(harness):
     await harness.initialize()
-    frame = await harness.call("session/load", {"sessionId": "missing", "cwd": "/tmp"})
+    frame = await harness.call("session/load", {"sessionId": "missing", "cwd": harness.cwd})
     assert frame.message["error"] == {
         "code": -32002,
         "message": "Resource not found",
@@ -512,14 +546,14 @@ async def test_loading_an_unknown_session_is_resource_not_found_without_a_worker
 
 
 async def test_a_failed_load_unmaps_the_session_and_stops_the_worker(harness):
-    session_id = _stored(harness.store)
+    session_id = _stored(harness)
 
     async def refuse(worker: FakeWorker, frame: Frame) -> None:
         await worker.reply(frame, error={"code": -32600, "message": "already open"})
 
     harness.handlers["session/load"] = refuse
     await harness.initialize()
-    frame = await harness.call("session/load", {"sessionId": session_id, "cwd": "/tmp"})
+    frame = await harness.call("session/load", {"sessionId": session_id, "cwd": harness.cwd})
     assert frame.message["error"]["message"] == "already open"
     await asyncio.wait_for(harness.workers[1].eof.wait(), TIMEOUT)
     frame = await harness.call("session/prompt", {"sessionId": session_id, "prompt": []})
@@ -551,12 +585,28 @@ async def test_a_failed_new_session_stops_its_worker(harness):
 
 
 async def test_deleting_a_session_that_is_not_live_uses_a_worker_then_stops_it(harness):
-    session_id = _stored(harness.store)
+    session_id = _stored(harness)
     await harness.initialize()
-    frame = await harness.call("_nooa/session/delete", {"sessionId": session_id})
+    frame = await harness.call(
+        "_nooa/session/delete", {"sessionId": session_id, "cwd": harness.cwd}
+    )
     assert frame.message["result"] == {}
     assert harness.workers[1].methods()[-1] == "_nooa/session/delete"
     await asyncio.wait_for(harness.workers[1].eof.wait(), TIMEOUT)
+
+
+async def test_a_delete_without_cwd_searches_the_named_workspaces_and_passes_the_cwd_on(harness):
+    session_id = _stored(harness)
+    await harness.initialize()
+    frame = await harness.call("_nooa/session/delete", {"sessionId": session_id})
+    assert frame.message["error"]["code"] == -32002  # no workspace named yet
+    assert harness.spawned == []
+
+    await harness.call("session/list", {"cwd": harness.cwd})
+    frame = await harness.call("_nooa/session/delete", {"sessionId": session_id})
+    assert frame.message["result"] == {}
+    [delete] = [f for f in harness.workers[1].received if f.method == "_nooa/session/delete"]
+    assert delete.params == {"sessionId": session_id, "cwd": harness.cwd}
 
 
 async def test_a_worker_exiting_mid_prompt_fails_the_prompt_and_answers_close(harness):
@@ -593,7 +643,7 @@ async def test_a_worker_exiting_mid_prompt_fails_the_prompt_and_answers_close(ha
 async def test_a_failed_spawn_answers_the_request_with_an_internal_error(harness):
     harness.spawn_error[1] = OSError("no such interpreter")
     await harness.initialize()
-    frame = await harness.call("session/new", {"cwd": "/tmp", "mcpServers": []})
+    frame = await harness.call("session/new", {"cwd": harness.cwd, "mcpServers": []})
     assert frame.message["error"]["code"] == -32603
     assert "no such interpreter" in json.dumps(frame.message["error"])
 
@@ -612,7 +662,7 @@ async def test_a_load_sent_while_close_is_answered_keeps_the_session(harness):
     await harness.initialize()
     session_id = await harness.new_session()
     close = await harness.request("session/close", {"sessionId": session_id})
-    load = await harness.request("session/load", {"sessionId": session_id, "cwd": "/tmp"})
+    load = await harness.request("session/load", {"sessionId": session_id, "cwd": harness.cwd})
     assert (await harness.response(close)).message["result"] == {}
     assert "result" in (await harness.response(load)).message
     frame = await harness.call("session/prompt", {"sessionId": session_id, "prompt": []})
@@ -645,12 +695,12 @@ async def test_worker_sockets_are_closed_when_workers_end(harness):
 
 
 async def test_a_store_error_during_load_routing_is_an_internal_error(harness, monkeypatch):
-    def broken(path: Any) -> Any:
+    def broken(self: Any, path: Any) -> Any:
         raise RuntimeError("store is broken")
 
-    monkeypatch.setattr(harness.store, "_read_info", broken)
+    monkeypatch.setattr(SessionStore, "_read_info", broken)
     await harness.initialize()
-    request_id = await harness.request("session/load", {"sessionId": "abc", "cwd": "/tmp"})
+    request_id = await harness.request("session/load", {"sessionId": "abc", "cwd": harness.cwd})
     frame = await harness.response(request_id, timeout=3)
     assert frame.message["error"]["code"] == -32603
     assert "store is broken" in json.dumps(frame.message["error"])

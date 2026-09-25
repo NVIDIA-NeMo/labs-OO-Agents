@@ -22,7 +22,7 @@ from nooa_coder.acp.framing import FRAME_LIMIT
 from nooa_coder.acp.server import CoderACPAgent
 from nooa_coder.acp.worker import run_worker, serve_worker, start_parent_watchdog
 from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
+from nooa_coder.session.store import SessionStore, sessions_root
 
 TIMEOUT = 20
 ID_BASE = 1 << 32
@@ -58,11 +58,12 @@ class Client:
 
 
 @pytest.fixture
-async def worker(sessions_dir, workspace):
+async def worker(workspace):
     """``(connection, frames_in, worker_task, store)``: a worker on a socket pair."""
-    store = SessionStore(sessions_dir)
+    store = SessionStore(sessions_root(workspace))
+    models = ScriptedModels()
     agent = AskingAgent(
-        SessionRegistry(store, agent_factory=ScriptedModels()),
+        lambda root_store: SessionRegistry(root_store, agent_factory=models),
         agent_spec="coder_test_agents:EchoAgent",
     )
     ours, theirs = socket.socketpair()
@@ -123,12 +124,17 @@ async def test_end_of_stream_closes_the_sessions_and_ends_the_worker(worker, wor
     assert not store.is_active(session.session_id)
 
 
-def test_run_worker_returns_zero_on_end_of_stream(sessions_dir):
+def test_run_worker_returns_zero_on_end_of_stream():
     ours, theirs = socket.socketpair()
     ours.close()
-    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
+    models = ScriptedModels()
     code = run_worker(
-        theirs.detach(), id_base=ID_BASE, make_agent=lambda: CoderACPAgent(registry), watchdog=False
+        theirs.detach(),
+        id_base=ID_BASE,
+        make_agent=lambda: CoderACPAgent(
+            lambda store: SessionRegistry(store, agent_factory=models)
+        ),
+        watchdog=False,
     )
     assert code == 0
 

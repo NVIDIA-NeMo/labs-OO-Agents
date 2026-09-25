@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import signal
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -90,7 +90,12 @@ from nooa_coder.session.session import (
     SessionClosedError,
     TurnFailedError,
 )
-from nooa_coder.session.store import InvalidSessionIdError, SessionNotFoundError, SessionStore
+from nooa_coder.session.store import (
+    InvalidSessionIdError,
+    SessionNotFoundError,
+    SessionStore,
+    sessions_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +235,14 @@ def initialize_response(protocol_version: int) -> InitializeResponse:
 
 
 class CoderACPAgent:
-    """One ACP connection's view of a ``SessionRegistry``.
+    """One ACP connection's view of the sessions this process runs.
+
+    Sessions are stored per workspace (``sessions_root``): a request's
+    ``cwd`` picks the store, and each store has its own
+    ``SessionRegistry``, built by ``new_registry(store)`` the first time
+    the client names that workspace. ``sessions_dir`` is one directory
+    for every workspace instead (``None``: ``NOOA_SESSIONS_DIR``, else each
+    workspace's ``.nooa/sessions``).
 
     ``agent_spec`` names the agent class for new sessions (``None``: the
     workspace's ``coding.agent_spec`` setting, else the coding agent).
@@ -240,12 +252,16 @@ class CoderACPAgent:
 
     def __init__(
         self,
-        registry: SessionRegistry,
+        new_registry: Callable[[SessionStore], SessionRegistry],
         *,
+        sessions_dir: Path | None = None,
         agent_spec: str | None = None,
         model: str | None = None,
     ) -> None:
-        self.registry = registry
+        self._new_registry = new_registry
+        self._sessions_dir = sessions_dir
+        # By store directory: two workspaces sharing one directory share a registry.
+        self._registries: dict[Path, SessionRegistry] = {}
         self._agent_spec = agent_spec
         self._model = model
         self._conn: Client | None = None
@@ -265,6 +281,36 @@ class CoderACPAgent:
 
     def on_connect(self, conn: Client) -> None:
         self._conn = conn
+
+    # ---- registries ----------------------------------------------------
+
+    def registry_for(self, workspace: Path) -> SessionRegistry:
+        """The registry of the store that holds ``workspace``'s sessions."""
+        root = sessions_root(workspace, self._sessions_dir).resolve()
+        registry = self._registries.get(root)
+        if registry is None:
+            registry = self._registries[root] = self._new_registry(SessionStore(root))
+        return registry
+
+    def session(self, session_id: str) -> Session | None:
+        """The live session with this id, in any of this connection's registries."""
+        for registry in self._registries.values():
+            session = registry.get(session_id)
+            if session is not None:
+                return session
+        return None
+
+    def _registry_holding(self, session_id: str) -> SessionRegistry | None:
+        """The registry whose store has this session: live, else on disk."""
+        registries = list(self._registries.values())
+        for registry in registries:
+            if registry.get(session_id) is not None:
+                return registry
+        for registry in registries:
+            with suppress(InvalidSessionIdError):
+                if registry.store.path_for(session_id).exists():
+                    return registry
+        return None
 
     # ---- initialize ----------------------------------------------------
 
@@ -304,7 +350,7 @@ class CoderACPAgent:
             warnings.extend(await self._prepare_agent(session, mcp_servers))
 
         try:
-            session = await self.registry.create(options, prepare=prepare)
+            session = await self.registry_for(root).create(options, prepare=prepare)
         except BaseException:
             for bridge in attached:
                 self._bridges.pop(bridge.session_id, None)
@@ -328,8 +374,9 @@ class CoderACPAgent:
         **kwargs: Any,
     ) -> LoadSessionResponse:
         del kwargs
-        self._validate_workspace(cwd, additional_directories)
-        live = self.registry.get(session_id)
+        root = self._validate_workspace(cwd, additional_directories)
+        registry = self.registry_for(root)
+        live = self.session(session_id)
         if live is not None:
             # Attach: the same Session; reuse this adapter's bridge if it has
             # one (a second bridge would send every update twice) and replay.
@@ -351,7 +398,7 @@ class CoderACPAgent:
             warnings.extend(await self._prepare_agent(session, mcp_servers))
 
         try:
-            session = await self.registry.load(session_id, prepare=prepare, host="acp")
+            session = await registry.load(session_id, prepare=prepare, host="acp")
         except BaseException as exc:
             for bridge in attached:
                 self._bridges.pop(bridge.session_id, None)
@@ -368,23 +415,39 @@ class CoderACPAgent:
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
     ) -> ListSessionsResponse:
-        """Root sessions with at least one message, most recent first (see ``list_sessions``)."""
+        """Root sessions with at least one message, most recent first (see ``list_sessions``).
+
+        Without ``cwd``, the stores of the workspaces this connection has
+        named; there is no index of every workspace.
+        """
         del kwargs
+        if cwd is not None:
+            self.registry_for(self._validate_workspace(cwd, None))
 
         def live(session_id: str) -> tuple[str, str | None] | None:
-            session = self.registry.get(session_id)
-            if session is None:
-                return None
-            return self.registry.live_info(session).status, session.info.title
+            for registry in self._registries.values():
+                session = registry.get(session_id)
+                if session is not None:
+                    return registry.live_info(session).status, session.info.title
+            return None
 
-        return await list_sessions(self.registry.store, cwd=cwd, cursor=cursor, live=live)
+        return await list_sessions(
+            self._store_for,
+            cwd=cwd,
+            cursor=cursor,
+            live=live,
+            known=[registry.store for registry in self._registries.values()],
+        )
+
+    def _store_for(self, workspace: Path) -> SessionStore:
+        return self.registry_for(workspace).store
 
     # ---- close and delete ----------------------------------------------
 
     async def close_session(self, session_id: str, **kwargs: Any) -> CloseSessionResponse:
         """Close a session; for a child whose parent is live, only stop following it."""
         del kwargs
-        session = self.registry.get(session_id)
+        session = self.session(session_id)
         bridge = self._bridges.pop(session_id, None)
         if session is None and bridge is None:
             raise RequestError.resource_not_found(session_id)
@@ -393,20 +456,34 @@ class CoderACPAgent:
                 await bridge.close(finish_open=False)
             return CloseSessionResponse()
         if session is not None:
-            await self.registry.close(session_id)
+            await session.close()
         if bridge is not None:
             await bridge.close()
         return CloseSessionResponse()
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """``_nooa/session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
+
+        ``cwd`` names the workspace whose store holds the session; without
+        it the stores of the workspaces this connection has named are searched.
+        """
         if method != _DELETE_METHOD:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
         if not isinstance(session_id, str):
             raise RequestError.invalid_params({"reason": "sessionId must be a string"})
+        cwd = params.get("cwd")
+        if cwd is not None:
+            # Only the store is needed: the workspace itself may be gone.
+            if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+                raise RequestError.invalid_params({"cwd": cwd, "reason": "cwd must be absolute"})
+            self.registry_for(Path(cwd))
+        registry = self._registry_holding(session_id)
+        if registry is None:
+            raise RequestError.resource_not_found(session_id)
         bridge = self._bridges.pop(session_id, None)
         try:
-            await self.registry.delete(session_id, keep_files=bool(params.get("keepFiles")))
+            await registry.delete(session_id, keep_files=bool(params.get("keepFiles")))
         except (SessionNotFoundError, InvalidSessionIdError):
             raise RequestError.resource_not_found(session_id) from None
         if bridge is not None:
@@ -424,7 +501,7 @@ class CoderACPAgent:
         bridges = list(self._bridges.values())
         self._bridges.clear()
         await _close_in_order(
-            self.registry.close_all,
+            *(registry.close_all for registry in self._registries.values()),
             *(bridge.close for bridge in bridges),
         )
 
@@ -693,7 +770,7 @@ class CoderACPAgent:
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         """Stop the running turn. The bridge closes its cards when the Session reports it."""
         del kwargs
-        session = self.registry.get(session_id)
+        session = self.session(session_id)
         if session is None or session_id not in self._bridges:
             return  # a notification: nothing to answer
         ask = self._asks.get(session_id)
@@ -767,7 +844,7 @@ class CoderACPAgent:
         ]
 
     def _followed(self, session_id: str) -> tuple[Session, ACPEventBridge]:
-        session = self.registry.get(session_id)
+        session = self.session(session_id)
         bridge = self._bridges.get(session_id)
         if session is None or bridge is None:
             raise RequestError.resource_not_found(session_id)
@@ -784,7 +861,7 @@ class CoderACPAgent:
 
     def _attach(self, session: Session) -> ACPEventBridge:
         conn = self._require_conn()
-        bridge = ACPEventBridge(session, conn, resolve_child=self.registry.get)
+        bridge = ACPEventBridge(session, conn, resolve_child=self.session)
         self._bridges[session.id] = bridge
 
         def forget_on_close(update: Any) -> None:
@@ -801,7 +878,7 @@ class CoderACPAgent:
         return bridge
 
     def _parent_is_live(self, session: Session) -> bool:
-        return session.parent_id is not None and self.registry.get(session.parent_id) is not None
+        return session.parent_id is not None and self.session(session.parent_id) is not None
 
     def _require_conn(self) -> Client:
         if self._conn is None:
@@ -1006,16 +1083,20 @@ def _slash_invocation(text: str) -> tuple[str, str] | None:
 
 
 async def list_sessions(
-    store: SessionStore,
+    store_for: Callable[[Path], SessionStore],
     *,
     cwd: str | None = None,
     cursor: str | None = None,
     live: Callable[[str], tuple[str, str | None] | None] = lambda _session_id: None,
+    known: Iterable[SessionStore] = (),
 ) -> ListSessionsResponse:
     """Root sessions with at least one message, most recent first.
 
-    ``cwd`` keeps one workspace; without it every workspace is listed
-    (the store is per user). ``live(session_id)`` returns ``(status,
+    ``cwd`` lists that workspace's sessions from ``store_for(cwd)``.
+    Without it, every session in the ``known`` stores is listed: sessions
+    are stored per workspace and there is no index of every workspace, so
+    the caller passes the stores of the workspaces it has seen.
+    ``live(session_id)`` returns ``(status,
     title)`` for a session that runs in this process (or, for the router,
     in one of its workers), else ``None``. Sessions held by another
     process are left out: opening them would fail. ``_meta["dev.nooa/status"]``
@@ -1032,13 +1113,22 @@ async def list_sessions(
     if offset < 0:
         raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"})
 
+    if root is not None:
+        stores = [store_for(root)]
+    else:
+        # Workspaces sharing one directory give the same store more than once.
+        stores = list({store.root.resolve(): store for store in known}.values())
+
     def scan() -> list[tuple[Any, bool]]:
         # Pure filesystem work, one lock probe per session: off the loop.
-        return [
-            (info, store.is_active(info.id))
+        infos = [
+            (info, store)
+            for store in stores
             for info in store.list(workspace=root, roots_only=True)
             if info.turn_count > 0
         ]
+        infos.sort(key=lambda pair: pair[0].last_active, reverse=True)
+        return [(info, store.is_active(info.id)) for info, store in infos]
 
     found: list[tuple[Any, str]] = []
     for info, active in await asyncio.to_thread(scan):
@@ -1205,8 +1295,9 @@ async def serve_connection(
 
 
 async def serve(
-    registry: SessionRegistry,
+    new_registry: Callable[[SessionStore], SessionRegistry],
     *,
+    sessions_dir: Path | None = None,
     agent_spec: str | None = None,
     model: str | None = None,
     observers: list[Callable[[Any], None]] | None = None,
@@ -1218,8 +1309,11 @@ async def serve(
     ``input_fd`` and ``output_fd`` are the descriptors frames are read from
     and written to when stdio was reserved for ACP
     (``cli.reserve_stdio_for_acp``); ``None`` uses the process's stdio.
+    ``new_registry`` and ``sessions_dir`` are as for ``CoderACPAgent``.
     """
-    adapter = CoderACPAgent(registry, agent_spec=agent_spec, model=model)
+    adapter = CoderACPAgent(
+        new_registry, sessions_dir=sessions_dir, agent_spec=agent_spec, model=model
+    )
     # ACP clients may terminate their subprocess instead of closing stdin.
     # Let normal teardown checkpoint sessions and release their file claims.
     loop = asyncio.get_running_loop()

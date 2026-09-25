@@ -14,13 +14,20 @@ bytes. Routing, client to worker:
 
 - ``initialize``: answered by the router (``initialize_response``); the
   raw params are kept and replayed as each new worker's first request.
-- ``session/list``: answered from the store, read-only.
+- ``session/list``: answered from the stores, read-only. Sessions are
+  stored per workspace (``sessions_root``): with a ``cwd``, that
+  workspace's store; without one, the stores of every workspace the
+  client has named (in ``session/new``, ``session/load``, ``session/list``
+  or a delete's ``cwd``), since there is no index of every workspace.
 - ``session/new``: a new worker; the session id in its answer is mapped to
   that worker before the answer is forwarded.
 - ``session/load`` (and ``_nooa/session/delete``) of an id that is not
-  mapped: the store's ``parent_id`` chain gives the root; if a live worker
-  runs that root, the request goes there, else to a new worker. A load is
-  mapped when forwarded and unmapped if it fails.
+  mapped: the ``parent_id`` chain in the store of the request's ``cwd``
+  gives the root (a delete without ``cwd`` searches the stores of the
+  workspaces the client has named, and is forwarded with the ``cwd``
+  its record gives, the one frame the router rewrites); if a live
+  worker runs that root, the request goes there, else to a new worker. A
+  load is mapped when forwarded and unmapped if it fails.
 - ``$/cancel_request``: to the worker running that request.
 - anything else with ``params.sessionId``: to the session's worker; an
   unknown id is ``resource_not_found`` for a request and dropped for a
@@ -53,6 +60,7 @@ import socket
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from acp import PROTOCOL_VERSION, RequestError
@@ -62,7 +70,12 @@ from pydantic import ValidationError
 
 from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_coder.acp.server import initialize_response, list_sessions
-from nooa_coder.session.store import InvalidSessionIdError, SessionNotFoundError, SessionStore
+from nooa_coder.session.store import (
+    InvalidSessionIdError,
+    SessionNotFoundError,
+    SessionStore,
+    sessions_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,13 +209,15 @@ class Router:
         self,
         *,
         spawn: Spawn,
-        store: SessionStore,
+        sessions_dir: Path | None = None,
         observers: list[Observer] | None = None,
         spawn_timeout: float = SPAWN_TIMEOUT,
         stop_grace: float = STOP_GRACE,
     ) -> None:
         self._spawn = spawn
-        self._store = store
+        self._sessions_dir = sessions_dir
+        # Workspaces the client has named, in order (a set that keeps order).
+        self._workspaces: dict[Path, None] = {}
         self._observers = list(observers or [])
         self._spawn_timeout = spawn_timeout
         self._stop_grace = stop_grace
@@ -395,6 +410,8 @@ class Router:
             self._on_client_notification(frame, method)
             return
         session_id = frame.session_id
+        if method in ("session/new", "session/list", *_ROUTED_BY_STORE):
+            self._note_workspace(frame.params.get("cwd"))
         if method == "initialize":
             self._initialize(frame)
         elif method == "session/list":
@@ -457,7 +474,11 @@ class Router:
         try:
             request = ListSessionsRequest.model_validate(frame.message.get("params") or {})
             response = await list_sessions(
-                self._store, cwd=request.cwd, cursor=request.cursor, live=self._live_status
+                self._store_for,
+                cwd=request.cwd,
+                cursor=request.cursor,
+                live=self._live_status,
+                known=[self._store_for(workspace) for workspace in self._workspaces],
             )
         except RequestError as exc:
             self._fail(frame.id, exc)
@@ -483,10 +504,22 @@ class Router:
         )
         return ("running" if running else "idle"), None
 
+    def _note_workspace(self, cwd: Any) -> None:
+        if isinstance(cwd, str) and Path(cwd).is_absolute() and Path(cwd).is_dir():
+            self._workspaces[Path(cwd).resolve()] = None
+
+    def _store_for(self, workspace: Path) -> SessionStore:
+        return SessionStore(sessions_root(workspace, self._sessions_dir))
+
     async def _route_by_store(self, frame: Frame, session_id: str) -> None:
         """Send a load or delete of an unmapped id to its root's worker, or a new one."""
+        cwd = frame.params.get("cwd")
         try:
-            root_id = await asyncio.to_thread(self._root_of, session_id)
+            if isinstance(cwd, str):
+                stores = [self._store_for(Path(cwd))]
+            else:
+                stores = [self._store_for(workspace) for workspace in self._workspaces]
+            root_id, workspace = await asyncio.to_thread(self._root_of, session_id, stores)
         except (SessionNotFoundError, InvalidSessionIdError):
             self._fail(frame.id, RequestError.resource_not_found(session_id))
             return
@@ -494,6 +527,10 @@ class Router:
             logger.exception("Could not find the root of session %s", session_id)
             self._fail(frame.id, RequestError.internal_error({"details": str(exc)}))
             return
+        if cwd is None and workspace:
+            # The worker has seen no workspace yet: tell it which store to use.
+            message = {**frame.message, "params": {**frame.params, "cwd": workspace}}
+            frame = Frame(encode(message), message)
         # No await from here on: the lookups and the mapping are one step, so a
         # second load of the same tree finds the worker this one chose.
         worker = self._sessions.get(session_id) or self._root_worker(root_id)
@@ -506,16 +543,25 @@ class Router:
             mapped = True
         self._forward(worker, frame, mapped=mapped)
 
-    def _root_of(self, session_id: str) -> str:
-        info = self._store.get(session_id)
-        for _ in range(_MAX_TREE_DEPTH):
-            if info.parent_id is None:
-                return info.id
+    @staticmethod
+    def _root_of(session_id: str, stores: list[SessionStore]) -> tuple[str, str]:
+        """``(root id, recorded workspace)`` of a session in the first store that has it."""
+        for store in stores:
             try:
-                info = self._store.get(info.parent_id)
-            except (SessionNotFoundError, InvalidSessionIdError):
-                return info.id
-        return info.id
+                info = store.get(session_id)
+            except SessionNotFoundError:
+                continue
+            workspace = info.workspace if Path(info.workspace).is_absolute() else ""
+            for _ in range(_MAX_TREE_DEPTH):
+                if info.parent_id is None:
+                    break
+                try:
+                    info = store.get(info.parent_id)
+                except (SessionNotFoundError, InvalidSessionIdError):
+                    break
+            return info.id, workspace
+        SessionStore._validate_id(session_id)
+        raise SessionNotFoundError(f"Session {session_id!r} was not found")
 
     def _root_worker(self, root_id: str) -> _Worker | None:
         for worker in self._workers.values():

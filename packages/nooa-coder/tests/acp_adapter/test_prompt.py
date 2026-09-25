@@ -83,7 +83,7 @@ async def test_a_waiting_turn_keeps_the_prompt_open_until_a_later_turn_ends(
     adapter = await make_adapter(models)
     session_id = await _new(adapter, workspace)
     first = asyncio.create_task(adapter.prompt(session_id, [text_block("start the job")]))
-    session = adapter.registry.get(session_id)
+    session = adapter.session(session_id)
     await asyncio.wait_for(
         _until(lambda: len(models.llms[None].calls) == 1 and session.info.status == "idle"),
         TIMEOUT,
@@ -159,7 +159,7 @@ async def test_stop_also_stops_a_prompt_that_steered_the_turn(make_adapter, work
     responses = await asyncio.wait_for(asyncio.gather(first, second), TIMEOUT)
     assert [response.stop_reason for response in responses] == ["cancelled", "cancelled"]
     await asyncio.sleep(0.2)  # a re-admitted steer would start a turn now
-    session = adapter.registry.get(session_id)
+    session = adapter.session(session_id)
     assert session.info.status == "idle"
     assert len(models.llms[None].calls) == 1
     entries = session.transcript()
@@ -237,8 +237,8 @@ async def test_a_command_with_text_output_answers_without_a_turn(make_adapter, w
     session_id = await _new(adapter, workspace)
     response = await _prompt(adapter, session_id, "/model fast")
     assert response.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "model is fast\n\n"
-    agent = adapter.registry.get(session_id).agent
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "model is fast\n"
+    agent = adapter.session(session_id).agent
     assert isinstance(agent, CommandAgent)
     assert agent.slash_commands.invoked == [("model", "fast")]
 
@@ -299,7 +299,7 @@ async def test_an_unknown_slash_command_is_an_ordinary_prompt(make_adapter, work
 async def test_a_failing_command_reports_the_failure(make_adapter, workspace, client):
     adapter = await make_adapter(ScriptedModels(), agent_spec="coder_test_agents:CommandAgent")
     session_id = await _new(adapter, workspace)
-    agent = adapter.registry.get(session_id).agent
+    agent = adapter.session(session_id).agent
 
     async def broken(name, raw_args):
         raise RuntimeError("command exploded")
@@ -352,7 +352,7 @@ async def test_the_first_prompt_asks_the_agent_for_a_title(coder_adapter, worksp
     titles = [u.title for u in client.updates(session_id, SessionInfoUpdate) if u.title]
     assert titles == ["Parser fix"]
     # The request is housekeeping: not part of the conversation.
-    entries = adapter.registry.get(session_id).transcript()
+    entries = adapter.session(session_id).transcript()
     assert [e.content for e in entries if e.role == "user"] == ["fix the parser", "and the lexer"]
 
 
@@ -360,6 +360,6 @@ async def test_a_session_that_has_a_title_is_not_asked_again(make_adapter, works
     models = ScriptedModels({None: [reply("Hi.")]})
     adapter = await make_adapter(models, agent_spec="coder_test_agents:EchoAgent")
     session_id = await _new(adapter, workspace)
-    await adapter.registry.get(session_id).set_title("Chosen", user_set=True)
+    await adapter.session(session_id).set_title("Chosen", user_set=True)
     await _prompt(adapter, session_id, "hello")
     assert "[session-title]" not in str(models.llms[None].calls[0].messages)

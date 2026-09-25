@@ -186,7 +186,7 @@ class TurnCancelledOutcome(BaseModel):
 class TranscriptEntry(BaseModel):
     """One line of a session's transcript as a host shows it."""
 
-    role: Literal["user", "agent", "question", "cancelled"]
+    role: Literal["user", "agent", "question", "cancelled", "note"]
     content: str
     item_id: str | None = None
     timestamp: float

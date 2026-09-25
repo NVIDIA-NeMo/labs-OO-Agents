@@ -54,8 +54,14 @@ to follow semantic versioning.
     `set_model()` (applied before the next turn, with the registry's
     `llm_factory`), a `prepare` hook on `create()`/`load()`, and `load()`
     options taken from the session's record.
-  - Sessions live in the user directory (`~/.config/nooa/sessions`), not
-    per project; the store is adapted from `nooa_cli.sessions`.
+  - Sessions live in their workspace, in `<workspace>/.nooa/sessions`
+    (where `nooa-acp` and the TUI keep them), unless `NOOA_SESSIONS_DIR`
+    or `--sessions-dir` names one shared directory for all workspaces;
+    `sessions_root()` gives the directory. Sessions written by `nooa-acp`
+    are listed and load (its `CodingAgent` record maps to the coding
+    agent); a saved agent state that cannot be restored is logged, noted
+    in the transcript, and the session goes on from an empty state. The
+    store is adapted from `nooa_cli.sessions`.
   - Session-layer fixes from its review: the turn loop survives a failed
     turn and `close()` never raises; a cancelled `wait()` or a cancelled
     child turn reaches the parent as a result or `ChildFailed`;
@@ -85,8 +91,9 @@ to follow semantic versioning.
   - `nooa coder` serves the coding agent over ACP on
     stdio, one process for every session, on the Session layer; the older
     `nooa-acp` is unchanged. Sessions: new, load (attaching to a live
-    session and replaying its transcript), list (root sessions from every
-    workspace, with `_meta["dev.nooa/status"]`), close, and delete through
+    session and replaying its transcript), list (root sessions of the `cwd`'s
+    workspace, or without `cwd` of every workspace the client has named,
+    with `_meta["dev.nooa/status"]`), close, and delete through
     the `_nooa/session/delete` extension method. Turns: a prompt sent
     during a turn steers it and both return together; `Waiting` keeps the
     prompt open; cancel closes open tool cards as "Cancelled" before the

@@ -147,7 +147,7 @@ async def test_close_goes_children_first(registry, root_options):
 
     await registry.close_all()
     assert order[-1] == "other" and registry.sessions == {}
-    store = SessionStore(root_options.sessions_dir)
+    store = registry.store
     assert {info.status for info in store.list(roots_only=False)} == {"on_disk"}
 
 

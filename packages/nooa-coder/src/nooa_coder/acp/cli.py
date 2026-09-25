@@ -100,7 +100,10 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     type=click.Path(path_type=Path, file_okay=False),
     envvar="NOOA_SESSIONS_DIR",
     default=None,
-    help="Where sessions are stored (default: the user directory's sessions folder).",
+    help=(
+        "One shared directory for the sessions of all workspaces. Or set NOOA_SESSIONS_DIR. "
+        "Default: <workspace>/.nooa/sessions."
+    ),
 )
 @click.option(
     "--tee",
@@ -252,7 +255,6 @@ def _run_router(
     from nooa_coder.acp._mcp_trace import MCPHandoffTrace
     from nooa_coder.acp.router import Router, process_spawn
     from nooa_coder.acp.tee import FrameLog
-    from nooa_coder.session.store import SessionStore
 
     _configure_logging("nooa-coder router")
     # Both observe the client's side, which only the router sees whole.
@@ -264,7 +266,7 @@ def _run_router(
         observers.append(frame_log)
     router = Router(
         spawn=process_spawn(list(sys.orig_argv)),
-        store=SessionStore(sessions_dir),
+        sessions_dir=sessions_dir,
         observers=observers,
     )
     try:
@@ -294,11 +296,13 @@ def _run_worker(
 
     _configure_logging(f"nooa-coder worker {id_base >> 32}")
 
+    def new_registry(store: SessionStore) -> SessionRegistry:
+        return SessionRegistry(store, agent_factory=agent_factory, llm_factory=llm_factory)
+
     def make_agent() -> CoderACPAgent:
-        registry = SessionRegistry(
-            SessionStore(sessions_dir), agent_factory=agent_factory, llm_factory=llm_factory
+        return CoderACPAgent(
+            new_registry, sessions_dir=sessions_dir, agent_spec=agent_spec, model=model
         )
-        return CoderACPAgent(registry, agent_spec=agent_spec, model=model)
 
     run_worker(
         fd,
@@ -338,9 +342,9 @@ async def _serve(
     from nooa_coder.session.registry import SessionRegistry
     from nooa_coder.session.store import SessionStore
 
-    registry = SessionRegistry(
-        SessionStore(sessions_dir), agent_factory=agent_factory, llm_factory=llm_factory
-    )
+    def new_registry(store: SessionStore) -> SessionRegistry:
+        return SessionRegistry(store, agent_factory=agent_factory, llm_factory=llm_factory)
+
     observers: list[Any] = []
     trace = MCPHandoffTrace.from_env()
     if trace is not None:
@@ -350,7 +354,8 @@ async def _serve(
         observers.append(frame_log)
     try:
         await serve(
-            registry,
+            new_registry,
+            sessions_dir=sessions_dir,
             agent_spec=agent_spec,
             model=model,
             observers=observers,
