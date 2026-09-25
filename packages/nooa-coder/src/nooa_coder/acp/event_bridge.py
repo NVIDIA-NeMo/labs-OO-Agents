@@ -73,6 +73,8 @@ logger = logging.getLogger(__name__)
 
 _STOP = object()
 
+_MAX_TITLE_CODE_CHARS = 80
+
 # Values of return_result(...): the turn's result, not a cell's output.
 _TURN_RESULTS = (Done, NeedInput, Waiting, RespondResult)
 
@@ -136,6 +138,20 @@ def _python_content(code: str, output: str | None = None) -> list[ContentToolCal
     if output is not None:
         content.append(tool_content(text_block(_fenced_code(output, "text"))))
     return content
+
+
+def _python_title(code: str, status: str | None = None) -> str:
+    """``python: <first code line>``, like the shell card's ``$ <command>``.
+
+    A card's title is what a collapsed card shows, so it names the code; a
+    status word (``failed``, ``cancelled``...) is appended when the cell did
+    not complete.
+    """
+    first = next((line.strip() for line in code.splitlines() if line.strip()), "")
+    if len(first) > _MAX_TITLE_CODE_CHARS:
+        first = first[: _MAX_TITLE_CODE_CHARS - 1] + "…"
+    title = f"python: {first}" if first else "python"
+    return f"{title} ({status})" if status else title
 
 
 def cancel_text(by: str) -> str:
@@ -393,7 +409,7 @@ class ACPEventBridge:
         self._enqueue(
             start_tool_call(
                 self._wire_id(key),
-                "Running Python",
+                _python_title(code),
                 # Zed 1.14 treats every ``execute`` tool as a terminal card.
                 # A plain-content execute card has neither a terminal nor an
                 # output disclosure, so its source cannot be opened. Python is
@@ -401,6 +417,7 @@ class ACPEventBridge:
                 kind="other",
                 status="in_progress",
                 content=_python_content(code),
+                raw_input={"code": code},
             )
         )
 
@@ -429,12 +446,8 @@ class ACPEventBridge:
                 if event.execution_status in (ResultStatus.ERROR, ResultStatus.CANCELLED)
                 else "completed"
             )
-            title = (
-                "Cancelled"
-                if cancelled
-                else "Python failed"
-                if status == "failed"
-                else "Ran Python"
+            title = _python_title(
+                code, "cancelled" if cancelled else "failed" if status == "failed" else None
             )
             self._enqueue(
                 update_tool_call(
@@ -442,6 +455,7 @@ class ACPEventBridge:
                     title=title,
                     status=status,
                     content=_python_content(code, output),
+                    raw_input={"code": code},
                 )
             )
         if source is None:
@@ -728,7 +742,10 @@ class ACPEventBridge:
             self._enqueue(
                 update_tool_call(
                     self._wire_id(key),
-                    title=title or ("Python interrupted" if card.kind == "python" else None),
+                    # A Python card keeps its code in the title, with the reason.
+                    title=_python_title(card.code, (title or "interrupted").lower())
+                    if card.kind == "python"
+                    else title,
                     status="failed",
                     content=content,
                 )
