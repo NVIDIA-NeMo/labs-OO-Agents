@@ -1579,13 +1579,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Execute the code (pass tool_call.id for trace correlation)
         # Nested agent calls may add their events to the event manager during this execution
         with get_harness_metrics().timer("time_code_execution"):
-            try:
-                result = await self._execute_code(
-                    runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
-                )
-            except asyncio.CancelledError as cancel:
-                self._record_cancelled_cell(runtime, tool_call.id, execution_count, cancel, {})
-                raise
+            result = await self._execute_code(
+                runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
+            )
 
         # Determine final status
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
@@ -1801,8 +1797,8 @@ Standard Python builtins and agent instance (`self`) are available."""
         a cancel is a later fact about the turn, recorded by appending, not by
         rewriting an earlier event (which would also invalidate cached prompt
         prefixes). ``metadata`` is the tag the cell's normal ``PythonOutput``
-        would carry (the prefill tag for a prefill step). The caller re-raises
-        the cancellation.
+        would carry (the prefill tag for a prefill step). ``_execute_code``
+        calls this and re-raises the cancellation.
         """
         partial = getattr(cancel, "execution_result", None)
         runtime.event_manager.add(
@@ -2722,21 +2718,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         )
 
         # Execute the code. A cancel here is recorded exactly like a cancel in a
-        # model-written cell: the partial output is appended, the synthetic
-        # tool-call event is left as written, and the cancel is re-raised.
-        try:
-            result = await self._execute_code(
-                runtime, code, builtins, session, method_name, tool_call_id=prefill_id
-            )
-        except asyncio.CancelledError as cancel:
-            self._record_cancelled_cell(
-                runtime,
-                prefill_id,
-                execution_count,
-                cancel,
-                {"prefill": True, "prefill_type": prefill_type},
-            )
-            raise
+        # model-written cell, with the prefill tag on the recorded output.
+        result = await self._execute_code(
+            runtime,
+            code,
+            builtins,
+            session,
+            method_name,
+            tool_call_id=prefill_id,
+            output_metadata={"prefill": True, "prefill_type": prefill_type},
+        )
 
         # Merge captured locals into session (persists for next steps and LLM turns)
         if result.captured_locals:
@@ -2791,8 +2782,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         session: CodeActSession,
         target_method_name: str,
         tool_call_id: str | None = None,
+        output_metadata: dict[str, Any] | None = None,
     ) -> Any:
-        """Execute Python code via the runtime."""
+        """Execute Python code via the runtime.
+
+        If the cell is cancelled while it runs, the cancel is recorded with
+        ``_record_cancelled_cell`` (tagged with ``output_metadata``) under
+        ``tool_call_id`` and the current execution count, then re-raised.
+        """
         from nooa.events import ExecutionResult
 
         logger.debug(
@@ -2817,74 +2814,75 @@ Standard Python builtins and agent instance (`self`) are available."""
         # delegate the cell to the guarded worker process. Routing through
         # execute_code (rather than the executor directly) keeps the execute_python
         # middleware, before/after_code_execution hooks and events firing.
+        run_kwargs: dict[str, Any]
         if session.sandbox_executor is not None:
-            from nooa.runtime.debug_handler import code_exec_context
+            # Validation of restrictions and the cell guard still runs on the parent.
+            run_kwargs = {"sandbox_executor": session.sandbox_executor}
+        else:
+            # Build execution namespace
+            strategy_extras: dict[str, Any] = {
+                "CodeActStrategy": type(self),
+            }
+            try:
+                from nooa.strategies.predict import PredictStrategy
 
-            with code_exec_context(code):
-                return await runtime.execute_code(
-                    code,
-                    validate=True,  # run restrictions/cell-guard validation on the parent
-                    wrap_in_function=True,
-                    timeout=self.config.cell_timeout,
-                    tool_call_id=tool_call_id,
-                    execution_count=session.execution_count,
-                    restrictions=self.config.restrictions,
-                    sandbox_executor=session.sandbox_executor,
-                )
+                strategy_extras["PredictStrategy"] = PredictStrategy
+            except ImportError:
+                pass
 
-        # Build execution namespace
-        strategy_extras: dict[str, Any] = {
-            "CodeActStrategy": type(self),
-        }
-        try:
-            from nooa.strategies.predict import PredictStrategy
-
-            strategy_extras["PredictStrategy"] = PredictStrategy
-        except ImportError:
-            pass
-
-        namespace = ExecutionNamespaceBuilder.build(
-            runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
-        )
-
-        # Pre-compile helper function defs so @strategy decorators can see
-        # _generated_source at decoration time. Helpers are never attached to the agent.
-        helper_compiler = HelperFunctionManager()
-        helper_result = helper_compiler.apply(
-            code,
-            runtime.agent,
-            session.session_locals,
-            namespace=namespace,
-        )
-
-        if helper_result.errors:
-            error_msg = "Failed to define helper function(s):\n" + "\n".join(
-                f"- {e}" for e in helper_result.errors
+            namespace = ExecutionNamespaceBuilder.build(
+                runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
             )
-            logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
-            return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
 
-        if helper_result.installed:
-            logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
+            # Pre-compile helper function defs so @strategy decorators can see
+            # _generated_source at decoration time. Helpers are never attached to the agent.
+            helper_compiler = HelperFunctionManager()
+            helper_result = helper_compiler.apply(
+                code,
+                runtime.agent,
+                session.session_locals,
+                namespace=namespace,
+            )
 
-        # Execute with session locals
-        execution_builtins = {**builtins, **session.session_locals}
+            if helper_result.errors:
+                error_msg = "Failed to define helper function(s):\n" + "\n".join(
+                    f"- {e}" for e in helper_result.errors
+                )
+                logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
+                return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
+
+            if helper_result.installed:
+                logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
+
+            # Execute with session locals
+            run_kwargs = {"builtins": {**builtins, **session.session_locals}}
 
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
 
         with code_exec_context(code):
-            return await runtime.execute_code(
-                code,
-                builtins=execution_builtins,
-                validate=True,
-                wrap_in_function=True,
-                timeout=self.config.cell_timeout,
-                tool_call_id=tool_call_id,
-                execution_count=session.execution_count,
-                restrictions=self.config.restrictions,
-            )
+            try:
+                return await runtime.execute_code(
+                    code,
+                    validate=True,
+                    wrap_in_function=True,
+                    timeout=self.config.cell_timeout,
+                    tool_call_id=tool_call_id,
+                    execution_count=session.execution_count,
+                    restrictions=self.config.restrictions,
+                    **run_kwargs,
+                )
+            except asyncio.CancelledError as cancel:
+                if tool_call_id is not None:
+                    self._record_cancelled_cell(
+                        runtime,
+                        tool_call_id,
+                        session.execution_count,
+                        cancel,
+                        output_metadata or {},
+                    )
+                raise
 
     def _format_execution_error(
         self,
