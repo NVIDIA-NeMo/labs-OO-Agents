@@ -148,6 +148,7 @@ class SessionRegistry:
                 name=options.name,
                 retained=options.retain,
                 turn_method=options.turn_method,
+                mode=options.permission_mode,
                 session_id=session_id,
             )
             session = await self._build(options, handle)
@@ -426,11 +427,10 @@ class SessionRegistry:
             return live
         info = self.store.get(child_id)
         # The record gives the child's own options; the parent passes on
-        # what it does not record (mode, depth cap) and a client it shares.
+        # what it does not record (the depth cap) and a client it shares.
         shared_llm = parent.options.llm if (info.model or None) == parent.options.model else None
         return await self.load(
             child_id,
-            permission_mode=parent.options.permission_mode,
             max_depth=parent.options.max_depth,
             llm=shared_llm,
         )
@@ -452,7 +452,8 @@ class SessionRegistry:
         """Attach to a live session, or open one from disk and resume it.
 
         The session's options come from its record (agent spec, turn
-        method, model, workspace, name, retain, host); keyword
+        method, model, permission mode, workspace, name, retain, host; the
+        latest ``set_model``/``set_mode`` win); keyword
         ``overrides`` (any ``SessionOptions`` field, e.g. ``host="acp"``
         or ``llm=...``) replace those fields and nothing else does.
 
@@ -520,6 +521,8 @@ class SessionRegistry:
         }
         if info.host:
             values["host"] = info.host
+        if info.mode in ("auto", "ask"):
+            values["permission_mode"] = info.mode
         values.update(overrides)
         return SessionOptions.model_validate(values)
 
