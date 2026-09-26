@@ -166,6 +166,7 @@ class ACPEventBridge:
         self._pump_failure: BaseException | None = None
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+        self._close_started = asyncio.Event()
         # Sticky: any close(finish_open=False) before the cards are finalised
         # wins, whoever started the close.
         self._finish_open = True
@@ -295,7 +296,7 @@ class ACPEventBridge:
         elif getattr(update, "kind", None) == "usage_changed":
             self._publish_usage()
         elif getattr(update, "kind", None) == "closed":
-            self._close_task = self._close_task or asyncio.ensure_future(self._close())
+            self._start_close()
 
     def _on_turn_ended(self, update: TurnEndedUpdate) -> None:
         if update.outcome_kind == "need_input":
@@ -721,14 +722,18 @@ class ACPEventBridge:
         """
         if not finish_open:
             self._finish_open = False
+        await asyncio.shield(self._start_close())
+
+    def _start_close(self) -> asyncio.Task[None]:
         if self._close_task is None:
             self._close_task = asyncio.ensure_future(self._close())
-        await asyncio.shield(self._close_task)
+            self._close_started.set()
+        return self._close_task
 
     async def wait_closed(self) -> None:
         """Wait until a close started by the session's ``closed`` update has finished."""
-        while self._close_task is None:
-            await asyncio.sleep(0)
+        await self._close_started.wait()
+        assert self._close_task is not None
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
