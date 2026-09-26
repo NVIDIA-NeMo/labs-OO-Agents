@@ -166,6 +166,8 @@ class MCPApprovalRequest:
     target: str
     bindings: tuple[tuple[str, str], ...]
     config: dict[str, Any] = field(repr=False, compare=False)
+    # The workspace the fingerprint is bound to; recorded so a revoke stays in it.
+    scope: str = field(default="", compare=False)
 
     @property
     def confirmation(self) -> str:
@@ -314,6 +316,7 @@ def build_approval_request(
         target=target,
         bindings=tuple(_placeholder_bindings(config)),
         config=config,
+        scope=scope,
     )
 
 
@@ -400,21 +403,36 @@ class MCPApprovalStore:
         data = self._load()
         data["approvals"][request.fingerprint] = {
             "server": request.server_name,
+            "scope": request.scope,
             "variables": list(request.variables),
             "approved_at": datetime.now(UTC).isoformat(),
         }
         self._write(data)
 
-    def revoke_server(self, server_name: str) -> bool:
+    def revoke_server(
+        self, server_name: str, *, scope: str, fingerprint: str | None = None
+    ) -> bool:
+        """Revoke ``server_name``'s approvals in the workspace ``scope``.
+
+        Removes every approval of that server recorded for ``scope`` (older
+        configurations too) and ``fingerprint``, the current one. Another
+        workspace's approval of the same name stays. A record from before
+        scopes were stored cannot be placed and is removed (fail closed).
+        """
         data = self._load()
         approvals = data["approvals"]
         remove = [
-            fingerprint
-            for fingerprint, record in approvals.items()
-            if isinstance(record, dict) and record.get("server") == server_name
+            key
+            for key, record in approvals.items()
+            if key == fingerprint
+            or (
+                isinstance(record, dict)
+                and record.get("server") == server_name
+                and record.get("scope", scope) == scope
+            )
         ]
-        for fingerprint in remove:
-            approvals.pop(fingerprint, None)
+        for key in remove:
+            approvals.pop(key, None)
         if remove:
             self._write(data)
         return bool(remove)
