@@ -109,7 +109,7 @@ async def test_a_change_to_the_commands_is_advertised_again(
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: shipit\ndescription: Ship it\n---\nShip.\n")
     session = adapter.session(response.session_id)
-    session.agent.slash_commands.add_skills_dir(skill.parent)
+    session._agent.slash_commands.add_skills_dir(skill.parent)
     await client.wait_for(
         lambda: len(client.updates(response.session_id, AvailableCommandsUpdate)) == 2
     )

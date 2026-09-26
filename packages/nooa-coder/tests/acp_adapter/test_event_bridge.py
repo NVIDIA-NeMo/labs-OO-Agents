@@ -59,7 +59,7 @@ class _FakeSession:
 
     def __init__(self, agent: Any, session_id: str = "session-1") -> None:
         self.id = session_id
-        self.agent = agent
+        self._agent = agent
         self.info = SessionInfo(id=session_id)
         self.listeners: list[Any] = []
         self.handle = SimpleNamespace(update_usage=lambda usage: None)

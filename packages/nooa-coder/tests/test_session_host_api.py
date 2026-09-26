@@ -26,7 +26,7 @@ async def test_channels_names_the_agents_queue_channels(make_session):
     session, _ = make_session(start=False)
     channels = session.channels()
     assert "user_messages" in channels
-    assert channels == list(session.agent.queue_manager.channels())
+    assert channels == list(session._agent.queue_manager.channels())
 
 
 async def test_model_info_reads_the_client(make_session):
@@ -121,7 +121,7 @@ async def test_commands_changed_is_emitted_when_the_registry_changes(make_sessio
     session, _ = make_session(agent_spec="coder_test_agents:CommandAgent", start=False)
     seen = []
     session.subscribe(seen.append)
-    session.agent.slash_commands.add("review", "Review the diff")
+    session._agent.slash_commands.add("review", "Review the diff")
     [update] = [u for u in seen if isinstance(u, CommandsChangedUpdate)]
     assert update.session_id == session.id
     assert [command.name for command in update.commands] == ["model", "clear", "review"]
@@ -141,10 +141,10 @@ async def test_agent_events_reach_subscribers_as_agent_event_updates(make_sessio
     seen = []
     session.subscribe(seen.append)
     message = AgentMessage(content="hello")
-    session.agent.event_manager.add(message)
+    session._agent.event_manager.add(message)
     # Runtime events (never recorded for the model) are forwarded too.
     started = TerminalCommandStarted(command_id="c1", command="ls", working_directory="/")
-    session.agent.event_manager.add(started)
+    session._agent.event_manager.add(started)
     updates = [u for u in seen if isinstance(u, AgentEventUpdate)]
     assert [u.event for u in updates] == [message, started]
     assert updates[0].event is message  # the event itself, not a copy
@@ -161,7 +161,7 @@ async def test_a_model_response_arrives_before_the_usage_it_changes(make_session
     session, _ = make_session(start=False)
     seen = []
     session.subscribe(seen.append)
-    session.agent.event_manager.add(LLMResponse(usage=LLMUsage(input_tokens=10)))
+    session._agent.event_manager.add(LLMResponse(usage=LLMUsage(input_tokens=10)))
     kinds = [type(u) for u in seen]
     assert kinds == [AgentEventUpdate, UsageChangedUpdate]
 
@@ -221,7 +221,7 @@ class _Tool:
 async def test_prepare_tools_runs_the_agents_hook_and_returns_its_warnings(make_session):
     session, _ = make_session(agent_spec="coder_test_agents:ToolPrepAgent", start=False)
     assert await session.prepare_tools() == ["server 'x' was not connected"]
-    assert session.agent.prepared == 1
+    assert session._agent.prepared == 1
 
 
 async def test_prepare_tools_without_a_hook_does_nothing(make_session):
@@ -235,8 +235,8 @@ async def test_register_tools_registers_and_activates_each_tool(make_session):
     assert session.register_tools({"mcp.remote": tool, "repo": _Tool()}) == {
         "repo": "Cannot register skill 'repo' as agent attr 'repo': already provided by 'nemo.repo'"
     }
-    assert "mcp.remote" in session.agent.skills.activated()
-    assert session.agent.skills["mcp.remote"] is tool
+    assert "mcp.remote" in session._agent.skills.activated()
+    assert session._agent.skills["mcp.remote"] is tool
 
 
 async def test_register_tools_on_an_agent_without_skills(make_session):
@@ -272,7 +272,7 @@ async def test_the_coding_agent_connects_the_servers_its_workspace_remembers(
                 raise RuntimeError("not approved")
             return names
 
-        session.agent.mcp.connect = connect
+        session._agent.mcp.connect = connect
         assert await session.prepare_tools() == [
             "MCP server 'nowhere' was not connected: not approved"
         ]

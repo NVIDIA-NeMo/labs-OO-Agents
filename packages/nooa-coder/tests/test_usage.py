@@ -83,7 +83,7 @@ async def test_a_childs_cached_tokens_roll_up_and_survive_a_reload(
     models.scripts["A"] = [done("a done", usage=CALL)]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
-    totals = root.agent.session.usage()
+    totals = root._agent.session.usage()
     assert (totals.cached_input_tokens, totals.attributed_cached_input_tokens) == (0, 60)
     assert totals.attributed_reasoning_tokens == 5
     await registry.close_all()
@@ -108,7 +108,7 @@ async def test_usage_reports_this_session_then_with_its_subagents(registry, root
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
 
-    text = str(await UsageControl(root.agent, None).invoke(""))
+    text = str(await UsageControl(root._agent, None).invoke(""))
     own, _, rest = text.partition("Including subagents")
     assert "This session" in own
     assert _row(own, "Input tokens") == "100"
@@ -126,7 +126,7 @@ async def test_usage_without_subagents_has_one_block(registry, root_options, mod
     models.scripts[None] = [done("one", usage=LLMUsage(input_tokens=3, output_tokens=1))]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("one"), TIMEOUT)
-    text = str(await UsageControl(root.agent, None).invoke(""))
+    text = str(await UsageControl(root._agent, None).invoke(""))
     assert "Including subagents" not in text
     assert "Cost (USD)" not in text  # nothing was spent
     assert _row(text, "Output tokens") == "1"
