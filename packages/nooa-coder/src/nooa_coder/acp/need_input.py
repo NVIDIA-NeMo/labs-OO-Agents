@@ -183,6 +183,11 @@ def _property(annotation: Any, field: FieldInfo, name: str, metadata: list[Any])
             return ElicitationMultiSelectPropertySchema(
                 type="array",
                 items=UntitledMultiSelectItems(type="string", enum=choices),
+                default=(
+                    list(default)
+                    if isinstance(default, (list, tuple)) and all(v in choices for v in default)
+                    else None
+                ),
                 min_items=limits.get("min_length"),
                 max_items=limits.get("max_length"),
                 **common,
