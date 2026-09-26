@@ -172,6 +172,9 @@ advance.
 
 - Workers are reached only through the socket pair their router created.
   Attaching a second client to a running worker needs a listening socket;
-  that is stage 2 of the session tree design.
+  that is stage 2 of the session tree design. The adapter already works
+  from the Session's methods and its update stream only (the agent's events
+  arrive as `AgentEventUpdate`), never from the agent, so a second client
+  can be served from the same data.
 - MCP over ACP (`mcpCapabilities.acp`) is not supported. Its messages are
   routed by connection id, not by session id.

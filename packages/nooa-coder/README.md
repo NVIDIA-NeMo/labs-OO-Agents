@@ -20,6 +20,18 @@ state when it can be restored. `NOOA_SESSIONS_DIR`, or an explicit
 for all workspaces instead. A `SessionRegistry` serves one such directory;
 a subagent's session goes in its root's.
 
+A host never holds a session's agent (`Session._agent` is private). It
+submits items (`submit`, `prompt`, `steer`, `withdraw`, `cancel`) and reads
+and changes the session through data: `info`, `transcript()`, `channels()`,
+`model_info()`, `set_model()`, `set_reasoning()`, `set_mode()`,
+`commands()` and `invoke_command()`, `host_status()` (agent-specific status
+such as the coding agent's context and todos), and, before the first turn,
+`prepare_tools()` and `register_tools()`. `subscribe()` delivers every
+change as a pydantic update, in order: turns, items, title, mode, model,
+reasoning level, commands, usage, children, close, and each of the agent's
+own events (`AgentEventUpdate`). The ACP adapter uses only these; a test
+checks that the `nooa_coder.acp` package reads no `agent` attribute.
+
 Over ACP, a `session/prompt` sent during a turn is queued, not steered.
 `_nooa/session/inject` queues or steers a message without a prompt request,
 and `_nooa/session/revoke_inject` takes one back; see `docs/acp-router.md`
