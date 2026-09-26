@@ -326,9 +326,9 @@ async def test_nooa_sessions_dir_holds_the_sessions_of_every_workspace(
 
 
 async def test_list_pages_with_a_cursor(make_adapter, workspace, monkeypatch):
-    from nooa_coder.acp import server
+    from nooa_coder.acp import listing
 
-    monkeypatch.setattr(server, "_SESSION_PAGE_SIZE", 2)
+    monkeypatch.setattr(listing, "SESSION_PAGE_SIZE", 2)
     models = ScriptedModels()
     adapter = await make_adapter(models)
     ids = {await _finished_session(adapter, workspace, models) for _ in range(3)}

@@ -14,13 +14,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
 import re
 import signal
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext, suppress
-from datetime import UTC, datetime
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from string import Formatter
 from types import SimpleNamespace
@@ -28,7 +25,6 @@ from typing import Any, cast
 from uuid import uuid4
 
 from acp import (
-    PROTOCOL_VERSION,
     InitializeResponse,
     LoadSessionResponse,
     NewSessionResponse,
@@ -41,11 +37,9 @@ from acp import (
     update_user_message,
 )
 from acp.agent.connection import AgentSideConnection
-from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
 from acp.helpers import update_available_commands
 from acp.interfaces import Agent, Client
 from acp.schema import (
-    AgentCapabilities,
     AvailableCommand,
     AvailableCommandInput,
     ClientCapabilities,
@@ -54,14 +48,10 @@ from acp.schema import (
     HttpMcpServer,
     Implementation,
     ListSessionsResponse,
-    McpCapabilities,
     McpServerStdio,
     PermissionOption,
-    SessionCapabilities,
-    SessionCloseCapabilities,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
-    SessionListCapabilities,
     SessionMode,
     SessionModeState,
     SetSessionConfigOptionResponse,
@@ -70,7 +60,6 @@ from acp.schema import (
     ToolCallUpdate,
     UnstructuredCommandInput,
 )
-from acp.schema import SessionInfo as ACPSessionInfo
 
 from nooa.errors import GenerationError
 from nooa.interactive import NeedInput
@@ -79,7 +68,9 @@ from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
 from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
+from nooa_coder.acp.listing import list_sessions, validate_workspace
 from nooa_coder.acp.need_input import answer_from_content, need_input_schema
+from nooa_coder.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
 from nooa_coder.coding.identity import CODING_AGENT, canonical_agent_spec
 from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_coder.session.items import CommandInfo, Receipt, TurnCancelledOutcome
@@ -100,16 +91,10 @@ from nooa_coder.session.store import (
 
 logger = logging.getLogger(__name__)
 
-_SESSION_PAGE_SIZE = 50
 _DELETE_METHOD = "nooa/session/delete"
 """``_nooa/session/delete`` as ``ext_method`` receives it (without the underscore)."""
 _INJECT_METHOD = "nooa/session/inject"
 _REVOKE_METHOD = "nooa/session/revoke_inject"
-INJECT_CAPABILITY = {"dev.nooa/inject": {"queue": {}, "steer": {}, "revoke": {}}}
-"""``agentCapabilities._meta`` for ``_nooa/session/inject`` and ``revoke_inject``.
-
-They follow the ACP RFD for message injection (agent-client-protocol PR #1261).
-"""
 
 SOURCE = "acp"
 """The source of items this adapter admits (the bridge does not echo them back)."""
@@ -205,42 +190,6 @@ def model_aliases() -> list[str]:
     except Exception:
         logger.warning("Could not load the model registry", exc_info=True)
     return sorted(MODELS)
-
-
-def initialize_response(protocol_version: int) -> InitializeResponse:
-    """The static answer to ``initialize``: what this agent supports.
-
-    ``session/delete`` and ``logout`` are not advertised: the 0.12 library
-    does not route them, so a client calling them would get "method not
-    found". Deleting is the ``_nooa/session/delete`` extension method.
-    """
-    try:
-        package_version = version("nooa-coder")
-    except PackageNotFoundError:
-        package_version = "0.0.0"
-    return InitializeResponse(
-        protocol_version=min(protocol_version, PROTOCOL_VERSION),
-        agent_capabilities=AgentCapabilities(
-            load_session=True,
-            # McpCapabilities defaults to all-false, and a client that honours
-            # the handshake then filters its HTTP/SSE servers out of
-            # session/new. _create_mcp_tools connects both transports, so say
-            # so. `acp` stays off: it is unstable in the spec and not
-            # implemented here.
-            mcp_capabilities=McpCapabilities(http=True, sse=True),
-            session_capabilities=SessionCapabilities(
-                list=SessionListCapabilities(),
-                close=SessionCloseCapabilities(),
-            ),
-            field_meta=INJECT_CAPABILITY,
-        ),
-        auth_methods=[],
-        agent_info=Implementation(
-            name="nooa-coder",
-            title="NVIDIA Labs Object Oriented Agents (NOOA)",
-            version=package_version,
-        ),
-    )
 
 
 class CoderACPAgent:
@@ -347,7 +296,7 @@ class CoderACPAgent:
         **kwargs: Any,
     ) -> NewSessionResponse:
         del kwargs
-        root = self._validate_workspace(cwd, additional_directories)
+        root = validate_workspace(cwd, additional_directories)
         options = SessionOptions(
             workspace=root,
             agent_spec=self._agent_spec_for(root),
@@ -387,7 +336,7 @@ class CoderACPAgent:
         **kwargs: Any,
     ) -> LoadSessionResponse:
         del kwargs
-        root = self._validate_workspace(cwd, additional_directories)
+        root = validate_workspace(cwd, additional_directories)
         registry = self.registry_for(root)
         live = self.session(session_id)
         if live is not None:
@@ -436,7 +385,7 @@ class CoderACPAgent:
         """
         del kwargs
         if cwd is not None:
-            self.registry_for(self._validate_workspace(cwd, None))
+            self.registry_for(validate_workspace(cwd, None))
 
         def live(session_id: str) -> tuple[str, str | None] | None:
             for registry in self._registries.values():
@@ -1182,19 +1131,6 @@ class CoderACPAgent:
             raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
         return text
 
-    @staticmethod
-    def _validate_workspace(cwd: str, additional_directories: list[str] | None) -> Path:
-        if additional_directories:
-            raise RequestError.invalid_params(
-                {"reason": "Additional directories are not supported"}
-            )
-        root = Path(cwd).expanduser()
-        if not root.is_absolute() or not root.is_dir():
-            raise RequestError.invalid_params(
-                {"cwd": cwd, "reason": "cwd must be an existing absolute directory"}
-            )
-        return root.resolve()
-
 
 def _trace_as(session: Session) -> None:
     """Make the ACP session id the trace session of the session's turns.
@@ -1240,96 +1176,6 @@ def _slash_invocation(text: str) -> tuple[str, str] | None:
     if not name:
         return None
     return name, parts[1] if len(parts) == 2 else ""
-
-
-async def list_sessions(
-    store_for: Callable[[Path], SessionStore],
-    *,
-    cwd: str | None = None,
-    cursor: str | None = None,
-    live: Callable[[str], tuple[str, str | None] | None] = lambda _session_id: None,
-    known: Iterable[SessionStore] = (),
-) -> ListSessionsResponse:
-    """Root sessions with at least one message, most recent first.
-
-    Listed: root sessions with a message the agent answered, or a title a
-    person set. ``cwd`` lists that workspace's sessions from ``store_for(cwd)``.
-    Without it, every session in the ``known`` stores is listed: sessions
-    are stored per workspace and there is no index of every workspace, so
-    the caller passes the stores of the workspaces it has seen. Before any
-    workspace is named, the server's own working directory is the workspace.
-    ``live(session_id)`` returns ``(status,
-    title)`` for a session that runs in this process (or, for the router,
-    in one of its workers), else ``None``. Sessions held by another
-    process are left out: opening them would fail. ``_meta["dev.nooa/status"]``
-    is the live status (``running``, ``idle`` or ``retained``) or ``on_disk``.
-
-    Read-only: the store is scanned without claiming any session, so the
-    router can answer ``session/list`` without a worker.
-    """
-    root = CoderACPAgent._validate_workspace(cwd, None) if cwd is not None else None
-    try:
-        offset = int(cursor) if cursor is not None else 0
-    except ValueError:
-        raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"}) from None
-    if offset < 0:
-        raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"})
-
-    if root is not None:
-        stores = [store_for(root)]
-    else:
-        # Workspaces sharing one directory give the same store more than once.
-        stores = list({store.root.resolve(): store for store in known}.values())
-        if not stores:
-            # Pool 1.0.16 lists without ``cwd`` before it opens any session;
-            # the client starts the server in the directory it works in.
-            stores = [store_for(Path.cwd())]
-
-    def scan() -> list[tuple[Any, SessionStore, bool]]:
-        # Pure filesystem work, one lock probe per session: off the loop.
-        # A session the agent never answered and nobody named is noise from
-        # a failed first turn; it is not listed.
-        infos = [
-            (info, store)
-            for store in stores
-            for info in store.list(workspace=root, roots_only=True)
-            if info.turn_count > 0 and (info.reply_count > 0 or info.title_is_user_set)
-        ]
-        infos.sort(key=lambda pair: pair[0].last_active, reverse=True)
-        return [(info, store, store.is_active(info.id)) for info, store in infos]
-
-    found: list[tuple[Any, str]] = []
-    for info, store, active in await asyncio.to_thread(scan):
-        here = live(info.id)
-        if here is not None:
-            status, title = here
-            info = info.model_copy(update={"title": title or info.title})
-        elif active:
-            continue
-        else:
-            status = "on_disk"
-        # ACP requires an absolute cwd for every entry. The old TUI recorded
-        # the directory as typed ("../"), so fall back to the request's cwd,
-        # then to the directory the store belongs to.
-        workspace = info.workspace if Path(info.workspace).is_absolute() else None
-        workspace = workspace or (str(root) if root is not None else None)
-        workspace = workspace or (str(store.workspace) if store.workspace is not None else None)
-        if workspace is None:
-            continue
-        found.append((info.model_copy(update={"workspace": workspace}), status))
-    page = found[offset : offset + _SESSION_PAGE_SIZE]
-    sessions = [
-        ACPSessionInfo(
-            session_id=info.id,
-            cwd=info.workspace,
-            title=info.title or f"Untitled session [{info.id[:8]}]",
-            updated_at=datetime.fromtimestamp(info.last_active, UTC).isoformat(),
-            field_meta={"dev.nooa/status": status},
-        )
-        for info, status in page
-    ]
-    next_cursor = str(offset + len(page)) if len(found) > offset + len(page) else None
-    return ListSessionsResponse(sessions=sessions, next_cursor=next_cursor)
 
 
 def _discard_if_empty(session: Session) -> None:
@@ -1387,58 +1233,6 @@ def _available_commands_update(session: Session) -> Any:
             )
         )
     return update_available_commands(available)
-
-
-class _WritePipeProtocol(asyncio.BaseProtocol):
-    """Flow control for the output pipe (as ``acp.stdio`` does for stdout)."""
-
-    def __init__(self) -> None:
-        self._loop = asyncio.get_running_loop()
-        self._paused = False
-        self._drain_waiter: asyncio.Future[None] | None = None
-
-    def pause_writing(self) -> None:
-        self._paused = True
-        if self._drain_waiter is None:
-            self._drain_waiter = self._loop.create_future()
-
-    def resume_writing(self) -> None:
-        self._paused = False
-        if self._drain_waiter is not None and not self._drain_waiter.done():
-            self._drain_waiter.set_result(None)
-        self._drain_waiter = None
-
-    async def _drain_helper(self) -> None:
-        if self._paused and self._drain_waiter is not None:
-            await self._drain_waiter
-
-
-async def _stdio_streams(
-    input_fd: int, output_fd: int
-) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """A reader on ``input_fd`` and a writer on ``output_fd`` (the reserved real stdio)."""
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader(limit=DEFAULT_STDIO_BUFFER_LIMIT_BYTES)
-    await loop.connect_read_pipe(
-        lambda: asyncio.StreamReaderProtocol(reader),
-        os.fdopen(input_fd, "rb", buffering=0, closefd=False),
-    )
-    protocol = _WritePipeProtocol()
-    transport, _ = await loop.connect_write_pipe(
-        lambda: protocol, os.fdopen(output_fd, "wb", buffering=0, closefd=False)
-    )
-    return reader, asyncio.StreamWriter(transport, protocol, None, loop)
-
-
-async def open_stdio(
-    input_fd: int | None = None, output_fd: int | None = None
-) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """Streams for ACP frames: on the reserved descriptors when given, else stdin and stdout."""
-    if input_fd is not None and output_fd is not None:
-        return await _stdio_streams(input_fd, output_fd)
-    from acp.stdio import stdio_streams
-
-    return await stdio_streams(limit=DEFAULT_STDIO_BUFFER_LIMIT_BYTES)
 
 
 async def serve_connection(
@@ -1542,6 +1336,7 @@ async def serve(
 
 
 __all__ = [
+    "INJECT_CAPABILITY",
     "CoderACPAgent",
     "initialize_response",
     "list_sessions",
