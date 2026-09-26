@@ -339,6 +339,13 @@ async def test_bridge_emits_terminal_lifecycle(tmp_path):
     started = cast(ToolCallStart, updates[0])
     assert started.kind == "execute"
     assert started.title == "$ pytest -q"
+    assert started.raw_input == {
+        "command": "pytest -q",
+        "working_directory": str(tmp_path),
+        "command_truncated": False,
+        "stdin_truncated": False,
+    }
+    assert not started.content
     progress = cast(ToolCallProgress, updates[1])
     assert progress.content is not None
     content = cast(ContentToolCallContent, progress.content[0])
@@ -352,6 +359,57 @@ async def test_bridge_emits_terminal_lifecycle(tmp_path):
     }
     await bridge.close()
     await agent.aclose()
+
+
+def _texts(update: Any) -> list[str]:
+    return [_content_text(content) for content in update.content or []]
+
+
+async def test_a_truncated_diff_is_flagged_and_says_so(bridged, tmp_path):
+    agent, _session, client, bridge = bridged
+    agent.event_manager.add(
+        FileEdit(
+            path=str(tmp_path / "big.py"),
+            operation="update",
+            diff="@@ -1,400 +1,400 @@\n-old\n+new\n",
+            content_complete=False,
+            diff_complete=False,
+        )
+    )
+    await bridge.flush()
+    [start] = [u for _, u in client.updates if isinstance(u, ToolCallStart)]
+    assert start.raw_output == {"content_complete": False, "diff_complete": False}
+    texts = _texts(start)
+    assert texts[0].startswith("@@ -1,400")
+    assert texts[-1] == "The diff was truncated: the edit is larger than shown."
+
+
+async def test_a_truncated_command_is_flagged_and_says_so_until_it_finishes(bridged):
+    agent, _session, client, bridge = bridged
+    agent.event_manager.add(
+        TerminalCommandStarted(
+            command_id="cmd-1",
+            command="python - <<'EOF' ...",
+            working_directory="/",
+            stdin="print(1)...",
+            command_truncated=True,
+            stdin_truncated=True,
+        )
+    )
+    note = "The command and its standard input were truncated for display."
+    agent.event_manager.add(TerminalCommandOutput(command_id="cmd-1", stdout="1\n"))
+    agent.event_manager.add(TerminalCommandFinished(command_id="cmd-1", exit_code=0))
+    await bridge.flush()
+    start, output, finished = [u for _, u in client.updates]
+    assert start.raw_input == {
+        "command": "python - <<'EOF' ...",
+        "working_directory": "/",
+        "command_truncated": True,
+        "stdin_truncated": True,
+    }
+    assert _texts(start) == [note]
+    assert _texts(output) == [note, "1\n"]
+    assert _texts(finished) == [note, "1\n"]
 
 
 class _BlockingClient(_RecordingClient):
