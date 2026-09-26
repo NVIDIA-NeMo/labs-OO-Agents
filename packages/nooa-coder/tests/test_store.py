@@ -412,7 +412,7 @@ def test_session_files_use_the_rollback_journal_and_readers_leave_no_side_files(
         pass
     with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
         assert db.execute("pragma journal_mode").fetchone()[0] == "delete"
-    # Listing and transcript reads take no locks and create no -shm/-wal sidecars.
+    # Listing and transcript reads create no -shm/-wal sidecars (rollback journal).
     store.list()
     store.load_transcript(handle.id)
     assert not path.with_name(path.name + "-shm").exists()
@@ -433,3 +433,22 @@ def test_the_liveness_probe_does_not_rewrite_the_lock_record(tmp_path):
     handle.close()
     assert store.is_active(handle.id) is False
     assert lock.read_text() == ""
+
+
+def test_a_file_in_use_on_another_machine_is_not_read_when_listing(tmp_path, monkeypatch):
+    """Locks do not cross a shared mount, so such a file may be mid-write: skip it unread."""
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    store.path_for(handle.id).with_suffix(".lock").write_text("4242 other-box")
+    original = SessionStore._read_info
+
+    def guard(self, path):
+        if path.stem == handle.id:
+            raise AssertionError("a foreign-owned file must not be read")
+        return original(self, path)
+
+    monkeypatch.setattr(SessionStore, "_read_info", guard)
+    assert store.list() == []

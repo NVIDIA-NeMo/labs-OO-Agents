@@ -122,10 +122,14 @@ def _connect_read_only(path: Path) -> sqlite3.Connection:
     Read-only mode never creates the file, so a reader racing a delete
     fails instead of leaving an empty database behind.
     """
-    # immutable: no locks and no shared-memory side file, so a reader on
-    # another machine sharing the directory cannot disturb the writer.
-    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
-    return sqlite3.connect(uri, uri=True)
+    # A locking read: SQLite then serialises it against a writer in this
+    # machine's kernel, so a session another process here is writing never
+    # reads torn. A file another machine is writing is not read at all (see
+    # ``list``), because locks do not cross a shared mount.
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    connection.execute("PRAGMA busy_timeout=5000")
+    return connection
 
 
 def _item_text(item_json: str) -> str:
@@ -481,6 +485,8 @@ class SessionStore:
             info
             for path in self.root.glob("*.db")
             if not path.stem.endswith("-memory")
+            # In use on another machine: unreadable safely and hidden anyway.
+            if self.foreign_owner(path.stem) is None
             if (info := self._read_info(path)) is not None
             if not roots_only or info.parent_id is None
             if wanted is None or _workspace_matches(info.workspace, wanted)
