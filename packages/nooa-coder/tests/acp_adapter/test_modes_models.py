@@ -141,7 +141,7 @@ async def test_choosing_a_reasoning_level_applies_to_the_client(make_adapter, wo
     response = await adapter.set_config_option("reasoning", session_id, "high")
     reasoning = next(option for option in response.config_options if option.id == "reasoning")
     assert reasoning.current_value == "high"
-    assert adapter.session(session_id).agent.llm.reasoning_level == "high"
+    assert adapter.session(session_id).model_info().reasoning_level == "high"
     with pytest.raises(RequestError) as excinfo:
         await adapter.set_config_option("reasoning", session_id, "max")
     assert excinfo.value.code == -32602

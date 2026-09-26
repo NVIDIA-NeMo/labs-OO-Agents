@@ -26,6 +26,7 @@ from nooa_coder.session.events import (
     SESSION_EVENT_TYPES,
     SessionModeChanged,
     SessionModelChanged,
+    SessionReasoningChanged,
     SessionStarted,
     SessionTitleUpdated,
 )
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 _START_EVENT_TYPES = frozenset(("SessionStarted", "TUISessionStart"))
 _TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated", "TUISessionRename"))
-_SETTING_EVENT_TYPES = ("SessionModeChanged", "SessionModelChanged")
+_SETTING_EVENT_TYPES = ("SessionModeChanged", "SessionModelChanged", "SessionReasoningChanged")
 # SessionUserMessage: written by earlier versions of this package, still read.
 _USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
 _AGENT_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
@@ -291,7 +292,15 @@ class SessionHandle:
         self._ensure_open()
         self._events.add(SessionModelChanged(model=model))
         with self._metadata_lock:
-            self._info = self._info.model_copy(update={"model": model})
+            # A new model starts from its own reasoning default.
+            self._info = self._info.model_copy(update={"model": model, "reasoning": None})
+
+    def set_reasoning(self, level: str) -> None:
+        """Persist a reasoning level and update this handle's current metadata."""
+        self._ensure_open()
+        self._events.add(SessionReasoningChanged(level=level))
+        with self._metadata_lock:
+            self._info = self._info.model_copy(update={"reasoning": level})
 
     def update_usage(self, usage: Usage) -> None:
         """Set the session's usage totals (a copy) as ``info`` reports them."""
@@ -688,7 +697,7 @@ class SessionStore:
                     "SELECT data FROM events ORDER BY insertion_order DESC LIMIT 1"
                 ).fetchone()
                 setting_rows = connection.execute(
-                    "SELECT event_type, data FROM events WHERE event_type IN (?, ?) "
+                    "SELECT event_type, data FROM events WHERE event_type IN (?, ?, ?) "
                     "ORDER BY insertion_order",
                     _SETTING_EVENT_TYPES,
                 ).fetchall()
@@ -715,6 +724,7 @@ class SessionStore:
 
         mode = str(start.get("mode") or "auto")
         model = str(start.get("model", ""))
+        reasoning: str | None = None
         for event_type, data in setting_rows:
             raw = self._decode_data(data, path)
             if raw is None:
@@ -723,6 +733,9 @@ class SessionStore:
                 mode = str(raw["mode"])
             elif event_type == "SessionModelChanged" and raw.get("model"):
                 model = str(raw["model"])
+                reasoning = None
+            elif event_type == "SessionReasoningChanged" and raw.get("level"):
+                reasoning = str(raw["level"])
 
         title: str | None = None
         title_is_user_set = False
@@ -738,6 +751,7 @@ class SessionStore:
         return SessionInfo(
             id=path.stem,
             model=model,
+            reasoning=reasoning,
             mode=mode,
             agent=str(start.get("agent", start.get("agent_cls", ""))),
             created_at=started_at,

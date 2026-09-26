@@ -56,6 +56,18 @@ class SessionModelChanged(Metadata):
     model: str = ""
 
 
+class SessionReasoningChanged(Metadata):
+    """The session's reasoning level changed (``set_reasoning``); a load restores it.
+
+    A ``SessionModelChanged`` after it resets the level: a new model starts
+    from its own default.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    level: str = ""
+
+
 class SessionTitleUpdated(Metadata):
     """The latest human- or agent-selected session title."""
 
@@ -179,6 +191,7 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     SessionTitleUpdated,
     SessionModeChanged,
     SessionModelChanged,
+    SessionReasoningChanged,
     ItemAdmitted,
     ItemConsumed,
     ItemWithdrawn,

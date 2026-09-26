@@ -72,7 +72,12 @@ from nooa_coder.acp.listing import list_sessions, validate_workspace
 from nooa_coder.acp.need_input import answer_from_content, need_input_schema
 from nooa_coder.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
 from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
-from nooa_coder.session.items import CommandInfo, Receipt, TurnCancelledOutcome
+from nooa_coder.session.items import (
+    CommandInfo,
+    CommandsChangedUpdate,
+    Receipt,
+    TurnCancelledOutcome,
+)
 from nooa_coder.session.loader import CODING_AGENT, canonical_agent_spec
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import ChildActiveElsewhereError, SessionRegistry
@@ -573,7 +578,7 @@ class CoderACPAgent:
         if session.id in self._title_checked:
             return
         self._title_checked.add(session.id)
-        if session.info.title or "system_messages" not in session.agent.queue_manager.channels():
+        if session.info.title or "system_messages" not in session.channels():
             return
         if any(entry.role == "user" for entry in session.transcript()):
             return
@@ -769,7 +774,7 @@ class CoderACPAgent:
                 return await self._say(
                     bridge, f"/{name} produced no output, so nothing was sent to the agent."
                 )
-            channels = session.agent.queue_manager.channels()
+            channels = session.channels()
             channel = "slash_commands" if "slash_commands" in channels else "user_messages"
             receipt = await session.submit(result.text, channel=channel, source=SOURCE)
             return await self._finish(session, bridge, receipt.item_id)
@@ -820,7 +825,7 @@ class CoderACPAgent:
         del kwargs
         session, _bridge = self._followed(session_id)
         if config_id == "reasoning" and isinstance(value, str):
-            self._set_reasoning(session, value)
+            await self._set_reasoning(session, value)
             return SetSessionConfigOptionResponse(
                 config_options=self._config_options(session) or []
             )
@@ -839,25 +844,20 @@ class CoderACPAgent:
         return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
 
     @staticmethod
-    def _set_reasoning(session: Session, level: str) -> None:
-        """Select a reasoning level the session's current client declares.
+    async def _set_reasoning(session: Session, level: str) -> None:
+        """Select a reasoning level the session's model declares (``Session.set_reasoning``).
 
-        The level applies from the next model call on. It lives on the
-        client, so switching the model later starts from that alias's
-        default again; the option shows what the current client will do.
+        The level applies from the next model call on; switching the model
+        later starts from that alias's default again.
         """
-        client = session.agent.llm
-        levels = getattr(client, "reasoning_levels", None) or ()
-        if level not in levels:
-            allowed = ", ".join(levels) if levels else "none for this model"
+        try:
+            await session.set_reasoning(level)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session.id) from None
+        except ValueError as exc:
             raise RequestError.invalid_params(
-                {
-                    "configId": "reasoning",
-                    "value": level,
-                    "reason": f"Unknown reasoning level; allowed: {allowed}",
-                }
-            )
-        client.reasoning_level = level
+                {"configId": "reasoning", "value": level, "reason": str(exc)}
+            ) from exc
 
     def _config_options(self, session: Session) -> list[Any] | None:
         """The model select option (the registry's aliases plus the current model),
@@ -894,11 +894,9 @@ class CoderACPAgent:
         chosen or the route has a default; otherwise there is no honest
         current value to show.
         """
-        client = getattr(session.agent, "llm", None)
-        levels = tuple(getattr(client, "reasoning_levels", None) or ())
-        current = getattr(client, "reasoning_level", None) or getattr(
-            client, "reasoning_default", None
-        )
+        model = session.model_info()
+        levels = model.reasoning_levels
+        current = model.reasoning_level or model.reasoning_default
         if not levels or current not in levels:
             return None
         return SessionConfigOptionSelect(
@@ -932,17 +930,15 @@ class CoderACPAgent:
         bridge = ACPEventBridge(session, conn, resolve_child=self.session)
         self._bridges[session.id] = bridge
 
-        def forget_on_close(update: Any) -> None:
-            if getattr(update, "kind", None) == "closed":
+        def on_update(update: Any) -> None:
+            if isinstance(update, CommandsChangedUpdate):
+                bridge.publish(_available_commands_update(update.commands))
+            elif getattr(update, "kind", None) == "closed":
                 if self._bridges.get(session.id) is bridge:
                     del self._bridges[session.id]
                 unsubscribe()
 
-        unsubscribe = session.subscribe(forget_on_close)
-        commands = getattr(session.agent, "slash_commands", None)
-        set_on_change = getattr(commands, "set_on_change", None)
-        if callable(set_on_change):
-            set_on_change(lambda _commands: bridge.publish(_available_commands_update(session)))
+        unsubscribe = session.subscribe(on_update)
         return bridge
 
     def _parent_is_live(self, session: Session) -> bool:
@@ -1052,7 +1048,7 @@ class CoderACPAgent:
 
         async def publish() -> None:
             await asyncio.sleep(0)
-            bridge.publish_best_effort(_available_commands_update(session))
+            bridge.publish_best_effort(_available_commands_update(session.commands()))
             if warnings:
                 details = "\n".join(f"- {warning}" for warning in warnings)
                 bridge.publish_best_effort(
@@ -1196,8 +1192,7 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
     return exc
 
 
-def _available_commands_update(session: Session) -> Any:
-    commands: list[CommandInfo] = session.commands()
+def _available_commands_update(commands: list[CommandInfo]) -> Any:
     available: list[AvailableCommand] = []
     for command in commands:
         input_spec = (

@@ -268,6 +268,8 @@ class SessionInfo(BaseModel):
     host: str = ""
     agent: str = ""
     model: str = ""
+    reasoning: str | None = None
+    """The reasoning level chosen with ``set_reasoning``; ``None`` for the model's default."""
     mode: str = "auto"
     status: SessionStatus = "on_disk"
     retained: bool = False
@@ -285,6 +287,21 @@ class CommandInfo(BaseModel):
     name: str
     description: str = ""
     input_hint: str | None = None
+
+
+class ModelInfo(BaseModel):
+    """The model a session's next call uses, as data (``Session.model_info()``).
+
+    ``reasoning_levels`` is empty when the client declares none;
+    ``reasoning_level`` is ``None`` when none was chosen, so the model
+    uses ``reasoning_default`` (or its own default when that is ``None``).
+    """
+
+    alias: str = ""
+    context_window: int | None = None
+    reasoning_level: str | None = None
+    reasoning_levels: list[str] = Field(default_factory=list)
+    reasoning_default: str | None = None
 
 
 class CommandResult(BaseModel):
@@ -368,6 +385,23 @@ class ModelChangedUpdate(_Update):
     model: str
 
 
+class ReasoningChangedUpdate(_Update):
+    """The reasoning level changed (``set_reasoning``); it applies from the next model call."""
+
+    kind: Literal["reasoning_changed"] = "reasoning_changed"
+    level: str
+
+
+class CommandsChangedUpdate(_Update):
+    """The slash commands the session offers changed (a skill loaded, a control added).
+
+    ``commands`` is the new list, as ``Session.commands()`` returns it.
+    """
+
+    kind: Literal["commands_changed"] = "commands_changed"
+    commands: list[CommandInfo]
+
+
 class ChildCreatedUpdate(_Update):
     """A child session was created under this one."""
 
@@ -402,6 +436,8 @@ SessionEvent = Annotated[
     | TitleChangedUpdate
     | ModeChangedUpdate
     | ModelChangedUpdate
+    | ReasoningChangedUpdate
+    | CommandsChangedUpdate
     | ChildCreatedUpdate
     | UsageChangedUpdate
     | ClosedUpdate,

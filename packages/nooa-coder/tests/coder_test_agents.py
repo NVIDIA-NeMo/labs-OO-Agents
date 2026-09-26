@@ -222,12 +222,24 @@ class FakeSlashCommands:
 
     def __init__(self) -> None:
         self.invoked: list[tuple[str, str]] = []
+        self.added: list[_Command] = []
+        self.on_change: Any = None
 
     def commands(self) -> tuple[_Command, ...]:
         return (
             _Command("model", "Show or switch the model", "[alias]"),
             _Command("clear", "Clear", None),
+            *self.added,
         )
+
+    def set_on_change(self, callback: Any) -> None:
+        self.on_change = callback
+
+    def add(self, name: str, description: str = "") -> None:
+        """Add a command and report the change, as a skill reload does."""
+        self.added.append(_Command(name, description, None))
+        if self.on_change is not None:
+            self.on_change(self.commands())
 
     async def invoke(self, name: str, raw_args: str) -> _CommandOutput:
         if name not in ("model", "clear"):
@@ -254,6 +266,24 @@ class TrackedLLM(CellLLM):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class LeveledModelFactory:
+    """An ``llm_factory`` whose clients declare reasoning levels (``low`` by default)."""
+
+    def __init__(self) -> None:
+        self.made: list[TrackedLLM] = []
+
+    def __call__(self, alias: str | None, workspace: Any) -> TrackedLLM:
+        from nooa.unifiedllm.reasoning import ReasoningConfig
+
+        llm = TrackedLLM(alias or "default-model", [])
+        llm._reasoning_config = ReasoningConfig(
+            levels={"low": {"reasoning_effort": "low"}, "high": {"reasoning_effort": "high"}},
+            default="low",
+        )
+        self.made.append(llm)
+        return llm
 
 
 class ModelFactory:
