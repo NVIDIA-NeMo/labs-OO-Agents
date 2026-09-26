@@ -134,25 +134,51 @@ _MODES = [
 ]
 
 
+_detached_closes: set[asyncio.Future[Any]] = set()
+"""Closes started by a cancelled ``_close_in_order``; kept so they are not collected."""
+
+
+def _detached_close_done(task: asyncio.Future[Any]) -> None:
+    _detached_closes.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("A close failed after cancellation", exc_info=task.exception())
+
+
 async def _close_in_order(*closers: Callable[[], Any] | None) -> None:
     """Run each closer in order, tolerating failures, then re-raise.
 
     Equivalent to nesting one ``try/finally`` per closer: every closer runs
     even if an earlier one fails, and the last failure propagates with the
     earlier ones chained as its ``__context__``.
+
+    A cancellation propagates at once: the closers not yet run are started
+    in the background, not waited for, so cleanup does not hold it up.
     """
+    remaining = [close for close in closers if close is not None]
     pending: BaseException | None = None
-    for close in closers:
-        if close is None:
-            continue
-        try:
-            result = close()
-            if inspect.isawaitable(result):
-                await result
-        except BaseException as exc:
-            if pending is not None:
-                exc.__context__ = pending
-            pending = exc
+    try:
+        while remaining:
+            close = remaining.pop(0)
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                if pending is not None:
+                    exc.__context__ = pending
+                pending = exc
+    finally:
+        for close in remaining:  # left over only when cancelled
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    started = asyncio.ensure_future(result)
+                    _detached_closes.add(started)
+                    started.add_done_callback(_detached_close_done)
+            except Exception:
+                logger.warning("A close failed after cancellation", exc_info=True)
     if pending is not None:
         raise pending
 
