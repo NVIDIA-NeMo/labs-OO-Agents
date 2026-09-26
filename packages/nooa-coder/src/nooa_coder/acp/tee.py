@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import queue
 import signal
@@ -31,6 +32,8 @@ import threading
 import time
 from pathlib import Path
 from typing import IO, Any
+
+logger = logging.getLogger(__name__)
 
 
 def open_private_log(path: Path) -> IO[str]:
@@ -195,15 +198,37 @@ class FrameLog:
             try:
                 self._file.write(record)
                 self._file.flush()
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                # Nothing reads the queue after this; __call__ and close() must
+                # not wait on it.
+                logger.warning("ACP tee log stopped; later frames are not recorded: %s", exc)
                 return
 
     def close(self, timeout: float = 5.0) -> None:
-        """Write what is queued (waiting up to ``timeout`` seconds) and close the file."""
+        """Write what is queued (waiting up to ``timeout`` seconds) and close the file.
+
+        Never waits longer than ``timeout``. A live writer gets that long to
+        make room for the stop marker; after that, or at once when the writer
+        has died, the oldest records are dropped (and counted) instead, so a
+        log that became unwritable cannot hang shutdown.
+        """
         if self._closed:
             return
         self._closed = True
-        self._queue.put(None)
-        self._thread.join(timeout)
+        deadline = time.monotonic() + timeout
+        try:
+            self._queue.put(None, block=self._thread.is_alive(), timeout=timeout)
+        except queue.Full:
+            while True:
+                try:
+                    self._queue.put_nowait(None)
+                    break
+                except queue.Full:
+                    try:
+                        self._queue.get_nowait()
+                        self.dropped += 1
+                    except queue.Empty:
+                        pass
+        self._thread.join(max(0.0, deadline - time.monotonic()))
         if not self._thread.is_alive():
             self._file.close()
