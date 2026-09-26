@@ -358,6 +358,28 @@ class CodingAgent(InteractiveAgent):
             raise RuntimeError("This agent is not running in a session")
         return self.session
 
+    @hidden
+    def host_status(self) -> dict[str, Any]:
+        """Status for hosts, read through ``Session.host_status()``: context and todos.
+
+        ``context`` is ``get_summarization_status()``; ``todos`` lists each
+        todo's ``id``, ``title``, stored ``status`` (``open`` or ``done``)
+        and whether it is the ``active`` one.
+        """
+        active = self.todo.active()
+        return {
+            "context": self.get_summarization_status(),
+            "todos": [
+                {
+                    "id": todo.id,
+                    "title": todo.title,
+                    "status": todo.status,
+                    "active": active is not None and todo.id == active.id,
+                }
+                for todo in self.todo.list_todos()
+            ],
+        }
+
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""
         tags = self.event_manager.keys()

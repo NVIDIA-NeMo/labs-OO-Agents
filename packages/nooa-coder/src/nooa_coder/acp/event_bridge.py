@@ -1,17 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Translate a Session's updates and its agent's events into ACP session updates.
+"""Translate a Session's updates into ACP session updates.
 
-One bridge per session id per adapter. It listens in two places: the
-Session's updates (``subscribe``: titles, modes, turn ends, cancels,
-children, admitted items, close) and the agent's own event stream (tool
-cells, messages, file edits, terminal commands, model responses), which
-carries runtime events the Session's passthrough leaves out. Both are
-synchronous, so updates reach the client in the order things happened.
+One bridge per session id per adapter. It listens to the Session's
+updates only (``subscribe``): titles, modes, turn ends, cancels,
+children, admitted items, close, and the agent's events (tool cells,
+messages, file edits, terminal commands, model responses) as
+``AgentEventUpdate``. The stream is synchronous and ordered, so updates
+reach the client in the order things happened. The bridge never holds
+the agent: status beyond the updates comes from ``model_info()`` and
+``host_status()``.
 """
 
 import asyncio
-import json
 import logging
 import re
 from collections.abc import Callable
@@ -59,6 +60,7 @@ from nooa_coder.coding.activity import (
 )
 from nooa_coder.session.items import (
     USAGE_FIELDS,
+    AgentEventUpdate,
     CancelledUpdate,
     ChildCreatedUpdate,
     ItemAdmittedUpdate,
@@ -116,12 +118,13 @@ class BridgedSession(Protocol):
     """What the bridge needs from a Session."""
 
     id: str
-    agent: Any
     info: SessionInfo
 
     def subscribe(self, listener: Callable[[Any], None]) -> Callable[[], None]: ...
 
     def model_info(self) -> ModelInfo: ...
+
+    def host_status(self) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,30 +176,6 @@ def question_text(question: str, options: list[str] | None, reason: str | None =
     return text
 
 
-def _json_safe(value: Any) -> Any:
-    return json.loads(json.dumps(value, default=str))
-
-
-def end_line(update: Any) -> Any:
-    """``update``, with its text ending in a line break when it is a whole agent message.
-
-    Every agent message the bridge sends is complete, but ACP has no end of
-    message: clients join consecutive agent chunks. Pool 1.0.16 joins them into
-    one paragraph even across ``messageId`` values, so a message that ends
-    mid-line runs into the next one, and a Markdown fence at the start of the
-    next one (``/usage``, ``/trace-url``) is no longer at the start of a line.
-    """
-    if (
-        isinstance(update, AgentMessageChunk)
-        and isinstance(update.content, TextContentBlock)
-        and update.content.text
-        and not update.content.text.endswith("\n")
-    ):
-        content = update.content.model_copy(update={"text": update.content.text + "\n"})
-        return update.model_copy(update={"content": content})
-    return update
-
-
 class ACPEventBridge:
     """Send one session's activity to an ACP client, in order, through one pump task.
 
@@ -214,7 +193,6 @@ class ACPEventBridge:
         own_sources: frozenset[str] = OWN_SOURCES,
     ) -> None:
         self.session = session
-        self.agent = session.agent
         self.client = client
         self.session_id = session.id
         self._resolve_child = resolve_child
@@ -234,37 +212,42 @@ class ACPEventBridge:
         self._plan: list[PlanEntry] = []
         self._children: list[dict[str, Any]] = []
         self._mirrors: dict[str, list[Callable[[], None]]] = {}
+        # By event type. Cards come from this session's agent and, mirrored,
+        # from its children's; messages, thoughts and usage only from its own.
+        self._card_handlers: dict[str, Callable[[Any, str | None], None]] = {
+            "ToolCallEvent": self._on_tool_call,
+            "PythonOutput": self._on_python_output,
+            "FileEdit": self._on_file_edit,
+            "TerminalCommandStarted": self._on_terminal_started,
+            "TerminalCommandOutput": self._on_terminal_output,
+            "TerminalCommandFinished": self._on_terminal_finished,
+        }
+        self._own_handlers: dict[str, Callable[[Any], None]] = {
+            "AgentMessage": self._on_agent_message,
+            "LLMResponse": self._on_llm_response,
+        }
         self._unsubscribers: list[Callable[[], None]] = [
-            *self._subscribe_agent(self.agent.event_manager, source=None),
             session.subscribe(self._on_session_update),
         ]
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
 
     # ---- subscriptions -----------------------------------------------
 
-    def _subscribe_agent(
-        self, event_manager: Any, *, source: str | None
-    ) -> list[Callable[[], None]]:
-        """Wire the handlers onto one agent's events.
+    def _on_agent_event(self, event: EventBase, source: str | None) -> None:
+        """One agent event, from an ``AgentEventUpdate``.
 
         ``source`` is ``None`` for this session's own agent, else the id of
         a child whose tool cards are mirrored (cards only: a child's
         messages, thoughts and usage are not this conversation's).
         """
-        handlers: list[tuple[str, Callable[[Any], None]]] = [
-            ("ToolCallEvent", lambda event: self._on_tool_call(event, source)),
-            ("PythonOutput", lambda event: self._on_python_output(event, source)),
-            ("FileEdit", lambda event: self._on_file_edit(event, source)),
-            ("TerminalCommandStarted", lambda event: self._on_terminal_started(event, source)),
-            ("TerminalCommandOutput", lambda event: self._on_terminal_output(event, source)),
-            ("TerminalCommandFinished", lambda event: self._on_terminal_finished(event, source)),
-        ]
+        card = self._card_handlers.get(event.event_type)
+        if card is not None:
+            card(event, source)
+            return
         if source is None:
-            handlers += [
-                ("AgentMessage", self._on_agent_message),
-                ("LLMResponse", self._on_llm_response),
-            ]
-        return [event_manager.on(event_type, handler) for event_type, handler in handlers]
+            own = self._own_handlers.get(event.event_type)
+            if own is not None:
+                own(event)
 
     def _mirror(self, child: BridgedSession) -> None:
         """Mirror a child's tool cards (and its own children's) into this session."""
@@ -273,17 +256,16 @@ class ACPEventBridge:
 
         def on_child_update(update: Any) -> None:
             kind = getattr(update, "kind", None)
-            if isinstance(update, ChildCreatedUpdate):
+            if isinstance(update, AgentEventUpdate):
+                self._on_agent_event(update.event, child.id)
+            elif isinstance(update, ChildCreatedUpdate):
                 # Announced like this session's own children, so the client
                 # knows the id before cards arrive under it.
                 self._on_child_created(update)
             elif kind == "closed":
                 self._unmirror(child.id)
 
-        self._mirrors[child.id] = [
-            *self._subscribe_agent(child.agent.event_manager, source=child.id),
-            child.subscribe(on_child_update),
-        ]
+        self._mirrors[child.id] = [child.subscribe(on_child_update)]
 
     def _unmirror(self, child_id: str) -> None:
         for unsubscribe in self._mirrors.pop(child_id, []):
@@ -320,7 +302,9 @@ class ACPEventBridge:
     # ---- session updates ---------------------------------------------
 
     def _on_session_update(self, update: Any) -> None:
-        if isinstance(update, ItemAdmittedUpdate):
+        if isinstance(update, AgentEventUpdate):
+            self._on_agent_event(update.event, None)
+        elif isinstance(update, ItemAdmittedUpdate):
             if update.channel in _ECHOED_CHANNELS and update.source not in self._own_sources:
                 text = getattr(update, "text", "") or update.preview
                 self._enqueue(update_user_message_text(text))
@@ -609,12 +593,9 @@ class ACPEventBridge:
             include={name for name in USAGE_FIELDS if name != "cost_usd"}
         )
         meta: dict[str, Any] = {"dev.nooa/usage": meta_totals}
-        status = getattr(self.agent, "get_summarization_status", None)
-        if callable(status):
-            try:
-                meta["dev.nooa/context"] = _json_safe(status())
-            except Exception:
-                logger.debug("Could not read the context status", exc_info=True)
+        context = self.session.host_status().get("context")
+        if context is not None:
+            meta["dev.nooa/context"] = context
         self._enqueue(
             UsageUpdate(
                 session_update="usage_update",
@@ -626,23 +607,23 @@ class ACPEventBridge:
         )
 
     def _publish_plan(self) -> None:
-        """Send the agent's todos as an ACP plan when they changed."""
-        todo: Any = getattr(self.agent, "todo", None)
-        if not callable(getattr(todo, "list_todos", None)):
+        """Send the agent's todos (``host_status()["todos"]``) as an ACP plan when they changed."""
+        todos = self.session.host_status().get("todos")
+        if not isinstance(todos, list):
             return
-        active = todo.active() if callable(getattr(todo, "active", None)) else None
         entries = [
             plan_entry(
-                item.title,
+                str(item.get("title", "")),
                 status=(
                     "completed"
-                    if item.status == "done"
+                    if item.get("status") == "done"
                     else "in_progress"
-                    if active is not None and item.id == active.id
+                    if item.get("active")
                     else "pending"
                 ),
             )
-            for item in todo.list_todos()
+            for item in todos
+            if isinstance(item, dict)
         ]
         if entries == self._plan:
             return

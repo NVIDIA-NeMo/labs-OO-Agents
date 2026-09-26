@@ -126,3 +126,83 @@ async def test_commands_changed_is_emitted_when_the_registry_changes(make_sessio
     assert update.session_id == session.id
     assert [command.name for command in update.commands] == ["model", "clear", "review"]
     assert update.commands == session.commands()
+
+
+# ---- the agent's events, as session updates ---------------------------------
+
+
+async def test_agent_events_reach_subscribers_as_agent_event_updates(make_session):
+    from nooa_coder.coding.activity import TerminalCommandStarted
+    from nooa_coder.session.items import AgentEventUpdate
+
+    from nooa.interactive import AgentMessage
+
+    session, _ = make_session(start=False)
+    seen = []
+    session.subscribe(seen.append)
+    message = AgentMessage(content="hello")
+    session.agent.event_manager.add(message)
+    # Runtime events (never recorded for the model) are forwarded too.
+    started = TerminalCommandStarted(command_id="c1", command="ls", working_directory="/")
+    session.agent.event_manager.add(started)
+    updates = [u for u in seen if isinstance(u, AgentEventUpdate)]
+    assert [u.event for u in updates] == [message, started]
+    assert updates[0].event is message  # the event itself, not a copy
+    assert all(u.session_id == session.id for u in updates)
+    assert updates[0].model_dump(mode="json")["event"]["content"] == "hello"
+
+
+async def test_a_model_response_arrives_before_the_usage_it_changes(make_session):
+    from nooa_coder.session.items import AgentEventUpdate, UsageChangedUpdate
+
+    from nooa.events import LLMResponse
+    from nooa.llm_types import LLMUsage
+
+    session, _ = make_session(start=False)
+    seen = []
+    session.subscribe(seen.append)
+    session.agent.event_manager.add(LLMResponse(usage=LLMUsage(input_tokens=10)))
+    kinds = [type(u) for u in seen]
+    assert kinds == [AgentEventUpdate, UsageChangedUpdate]
+
+
+# ---- host status ----------------------------------------------------------------
+
+
+async def test_host_status_is_empty_for_an_agent_without_one(make_session):
+    session, _ = make_session(start=False)
+    assert session.host_status() == {}
+
+
+async def test_host_status_is_the_agents_as_json_data(make_session):
+    session, _ = make_session(agent_spec="coder_test_agents:StatusAgent", start=False)
+    assert session.host_status() == {"context": {"active_events": 3}, "where": "/tmp/x"}
+
+
+async def test_a_failing_host_status_is_empty(make_session, caplog):
+    session, _ = make_session(agent_spec="coder_test_agents:BrokenStatusAgent", start=False)
+    assert session.host_status() == {}
+    assert "host status" in caplog.text
+
+
+async def test_the_coding_agent_reports_context_and_todos(tmp_path):
+    import json
+
+    from nooa_coder.coding.agent import CodingAgent
+
+    from nooa.unifiedllm import FakeLLMClient
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        first = agent.todo.add("Write the test")
+        agent.todo.add("Make it pass")
+        agent.todo.activate(first.id)
+        status = agent.host_status()
+        json.dumps(status)  # data only
+        assert status["context"] == json.loads(json.dumps(agent.get_summarization_status()))
+        assert [(t["title"], t["status"], t["active"]) for t in status["todos"]] == [
+            ("Write the test", "open", True),
+            ("Make it pass", "open", False),
+        ]
+    finally:
+        await agent.aclose()
