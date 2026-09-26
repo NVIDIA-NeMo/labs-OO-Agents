@@ -71,9 +71,9 @@ from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
 from nooa_coder.acp.listing import list_sessions, validate_workspace
 from nooa_coder.acp.need_input import answer_from_content, need_input_schema
 from nooa_coder.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
-from nooa_coder.coding.identity import CODING_AGENT, canonical_agent_spec
 from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_coder.session.items import CommandInfo, Receipt, TurnCancelledOutcome
+from nooa_coder.session.loader import CODING_AGENT, canonical_agent_spec
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import ChildActiveElsewhereError, SessionRegistry
 from nooa_coder.session.session import (

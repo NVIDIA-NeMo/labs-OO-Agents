@@ -32,6 +32,18 @@ class CodingSlashCommand:
     # Not compared: a host re-installing the same controls is not a change.
     _method: Any = field(default=None, repr=False, compare=False)
 
+    @classmethod
+    def for_control(cls, control: Any) -> CodingSlashCommand:
+        """A host control (``workspace.controls.ControlCommand``) as a slash command."""
+        return cls(
+            name=control.name,
+            description=control.description,
+            argument_hint=control.argument_hint,
+            output_to_agent=False,
+            is_control=True,
+            _method=control.invoke,
+        )
+
     def help_entry(self) -> tuple[str, str]:
         hint = self.argument_hint or ""
         key = f"/{self.name} {hint}".strip()

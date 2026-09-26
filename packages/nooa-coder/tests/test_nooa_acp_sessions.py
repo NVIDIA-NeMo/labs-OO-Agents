@@ -16,6 +16,7 @@ import pytest
 from nooa_cli.coding import CodingAgent as OldCodingAgent
 from nooa_cli.sessions.store import SessionStore as OldSessionStore
 from nooa_coder.coding.agent import CodingAgent
+from nooa_coder.coding.factory import create_session_agent
 from nooa_coder.session.registry import SessionRegistry
 from nooa_coder.session.store import SessionStore, sessions_root
 
@@ -61,7 +62,7 @@ async def test_an_old_session_is_listed_and_loads_with_its_state(tmp_path, agent
     assert (info.id, info.parent_id, info.host) == (session_id, None, "acp")
     assert info.turn_count > 0
 
-    registry = SessionRegistry(store)
+    registry = SessionRegistry(store, agent_factory=create_session_agent)
     try:
         session = await registry.load(session_id, llm=FakeLLMClient([]))
         assert isinstance(session.agent, CodingAgent)
@@ -81,7 +82,9 @@ async def test_a_snapshot_that_cannot_be_restored_still_loads(tmp_path, caplog):
     with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE snapshots SET data = 'damaged'")
 
-    registry = SessionRegistry(SessionStore(sessions_root(workspace)))
+    registry = SessionRegistry(
+        SessionStore(sessions_root(workspace)), agent_factory=create_session_agent
+    )
     try:
         with caplog.at_level(logging.WARNING, logger="nooa_coder.session.registry"):
             session = await registry.load(session_id, llm=FakeLLMClient([]))
@@ -120,7 +123,9 @@ async def test_an_unreadable_latest_snapshot_falls_back_to_the_one_before(tmp_pa
             ("newest", "2099-01-01T00:00:00+00:00", "damaged"),
         )
 
-    registry = SessionRegistry(SessionStore(sessions_root(workspace)))
+    registry = SessionRegistry(
+        SessionStore(sessions_root(workspace)), agent_factory=create_session_agent
+    )
     try:
         with caplog.at_level(logging.WARNING, logger="nooa_coder.session.registry"):
             session = await registry.load(session_id, llm=FakeLLMClient([]))

@@ -17,6 +17,7 @@ prompt must raise a limit here on purpose.
 import asyncio
 
 import pytest
+from nooa_coder.coding.factory import create_session_agent
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import SessionRegistry
 from nooa_coder.session.store import SessionStore
@@ -64,7 +65,7 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     llm = FakeLLMClient([response], strict_exhaustion=True)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(
             SessionOptions(

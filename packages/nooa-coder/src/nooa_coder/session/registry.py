@@ -85,13 +85,13 @@ class SessionRegistry:
         self,
         store: SessionStore,
         *,
-        agent_factory: AgentFactory | None = None,
+        agent_factory: AgentFactory,
         llm_factory: LLMFactory | None = None,
     ) -> None:
-        """``agent_factory(options, storage)`` builds each agent (default: the
-        coding agent's ``create_session_agent``, which loads
-        ``options.agent_spec`` and gives a coding agent its workspace
-        settings). ``llm_factory(model_alias, workspace)`` builds the model
+        """``agent_factory(options, storage)`` builds each agent; the host
+        chooses it (usually the coding layer's ``create_session_agent``,
+        which loads ``options.agent_spec`` and gives a coding agent its
+        workspace settings). ``llm_factory(model_alias, workspace)`` builds the model
         client for every session whose options carry no ``llm``;
         ``model_alias`` is ``options.model``, or ``None`` for the factory's
         default. The session owns that client and closes it. When the client
@@ -101,10 +101,6 @@ class SessionRegistry:
         self.llm_factory = llm_factory
         self.sessions: dict[str, Session] = {}
         self._reserved: dict[str, asyncio.Future[Session | None]] = {}
-        if agent_factory is None:
-            from nooa_coder.coding.factory import create_session_agent
-
-            agent_factory = create_session_agent
         self._agent_factory: AgentFactory = agent_factory
         # Parent-side delivery state, by (parent id, child id): only the
         # child's own parent can wait for or take its results.

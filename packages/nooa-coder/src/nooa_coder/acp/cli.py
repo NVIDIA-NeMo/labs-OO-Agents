@@ -182,7 +182,7 @@ def run(
     agent_spec: str | None = None,
     sessions_dir: Path | None = None,
     tee: Path | None = None,
-    agent_factory: Any = None,
+    agent_factory: Any = None,  # None: create_session_agent
     single_process: bool | None = None,
     worker_fd: int | None = None,
     id_base: int | None = None,
@@ -302,6 +302,7 @@ def _run_worker(
 
     from nooa_coder.acp.server import CoderACPAgent
     from nooa_coder.acp.worker import run_worker
+    from nooa_coder.coding.factory import create_session_agent
     from nooa_coder.session.registry import SessionRegistry
     from nooa_coder.session.store import SessionStore
 
@@ -309,7 +310,9 @@ def _run_worker(
     logging.getLogger("nooa_coder.acp").info(llm_config_summary())
 
     def new_registry(store: SessionStore) -> SessionRegistry:
-        return SessionRegistry(store, agent_factory=agent_factory, llm_factory=llm_factory)
+        return SessionRegistry(
+            store, agent_factory=agent_factory or create_session_agent, llm_factory=llm_factory
+        )
 
     def make_agent() -> CoderACPAgent:
         return CoderACPAgent(
@@ -351,11 +354,14 @@ async def _serve(
     from nooa_coder.acp._mcp_trace import MCPHandoffTrace
     from nooa_coder.acp.server import serve
     from nooa_coder.acp.tee import FrameLog
+    from nooa_coder.coding.factory import create_session_agent
     from nooa_coder.session.registry import SessionRegistry
     from nooa_coder.session.store import SessionStore
 
     def new_registry(store: SessionStore) -> SessionRegistry:
-        return SessionRegistry(store, agent_factory=agent_factory, llm_factory=llm_factory)
+        return SessionRegistry(
+            store, agent_factory=agent_factory or create_session_agent, llm_factory=llm_factory
+        )
 
     observers: list[Any] = []
     trace = MCPHandoffTrace.from_env()

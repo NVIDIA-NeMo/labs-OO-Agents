@@ -147,17 +147,17 @@ def file_spec():
 async def coder_adapter(make_adapter):
     """``coder_adapter(*responses)``: an adapter building real coding agents.
 
-    Sessions go through the registry's default agent factory
-    (``create_session_agent``), so workspace settings, skills and slash
+    Sessions are built by ``create_session_agent``, so workspace settings, skills and slash
     commands apply; each session's model is a strict fake scripted with
     ``responses`` (one list per session, in creation order).
     """
     from coder_test_agents import CODER_SPEC, ModelFactory
+    from nooa_coder.coding.factory import create_session_agent
 
     async def make(*scripts: list[Any], capabilities: Any = None) -> Any:
         factory = ModelFactory({"fake": [list(script) for script in scripts]})
         adapter = await make_adapter(
-            None,
+            create_session_agent,
             agent_spec=CODER_SPEC,
             llm_factory=factory,
             model="fake",

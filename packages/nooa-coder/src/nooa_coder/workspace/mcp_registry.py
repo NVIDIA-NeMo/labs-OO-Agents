@@ -232,7 +232,7 @@ class MCPRegistry(Skill):
     def _config_path(self) -> Path:
         """Return the project-local interactive host settings.yaml path."""
         from nooa.paths import get_project_dir
-        from nooa_coder.coding.settings import _SETTINGS_FILENAME as SETTINGS_FILENAME
+        from nooa_coder.workspace.settings import SETTINGS_FILENAME
 
         return (
             (self._project_dir / SETTINGS_FILENAME)
@@ -291,12 +291,7 @@ class MCPRegistry(Skill):
             return []
 
         from nooa.layered_config import load_layered_yaml
-        from nooa_coder.coding.settings import (
-            _SETTINGS_ENV_VAR as SETTINGS_ENV_VAR,
-        )
-        from nooa_coder.coding.settings import (
-            _SETTINGS_FILENAME as SETTINGS_FILENAME,
-        )
+        from nooa_coder.workspace.settings import SETTINGS_ENV_VAR, SETTINGS_FILENAME
 
         data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=self._project_dir)
         legacy = data.get("tui", {})
