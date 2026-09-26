@@ -29,7 +29,8 @@ class CodingSlashCommand:
     completions: tuple[str, ...] = ()
     output_to_agent: bool = True
     is_control: bool = False
-    _method: Any = field(default=None, repr=False)
+    # Not compared: a host re-installing the same controls is not a change.
+    _method: Any = field(default=None, repr=False, compare=False)
 
     def help_entry(self) -> tuple[str, str]:
         hint = self.argument_hint or ""
@@ -201,6 +202,7 @@ class CodingSlashCommandRegistry:
         return added
 
     def set_controls(self, controls):
+        """Replace the host controls; installing the same ones again changes nothing visible."""
         self.controls = {command.name: command for command in controls}
         self.refresh_skill_commands()
 

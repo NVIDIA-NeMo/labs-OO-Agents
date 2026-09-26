@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from nooa.interactive import InteractiveAgent
 from nooa.unifiedllm import get_llm_client
 from nooa_coder.session.loader import load_agent_class
+from nooa_coder.workspace.controls import behavior_commands
 from nooa_coder.workspace.options import CoderOptions, configure_session_skills
 
 if TYPE_CHECKING:
@@ -42,8 +43,8 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     A coding agent also gets the workspace's settings (``CoderOptions``):
     ``cwd``, ``skills_dirs``, ``summarization`` and a ``libs_dir`` inside
     the workspace, and then its MCP registry and configured skills
-    (``configure_session_skills``), before the registry restores any
-    snapshot. Connecting remembered MCP servers is async and is left to
+    (``configure_session_skills``) and its ``/skills`` and ``/mcp`` controls,
+    before the registry restores any snapshot. Connecting remembered MCP servers is async and is left to
     the host's ``prepare`` hook.
     """
     from nooa_coder.coding.agent import CodingAgent
@@ -91,7 +92,17 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     if coder_options is not None and isinstance(agent, CodingAgent):
         for warning in configure_session_skills(agent, coder_options):
             logger.warning("Session in %s: %s", options.workspace, warning)
-        agent.slash_commands.refresh_skill_commands()
+        # The /skills and /mcp controls belong to the agent, not to one host:
+        # MCPApprovalRequired tells the user to run /mcp approve. set_controls()
+        # also refreshes the skill commands.
+        agent.slash_commands.set_controls(
+            behavior_commands(
+                agent,
+                coder_options,
+                workspace=Path(coder_options.working_dir),
+                command_registry=agent.slash_commands,
+            )
+        )
     return agent
 
 
