@@ -9,7 +9,7 @@ live agents never cross.
 
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
@@ -126,10 +126,26 @@ class ChildFailedError(RuntimeError):
 
 
 class ChildResult(BaseModel):
-    """A child finished a turn with ``Done``; delivered on the parent's ``delegates`` channel."""
+    """A child finished a turn with ``Done``; delivered on the parent's ``delegates`` channel.
+
+    A ``done.result`` that arrives as data (a child that returned a dict, or
+    a result reloaded from the record) is rebuilt as a ``TaskResult`` when it
+    is one. ``delegate()`` gets its ``Done`` through this class too.
+    """
 
     child: ChildRef
     done: Done
+
+    @field_validator("done", mode="after")
+    @classmethod
+    def _task_result(cls, done: Done) -> Done:
+        if isinstance(done.result, dict):
+            try:
+                result = TaskResult.model_validate(done.result)
+            except ValidationError:
+                return done
+            done = done.model_copy(update={"result": result})
+        return done
 
 
 class ChildQuestion(BaseModel):

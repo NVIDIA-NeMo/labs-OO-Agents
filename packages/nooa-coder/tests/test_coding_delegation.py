@@ -91,6 +91,63 @@ async def test_a_spawned_childs_result_arrives_on_delegates_and_wakes_the_parent
     assert [ref.name for ref in root.agent.children()] == ["Review"]
 
 
+CHILD_DICT_RESULT = (
+    "return_result(Done(explanation='fixed', result={"
+    "'solution_description': 'patched parse()', 'evidence': 'tests pass', "
+    "'how_to_verify': 'pytest tests/test_parser.py', 'report': 'REPORT: dict result'}))"
+)
+
+
+async def test_a_spawned_childs_dict_result_arrives_as_a_task_result(
+    coder_registry, coder_options, coder_models
+):
+    coder_models.scripts[None] = [
+        cell(
+            "await self.spawn('Review', 'review the diff')\n"
+            "return_result(Waiting(explanation='review running', on=['delegates']))"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "return_result(Done(explanation='review: ' + item.done.result.report))"
+        ),
+    ]
+    coder_models.scripts["Review"] = [cell(CHILD_DICT_RESULT)]
+    root = await coder_registry.create(coder_options)
+    outcome = await asyncio.wait_for(root.prompt("review"), TIMEOUT)
+    assert outcome == Done(explanation="review: REPORT: dict result")
+
+
+async def test_delegate_coerces_a_dict_result_too(coder_registry, coder_options, coder_models):
+    coder_models.scripts[None] = [
+        cell(
+            "done = await self.delegate('Fix parser', 'fix the parser')\n"
+            "return_result(Done(explanation=done.result.report))"
+        )
+    ]
+    coder_models.scripts["Fix parser"] = [cell(CHILD_DICT_RESULT)]
+    root = await coder_registry.create(coder_options)
+    outcome = await asyncio.wait_for(root.prompt("fix it"), TIMEOUT)
+    assert outcome == Done(explanation="REPORT: dict result")
+
+
+def test_a_child_result_rebuilt_from_json_carries_a_task_result():
+    """A queued ChildResult reloaded from the record keeps its TaskResult."""
+    from nooa_coder.session.items import ChildRef, ChildResult
+
+    result = TaskResult(solution_description="s", evidence="e", how_to_verify="h", report="r")
+    item = ChildResult(
+        child=ChildRef(id="c", name="c", depth=1, status="idle"),
+        done=Done(explanation="x", result=result),
+    )
+    reloaded = ChildResult.model_validate_json(item.model_dump_json())
+    assert reloaded.done.result == result
+    # A result that is not a TaskResult stays as it was.
+    other = ChildResult.model_validate(
+        {"child": item.child.model_dump(), "done": {"explanation": "x", "result": {"a": 1}}}
+    )
+    assert other.done.result == {"a": 1}
+
+
 async def test_a_todo_objective_goes_as_text_and_gets_the_report(
     coder_registry, coder_options, coder_models
 ):
