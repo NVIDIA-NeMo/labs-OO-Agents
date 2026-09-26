@@ -3,6 +3,7 @@
 """Tests for translating NOOA events into ACP updates."""
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -38,6 +39,7 @@ from nooa_coder.session.items import (
     TitleChangedUpdate,
     TurnEndedUpdate,
 )
+from nooa_coder.session.session import Session
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
@@ -47,13 +49,20 @@ from nooa.unifiedllm import FakeLLMClient
 
 
 class _FakeSession:
-    """The part of a Session the bridge uses: its id, agent, info and updates."""
+    """The part of a Session the bridge uses: its id, agent, info and updates.
+
+    Like a Session, it counts each model call's usage (with the Session's
+    own ``_count_usage``) and emits a ``UsageChangedUpdate``.
+    """
 
     def __init__(self, agent: Any, session_id: str = "session-1") -> None:
         self.id = session_id
         self.agent = agent
         self.info = SessionInfo(id=session_id)
         self.listeners: list[Any] = []
+        self.handle = SimpleNamespace(update_usage=lambda usage: None)
+        self._emit = self.emit
+        agent.event_manager.on("LLMResponse", lambda event: Session._count_usage(self, event))
 
     def subscribe(self, listener: Any) -> Any:
         self.listeners.append(listener)
@@ -173,9 +182,7 @@ async def test_the_usage_update_carries_the_token_totals(tmp_path):
     agent = CodingAgent(llm=llm, cwd=tmp_path)
     client = _RecordingClient()
     session = _FakeSession(agent, "session-1")
-    session.info.usage = Usage(
-        input_tokens=40, cached_input_tokens=30, attributed_cached_input_tokens=5
-    )
+    session.info.usage = Usage(attributed_cached_input_tokens=5)
     bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
     agent.event_manager.add(LLMResponse(usage=LLMUsage(input_tokens=40, cached_input_tokens=30)))
     await bridge.flush()

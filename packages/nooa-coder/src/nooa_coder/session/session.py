@@ -988,7 +988,9 @@ class Session:
         totals = self.info.usage
         for name in USAGE_FIELDS:
             setattr(totals, name, getattr(totals, name) + (getattr(usage, name, 0) or 0))
+        totals.last_input_tokens = usage.input_tokens or 0
         self.handle.update_usage(totals)
+        self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
 
     # ---- output ------------------------------------------------------
 
