@@ -15,12 +15,14 @@ import asyncio
 import inspect
 import logging
 import os
+import re
 import signal
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from string import Formatter
 from typing import Any, cast
 from uuid import uuid4
 
@@ -74,6 +76,7 @@ from nooa.interactive import NeedInput
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
+from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
 from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
 from nooa_coder.acp.need_input import answer_from_content, need_input_schema
 from nooa_coder.coding.identity import CODING_AGENT, canonical_agent_spec
@@ -108,6 +111,19 @@ _CONNECT_TEXT = (
     "Connecting a model provider needs the terminal for now: run `nooa connect` in a "
     "shell, then pick the new model alias here."
 )
+
+
+def _template_pattern(template: str) -> re.Pattern[str]:
+    """A pattern matching ``template`` (a ``str.format`` string) with any field values."""
+    return re.compile(
+        "".join(
+            re.escape(literal) + (".*?" if field is not None else "")
+            for literal, field, _spec, _conversion in Formatter().parse(template)
+        )
+    )
+
+
+_MAX_ITERATIONS = _template_pattern(MAX_ITERATIONS_MESSAGE)
 
 _MODES = [
     SessionMode(
@@ -636,12 +652,12 @@ class CoderACPAgent:
         error = getattr(exc, "error", None) or exc.__cause__ or exc
         message = str(error)
         if isinstance(error, GenerationError):
-            # The wordings CodeActStrategy uses (nooa/strategies/codeact.py).
+            # The messages CodeActStrategy raises, from its own constants.
             # max_retries ("failed after N errors") is repeated invalid output,
             # not a limit on turn requests, so it stays an error.
-            if "The model used all available output tokens" in message:
+            if OUTPUT_TOKENS_EXHAUSTED_MESSAGE in message:
                 return PromptResponse(stop_reason="max_tokens")
-            if message.startswith("Generation failed after ") and "max_iterations=" in message:
+            if _MAX_ITERATIONS.search(message):
                 return PromptResponse(stop_reason="max_turn_requests")
         raise RequestError(-32603, message, {"details": message}) from exc
 
