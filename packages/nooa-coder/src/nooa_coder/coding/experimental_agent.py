@@ -9,33 +9,6 @@ import json  # noqa: F401 — module capability exposed to generated Python cell
 import re  # noqa: F401 — module capability exposed to generated Python cells
 from typing import Annotated, Any
 
-# Optional data libraries follow the standard InteractiveAgent capability aliases.
-try:
-    import numpy as np  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
-
-try:
-    import pandas as pd  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
-
-try:
-    import plotly.express as px  # noqa: F401  # type: ignore[import-untyped]
-    import plotly.graph_objects as go  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
-
-try:
-    import scipy  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
-
-try:
-    import sklearn  # noqa: F401  # type: ignore[import-untyped]
-except ImportError:
-    pass
-
 from nooa import hidden, strategy
 from nooa.agentdoc import doc  # noqa: F401 — used by dynamic context expressions
 from nooa.config import CodeActConfig

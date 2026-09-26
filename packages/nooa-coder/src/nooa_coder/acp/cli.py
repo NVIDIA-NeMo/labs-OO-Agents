@@ -94,7 +94,6 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
         "workspace's coding.agent_spec setting, else the coding agent."
     ),
 )
-@click.option("--legacy-agent", is_flag=True, help="Use the standard coding agent class.")
 @click.option(
     "--sessions-dir",
     type=click.Path(path_type=Path, file_okay=False),
@@ -124,7 +123,6 @@ def command(
     model: str,
     client_type: str | None,
     agent_spec: str | None,
-    legacy_agent: bool,
     sessions_dir: Path | None,
     tee: Path | None,
     single_process: bool,
@@ -144,16 +142,10 @@ def command(
     reserve_stdio_for_acp()
     from nooa.secrets import load_secrets_into_env
 
-    if agent_spec and legacy_agent:
-        raise click.UsageError("--agent and --legacy-agent cannot be used together.")
     if (worker_fd is None) != (id_base is None):
         raise click.UsageError("--worker-fd and --id-base go together.")
     if worker_fd is not None and single_process:
         raise click.UsageError("--single-process and --worker-fd cannot be used together.")
-    if legacy_agent:
-        from nooa_coder.coding.identity import CODING_AGENT
-
-        agent_spec = CODING_AGENT
     load_secrets_into_env()
     nvidia_api_key = os.getenv("NVIDIA_API_KEY")
 

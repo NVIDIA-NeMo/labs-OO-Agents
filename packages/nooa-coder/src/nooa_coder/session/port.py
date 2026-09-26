@@ -229,6 +229,5 @@ def install_port(
         agent.queue_manager.queue("delegates")
     if session.parent_id is not None and "context" not in channels:
         agent.queue_manager.queue("context")
-    session.port = port
     session.add_loop_context_hook(lambda: current_port.set(port))
     return port

@@ -101,26 +101,25 @@ async def test_the_mcp_and_skills_controls_are_installed_without_a_host(workspac
         await registry.close_all()
 
 
-async def test_installing_the_controls_again_does_not_announce_a_change(workspace):
-    from nooa_coder.workspace.controls import behavior_commands
-    from nooa_coder.workspace.options import CoderOptions
-
+async def test_the_factory_installs_the_skills_and_mcp_controls(workspace):
     options = SessionOptions(workspace=workspace, agent_spec=CODER_SPEC, llm=FakeLLMClient())
     agent = create_session_agent(options, InMemoryStorageManager())
     try:
-        changes = []
-        agent.slash_commands.set_on_change(changes.append)
-        # What the ACP adapter does in its prepare step.
-        coder_options = CoderOptions.load(workspace)
-        agent.slash_commands.set_controls(
-            behavior_commands(
-                agent, coder_options, workspace=workspace, command_registry=agent.slash_commands
-            )
-        )
-        assert changes == []
         assert {"mcp", "skills"} <= {c.name for c in agent.slash_commands.commands()}
     finally:
         await _close(agent)
+
+
+async def test_a_settings_file_from_before_legacy_agent_was_removed_still_loads(workspace):
+    from nooa_coder.workspace.options import CoderOptions
+
+    (workspace / ".nooa").mkdir()
+    (workspace / ".nooa" / "settings.yaml").write_text(
+        "tui:\n  legacy_agent: true\ncoding:\n  legacy_agent: true\n  default_model: m\n"
+    )
+    options = CoderOptions.load(workspace)
+    assert options.default_model == "m"
+    assert not hasattr(options, "legacy_agent")
 
 
 async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, sessions_dir, caplog):

@@ -32,7 +32,6 @@ def behavior_fields() -> frozenset[str]:
 
     return frozenset(CoderOptions.model_fields) - {
         "working_dir",
-        "legacy_agent",
         "skills_dirs",
         "agent_spec",
     }

@@ -24,7 +24,6 @@ class CoderOptions(BaseModel):
 
     working_dir: str = "."
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig)
-    legacy_agent: bool = False
     agent_spec: str | None = None
     skills_dirs: list[Path] = Field(default_factory=list)
     additional_skills_dirs: list[Path] = Field(default_factory=list)

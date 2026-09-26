@@ -76,17 +76,7 @@ def test_a_relative_agent_file_is_resolved_where_the_command_runs(served, tmp_pa
     assert served["agent_spec"] == "pkg.module:Agent"
 
 
-def test_agent_and_legacy_agent_exclude_each_other(served):
-    result = _invoke(["--model", "m", "--agent", "pkg:A", "--legacy-agent"])
-    assert result.exit_code == 2
-    assert "--legacy-agent" in result.output
-
-
-def test_legacy_agent_selects_the_coding_agent(served):
-    from nooa_coder.coding.identity import CODING_AGENT
-
-    assert _invoke(["--model", "m", "--legacy-agent"]).exit_code == 0
-    assert served["agent_spec"] == CODING_AGENT
+def test_without_agent_the_workspace_setting_decides(served):
     assert _invoke(["--model", "m"]).exit_code == 0
     assert served["agent_spec"] is None  # the workspace setting, else the coding agent
 

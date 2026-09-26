@@ -25,7 +25,7 @@ upwards, with `B = k << 32` for worker `k`. The router sends each reply to the
 worker whose id range contains the reply's id.
 
 The shared options are `--model` (or `NOOA_MODEL`, required), `--client-type`,
-`--agent` or `--legacy-agent`, `--sessions-dir` (or `NOOA_SESSIONS_DIR`) and
+`--agent`, `--sessions-dir` (or `NOOA_SESSIONS_DIR`) and
 `--tee`. The router starts
 each worker by re-running its own command line (`sys.orig_argv`) with
 `--worker-fd` and `--id-base` added. A worker therefore runs the same
