@@ -59,6 +59,20 @@ async def connect_session_mcp(agent: Any, options: CoderOptions) -> list[str]:
     return warnings
 
 
+def drop_stale_memory_context(agent: Any) -> None:
+    """Drop memory prompts an older shared-host snapshot restored.
+
+    The memory skill itself is excluded from snapshots, but its context
+    blocks were not. Restoring is additive, so this runs after the restore
+    (``CodingAgent.after_restore``). An agent that attached its own
+    ``memory`` keeps them.
+    """
+    if not hasattr(agent, "memory"):
+        for key in ("memory_system", "recalled_memories"):
+            if key in agent.context:
+                del agent.context[key]
+
+
 def configure_session_skills(agent: Any, options: CoderOptions) -> list[str]:
     """Attach the same MCP registry and explicit skills before resume events.
 
@@ -67,14 +81,6 @@ def configure_session_skills(agent: Any, options: CoderOptions) -> list[str]:
     """
     from nooa_coder.workspace.mcp_registry import MCPRegistry
     from nooa_coder.workspace.workspace_settings import WorkspaceSettings
-
-    # Older shared-host snapshots contain memory prompts even though the skill
-    # itself is excluded from snapshots. Drop those prompts when no custom agent
-    # has explicitly attached its own memory implementation.
-    if not hasattr(agent, "memory"):
-        for key in ("memory_system", "recalled_memories"):
-            if key in agent.context:
-                del agent.context[key]
 
     skills = getattr(agent, "skills", None)
     if skills is None:
