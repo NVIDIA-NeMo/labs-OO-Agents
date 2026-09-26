@@ -8,6 +8,7 @@ import asyncio
 import copy
 import fnmatch
 import inspect
+import json
 import keyword
 import logging
 import os
@@ -47,6 +48,15 @@ _FACTORY_CONFIG_FIELDS = (
     "oauth_open_browser",
     "oauth_manual",
 )
+
+
+def _file_state(path: Path) -> tuple[int, int, int] | None:
+    """What tells a changed file from an unchanged one: inode, mtime, size."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
 
 def _to_attr_name(name: str) -> str:
@@ -254,6 +264,7 @@ class MCPRegistry(Skill):
         self._settings_server_names = set(self._servers)
         self._registered_server_names: set[str] = set()
         self._approval_store = MCPApprovalStore(approval_path)
+        self._status_cache: tuple[tuple[Any, ...], str] | None = None
         self._connected: dict[str, Any] = {}
         self._activated: set[str] = set()
         self._oauth_code_prompt: Callable[[str], Awaitable[str]] | None = None
@@ -638,8 +649,24 @@ class MCPRegistry(Skill):
           agent until re-activated.
         * **Configured** — known but not connected; how to connect.
 
-        Matches the ``<skills>`` block so the two read identically.
+        Matches the ``<skills>`` block so the two read identically. It is
+        rendered on every turn, so the text is kept until the config file,
+        the approvals file, the inline servers or the connections change.
         """
+        key = (
+            _file_state(self._mcp_file or Path(".mcp.json")),
+            _file_state(self._approval_store.path),
+            json.dumps(self._servers, sort_keys=True, default=str),
+            tuple(sorted((name, id(tool)) for name, tool in self._connected.items())),
+            frozenset(self._activated),
+        )
+        if self._status_cache is not None and self._status_cache[0] == key:
+            return self._status_cache[1]
+        text = self._render_status()
+        self._status_cache = (key, text)
+        return text
+
+    def _render_status(self) -> str:
         configured = self.discovered()
         if not configured:
             return "No MCP servers configured."

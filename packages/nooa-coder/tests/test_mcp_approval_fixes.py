@@ -102,3 +102,29 @@ def test_revoking_also_drops_this_workspaces_approval_of_an_older_config(tmp_pat
     a._revoke_approvals("gdrive")
     a._servers["gdrive"] = {"command": "run-gdrive"}
     assert not a._is_approved("gdrive")
+
+
+def test_status_reads_the_config_again_only_after_it_changes(tmp_path, monkeypatch):
+    """status() renders the <mcp> block every turn; unchanged files are not re-read."""
+    import json
+
+    import nooa_coder.workspace.mcp_approval as approval
+    from nooa_coder.workspace.mcp_registry import MCPRegistry
+
+    mcp_file = tmp_path / ".mcp.json"
+    mcp_file.write_text(json.dumps({"mcpServers": {"tool": {"command": "run-tool"}}}))
+    registry = MCPRegistry(mcp_file=mcp_file, approval_path=tmp_path / "approvals.json")
+    reads = []
+    load = approval._load_server_config
+    monkeypatch.setattr(
+        approval, "_load_server_config", lambda *a, **k: reads.append(a) or load(*a, **k)
+    )
+    first = registry.status()
+    assert "[approval required]" in first
+    assert registry.status() == first
+    assert len(reads) == 1
+    # Approving (another file) and editing the config both show up.
+    registry._approve("tool", registry._approval_request("tool").confirmation)
+    assert "[approval required]" not in registry.status()
+    mcp_file.write_text(json.dumps({"mcpServers": {"other": {"command": "run-other-tool"}}}))
+    assert "run-other-tool" in registry.status()
