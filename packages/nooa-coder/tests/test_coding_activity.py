@@ -447,3 +447,24 @@ async def test_overwrite_reads_the_previous_content_boundedly(tmp_path):
     # "<= limit" assertion.
     assert reads, "the previous content was never read"
     assert all(0 < size <= activity._MAX_DIFF_INPUT_CHARS + 1 for size in reads), reads
+
+
+async def test_run_and_run_stream_forward_a_per_command_cwd(tmp_path):
+    """The rendered doc offers cwd= (copied from ShellTools.run); it must work."""
+    (tmp_path / "sub").mkdir()
+    shell, events = _observed_shell(tmp_path)
+    try:
+        result = await shell.run("pwd", cwd="sub")
+        assert result.stdout.strip() == str(tmp_path / "sub")
+        chunks = [item async for item in shell.run_stream("pwd", cwd="sub")]
+        assert str(tmp_path / "sub") in "".join(getattr(c, "text", "") for c in chunks)
+        # The shell's own directory is unchanged.
+        assert (await shell.run("pwd")).stdout.strip() == str(tmp_path)
+    finally:
+        await shell.close()
+    started = [event for event in events if isinstance(event, TerminalCommandStarted)]
+    assert [event.working_directory for event in started] == [
+        str(tmp_path / "sub"),
+        str(tmp_path / "sub"),
+        str(tmp_path),
+    ]

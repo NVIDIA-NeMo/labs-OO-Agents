@@ -261,6 +261,10 @@ class ActivityShellTools(Skill):
     def _resolve_path(self, path: str) -> Path:
         return self._shell._resolve_path(path)
 
+    def _command_directory(self, cwd: str | Path | None) -> str:
+        """The directory one command runs in: its own ``cwd=``, else the shell's."""
+        return str(self.cwd if cwd is None else self._resolve_path(str(cwd)))
+
     def _diff_path(self, resolved: Path) -> str:
         try:
             return resolved.relative_to(self.cwd).as_posix()
@@ -282,6 +286,9 @@ class ActivityShellTools(Skill):
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
         timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        cwd: Annotated[
+            str | Path | None, spec(description="Directory for this command only")
+        ] = None,
     ) -> ShellResult:
         command_id = str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -295,14 +302,14 @@ class ActivityShellTools(Skill):
             TerminalCommandStarted(
                 command_id=command_id,
                 command=bounded_command,
-                working_directory=str(self.cwd),
+                working_directory=self._command_directory(cwd),
                 stdin=bounded_stdin,
                 command_truncated=command_truncated,
                 stdin_truncated=stdin_truncated,
             )
         )
         try:
-            result = await self._shell.run(command, stdin=stdin, timeout=timeout)
+            result = await self._shell.run(command, stdin=stdin, timeout=timeout, cwd=cwd)
         except BaseException as error:
             cancelled = isinstance(error, asyncio.CancelledError)
             self._emit(
@@ -347,6 +354,9 @@ class ActivityShellTools(Skill):
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
         timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        cwd: Annotated[
+            str | Path | None, spec(description="Directory for this command only")
+        ] = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         command_id = str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -355,7 +365,7 @@ class ActivityShellTools(Skill):
             TerminalCommandStarted(
                 command_id=command_id,
                 command=bounded_command,
-                working_directory=str(self.cwd),
+                working_directory=self._command_directory(cwd),
                 command_truncated=command_truncated,
                 stdin=(
                     pformat(stdin, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -368,7 +378,7 @@ class ActivityShellTools(Skill):
         finished = False
         stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
         stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
-        stream = self._shell.run_stream(command, stdin=stdin, timeout=timeout)
+        stream = self._shell.run_stream(command, stdin=stdin, timeout=timeout, cwd=cwd)
         try:
             async for item in stream:
                 if isinstance(item, StreamDone):
