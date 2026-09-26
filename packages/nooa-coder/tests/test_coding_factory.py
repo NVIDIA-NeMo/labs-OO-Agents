@@ -76,7 +76,7 @@ async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=llm))
-        agent = root.agent
+        agent = root._agent
         assert isinstance(agent, CodingAgent)
         assert agent.cwd == workspace.resolve()
         assert agent.llm is llm
@@ -95,7 +95,7 @@ async def test_the_mcp_and_skills_controls_are_installed_without_a_host(workspac
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         names = {command.name for command in root.commands()}
         assert {"mcp", "skills"} <= names
-        result = await root.agent.slash_commands.invoke("mcp", "status")
+        result = await root._agent.slash_commands.invoke("mcp", "status")
         assert "MCP servers" in str(result.value)
     finally:
         await registry.close_all()
@@ -130,8 +130,8 @@ async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, ses
     try:
         with caplog.at_level("WARNING"):
             root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
-        assert isinstance(root.agent, CodingAgent)
-        assert root.agent.cwd == workspace.resolve()
+        assert isinstance(root._agent, CodingAgent)
+        assert root._agent.cwd == workspace.resolve()
         [warning] = [r.getMessage() for r in caplog.records if str(settings) in r.getMessage()]
         assert "active_skills" in warning
     finally:
@@ -289,14 +289,14 @@ async def test_stale_memory_context_is_dropped_after_a_reload(workspace, session
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         session_id = root.id
-        root.agent.context["memory_system"] = "stale memory prompt"
-        root.agent.context["recalled_memories"] = "stale recall"
+        root._agent.context["memory_system"] = "stale memory prompt"
+        root._agent.context["recalled_memories"] = "stale recall"
         root._checkpoint()
         await root.wait_for_checkpoint()
         await registry.close(session_id)
         loaded = await registry.load(session_id, llm=FakeLLMClient())
-        assert "memory_system" not in loaded.agent.context
-        assert "recalled_memories" not in loaded.agent.context
+        assert "memory_system" not in loaded._agent.context
+        assert "recalled_memories" not in loaded._agent.context
     finally:
         await registry.close_all()
 
@@ -389,7 +389,7 @@ async def test_a_host_registry_builds_the_workspace_default_model(
         assert aliases == [None]
         [client] = built
         assert client.alias == "ws-model"
-        assert root.agent.llm is client
+        assert root._agent.llm is client
         assert root.info.model == "ws-model"
         await registry.close(root.id)
         assert client.closed is True

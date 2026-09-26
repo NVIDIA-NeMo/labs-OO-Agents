@@ -659,7 +659,7 @@ class SessionRegistry:
                     admitted[item_id] = raw
             else:
                 finished.add(item_id)
-        channels = session.agent.queue_manager.channels()
+        channels = session._agent.queue_manager.channels()
         for item_id, raw in admitted.items():
             if item_id in finished:
                 continue
@@ -760,7 +760,7 @@ def _admit_delegate(parent: Session, item: Any, source: str) -> Receipt:
     The channel is re-created if the parent's agent removed it, so a
     child's result is never lost to a ``remove_channel("delegates")``.
     """
-    queues = parent.agent.queue_manager
+    queues = parent._agent.queue_manager
     if "delegates" not in queues.channels():
         queues.queue("delegates")
     return parent.admit(item, channel="delegates", source=source)

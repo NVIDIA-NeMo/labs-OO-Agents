@@ -30,7 +30,7 @@ async def _prompt(adapter, session_id, text):
 
 
 async def test_a_done_turn_ends_the_prompt_after_its_messages(make_adapter, workspace, client):
-    adapter = await make_adapter(ScriptedModels({None: [reply("Hello there.")]}))
+    adapter = await make_adapter(ScriptedModels({None: [reply("Hello there.\n")]}))
     session_id = await _new(adapter, workspace)
     response = await _prompt(adapter, session_id, "hi")
     client.log.append(("response", "prompt", response))
@@ -195,7 +195,7 @@ async def test_cancel_without_a_turn_is_harmless_and_the_session_goes_on(make_ad
 async def test_the_session_is_usable_after_a_cancel(make_adapter, workspace, client):
     started, _block = fresh_events()
     adapter = await make_adapter(
-        ScriptedModels({None: [cell(BLOCKING_CELL), reply("Back again.")]})
+        ScriptedModels({None: [cell(BLOCKING_CELL), reply("Back again.\n")]})
     )
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("wait")]))
@@ -255,7 +255,7 @@ async def test_a_command_with_text_output_answers_without_a_turn(make_adapter, w
     response = await _prompt(adapter, session_id, "/model fast")
     assert response.stop_reason == "end_turn"
     assert client.texts(AgentMessageChunk, session_id)[-1] == "model is fast\n"
-    agent = adapter.session(session_id).agent
+    agent = adapter.session(session_id)._agent
     assert isinstance(agent, CommandAgent)
     assert agent.slash_commands.invoked == [("model", "fast")]
 
@@ -271,7 +271,7 @@ async def test_a_command_meant_for_the_agent_runs_a_turn(coder_adapter, workspac
     (workspace / ".nooa" / "settings.yaml").write_text(
         f"coding:\n  additional_skills_dirs:\n    - {workspace / 'skills'}\n"
     )
-    adapter = await coder_adapter([reply("Reviewed.")])
+    adapter = await coder_adapter([reply("Reviewed.\n")])
     session_id = await _new(adapter, workspace)
     response = await _prompt(adapter, session_id, '/review-this "two words"')
     assert response.stop_reason == "end_turn"
@@ -393,7 +393,7 @@ async def test_an_unknown_slash_command_is_an_ordinary_prompt(make_adapter, work
 async def test_a_failing_command_reports_the_failure(make_adapter, workspace, client):
     adapter = await make_adapter(ScriptedModels(), agent_spec="coder_test_agents:CommandAgent")
     session_id = await _new(adapter, workspace)
-    agent = adapter.session(session_id).agent
+    agent = adapter.session(session_id)._agent
 
     async def broken(name, raw_args):
         raise RuntimeError("command exploded")
@@ -409,7 +409,7 @@ async def test_a_command_for_the_agent_with_no_output_says_so(make_adapter, work
 
     adapter = await make_adapter(ScriptedModels(), agent_spec="coder_test_agents:CommandAgent")
     session_id = await _new(adapter, workspace)
-    agent = adapter.session(session_id).agent
+    agent = adapter.session(session_id)._agent
 
     async def empty(name, raw_args):
         return _CommandOutput("", None, True)

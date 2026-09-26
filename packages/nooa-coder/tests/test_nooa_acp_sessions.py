@@ -65,12 +65,12 @@ async def test_an_old_session_is_listed_and_loads_with_its_state(tmp_path, agent
     registry = SessionRegistry(store, agent_factory=create_session_agent)
     try:
         session = await registry.load(session_id, llm=FakeLLMClient([]))
-        assert isinstance(session.agent, CodingAgent)
-        assert session.agent.cwd == workspace.resolve()
+        assert isinstance(session._agent, CodingAgent)
+        assert session._agent.cwd == workspace.resolve()
         assert [(e.role, e.content) for e in session.transcript()] == [
             ("user", "please remember the plan")
         ]
-        assert _TODO in session.agent.todo.status()
+        assert _TODO in session._agent.todo.status()
     finally:
         await registry.close_all()
 
@@ -93,7 +93,7 @@ async def test_a_snapshot_that_cannot_be_restored_still_loads(tmp_path, caplog):
         assert (user.role, user.content) == ("user", "please remember the plan")
         assert note.role == "note"
         assert "could not be restored" in note.content
-        assert _TODO not in session.agent.todo.status()
+        assert _TODO not in session._agent.todo.status()
         assert registry.get(session_id) is session
     finally:
         await registry.close_all()
@@ -133,6 +133,6 @@ async def test_an_unreadable_latest_snapshot_falls_back_to_the_one_before(tmp_pa
         [user, note] = session.transcript()
         assert user.role == "user"
         assert "restored the older snapshot" in note.content
-        assert _TODO in session.agent.todo.status()
+        assert _TODO in session._agent.todo.status()
     finally:
         await registry.close_all()

@@ -76,3 +76,41 @@ def test_no_module_uses_private_core_names_that_have_public_replacements():
         if re.search(pattern, line)
     ]
     assert hits == []
+
+
+def _agent_reaches(path: Path) -> list[str]:
+    """Attribute reads named ``agent``/``_agent``, and ``getattr(x, "agent")``, in one file."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    names = {"agent", "_agent"}
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in names:
+            hits.append(f"{path.name}:{node.lineno}: .{node.attr}")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("getattr", "setattr", "hasattr")
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in names
+        ):
+            hits.append(f"{path.name}:{node.lineno}: {node.func.id}(..., {node.args[1].value!r})")
+    return hits
+
+
+def test_the_acp_package_never_reaches_the_agent():
+    """Data only across the Session boundary: the ACP adapter, router and bridge
+    use the Session's methods and updates, never the agent it owns.
+
+    Module imports such as ``acp.agent.connection`` are not attribute reads
+    and do not count.
+    """
+    root = Path(nooa_coder.__file__).parent / "acp"
+    sources = sorted(root.rglob("*.py"))
+    assert sources
+    assert [hit for path in sources for hit in _agent_reaches(path)] == []
+
+
+async def test_the_session_keeps_its_agent_private(make_session):
+    session, _ = make_session(start=False)
+    assert not hasattr(session, "agent")

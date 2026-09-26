@@ -162,7 +162,10 @@ class Session:
     """One agent, its turn loop and its durable record.
 
     Built by the registry, which calls :meth:`start` after publishing it.
-    Nobody else holds the agent.
+    Nobody else holds the agent: it is private (``_agent``), read only by
+    the registry in this package. Hosts use the methods and the update
+    stream (``subscribe``), which carries the agent's events as
+    ``AgentEventUpdate``.
     """
 
     def __init__(
@@ -182,7 +185,7 @@ class Session:
         self.depth: int = info.depth
         self.name: str | None = info.name
         self.options = options
-        self.agent = agent
+        self._agent = agent
         self.handle = handle
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
@@ -270,7 +273,7 @@ class Session:
         context = contextvars.Context()
         for hook in self._loop_context_hooks:
             context.run(hook)
-        self.agent.turns.start(
+        self._agent.turns.start(
             turn_method=self.options.turn_method,
             context=context,
             prepare=self._prepare_turn,
@@ -292,13 +295,13 @@ class Session:
         """
         if self.id in _closing_sessions.get():
             return
-        if self.agent.turns.in_turn:
+        if self._agent.turns.in_turn:
             raise RuntimeError("an executing turn cannot close its own session")
         if self._closed:
             return
         if self._close_task is None:
             self._closing = True
-            self.agent.turns.pause()
+            self._agent.turns.pause()
             self._close_task = asyncio.ensure_future(self._close())
         await asyncio.shield(self._close_task)
 
@@ -318,9 +321,9 @@ class Session:
         # No new turn from here on (a running one goes on while children
         # close): an item a doomed turn took would be recorded as consumed
         # and never come back on load.
-        self.agent.turns.stop_starting()
+        self._agent.turns.stop_starting()
         await self._close_step("closing its children", self._before_close)
-        await self._close_step("stopping the turn loop", self.agent.turns.stop)
+        await self._close_step("stopping the turn loop", self._agent.turns.stop)
         self._resolve_all(TurnCancelledOutcome(by="host"))
         pending, self._pending_model = self._pending_model, None
         if pending is not None:
@@ -328,8 +331,8 @@ class Session:
         await self._close_step("waiting for the checkpoint", self.wait_for_checkpoint)
         await self._close_step("unsubscribing from agent events", self._unsubscribe_agent)
         await self._close_step("unsubscribing the steer flush", self._unsubscribe_steers)
-        await self._close_step("stopping the agent's jobs", self.agent.queue_manager.shutdown)
-        await self._close_step("closing the agent", self.agent.aclose)
+        await self._close_step("stopping the agent's jobs", self._agent.queue_manager.shutdown)
+        await self._close_step("closing the agent", self._agent.aclose)
         for unsubscribe in self._unsubscribe_items:
             await self._close_step("unsubscribing from its queues", unsubscribe)
         await self._close_step("closing its model client", self._close_owned_llm)
@@ -359,7 +362,7 @@ class Session:
         prompts left open by a ``Waiting`` are closed with
         ``TurnCancelledOutcome`` and no event is written.
         """
-        if await self.agent.turns.cancel(by=by):
+        if await self._agent.turns.cancel(by=by):
             return True
         waiting, self._waiting = self._waiting, []
         for item_id in waiting:
@@ -386,15 +389,15 @@ class Session:
     def _ensure_external_admission(self) -> None:
         """Reject new external work while allowing durable internal deliveries."""
         self._ensure_open()
-        if self.agent.turns.dispatch_error is not None:
+        if self._agent.turns.dispatch_error is not None:
             raise TurnFailedError(
-                "dispatch is blocked; repair and resume_dispatch()", self.agent.turns.dispatch_error
+                "dispatch is blocked; repair and resume_dispatch()", self._agent.turns.dispatch_error
             )
 
     def requeue(self, item: Any, *, channel: str, source: str, item_id: str) -> Receipt:
         """Own the replay record and synchronous queue admission together."""
         self._ensure_open()
-        target = self.agent.queue_manager.channels().get(channel)
+        target = self._agent.queue_manager.channels().get(channel)
         if target is None or target.mode != "queue":
             raise ValueError(f"no queue channel {channel!r}")
         self.handle.events.add(ItemRequeued(item_id=item_id))
@@ -409,7 +412,7 @@ class Session:
         self._ensure_open()
         self._admit_leftover_steers()  # repaired ledger: explicit buffered-steer retry
         self._recording_error = None
-        self.agent.turns.resume()
+        self._agent.turns.resume()
 
     async def submit(
         self, item: Any, *, channel: str = "user_messages", source: str = "user"
@@ -430,7 +433,7 @@ class Session:
         A steer is never lost.
         """
         self._ensure_external_admission()
-        if not self.agent.turns.running or self.info.status != "running":
+        if not self._agent.turns.running or self.info.status != "running":
             return self.admit(text, channel="user_messages", source=source)
         event = ItemAdmitted(
             channel="steer", item_json=item_to_json(text), item_type=type_name(text), source=source
@@ -454,7 +457,7 @@ class Session:
 
     def _flush_steers(self, _event: Any) -> None:
         """``BeforeTurn`` handler: hand buffered steers to the coming model call."""
-        if not self._pending_steers or not self.agent.turns.running:
+        if not self._pending_steers or not self._agent.turns.running:
             return
         while self._pending_steers:
             item_id, text, source = self._pending_steers[0]
@@ -462,7 +465,7 @@ class Session:
                 self.handle.events.add(ItemConsumed(item_id=item_id))
                 self._consumed.append(item_id)
                 self._pending_steers.pop(0)
-                self.agent.event_manager.add(
+                self._agent.event_manager.add(
                     Notification(source=_steer_source(source), description=text)
                 )
             except (Exception, asyncio.CancelledError) as exc:
@@ -502,7 +505,7 @@ class Session:
 
     def _remove_queued(self, channel_name: str, item_id: str) -> bool:
         entries = self._ids.get(channel_name)
-        channel = self.agent.queue_manager.channels().get(channel_name)
+        channel = self._agent.queue_manager.channels().get(channel_name)
         if not entries or channel is None:
             return False
         index = next((i for i, (_, known) in enumerate(entries) if known == item_id), None)
@@ -578,7 +581,7 @@ class Session:
         """
         if self._closed or (self._closing and not internal):
             raise SessionClosedError(f"Session {self.id!r} is closed")
-        target = self.agent.queue_manager.channels().get(channel)
+        target = self._agent.queue_manager.channels().get(channel)
         if target is None or target.mode != "queue":
             raise ValueError(f"Session {self.id!r} has no queue channel {channel!r}")
         event = ItemAdmitted(
@@ -610,8 +613,8 @@ class Session:
 
     def _record_failure(self, exc: BaseException, item_ids: list[str]) -> None:
         self._recording_error = exc
-        self.agent.turns.dispatch_error = exc
-        self.agent.turns.pause()
+        self._agent.turns.dispatch_error = exc
+        self._agent.turns.pause()
         error = TurnFailedError(f"consumption recording failed: {type(exc).__name__}: {exc}", exc)
         for item_id in [*item_ids, *(identity for identity, _, _ in self._pending_steers)]:
             self._resolve(item_id, error)
@@ -759,11 +762,11 @@ class Session:
         text = getattr(outcome, "message", None) if isinstance(outcome, Done | Waiting) else None
         if not text or text in self._turn_messages:
             return False
-        send = getattr(self.agent, "message", None)
+        send = getattr(self._agent, "message", None)
         if callable(send):
             send(text)
         else:
-            self.agent.event_manager.add(AgentMessage(content=text))
+            self._agent.event_manager.add(AgentMessage(content=text))
         return True
 
     def _settle(self, event: TurnSettled) -> None:
@@ -826,7 +829,7 @@ class Session:
         affected; the next settled turn tries again.
         """
         try:
-            blob = json.dumps(snapshot_to_json(self.agent), sort_keys=True)
+            blob = json.dumps(snapshot_to_json(self._agent), sort_keys=True)
         except Exception:
             logger.warning(
                 "Session %s: checkpoint could not serialise the agent", self.id, exc_info=True
@@ -897,7 +900,7 @@ class Session:
         A host calls this once, in the registry's ``prepare`` step, before
         the first turn.
         """
-        hook = getattr(self.agent, "prepare_tools", None)
+        hook = getattr(self._agent, "prepare_tools", None)
         if not callable(hook):
             return []
         return [str(warning) for warning in await hook()]
@@ -910,7 +913,7 @@ class Session:
         already provides); the others are registered. Call before the
         first turn (the registry's ``prepare`` step).
         """
-        skills = getattr(self.agent, "skills", None)
+        skills = getattr(self._agent, "skills", None)
         failed: dict[str, str] = {}
         for name, tool in tools.items():
             if skills is None:
@@ -935,7 +938,7 @@ class Session:
         ``commands()`` returns objects with ``name``, ``description`` and
         ``argument_hint``, and ``invoke(name, raw_args)`` runs one.
         """
-        registry = getattr(self.agent, "slash_commands", None)
+        registry = getattr(self._agent, "slash_commands", None)
         if registry is None:
             return []
         return [
@@ -949,7 +952,7 @@ class Session:
 
     async def invoke_command(self, name: str, raw_args: str) -> CommandResult:
         """Run a slash command through the agent's registry; ``KeyError`` if unknown."""
-        registry = getattr(self.agent, "slash_commands", None)
+        registry = getattr(self._agent, "slash_commands", None)
         if registry is None:
             raise KeyError(name)
         result = await registry.invoke(name, raw_args)
@@ -1013,14 +1016,14 @@ class Session:
         if pending is None:
             return
         alias, client = pending
-        old_agent_llm = self.agent.llm
+        old_agent_llm = self._agent.llm
         try:
-            self.agent.set_llm(client)
-            apply_model_limits(self.agent)
+            self._agent.set_llm(client)
+            apply_model_limits(self._agent)
         except BaseException:
             # Attempt once. Failed clients remain owned for later cleanup.
             self._retired_llms.append(client)
-            self.agent.set_llm(old_agent_llm)
+            self._agent.set_llm(old_agent_llm)
             raise
         old, self._owned_llm = self._owned_llm, client
         # New same-model children share the new client.
@@ -1034,13 +1037,13 @@ class Session:
 
     def channels(self) -> list[str]:
         """Names of the agent's queue channels: where ``submit`` can put an item."""
-        return list(self.agent.queue_manager.channels())
+        return list(self._agent.queue_manager.channels())
 
     def _next_llm(self) -> Any:
         """The client the next model call uses: one a ``set_model`` left pending, else the agent's."""
         if self._pending_model is not None:
             return self._pending_model[1]
-        return getattr(self.agent, "llm", None)
+        return getattr(self._agent, "llm", None)
 
     def model_info(self) -> ModelInfo:
         """The model the next call uses, as data: alias, context window, reasoning levels.
@@ -1083,7 +1086,7 @@ class Session:
 
     def _restore_reasoning(self, level: str) -> None:
         """Apply a recorded level on load, if the client still declares it."""
-        client = getattr(self.agent, "llm", None)
+        client = getattr(self._agent, "llm", None)
         if level in tuple(getattr(client, "reasoning_levels", None) or ()):
             client.reasoning_level = level
         else:
@@ -1167,7 +1170,7 @@ class Session:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)
-        if isinstance(event, AgentMessage) and self.agent.turns.in_turn:
+        if isinstance(event, AgentMessage) and self._agent.turns.in_turn:
             self._turn_messages.add(event.content)
 
     def host_status(self) -> dict[str, Any]:
@@ -1178,7 +1181,7 @@ class Session:
         state, and ``todos``). Values that are not JSON become strings. A
         failure is logged and reads as ``{}``.
         """
-        status = getattr(self.agent, "host_status", None)
+        status = getattr(self._agent, "host_status", None)
         if not callable(status):
             return {}
         try:
