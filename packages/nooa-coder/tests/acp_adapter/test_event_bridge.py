@@ -956,3 +956,14 @@ async def test_a_grandchild_is_announced_before_its_mirrored_cards(tmp_path):
     await bridge.close()
     for agent in agents.values():
         await agent.aclose()
+
+
+async def test_detaching_leaves_open_cards_alone_even_if_the_session_closed_first(bridged):
+    """close(finish_open=False) wins over a close already started by the session."""
+    agent, session, client, bridge = bridged
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="t1", name="execute_python", arguments={"code": "x"})
+    )
+    session.emit(ClosedUpdate(session_id="session-1"))  # starts a close that finishes cards
+    await bridge.close(finish_open=False)
+    assert [u for _, u in client.updates if isinstance(u, ToolCallProgress)] == []

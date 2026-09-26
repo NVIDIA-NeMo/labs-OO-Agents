@@ -159,6 +159,9 @@ class ACPEventBridge:
         self._pump_failure: BaseException | None = None
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+        # Sticky: any close(finish_open=False) before the cards are finalised
+        # wins, whoever started the close.
+        self._finish_open = True
         self._open_tools: set[ToolKey] = set()
         self._python_source: dict[ToolKey, str] = {}
         self._terminal_output: dict[ToolKey, str] = {}
@@ -677,9 +680,14 @@ class ACPEventBridge:
 
         ``finish_open`` closes cards still open as "Unfinished"; a bridge
         detached from a session that goes on running leaves them alone.
+        ``finish_open=False`` counts even when a close is already under way
+        (the session's own ``closed`` update, say), as long as that close
+        has not yet finalised the cards.
         """
+        if not finish_open:
+            self._finish_open = False
         if self._close_task is None:
-            self._close_task = asyncio.ensure_future(self._close(finish_open=finish_open))
+            self._close_task = asyncio.ensure_future(self._close())
         await asyncio.shield(self._close_task)
 
     async def wait_closed(self) -> None:
@@ -688,7 +696,7 @@ class ACPEventBridge:
             await asyncio.sleep(0)
         await asyncio.shield(self._close_task)
 
-    async def _close(self, *, finish_open: bool = True) -> None:
+    async def _close(self) -> None:
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers.clear()
@@ -697,7 +705,7 @@ class ACPEventBridge:
                 unsubscribe()
         # A turn that ended before its PythonOutput — an exception escaping the
         # strategy, say — leaves cards in_progress and their source retained.
-        if finish_open:
+        if self._finish_open:
             # Every card, mirrored children's too: nothing will close them now.
             self._fail_tools(
                 sorted(self._open_tools), "Session closed before this finished.", title="Unfinished"
