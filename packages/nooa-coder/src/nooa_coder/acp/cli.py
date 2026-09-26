@@ -187,7 +187,8 @@ async def _serve(
         SessionStore(sessions_dir), agent_factory=agent_factory, llm_factory=llm_factory
     )
     observers: list[Any] = []
-    if (trace := MCPHandoffTrace.from_env()) is not None:
+    trace = MCPHandoffTrace.from_env()
+    if trace is not None:
         observers.append(trace)
     frame_log = FrameLog(tee) if tee is not None else None
     if frame_log is not None:
@@ -202,8 +203,12 @@ async def _serve(
             output_fd=acp_stdout,
         )
     finally:
-        if frame_log is not None:
-            frame_log.close()
+        try:
+            if frame_log is not None:
+                frame_log.close()
+        finally:
+            if trace is not None:
+                trace.close()
 
 
 def main() -> None:
