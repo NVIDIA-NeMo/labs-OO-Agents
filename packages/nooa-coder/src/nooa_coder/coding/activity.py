@@ -64,6 +64,28 @@ def _offset_hunk_header(line: str, offset: int) -> str:
     return f"@@ {old_part} {new_part} @@{trailer}\n"
 
 
+# Above this many characters (old and new together) the diff is computed in a
+# worker thread: difflib can take seconds on a large file with scattered edits,
+# and every session shares one event loop.
+_DIFF_INLINE_CHARS = 20_000
+
+
+async def _edit_diff_off_loop(
+    path: str,
+    old_text: str,
+    new_text: str,
+    start_line: int | None,
+    *,
+    whole_file: bool = False,
+) -> tuple[str, bool]:
+    """``_edit_diff``, in a worker thread unless the texts are small."""
+    if len(old_text) + len(new_text) <= _DIFF_INLINE_CHARS:
+        return _edit_diff(path, old_text, new_text, start_line, whole_file=whole_file)
+    return await asyncio.to_thread(
+        _edit_diff, path, old_text, new_text, start_line, whole_file=whole_file
+    )
+
+
 def _edit_diff(
     path: str,
     old_text: str,
@@ -491,7 +513,7 @@ class ActivityShellTools(Skill):
         written_text = result.new_text
         bounded_new = pformat(written_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         new_truncated = len(written_text) > _MAX_EVENT_TEXT_CHARS
-        diff, diff_complete = _edit_diff(
+        diff, diff_complete = await _edit_diff_off_loop(
             self._diff_path(resolved),
             old_text,
             written_text,
@@ -549,7 +571,7 @@ class ActivityShellTools(Skill):
                 "previous file content could not be read",
             )
         else:
-            diff, diff_complete = _edit_diff(
+            diff, diff_complete = await _edit_diff_off_loop(
                 self._diff_path(resolved),
                 old_diff_text or "",
                 content,

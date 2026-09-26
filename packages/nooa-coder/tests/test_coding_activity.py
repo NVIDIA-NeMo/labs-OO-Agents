@@ -468,3 +468,30 @@ async def test_run_and_run_stream_forward_a_per_command_cwd(tmp_path):
         str(tmp_path / "sub"),
         str(tmp_path),
     ]
+
+
+async def test_a_large_diff_is_computed_off_the_event_loop(tmp_path, monkeypatch):
+    """difflib on a big file can take seconds; it must not block other sessions."""
+    import threading
+
+    threads = []
+    compute = activity._edit_diff
+
+    def spy(*args, **kwargs):
+        threads.append(threading.get_ident())
+        return compute(*args, **kwargs)
+
+    monkeypatch.setattr(activity, "_edit_diff", spy)
+    loop_thread = threading.get_ident()
+    big = "".join(f"line {i}\n" for i in range(5_000))
+    shell, _ = _observed_shell(tmp_path)
+    try:
+        await shell.write_file("small.txt", "one\n")
+        await shell.write_file("big.txt", big)
+        await shell.write_file("big.txt", big.replace("line 7\n", "LINE 7\n"))
+        await shell.replace("big.txt", "line 9\n", "LINE 9\n")
+    finally:
+        await shell.close()
+    # Small texts stay on the loop; whole-file diffs of the big file do not.
+    on_loop = [thread == loop_thread for thread in threads]
+    assert on_loop == [True, False, False, True]
