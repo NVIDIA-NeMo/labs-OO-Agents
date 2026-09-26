@@ -16,10 +16,10 @@ from pathlib import Path
 from threading import RLock
 
 from nooa.runtime.event_manager import EventManager
+from nooa.storage import read_lock_owner
 from nooa.storage.sqlite import (
     SessionAlreadyActiveError,
     SQLiteStorageManager,
-    _read_lock_owner,
     delete_sqlite_database,
 )
 from nooa_coder.session.events import (
@@ -189,33 +189,21 @@ class SessionNotFoundError(FileNotFoundError):
     """Raised when a durable session does not exist or lacks start metadata."""
 
 
-class _SessionStorageManager(SQLiteStorageManager):
+def _open_session_storage(path: Path, *, must_exist: bool) -> SQLiteStorageManager:
     """Storage for one session file: rollback journal, and no accidental creation.
 
-    ``SQLiteStorageManager`` opens with a plain ``sqlite3.connect(path)``,
-    which creates an empty database when the file is gone, so a delete
-    racing an open would leave a new empty file behind. ``must_exist``
-    opens with the ``mode=rw`` URI, which fails instead.
-
-    Session files use the rollback journal everywhere, not only where
-    virtiofs is detected: the directory may be shared with another machine
-    (a sandbox and its host), and WAL keeps cross-process state in a
+    ``must_exist`` makes a delete racing an open fail instead of leaving a new
+    empty file behind. Session files use the rollback journal everywhere, not
+    only where virtiofs is detected: the directory may be shared with another
+    machine (a sandbox and its host), and WAL keeps cross-process state in a
     shared-memory file that two kernels do not agree on. A file left in WAL
-    mode by an older build is converted on open.
+    mode by an older build is converted on open. ``check_same_thread=False``
+    because the Session writes its checkpoint from a worker thread through
+    ``save_snapshot_json``, which takes the manager's lock.
     """
-
-    def __init__(self, db_path: str | Path, *, must_exist: bool) -> None:
-        self._must_exist = must_exist
-        super().__init__(db_path)
-
-    def _open_connection(self) -> sqlite3.Connection:
-        mode = "rw" if self._must_exist else "rwc"
-        uri = f"{Path(self._db_path).resolve().as_uri()}?mode={mode}"
-        connection = sqlite3.connect(uri, uri=True, check_same_thread=self._check_same_thread)
-        connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute("PRAGMA journal_mode=DELETE")
-        connection.execute("PRAGMA synchronous=FULL")
-        return connection
+    return SQLiteStorageManager(
+        path, must_exist=must_exist, journal_mode="delete", check_same_thread=False
+    )
 
 
 class SessionHandle:
@@ -244,6 +232,11 @@ class SessionHandle:
     @property
     def store(self) -> SessionStore:
         return self._store
+
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`close` has run; a closed handle records nothing more."""
+        return self._closed
 
     @property
     def id(self) -> str:
@@ -376,7 +369,7 @@ class SessionStore:
             raise FileExistsError(f"Session {session_id!r} already exists")
 
         offset = datetime.now().astimezone().utcoffset()
-        storage = _SessionStorageManager(path, must_exist=False)
+        storage = _open_session_storage(path, must_exist=False)
         events = EventManager(backend=storage.event_backend)
         for event_type in SESSION_EVENT_TYPES:
             events.register_event_type(event_type)
@@ -443,7 +436,7 @@ class SessionStore:
                 owner_pid=pid,
             )
         try:
-            storage = _SessionStorageManager(path, must_exist=True)
+            storage = _open_session_storage(path, must_exist=True)
         except sqlite3.OperationalError as exc:
             if path.exists():
                 raise
@@ -627,7 +620,7 @@ class SessionStore:
         a crash here never blocks a resume here.
         """
         lock_path = self.path_for(session_id).with_suffix(".lock")
-        pid, host = _read_lock_owner(str(lock_path))
+        pid, host = read_lock_owner(str(lock_path))
         if pid is None or host is None or host == socket.gethostname():
             return None
         return pid, host

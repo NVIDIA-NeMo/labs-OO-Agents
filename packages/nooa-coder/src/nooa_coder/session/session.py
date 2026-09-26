@@ -15,12 +15,9 @@ import hashlib
 import inspect
 import json
 import logging
-import sqlite3
-import uuid
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -145,30 +142,6 @@ async def _aclose(client: Any) -> None:
     aclose = getattr(client, "aclose", None)
     if aclose is not None:
         await aclose()
-
-
-def _write_snapshot(path: Path, blob: str) -> None:
-    """Insert one serialised snapshot into the session file's ``snapshots`` table.
-
-    Runs in a worker thread on its own connection. It cannot go through
-    the session's ``SQLiteStorageManager``: that one's connection belongs
-    to the event loop thread, and a second manager would try to take the
-    session's file lock, which this process already holds. The row
-    matches what ``SQLiteStorageManager.save_snapshot`` writes, so
-    ``restore_latest_snapshot`` reads it back. The caller holds the
-    storage manager's lock (see ``Session._checkpoint``).
-    """
-    uri = f"{path.resolve().as_uri()}?mode=rw"
-    connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    try:
-        connection.execute("PRAGMA busy_timeout=5000")
-        with connection:
-            connection.execute(
-                "INSERT INTO snapshots (snapshot_id, created_at, data) VALUES (?, ?, ?)",
-                (str(uuid.uuid4()), datetime.now(UTC).isoformat(), blob),
-            )
-    finally:
-        connection.close()
 
 
 def _preview(value: Any, limit: int = 120) -> str:
@@ -463,20 +436,12 @@ class Session:
         index = next((i for i, (_, known) in enumerate(entries) if known == item_id), None)
         if index is None:
             return False
-        obj = entries[index][0]
-        # Equal-identity items put earlier are ahead of this one in the
-        # channel (FIFO), so skip that many matches.
-        skip = sum(1 for other, _ in list(entries)[:index] if other is obj)
-        # Channel exposes no remove-by-item; edit its deque directly.
-        pending = channel._items
-        for position, queued in enumerate(pending):
-            if queued is obj:
-                if skip == 0:
-                    del pending[position]
-                    del entries[index]
-                    return True
-                skip -= 1
-        return False
+        # The same object queued twice is indistinguishable in the channel,
+        # so removing its first occurrence is removing this one.
+        if not channel.remove(entries[index][0]):
+            return False
+        del entries[index]
+        return True
 
     async def prompt(self, text: str, *, source: str = "user") -> Outcome:
         """Submit ``text`` and wait for the outcome of the turn that consumes it.
@@ -580,7 +545,7 @@ class Session:
             return
         item_id = entries[index][1]
         del entries[index]
-        if not self.handle._closed:
+        if not self.handle.closed:
             self.handle.events.add(ItemConsumed(item_id=item_id))
         self._consumed.append(item_id)
 
@@ -595,7 +560,7 @@ class Session:
                 continue  # an item another producer put; it has no identity here
             item_id = entries[index][1]
             del entries[index]
-            if not self.handle._closed:
+            if not self.handle.closed:
                 self.handle.events.add(ItemDiscarded(item_id=item_id))
             self._resolve(
                 item_id,
@@ -792,24 +757,18 @@ class Session:
             return
         self._snapshot_digest = digest
         previous = self._checkpoint_task
-        path = self.handle.path
-        # The storage manager's lock serialises every write to this file in
-        # this process (the loop's event writes all take it). Holding it
-        # here means the two connections never contend for SQLite's write
-        # lock: the loop never waits in the busy handler or gets "database
-        # is locked"; at worst a loop-side write waits for this one insert.
-        db_lock = self.handle.storage._db_lock
-
-        def write_locked() -> None:
-            with db_lock:
-                _write_snapshot(path, blob)
+        # The storage manager takes its own lock, the one every event write
+        # in this process takes, so this write and the loop's writes never
+        # contend for SQLite's write lock; at worst a loop-side write waits
+        # for this one insert. The store opens it with check_same_thread=False.
+        save = self.handle.storage.save_snapshot_json
 
         async def write() -> None:
             if previous is not None:
                 with suppress(Exception):
                     await previous
             try:
-                await asyncio.to_thread(write_locked)
+                await asyncio.to_thread(save, blob)
             except Exception:
                 self._snapshot_digest = None
                 logger.warning("Session %s: checkpoint write failed", self.id, exc_info=True)
@@ -1010,7 +969,7 @@ class Session:
                 logger.warning("Session listener %r raised", listener, exc_info=True)
 
     def _on_agent_event(self, event: Any) -> None:
-        if event._role is Role.RUNTIME_EVENT:
+        if event.event_role is Role.RUNTIME_EVENT:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)

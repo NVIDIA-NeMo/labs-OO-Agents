@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
-from nooa.tools._bash_session import BashSession
+from nooa.tools import BashSession
 from nooa.tools.shell_tools import Match
 
 logger = logging.getLogger(__name__)

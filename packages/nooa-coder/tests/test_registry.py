@@ -482,7 +482,7 @@ async def test_the_owned_client_closes_when_the_agent_close_fails(
     await asyncio.wait_for(registry.close(root.id), TIMEOUT)
     [llm] = factory.made
     assert llm.closed
-    assert root.handle._closed and root.info.status == "closed"
+    assert root.handle.closed and root.info.status == "closed"
     assert registry.get(root.id) is None
 
 

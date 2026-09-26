@@ -3,6 +3,7 @@
 """nooa_coder stays independent of the older host packages."""
 
 import ast
+import re
 from pathlib import Path
 
 import nooa_coder
@@ -44,5 +45,34 @@ def test_the_coding_modules_use_no_retired_turn_or_worker_types():
         for path in sorted((root / package).rglob("*.py"))
         for name in retired
         if name in path.read_text()
+    ]
+    assert hits == []
+
+
+# Private names of the core (and of the acp library) that have public
+# replacements. Each pattern is matched against the source text.
+_PRIVATE_CORE_NAMES = {
+    r"\._items\b": "Channel.remove()",
+    r"\._on_get\b": "the ChannelItemConsumed event",
+    r"\._on_discard\b": "the ChannelItemsDiscarded event",
+    r"\._role\b": "EventBase.event_role",
+    r"\._db_lock\b": "SQLiteStorageManager.save_snapshot_json()",
+    r"\b_open_connection\b": "SQLiteStorageManager(must_exist=, journal_mode=)",
+    r"\b_read_lock_owner\b": "nooa.storage.read_lock_owner",
+    r"\b_acquire_session_lock\b": "a read-only lock probe (store._lock_is_held)",
+    r"\b_ChannelReader\b": "nooa.runtime.channels.ChannelReader",
+    r"\b_re_register_hooks\b": "nooa.tracing.register_hooks_in_current_context",
+    r"nooa\.tools\._\w+": "nooa.tools (BashSession, StreamEvent, StreamDone)",
+}
+
+
+def test_no_module_uses_private_core_names_that_have_public_replacements():
+    root = Path(nooa_coder.__file__).parent
+    hits = [
+        f"{path.relative_to(root)}:{number}: {line.strip()} (use {replacement})"
+        for path in sorted(root.rglob("*.py"))
+        for number, line in enumerate(path.read_text().splitlines(), start=1)
+        for pattern, replacement in _PRIVATE_CORE_NAMES.items()
+        if re.search(pattern, line)
     ]
     assert hits == []
