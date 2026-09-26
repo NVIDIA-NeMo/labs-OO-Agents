@@ -25,6 +25,7 @@ class MCPHandoffTrace:
         self._enabled = True
         # One worker so offloaded writes keep the order events arrived in.
         self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nooa-acp-mcp-trace")
+        self._closed = False
         self._write({"event": "trace_started"})
 
     @classmethod
@@ -63,6 +64,23 @@ class MCPHandoffTrace:
                 }
             )
         self._write({"event": method, "mcpServersField": state, "servers": summary})
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Let queued writes land (up to ``timeout`` seconds) and stop the writer thread."""
+        if self._closed:
+            return
+        self._closed = True
+        self._enabled = False
+        # One worker runs writes in order, so once this marker has run every
+        # earlier write has too and the worker is idle: shutdown(wait=True)
+        # then returns at once.
+        try:
+            self._writer.submit(lambda: None).result(timeout)
+        except TimeoutError:
+            logger.warning("ACP MCP handoff trace: writes still pending after %ss", timeout)
+            self._writer.shutdown(wait=False, cancel_futures=True)
+            return
+        self._writer.shutdown(wait=True)
 
     def _write(self, record: dict[str, Any]) -> None:
         # __call__ (an acp.connection observer) is a plain sync callback that

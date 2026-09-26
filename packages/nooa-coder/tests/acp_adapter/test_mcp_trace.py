@@ -10,9 +10,23 @@ from acp.connection import StreamDirection, StreamEvent
 from nooa_coder.acp._mcp_trace import MCPHandoffTrace
 
 
-def test_trace_selects_only_mcp_names_and_transports(tmp_path):
+@pytest.fixture
+def make_trace():
+    """``make_trace(path)``: a trace that is closed after the test."""
+    made: list[MCPHandoffTrace] = []
+
+    def make(path):
+        made.append(MCPHandoffTrace(path))
+        return made[-1]
+
+    yield make
+    for trace in made:
+        trace.close()
+
+
+def test_trace_selects_only_mcp_names_and_transports(tmp_path, make_trace):
     path = tmp_path / "trace.jsonl"
-    trace = MCPHandoffTrace(path)
+    trace = make_trace(path)
     secret = "DO-NOT-RECORD-THIS"
     trace(
         StreamEvent(
@@ -72,9 +86,11 @@ def test_trace_selects_only_mcp_names_and_transports(tmp_path):
         ({"mcpServers": "invalid-secret-payload"}, "invalid"),
     ],
 )
-def test_trace_distinguishes_missing_empty_and_malformed_fields(tmp_path, params, state):
+def test_trace_distinguishes_missing_empty_and_malformed_fields(
+    tmp_path, make_trace, params, state
+):
     path = tmp_path / "trace.jsonl"
-    trace = MCPHandoffTrace(path)
+    trace = make_trace(path)
     trace(StreamEvent(StreamDirection.INCOMING, {"method": "session/load", "params": params}))
     record = json.loads(path.read_text().splitlines()[-1])
     assert record["mcpServersField"] == state
@@ -86,7 +102,7 @@ def test_trace_requires_opt_in(monkeypatch):
     assert MCPHandoffTrace.from_env() is None
 
 
-def test_trace_handles_a_write_failure_on_a_later_event(tmp_path, caplog):
+def test_trace_handles_a_write_failure_on_a_later_event(tmp_path, caplog, make_trace):
     """A write failure on a later event -- not the constructor's own initial
     write -- must disable tracing and log a warning. Breaking the path only
     after successful construction keeps this from passing merely because
@@ -95,7 +111,7 @@ def test_trace_handles_a_write_failure_on_a_later_event(tmp_path, caplog):
     same already-broken path: __call__'s "if not self._enabled: return"
     guard would short-circuit and never reach _write again).
     """
-    trace = MCPHandoffTrace(tmp_path / "trace.jsonl")
+    trace = make_trace(tmp_path / "trace.jsonl")
     assert trace._enabled is True
     assert len(caplog.records) == 0
 
@@ -106,13 +122,13 @@ def test_trace_handles_a_write_failure_on_a_later_event(tmp_path, caplog):
     assert "Cannot write ACP MCP handoff trace" in caplog.text
 
 
-async def test_trace_write_does_not_block_the_running_event_loop(tmp_path):
+async def test_trace_write_does_not_block_the_running_event_loop(tmp_path, make_trace):
     """__call__ runs inline on acp.connection's sync receive loop; the actual
     file write must be offloaded to a worker thread from within a running
     event loop rather than blocking it, while still landing durably.
     """
     path = tmp_path / "trace.jsonl"
-    trace = MCPHandoffTrace(path)
+    trace = make_trace(path)
     trace(StreamEvent(StreamDirection.INCOMING, {"method": "session/new"}))
     # The offloaded write is fire-and-forget; give the executor thread a
     # scheduling tick to finish before checking the file landed.
@@ -122,3 +138,16 @@ async def test_trace_write_does_not_block_the_running_event_loop(tmp_path):
         await asyncio.sleep(0.01)
     lines = [json.loads(line) for line in path.read_text().splitlines()]
     assert [line["event"] for line in lines] == ["trace_started", "session/new"]
+
+
+async def test_close_writes_what_is_queued_and_stops_the_writer_thread(tmp_path):
+    import threading
+
+    path = tmp_path / "trace.jsonl"
+    trace = MCPHandoffTrace(path)
+    trace(StreamEvent(StreamDirection.INCOMING, {"method": "session/new"}))
+    trace.close()
+    trace.close()  # idempotent
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [line["event"] for line in lines] == ["trace_started", "session/new"]
+    assert not [t for t in threading.enumerate() if t.name.startswith("nooa-acp-mcp-trace")]
