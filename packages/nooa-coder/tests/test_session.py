@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import sqlite3
+import threading
 
 import coder_test_agents as agents
 import pytest
@@ -537,16 +538,41 @@ async def test_checkpoint_is_written_only_when_the_state_changed(
 
 
 async def test_checkpoint_failure_does_not_fail_the_turn(make_session, monkeypatch, caplog):
-    def broken(blob):
+    def broken(data, **kwargs):
         raise sqlite3.OperationalError("disk full")
 
-    session, _ = make_session(done("fine"))
+    session, _ = make_session(done("fine"), start=False)
     monkeypatch.setattr(session.handle.storage, "save_snapshot_json", broken)
+    session.start()
     with caplog.at_level(logging.WARNING, logger=session_module.__name__):
         assert await asyncio.wait_for(session.prompt("go"), TIMEOUT) == Done(explanation="fine")
         await session.wait_for_checkpoint()
     assert "checkpoint" in caplog.text.lower()
     assert _snapshot_count(session.handle.path) == 0
+
+
+async def test_the_checkpoint_is_written_through_the_storage_off_the_event_loop(
+    make_session, monkeypatch
+):
+    """The write goes through the storage manager's public method, in a worker thread."""
+    session, _ = make_session(
+        cell("self.v.answer = 1\nreturn_result(Done(explanation='x'))"), start=False
+    )
+    storage = session.handle.storage
+    write = storage.save_snapshot_json
+    threads = []
+
+    def recording(data, **kwargs):
+        threads.append(threading.current_thread())
+        return write(data, **kwargs)
+
+    monkeypatch.setattr(storage, "save_snapshot_json", recording)
+    session.start()
+    await asyncio.wait_for(session.prompt("go"), TIMEOUT)
+    await asyncio.wait_for(session.wait_for_checkpoint(), TIMEOUT)
+    assert len(threads) == 1
+    assert threads[0] is not threading.main_thread()
+    assert _snapshot_count(session.handle.path) == 1
 
 
 async def test_the_checkpoint_writer_waits_for_the_storage_lock(make_session):

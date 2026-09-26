@@ -1133,9 +1133,7 @@ def _trace_as(session: Session) -> None:
 
     def enter() -> None:
         tracing.set_session(session.id)
-        register_hooks = getattr(tracing, "_re_register_hooks", None)
-        if register_hooks is not None:
-            register_hooks()
+        tracing.register_hooks_in_current_context()
 
     session.add_loop_context_hook(enter)
     tracing.set_session(session.id)

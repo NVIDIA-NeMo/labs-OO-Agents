@@ -1045,7 +1045,7 @@ class Session:
                 logger.warning("Session listener %r raised", listener, exc_info=True)
 
     def _on_agent_event(self, event: Any) -> None:
-        if event._role is Role.RUNTIME_EVENT:
+        if event.event_role is Role.RUNTIME_EVENT:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)
