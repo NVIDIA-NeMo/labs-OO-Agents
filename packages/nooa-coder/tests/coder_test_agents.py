@@ -353,3 +353,19 @@ class CoderModels(ScriptedModels):
         self.llms[options.name] = llm
         self.built.append(options)
         return create_session_agent(options.model_copy(update={"llm": llm}), storage)
+
+
+class StatusAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """An agent that reports host status (``host_status``), one value not JSON-native."""
+
+    def host_status(self) -> dict[str, Any]:
+        from pathlib import Path
+
+        return {"context": {"active_events": 3}, "where": Path("/tmp/x")}
+
+
+class BrokenStatusAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """An agent whose ``host_status`` raises."""
+
+    def host_status(self) -> dict[str, Any]:
+        raise RuntimeError("status unavailable")

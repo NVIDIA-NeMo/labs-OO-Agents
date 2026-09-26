@@ -9,7 +9,7 @@ live agents never cross.
 
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, SerializeAsAny, ValidationError, field_validator
 
 from nooa.interactive import Done, NeedInput
 from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
@@ -422,6 +422,21 @@ class UsageChangedUpdate(_Update):
     usage: Usage
 
 
+class AgentEventUpdate(_Update):
+    """One event from the session's agent: tool calls, cell output, messages, model responses.
+
+    Every event the agent's event manager handles is forwarded, runtime
+    events (terminal output, file edits) included, in the order they
+    happen and ordered with the other updates: a model response arrives
+    before the ``UsageChangedUpdate`` it causes. ``event`` is the event
+    itself (a pydantic value; listeners must not change it) and
+    serialises as its own type.
+    """
+
+    kind: Literal["agent_event"] = "agent_event"
+    event: SerializeAsAny[EventBase]
+
+
 class ClosedUpdate(_Update):
     """The session closed."""
 
@@ -440,6 +455,7 @@ SessionEvent = Annotated[
     | CommandsChangedUpdate
     | ChildCreatedUpdate
     | UsageChangedUpdate
+    | AgentEventUpdate
     | ClosedUpdate,
     Field(discriminator="kind"),
 ]

@@ -30,6 +30,7 @@ from nooa_coder.coding import (
     TerminalCommandStarted,
 )
 from nooa_coder.session.items import (
+    AgentEventUpdate,
     CancelledUpdate,
     ChildCreatedUpdate,
     ClosedUpdate,
@@ -49,10 +50,11 @@ from nooa.unifiedllm import FakeLLMClient
 
 
 class _FakeSession:
-    """The part of a Session the bridge uses: its id, agent, info and updates.
+    """The part of a Session the bridge uses: its id, info, updates, model info and status.
 
-    Like a Session, it counts each model call's usage (with the Session's
-    own ``_count_usage``) and emits a ``UsageChangedUpdate``.
+    Like a Session, it forwards each agent event as an ``AgentEventUpdate``,
+    then counts a model call's usage (with the Session's own
+    ``_count_usage``) and emits a ``UsageChangedUpdate``.
     """
 
     def __init__(self, agent: Any, session_id: str = "session-1") -> None:
@@ -63,7 +65,12 @@ class _FakeSession:
         self.handle = SimpleNamespace(update_usage=lambda usage: None)
         self._emit = self.emit
         self._pending_model = None
-        agent.event_manager.on("LLMResponse", lambda event: Session._count_usage(self, event))
+        agent.event_manager.on("*", self._on_agent_event)
+
+    def _on_agent_event(self, event: Any) -> None:
+        self.emit(AgentEventUpdate(session_id=self.id, event=event))
+        if isinstance(event, LLMResponse):
+            Session._count_usage(self, event)  # type: ignore[arg-type]
 
     def subscribe(self, listener: Any) -> Any:
         self.listeners.append(listener)
@@ -83,6 +90,9 @@ class _FakeSession:
 
     def _next_llm(self) -> Any:
         return Session._next_llm(self)  # type: ignore[arg-type]
+
+    def host_status(self) -> dict[str, Any]:
+        return Session.host_status(self)  # type: ignore[arg-type]
 
 
 class _RecordingClient:
