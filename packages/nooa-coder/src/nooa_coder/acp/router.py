@@ -561,7 +561,7 @@ class Router:
                 except (SessionNotFoundError, InvalidSessionIdError):
                     break
             return info.id, workspace
-        SessionStore._validate_id(session_id)
+        SessionStore.validate_id(session_id)
         raise SessionNotFoundError(f"Session {session_id!r} was not found")
 
     def _root_worker(self, root_id: str) -> _Worker | None:

@@ -327,7 +327,7 @@ class SessionStore:
         return None
 
     def path_for(self, session_id: str) -> Path:
-        session_id = self._validate_id(session_id)
+        session_id = self.validate_id(session_id)
         return self.root / f"{session_id}.db"
 
     def create(
@@ -345,7 +345,7 @@ class SessionStore:
         mode: str = "auto",
         session_id: str | None = None,
     ) -> SessionHandle:
-        session_id = self._validate_id(session_id or str(uuid.uuid4()))
+        session_id = self.validate_id(session_id or str(uuid.uuid4()))
         # Recorded as a resolved absolute path: a relative one ("../", as the
         # old TUI wrote) names no directory once the process has moved.
         workspace = _normalise_workspace(workspace)
@@ -826,7 +826,8 @@ class SessionStore:
         return fallback
 
     @staticmethod
-    def _validate_id(session_id: str) -> str:
+    def validate_id(session_id: str) -> str:
+        """``session_id`` if it can name a session file; else ``InvalidSessionIdError``."""
         if (
             not session_id
             or session_id in {".", ".."}
