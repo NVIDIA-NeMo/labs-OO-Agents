@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from nooa.interactive import DEFAULT_MODEL, SummarizationConfig
-from nooa_coder.coding.settings import load_coding_skills_dirs
+from nooa_coder.workspace.settings import load_coding_skills_dirs
 
 
 class CoderOptions(BaseModel):

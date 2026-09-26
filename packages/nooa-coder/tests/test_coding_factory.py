@@ -73,7 +73,7 @@ async def _close(agent):
 
 async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace, sessions_dir):
     llm = FakeLLMClient()
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=llm))
         agent = root.agent
@@ -90,7 +90,7 @@ async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace
 
 async def test_the_mcp_and_skills_controls_are_installed_without_a_host(workspace, sessions_dir):
     """/mcp approve is what MCPApprovalRequired tells the user to run: it must exist."""
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         names = {command.name for command in root.commands()}
@@ -126,7 +126,7 @@ async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, ses
     settings = workspace / ".nooa" / "settings.yaml"
     settings.parent.mkdir()
     settings.write_text('coding:\n  active_skills: "just-one"\n')
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         with caplog.at_level("WARNING"):
             root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
@@ -253,7 +253,9 @@ def test_legacy_coding_agent_specs_load_the_moved_class(spec):
 
 async def test_a_child_with_another_model_gets_its_own_client(workspace, sessions_dir):
     models = ModelFactory({"other": [[cell(CHILD_RESULT)]]})
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=models)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=models
+    )
     parent_llm = CellLLM(
         [
             cell(
@@ -283,7 +285,7 @@ async def test_a_child_with_another_model_gets_its_own_client(workspace, session
 
 async def test_stale_memory_context_is_dropped_after_a_reload(workspace, sessions_dir):
     """Keys an older snapshot carries are gone after load (restore is additive)."""
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         session_id = root.id
@@ -326,7 +328,7 @@ async def test_skills_are_configured_before_and_stale_context_dropped_after_a_re
         order.append("cleanup")
         return cleanup(agent)
 
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         session_id = root.id
@@ -379,7 +381,9 @@ async def test_a_host_registry_builds_the_workspace_default_model(
         aliases.append(alias)
         return make(alias, path)
 
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=spy)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=spy
+    )
     try:
         root = await registry.create(_options(workspace, sessions_dir))
         assert aliases == [None]

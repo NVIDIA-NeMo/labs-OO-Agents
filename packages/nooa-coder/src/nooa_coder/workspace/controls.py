@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import shlex
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -493,10 +494,25 @@ CONTROL_TYPES = {
 }
 
 
-def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_registry: Any):
-    """Adapt shared operations to the host-neutral command catalog."""
-    from nooa_coder.coding.slash_commands import CodingSlashCommand
+@dataclass(frozen=True)
+class ControlCommand:
+    """One control as a slash command: its name, help text and what runs it.
 
+    The coding agent's command registry wraps each in its own command type
+    (``CodingSlashCommand.for_control``).
+    """
+
+    name: str
+    description: str
+    argument_hint: str
+    # Not compared: the same control built again is not a change.
+    invoke: Callable[..., Awaitable[Any]] = field(repr=False, compare=False)
+
+
+def behavior_commands(
+    agent: Any, config: Any, *, workspace: Path, command_registry: Any
+) -> list[ControlCommand]:
+    """The ``/skills``, ``/mcp``, ``/trace-url`` and ``/usage`` controls, as plain commands."""
     result = []
     for control_type in CONTROL_TYPES.values():
         control = control_type(
@@ -506,7 +522,7 @@ def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_regis
             command_registry=command_registry,
         )
         result.append(
-            CodingSlashCommand(
+            ControlCommand(
                 name=control.name,
                 description=control_type.__doc__ or "",
                 argument_hint={
@@ -515,9 +531,7 @@ def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_regis
                     "trace-url": "",
                     "usage": "",
                 }[control.name],
-                output_to_agent=False,
-                is_control=True,
-                _method=control.invoke,
+                invoke=control.invoke,
             )
         )
     return result

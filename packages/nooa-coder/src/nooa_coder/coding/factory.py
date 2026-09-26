@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from nooa.interactive import InteractiveAgent
 from nooa.unifiedllm import get_llm_client
+from nooa_coder.coding.slash_commands import CodingSlashCommand
 from nooa_coder.session.loader import load_agent_class
 from nooa_coder.workspace.controls import behavior_commands
 from nooa_coder.workspace.options import CoderOptions, configure_session_skills
@@ -95,13 +96,14 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
         # The /skills and /mcp controls belong to the agent, not to one host:
         # MCPApprovalRequired tells the user to run /mcp approve. set_controls()
         # also refreshes the skill commands.
+        controls = behavior_commands(
+            agent,
+            coder_options,
+            workspace=Path(coder_options.working_dir),
+            command_registry=agent.slash_commands,
+        )
         agent.slash_commands.set_controls(
-            behavior_commands(
-                agent,
-                coder_options,
-                workspace=Path(coder_options.working_dir),
-                command_registry=agent.slash_commands,
-            )
+            [CodingSlashCommand.for_control(control) for control in controls]
         )
     return agent
 

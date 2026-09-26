@@ -6,6 +6,7 @@ import asyncio
 import json
 
 import pytest
+from nooa_coder.coding.factory import create_session_agent
 from nooa_coder.session.items import TaskResult
 from nooa_coder.session.loader import load_agent_class
 from nooa_coder.session.options import SessionOptions
@@ -57,7 +58,7 @@ async def test_an_experimental_batch_turn_must_carry_a_task_result(tmp_path, ses
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(
             SessionOptions(
