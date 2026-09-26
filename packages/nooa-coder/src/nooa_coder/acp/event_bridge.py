@@ -80,6 +80,13 @@ OWN_SOURCES = frozenset({"acp", "user:declined"})
 
 _ECHOED_CHANNELS = frozenset({"user_messages", "steer"})
 
+# By (command_truncated, stdin_truncated) of a TerminalCommandStarted.
+_TRUNCATION_NOTES = {
+    (True, True): "The command and its standard input were truncated for display.",
+    (True, False): "The command was truncated for display.",
+    (False, True): "Its standard input was truncated for display.",
+}
+
 ToolKey = tuple[str, str]
 """An open tool card: (id of the session that ran it, its tool call id)."""
 
@@ -165,6 +172,8 @@ class ACPEventBridge:
         self._open_tools: set[ToolKey] = set()
         self._python_source: dict[ToolKey, str] = {}
         self._terminal_output: dict[ToolKey, str] = {}
+        # A note kept at the top of a terminal card whose command was truncated.
+        self._terminal_notes: dict[ToolKey, str] = {}
         # What the session spent before this bridge was attached (a resumed or
         # re-followed session), plus what it spends from here on.
         self._cost_usd = session.info.usage.cost_usd
@@ -408,10 +417,17 @@ class ACPEventBridge:
         tool_call_id = self._wire_id(self._key(f"file-edit-{uuid4()}", source))
         path = event.path
         title = f"{'Created' if event.operation == 'create' else 'Edited'} {Path(path).name}"
+        content: list[Any]
         if event.content_complete:
             content = [tool_diff_content(path, event.new_text, event.old_text)]
         else:
             content = [tool_content(text_block(event.diff or "File content was truncated."))]
+            if event.diff and not event.diff_complete:
+                content.append(
+                    tool_content(
+                        text_block("The diff was truncated: the edit is larger than shown.")
+                    )
+                )
         line = max(0, event.start_line - 1) if event.start_line is not None else None
         self._enqueue(
             start_tool_call(
@@ -422,6 +438,10 @@ class ACPEventBridge:
                 content=content,
                 locations=[ToolCallLocation(path=path, line=line)],
                 raw_input={"path": path, "operation": event.operation},
+                raw_output={
+                    "content_complete": event.content_complete,
+                    "diff_complete": event.diff_complete,
+                },
             )
         )
 
@@ -431,18 +451,30 @@ class ACPEventBridge:
         key = self._key(event.command_id, source)
         self._open_tools.add(key)
         self._terminal_output[key] = ""
+        note = _TRUNCATION_NOTES.get((event.command_truncated, event.stdin_truncated))
+        if note is not None:
+            self._terminal_notes[key] = note
         self._enqueue(
             start_tool_call(
                 self._wire_id(key),
                 f"$ {event.command}",
                 kind="execute",
                 status="in_progress",
+                content=self._terminal_content(key, None),
                 raw_input={
                     "command": event.command,
                     "working_directory": event.working_directory,
+                    "command_truncated": event.command_truncated,
+                    "stdin_truncated": event.stdin_truncated,
                 },
             )
         )
+
+    def _terminal_content(self, key: ToolKey, output: str | None) -> list[Any] | None:
+        """A terminal card's content: its truncation note, if any, then ``output``."""
+        texts = [self._terminal_notes.get(key), output]
+        content = [tool_content(text_block(text)) for text in texts if text is not None]
+        return content or None
 
     def _on_terminal_output(self, event: EventBase, source: str | None) -> None:
         if not isinstance(event, TerminalCommandOutput):
@@ -459,7 +491,7 @@ class ACPEventBridge:
             update_tool_call(
                 self._wire_id(key),
                 status="in_progress",
-                content=[tool_content(text_block(output))],
+                content=self._terminal_content(key, output),
             )
         )
 
@@ -474,6 +506,8 @@ class ACPEventBridge:
         reason = "Cancelled by user." if event.cancelled else event.error
         if reason:
             output += ("\n" if output and not output.endswith("\n") else "") + reason
+        content = self._terminal_content(key, output or "Completed.")
+        self._terminal_notes.pop(key, None)
         failed = (
             event.timed_out
             or event.cancelled
@@ -484,7 +518,7 @@ class ACPEventBridge:
             update_tool_call(
                 self._wire_id(key),
                 status="failed" if failed else "completed",
-                content=[tool_content(text_block(output or "Completed."))],
+                content=content,
                 raw_output={
                     "exit_code": event.exit_code,
                     "timed_out": event.timed_out,
@@ -646,6 +680,7 @@ class ACPEventBridge:
         for key in keys:
             self._open_tools.discard(key)
             self._terminal_output.pop(key, None)
+            self._terminal_notes.pop(key, None)
             code = self._python_source.pop(key, None)
             content = (
                 _python_content(code, reason)
@@ -714,6 +749,7 @@ class ACPEventBridge:
             self._open_tools.clear()
             self._python_source.clear()
             self._terminal_output.clear()
+            self._terminal_notes.clear()
         with suppress(Exception):
             await self.flush()
         self._closed = True
