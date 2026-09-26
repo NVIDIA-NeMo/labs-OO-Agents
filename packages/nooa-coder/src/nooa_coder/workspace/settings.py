@@ -43,6 +43,50 @@ def load_settings_data(workspace: str | Path | None = None) -> dict[str, Any]:
     return load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project)
 
 
+def load_behavior_settings(workspace: str | Path) -> dict[str, Any]:
+    """The workspace's resolved behaviour settings; the defaults if they are invalid.
+
+    A value of the wrong type (``active_skills: "one"``) must not stop a
+    session from starting: a warning names the settings file and the error,
+    and every setting falls back to its default.
+    """
+    from pydantic import ValidationError
+
+    try:
+        return resolve_behavior_settings(load_settings_data(workspace))
+    except ValidationError as exc:
+        errors = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()
+        )
+        files = ", ".join(_invalid_settings_files(workspace)) or "the merged settings"
+        logger.warning("Invalid coding settings in %s (%s); using the defaults", files, errors)
+        return {}
+
+
+def _invalid_settings_files(workspace: str | Path) -> list[str]:
+    """The settings files whose own values do not validate."""
+    import yaml
+    from pydantic import ValidationError
+
+    from nooa.layered_config import layered_paths
+
+    project = Path(workspace).expanduser().resolve() / ".nooa"
+    invalid = []
+    for path in layered_paths(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project):
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, UnicodeError, yaml.YAMLError):
+            continue  # load_layered_yaml already skipped and reported it
+        if not isinstance(data, dict):
+            continue
+        try:
+            resolve_behavior_settings(data)
+        except ValidationError:
+            invalid.append(str(path))
+    return invalid
+
+
 def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
     """Resolve legacy aliases and partial nested overrides identically for both hosts."""
     from .options import CoderOptions

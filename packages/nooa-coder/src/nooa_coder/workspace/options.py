@@ -37,11 +37,14 @@ class CoderOptions(BaseModel):
 
     @classmethod
     def load(cls, workspace: str | Path, **overrides: Any) -> CoderOptions:
-        """Load legacy ``tui`` and shared ``coding`` settings for this workspace."""
-        root = Path(workspace).expanduser().resolve()
-        from .settings import load_settings_data, resolve_behavior_settings
+        """Load legacy ``tui`` and shared ``coding`` settings for this workspace.
 
-        values = resolve_behavior_settings(load_settings_data(root))
+        Invalid settings are reported and replaced by the defaults.
+        """
+        root = Path(workspace).expanduser().resolve()
+        from .settings import load_behavior_settings
+
+        values = load_behavior_settings(root)
         values.update({key: value for key, value in overrides.items() if value is not None})
         values["working_dir"] = str(root)
         values["skills_dirs"] = load_coding_skills_dirs(root)

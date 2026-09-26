@@ -123,6 +123,22 @@ async def test_installing_the_controls_again_does_not_announce_a_change(workspac
         await _close(agent)
 
 
+async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, sessions_dir, caplog):
+    settings = workspace / ".nooa" / "settings.yaml"
+    settings.parent.mkdir()
+    settings.write_text('coding:\n  active_skills: "just-one"\n')
+    registry = SessionRegistry(SessionStore(sessions_dir))
+    try:
+        with caplog.at_level("WARNING"):
+            root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
+        assert isinstance(root.agent, CodingAgent)
+        assert root.agent.cwd == workspace.resolve()
+        [warning] = [r.getMessage() for r in caplog.records if str(settings) in r.getMessage()]
+        assert "active_skills" in warning
+    finally:
+        await registry.close_all()
+
+
 async def test_workspace_settings_reach_the_agent(workspace):
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text(
