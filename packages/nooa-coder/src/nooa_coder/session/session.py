@@ -16,7 +16,7 @@ import inspect
 import json
 import logging
 from collections import OrderedDict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
@@ -822,6 +822,42 @@ class Session:
         self._waiting = []
         for item_id in list(self._futures):
             self._resolve(item_id, outcome)
+
+    # ---- tools -------------------------------------------------------
+
+    async def prepare_tools(self) -> list[str]:
+        """Run the agent's own tool set-up; return warnings for the user.
+
+        Awaits the agent's ``prepare_tools()`` hook if it has one (the
+        coding agent connects the MCP servers its workspace remembers).
+        A host calls this once, in the registry's ``prepare`` step, before
+        the first turn.
+        """
+        hook = getattr(self.agent, "prepare_tools", None)
+        if not callable(hook):
+            return []
+        return [str(warning) for warning in await hook()]
+
+    def register_tools(self, tools: Mapping[str, Any]) -> dict[str, str]:
+        """Register and activate each tool as an agent skill under its name.
+
+        Returns the tools that were not registered, name to reason (the
+        agent has no skills, or the name collides with one the agent
+        already provides); the others are registered. Call before the
+        first turn (the registry's ``prepare`` step).
+        """
+        skills = getattr(self.agent, "skills", None)
+        failed: dict[str, str] = {}
+        for name, tool in tools.items():
+            if skills is None:
+                failed[name] = "the agent has no skills"
+                continue
+            try:
+                skills.register(name, tool)
+                skills.activate([name])
+            except ValueError as exc:
+                failed[name] = str(exc)
+        return failed
 
     # ---- slash commands ----------------------------------------------
 

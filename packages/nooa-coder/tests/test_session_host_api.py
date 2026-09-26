@@ -206,3 +206,82 @@ async def test_the_coding_agent_reports_context_and_todos(tmp_path):
         ]
     finally:
         await agent.aclose()
+
+
+# ---- tools --------------------------------------------------------------------
+
+
+class _Tool:
+    """A tool a host hands to the agent."""
+
+    def ping(self) -> str:
+        return "pong"
+
+
+async def test_prepare_tools_runs_the_agents_hook_and_returns_its_warnings(make_session):
+    session, _ = make_session(agent_spec="coder_test_agents:ToolPrepAgent", start=False)
+    assert await session.prepare_tools() == ["server 'x' was not connected"]
+    assert session.agent.prepared == 1
+
+
+async def test_prepare_tools_without_a_hook_does_nothing(make_session):
+    session, _ = make_session(start=False)
+    assert await session.prepare_tools() == []
+
+
+async def test_register_tools_registers_and_activates_each_tool(make_session):
+    session, _ = make_session(agent_spec="nooa_coder.coding.agent:CodingAgent", start=False)
+    tool = _Tool()
+    assert session.register_tools({"mcp.remote": tool, "repo": _Tool()}) == {
+        "repo": "Cannot register skill 'repo' as agent attr 'repo': already provided by 'nemo.repo'"
+    }
+    assert "mcp.remote" in session.agent.skills.activated()
+    assert session.agent.skills["mcp.remote"] is tool
+
+
+async def test_register_tools_on_an_agent_without_skills(make_session):
+    session, _ = make_session(start=False)
+    assert session.register_tools({"mcp.remote": _Tool()}) == {
+        "mcp.remote": "the agent has no skills"
+    }
+
+
+async def test_the_coding_agent_connects_the_servers_its_workspace_remembers(
+    root_options, sessions_dir, tmp_path_factory, monkeypatch
+):
+    import yaml
+    from nooa_coder.coding.factory import create_session_agent
+
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path_factory.mktemp("user-config")))
+    workspace = root_options.workspace
+    (workspace / ".nooa").mkdir(exist_ok=True)
+    (workspace / ".nooa" / "settings.yaml").write_text(
+        yaml.safe_dump({"coding": {"mcp_auto_connect": ["docs", "nowhere"]}})
+    )
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    try:
+        options = root_options.model_copy(
+            update={"agent_spec": "nooa_coder.coding.agent:CodingAgent", "llm": _fake_llm()}
+        )
+        session = await registry.create(options)
+        asked = []
+
+        async def connect(names):
+            asked.extend(names)
+            if names == ["nowhere"]:
+                raise RuntimeError("not approved")
+            return names
+
+        session.agent.mcp.connect = connect
+        assert await session.prepare_tools() == [
+            "MCP server 'nowhere' was not connected: not approved"
+        ]
+        assert asked == ["docs", "nowhere"]
+    finally:
+        await registry.close_all()
+
+
+def _fake_llm():
+    from nooa.unifiedllm import FakeLLMClient
+
+    return FakeLLMClient()

@@ -313,7 +313,7 @@ class CoderACPAgent:
         async def prepare(session: Session) -> None:
             _trace_as(session)
             attached.append(self._attach(session))
-            warnings.extend(await self._prepare_agent(session, mcp_servers))
+            warnings.extend(await self._prepare_tools(session, mcp_servers))
 
         try:
             session = await self.registry_for(root).create(options, prepare=prepare)
@@ -362,7 +362,7 @@ class CoderACPAgent:
             bridge = self._attach(session)
             attached.append(bridge)
             self._replay(bridge, session)
-            warnings.extend(await self._prepare_agent(session, mcp_servers))
+            warnings.extend(await self._prepare_tools(session, mcp_servers))
 
         try:
             session = await registry.load(session_id, prepare=prepare, host="acp")
@@ -960,38 +960,25 @@ class CoderACPAgent:
     def _modes(self, session: Session) -> SessionModeState:
         return SessionModeState(current_mode_id=session.info.mode or "auto", available_modes=_MODES)
 
-    async def _prepare_agent(self, session: Session, mcp_servers: list[Any] | None) -> list[str]:
-        """Give a new or loaded agent its MCP tools; return warnings.
+    async def _prepare_tools(self, session: Session, mcp_servers: list[Any] | None) -> list[str]:
+        """Give a new or loaded session its tools; return warnings.
 
-        Runs in the registry's ``prepare`` step, before any turn. A coding
-        agent connects the MCP servers its workspace remembers (its
-        ``/skills`` and ``/mcp`` controls come from the agent factory);
-        every agent with skills gets the MCP servers the client sent.
+        Runs in the registry's ``prepare`` step, before any turn. The
+        agent's own set-up runs first (a coding agent connects the MCP
+        servers its workspace remembers), then the MCP servers the client
+        sent are registered as ``mcp.<name>``. A name that collides with
+        one the agent provides (``shell``, ``repo``) is skipped with a
+        warning, so the session stays usable instead of failing.
         """
-        from nooa_coder.coding.agent import CodingAgent
-        from nooa_coder.workspace.options import CoderOptions, connect_session_mcp
-
-        agent = session.agent
-        warnings: list[str] = []
-        if isinstance(agent, CodingAgent):
-            coder_options = CoderOptions.load(session.options.workspace)
-            warnings.extend(await connect_session_mcp(agent, coder_options))
+        warnings = await session.prepare_tools()
         tools, mcp_warnings = await self._create_mcp_tools(mcp_servers)
         warnings.extend(mcp_warnings)
-        skills = getattr(agent, "skills", None)
-        for name, tool in tools.items():
-            registry_name = f"mcp.{name}"
-            if skills is None:
-                warnings.append(f"MCP server {name!r} was not registered: the agent has no skills")
-                continue
-            try:
-                skills.register(registry_name, tool)
-                skills.activate([registry_name])
-            except ValueError as exc:
-                # A server name can collide with a core agent attribute
-                # (`shell`, `repo`) or a reserved one. Skipping it keeps the
-                # session usable instead of failing session/new.
-                warnings.append(f"MCP server {name!r} was not registered: {exc}")
+        failed = session.register_tools({f"mcp.{name}": tool for name, tool in tools.items()})
+        warnings.extend(
+            f"MCP server {name!r} was not registered: {failed[f'mcp.{name}']}"
+            for name in tools
+            if f"mcp.{name}" in failed
+        )
         return warnings
 
     async def _create_mcp_tools(
