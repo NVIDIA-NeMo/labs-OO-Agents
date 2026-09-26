@@ -396,12 +396,15 @@ class MCPRegistry(Skill):
     # User approval boundary
     # ------------------------------------------------------------------
 
+    def _approval_scope(self) -> str:
+        return str((self._project_dir or Path.cwd()).resolve())
+
     def _approval_request(self, name: str) -> MCPApprovalRequest:
         return build_approval_request(
             name,
             mcp_file=self._mcp_file,
             servers=self._servers,
-            scope=str((self._project_dir or Path.cwd()).resolve()),
+            scope=self._approval_scope(),
         )
 
     def _is_approved(self, name: str) -> bool:
@@ -418,7 +421,14 @@ class MCPRegistry(Skill):
         return request
 
     def _revoke_approvals(self, name: str) -> bool:
-        return self._approval_store.revoke_server(name)
+        """Revoke ``name`` in this workspace only; other workspaces keep theirs."""
+        try:
+            fingerprint: str | None = self._approval_request(name).fingerprint
+        except ValueError:
+            fingerprint = None  # an invalid config; its scope still matches
+        return self._approval_store.revoke_server(
+            name, scope=self._approval_scope(), fingerprint=fingerprint
+        )
 
     def _prepared_connection(
         self, name: str

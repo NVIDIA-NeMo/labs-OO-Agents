@@ -69,3 +69,36 @@ def test_approval_store_write_failure_does_not_double_close_fd(tmp_path, monkeyp
     # The file object's own close does not go through os.close, so any entry
     # here is a direct close of a descriptor os.fdopen() already owns.
     assert closed == [], f"fd closed directly after os.fdopen took ownership: {closed}"
+
+
+def _registry(tmp_path, workspace, servers):
+    from nooa_coder.workspace.mcp_registry import MCPRegistry
+
+    root = tmp_path / workspace
+    (root / ".nooa").mkdir(parents=True)
+    return MCPRegistry(
+        servers=servers,
+        approval_path=tmp_path / "approvals.json",
+        project_dir=root / ".nooa",
+    )
+
+
+def test_revoking_in_one_workspace_keeps_the_other_workspaces_approval(tmp_path):
+    servers = {"gdrive": {"command": "run-gdrive"}}
+    a = _registry(tmp_path, "a", servers)
+    b = _registry(tmp_path, "b", servers)
+    a._approve("gdrive", a._approval_request("gdrive").confirmation)
+    b._approve("gdrive", b._approval_request("gdrive").confirmation)
+    assert a._revoke_approvals("gdrive")
+    assert not a._is_approved("gdrive")
+    assert b._is_approved("gdrive")
+
+
+def test_revoking_also_drops_this_workspaces_approval_of_an_older_config(tmp_path):
+    a = _registry(tmp_path, "a", {"gdrive": {"command": "run-gdrive"}})
+    a._approve("gdrive", a._approval_request("gdrive").confirmation)
+    # The config changes; the old approval stays on record until revoked.
+    a._servers["gdrive"] = {"command": "run-gdrive-v2"}
+    a._revoke_approvals("gdrive")
+    a._servers["gdrive"] = {"command": "run-gdrive"}
+    assert not a._is_approved("gdrive")
