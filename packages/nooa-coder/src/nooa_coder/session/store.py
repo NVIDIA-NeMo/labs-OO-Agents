@@ -8,6 +8,7 @@ import fcntl
 import json
 import logging
 import os
+import socket
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from nooa.storage.sqlite import (
     SessionAlreadyActiveError,
     SQLiteStorageManager,
     _acquire_session_lock,
+    _read_lock_owner,
     delete_sqlite_database,
 )
 from nooa_coder.session.events import (
@@ -97,7 +99,9 @@ def _connect_read_only(path: Path) -> sqlite3.Connection:
     Read-only mode never creates the file, so a reader racing a delete
     fails instead of leaving an empty database behind.
     """
-    uri = f"{path.resolve().as_uri()}?mode=ro"
+    # immutable: no locks and no shared-memory side file, so a reader on
+    # another machine sharing the directory cannot disturb the writer.
+    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
     return sqlite3.connect(uri, uri=True)
 
 
@@ -161,6 +165,35 @@ class InvalidSessionIdError(ValueError):
 
 class SessionNotFoundError(FileNotFoundError):
     """Raised when a durable session does not exist or lacks start metadata."""
+
+
+class _SessionStorageManager(SQLiteStorageManager):
+    """Storage for one session file: rollback journal, and no accidental creation.
+
+    ``SQLiteStorageManager`` opens with a plain ``sqlite3.connect(path)``,
+    which creates an empty database when the file is gone, so a delete
+    racing an open would leave a new empty file behind. ``must_exist``
+    opens with the ``mode=rw`` URI, which fails instead.
+
+    Session files use the rollback journal everywhere, not only where
+    virtiofs is detected: the directory may be shared with another machine
+    (a sandbox and its host), and WAL keeps cross-process state in a
+    shared-memory file that two kernels do not agree on. A file left in WAL
+    mode by an older build is converted on open.
+    """
+
+    def __init__(self, db_path: str | Path, *, must_exist: bool) -> None:
+        self._must_exist = must_exist
+        super().__init__(db_path, check_same_thread=False)
+
+    def _open_connection(self) -> sqlite3.Connection:
+        mode = "rw" if self._must_exist else "rwc"
+        uri = f"{Path(self._db_path).resolve().as_uri()}?mode={mode}"
+        connection = sqlite3.connect(uri, uri=True, check_same_thread=self._check_same_thread)
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
 
 
 class SessionHandle:
@@ -325,9 +358,7 @@ class SessionStore:
             raise FileExistsError(f"Session {session_id!r} already exists")
 
         offset = datetime.now().astimezone().utcoffset()
-        # check_same_thread=False: the session's checkpoint writes from a
-        # worker thread (save_snapshot_json takes the manager's lock).
-        storage = SQLiteStorageManager(path, check_same_thread=False)
+        storage = _SessionStorageManager(path, must_exist=False)
         events = EventManager(backend=storage.event_backend)
         for event_type in SESSION_EVENT_TYPES:
             events.register_event_type(event_type)
@@ -383,8 +414,18 @@ class SessionStore:
                 session_id=session_id,
                 owner_pid=owner,
             )
+        foreign = self.foreign_owner(session_id)
+        if foreign is not None:
+            pid, host = foreign
+            lock_path = self.path_for(session_id).with_suffix(".lock")
+            raise SessionAlreadyActiveError(
+                f"Session {session_id!r} is in use on {host} (pid {pid}). Close it there "
+                f"first. If that process is gone, empty the file {str(lock_path)!r} to reclaim it.",
+                session_id=session_id,
+                owner_pid=pid,
+            )
         try:
-            storage = SQLiteStorageManager(path, check_same_thread=False, must_exist=True)
+            storage = _SessionStorageManager(path, must_exist=True)
         except sqlite3.OperationalError as exc:
             if path.exists():
                 raise
@@ -568,6 +609,8 @@ class SessionStore:
         lock_path = self.path_for(session_id).with_suffix(".lock")
         if not lock_path.exists():
             return False
+        if self.foreign_owner(session_id) is not None:
+            return True
         try:
             fd = _acquire_session_lock(str(lock_path))
         except SessionAlreadyActiveError:
@@ -575,6 +618,20 @@ class SessionStore:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
         return False
+
+    def foreign_owner(self, session_id: str) -> tuple[int, str] | None:
+        """``(pid, host)`` of a process on another machine holding the session, else None.
+
+        The kernel lock is not visible across a shared mount; the owner's
+        record in the lock file is. A blank file means a clean close. A
+        record naming this machine is left to the kernel lock to judge, so
+        a crash here never blocks a resume here.
+        """
+        lock_path = self.path_for(session_id).with_suffix(".lock")
+        pid, host = _read_lock_owner(str(lock_path))
+        if pid is None or host is None or host == socket.gethostname():
+            return None
+        return pid, host
 
     def claim_owner(self, session_id: str) -> int | None:
         """The pid of a live process claiming the session through ``<id>.active/``, else None."""
