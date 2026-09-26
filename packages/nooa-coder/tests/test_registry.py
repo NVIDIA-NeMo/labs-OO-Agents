@@ -397,6 +397,19 @@ async def test_set_model_swaps_the_client_before_the_next_turn(root_options, ses
     assert new.closed
 
 
+async def test_set_model_records_the_alias_at_once_and_says_so(root_options, sessions_dir):
+    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=ModelFactory())
+    try:
+        root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
+        seen = []
+        root.subscribe(lambda e: seen.append(e) if e.kind == "model_changed" else None)
+        await root.set_model("alias-b")
+        assert root.info.model == "alias-b"
+        assert [e.model for e in seen] == ["alias-b"]
+    finally:
+        await registry.close_all()
+
+
 async def test_a_same_model_child_shares_the_parents_client(root_options, sessions_dir):
     factory = ModelFactory()
     registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)

@@ -227,7 +227,6 @@ class CoderACPAgent:
         self._bridges: dict[str, ACPEventBridge] = {}
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
-        self._chosen_models: dict[str, str] = {}
         # Receipts of prompts still waiting for their turn, by session: Stop
         # answers them "cancelled" and withdraws the ones not yet consumed.
         self._prompts: dict[str, list[Receipt]] = {}
@@ -837,7 +836,6 @@ class CoderACPAgent:
             raise RequestError.invalid_params(
                 {"configId": config_id, "value": value, "reason": str(exc)}
             ) from exc
-        self._chosen_models[session.id] = value
         return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
 
     @staticmethod
@@ -865,12 +863,7 @@ class CoderACPAgent:
         """The model select option (the registry's aliases plus the current model),
         and a reasoning option when the current client declares levels."""
         options: list[Any] = []
-        current = (
-            self._chosen_models.get(session.id)
-            or session.info.model
-            or session.options.model
-            or self._model
-        )
+        current = session.info.model or self._model
         aliases = model_aliases()
         if current and current not in aliases:
             aliases = [current, *aliases]

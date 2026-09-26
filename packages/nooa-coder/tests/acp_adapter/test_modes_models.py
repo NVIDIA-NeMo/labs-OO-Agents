@@ -75,6 +75,21 @@ async def test_choosing_a_model_switches_the_next_turn(make_adapter, workspace, 
     assert client.texts(AgentMessageChunk, session_id)[-1] == "From the smart model.\n\n"
 
 
+async def test_the_model_option_reports_the_chosen_model_at_once_and_after_a_load(
+    make_adapter, workspace
+):
+    adapter = await make_adapter(ScriptedModels(), llm_factory=ModelFactory(), model="fast")
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    await adapter.set_config_option("model", session_id, "smart")
+    session = adapter.registry_for(workspace).get(session_id)
+    [option] = adapter._config_options(session)
+    assert option.current_value == "smart"  # before any turn used it
+    await adapter.close_session(session_id)
+    loaded = await adapter.load_session(str(workspace), session_id)
+    [option] = loaded.config_options or []
+    assert option.current_value == "smart"
+
+
 async def test_a_model_that_cannot_be_built_is_invalid(make_adapter, workspace):
     def factory(alias, workspace):
         if alias == "broken":

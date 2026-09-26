@@ -357,6 +357,13 @@ class ModeChangedUpdate(_Update):
     mode: str
 
 
+class ModelChangedUpdate(_Update):
+    """The session's model alias changed; the new client applies from the next turn."""
+
+    kind: Literal["model_changed"] = "model_changed"
+    model: str
+
+
 class ChildCreatedUpdate(_Update):
     """A child session was created under this one."""
 
@@ -395,6 +402,7 @@ SessionEvent = Annotated[
     | CancelledUpdate
     | TitleChangedUpdate
     | ModeChangedUpdate
+    | ModelChangedUpdate
     | ChildCreatedUpdate
     | UsageChangedUpdate
     | ClosedUpdate
