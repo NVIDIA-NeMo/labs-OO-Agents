@@ -292,7 +292,8 @@ async def test_list_without_cwd_covers_only_workspaces_this_process_serves(
     """There is no index of every workspace, so a session no request led here is not listed."""
     unseen = tmp_path / "unseen"
     with SessionStore(sessions_root(unseen)).create(workspace=str(unseen)) as handle:
-        from nooa_coder.session.events import SessionUserMessage, TurnEnded
+        from coder_test_agents import SessionUserMessage
+        from nooa_coder.session.events import TurnEnded
 
         handle.events.add(SessionUserMessage(content="hello"))
         handle.events.add(TurnEnded(outcome_kind="done"))

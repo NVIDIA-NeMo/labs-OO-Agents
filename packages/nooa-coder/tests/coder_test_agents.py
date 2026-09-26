@@ -21,9 +21,11 @@ from nooa_coder.session.items import (  # noqa: F401
     ChildResult,
     TaskResult,
 )
-from nooa_coder.session.loader import default_agent_factory
+from nooa_coder.session.loader import load_agent_class
 from pydantic import BaseModel
 
+from nooa.context_blocks import Metadata
+from nooa.context_blocks.roles import Role
 from nooa.interactive import Done, InteractiveAgent, NeedInput, Waiting  # noqa: F401
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage, ToolCall
 
@@ -184,7 +186,21 @@ class ScriptedModels:
         llm = CellLLM(list(self.scripts.get(options.name, [])))
         self.llms[options.name] = llm
         self.built.append(options)
-        return default_agent_factory(options.model_copy(update={"llm": llm}), storage)
+        return plain_agent_factory(options.model_copy(update={"llm": llm}), storage)
+
+
+def plain_agent_factory(options: Any, storage: Any) -> InteractiveAgent:
+    """``options.agent_spec`` built with only the session's storage and ``options.llm``."""
+    agent_class = load_agent_class(options.agent_spec, base=options.workspace)
+    return agent_class(storage=storage, **({"llm": options.llm} if options.llm is not None else {}))
+
+
+class SessionUserMessage(Metadata):
+    """The user-message record older hosts wrote; the store still reads it."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    content: str = ""
 
 
 class _Command:

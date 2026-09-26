@@ -80,14 +80,12 @@ class WorkspaceSettings(Skill):
         super().__init__()
         self._workspace = Path(options.working_dir).expanduser().resolve()
         self._agent_spec = options.agent_spec
-        self._legacy_agent = options.legacy_agent
 
     def _options(self):
         from .options import CoderOptions
 
         options = CoderOptions.load(self._workspace)
         options.agent_spec = self._agent_spec
-        options.legacy_agent = self._legacy_agent
         return options
 
     async def remember_skill(self, skill_id: str, directory: str | None = None) -> str:

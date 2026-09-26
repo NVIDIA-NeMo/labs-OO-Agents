@@ -65,14 +65,6 @@ class SessionTitleUpdated(Metadata):
     user_set: bool = False
 
 
-class SessionUserMessage(Metadata):
-    """Raw user text accepted by the agent runtime as a conversation turn."""
-
-    _role: ClassVar[Role] = Role.METADATA
-
-    content: str = ""
-
-
 class ItemAdmitted(Metadata):
     """An item accepted onto one of the agent's channels, recorded before it is queued.
 
@@ -187,7 +179,6 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     SessionTitleUpdated,
     SessionModeChanged,
     SessionModelChanged,
-    SessionUserMessage,
     ItemAdmitted,
     ItemConsumed,
     ItemWithdrawn,

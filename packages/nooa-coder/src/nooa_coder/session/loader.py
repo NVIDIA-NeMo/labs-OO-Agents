@@ -138,14 +138,6 @@ def _load_agent_file(file_path: Path) -> ModuleType:
     return module
 
 
-def default_agent_factory(options: SessionOptions, storage: StorageManager) -> InteractiveAgent:
-    """Instantiate ``options.agent_spec`` with the session's storage and ``options.llm``."""
-    agent_class = load_agent_class(options.agent_spec, base=options.workspace)
-    if options.llm is not None:
-        return agent_class(llm=options.llm, storage=storage)
-    return agent_class(storage=storage)
-
-
 def load_typed(type_name: str | None, data: Any) -> Any:
     """Rebuild a value recorded as JSON data and the ``module:qualname`` of its class.
 

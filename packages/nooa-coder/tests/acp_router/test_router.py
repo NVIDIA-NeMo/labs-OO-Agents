@@ -239,7 +239,8 @@ def _stored(
     handle = harness.store.create(
         agent="a:B", workspace=workspace or harness.cwd, host="acp", parent_id=parent_id
     )
-    from nooa_coder.session.events import SessionUserMessage, TurnEnded
+    from coder_test_agents import SessionUserMessage
+    from nooa_coder.session.events import TurnEnded
 
     for _ in range(turns):
         handle.events.add(SessionUserMessage(content="hello"))

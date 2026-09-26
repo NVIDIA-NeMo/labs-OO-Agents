@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 _START_EVENT_TYPES = frozenset(("SessionStarted", "TUISessionStart"))
 _TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated", "TUISessionRename"))
 _SETTING_EVENT_TYPES = ("SessionModeChanged", "SessionModelChanged")
+# SessionUserMessage: written by earlier versions of this package, still read.
 _USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
 _AGENT_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
 _TURN_EVENT_TYPES = _USER_EVENT_TYPES | _AGENT_EVENT_TYPES
@@ -583,19 +584,6 @@ class SessionStore:
                     )
                 )
         return entries
-
-    def find_by_prefix(self, prefix: str) -> list[str]:
-        if not prefix or any(separator in prefix for separator in ("/", "\\", "\x00")):
-            return []
-        if not self.root.exists():
-            return []
-        matches = [
-            path
-            for path in self.root.glob("*.db")
-            if path.stem.startswith(prefix) and not path.stem.endswith("-memory")
-        ]
-        matches.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        return [path.stem for path in matches]
 
     def is_active(self, session_id: str) -> bool:
         """Whether another owner holds the session: the file lock, or a live claim.

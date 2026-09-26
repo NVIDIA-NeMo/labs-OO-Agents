@@ -47,7 +47,6 @@ from nooa_coder.session.events import (
 )
 from nooa_coder.session.items import (
     USAGE_FIELDS,
-    AgentEventUpdate,
     CancelledUpdate,
     ClosedUpdate,
     CommandInfo,
@@ -213,7 +212,6 @@ class Session:
         self._closing = False
         self._closed = False
         self._before_close = before_close
-        self.port: Any = None  # the agent's SessionPort, set by install_port()
         self._loop_context_hooks: list[Callable[[], object]] = []
         self._pending_steers: list[tuple[str, str, str]] = []  # (item_id, text, source)
         self._snapshot_digest: str | None = None
@@ -1053,19 +1051,6 @@ class Session:
             self._count_usage(event)
         if isinstance(event, AgentMessage) and self.agent.turns.in_turn:
             self._turn_messages.add(event.content)
-        update = AgentEventUpdate(
-            session_id=self.id, event_id=str(event.id), event_type=event.event_type
-        )
-        # Handlers run before the event manager stores the event; tell
-        # listeners on the next loop step, when event_manager.get(event_id)
-        # finds it.
-        try:
-            if isinstance(event, AgentMessage):
-            self._emit(update)
-        else:
-            asyncio.get_running_loop().call_soon(self._emit, update)
-        except RuntimeError:  # no running loop: nothing to defer to
-            self._emit(update)
 
     def transcript(self, *, limit: int | None = None) -> list[TranscriptEntry]:
         """The session's transcript as a person would see it; the last ``limit`` entries."""

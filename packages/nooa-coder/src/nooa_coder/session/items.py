@@ -394,14 +394,6 @@ class ClosedUpdate(_Update):
     kind: Literal["closed"] = "closed"
 
 
-class AgentEventUpdate(_Update):
-    """The agent added an event; read it from the agent's events by id."""
-
-    kind: Literal["agent_event"] = "agent_event"
-    event_id: str
-    event_type: str
-
-
 SessionEvent = Annotated[
     TurnStartedUpdate
     | TurnEndedUpdate
@@ -412,8 +404,7 @@ SessionEvent = Annotated[
     | ModelChangedUpdate
     | ChildCreatedUpdate
     | UsageChangedUpdate
-    | ClosedUpdate
-    | AgentEventUpdate,
+    | ClosedUpdate,
     Field(discriminator="kind"),
 ]
 """What ``Session.subscribe()`` listeners receive: data only."""

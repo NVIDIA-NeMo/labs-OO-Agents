@@ -10,7 +10,7 @@ import sqlite3
 
 import coder_test_agents as agents
 import pytest
-from coder_test_agents import ask, cell, done, reply, until, wait_on
+from coder_test_agents import ask, cell, done, plain_agent_factory, reply, until, wait_on
 from nooa_coder.session import session as session_module
 from nooa_coder.session.items import (
     CommandInfo,
@@ -20,7 +20,6 @@ from nooa_coder.session.items import (
     TurnCancelledOutcome,
     TurnEndedUpdate,
 )
-from nooa_coder.session.loader import default_agent_factory
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.session import (
     ItemDiscardedError,
@@ -137,13 +136,8 @@ async def test_subscribers_see_admission_then_turn_start_then_turn_end(make_sess
     unsubscribe = session.subscribe(seen.append)
     session.start()
     await asyncio.wait_for(session.prompt("go"), TIMEOUT)
-    kinds = [e.kind for e in seen if e.kind != "agent_event"]
+    kinds = [e.kind for e in seen if e.kind != "usage_changed"]
     assert kinds == ["item_admitted", "turn_started", "turn_ended"]
-    agent_events = [e for e in seen if e.kind == "agent_event"]
-    assert "AgentMessage" in {e.event_type for e in agent_events}
-    [message_event] = [e for e in agent_events if e.event_type == "AgentMessage"]
-    assert session.agent.event_manager.values()
-    assert any(str(e.id) == message_event.event_id for e in session.agent.event_manager.values())
 
     unsubscribe()
     count = len(seen)
@@ -537,7 +531,7 @@ async def test_checkpoint_is_written_only_when_the_state_changed(
     await session.close()
     with SessionStore(sessions_dir).open(session_id) as handle:
         options = SessionOptions(workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent")
-        restored = default_agent_factory(options, handle.storage)
+        restored = plain_agent_factory(options, handle.storage)
         assert handle.storage.restore_latest_snapshot(restored)
         assert restored.v.answer == 42
 
@@ -712,23 +706,6 @@ async def test_idle_cancel_leaves_items_no_turn_has_taken(make_session):
     assert not outcome.done()
 
 
-async def test_listeners_can_read_an_agent_event_by_its_id(make_session):
-    session, _ = make_session(reply("hi"), start=False)
-    found = []
-
-    def listener(update):
-        if update.kind == "agent_event":
-            event = session.agent.event_manager.get(update.event_id)
-            found.append((update.event_type, event is not None and event.tag is not None))
-
-    session.subscribe(listener)
-    session.start()
-    await asyncio.wait_for(session.prompt("hello"), TIMEOUT)
-    await asyncio.sleep(0)
-    assert found and all(ok for _, ok in found), found
-    assert "AgentMessage" in {event_type for event_type, _ in found}
-
-
 async def test_item_admitted_updates_carry_the_full_text(make_session):
     session, _ = make_session(start=False)
     seen = []
@@ -752,7 +729,7 @@ def test_unused_store_api_is_gone():
 
 
 async def test_old_user_message_records_still_show_in_the_transcript(make_session):
-    from nooa_coder.session.events import SessionUserMessage
+    from coder_test_agents import SessionUserMessage
 
     session, _ = make_session(start=False)
     session.handle.events.add(SessionUserMessage(content="from an older host"))
@@ -771,12 +748,16 @@ async def test_commands_need_the_coding_registry_shape(make_session):
         session.commands()
 
 
-def _order(session, kinds=("agent_event", "turn_ended")):
-    """Session updates of the given kinds, as (kind, event_type) pairs, in order."""
+def _order(session):
+    """The agent's messages and the session's turn ends, in order.
+
+    As ``("agent_event", "AgentMessage")`` and ``("turn_ended", None)`` pairs.
+    """
     seen = []
-    session.subscribe(
-        lambda e: seen.append((e.kind, getattr(e, "event_type", None))) if e.kind in kinds else None
+    session.agent.event_manager.on(
+        "AgentMessage", lambda _event: seen.append(("agent_event", "AgentMessage"))
     )
+    session.subscribe(lambda e: seen.append((e.kind, None)) if e.kind == "turn_ended" else None)
     return seen
 
 

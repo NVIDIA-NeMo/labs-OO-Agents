@@ -31,7 +31,7 @@ async def make_session(sessions_dir, tmp_path):
     Returns ``(session, llm)``. The fake model is strict: a model call with
     no scripted response left fails the turn, so tests see extra calls.
     """
-    from nooa_coder.session.loader import default_agent_factory
+    from coder_test_agents import plain_agent_factory
     from nooa_coder.session.options import SessionOptions
     from nooa_coder.session.session import Session
     from nooa_coder.session.store import SessionStore
@@ -56,7 +56,7 @@ async def make_session(sessions_dir, tmp_path):
             turn_method=turn_method,
         )
         handle = store.create(agent=agent_spec, workspace=str(tmp_path), host=options.host)
-        agent = default_agent_factory(options, handle.storage)
+        agent = plain_agent_factory(options, handle.storage)
         session = Session(options=options, agent=agent, handle=handle)
         if start:
             session.start()
