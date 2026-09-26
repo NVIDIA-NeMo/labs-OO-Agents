@@ -162,7 +162,9 @@ class ACPEventBridge:
         self._open_tools: set[ToolKey] = set()
         self._python_source: dict[ToolKey, str] = {}
         self._terminal_output: dict[ToolKey, str] = {}
-        self._cost_usd = 0.0
+        # What the session spent before this bridge was attached (a resumed or
+        # re-followed session), plus what it spends from here on.
+        self._cost_usd = session.info.usage.cost_usd
         self._used: int | None = None  # input tokens of the latest model call
         self._plan: list[PlanEntry] = []
         self._children: list[dict[str, Any]] = []
