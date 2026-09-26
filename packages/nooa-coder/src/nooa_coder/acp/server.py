@@ -511,7 +511,7 @@ class CoderACPAgent:
         bridges = list(self._bridges.values())
         self._bridges.clear()
         empty = [
-            session
+            (registry, session.id)
             for registry in self._registries.values()
             for session in registry.sessions.values()
             if session.parent_id is None and session.info.turn_count == 0
@@ -520,8 +520,8 @@ class CoderACPAgent:
             *(registry.close_all for registry in self._registries.values()),
             *(bridge.close for bridge in bridges),
         )
-        for session in empty:
-            _discard_if_empty(session)
+        for registry, session_id in empty:
+            await _discard_empty(registry, session_id)
 
     # ---- prompt and cancel ---------------------------------------------
 
@@ -1162,19 +1162,17 @@ def _slash_invocation(text: str) -> tuple[str, str] | None:
     return name, parts[1] if len(parts) == 2 else ""
 
 
-def _discard_if_empty(session: Session) -> None:
+async def _discard_empty(registry: SessionRegistry, session_id: str) -> None:
     """At shutdown, a root session the client never wrote to leaves no file.
 
     Clients open sessions they then abandon (a picker, a restart); without
     this the store fills with files that list nothing. Only at shutdown: a
     client may close a fresh session and load it again by id meanwhile.
     """
-    if session.parent_id is not None or session.info.turn_count > 0:
-        return
     try:
-        session.handle.store.delete(session.id)
+        await registry.delete(session_id, keep_files=False)
     except Exception:
-        logger.warning("Session %s: could not remove its empty file", session.id, exc_info=True)
+        logger.warning("Session %s: could not remove its empty file", session_id, exc_info=True)
 
 
 def _load_error(session_id: str, exc: BaseException) -> BaseException:
