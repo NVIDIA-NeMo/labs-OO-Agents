@@ -208,10 +208,10 @@ class ACPEventBridge:
 
         def on_child_update(update: Any) -> None:
             kind = getattr(update, "kind", None)
-            if kind == "child_created" and self._resolve_child is not None:
-                grandchild = self._resolve_child(update.child_id)
-                if grandchild is not None:
-                    self._mirror(grandchild)
+            if isinstance(update, ChildCreatedUpdate):
+                # Announced like this session's own children, so the client
+                # knows the id before cards arrive under it.
+                self._on_child_created(update)
             elif kind == "closed":
                 self._unmirror(child.id)
 
