@@ -318,3 +318,46 @@ async def test_unknown_extension_methods_are_not_found(make_adapter):
     with pytest.raises(RequestError) as caught:
         await adapter.ext_method("nooa/unknown", {})
     assert caught.value.code == -32601
+
+
+# ---- shutdown ----------------------------------------------------------------
+
+
+async def test_closing_in_order_runs_every_closer_and_raises_the_last_failure():
+    from nooa_coder.acp.server import _close_in_order
+
+    ran: list[str] = []
+
+    async def failing(name):
+        ran.append(name)
+        raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match="second") as caught:
+        await _close_in_order(
+            lambda: failing("first"), None, lambda: failing("second"), lambda: ran.append("sync")
+        )
+    assert ran == ["first", "second", "sync"]
+    assert str(caught.value.__context__) == "first"
+
+
+async def test_closing_in_order_lets_a_cancellation_through_at_once():
+    """Cancelled part-way, the rest are started but not waited for."""
+    from nooa_coder.acp.server import _close_in_order
+
+    first_started, second_started, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def first():
+        first_started.set()
+        await asyncio.Event().wait()
+
+    async def second():
+        second_started.set()
+        await release.wait()
+
+    task = asyncio.create_task(_close_in_order(first, second))
+    await first_started.wait()
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=2)
+    assert task in done and task.cancelled()
+    await asyncio.wait_for(second_started.wait(), 2)
+    release.set()
