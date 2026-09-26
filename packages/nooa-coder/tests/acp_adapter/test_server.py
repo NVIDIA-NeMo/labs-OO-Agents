@@ -99,6 +99,24 @@ async def test_commands_are_advertised_after_the_new_session_response(
     assert {"mcp", "skills", "trace-url", "usage"} <= set(names)
 
 
+async def test_a_change_to_the_commands_is_advertised_again(
+    make_adapter, workspace, client, tmp_path
+):
+    adapter = await make_adapter(CoderModels(), agent_spec=CODER_SPEC)
+    response = await adapter.new_session(str(workspace))
+    await client.wait_for(lambda: client.updates(response.session_id, AvailableCommandsUpdate))
+    skill = tmp_path / "extra-skills" / "shipit"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: shipit\ndescription: Ship it\n---\nShip.\n")
+    session = adapter.session(response.session_id)
+    session.agent.slash_commands.add_skills_dir(skill.parent)
+    await client.wait_for(
+        lambda: len(client.updates(response.session_id, AvailableCommandsUpdate)) == 2
+    )
+    latest = client.updates(response.session_id, AvailableCommandsUpdate)[-1]
+    assert "shipit" in [command.name for command in latest.available_commands]
+
+
 async def test_startup_warnings_are_sent_as_an_agent_message(make_adapter, workspace, client):
     from acp.schema import AcpMcpServer
 

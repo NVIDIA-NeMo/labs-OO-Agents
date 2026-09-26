@@ -63,6 +63,7 @@ from nooa_coder.session.items import (
     ChildCreatedUpdate,
     ItemAdmittedUpdate,
     ModeChangedUpdate,
+    ModelInfo,
     SessionInfo,
     TitleChangedUpdate,
     TurnEndedUpdate,
@@ -119,6 +120,8 @@ class BridgedSession(Protocol):
     info: SessionInfo
 
     def subscribe(self, listener: Callable[[Any], None]) -> Callable[[], None]: ...
+
+    def model_info(self) -> ModelInfo: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,7 +599,7 @@ class ACPEventBridge:
         tokens included) go in ``_meta["dev.nooa/usage"]``. Nothing is sent
         before the session's first model call: there is no context in use.
         """
-        context_window = getattr(getattr(self.agent, "llm", None), "context_window", None)
+        context_window = self.session.model_info().context_window
         usage = self.session.info.usage
         used = usage.last_input_tokens
         if context_window is None or not used:

@@ -50,9 +50,12 @@ from nooa_coder.session.items import (
     ClosedUpdate,
     CommandInfo,
     CommandResult,
+    CommandsChangedUpdate,
     ItemAdmittedUpdate,
     ModeChangedUpdate,
     ModelChangedUpdate,
+    ModelInfo,
+    ReasoningChangedUpdate,
     Receipt,
     SessionEvent,
     SessionInfo,
@@ -223,6 +226,13 @@ class Session:
                 "ChannelItemsDiscarded", lambda e: self._on_discarded(e.channel, e.items)
             ),
         )
+        if self.info.reasoning:
+            self._restore_reasoning(self.info.reasoning)
+        # The one listener of the agent's command registry: hosts see
+        # changes as CommandsChangedUpdate.
+        set_on_change = getattr(getattr(agent, "slash_commands", None), "set_on_change", None)
+        if callable(set_on_change):
+            set_on_change(self._on_commands_changed)
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -814,6 +824,9 @@ class Session:
 
     # ---- slash commands ----------------------------------------------
 
+    def _on_commands_changed(self, _commands: object) -> None:
+        self._emit(CommandsChangedUpdate(session_id=self.id, commands=self.commands()))
+
     def commands(self) -> list[CommandInfo]:
         """Slash commands of the agent's ``slash_commands`` registry, if it has one.
 
@@ -880,8 +893,10 @@ class Session:
         self._ensure_open()
         client = self._llm_factory(alias, self.options.workspace)
         # Recorded now: a load before the next turn resumes on this model.
+        # The new client starts from its own reasoning default.
         self.handle.set_model(alias)
         self.info.model = alias
+        self.info.reasoning = None
         previous, self._pending_model = self._pending_model, (alias, client)
         if previous is not None:
             await _aclose(previous[1])
@@ -903,6 +918,68 @@ class Session:
         # New same-model children share the new client.
         self.options = self.options.model_copy(update={"model": alias, "llm": client})
         self.info.model = alias
+
+    def channels(self) -> list[str]:
+        """Names of the agent's queue channels: where ``submit`` can put an item."""
+        return list(self.agent.queue_manager.channels())
+
+    def _next_llm(self) -> Any:
+        """The client the next model call uses: one a ``set_model`` left pending, else the agent's."""
+        if self._pending_model is not None:
+            return self._pending_model[1]
+        return getattr(self.agent, "llm", None)
+
+    def model_info(self) -> ModelInfo:
+        """The model the next call uses, as data: alias, context window, reasoning levels.
+
+        After a ``set_model`` whose client is not swapped in yet, this
+        describes that client: it is the one the next turn uses.
+        """
+        client = self._next_llm()
+        return ModelInfo(
+            alias=self.info.model,
+            context_window=getattr(client, "context_window", None),
+            reasoning_level=getattr(client, "reasoning_level", None),
+            reasoning_levels=list(getattr(client, "reasoning_levels", None) or ()),
+            reasoning_default=getattr(client, "reasoning_default", None),
+        )
+
+    async def set_reasoning(self, level: str) -> None:
+        """Choose a reasoning level the client declares; it applies from the next model call.
+
+        The level is set on the client the next call uses (see
+        ``model_info``), recorded (``info.reasoning``, and the store, so a
+        load restores it) and announced with a ``ReasoningChangedUpdate``.
+        A later ``set_model`` resets it: the new client starts from its own
+        default. A same-model child shares its parent's client, so a level
+        set on either applies to both.
+
+        Raises:
+            ValueError: If the client does not declare ``level``.
+        """
+        self._ensure_open()
+        client = self._next_llm()
+        levels = tuple(getattr(client, "reasoning_levels", None) or ())
+        if level not in levels:
+            allowed = ", ".join(levels) if levels else "none for this model"
+            raise ValueError(f"Unknown reasoning level {level!r}; allowed: {allowed}")
+        client.reasoning_level = level
+        self.handle.set_reasoning(level)
+        self.info.reasoning = level
+        self._emit(ReasoningChangedUpdate(session_id=self.id, level=level))
+
+    def _restore_reasoning(self, level: str) -> None:
+        """Apply a recorded level on load, if the client still declares it."""
+        client = getattr(self.agent, "llm", None)
+        if level in tuple(getattr(client, "reasoning_levels", None) or ()):
+            client.reasoning_level = level
+        else:
+            logger.info(
+                "Session %s: the recorded reasoning level %r is not offered by the model; "
+                "using its default",
+                self.id,
+                level,
+            )
 
     async def set_mode(self, mode: str) -> None:
         """Record the permission mode (``auto`` or ``ask``); nothing enforces it yet.

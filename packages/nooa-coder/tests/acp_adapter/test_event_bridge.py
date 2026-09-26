@@ -62,6 +62,7 @@ class _FakeSession:
         self.listeners: list[Any] = []
         self.handle = SimpleNamespace(update_usage=lambda usage: None)
         self._emit = self.emit
+        self._pending_model = None
         agent.event_manager.on("LLMResponse", lambda event: Session._count_usage(self, event))
 
     def subscribe(self, listener: Any) -> Any:
@@ -76,6 +77,12 @@ class _FakeSession:
     def emit(self, update: Any) -> None:
         for listener in list(self.listeners):
             listener(update)
+
+    def model_info(self) -> Any:
+        return Session.model_info(self)  # type: ignore[arg-type]
+
+    def _next_llm(self) -> Any:
+        return Session._next_llm(self)  # type: ignore[arg-type]
 
 
 class _RecordingClient:
