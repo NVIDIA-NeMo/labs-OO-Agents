@@ -169,53 +169,45 @@ async def test_a_model_response_arrives_before_the_usage_it_changes(make_session
 # ---- host status ----------------------------------------------------------------
 
 
-async def test_host_status_is_empty_for_an_agent_without_one(make_session):
+async def test_the_plan_is_empty_for_an_agent_without_one(make_session):
     session, _ = make_session(start=False)
-    assert session.host_status() == {}
+    assert session.plan() == []
 
 
-async def test_host_status_is_the_agents_as_json_data(make_session):
-    session, _ = make_session(agent_spec="coder_test_agents:StatusAgent", start=False)
-    assert session.host_status() == {"context": {"active_events": 3}, "where": "/tmp/x"}
+async def test_the_plan_is_the_agents_as_entries(make_session):
+    from nooa_coder.session.items import PlanEntry
+
+    session, _ = make_session(agent_spec="coder_test_agents:PlanAgent", start=False)
+    assert session.plan() == [
+        PlanEntry(content="write the test", status="in_progress"),
+        PlanEntry(content="run it"),
+    ]
 
 
-async def test_a_failing_host_status_is_empty(make_session, caplog):
-    session, _ = make_session(agent_spec="coder_test_agents:BrokenStatusAgent", start=False)
-    assert session.host_status() == {}
-    assert "host status" in caplog.text
+async def test_a_failing_plan_is_empty(make_session, caplog):
+    session, _ = make_session(agent_spec="coder_test_agents:BrokenPlanAgent", start=False)
+    assert session.plan() == []
+    assert "plan" in caplog.text
 
 
-async def test_the_coding_agent_reports_context_and_todos(tmp_path):
-    import json
-
+async def test_the_coding_agent_plans_from_its_todos(tmp_path):
     from nooa_coder.coding.agent import CodingAgent
+    from nooa_coder.session.items import PlanEntry
 
     from nooa.unifiedllm import FakeLLMClient
 
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         first = agent.todo.add("Write the test")
-        agent.todo.add("Make it pass")
+        second = agent.todo.add("Make it pass")
         agent.todo.activate(first.id)
-        status = agent.host_status()
-        json.dumps(status)  # data only
-        assert status["context"] == json.loads(json.dumps(agent.get_summarization_status()))
-        assert [(t["title"], t["status"], t["active"]) for t in status["todos"]] == [
-            ("Write the test", "open", True),
-            ("Make it pass", "open", False),
+        agent.todo.complete(second.id)
+        assert agent.plan() == [
+            PlanEntry(content="Write the test", status="in_progress"),
+            PlanEntry(content="Make it pass", status="completed"),
         ]
     finally:
         await agent.aclose()
-
-
-# ---- tools --------------------------------------------------------------------
-
-
-class _Tool:
-    """A tool a host hands to the agent."""
-
-    def ping(self) -> str:
-        return "pong"
 
 
 async def test_prepare_tools_runs_the_agents_hook_and_returns_its_warnings(make_session):
@@ -227,6 +219,13 @@ async def test_prepare_tools_runs_the_agents_hook_and_returns_its_warnings(make_
 async def test_prepare_tools_without_a_hook_does_nothing(make_session):
     session, _ = make_session(start=False)
     assert await session.prepare_tools() == []
+
+
+class _Tool:
+    """A tool a host hands to the agent."""
+
+    def ping(self) -> str:
+        return "pong"
 
 
 async def test_register_tools_registers_and_activates_each_tool(make_session):

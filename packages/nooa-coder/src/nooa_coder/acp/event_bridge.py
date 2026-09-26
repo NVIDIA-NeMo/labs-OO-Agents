@@ -9,7 +9,7 @@ messages, file edits, terminal commands, model responses) as
 ``AgentEventUpdate``. The stream is synchronous and ordered, so updates
 reach the client in the order things happened. The bridge never holds
 the agent: status beyond the updates comes from ``model_info()`` and
-``host_status()``.
+``plan()``.
 """
 
 import asyncio
@@ -124,7 +124,7 @@ class BridgedSession(Protocol):
 
     def model_info(self) -> ModelInfo: ...
 
-    def host_status(self) -> dict[str, Any]: ...
+    def plan(self) -> list[Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,9 +593,6 @@ class ACPEventBridge:
             include={name for name in USAGE_FIELDS if name != "cost_usd"}
         )
         meta: dict[str, Any] = {"dev.nooa/usage": meta_totals}
-        context = self.session.host_status().get("context")
-        if context is not None:
-            meta["dev.nooa/context"] = context
         self._enqueue(
             UsageUpdate(
                 session_update="usage_update",
@@ -607,23 +604,10 @@ class ACPEventBridge:
         )
 
     def _publish_plan(self) -> None:
-        """Send the agent's todos (``host_status()["todos"]``) as an ACP plan when they changed."""
-        todos = self.session.host_status().get("todos")
-        if not isinstance(todos, list):
-            return
+        """Send the agent's plan (``Session.plan()``) as an ACP plan update when it changed."""
         entries = [
-            plan_entry(
-                str(item.get("title", "")),
-                status=(
-                    "completed"
-                    if item.get("status") == "done"
-                    else "in_progress"
-                    if item.get("active")
-                    else "pending"
-                ),
-            )
-            for item in todos
-            if isinstance(item, dict)
+            plan_entry(entry.content, status=entry.status, priority=entry.priority)
+            for entry in self.session.plan()
         ]
         if entries == self._plan:
             return
