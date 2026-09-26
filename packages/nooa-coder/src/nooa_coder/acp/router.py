@@ -69,7 +69,8 @@ from acp.schema import InitializeRequest, ListSessionsRequest
 from pydantic import ValidationError
 
 from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
-from nooa_coder.acp.server import initialize_response, list_sessions
+from nooa_coder.acp.listing import list_sessions
+from nooa_coder.acp.protocol import initialize_response
 from nooa_coder.session.store import (
     InvalidSessionIdError,
     SessionNotFoundError,
@@ -268,7 +269,7 @@ class Router:
         starts the same shutdown as end of input; a second one gets the
         default action, so a hung shutdown can still be killed.
         """
-        from nooa_coder.acp.server import open_stdio
+        from nooa_coder.acp.protocol import open_stdio
 
         loop = asyncio.get_running_loop()
         previous = signal.getsignal(signal.SIGTERM)
