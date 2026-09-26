@@ -88,6 +88,41 @@ async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace
         await registry.close_all()
 
 
+async def test_the_mcp_and_skills_controls_are_installed_without_a_host(workspace, sessions_dir):
+    """/mcp approve is what MCPApprovalRequired tells the user to run: it must exist."""
+    registry = SessionRegistry(SessionStore(sessions_dir))
+    try:
+        root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
+        names = {command.name for command in root.commands()}
+        assert {"mcp", "skills"} <= names
+        result = await root.agent.slash_commands.invoke("mcp", "status")
+        assert "MCP servers" in str(result.value)
+    finally:
+        await registry.close_all()
+
+
+async def test_installing_the_controls_again_does_not_announce_a_change(workspace):
+    from nooa_coder.workspace.controls import behavior_commands
+    from nooa_coder.workspace.options import CoderOptions
+
+    options = SessionOptions(workspace=workspace, agent_spec=CODER_SPEC, llm=FakeLLMClient())
+    agent = create_session_agent(options, InMemoryStorageManager())
+    try:
+        changes = []
+        agent.slash_commands.set_on_change(changes.append)
+        # What the ACP adapter does in its prepare step.
+        coder_options = CoderOptions.load(workspace)
+        agent.slash_commands.set_controls(
+            behavior_commands(
+                agent, coder_options, workspace=workspace, command_registry=agent.slash_commands
+            )
+        )
+        assert changes == []
+        assert {"mcp", "skills"} <= {c.name for c in agent.slash_commands.commands()}
+    finally:
+        await _close(agent)
+
+
 async def test_workspace_settings_reach_the_agent(workspace):
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text(

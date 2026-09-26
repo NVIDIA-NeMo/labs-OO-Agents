@@ -122,7 +122,8 @@ class CodingAgent(InteractiveAgent):
     # a command's output to the agent puts it on the slash_commands channel.
     _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
     # The command registry the Session lists and runs (Session.commands(),
-    # Session.invoke_command()); hosts add their controls with set_controls().
+    # Session.invoke_command()). create_session_agent() installs the /skills and
+    # /mcp controls with set_controls().
     slash_commands: Annotated[CodingSlashCommandRegistry, hidden, nosnapshot]
     # Set by the registry that binds itself to this agent (skills use it).
     _command_registry: Annotated[Any, hidden, nosnapshot]
