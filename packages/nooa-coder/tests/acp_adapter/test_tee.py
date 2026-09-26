@@ -216,3 +216,26 @@ def test_observer_close_is_idempotent(tmp_path):
     tee = FrameLog(tmp_path / "tee.jsonl")
     tee.close()
     tee.close()
+
+
+def test_observer_close_returns_when_the_writer_died_with_a_full_queue(tmp_path, caplog):
+    """A log that became unwritable must not hang shutdown, and is reported once."""
+    import threading
+
+    from acp.connection import StreamDirection, StreamEvent
+    from nooa_coder.acp.tee import FrameLog
+
+    tee = FrameLog(tmp_path / "tee.jsonl", max_pending=2)
+    tee._file.close()  # every write now fails: the writer thread stops
+    tee(StreamEvent(StreamDirection.INCOMING, {"id": 0}))
+    tee._thread.join(5)
+    assert not tee._thread.is_alive()
+    for index in range(1, 5):
+        tee(StreamEvent(StreamDirection.INCOMING, {"id": index}))
+
+    closer = threading.Thread(target=tee.close, daemon=True)
+    closer.start()
+    closer.join(5)
+    assert not closer.is_alive()
+    warnings = [r for r in caplog.records if "tee" in r.getMessage().lower()]
+    assert len(warnings) == 1
