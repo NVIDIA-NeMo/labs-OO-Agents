@@ -56,6 +56,7 @@ from nooa_coder.session.items import (
     CommandResult,
     ItemAdmittedUpdate,
     ModeChangedUpdate,
+    ModelChangedUpdate,
     Receipt,
     SessionEvent,
     SessionInfo,
@@ -914,7 +915,8 @@ class Session:
         turn and closes the old client if this session created it; a
         running turn keeps its model. A second call before that turn
         replaces (and closes) the first pending client. The alias is
-        recorded at once, so a load resumes on it.
+        recorded at once (``info.model``, and the store, so a load resumes
+        on it) and a ``ModelChangedUpdate`` is emitted.
         """
         if self._llm_factory is None:
             raise RuntimeError("set_model() needs the registry's llm_factory to build clients")
@@ -922,9 +924,11 @@ class Session:
         client = self._llm_factory(alias, self.options.workspace)
         # Recorded now: a load before the next turn resumes on this model.
         self.handle.set_model(alias)
+        self.info.model = alias
         previous, self._pending_model = self._pending_model, (alias, client)
         if previous is not None:
             await _aclose(previous[1])
+        self._emit(ModelChangedUpdate(session_id=self.id, model=alias))
 
     async def _apply_pending_model(self) -> None:
         pending, self._pending_model = self._pending_model, None
