@@ -155,7 +155,7 @@ async def test_load_of_a_live_session_attaches_to_the_same_session(make_adapter,
 
     await adapter.load_session(str(workspace), response.session_id)
     assert adapter.registry.get(response.session_id) is session
-    assert "hello\n" in client.texts(UserMessageChunk, response.session_id)
+    assert adapter.bridge(response.session_id).session is session
 
 
 async def test_loading_a_session_twice_sends_each_later_update_once(
@@ -168,6 +168,12 @@ async def test_loading_a_session_twice_sends_each_later_update_once(
     await asyncio.wait_for(session.prompt("hello", source="acp"), TIMEOUT)
     await adapter.load_session(str(workspace), response.session_id)
     await adapter.load_session(str(workspace), response.session_id)
+    # This connection already follows the session and saw every update live:
+    # neither load replays the transcript again.
+    assert [text.strip() for text in client.texts(AgentMessageChunk, response.session_id)] == [
+        "Hi there."
+    ]
+    assert client.texts(UserMessageChunk, response.session_id) == []
     client.log.clear()
 
     await asyncio.wait_for(session.prompt("again", source="acp"), TIMEOUT)

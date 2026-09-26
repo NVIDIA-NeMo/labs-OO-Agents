@@ -289,10 +289,14 @@ class CoderACPAgent:
         self._validate_workspace(cwd, additional_directories)
         live = self.registry.get(session_id)
         if live is not None:
-            # Attach: the same Session; reuse this adapter's bridge if it has
-            # one (a second bridge would send every update twice) and replay.
-            bridge = self._bridges.get(session_id) or self._attach(live)
-            self._replay(bridge, live)
+            # Attach: the same Session. A bridge this adapter already has means
+            # the client follows the session and has seen its updates: reuse it
+            # (a second bridge would send every update twice) and do not replay.
+            # A new bridge replays the transcript first.
+            bridge = self._bridges.get(session_id)
+            if bridge is None:
+                bridge = self._attach(live)
+                self._replay(bridge, live)
             await bridge.flush()
             self._defer_bootstrap_updates(live, [])
             return LoadSessionResponse(
