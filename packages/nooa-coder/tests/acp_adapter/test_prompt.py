@@ -409,7 +409,7 @@ async def test_a_command_for_the_agent_with_no_output_says_so(make_adapter, work
 
     adapter = await make_adapter(ScriptedModels(), agent_spec="coder_test_agents:CommandAgent")
     session_id = await _new(adapter, workspace)
-    agent = adapter.registry.get(session_id).agent
+    agent = adapter.session(session_id).agent
 
     async def empty(name, raw_args):
         return _CommandOutput("", None, True)
