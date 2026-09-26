@@ -63,6 +63,7 @@ _PRIVATE_CORE_NAMES = {
     r"\b_ChannelReader\b": "nooa.runtime.channels.ChannelReader",
     r"\b_re_register_hooks\b": "nooa.tracing.register_hooks_in_current_context",
     r"nooa\.tools\._\w+": "nooa.tools (BashSession, StreamEvent, StreamDone)",
+    r"\._llm\b|[\"']_llm[\"']": "Agent.llm",
 }
 
 

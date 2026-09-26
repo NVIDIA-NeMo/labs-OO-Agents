@@ -211,7 +211,7 @@ class WorkspaceSettings(Skill):
             },
             "current": {
                 "active_skills": self._agent.skills.activated(),
-                "model": getattr(getattr(self._agent, "_llm", None), "model", None),
+                "model": getattr(getattr(self._agent, "llm", None), "model", None),
                 "connected_mcp": self._agent.mcp.connected(),
                 "active_mcp_skills": [
                     name for name in self._agent.skills.activated() if name.startswith("mcp.")
