@@ -28,6 +28,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# CodingAgent subclasses already warned about parameters they do not accept.
+_warned_classes: set[type] = set()
+
 
 def create_session_agent(options: SessionOptions, storage: StorageManager) -> InteractiveAgent:
     """Build the agent ``options.agent_spec`` names, for ``options.workspace``.
@@ -40,53 +43,50 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     default model) and passes the result here. Without an ``llm_factory``
     and without ``options.llm``, the class's own default client applies.
 
-    A coding agent also gets the workspace's settings (``CoderOptions``):
-    ``cwd``, ``skills_dirs``, ``summarization`` and a ``libs_dir`` inside
-    the workspace, and then its MCP registry and configured skills
-    (``configure_session_skills``) and its ``/skills`` and ``/mcp`` controls,
-    before the registry restores any snapshot. Connecting remembered MCP servers is async and is left to
-    the host's ``prepare`` hook.
+    A coding agent (a ``CodingAgent`` subclass) also gets the workspace's
+    settings (``CoderOptions``): ``cwd``, ``skills_dirs``, ``summarization``
+    and a ``libs_dir`` inside the workspace, each one its ``__init__``
+    accepts (a warning names the ones it does not), and then its MCP
+    registry and configured skills (``configure_session_skills``) and its
+    ``/skills`` and ``/mcp`` controls, before the registry restores any
+    snapshot. Connecting remembered MCP servers is async and is left to the
+    host's ``prepare`` hook. Any other agent gets only ``storage`` and ``llm``.
     """
     from nooa_coder.coding.agent import CodingAgent
 
     agent_class = load_agent_class(options.agent_spec, base=options.workspace)
-    parameters = inspect.signature(agent_class).parameters
-    # A CodingAgent subclass overriding __init__ to forward extra kwargs (the
-    # normal extension pattern: def __init__(self, llm=None, storage=None,
-    # **kwargs): super().__init__(llm=llm, storage=storage, **kwargs)) has no
-    # literal 'cwd'/'skills_dirs'/'summarization'/'libs_dir' parameter name to
-    # match against, so a name-only check silently drops per-workspace
-    # isolation for it -- cwd falls back to '.' (this process's own
-    # directory) instead of the session's actual workspace. Only trust a
-    # **kwargs catch-all to accept these names when __init__ has actually
-    # been overridden on a real CodingAgent subclass (CodingAgent's own
-    # **kwargs relays unrelated Agent-base keywords, and it names every one
-    # of these directly). An unrelated agent that declares **kwargs for
-    # some other reason must not have them forced on it.
-    overridden_subclass = (
-        issubclass(agent_class, CodingAgent) and agent_class.__init__ is not CodingAgent.__init__
-    )
-    accepts_arbitrary_kwargs = overridden_subclass and any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
-    )
-    wants_workspace = accepts_arbitrary_kwargs or any(
-        name in parameters for name in ("cwd", "skills_dirs", "summarization", "libs_dir")
-    )
-    coder_options = CoderOptions.load(options.workspace) if wants_workspace else None
+    # Only a coding agent gets the workspace: an unrelated agent's own
+    # cwd/summarization/... parameters mean something else and are left alone.
+    is_coder = isinstance(agent_class, type) and issubclass(agent_class, CodingAgent)
+    coder_options = CoderOptions.load(options.workspace) if is_coder else None
 
     kwargs: dict[str, Any] = {"storage": storage}
     if options.llm is not None:
         kwargs["llm"] = options.llm
     if coder_options is not None:
+        parameters = inspect.signature(agent_class).parameters
+        accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
         workspace = Path(coder_options.working_dir)
+        missing = []
         for name, value in {
             "cwd": workspace,
             "skills_dirs": coder_options.skills_dirs,
             "summarization": coder_options.summarization,
             "libs_dir": workspace / ".nooa" / "libs",
         }.items():
-            if name in parameters or accepts_arbitrary_kwargs:
+            if name in parameters or accepts_any:
                 kwargs[name] = value
+            else:
+                missing.append(name)
+        if missing and agent_class not in _warned_classes:
+            _warned_classes.add(agent_class)
+            logger.warning(
+                "%s.__init__ does not accept %s; the session's workspace settings for %s "
+                "are not passed to it (add the parameters or **kwargs and forward them)",
+                agent_class.__qualname__,
+                ", ".join(missing),
+                "them" if len(missing) > 1 else "it",
+            )
     agent = agent_class(**kwargs)
 
     if coder_options is not None and isinstance(agent, CodingAgent):
