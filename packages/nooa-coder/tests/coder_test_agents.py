@@ -369,3 +369,15 @@ class BrokenStatusAgent(InteractiveAgent, llm=FakeLLMClient()):
 
     def host_status(self) -> dict[str, Any]:
         raise RuntimeError("status unavailable")
+
+
+class ToolPrepAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """An agent with an async ``prepare_tools`` hook that reports one warning."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.prepared = 0
+
+    async def prepare_tools(self) -> list[str]:
+        self.prepared += 1
+        return ["server 'x' was not connected"]

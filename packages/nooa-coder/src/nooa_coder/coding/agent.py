@@ -359,6 +359,18 @@ class CodingAgent(InteractiveAgent):
         return self.session
 
     @hidden
+    async def prepare_tools(self) -> list[str]:
+        """Connect the MCP servers this workspace remembers; return warnings.
+
+        Called through ``Session.prepare_tools()`` by a host before the
+        first turn. The ``/skills`` and ``/mcp`` controls come from the
+        agent factory.
+        """
+        from nooa_coder.workspace.options import CoderOptions, connect_session_mcp
+
+        return await connect_session_mcp(self, CoderOptions.load(self.cwd))
+
+    @hidden
     def host_status(self) -> dict[str, Any]:
         """Status for hosts, read through ``Session.host_status()``: context and todos.
 
