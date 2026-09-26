@@ -155,6 +155,63 @@ async def test_a_kwargs_forwarding_subclass_gets_the_real_workspace(workspace):
         await _close(agent)
 
 
+_NARROW_AGENT = """\
+from nooa_coder.coding.agent import CodingAgent
+
+
+class NarrowCoder(CodingAgent):
+    '''Overrides __init__ with explicit keywords and no **kwargs.'''
+
+    def __init__(self, llm=None, *, storage=None):
+        super().__init__(llm=llm, storage=storage)
+"""
+
+_OWN_CWD_AGENT = """\
+from nooa.interactive import InteractiveAgent
+
+
+class OwnCwd(InteractiveAgent):
+    '''An unrelated agent with its own cwd and summarization parameters.'''
+
+    def __init__(self, llm=None, storage=None, cwd="/opt/mydata", summarization="off"):
+        assert isinstance(summarization, str)
+        super().__init__(llm=llm, storage=storage)
+        self.my_cwd = cwd
+"""
+
+
+async def test_a_narrow_subclass_keeps_the_workspace_wiring_and_is_warned(workspace, caplog):
+    (workspace / "narrow.py").write_text(_NARROW_AGENT)
+    options = SessionOptions(
+        workspace=workspace, agent_spec="./narrow.py:NarrowCoder", llm=FakeLLMClient()
+    )
+    with caplog.at_level("WARNING", logger="nooa_coder.coding.factory"):
+        agent = create_session_agent(options, InMemoryStorageManager())
+    try:
+        assert {"nemo.mcp", "nooa.workspace_settings"} <= set(agent.skills.activated())
+        assert "mcp" in {c.name for c in agent.slash_commands.commands()}
+        warnings = [r.getMessage() for r in caplog.records if "NarrowCoder" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "cwd" in warnings[0] and "libs_dir" in warnings[0]
+    finally:
+        await _close(agent)
+    # Once per class: a second session does not repeat it.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="nooa_coder.coding.factory"):
+        agent = create_session_agent(options, InMemoryStorageManager())
+    try:
+        assert not [r for r in caplog.records if "NarrowCoder" in r.getMessage()]
+    finally:
+        await _close(agent)
+
+
+def test_an_unrelated_agent_keeps_its_own_cwd_and_summarization(workspace):
+    (workspace / "own.py").write_text(_OWN_CWD_AGENT)
+    options = SessionOptions(workspace=workspace, agent_spec="./own.py:OwnCwd", llm=FakeLLMClient())
+    agent = create_session_agent(options, InMemoryStorageManager())
+    assert agent.my_cwd == "/opt/mydata"
+
+
 def test_kwargs_are_not_forced_on_an_unrelated_agent(workspace):
     (workspace / "unrelated.py").write_text(_UNRELATED_AGENT)
     llm = FakeLLMClient()
