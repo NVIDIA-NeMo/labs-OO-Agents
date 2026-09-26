@@ -295,20 +295,15 @@ class CoderModels(ScriptedModels):
     """An agent factory for coding-agent sessions, one strict fake model each.
 
     Like ``ScriptedModels``, scripts are keyed by session name. The agent is
-    built for the session's workspace, with its libraries directory inside
-    that workspace so tests never touch the process's project directory.
+    built by ``create_session_agent`` for the session's workspace (its
+    libraries directory is inside that workspace, so tests never touch the
+    process's project directory), with the fake model as ``options.llm``.
     """
 
     def __call__(self, options: Any, storage: Any) -> InteractiveAgent:
-        from nooa_coder.session.loader import load_agent_class
+        from nooa_coder.coding.factory import create_session_agent
 
         llm = options.llm or CellLLM(list(self.scripts.get(options.name, [])))
         self.llms[options.name] = llm
         self.built.append(options)
-        agent_class = load_agent_class(options.agent_spec, base=options.workspace)
-        return agent_class(
-            llm=llm,
-            storage=storage,
-            cwd=options.workspace,
-            libs_dir=options.workspace / ".nooa" / "libs",
-        )
+        return create_session_agent(options.model_copy(update={"llm": llm}), storage)

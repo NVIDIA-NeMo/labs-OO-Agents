@@ -972,29 +972,20 @@ class CoderACPAgent:
         return SessionModeState(current_mode_id=session.info.mode or "auto", available_modes=_MODES)
 
     async def _prepare_agent(self, session: Session, mcp_servers: list[Any] | None) -> list[str]:
-        """Give a new or loaded agent its host controls and MCP tools; return warnings.
+        """Give a new or loaded agent its MCP tools; return warnings.
 
         Runs in the registry's ``prepare`` step, before any turn. A coding
-        agent gets the ``/skills`` and ``/mcp`` controls and connects the
-        MCP servers its workspace remembers; every agent with skills gets
-        the MCP servers the client sent.
+        agent connects the MCP servers its workspace remembers (its
+        ``/skills`` and ``/mcp`` controls come from the agent factory);
+        every agent with skills gets the MCP servers the client sent.
         """
         from nooa_coder.coding.agent import CodingAgent
-        from nooa_coder.workspace.controls import behavior_commands
         from nooa_coder.workspace.options import CoderOptions, connect_session_mcp
 
         agent = session.agent
         warnings: list[str] = []
         if isinstance(agent, CodingAgent):
             coder_options = CoderOptions.load(session.options.workspace)
-            agent.slash_commands.set_controls(
-                behavior_commands(
-                    agent,
-                    coder_options,
-                    workspace=Path(coder_options.working_dir),
-                    command_registry=agent.slash_commands,
-                )
-            )
             warnings.extend(await connect_session_mcp(agent, coder_options))
         tools, mcp_warnings = await self._create_mcp_tools(mcp_servers)
         warnings.extend(mcp_warnings)
