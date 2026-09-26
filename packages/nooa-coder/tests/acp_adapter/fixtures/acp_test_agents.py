@@ -6,17 +6,13 @@ from typing import Any
 
 from nooa.errors import GenerationError
 from nooa.interactive import InteractiveAgent
+from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
 from nooa.unifiedllm import FakeLLMClient
 
 MESSAGES = {
-    # The wording CodeActStrategy uses (nooa/strategies/codeact.py).
-    "tokens": (
-        "The model used all available output tokens before completing a tool call. "
-        "Increase `max_tokens` (16384 or more is often needed for reasoning models)."
-    ),
-    "iterations": (
-        "Generation failed after 3 iterations (max_iterations=3). Unable to complete `handle`."
-    ),
+    # The messages CodeActStrategy raises, from the constants it raises them with.
+    "tokens": OUTPUT_TOKENS_EXHAUSTED_MESSAGE,
+    "iterations": MAX_ITERATIONS_MESSAGE.format(iterations=3, max_iterations=3, method="handle"),
     "retries": (
         "Generation failed after 3 errors (max_retries=3). "
         "Unable to generate valid code for `handle`."
