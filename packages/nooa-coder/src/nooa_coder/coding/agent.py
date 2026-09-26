@@ -286,11 +286,6 @@ class CodingAgent(InteractiveAgent):
             description, text, context=context, model=model, retain=False
         )
         done = await child.wait()
-        if isinstance(done.result, dict):
-            try:
-                done.result = TaskResult.model_validate(done.result)
-            except ValueError:
-                pass
         if todo is not None:
             self.todo.comment(todo, f"Delegated to {description!r}: {_report_text(done)}")
         return done

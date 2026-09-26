@@ -319,11 +319,12 @@ class SessionRegistry:
         delivered = False
         try:
             if kind == "done":
-                done = _rebuild_done(update)
+                # Built for both paths: ChildResult rebuilds a TaskResult sent as data.
+                result = ChildResult(child=ref, done=_rebuild_done(update))
                 if waiter is not None:
-                    waiter.set_result(done)
+                    waiter.set_result(result.done)
                 else:
-                    self._put(parent, child.id, ChildResult(child=ref, done=done), source)
+                    self._put(parent, child.id, result, source)
             elif kind in ("error", "cancelled"):
                 # A cancelled turn ends without a result: to the parent it is a failure.
                 error = (
