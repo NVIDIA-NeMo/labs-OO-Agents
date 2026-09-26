@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """need_input_schema: a NeedInput question as a flat ACP elicitation form."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
 import pytest
 from nooa_coder.acp.need_input import answer_from_content, need_input_schema
@@ -79,6 +79,41 @@ def test_a_flat_answer_type_becomes_one_property_per_field():
         need, {"target": "staging", "replicas": 2, "dry_run": True, "regions": ["eu"]}
     )
     assert answer == Deployment(target="staging", replicas=2, dry_run=True, regions=["eu"])
+
+
+class Constrained(BaseModel):
+    name: str
+    note: Annotated[str, Field(max_length=200)] | None = None
+    count: Annotated[int, Field(ge=1, le=5, gt=0)] = 1
+    tags: Annotated[list[Literal["a", "b"]], Field(min_length=1)] | None = None
+
+
+def test_annotated_fields_keep_their_type_and_the_constraints_a_form_can_express():
+    """``Annotated[...] | None`` is an ordinary pydantic field; it must not sink the form."""
+    need = NeedInput(question="Details?", answer_type=Constrained)
+    assert _json(need) == {
+        "type": "object",
+        "title": "Details?",
+        "properties": {
+            "name": {"type": "string", "title": "Name"},
+            "note": {"type": "string", "title": "Note", "maxLength": 200},
+            # gt has no form equivalent and is left out; ge and le are kept.
+            "count": {
+                "type": "integer",
+                "title": "Count",
+                "default": 1,
+                "minimum": 1,
+                "maximum": 5,
+            },
+            "tags": {
+                "type": "array",
+                "title": "Tags",
+                "items": {"type": "string", "enum": ["a", "b"]},
+                "minItems": 1,
+            },
+        },
+        "required": ["name"],
+    }
 
 
 class Nested(BaseModel):
