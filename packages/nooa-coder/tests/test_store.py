@@ -336,3 +336,84 @@ def test_a_tui_claim_whose_process_is_gone_does_not_block(tmp_path):
     assert store.is_active(handle.id) is False
     with store.open(handle.id):
         pass
+
+
+def test_the_lock_file_names_the_owner_and_is_blank_after_a_clean_close(tmp_path):
+    """Another machine sharing the directory cannot see the kernel lock; the record it can."""
+    import os
+    import socket
+
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    handle = store.create(workspace=str(tmp_path))
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    assert lock.read_text() == f"{os.getpid()} {socket.gethostname()}"
+    handle.close()
+    assert lock.read_text() == ""
+    assert store.is_active(handle.id) is False
+
+
+def test_a_session_held_on_another_machine_is_active_and_cannot_be_opened(tmp_path):
+    from nooa_coder.session.store import SessionStore
+
+    from nooa.storage.sqlite import SessionAlreadyActiveError
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    lock.write_text("4242 other-box")
+    assert store.foreign_owner(handle.id) == (4242, "other-box")
+    assert store.is_active(handle.id) is True
+    with pytest.raises(SessionAlreadyActiveError) as excinfo:
+        store.open(handle.id)
+    assert excinfo.value.owner_pid == 4242
+    assert "other-box" in str(excinfo.value) and str(lock) in str(excinfo.value)
+    # Reclaimed: the operator emptied the file.
+    lock.write_text("")
+    assert store.is_active(handle.id) is False
+    with store.open(handle.id):
+        pass
+
+
+def test_a_stale_record_from_this_machine_is_left_to_the_kernel_lock(tmp_path):
+    """A crash here leaves our own hostname behind; nothing holds the lock, so it is free."""
+    import socket
+
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    lock.write_text(f"999999 {socket.gethostname()}")
+    assert store.foreign_owner(handle.id) is None
+    assert store.is_active(handle.id) is False
+    with store.open(handle.id):
+        pass
+
+
+def test_session_files_use_the_rollback_journal_and_readers_leave_no_side_files(tmp_path):
+    import sqlite3
+
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    path = store.path_for(handle.id)
+    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+        assert db.execute("pragma journal_mode").fetchone()[0] == "delete"
+    # A file an older build left in WAL mode is converted when opened.
+    with sqlite3.connect(path) as db:
+        db.execute("pragma journal_mode=wal")
+    with store.open(handle.id):
+        pass
+    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+        assert db.execute("pragma journal_mode").fetchone()[0] == "delete"
+    # Listing and transcript reads take no locks and create no -shm/-wal sidecars.
+    store.list()
+    store.load_transcript(handle.id)
+    assert not path.with_name(path.name + "-shm").exists()
+    assert not path.with_name(path.name + "-wal").exists()
