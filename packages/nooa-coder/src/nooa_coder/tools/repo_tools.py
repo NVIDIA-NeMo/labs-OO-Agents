@@ -644,7 +644,7 @@ class RepoTools(Skill):
     async def refs(
         self,
         name: Annotated[str, spec(description="Symbol or qualified name to find references for")],
-        path: Annotated[str, spec(description="Directory to search")] = ".",
+        path: Annotated[str, spec(description="File or directory to search")] = ".",
         max_results: Annotated[int, spec(description="Maximum result lines")] = 50,
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
@@ -1128,10 +1128,11 @@ class RepoTools(Skill):
 
         if self._session:
             if await self._check_rg():
-                cmd = f"rg -n --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
+                # -H: a single file also gets the file:line:text prefix parsed below.
+                cmd = f"rg -nH --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
             else:
                 # GNU grep is present in images where rg is not (e.g. SWE-bench).
-                cmd = f"grep -rnE {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
+                cmd = f"grep -rnHE {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
             stdout, _, code = await self._session.run(cmd, timeout=30)
             if code != 0 or not stdout:
                 return ReferenceSearchResult(query=name, matches=[], total_matches=0)
@@ -1143,7 +1144,10 @@ class RepoTools(Skill):
                     text = fpath.read_text(errors="replace")
                     for i, line in enumerate(text.splitlines(), 1):
                         if re.search(rf"\b{re.escape(name)}\b", line):
-                            rel = fpath.relative_to(self._root)
+                            try:
+                                rel = fpath.relative_to(self._root)
+                            except ValueError:
+                                rel = fpath
                             raw_lines.append(f"{rel}:{i}:{line}")
                 except OSError:
                     continue
@@ -1186,7 +1190,15 @@ class RepoTools(Skill):
     # Helpers
     # ------------------------------------------------------------------
     def _iter_source_files(self, root: Path, max_files: int = 500):
-        """Yield source files under *root*, skipping non-source and common build dirs."""
+        """Yield source files under *root*, skipping non-source and common build dirs.
+
+        A file *root* yields itself. Only directories below *root* are
+        skipped: a workspace under ``~/.cache`` is still searched.
+        """
+        if root.is_file():
+            if _detect_lang(root) != "unknown":
+                yield root
+            return
         count = 0
         for fpath in sorted(root.rglob("*")):
             if count >= max_files:
@@ -1195,8 +1207,8 @@ class RepoTools(Skill):
                 continue
             if _detect_lang(fpath) == "unknown":
                 continue
-            # Skip common non-source dirs
-            parts = fpath.parts
+            # Skip common non-source dirs inside root (not root's own ancestors)
+            parts = fpath.relative_to(root).parts
             if any(
                 p.startswith(".")
                 or p in ("node_modules", "__pycache__", "venv", ".venv", "build", "dist")
