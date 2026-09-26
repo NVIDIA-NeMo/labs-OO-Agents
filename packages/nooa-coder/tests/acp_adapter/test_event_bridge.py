@@ -823,6 +823,59 @@ async def test_tool_cards_of_a_child_are_mirrored_under_the_childs_id(tmp_path):
     await child_agent.aclose()
 
 
+@pytest.mark.parametrize(
+    "update",
+    [
+        CancelledUpdate(session_id="parent", by="user"),
+        TurnEndedUpdate(session_id="parent", outcome_kind="error", outcome={"error": "boom"}),
+    ],
+    ids=["cancelled", "failed-turn"],
+)
+async def test_ending_the_parents_turn_leaves_a_mirrored_childs_cards_open(tmp_path, update):
+    parent_agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    child_agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    parent = _FakeSession(parent_agent, "parent")
+    child = _FakeSession(child_agent, "child-1")
+    client = _RecordingClient()
+    bridge = ACPEventBridge(
+        parent,  # type: ignore[arg-type]
+        client,  # type: ignore[arg-type]
+        resolve_child=lambda child_id: child if child_id == "child-1" else None,
+    )
+    parent.emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child-1", name="helper", depth=1, retained=False
+        )
+    )
+    for agent in (parent_agent, child_agent):
+        agent.event_manager.add(
+            ToolCallEvent(tool_call_id="c1", name="execute_python", arguments={"code": "x"})
+        )
+    child_agent.event_manager.add(
+        TerminalCommandStarted(command_id="cmd-1", command="make", working_directory="/")
+    )
+    parent.emit(update)
+    await bridge.flush()
+    closed = [u.tool_call_id for _, u in client.updates if isinstance(u, ToolCallProgress)]
+    assert closed == ["c1"]  # the parent's own card only
+
+    # The child goes on running; its real results close its cards, once each.
+    child_agent.event_manager.add(
+        PythonOutput(tool_call_id="c1", execution_status=ResultStatus.COMPLETE, execution_count=1)
+    )
+    child_agent.event_manager.add(TerminalCommandFinished(command_id="cmd-1", exit_code=0))
+    await bridge.flush()
+    child_updates = [
+        (u.tool_call_id, u.status)
+        for _, u in client.updates
+        if isinstance(u, ToolCallProgress) and u.tool_call_id.startswith("child-1:")
+    ]
+    assert child_updates == [("child-1:c1", "completed"), ("child-1:cmd-1", "completed")]
+    await bridge.close()
+    await parent_agent.aclose()
+    await child_agent.aclose()
+
+
 async def test_the_bridge_unsubscribes_when_its_session_closes(bridged):
     agent, session, client, bridge = bridged
     session.emit(ClosedUpdate(session_id="session-1"))

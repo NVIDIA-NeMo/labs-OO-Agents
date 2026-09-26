@@ -657,13 +657,18 @@ class ACPEventBridge:
             )
 
     def fail_open_tools(self, reason: str, *, title: str | None = None) -> None:
-        """Close out open tool calls, titling them with what actually happened.
+        """Close out this session's open tool calls, titling them with what happened.
 
         The title is the collapsed-card text, so it is the only thing a user
         sees without expanding. A fixed "Python interrupted" made a deliberate
         cancellation read as a technical failure.
+
+        Mirrored children's cards are left alone: a child goes on running
+        when this session's turn is cancelled or fails, and its own results
+        close them (or ``_unmirror`` does when it ends).
         """
-        self._fail_tools(sorted(self._open_tools), reason, title=title)
+        own = sorted(key for key in self._open_tools if key[0] == self.session_id)
+        self._fail_tools(own, reason, title=title)
 
     async def close(self, *, finish_open: bool = True) -> None:
         """Stop listening and sending. Idempotent.
@@ -691,7 +696,10 @@ class ACPEventBridge:
         # A turn that ended before its PythonOutput — an exception escaping the
         # strategy, say — leaves cards in_progress and their source retained.
         if finish_open:
-            self.fail_open_tools("Session closed before this finished.", title="Unfinished")
+            # Every card, mirrored children's too: nothing will close them now.
+            self._fail_tools(
+                sorted(self._open_tools), "Session closed before this finished.", title="Unfinished"
+            )
         else:
             self._open_tools.clear()
             self._python_source.clear()
