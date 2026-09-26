@@ -10,7 +10,7 @@ flatten; the host then asks in free text.
 """
 
 import types
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from acp.schema import (
     ElicitationBooleanPropertySchema,
@@ -39,7 +39,10 @@ def need_input_schema(need: NeedInput) -> ElicitationSchema | None:
       and ``bool`` are string, integer, number and boolean; a ``Literal``
       of strings is a string with an ``enum``; ``list[Literal[...]]`` of
       strings is a multi-select array; ``X | None`` is ``X`` and not
-      required. Any other field type gives ``None``.
+      required. ``Annotated`` wrappers are looked through; the length,
+      ``ge``/``le`` and pattern constraints they (or the field) carry are
+      kept where the form has an equivalent, others are left out. Any other
+      field type gives ``None``.
     """
     if need.options is not None:
         return ElicitationSchema(
@@ -60,8 +63,8 @@ def need_input_schema(need: NeedInput) -> ElicitationSchema | None:
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name, field in need.answer_type.model_fields.items():
-        annotation, optional = _unwrap_optional(field.annotation)
-        prop = _property(annotation, field, name)
+        annotation, optional, metadata = _unwrap_optional(field.annotation)
+        prop = _property(annotation, field, name, [*field.metadata, *metadata])
         if prop is None:
             return None
         properties[name] = prop
@@ -86,12 +89,40 @@ def answer_from_content(need: NeedInput, content: dict[str, Any] | None) -> Any:
         return content
 
 
-def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
+def _strip_annotated(annotation: Any, metadata: list[Any]) -> Any:
+    """``annotation`` without ``Annotated``; its metadata is appended to ``metadata``."""
+    while get_origin(annotation) is Annotated:
+        annotation, *extras = get_args(annotation)
+        for extra in extras:
+            metadata.extend(extra.metadata if isinstance(extra, FieldInfo) else [extra])
+    return annotation
+
+
+def _unwrap_optional(annotation: Any) -> tuple[Any, bool, list[Any]]:
+    """``(type, optional, metadata)``: ``X | None`` and ``Annotated`` unwrapped.
+
+    Pydantic strips a field's outer ``Annotated`` itself, but not one inside
+    ``| None``.
+    """
+    metadata: list[Any] = []
+    annotation = _strip_annotated(annotation, metadata)
+    optional = False
     if get_origin(annotation) in (Union, types.UnionType):
         members = [arg for arg in get_args(annotation) if arg is not type(None)]
         if len(members) == 1 and len(members) < len(get_args(annotation)):
-            return members[0], True
-    return annotation, False
+            annotation, optional = members[0], True
+    return _strip_annotated(annotation, metadata), optional, metadata
+
+
+def _constraints(metadata: list[Any]) -> dict[str, Any]:
+    """The constraints in pydantic/annotated-types metadata, by attribute name."""
+    found: dict[str, Any] = {}
+    for item in metadata:
+        for attribute in ("min_length", "max_length", "ge", "le", "pattern"):
+            value = getattr(item, attribute, None)
+            if value is not None:
+                found[attribute] = getattr(value, "pattern", value)  # a compiled re.Pattern as its source
+    return found
 
 
 def _string_literals(annotation: Any) -> list[str] | None:
@@ -103,10 +134,11 @@ def _string_literals(annotation: Any) -> list[str] | None:
     return list(values)
 
 
-def _property(annotation: Any, field: FieldInfo, name: str) -> Any:
+def _property(annotation: Any, field: FieldInfo, name: str, metadata: list[Any]) -> Any:
     title = field.title or name.replace("_", " ").title()
     common: dict[str, Any] = {"title": title, "description": field.description}
     default = None if field.is_required() else field.default
+    limits = _constraints(metadata)
     if annotation is bool:
         return ElicitationBooleanPropertySchema(
             type="boolean", default=default if isinstance(default, bool) else None, **common
@@ -115,17 +147,26 @@ def _property(annotation: Any, field: FieldInfo, name: str) -> Any:
         return ElicitationIntegerPropertySchema(
             type="integer",
             default=default if isinstance(default, int) and not isinstance(default, bool) else None,
+            minimum=limits.get("ge") if isinstance(limits.get("ge"), int) else None,
+            maximum=limits.get("le") if isinstance(limits.get("le"), int) else None,
             **common,
         )
     if annotation is float:
         return ElicitationNumberPropertySchema(
             type="number",
             default=default if isinstance(default, (int, float)) else None,
+            minimum=limits.get("ge") if isinstance(limits.get("ge"), (int, float)) else None,
+            maximum=limits.get("le") if isinstance(limits.get("le"), (int, float)) else None,
             **common,
         )
     if annotation is str:
         return ElicitationStringPropertySchema(
-            type="string", default=default if isinstance(default, str) else None, **common
+            type="string",
+            default=default if isinstance(default, str) else None,
+            min_length=limits.get("min_length"),
+            max_length=limits.get("max_length"),
+            pattern=limits.get("pattern") if isinstance(limits.get("pattern"), str) else None,
+            **common,
         )
     if (choices := _string_literals(annotation)) is not None:
         return ElicitationStringPropertySchema(
@@ -136,10 +177,12 @@ def _property(annotation: Any, field: FieldInfo, name: str) -> Any:
         )
     if get_origin(annotation) is list:
         (item,) = get_args(annotation) or (None,)
-        if (choices := _string_literals(item)) is not None:
+        if (choices := _string_literals(_strip_annotated(item, []))) is not None:
             return ElicitationMultiSelectPropertySchema(
                 type="array",
                 items=UntitledMultiSelectItems(type="string", enum=choices),
+                min_items=limits.get("min_length"),
+                max_items=limits.get("max_length"),
                 **common,
             )
     return None
