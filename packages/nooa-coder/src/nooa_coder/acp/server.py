@@ -677,7 +677,14 @@ class CoderACPAgent:
                 "Slash command /%s failed in session %s", name, session.id, exc_info=True
             )
             return await self._say(bridge, f"/{name} failed: {exc}")
-        if result.output_to_agent and result.text:
+        if result.output_to_agent:
+            if not result.text.strip():
+                # An empty message would spend a turn on nothing (and some
+                # providers reject empty content); ending silently hides that
+                # the command ran at all.
+                return await self._say(
+                    bridge, f"/{name} produced no output, so nothing was sent to the agent."
+                )
             channels = session.agent.queue_manager.channels()
             channel = "slash_commands" if "slash_commands" in channels else "user_messages"
             receipt = await session.submit(result.text, channel=channel, source=SOURCE)

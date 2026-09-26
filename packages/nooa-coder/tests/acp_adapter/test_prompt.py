@@ -309,6 +309,24 @@ async def test_a_failing_command_reports_the_failure(make_adapter, workspace, cl
     assert client.texts(AgentMessageChunk, session_id)[-1] == "/model failed: command exploded"
 
 
+async def test_a_command_for_the_agent_with_no_output_says_so(make_adapter, workspace, client):
+    """Nothing to send the agent: the client is told, not left with a silent end_turn."""
+    from coder_test_agents import _CommandOutput
+
+    adapter = await make_adapter(ScriptedModels(), agent_spec="coder_test_agents:CommandAgent")
+    session_id = await _new(adapter, workspace)
+    agent = adapter.registry.get(session_id).agent
+
+    async def empty(name, raw_args):
+        return _CommandOutput("", None, True)
+
+    agent.slash_commands.invoke = empty
+    assert (await _prompt(adapter, session_id, "/model")).stop_reason == "end_turn"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == (
+        "/model produced no output, so nothing was sent to the agent."
+    )
+
+
 # ---- titles ------------------------------------------------------------------
 
 
