@@ -19,7 +19,6 @@ from nooa.runtime.event_manager import EventManager
 from nooa.storage.sqlite import (
     SessionAlreadyActiveError,
     SQLiteStorageManager,
-    _acquire_session_lock,
     _read_lock_owner,
     delete_sqlite_database,
 )
@@ -66,6 +65,28 @@ def _normalise_workspace(workspace: str | Path) -> str:
     if not str(workspace):
         return ""
     return str(Path(workspace).expanduser().resolve())
+
+
+def _lock_is_held(lock_path: Path) -> bool:
+    """Whether another process holds the kernel lock on ``lock_path``, without writing to it.
+
+    Acquiring the lock the normal way records the acquirer's own pid and host
+    in the file; a probe must not, or the other side of a shared mount would
+    read the prober as the owner.
+    """
+    try:
+        fd = os.open(lock_path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -595,13 +616,7 @@ class SessionStore:
             return False
         if self.foreign_owner(session_id) is not None:
             return True
-        try:
-            fd = _acquire_session_lock(str(lock_path))
-        except SessionAlreadyActiveError:
-            return True
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-        return False
+        return _lock_is_held(lock_path)
 
     def foreign_owner(self, session_id: str) -> tuple[int, str] | None:
         """``(pid, host)`` of a process on another machine holding the session, else None.

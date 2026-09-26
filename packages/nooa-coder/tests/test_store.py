@@ -417,3 +417,19 @@ def test_session_files_use_the_rollback_journal_and_readers_leave_no_side_files(
     store.load_transcript(handle.id)
     assert not path.with_name(path.name + "-shm").exists()
     assert not path.with_name(path.name + "-wal").exists()
+
+
+def test_the_liveness_probe_does_not_rewrite_the_lock_record(tmp_path):
+    """Checking whether a session is active must not make the checker look like the owner."""
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    handle = store.create(workspace=str(tmp_path))
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    record = lock.read_text()
+    assert record.split()[0].isdigit() and len(record.split()) == 2
+    assert store.is_active(handle.id) is True
+    assert lock.read_text() == record
+    handle.close()
+    assert store.is_active(handle.id) is False
+    assert lock.read_text() == ""
