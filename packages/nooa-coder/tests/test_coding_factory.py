@@ -267,16 +267,38 @@ async def test_a_child_with_another_model_gets_its_own_client(workspace, session
         await registry.close_all()
 
 
-async def test_skills_are_configured_before_a_snapshot_is_restored(
+async def test_stale_memory_context_is_dropped_after_a_reload(workspace, sessions_dir):
+    """Keys an older snapshot carries are gone after load (restore is additive)."""
+    registry = SessionRegistry(SessionStore(sessions_dir))
+    try:
+        root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
+        session_id = root.id
+        root.agent.context["memory_system"] = "stale memory prompt"
+        root.agent.context["recalled_memories"] = "stale recall"
+        root._checkpoint()
+        await root.wait_for_checkpoint()
+        await registry.close(session_id)
+        loaded = await registry.load(session_id, llm=FakeLLMClient())
+        assert "memory_system" not in loaded.agent.context
+        assert "recalled_memories" not in loaded.agent.context
+    finally:
+        await registry.close_all()
+
+
+async def test_skills_are_configured_before_and_stale_context_dropped_after_a_restore(
     workspace, sessions_dir, monkeypatch
 ):
+    """Skills are configured before the snapshot is restored; the stale-context
+    cleanup runs after it, since restoring is additive and would re-add the keys."""
     import nooa_coder.coding.factory as factory
+    import nooa_coder.workspace.options as coder_options
 
     from nooa.storage.sqlite import SQLiteStorageManager
 
     order: list[str] = []
     configure = factory.configure_session_skills
     restore = SQLiteStorageManager.restore_latest_snapshot
+    cleanup = coder_options.drop_stale_memory_context
 
     def spy_configure(agent, options):
         order.append("configure")
@@ -286,15 +308,22 @@ async def test_skills_are_configured_before_a_snapshot_is_restored(
         order.append("restore")
         return restore(self, agent)
 
+    def spy_cleanup(agent):
+        order.append("cleanup")
+        return cleanup(agent)
+
     registry = SessionRegistry(SessionStore(sessions_dir))
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         session_id = root.id
+        root._checkpoint()
+        await root.wait_for_checkpoint()
         await registry.close(session_id)
         monkeypatch.setattr(factory, "configure_session_skills", spy_configure)
         monkeypatch.setattr(SQLiteStorageManager, "restore_latest_snapshot", spy_restore)
+        monkeypatch.setattr(coder_options, "drop_stale_memory_context", spy_cleanup)
         await registry.load(session_id, llm=FakeLLMClient())
-        assert order == ["configure", "restore"]
+        assert order == ["configure", "restore", "cleanup"]
     finally:
         await registry.close_all()
 

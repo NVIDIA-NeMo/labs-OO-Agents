@@ -330,6 +330,13 @@ class CodingAgent(InteractiveAgent):
         return self._port().children()
 
     @hidden
+    def after_restore(self) -> None:
+        """Called by the session registry after it restores a snapshot into this agent."""
+        from nooa_coder.workspace.options import drop_stale_memory_context
+
+        drop_stale_memory_context(self)
+
+    @hidden
     def _port(self) -> SessionPort:
         if self.session is None:
             raise RuntimeError("This agent is not running in a session")

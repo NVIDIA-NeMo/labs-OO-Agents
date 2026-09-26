@@ -467,7 +467,8 @@ class SessionRegistry:
         A live id returns the same Session (the caller subscribes and reads
         ``transcript()``). Otherwise the file is opened (claim-checked by
         the store: ``SessionAlreadyActiveError`` if another owner has it),
-        the agent is built and its latest snapshot restored,
+        the agent is built and its latest snapshot restored (then the
+        agent's ``after_restore()`` runs, if it has one),
         ``TuiSessionResumed`` is emitted, items admitted but never consumed
         or withdrawn are re-queued (``ItemRequeued``), and the session is
         published and started. Loading a child whose parent is not live is
@@ -498,6 +499,9 @@ class SessionRegistry:
             self._refuse_if_tree_active_elsewhere(session_id, handle.info.parent_id)
             session = await self._build(self._stored_options(handle.info, overrides), handle)
             restored = handle.storage.restore_latest_snapshot(session.agent)
+            after_restore = getattr(session.agent, "after_restore", None)
+            if restored and callable(after_restore):
+                after_restore()
             session.agent.event_manager.add(
                 TuiSessionResumed(session_id=session_id, restored=restored)
             )
