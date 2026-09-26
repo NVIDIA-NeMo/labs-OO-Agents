@@ -213,6 +213,9 @@ class Usage(BaseModel):
     ``cached_input_tokens`` are input tokens read from the provider's prompt
     cache, ``cache_write_input_tokens`` those written to it, and
     ``reasoning_tokens`` output tokens spent on reasoning.
+    ``last_input_tokens`` is the input of this session's latest model call
+    (the context in use); it is not a total, so ``own()`` and
+    ``with_attributed()`` leave it out.
     """
 
     input_tokens: int = 0
@@ -229,6 +232,7 @@ class Usage(BaseModel):
     attributed_reasoning_tokens: int = 0
     attributed_total_tokens: int = 0
     attributed_cost_usd: float = 0.0
+    last_input_tokens: int = 0
 
     def own(self) -> "Usage":
         """Only this session's own totals."""
@@ -375,7 +379,10 @@ class ChildCreatedUpdate(_Update):
 
 
 class UsageChangedUpdate(_Update):
-    """Usage attributed from children changed; ``usage`` is the new total."""
+    """The session's usage changed (a model call, or a child's attributed usage).
+
+    ``usage`` is the new total.
+    """
 
     kind: Literal["usage_changed"] = "usage_changed"
     usage: Usage

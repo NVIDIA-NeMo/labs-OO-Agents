@@ -230,10 +230,6 @@ class ACPEventBridge:
         # wins, whoever started the close.
         self._finish_open = True
         self._open: dict[ToolKey, _OpenCard] = {}
-        # What the session spent before this bridge was attached (a resumed or
-        # re-followed session), plus what it spends from here on.
-        self._cost_usd = session.info.usage.cost_usd
-        self._used: int | None = None  # input tokens of the latest model call
         self._plan: list[PlanEntry] = []
         self._children: list[dict[str, Any]] = []
         self._mirrors: dict[str, list[Callable[[], None]]] = {}
@@ -591,12 +587,6 @@ class ACPEventBridge:
         reasoning = event.reasoning
         if reasoning:
             self._enqueue(update_agent_thought_text(reasoning))
-        usage = event.usage
-        if usage is None:
-            return
-        self._cost_usd += usage.cost_usd
-        self._used = usage.input_tokens
-        self._publish_usage()
 
     # ---- derived updates ---------------------------------------------
 
@@ -605,16 +595,19 @@ class ACPEventBridge:
 
         ACP's usage update has no token counts beyond the context in use, so
         the session's totals (own plus children's, cached and reasoning
-        tokens included) go in ``_meta["dev.nooa/usage"]``.
+        tokens included) go in ``_meta["dev.nooa/usage"]``. Nothing is sent
+        before the session's first model call: there is no context in use.
         """
         context_window = getattr(getattr(self.agent, "llm", None), "context_window", None)
-        if context_window is None or self._used is None:
+        usage = self.session.info.usage
+        used = usage.last_input_tokens
+        if context_window is None or not used:
             return
-        attributed = self.session.info.usage.attributed_cost_usd
-        totals = self.session.info.usage.with_attributed().model_dump(
+        totals = usage.with_attributed()
+        meta_totals = totals.model_dump(
             include={name for name in USAGE_FIELDS if name != "cost_usd"}
         )
-        meta: dict[str, Any] = {"dev.nooa/usage": totals}
+        meta: dict[str, Any] = {"dev.nooa/usage": meta_totals}
         status = getattr(self.agent, "get_summarization_status", None)
         if callable(status):
             try:
@@ -624,9 +617,9 @@ class ACPEventBridge:
         self._enqueue(
             UsageUpdate(
                 session_update="usage_update",
-                used=self._used,
-                size=max(context_window, self._used),
-                cost=Cost(amount=self._cost_usd + attributed, currency="USD"),
+                used=used,
+                size=max(context_window, used),
+                cost=Cost(amount=totals.cost_usd, currency="USD"),
                 field_meta=meta,
             )
         )

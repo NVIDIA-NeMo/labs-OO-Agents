@@ -48,7 +48,8 @@ async def test_every_token_count_is_kept_over_the_whole_trajectory(
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("one"), TIMEOUT)
     await asyncio.wait_for(root.prompt("two"), TIMEOUT)
-    assert root.info.usage == TWO_CALLS
+    # The latest call's input is the context in use; it is live state, not a total.
+    assert root.info.usage == TWO_CALLS.model_copy(update={"last_input_tokens": 100})
     await registry.close_all()
 
     assert SessionStore(sessions_dir).get(root.id).usage == TWO_CALLS
@@ -57,6 +58,16 @@ async def test_every_token_count_is_kept_over_the_whole_trajectory(
         assert loaded.info.usage == TWO_CALLS
     finally:
         await fresh.close_all()
+
+
+async def test_every_model_call_is_announced_with_the_new_totals(registry, root_options, models):
+    models.scripts[None] = [done("one", usage=CALL)]
+    root = await registry.create(root_options)
+    seen = []
+    root.subscribe(lambda e: seen.append(e.usage) if e.kind == "usage_changed" else None)
+    await asyncio.wait_for(root.prompt("one"), TIMEOUT)
+    [usage] = seen
+    assert (usage.input_tokens, usage.cost_usd, usage.last_input_tokens) == (100, 0.5, 100)
 
 
 async def test_a_childs_cached_tokens_roll_up_and_survive_a_reload(
