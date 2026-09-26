@@ -116,6 +116,21 @@ def test_annotated_fields_keep_their_type_and_the_constraints_a_form_can_express
     }
 
 
+class Tagged(BaseModel):
+    tags: list[Literal["a", "b", "c"]] = ["a"]
+
+
+def test_a_multi_select_keeps_its_default():
+    schema = _json(NeedInput(question="Tags?", answer_type=Tagged))
+    assert schema is not None
+    assert schema["properties"]["tags"] == {
+        "type": "array",
+        "title": "Tags",
+        "items": {"type": "string", "enum": ["a", "b", "c"]},
+        "default": ["a"],
+    }
+
+
 class Nested(BaseModel):
     inner: Deployment
 
