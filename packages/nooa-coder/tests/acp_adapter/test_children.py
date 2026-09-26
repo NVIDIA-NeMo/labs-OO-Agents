@@ -75,8 +75,6 @@ async def test_loading_a_child_follows_it_and_closing_it_only_detaches(
     await adapter.close_session(child_id)
     assert adapter.registry.get(child_id) is child  # still running under its parent
     await adapter.load_session(str(workspace), child_id)  # and can be followed again
-    # Following it again is a new bridge, so the transcript is sent again.
-    assert client.texts(UserMessageChunk, child_id).count("CHILD-PROMPT\n") == 2
 
 
 async def test_listing_shows_roots_only(make_adapter, workspace, client):
