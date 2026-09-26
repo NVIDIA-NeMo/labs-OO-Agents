@@ -121,7 +121,9 @@ def _constraints(metadata: list[Any]) -> dict[str, Any]:
         for attribute in ("min_length", "max_length", "ge", "le", "pattern"):
             value = getattr(item, attribute, None)
             if value is not None:
-                found[attribute] = getattr(value, "pattern", value)  # a compiled re.Pattern as its source
+                found[attribute] = getattr(
+                    value, "pattern", value
+                )  # a compiled re.Pattern as its source
     return found
 
 

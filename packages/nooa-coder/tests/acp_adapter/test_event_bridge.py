@@ -896,3 +896,19 @@ async def test_usage_includes_cost_attributed_from_children(bridged):
     [usage] = [u for _, u in client.updates if isinstance(u, UsageUpdate)]
     assert usage.cost is not None and usage.cost.amount == 1.25
     assert usage.field_meta is not None and "dev.nooa/context" in usage.field_meta
+
+
+async def test_a_resumed_sessions_cost_continues_from_what_it_already_spent(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    session = _FakeSession(agent)
+    session.info.usage.cost_usd = 2.0  # spent before this bridge was attached
+    client = _RecordingClient()
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    agent.event_manager.add(
+        LLMResponse(usage=LLMUsage(input_tokens=40, output_tokens=10, cost_usd=0.25))
+    )
+    await bridge.flush()
+    [usage] = [u for _, u in client.updates if isinstance(u, UsageUpdate)]
+    assert usage.cost is not None and usage.cost.amount == 2.25
+    await bridge.close()
+    await agent.aclose()
