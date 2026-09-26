@@ -912,3 +912,47 @@ async def test_a_resumed_sessions_cost_continues_from_what_it_already_spent(tmp_
     assert usage.cost is not None and usage.cost.amount == 2.25
     await bridge.close()
     await agent.aclose()
+
+
+async def test_a_grandchild_is_announced_before_its_mirrored_cards(tmp_path):
+    agents = {name: CodingAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c", "g")}
+    parent = _FakeSession(agents["p"], "parent")
+    sessions = {
+        "child-1": _FakeSession(agents["c"], "child-1"),
+        "grandchild-1": _FakeSession(agents["g"], "grandchild-1"),
+    }
+    client = _RecordingClient()
+    bridge = ACPEventBridge(
+        parent,  # type: ignore[arg-type]
+        client,  # type: ignore[arg-type]
+        resolve_child=sessions.get,
+    )
+    parent.emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child-1", name="helper", depth=1, retained=False
+        )
+    )
+    sessions["child-1"].emit(
+        ChildCreatedUpdate(
+            session_id="child-1", child_id="grandchild-1", name="scout", depth=2, retained=True
+        )
+    )
+    agents["g"].event_manager.add(
+        ToolCallEvent(tool_call_id="c1", name="execute_python", arguments={"code": "x"})
+    )
+    await bridge.flush()
+
+    infos = [u for _, u in client.updates if isinstance(u, SessionInfoUpdate)]
+    assert infos[-1].field_meta == {
+        "dev.nooa/children": [
+            {"sessionId": "child-1", "name": "helper", "depth": 1, "retained": False},
+            {"sessionId": "grandchild-1", "name": "scout", "depth": 2, "retained": True},
+        ]
+    }
+    kinds = [type(u) for _, u in client.updates]
+    assert kinds == [SessionInfoUpdate, SessionInfoUpdate, ToolCallStart]
+    [start] = [u for _, u in client.updates if isinstance(u, ToolCallStart)]
+    assert start.tool_call_id == "grandchild-1:c1"
+    await bridge.close()
+    for agent in agents.values():
+        await agent.aclose()
