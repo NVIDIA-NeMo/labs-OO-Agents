@@ -76,3 +76,14 @@ async def test_refs_scoped_to_one_file_through_a_session(tmp_path, monkeypatch, 
         assert all("caller.py:" in line for line in result.lines)
     finally:
         await shell.close()
+
+
+def test_the_tool_docs_promise_editable_only_when_match_has_it():
+    """The model is told to filter on Match.editable only if core Match has it (#382)."""
+    from nooa_coder.tools import repo_tools
+
+    from nooa.agentdoc import doc
+
+    rendered = str(doc(RepoTools))
+    assert ("editable" in rendered) == repo_tools._MATCH_HAS_EDITABLE
+    assert "read-only" not in rendered or repo_tools._MATCH_HAS_EDITABLE
