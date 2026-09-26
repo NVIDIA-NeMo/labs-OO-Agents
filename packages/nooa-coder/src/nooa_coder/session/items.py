@@ -304,6 +304,22 @@ class ModelInfo(BaseModel):
     reasoning_default: str | None = None
 
 
+PlanStatus = Literal["pending", "in_progress", "completed"]
+PlanPriority = Literal["high", "medium", "low"]
+
+
+class PlanEntry(BaseModel):
+    """One step of the agent's plan, as a host shows it (``Session.plan()``).
+
+    The fields are ACP's plan entry: ``content`` (the step), ``status`` and
+    ``priority``. The coding agent derives them from its todos.
+    """
+
+    content: str
+    status: PlanStatus = "pending"
+    priority: PlanPriority = "medium"
+
+
 class CommandResult(BaseModel):
     """What a slash command returned: text to show, and data for clients that know it.
 

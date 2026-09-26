@@ -355,20 +355,20 @@ class CoderModels(ScriptedModels):
         return create_session_agent(options.model_copy(update={"llm": llm}), storage)
 
 
-class StatusAgent(InteractiveAgent, llm=FakeLLMClient()):
-    """An agent that reports host status (``host_status``), one value not JSON-native."""
+class PlanAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """An agent that offers a plan (``plan``), one entry as a dict."""
 
-    def host_status(self) -> dict[str, Any]:
-        from pathlib import Path
+    def plan(self) -> list[Any]:
+        from nooa_coder.session.items import PlanEntry
 
-        return {"context": {"active_events": 3}, "where": Path("/tmp/x")}
+        return [PlanEntry(content="write the test", status="in_progress"), {"content": "run it"}]
 
 
-class BrokenStatusAgent(InteractiveAgent, llm=FakeLLMClient()):
-    """An agent whose ``host_status`` raises."""
+class BrokenPlanAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """An agent whose ``plan`` raises."""
 
-    def host_status(self) -> dict[str, Any]:
-        raise RuntimeError("status unavailable")
+    def plan(self) -> list[Any]:
+        raise RuntimeError("plan unavailable")
 
 
 class ToolPrepAgent(InteractiveAgent, llm=FakeLLMClient()):

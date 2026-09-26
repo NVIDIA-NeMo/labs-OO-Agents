@@ -57,6 +57,7 @@ from nooa_coder.session.items import (
     ModeChangedUpdate,
     ModelChangedUpdate,
     ModelInfo,
+    PlanEntry,
     ReasoningChangedUpdate,
     Receipt,
     SessionEvent,
@@ -1173,25 +1174,21 @@ class Session:
         if isinstance(event, AgentMessage) and self._agent.turns.in_turn:
             self._turn_messages.add(event.content)
 
-    def host_status(self) -> dict[str, Any]:
-        """Agent-specific status for a host to show, as JSON data; ``{}`` if the agent has none.
+    def plan(self) -> list[PlanEntry]:
+        """The agent's plan for a host to show, as ACP plan entries; empty if it has none.
 
-        An agent offers it with a ``host_status()`` method returning a dict
-        (the coding agent: ``context``, its history and summarisation
-        state, and ``todos``). Values that are not JSON become strings. A
-        failure is logged and reads as ``{}``.
+        An agent offers it with a ``plan()`` method returning ``PlanEntry``
+        values or dicts with their fields (the coding agent derives them
+        from its todos). A failure is logged and reads as no plan.
         """
-        status = getattr(self._agent, "host_status", None)
-        if not callable(status):
-            return {}
+        hook = getattr(self._agent, "plan", None)
+        if not callable(hook):
+            return []
         try:
-            value = status()
-            return json.loads(json.dumps(value, default=str)) if isinstance(value, dict) else {}
+            return [PlanEntry.model_validate(entry) for entry in hook()]
         except Exception:
-            logger.warning(
-                "Session %s: could not read the agent's host status", self.id, exc_info=True
-            )
-            return {}
+            logger.warning("Session %s: could not read the agent's plan", self.id, exc_info=True)
+            return []
 
     def transcript(self, *, limit: int | None = None) -> list[TranscriptEntry]:
         """The session's transcript as a person would see it; the last ``limit`` entries."""

@@ -91,8 +91,8 @@ class _FakeSession:
     def _next_llm(self) -> Any:
         return Session._next_llm(self)  # type: ignore[arg-type]
 
-    def host_status(self) -> dict[str, Any]:
-        return Session.host_status(self)  # type: ignore[arg-type]
+    def plan(self) -> list[Any]:
+        return Session.plan(self)  # type: ignore[arg-type]
 
 
 class _RecordingClient:
@@ -1088,7 +1088,9 @@ async def test_usage_includes_cost_attributed_from_children(bridged):
     await bridge.flush()
     [usage] = [u for _, u in client.updates if isinstance(u, UsageUpdate)]
     assert usage.cost is not None and usage.cost.amount == 1.25
-    assert usage.field_meta is not None and "dev.nooa/context" in usage.field_meta
+    assert (
+        usage.field_meta is not None and "dev.nooa/context" not in usage.field_meta
+    )  # no private diagnostics on the wire
 
 
 async def test_a_resumed_sessions_cost_continues_from_what_it_already_spent(tmp_path):

@@ -37,6 +37,7 @@ from nooa_coder.session.items import (
     ChildQuestion,
     ChildRef,
     ChildResult,
+    PlanEntry,
     TaskResult,
 )
 from nooa_coder.session.registry import DepthLimitError
@@ -371,26 +372,26 @@ class CodingAgent(InteractiveAgent):
         return await connect_session_mcp(self, CoderOptions.load(self.cwd))
 
     @hidden
-    def host_status(self) -> dict[str, Any]:
-        """Status for hosts, read through ``Session.host_status()``: context and todos.
+    def plan(self) -> list[PlanEntry]:
+        """The todo list as ACP plan entries, read through ``Session.plan()``.
 
-        ``context`` is ``get_summarization_status()``; ``todos`` lists each
-        todo's ``id``, ``title``, stored ``status`` (``open`` or ``done``)
-        and whether it is the ``active`` one.
+        A done todo is ``completed``, the active one ``in_progress``, the
+        rest ``pending``.
         """
         active = self.todo.active()
-        return {
-            "context": self.get_summarization_status(),
-            "todos": [
-                {
-                    "id": todo.id,
-                    "title": todo.title,
-                    "status": todo.status,
-                    "active": active is not None and todo.id == active.id,
-                }
-                for todo in self.todo.list_todos()
-            ],
-        }
+        return [
+            PlanEntry(
+                content=todo.title,
+                status=(
+                    "completed"
+                    if todo.status == "done"
+                    else "in_progress"
+                    if active is not None and todo.id == active.id
+                    else "pending"
+                ),
+            )
+            for todo in self.todo.list_todos()
+        ]
 
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""
