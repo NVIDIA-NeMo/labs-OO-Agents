@@ -3,10 +3,11 @@
 """RepoTools — code navigation that returns ShellTools Match anchors.
 
 Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
-``RepoResult``: printable lines plus ``Match`` objects. Anchors with
-``editable=True`` support ``self.shell.replace(result[i], new_text)`` — the
-same host filesystem a wired ``BashSession`` also operates on; anchors from a
-non-host session are read-only.
+``RepoResult``: printable lines plus ``Match`` objects for
+``self.shell.replace(result[i], new_text)`` — the same host filesystem a wired
+``BashSession`` also operates on. Once core ``Match`` has ``editable`` (#382),
+anchors from a non-host session are read-only (``editable=False``), and the
+tool docs say so only then.
 """
 
 import base64
@@ -27,6 +28,11 @@ from nooa.tools._bash_session import BashSession
 from nooa.tools.shell_tools import Match
 
 logger = logging.getLogger(__name__)
+
+# Core ``Match(editable=...)`` and read-only anchors come with #382. Until
+# then every anchor is editable, and the docs the model reads must not tell
+# it to filter on an attribute that does not exist.
+_MATCH_HAS_EDITABLE = "editable" in inspect.signature(Match.__init__).parameters
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -181,7 +187,11 @@ class RepoResult(BaseModel):
     lines: list[str] = Field(description="Display lines: file:line: context")
     matches: list[Match] = Field(
         default_factory=list,
-        description="Match anchors; only editable=True anchors support self.shell.replace()",
+        description=(
+            "Match anchors; only editable=True anchors support self.shell.replace()"
+            if _MATCH_HAS_EDITABLE
+            else "Match anchors; pass one to self.shell.replace() to edit it"
+        ),
     )
     total_matches: int = Field(default=0, description="Total matches found")
     truncated: bool = Field(default=False, description="True if results were capped")
@@ -329,9 +339,6 @@ def _line_match(path: Path, line_no: int) -> Match | None:
     if not (1 <= line_no <= len(lines)):
         return None
     return Match(str(path), line_no, line_no, lines[line_no - 1], resolved_path=path)
-
-
-_MATCH_HAS_EDITABLE = "editable" in inspect.signature(Match.__init__).parameters
 
 
 def _anchor(
@@ -509,11 +516,6 @@ class RepoTools(Skill):
         r = await self.repo.symbols("src/", query="Handler")
         await self.shell.replace(r[0], new_code)
 
-    A wired ``BashSession`` shares this same host filesystem (it is a local
-    subprocess, not a remote/sandboxed one), so anchors stay editable. A
-    non-``BashSession`` session (e.g. a scripted double over its own
-    in-memory filesystem) may not share it, so its anchors are read-only.
-
     ``root`` sets the default base for relative paths and result display; it
     is not a security boundary. Both an absolute ``path=`` argument and a
     shared ``session`` give the same filesystem access ``ShellTools.run()``
@@ -577,9 +579,7 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find definitions under a file or directory.
 
-        Returns printable lines plus ``Match`` anchors. Anchors with
-        ``editable=True`` support ``self.shell.replace``; anchors from a
-        non-host session are read-only.
+        Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
         """
         resolved = self._resolve(path)
         if not await self._path_exists(resolved):
@@ -649,9 +649,7 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
-        Returns printable lines plus ``Match`` anchors. Anchors with
-        ``editable=True`` support ``self.shell.replace``; anchors from a
-        non-host session are read-only.
+        Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
         """
         resolved = self._resolve(path)
         if not await self._path_exists(resolved):
@@ -1228,3 +1226,17 @@ class RepoTools(Skill):
         """
         p = Path(path)
         return p if p.is_absolute() else self._root / p
+
+
+if _MATCH_HAS_EDITABLE:
+    RepoTools.__doc__ = inspect.cleandoc(RepoTools.__doc__ or "") + (
+        "\n\nA wired ``BashSession`` shares this same host filesystem (it is a local\n"
+        "subprocess, not a remote/sandboxed one), so anchors stay editable. A\n"
+        "non-``BashSession`` session (e.g. a scripted double over its own\n"
+        "in-memory filesystem) may not share it, so its anchors are read-only."
+    )
+    for _method in (RepoTools.symbols, RepoTools.refs):
+        _method.__doc__ = inspect.cleandoc(_method.__doc__ or "") + (
+            "\nOnly anchors with ``editable=True`` support it; anchors from a\n"
+            "non-host session are read-only."
+        )
