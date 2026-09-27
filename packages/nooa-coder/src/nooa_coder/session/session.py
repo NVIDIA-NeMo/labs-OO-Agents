@@ -985,7 +985,7 @@ class Session:
             reasoning_default=getattr(client, "reasoning_default", None),
         )
 
-    async def set_reasoning(self, level: str) -> None:
+    async def set_reasoning(self, level: str | None) -> None:
         """Choose a reasoning level the client declares; it applies from the next model call.
 
         The level is set on the client the next call uses (see
@@ -1001,9 +1001,10 @@ class Session:
         self._ensure_open()
         client = self._next_llm()
         levels = tuple(getattr(client, "reasoning_levels", None) or ())
-        if level not in levels:
+        if level is not None and level not in levels:
             allowed = ", ".join(levels) if levels else "none for this model"
             raise ValueError(f"Unknown reasoning level {level!r}; allowed: {allowed}")
+        # None clears the choice: the model's own default applies again.
         client.reasoning_level = level
         self.handle.set_reasoning(level)
         self.info.reasoning = level

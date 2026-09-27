@@ -295,8 +295,8 @@ class SessionHandle:
             # A new model starts from its own reasoning default.
             self._info = self._info.model_copy(update={"model": model, "reasoning": None})
 
-    def set_reasoning(self, level: str) -> None:
-        """Persist a reasoning level and update this handle's current metadata."""
+    def set_reasoning(self, level: str | None) -> None:
+        """Persist a reasoning level (``None`` clears it) and update this handle's metadata."""
         self._ensure_open()
         self._events.add(SessionReasoningChanged(level=level))
         with self._metadata_lock:

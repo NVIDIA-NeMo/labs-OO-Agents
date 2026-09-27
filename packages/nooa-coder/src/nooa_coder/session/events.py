@@ -65,7 +65,7 @@ class SessionReasoningChanged(Metadata):
 
     _role: ClassVar[Role] = Role.METADATA
 
-    level: str = ""
+    level: str | None = None
 
 
 class SessionTitleUpdated(Metadata):
