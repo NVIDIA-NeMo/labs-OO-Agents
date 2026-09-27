@@ -131,8 +131,9 @@ async def test_the_reasoning_option_lists_the_client_levels(make_adapter, worksp
     by_id = {option.id: option for option in response.config_options or []}
     assert set(by_id) == {"model", "reasoning"}
     reasoning = by_id["reasoning"]
-    assert reasoning.current_value == "low"
-    assert [choice.value for choice in reasoning.options] == ["low", "high"]
+    assert reasoning.current_value == "default"
+    assert [choice.value for choice in reasoning.options] == ["default", "low", "high"]
+    assert reasoning.options[0].name == "Model default (low)"
 
 
 async def test_choosing_a_reasoning_level_applies_to_the_client(make_adapter, workspace):
@@ -154,3 +155,33 @@ async def test_no_reasoning_option_without_declared_levels(make_adapter, workspa
     assert [option.id for option in response.config_options or []] == ["model"]
     with pytest.raises(RequestError):
         await adapter.set_config_option("reasoning", response.session_id, "high")
+
+
+class _LeveledNoDefault(_LeveledModels):
+    """Levels declared, no default: the common connect entry shape."""
+
+    def __call__(self, options, storage):
+        from nooa.unifiedllm.reasoning import ReasoningConfig
+
+        agent = super().__call__(options, storage)
+        agent.llm._reasoning_config = ReasoningConfig(
+            levels={"low": {"reasoning_effort": "low"}, "high": {"reasoning_effort": "high"}}
+        )
+        return agent
+
+
+async def test_the_reasoning_option_is_offered_without_a_default_and_can_be_cleared(
+    make_adapter, workspace
+):
+    adapter = await make_adapter(_LeveledNoDefault(), model="fast")
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    [option] = [
+        o for o in (await adapter.new_session(str(workspace))).config_options if o.id == "reasoning"
+    ]
+    assert option.current_value == "default" and option.options[0].name == "Model default"
+    await adapter.set_config_option("reasoning", session_id, "high")
+    assert adapter.session(session_id).model_info().reasoning_level == "high"
+    response = await adapter.set_config_option("reasoning", session_id, "default")
+    reasoning = next(o for o in response.config_options if o.id == "reasoning")
+    assert reasoning.current_value == "default"
+    assert adapter.session(session_id).model_info().reasoning_level is None

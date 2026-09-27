@@ -98,6 +98,9 @@ logger = logging.getLogger(__name__)
 
 _DELETE_METHOD = "nooa/session/delete"
 """``_nooa/session/delete`` as ``ext_method`` receives it (without the underscore)."""
+# The reasoning option's first choice: no level chosen, the model's own default applies.
+DEFAULT_REASONING = "default"
+
 _INJECT_METHOD = "nooa/session/inject"
 _REVOKE_METHOD = "nooa/session/revoke_inject"
 
@@ -851,7 +854,7 @@ class CoderACPAgent:
         later starts from that alias's default again.
         """
         try:
-            await session.set_reasoning(level)
+            await session.set_reasoning(None if level == DEFAULT_REASONING else level)
         except SessionClosedError:
             raise RequestError.resource_not_found(session.id) from None
         except ValueError as exc:
@@ -896,17 +899,24 @@ class CoderACPAgent:
         """
         model = session.model_info()
         levels = model.reasoning_levels
-        current = model.reasoning_level or model.reasoning_default
-        if not levels or current not in levels:
+        if not levels:
             return None
+        default_name = (
+            f"Model default ({model.reasoning_default})"
+            if model.reasoning_default
+            else "Model default"
+        )
         return SessionConfigOptionSelect(
             id="reasoning",
             name="Reasoning",
             category="thought_level",
             description="How much the model reasons before answering, from its next call on.",
             type="select",
-            current_value=current,
-            options=[SessionConfigSelectOption(value=level, name=level) for level in levels],
+            current_value=model.reasoning_level or DEFAULT_REASONING,
+            options=[
+                SessionConfigSelectOption(value=DEFAULT_REASONING, name=default_name),
+                *(SessionConfigSelectOption(value=level, name=level) for level in levels),
+            ],
         )
 
     def _followed(self, session_id: str) -> tuple[Session, ACPEventBridge]:

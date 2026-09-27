@@ -405,7 +405,7 @@ class ReasoningChangedUpdate(_Update):
     """The reasoning level changed (``set_reasoning``); it applies from the next model call."""
 
     kind: Literal["reasoning_changed"] = "reasoning_changed"
-    level: str
+    level: str | None = None
 
 
 class CommandsChangedUpdate(_Update):
