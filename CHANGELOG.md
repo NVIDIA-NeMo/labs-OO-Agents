@@ -40,6 +40,17 @@ to follow semantic versioning.
   text. Typed fields are asked as strings and converted; a choice question is one text
   field that lists the choices, and the answer matches a choice ignoring case. A bad
   value is asked once more. Yes/no questions still use the permission dialog.
+- `nooa-coder`: the ACP server accepts Pool's steering. It advertises
+  `poolside/session_steer`, and a message typed in Pool during a running turn reaches
+  the turn's next model call (queued when no turn is running) instead of waiting in
+  Pool's queue.
+- `nooa-coder`: with Pool as the ACP client, free-text and typed questions (`NeedInput`)
+  open Pool's form (`_poolside/elicitation`) instead of ending the turn as text. Typed
+  fields are asked as strings and converted; a bad value is asked once more.
+- Headless benchmarks with the nooa-coder coding agent: `nooa-bench run --workspace DIR
+  --model ALIAS "task"` runs one task unattended and prints the result as JSON (exit 0 when
+  the agent finished), and `nemo-harbor --agent-type coder` runs Harbor tasks the same way.
+  Each run is a stored session in the workspace. `nooa_coder.run_task` is the API.
 - `nooa-coder`: `/recover` in ACP sessions continues a session that is marked in use,
   for example after a crash on another machine sharing the directory, in a new copy.
   Without an argument it lists those sessions. The original file is never modified;
