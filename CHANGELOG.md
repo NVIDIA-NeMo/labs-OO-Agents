@@ -16,6 +16,7 @@ to follow semantic versioning.
   `--provider` help and errors list every preset, including `hub`.
 - `nooa connect` offers the NVIDIA Inference Hub (`inference-api.nvidia.com`,
   key in `NVIDIA_INFERENCE_API_KEY`) as a preset provider, after build.nvidia.com.
+- `nooa-coder`: the ACP model picker re-reads the model registry when a registry file changes, so an alias added with `nooa connect` in a terminal appears without restarting the server.
 - `import nooa` no longer loads the strategies, the LLM client or LiteLLM
   (about 3.3 s down to 0.3 s here). The strategy names, `LLMResponse` and
   `llm_config_chain` load on first use; `from nooa import CodeActStrategy`
