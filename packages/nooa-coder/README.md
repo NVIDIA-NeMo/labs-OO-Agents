@@ -38,6 +38,22 @@ and `_nooa/session/revoke_inject` takes one back; see `docs/acp-router.md`
 ("Messages during a turn") and the ACP RFD for message injection
 (agent-client-protocol PR #1261).
 
+## Recovering a session marked in use
+
+A session in use is marked by its lock file, so that no two processes write
+it, including a sandbox and its host sharing the directory. A process that
+crashes leaves the mark behind, and the session is then left out of the
+session list and cannot be opened. In an ACP session, `/recover` lists the
+sessions of the workspace that are marked in use, with their owner and the
+time of their last write. `/recover <id, id prefix or title>` copies one
+into a new session titled "<title> (recovered)", which `/resume` then
+opens. The original file is never modified; if it is still in use
+elsewhere, the copy is a branch from that point. Queued messages the
+original never read and its subagent sessions are not carried over, and
+the agent is told so. A damaged file is copied event by event, and the
+reply says how many events could not be read. The store API is
+`SessionStore.in_use()` and `SessionStore.fork()`.
+
 The design is tracked in issue #388.
 
 

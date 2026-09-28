@@ -675,7 +675,8 @@ class SessionStore:
             lock_path = self.path_for(session_id).with_suffix(".lock")
             raise SessionAlreadyActiveError(
                 f"Session {session_id!r} is in use on {host} (pid {pid}). Close it there "
-                f"first. If that process is gone, empty the file {str(lock_path)!r} to reclaim it.",
+                "first. If that process is gone, run /recover to continue in a copy of the "
+                f"session, or empty the file {str(lock_path)!r} to reclaim it.",
                 session_id=session_id,
                 owner_pid=pid,
             )
