@@ -55,7 +55,7 @@ async def connect_session_mcp(agent: Any, options: CoderOptions) -> list[str]:
     warnings = []
     for name in dict.fromkeys(options.mcp_auto_connect):
         try:
-            await agent.mcp.connect([name])
+            await agent.skills.mcp.connect([name])
         except Exception as exc:
             warnings.append(f"MCP server {name!r} was not connected: {exc}")
     return warnings
@@ -76,12 +76,12 @@ def drop_stale_memory_context(agent: Any) -> None:
 
 
 def configure_session_skills(agent: Any, options: CoderOptions) -> list[str]:
-    """Attach the same MCP registry and explicit skills before resume events.
+    """Attach the workspace's MCP servers and explicit skills before resume events.
 
     Return actionable warnings for either host to display. Discovering a skill
     does not activate it; negative activation preferences override positives.
     """
-    from nooa_coder.workspace.mcp_registry import MCPRegistry
+    from nooa_coder.skills.mcp_servers import MCPServers
     from nooa_coder.workspace.workspace_settings import WorkspaceSettings
 
     skills = getattr(agent, "skills", None)
@@ -89,16 +89,14 @@ def configure_session_skills(agent: Any, options: CoderOptions) -> list[str]:
         return []
     root = Path(options.working_dir)
     mcp_file = options.mcp_file.expanduser()
-    skills.register(
-        "nemo.mcp",
-        MCPRegistry(
-            mcp_file=mcp_file if mcp_file.is_absolute() else root / mcp_file,
-            servers=options.mcp_servers,
-            watch_settings=True,
-            project_dir=root / ".nooa",
-        ),
+    servers = MCPServers(
+        mcp_file=mcp_file if mcp_file.is_absolute() else root / mcp_file,
+        servers=options.mcp_servers,
+        watch_settings=True,
+        project_dir=root / ".nooa",
     )
-    skills.activate(["nemo.mcp"])
+    servers.bind(agent)
+    skills.mcp = servers
     skills.register("nooa.workspace_settings", WorkspaceSettings(options))
     skills.activate(["nooa.workspace_settings"])
     warnings: list[str] = []

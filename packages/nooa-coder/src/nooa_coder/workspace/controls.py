@@ -322,7 +322,9 @@ class SkillsControl(BehaviorControl):
 
 
 class MCPControl(BehaviorControl):
-    """Review, approve, and revoke MCP server configurations."""
+    """Review, approve, sign in to, and revoke MCP server configurations."""
+
+    usage = "[status|approve NAME [CODE]|auth NAME ADDRESS|revoke NAME]"
 
     @property
     def name(self) -> str:
@@ -330,63 +332,67 @@ class MCPControl(BehaviorControl):
 
     @classmethod
     def help_text(cls) -> dict[str, str]:
-        return {"/mcp [status|approve NAME [CODE]|revoke NAME]": cls.__doc__ or ""}
+        return {f"/mcp {cls.usage}": cls.__doc__ or ""}
 
     def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
         if not args or (args[0] == "status" and len(args) == 1):
             return True, None
         if args[0] == "approve" and len(args) in (2, 3):
             return True, None
-        if args[0] == "revoke" and len(args) == 2:
+        if args[0] in ("revoke",) and len(args) == 2:
             return True, None
-        return False, "Usage: /mcp [status|approve NAME [CODE]|revoke NAME]"
+        if args[0] == "auth" and len(args) == 3:
+            return True, None
+        return False, f"Usage: /mcp {self.usage}"
 
     async def execute(self, args: list[str]) -> ControlResult:
-        from .mcp_approval import _safe_display
-        from .mcp_registry import MCPRegistry
+        from nooa_coder.skills.mcp_servers import MCPSignInRequired
 
-        registry = getattr(self.agent, "mcp", None)
-        if not isinstance(registry, MCPRegistry):
-            return ControlResult.err("This agent has no MCP registry.")
-        registry.refresh_settings()
+        from .mcp_approval import _safe_display
+
+        servers = getattr(getattr(self.agent, "skills", None), "mcp", None)
+        if servers is None:
+            return ControlResult.err("This agent has no MCP servers.")
+        servers.refresh_settings()
         if not args or args[0] == "status":
             rows = []
-            for name in registry.discovered():
+            for name in servers.discovered():
                 try:
-                    approval = "approved" if registry._is_approved(name) else "approval required"
+                    approval = "approved" if servers.is_approved(name) else "approval required"
                 except ValueError:
-                    # build_approval_request() raises for an invalid/unsupported
-                    # entry; one bad server config must not blank out /mcp
-                    # status for every other, valid server.
+                    # One bad server config must not blank out the status of the others.
                     approval = "invalid configuration"
-                rows.append(
-                    [
-                        _safe_display(name),
-                        approval,
-                        "connected" if name in registry.connected() else "disconnected",
-                    ]
-                )
+                rows.append([_safe_display(name), approval, servers.state(name)])
             return ControlResult.ok(
                 ControlTable(
-                    columns=["Server", "Approval", "Connection"], rows=rows, title="MCP servers"
+                    columns=["Server", "Approval", "State"], rows=rows, title="MCP servers"
                 ),
                 # The person also sees each server's endpoint and transport.
-                ControlMessage(registry.status(verbose=True)),
+                ControlMessage(servers.details()),
             )
         name = args[1]
-        # Registry APIs accept globs; approval commands name one exact definition.
+        # Connection APIs accept globs; these commands name one exact definition.
         pattern = "".join({"[": "[[]", "*": "[*]", "?": "[?]"}.get(c, c) for c in name)
         if args[0] == "revoke":
             # Revoke before disconnect so a transport failure cannot retain permission.
-            registry._revoke_approvals(name)
-            await registry.disconnect([pattern])
+            servers.revoke(name)
+            await servers.disconnect([pattern])
             return ControlResult.ok(
                 ControlMessage(f"Revoked approvals for {_safe_display(name)}.", "success")
             )
+        if args[0] == "auth":
+            message = await servers.complete_sign_in(name, args[2])
+            return ControlResult.ok(ControlMessage(message, "success"))
         if len(args) == 2:
-            return ControlResult.ok(ControlMessage(registry._approval_request(name).review_text()))
-        registry._approve(name, args[2])
-        await registry.connect([pattern])
+            return ControlResult.ok(ControlMessage(servers.approval_request(name).review_text()))
+        servers.approve(name, args[2])
+        try:
+            await servers.connect([pattern])
+        except MCPSignInRequired as needed:
+            return ControlResult.ok(
+                ControlMessage(f"Approved {_safe_display(name)}.", "success"),
+                ControlMessage(str(needed)),
+            )
         return ControlResult.ok(
             ControlMessage(f"Approved and connected to {_safe_display(name)}.", "success")
         )
@@ -527,7 +533,7 @@ def behavior_commands(
                 description=control_type.__doc__ or "",
                 argument_hint={
                     "skills": "<list|commands|add DIR|activate ID|deactivate ID>",
-                    "mcp": "[status|approve NAME [CODE]|revoke NAME]",
+                    "mcp": MCPControl.usage,
                     "trace-url": "",
                     "usage": "",
                 }[control.name],
