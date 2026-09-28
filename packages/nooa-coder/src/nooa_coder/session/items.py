@@ -280,6 +280,25 @@ class SessionInfo(BaseModel):
     turn_count: int = 0
     reply_count: int = 0
     usage: Usage = Field(default_factory=Usage)
+    forked_from: str | None = None
+    """The session this one was copied from by ``SessionStore.fork``, if any."""
+
+
+class InUseSession(BaseModel):
+    """A stored session some process holds, as ``SessionStore.in_use()`` reports it.
+
+    ``owner`` describes the holder: ``pid N on HOST`` (another machine),
+    ``local process (pid N)``, or ``old TUI (pid N)``. ``title``,
+    ``parent_id`` and ``workspace`` are empty when the file could not be
+    read. ``last_write`` is the file's modification time.
+    """
+
+    id: str
+    title: str | None = None
+    parent_id: str | None = None
+    workspace: str = ""
+    owner: str
+    last_write: float
 
 
 class CommandInfo(BaseModel):
