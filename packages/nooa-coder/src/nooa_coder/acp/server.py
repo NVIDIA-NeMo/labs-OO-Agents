@@ -71,6 +71,8 @@ from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
 from nooa_coder.acp.listing import list_sessions, validate_workspace
 from nooa_coder.acp.need_input import answer_from_content, need_input_schema
 from nooa_coder.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
+from nooa_coder.acp.recover import COMMAND as RECOVER
+from nooa_coder.acp.recover import recover
 from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_coder.session.items import (
     CommandInfo,
@@ -765,6 +767,8 @@ class CoderACPAgent:
         self, session: Session, bridge: ACPEventBridge, name: str, raw_args: str
     ) -> PromptResponse | None:
         """Run ``/name args``; ``None`` when it is not a command, so the text is a prompt."""
+        if name == RECOVER.name:
+            return await self._say(bridge, await self._recover(session, raw_args))
         if name not in {command.name for command in session.commands()}:
             if name == "connect":
                 message = _CONNECT_TEXT
@@ -807,6 +811,26 @@ class CoderACPAgent:
             receipt = await session.submit(result.text, channel=channel, source=SOURCE)
             return await self._finish(session, bridge, receipt.item_id)
         return await self._say(bridge, result.text)
+
+    async def _recover(self, session: Session, raw_args: str) -> str:
+        """``/recover``: over the store that holds ``session``, for its workspace."""
+        registry = self._registry_holding(session.id)
+        if registry is None:
+            return "/recover failed: this session's store is not known here."
+        open_here = {
+            session_id for known in self._registries.values() for session_id in known.sessions
+        }
+        try:
+            return await asyncio.to_thread(
+                recover,
+                registry.store,
+                session.info.workspace or None,
+                raw_args,
+                open_here=open_here,
+            )
+        except Exception as exc:
+            logger.warning("/recover failed in session %s", session.id, exc_info=True)
+            return f"/recover failed: {exc}"
 
     @staticmethod
     async def _say(bridge: ACPEventBridge, message: str) -> PromptResponse:
@@ -1215,8 +1239,10 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
 
 
 def _available_commands_update(commands: list[CommandInfo]) -> Any:
+    """The session's commands, and the ones this adapter runs itself (``/recover``)."""
     available: list[AvailableCommand] = []
-    for command in commands:
+    names = {command.name for command in commands}
+    for command in [*commands, *(c for c in (RECOVER,) if c.name not in names)]:
         input_spec = (
             AvailableCommandInput(UnstructuredCommandInput(hint=command.input_hint))
             if command.input_hint
