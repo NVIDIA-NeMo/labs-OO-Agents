@@ -922,7 +922,7 @@ class Session:
             return []
         return [str(warning) for warning in await hook()]
 
-    def register_tools(self, tools: Mapping[str, Any]) -> dict[str, str]:
+    async def register_tools(self, tools: Mapping[str, Any]) -> dict[str, str]:
         """Register and activate each tool as an agent skill under its name.
 
         Returns the tools that were not registered, name to reason (the
@@ -938,7 +938,10 @@ class Session:
                 continue
             try:
                 skills.register(name, tool)
-                skills.activate([name])
+                # A coding agent's SkillManager activates asynchronously.
+                activated = skills.activate([name])
+                if inspect.isawaitable(activated):
+                    await activated
             except ValueError as exc:
                 failed[name] = str(exc)
         return failed

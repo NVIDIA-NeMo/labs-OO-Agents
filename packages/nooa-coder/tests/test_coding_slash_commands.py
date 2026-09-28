@@ -78,9 +78,10 @@ async def test_registry_refresh_callback_observes_new_skill_commands(tmp_path):
     )
     try:
         agent.skills.register("test.workflow", _WorkflowSkill())
-        agent.skills.activate(["test.workflow"])
+        await agent.skills.activate(["test.workflow"])
 
-        assert updates == [(), ("diagnose",)]
+        # /mcp-add comes from the skill manager itself.
+        assert updates == [("mcp-add",), ("diagnose", "mcp-add")]
     finally:
         registry.close()
         await agent.aclose()

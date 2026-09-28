@@ -95,10 +95,9 @@ def configure_session_skills(agent: Any, options: CoderOptions) -> list[str]:
         watch_settings=True,
         project_dir=root / ".nooa",
     )
-    servers.bind(agent)
-    skills.mcp = servers
+    skills.set_mcp_servers(servers)
     skills.register("nooa.workspace_settings", WorkspaceSettings(options))
-    skills.activate(["nooa.workspace_settings"])
+    skills.registry.activate(["nooa.workspace_settings"])
     warnings: list[str] = []
     discover = getattr(skills, "discover_skills_dirs", None)
     if options.active_skills and callable(discover):
@@ -106,21 +105,24 @@ def configure_session_skills(agent: Any, options: CoderOptions) -> list[str]:
             discover(options.skills_dirs)
         except Exception as exc:
             warnings.append(f"Could not discover configured skills: {exc}")
-    discovered = set(skills.discovered())
+    # Saved names are registered names (nemo.web) or skill names (web).
     for name in options.active_skills:
-        if name not in discovered:
+        entry = skills.entry(name)
+        if entry is None or entry.kind == "mcp":
             warnings.append(f"Configured skill not found: {name}")
             continue
         try:
-            skills.activate([name])
-            if name not in skills.activated():
+            skills.registry.activate([entry.key])
+            if entry.kind == "code" and entry.key not in skills.activated():
                 warnings.append(f"Could not activate skill {name}")
         except Exception as exc:
             warnings.append(f"Could not activate skill {name}: {exc}")
     for name in options.inactive_skills:
-        if name in skills.activated():
+        entry = skills.entry(name)
+        if entry is not None and entry.key in skills.activated():
+            name = entry.key
             try:
-                skills.deactivate([name])
+                skills.registry.deactivate([name])
                 if name in skills.activated():
                     warnings.append(f"Could not deactivate skill {name}")
             except Exception as exc:

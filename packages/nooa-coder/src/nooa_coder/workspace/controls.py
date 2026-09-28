@@ -250,35 +250,38 @@ class SkillsControl(BehaviorControl):
                 ControlMessage(f"Searched: {self.skills_dirs}", "status"),
             )
 
-        from nooa.skill_registry import SkillRegistry
+        from nooa_coder.skills.manager import SkillManager
 
-        registry = getattr(self.agent, "skills", None)
-        if not isinstance(registry, SkillRegistry):
-            return ControlResult.err(
-                "Agent has no SkillRegistry. Skills require self.skills = SkillRegistry(self)."
-            )
+        manager = getattr(self.agent, "skills", None)
+        if not isinstance(manager, SkillManager):
+            return ControlResult.err("This agent has no skill manager.")
 
         if subcmd == "list":
-            all_names = registry.discovered()
-            activated = set(registry.activated())
-            if not all_names:
+            entries = manager.entries()
+            if not entries:
                 return ControlResult.ok(ControlMessage("No skills found", "info"))
-            rows = [[name, "\u2713" if name in activated else "", ""] for name in all_names]
+            rows = [[e.name, e.kind, e.state, e.description] for e in entries]
             return ControlResult.ok(
-                ControlTable(columns=["ID", "Active", "Description"], rows=rows, title="Skills"),
+                ControlTable(
+                    columns=["Name", "Kind", "State", "Description"], rows=rows, title="Skills"
+                ),
             )
 
+        entry = manager.entry(subargs[0])
+        if entry is None:
+            return ControlResult.err(f"Skill `{subargs[0]}` not found. Use /skills list.")
+        # Settings keep the registered name, which older settings files use too.
+        skill_id = entry.key
         if subcmd == "activate":
-            skill_id = subargs[0]
-            if skill_id not in registry.discovered():
-                return ControlResult.err(f"Skill `{skill_id}` not found. Use /skills list.")
             try:
-                if skill_id not in registry.activated():
-                    registry.activate([skill_id])
+                result = await manager.activate([skill_id])
             except Exception as e:
-                return ControlResult.err(f"Failed to activate `{skill_id}`: {e}")
-            if skill_id not in registry.activated():
-                return ControlResult.err(f"Failed to activate `{skill_id}`")
+                return ControlResult.err(f"Failed to activate `{entry.name}`: {e}")
+            if entry.kind != "code":
+                # Text skills are read once; MCP servers are saved through /mcp.
+                return ControlResult.ok(ControlMessage(result))
+            if manager.entry(skill_id).state != "active":
+                return ControlResult.err(result)
             active = list(dict.fromkeys([*project_saved.get("active_skills", []), skill_id]))
             inactive = [
                 name for name in project_saved.get("inactive_skills", []) if name != skill_id
@@ -291,22 +294,20 @@ class SkillsControl(BehaviorControl):
                 self._persist_settings({"active_skills": active, "inactive_skills": inactive})
             except Exception as exc:
                 return ControlResult.ok(
-                    ControlMessage(f"Skill `{skill_id}` activated", "success"),
+                    ControlMessage(result, "success"),
                     ControlMessage(f"Could not save skill activation: {exc}", "warning"),
                 )
-            return ControlResult.ok(ControlMessage(f"Skill `{skill_id}` activated", "success"))
+            return ControlResult.ok(ControlMessage(result, "success"))
 
         # deactivate
-        skill_id = subargs[0]
-        if skill_id not in registry.discovered():
-            return ControlResult.err(f"Skill `{skill_id}` not found. Use /skills list.")
         try:
-            if skill_id in registry.activated():
-                registry.deactivate([skill_id])
+            result = await manager.deactivate([skill_id])
         except Exception as e:
-            return ControlResult.err(f"Failed to deactivate `{skill_id}`: {e}")
-        if skill_id in registry.activated():
-            return ControlResult.err(f"Failed to deactivate `{skill_id}`")
+            return ControlResult.err(f"Failed to deactivate `{entry.name}`: {e}")
+        if entry.kind != "code":
+            return ControlResult.ok(ControlMessage(result))
+        if manager.entry(skill_id).state == "active":
+            return ControlResult.err(f"Failed to deactivate `{entry.name}`")
         active = [name for name in project_saved.get("active_skills", []) if name != skill_id]
         inactive = list(dict.fromkeys([*project_saved.get("inactive_skills", []), skill_id]))
         self.config.active_skills = [name for name in self.config.active_skills if name != skill_id]
@@ -315,10 +316,10 @@ class SkillsControl(BehaviorControl):
             self._persist_settings({"active_skills": active, "inactive_skills": inactive})
         except Exception as exc:
             return ControlResult.ok(
-                ControlMessage(f"Skill `{skill_id}` deactivated", "success"),
+                ControlMessage(result, "success"),
                 ControlMessage(f"Could not save skill deactivation: {exc}", "warning"),
             )
-        return ControlResult.ok(ControlMessage(f"Skill `{skill_id}` deactivated", "success"))
+        return ControlResult.ok(ControlMessage(result, "success"))
 
 
 class MCPControl(BehaviorControl):
