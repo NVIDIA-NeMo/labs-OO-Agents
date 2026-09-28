@@ -24,8 +24,8 @@ A host never holds a session's agent (`Session._agent` is private). It
 submits items (`submit`, `prompt`, `steer`, `withdraw`, `cancel`) and reads
 and changes the session through data: `info`, `transcript()`, `channels()`,
 `model_info()`, `set_model()`, `set_reasoning()`, `set_mode()`,
-`commands()` and `invoke_command()`, `host_status()` (agent-specific status
-such as the coding agent's context and todos), and, before the first turn,
+`commands()` and `invoke_command()`, `plan()` (the agent's plan entries,
+such as the coding agent's todos), and, before the first turn,
 `prepare_tools()` and `register_tools()`. `subscribe()` delivers every
 change as a pydantic update, in order: turns, items, title, mode, model,
 reasoning level, commands, usage, children, close, and each of the agent's
