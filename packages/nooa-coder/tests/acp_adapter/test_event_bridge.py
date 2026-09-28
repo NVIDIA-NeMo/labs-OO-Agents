@@ -578,11 +578,10 @@ async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
         ToolCallEvent(tool_call_id="t3", name="execute_python", arguments={"code": "boom"})
     )
     await bridge.flush()
-    assert bridge._open_tools == {("session-1", "t3")}
+    assert set(bridge._open) == {("session-1", "t3")}
 
     await bridge.close()
-    assert bridge._open_tools == set()
-    assert bridge._python_source == {}
+    assert bridge._open == {}
     # And the card was actually closed out for the client: clearing the private
     # state alone leaves it spinning, which is what the docstring forbids.
     closing = [
@@ -614,6 +613,26 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
 
     progress = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
     assert progress[-1].title == "Cancelled"
+    await bridge.close()
+
+
+async def test_a_force_closed_terminal_card_keeps_what_it_streamed(tmp_path):
+    """Cancelling a running command closes its card with its output so far, then the reason."""
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        TerminalCommandStarted(command_id="cmd-1", command="make", working_directory="/")
+    )
+    agent.event_manager.add(TerminalCommandOutput(command_id="cmd-1", stdout="Building...\n50%\n"))
+    await bridge.flush()
+    bridge.fail_open_tools("Cancelled by user.", title="Cancelled")
+    await bridge.flush()
+
+    last = [u for _, u in client.updates if isinstance(u, ToolCallProgress)][-1]
+    text = "\n".join(block.content.text for block in last.content)
+    assert text == "Building...\n50%\n\nCancelled by user."
     await bridge.close()
 
 
@@ -732,7 +751,7 @@ async def test_the_cancelled_update_closes_open_cards_before_saying_so(bridged, 
     }
     assert _types(client)[-1] is AgentMessageChunk
     assert _messages(client) == ["Stopped at your request."]
-    assert bridge._open_tools == set()
+    assert bridge._open == {}
 
 
 async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
@@ -870,7 +889,7 @@ async def test_tool_cards_of_a_child_are_mirrored_under_the_childs_id(tmp_path):
     assert starts == ["c1", "child-1:c1"]
     finished = [u.tool_call_id for _, u in client.updates if isinstance(u, ToolCallProgress)]
     assert finished == ["child-1:c1"]
-    assert bridge._open_tools == {("parent", "c1")}
+    assert set(bridge._open) == {("parent", "c1")}
     assert _messages(client) == []
 
     # When the child closes, the parent stops mirroring it.

@@ -88,6 +88,18 @@ _TRUNCATION_NOTES = {
 }
 
 ToolKey = tuple[str, str]
+
+
+@dataclass
+class _OpenCard:
+    """What the bridge keeps about one tool card it has opened and not yet closed."""
+
+    kind: Literal["python", "terminal"]
+    code: str = ""  # a Python card's source
+    output: str = ""  # what a terminal command has streamed so far
+    note: str | None = None  # a terminal card's truncation note, kept at the top
+
+
 """An open tool card: (id of the session that ran it, its tool call id)."""
 
 
@@ -170,11 +182,7 @@ class ACPEventBridge:
         # Sticky: any close(finish_open=False) before the cards are finalised
         # wins, whoever started the close.
         self._finish_open = True
-        self._open_tools: set[ToolKey] = set()
-        self._python_source: dict[ToolKey, str] = {}
-        self._terminal_output: dict[ToolKey, str] = {}
-        # A note kept at the top of a terminal card whose command was truncated.
-        self._terminal_notes: dict[ToolKey, str] = {}
+        self._open: dict[ToolKey, _OpenCard] = {}
         # What the session spent before this bridge was attached (a resumed or
         # re-followed session), plus what it spends from here on.
         self._cost_usd = session.info.usage.cost_usd
@@ -237,7 +245,7 @@ class ACPEventBridge:
         for unsubscribe in self._mirrors.pop(child_id, []):
             unsubscribe()
         self._fail_tools(
-            [key for key in self._open_tools if key[0] == child_id],
+            [key for key in self._open if key[0] == child_id],
             "The subagent ended before this finished.",
             title="Unfinished",
         )
@@ -354,8 +362,7 @@ class ACPEventBridge:
         if not isinstance(code, str):
             code = repr(code)
         key = self._key(event.tool_call_id, source)
-        self._open_tools.add(key)
-        self._python_source[key] = code
+        self._open[key] = _OpenCard("python", code=code)
         self._enqueue(
             start_tool_call(
                 self._wire_id(key),
@@ -374,9 +381,9 @@ class ACPEventBridge:
         if not isinstance(event, PythonOutput):
             return
         key = self._key(event.tool_call_id, source)
-        if key in self._open_tools:
-            self._open_tools.discard(key)
-            code = self._python_source.pop(key, "")
+        card = self._open.pop(key, None)
+        if card is not None:
+            code = card.code
             parts = [
                 part.rstrip() for part in (event.stdout, event.stderr, event.error) if part.strip()
             ]
@@ -450,11 +457,8 @@ class ACPEventBridge:
         if not isinstance(event, TerminalCommandStarted):
             return
         key = self._key(event.command_id, source)
-        self._open_tools.add(key)
-        self._terminal_output[key] = ""
         note = _TRUNCATION_NOTES.get((event.command_truncated, event.stdin_truncated))
-        if note is not None:
-            self._terminal_notes[key] = note
+        self._open[key] = _OpenCard("terminal", note=note)
         self._enqueue(
             start_tool_call(
                 self._wire_id(key),
@@ -473,7 +477,8 @@ class ACPEventBridge:
 
     def _terminal_content(self, key: ToolKey, output: str | None) -> list[Any] | None:
         """A terminal card's content: its truncation note, if any, then ``output``."""
-        texts = [self._terminal_notes.get(key), output]
+        card = self._open.get(key)
+        texts = [card.note if card is not None else None, output]
         content = [tool_content(text_block(text)) for text in texts if text is not None]
         return content or None
 
@@ -481,13 +486,14 @@ class ACPEventBridge:
         if not isinstance(event, TerminalCommandOutput):
             return
         key = self._key(event.command_id, source)
-        if key not in self._open_tools:
+        card = self._open.get(key)
+        if card is None:
             return
         chunk = event.stdout
         if event.stderr:
             chunk += ("\n" if chunk and not chunk.endswith("\n") else "") + event.stderr
-        output = self._terminal_output.get(key, "") + chunk
-        self._terminal_output[key] = output
+        card.output += chunk
+        output = card.output
         self._enqueue(
             update_tool_call(
                 self._wire_id(key),
@@ -500,15 +506,15 @@ class ACPEventBridge:
         if not isinstance(event, TerminalCommandFinished):
             return
         key = self._key(event.command_id, source)
-        self._open_tools.discard(key)
-        output = self._terminal_output.pop(key, "")
+        card = self._open.get(key)
+        output = card.output if card is not None else ""
         # ACP has no cancelled status, so a stopped command is still "failed" —
         # but it must read as the user's own action, not as a crash.
         reason = "Cancelled by user." if event.cancelled else event.error
         if reason:
             output += ("\n" if output and not output.endswith("\n") else "") + reason
         content = self._terminal_content(key, output or "Completed.")
-        self._terminal_notes.pop(key, None)
+        self._open.pop(key, None)
         failed = (
             event.timed_out
             or event.cancelled
@@ -679,19 +685,22 @@ class ACPEventBridge:
 
     def _fail_tools(self, keys: list[ToolKey], reason: str, *, title: str | None) -> None:
         for key in keys:
-            self._open_tools.discard(key)
-            self._terminal_output.pop(key, None)
-            self._terminal_notes.pop(key, None)
-            code = self._python_source.pop(key, None)
-            content = (
-                _python_content(code, reason)
-                if code is not None
-                else [tool_content(text_block(reason))]
-            )
+            card = self._open.get(key)
+            if card is None:
+                continue
+            if card.kind == "python":
+                content = _python_content(card.code, reason)
+            else:
+                # What the command streamed so far stays above the reason.
+                streamed = card.output.rstrip("\n")
+                content = self._terminal_content(
+                    key, f"{streamed}\n\n{reason}" if streamed else reason
+                )
+            del self._open[key]
             self._enqueue(
                 update_tool_call(
                     self._wire_id(key),
-                    title=title or ("Python interrupted" if code is not None else None),
+                    title=title or ("Python interrupted" if card.kind == "python" else None),
                     status="failed",
                     content=content,
                 )
@@ -708,7 +717,7 @@ class ACPEventBridge:
         when this session's turn is cancelled or fails, and its own results
         close them (or ``_unmirror`` does when it ends).
         """
-        own = sorted(key for key in self._open_tools if key[0] == self.session_id)
+        own = sorted(key for key in self._open if key[0] == self.session_id)
         self._fail_tools(own, reason, title=title)
 
     async def close(self, *, finish_open: bool = True) -> None:
@@ -748,13 +757,10 @@ class ACPEventBridge:
         if self._finish_open:
             # Every card, mirrored children's too: nothing will close them now.
             self._fail_tools(
-                sorted(self._open_tools), "Session closed before this finished.", title="Unfinished"
+                sorted(self._open), "Session closed before this finished.", title="Unfinished"
             )
         else:
-            self._open_tools.clear()
-            self._python_source.clear()
-            self._terminal_output.clear()
-            self._terminal_notes.clear()
+            self._open.clear()
         with suppress(Exception):
             await self.flush()
         self._closed = True
