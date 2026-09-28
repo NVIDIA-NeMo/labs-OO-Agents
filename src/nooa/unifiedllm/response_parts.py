@@ -7,7 +7,7 @@ There is no flattened-turn order ledger or public-content fingerprint.
 """
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from nooa._immutable_json import freeze, json_containers
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
@@ -56,6 +56,20 @@ def _capture_summary(native: dict) -> str:
     return _capture_text(summary, "\n")
 
 
+def _capture_reasoning_content(native: dict) -> str | None:
+    """Keep reasoning_text in the public part and its wire blocks in native state."""
+    content = native.get("content")
+    if content is None:
+        return None
+    if not isinstance(content, list):
+        raise ReasoningReplayError("Responses reasoning content must be a list of blocks.")
+    if any(
+        not isinstance(block, dict) or block.get("type") != "reasoning_text" for block in content
+    ):
+        raise ReasoningReplayError("Responses reasoning content requires reasoning_text blocks.")
+    return _capture_text(content, "\n") if content else None
+
+
 def _restore_summary(native: dict, text: str) -> None:
     if isinstance(native.get("summary"), str):
         native["summary"] = text
@@ -96,7 +110,7 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
             "Unsupported Responses output parts (%s); keeping readable output without native state.",
             ", ".join(unsupported),
         )
-    supported = _scope_provider(scope) in {"openai", "azure"}
+    supported = _scope_provider(scope) in {"openai", "azure", "deepseek"}
     parts: list[AssistantPart] = []
     ids: set[str] = set()
     portable_only = bool(unsupported)
@@ -139,9 +153,12 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
                 logger.warning(
                     "Unknown provider route: dropping opaque reasoning state; keeping readable text."
                 )
-            text = _capture_summary(native)
+            content_text = _capture_reasoning_content(native)
+            # A reasoning_text item is complete protocol data even without an
+            # encrypted payload. Its summary, if any, is separate wire data.
+            text = content_text if content_text is not None else _capture_summary(native)
             part = AssistantReasoning(text=text)
-            if encrypted is None:
+            if encrypted is None and content_text is None:
                 portable_only = True
                 parts.append(part)
                 continue
@@ -184,15 +201,21 @@ def project_turn(turn: LLMResponse, scope: str | None) -> list[dict[str, Any]]:
     so projection needs no content fingerprint or reconstructed order ledger.
     """
     compatible = scope is not None and turn.replay_scope == scope
-    if compatible and _scope_provider(scope) not in {"openai", "azure"}:
-        raise ReasoningReplayError("Native Responses replay only supports OpenAI and Azure.")
+    if compatible and _scope_provider(scope) not in {"openai", "azure", "deepseek"}:
+        raise ReasoningReplayError(
+            "Native Responses replay only supports OpenAI, Azure and DeepSeek."
+        )
     if turn.replay_scope and not compatible:
         logger.warning(
             "Incompatible assistant turn: replaying portable parts without native state."
         )
     result: list[dict[str, Any]] = []
     for part in turn.parts:
-        native = json_containers(part.native) if compatible and part.native is not None else None
+        native = (
+            cast("dict[str, Any]", json_containers(part.native))
+            if compatible and part.native is not None
+            else None
+        )
         if isinstance(part, ToolCall):
             item = native or {"type": "function_call"}
             item.update(call_id=part.id, name=part.name, arguments=part.arguments)
@@ -205,8 +228,16 @@ def project_turn(turn: LLMResponse, scope: str | None) -> list[dict[str, Any]]:
             else:
                 continue
         elif native is not None:
-            _require_encrypted_reasoning(native)
-            _restore_summary(native, part.text)
+            content = native.get("content")
+            if (
+                isinstance(content, list)
+                and content
+                and all("_text_length" in block for block in content)
+            ):
+                _restore_text(content, part.text, "\n")
+            else:
+                _require_encrypted_reasoning(native)
+                _restore_summary(native, part.text)
             item = native
         elif part.text:
             item = {"role": "assistant", "content": part.text}

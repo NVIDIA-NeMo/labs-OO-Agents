@@ -5,7 +5,7 @@
 import json
 import sqlite3
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
@@ -265,6 +265,68 @@ async def test_real_responses_message_structure_survives_json_resume(
         assert bodies[2]["input"][0] == {"role": "assistant", "content": "edited answer"}
         assert "encrypted_content" not in json.dumps(bodies[2]["input"])
         assert "phase" not in json.dumps(bodies[2]["input"])
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize(
+    ("model", "api_base"),
+    [
+        ("openai/nvidia/deepseek-ai/deepseek-v4-flash", "https://gateway.example/v1"),
+        ("deepseek/deepseek-flash", "https://api.deepseek.com"),
+    ],
+)
+async def test_deepseek_reasoning_text_survives_responses_next_turn(
+    is_async: bool, model: str, api_base: str
+) -> None:
+    reasoning = {
+        "id": "rs_1",
+        "type": "reasoning",
+        "status": "completed",
+        "content": [
+            {"type": "reasoning_text", "text": "Check the request."},
+            {"type": "reasoning_text", "text": "Then reply."},
+        ],
+        "summary": [],
+    }
+    raw = ResponsesAPIResponse.model_validate(
+        {
+            "id": "resp_deepseek",
+            "created_at": 0,
+            "model": "deepseek-flash",
+            "status": "completed",
+            "output": [reasoning, MESSAGE],
+            "usage": {
+                "input_tokens": 22,
+                "output_tokens": 29,
+                "total_tokens": 51,
+                "output_tokens_details": {"reasoning_tokens": 27},
+            },
+        }
+    )
+    client = ResponsesClient(model=model, api_key="test", api_base=api_base)
+    request = AsyncMock(return_value=raw) if is_async else Mock(return_value=raw)
+    try:
+        with patch("litellm.aresponses" if is_async else "litellm.responses", request) as call:
+            prompt = [{"role": "user", "content": "hi"}]
+            first = await client.acall(prompt) if is_async else client.call(prompt)
+            assert first.reasoning == "Check the request.\nThen reply."
+            assert first.usage.reasoning_tokens == 27
+            assert first.replay_scope is not None
+            resumed = LLMResponse.model_validate_json(first.model_dump_json())
+            next_turn = [resumed, {"role": "user", "content": "continue"}]
+            if is_async:
+                await client.acall(next_turn)
+            else:
+                client.call(next_turn)
+
+        expected = [item.model_dump(exclude_none=True) for item in raw.output]
+        assert call.call_args_list[1].kwargs["input"] == [
+            *expected,
+            {"role": "user", "content": "continue"},
+        ]
     finally:
         await client.aclose()
 

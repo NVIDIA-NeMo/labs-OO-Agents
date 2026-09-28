@@ -140,7 +140,7 @@ def replay_scope(
         )
         return None
     if provider not in _SUPPORTED_PROVIDERS or (
-        api_style == "responses" and provider not in {"openai", "azure"}
+        api_style == "responses" and provider not in {"openai", "azure", "deepseek"}
     ):
         return None
 
