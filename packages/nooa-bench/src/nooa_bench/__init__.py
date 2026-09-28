@@ -13,6 +13,8 @@ AGENT_CLASSES: dict[str, str] = {
     # Unified SWE-bench + Terminal-Bench baseline.
     "bench": "nooa_bench.bench_agent:BenchAgent",
     "rlm": "nooa_bench.rlm_bench_agent:RLMBenchAgent",
+    # The nooa-coder coding agent, run unattended in a session tree.
+    "coder": "nooa_bench.coder_agent:CoderBenchAgent",
 }
 
 __all__ = ["AGENT_CLASSES"]
