@@ -271,7 +271,7 @@ async def test_the_coding_agent_connects_the_servers_its_workspace_remembers(
                 raise RuntimeError("not approved")
             return names
 
-        session._agent.mcp.connect = connect
+        session._agent.skills.mcp.connect = connect
         assert await session.prepare_tools() == [
             "MCP server 'nowhere' was not connected: not approved"
         ]

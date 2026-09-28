@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Agent-facing workspace preferences for NOOA interactive hosts."""
 
-import copy
 import re
 from pathlib import Path
 from typing import Any
@@ -73,7 +72,7 @@ class WorkspaceSettings(Skill):
     Preferences belong to this workspace's .nooa/settings.yaml. They apply to
     fresh agents in either client; other live agents retain their current state.
     Named operations cover skills, MCP startup, and model defaults.
-    Ordinary self.skills.load/activate remains session-local.
+    Ordinary self.skills.activate remains session-local.
     """
 
     def __init__(self, options: Any):
@@ -91,7 +90,7 @@ class WorkspaceSettings(Skill):
     async def remember_skill(self, skill_id: str, directory: str | None = None) -> str:
         """Activate a skill here and remember it for future workspace sessions.
 
-        Use an exact ID from self.skills.discovered(). For a skill from a local
+        Use an exact name from self.skills.search(). For a skill from a local
         repository, supply its directory so fresh agents can discover it too;
         relative paths resolve against this workspace. An already active skill
         can still be remembered. Installation is separate. A save failure raises
@@ -127,11 +126,10 @@ class WorkspaceSettings(Skill):
         return f"Saved default model in {path}; the running model is unchanged."
 
     def remember_mcp(self, name: str, auto_connect: bool = True) -> str:
-        """Save a registered NOOA MCP definition and its startup preference.
+        """Save a configured MCP definition and its startup preference.
 
-        First register the server with self.mcp.register(...), or use an existing
-        NOOA-configured server. Use environment placeholders for credentials.
-        This saves the definition without connecting, approving, or authenticating
+        The server comes from the workspace or user settings or from
+        .mcp.json. Use environment placeholders for credentials. This saves the definition without connecting, approving, or authenticating
         it. Existing exact-definition approvals still apply when connecting.
         Pool-supplied servers are not automatically copied into NOOA settings.
         """
@@ -139,11 +137,11 @@ class WorkspaceSettings(Skill):
             raise ValueError("name must be a nonempty MCP server name")
         if not isinstance(auto_connect, bool):
             raise ValueError("auto_connect must be a boolean")
-        registry = self._agent.mcp
-        registry.refresh_settings()
-        # Reuse the registry's exact, unresolved definition. The request only
-        # describes configuration; it neither grants approval nor reads secrets.
-        definition = registry._approval_request(name).config
+        servers = self._agent.skills.mcp
+        servers.refresh_settings()
+        # Reuse the exact, unresolved definition. The request only describes
+        # configuration; it neither grants approval nor reads secrets.
+        definition = servers.approval_request(name).config
         # This definition is about to be written to the workspace's committed
         # .nooa/settings.yaml, not the user-level approval store -- a literal
         # secret here would land in version control.
@@ -163,19 +161,18 @@ class WorkspaceSettings(Skill):
                 ("coding", "mcp_auto_connect"): names,
             }
         )
-        if name in registry._servers:
-            # The saved form is normalized (e.g. a bare url gains its transport).
-            # Adopt it first so the refresh does not see a "changed" definition
-            # and disconnect a live server.
-            registry._servers[name] = copy.deepcopy(definition)
-        registry.refresh_settings()
+        # The saved form is normalized (e.g. a bare url gains its transport).
+        # Adopt it first so the refresh does not see a "changed" definition
+        # and disconnect a live server.
+        servers.adopt(name, definition)
+        servers.refresh_settings()
         return f"Saved MCP server `{name}` in {path}; auto-connect={auto_connect}. Connection approvals are unchanged."
 
     def forget_mcp(self, name: str) -> str:
         """Disable startup connection and remove this workspace's MCP definition.
 
         A null entry masks an inherited definition. An existing connection is
-        managed separately through self.mcp.disconnect; this does not revoke
+        managed separately through self.skills.deactivate; this does not revoke
         approvals or remove credential caches. Client-supplied servers are outside
         this preference and may still be supplied by that client on startup.
         """
@@ -212,7 +209,7 @@ class WorkspaceSettings(Skill):
             "current": {
                 "active_skills": self._agent.skills.activated(),
                 "model": getattr(getattr(self._agent, "llm", None), "model", None),
-                "connected_mcp": self._agent.mcp.connected(),
+                "connected_mcp": self._agent.skills.mcp.connected(),
                 "active_mcp_skills": [
                     name for name in self._agent.skills.activated() if name.startswith("mcp.")
                 ],

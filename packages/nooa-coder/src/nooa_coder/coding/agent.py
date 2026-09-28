@@ -535,6 +535,9 @@ class CodingAgent(InteractiveAgent):
             await super().aclose()
         finally:
             try:
+                servers = getattr(self.skills, "mcp", None)
+                if servers is not None:
+                    await servers.aclose()
                 await self.skills.aclose()
             finally:
                 await shell.close()
