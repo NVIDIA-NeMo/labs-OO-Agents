@@ -189,12 +189,37 @@ async def _close_in_order(*closers: Callable[[], Any] | None) -> None:
         raise pending
 
 
+_registry_seen: tuple[Any, ...] | None = None
+"""The registry files' names, sizes and times when ``model_aliases`` last looked."""
+
+
+def _registry_files() -> tuple[Any, ...]:
+    from nooa.llm_config import llm_config_chain
+
+    files: list[tuple[str, int, int]] = []
+    for path in llm_config_chain():
+        with suppress(OSError):
+            status = path.stat()
+            files.append((str(path), status.st_mtime_ns, status.st_size))
+    return tuple(files)
+
+
 def model_aliases() -> list[str]:
-    """The model aliases configured in the NOOA model registry, sorted."""
-    from nooa.unifiedllm.registry import MODELS, ensure_loaded
+    """The model aliases configured in the NOOA model registry, sorted.
+
+    Read from disk again whenever a registry file was added, removed or
+    changed since the last call (a ``stat`` per file otherwise), so a model
+    connected with ``nooa connect`` in a terminal shows up in the picker
+    without restarting the server.
+    """
+    global _registry_seen
+    from nooa.unifiedllm.registry import MODELS, reload_registry
 
     try:
-        ensure_loaded()
+        files = _registry_files()
+        if files != _registry_seen:
+            reload_registry()
+        _registry_seen = files
     except Exception:
         logger.warning("Could not load the model registry", exc_info=True)
     return sorted(MODELS)
