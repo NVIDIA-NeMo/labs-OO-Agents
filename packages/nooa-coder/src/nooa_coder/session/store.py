@@ -8,9 +8,11 @@ import fcntl
 import json
 import logging
 import os
+import shutil
 import socket
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
@@ -24,13 +26,21 @@ from nooa.storage.sqlite import (
 )
 from nooa_coder.session.events import (
     SESSION_EVENT_TYPES,
+    ItemDiscarded,
     SessionModeChanged,
     SessionModelChanged,
     SessionReasoningChanged,
+    SessionRecovered,
     SessionStarted,
     SessionTitleUpdated,
 )
-from nooa_coder.session.items import USAGE_FIELDS, SessionInfo, TranscriptEntry, Usage
+from nooa_coder.session.items import (
+    USAGE_FIELDS,
+    InUseSession,
+    SessionInfo,
+    TranscriptEntry,
+    Usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +54,10 @@ _TURN_EVENT_TYPES = _USER_EVENT_TYPES | _AGENT_EVENT_TYPES
 _TRANSCRIPT_EVENT_TYPES = _TURN_EVENT_TYPES | frozenset(
     ("ItemAdmitted", "TurnEnded", "TurnCancelled", "SnapshotRestoreFailed")
 )
+_ITEM_EVENT_TYPES = frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn", "ItemDiscarded"))
+_PROBE_MISSES = 50
+"""Consecutive rowids that do not read before a row-by-row probe stops."""
+_PREVIEW_CHARS = 200
 
 
 def sessions_root(workspace: Path, override: Path | None = None) -> Path:
@@ -184,6 +198,219 @@ def _stored_usage(connection: sqlite3.Connection) -> Usage:
         values[name] = cast(own[index] or 0)
         values[f"attributed_{name}"] = cast(attributed[index] or 0)
     return Usage.model_validate(values)
+
+
+def _probe_rows(
+    connection: sqlite3.Connection, table: str, columns: str
+) -> tuple[list[tuple[object, ...]], int, bool]:
+    """The rows of ``table`` that read, one rowid at a time, past damaged pages.
+
+    A query over the whole table fails when one page is damaged; probing by
+    rowid finds the rows that are still readable. Returns the rows, the
+    number of rowids that failed to read before the last row that did, and
+    whether the probe ended on failures (the end of the table could not be
+    read, so how much of it is lost is not known).
+    """
+    rows: list[tuple[object, ...]] = []
+    failed = 0
+    trailing = 0
+    misses = 0
+    rowid = 0
+    while misses < _PROBE_MISSES:
+        rowid += 1
+        try:
+            row = connection.execute(
+                f"SELECT {columns} FROM {table} WHERE rowid = ?", (rowid,)
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            misses += 1
+            trailing += 1
+            continue
+        if row is None:
+            misses += 1
+            continue
+        misses = 0
+        failed += trailing
+        trailing = 0
+        rows.append(tuple(row))
+    return rows, failed, trailing > 0
+
+
+def _parses(data: object) -> bool:
+    try:
+        json.loads(data)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _remove_files(*paths: Path) -> None:
+    """Remove files this module created (a staging copy and its journal)."""
+    for path in paths:
+        for candidate in (path, path.with_name(path.name + "-journal")):
+            candidate.unlink(missing_ok=True)
+
+
+def _copy_session_file(source: Path, target: Path) -> tuple[int, bool] | None:
+    """Copy the session file ``source`` to ``target`` without writing to ``source``.
+
+    SQLite's backup API reads ``source`` through a read-only connection; the
+    copy must pass ``PRAGMA integrity_check``, and a failed attempt (a
+    damaged file, or a writer on another machine that the locks cannot see)
+    is tried once more. Returns ``None`` then. When both fail, the file is
+    copied event by event (see ``_copy_by_event``) and the result is that
+    copy's ``(skipped events, end unreadable)``.
+    """
+    for attempt in (1, 2):
+        _remove_files(target)
+        try:
+            with (
+                closing(_connect_read_only(source)) as reader,
+                closing(sqlite3.connect(target)) as writer,
+            ):
+                reader.backup(writer)
+                if writer.execute("PRAGMA integrity_check").fetchall() == [("ok",)]:
+                    return None
+            logger.warning("Copy %d of %s failed the integrity check", attempt, source)
+        except sqlite3.Error as exc:
+            logger.warning("Copy %d of %s failed: %s", attempt, source, exc)
+    _remove_files(target)
+    return _copy_by_event(source, target)
+
+
+def _copy_by_event(source: Path, target: Path) -> tuple[int, bool]:
+    """Copy the readable rows of ``source`` into a new session file ``target``.
+
+    The rows are read from a byte copy of ``source`` and of its rollback
+    journal, if one is left: a crash in the middle of a write leaves a
+    journal that only a writer can roll back, and rolling back the copy
+    leaves the original untouched. ``writable_schema`` lets SQLite read a
+    file shorter than its header says. Every event that reads and parses is
+    copied with its tag, the active-tag order that reads (then any active
+    event it misses, in order), and the newest snapshot that parses.
+    Returns the number of events that could not be read and whether the end
+    of the events could not be read.
+    """
+    scratch = target.with_name(target.name + "-source")
+    journal = source.with_name(source.name + "-journal")
+    try:
+        shutil.copyfile(source, scratch)
+        if journal.exists():
+            shutil.copyfile(journal, scratch.with_name(scratch.name + "-journal"))
+        # The schema every session file has, written by the storage itself.
+        _open_session_storage(target, must_exist=False).close()
+        with (
+            closing(sqlite3.connect(scratch)) as reader,
+            closing(sqlite3.connect(target)) as writer,
+        ):
+            reader.execute("PRAGMA writable_schema=ON")
+            events, skipped, end_unreadable = _probe_rows(
+                reader, "events", "tag, event_id, event_type, status, data, insertion_order"
+            )
+            readable = [row for row in events if _parses(row[4])]
+            skipped += len(events) - len(readable)
+            active, _, _ = _probe_rows(reader, "active_tags", "position, tag")
+            snapshots, _, _ = _probe_rows(reader, "snapshots", "snapshot_id, created_at, data")
+            # Only tags whose event was copied: a tag left from a lost event
+            # would clash with the next tag the storage hands out.
+            copied = {str(row[0]) for row in readable}
+            tags = [
+                str(tag)
+                for _position, tag in sorted(active, key=lambda row: int(row[0]))
+                if str(tag) in copied
+            ]
+            listed = set(tags)
+            tags += [
+                str(row[0])
+                for row in sorted(readable, key=lambda row: int(row[5]))
+                if row[3] == "active" and str(row[0]) not in listed
+            ]
+            newest = max(
+                (row for row in snapshots if _parses(row[2])),
+                key=lambda row: str(row[1]),
+                default=None,
+            )
+            with writer:
+                writer.executemany(
+                    "INSERT OR IGNORE INTO events "
+                    "(tag, event_id, event_type, status, data, insertion_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    readable,
+                )
+                writer.executemany(
+                    "INSERT OR IGNORE INTO active_tags (position, tag) VALUES (?, ?)",
+                    list(enumerate(dict.fromkeys(tags), start=1)),
+                )
+                if newest is not None:
+                    writer.execute(
+                        "INSERT INTO snapshots (snapshot_id, created_at, data) VALUES (?, ?, ?)",
+                        newest,
+                    )
+        logger.warning(
+            "Copied %s event by event: %d events could not be read; end of file unreadable: %s",
+            source,
+            skipped,
+            end_unreadable,
+        )
+        return skipped, end_unreadable
+    finally:
+        _remove_files(scratch)
+
+
+def _pending_items(rows: list[tuple[str, dict[str, object]]]) -> dict[str, dict[str, object]]:
+    """Items admitted but never consumed, withdrawn or discarded, by item id.
+
+    A load re-queues these (``SessionRegistry._requeue``).
+    """
+    admitted: dict[str, dict[str, object]] = {}
+    finished: set[str] = set()
+    for event_type, raw in rows:
+        item_id = str(raw.get("item_id", ""))
+        if event_type == "ItemAdmitted":
+            admitted.setdefault(item_id, raw)
+        elif event_type in _ITEM_EVENT_TYPES:
+            finished.add(item_id)
+    return {item_id: raw for item_id, raw in admitted.items() if item_id not in finished}
+
+
+def _preview(text: str) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= _PREVIEW_CHARS else text[: _PREVIEW_CHARS - 3] + "..."
+
+
+def _recovery_note(
+    original_id: str,
+    pending: dict[str, dict[str, object]],
+    children: list[tuple[str, str]],
+    damage: tuple[int, bool] | None,
+) -> str:
+    """What the agent is told about a recovered copy of its session."""
+    lines = [
+        f"This session is a copy of session {original_id}, which was marked in use when "
+        "it was recovered. The history up to that point was copied; the original was not "
+        "changed."
+    ]
+    if pending:
+        lines.append("These queued items had not been read and were not carried over:")
+        lines += [
+            f"- [{raw.get('channel', '')}] {_preview(_item_text(str(raw.get('item_json', ''))))}"
+            for raw in pending.values()
+        ]
+    if children:
+        lines.append(
+            "These subagent sessions were not carried over; handles to them from earlier "
+            "turns do not work here:"
+        )
+        lines += [f"- {name} ({child_id})" for name, child_id in children]
+    if damage is not None:
+        skipped, end_unreadable = damage
+        if skipped:
+            lines.append(f"The original file was damaged: {skipped} events could not be read.")
+        if end_unreadable:
+            lines.append(
+                "The end of the original file could not be read; the newest events may be missing."
+            )
+    return "\n".join(lines)
 
 
 class InvalidSessionIdError(ValueError):
@@ -518,24 +745,10 @@ class SessionStore:
                 return [str(row[0]) for row in rows]
             except sqlite3.DatabaseError:
                 pass
-            found: list[tuple[str, str]] = []
-            misses = 0
-            rowid = 0
-            while misses < 50:
-                rowid += 1
-                try:
-                    row = connection.execute(
-                        "SELECT snapshot_id, created_at FROM snapshots WHERE rowid = ?", (rowid,)
-                    ).fetchone()
-                except sqlite3.DatabaseError:
-                    misses += 1
-                    continue
-                if row is None:
-                    misses += 1
-                    continue
-                misses = 0
-                found.append((str(row[1]), str(row[0])))
-            found.sort(reverse=True)
+            probed, _, _ = _probe_rows(connection, "snapshots", "snapshot_id, created_at")
+            found = sorted(
+                ((str(created), str(snapshot_id)) for snapshot_id, created in probed), reverse=True
+            )
             return [snapshot_id for _created, snapshot_id in found]
         finally:
             connection.close()
@@ -621,14 +834,156 @@ class SessionStore:
         claim naming its process instead of the file lock; a claim whose
         process is alive on this host counts as active.
         """
-        if self.claim_owner(session_id) is not None:
-            return True
+        return self._owner(session_id) is not None
+
+    def _owner(self, session_id: str) -> str | None:
+        """Who holds the session, in words (see ``InUseSession.owner``); ``None`` if nobody.
+
+        Reads the lock record, the TUI claims and a read-only lock probe;
+        writes nothing.
+        """
+        foreign = self.foreign_owner(session_id)
+        if foreign is not None:
+            pid, host = foreign
+            return f"pid {pid} on {host}"
+        claim = self.claim_owner(session_id)
+        if claim is not None:
+            return f"old TUI (pid {claim})"
         lock_path = self.path_for(session_id).with_suffix(".lock")
-        if not lock_path.exists():
-            return False
-        if self.foreign_owner(session_id) is not None:
-            return True
-        return _lock_is_held(lock_path)
+        if not lock_path.exists() or not _lock_is_held(lock_path):
+            return None
+        pid, _host = read_lock_owner(str(lock_path))
+        return f"local process (pid {pid})" if pid is not None else "local process"
+
+    def in_use(
+        self, *, workspace: str | Path | None = None, roots_only: bool = True
+    ) -> list[InUseSession]:
+        """Sessions some process holds, most recently written first; writes nothing.
+
+        These are the sessions ``open`` refuses and hosts leave out of their
+        listings: held on another machine (its lock record), by a process
+        here (the kernel lock), or claimed by the old TUI. A crash leaves the
+        record behind, so a session can stay held after its owner is gone;
+        ``fork`` recovers such a session without touching it. ``workspace``
+        and ``roots_only`` filter as in ``list``; a file that cannot be read
+        is kept, with no title.
+        """
+        if not self.root.exists():
+            return []
+        wanted = _normalise_workspace(workspace) if workspace is not None else None
+        found: list[InUseSession] = []
+        for path in self.root.glob("*.db"):
+            if path.stem.endswith("-memory"):
+                continue
+            owner = self._owner(path.stem)
+            if owner is None:
+                continue
+            info = self._read_info(path)
+            if info is not None and (
+                (roots_only and info.parent_id is not None)
+                or (wanted is not None and not _workspace_matches(info.workspace, wanted))
+            ):
+                continue
+            try:
+                last_write = path.stat().st_mtime
+            except OSError:
+                continue
+            found.append(
+                InUseSession(
+                    id=path.stem,
+                    title=info.title if info is not None else None,
+                    parent_id=info.parent_id if info is not None else None,
+                    workspace=info.workspace if info is not None else "",
+                    owner=owner,
+                    last_write=last_write,
+                )
+            )
+        found.sort(key=lambda session: session.last_write, reverse=True)
+        return found
+
+    def fork(self, session_id: str, *, title: str | None = None) -> SessionInfo:
+        """Copy a session into a new one, without taking its lock or writing to it.
+
+        For a session marked in use (see ``in_use``): a stale record left by
+        a crash, or a session that really is active elsewhere, in which case
+        the copy is a branch from that point. The file is copied as
+        ``_copy_session_file`` describes, then opened with the same storage
+        settings as any session (rollback journal, file lock), and these
+        are appended:
+
+        - the title: ``title``, else the original's with " (recovered)",
+          else "Recovered session";
+        - ``ItemDiscarded`` for each item the original admitted but never
+          read, so a load does not queue it again;
+        - ``SessionRecovered``, which links the copy to the original
+          (``info.forked_from``) and tells the agent what was not carried
+          over: those items, the original's subagent sessions (children are
+          not copied), and events a damaged file lost.
+
+        Returns the new session's info; the new session is closed, so it is
+        listed and can be loaded like any other.
+        """
+        source = self.path_for(session_id)
+        if not source.exists():
+            raise SessionNotFoundError(f"Session {session_id!r} was not found")
+        fork_id = str(uuid.uuid4())
+        path = self.path_for(fork_id)
+        staging = path.with_suffix(".recovering")
+        placed = False
+        try:
+            damage = _copy_session_file(source, staging)
+            original = self._read_info(staging)
+            if original is None:
+                raise SessionNotFoundError(
+                    f"Session {session_id!r} could not be recovered: its start record is unreadable"
+                )
+            rows = self._read_rows(staging, event_types=_ITEM_EVENT_TYPES | {"ChildDeleted"})
+            os.replace(staging, path)
+            placed = True
+            handle = SessionHandle(
+                self,
+                _open_session_storage(path, must_exist=True),
+                original.model_copy(update={"id": fork_id}),
+            )
+            with handle:
+                handle.set_title(
+                    title
+                    or (f"{original.title} (recovered)" if original.title else "Recovered session"),
+                    user_set=original.title_is_user_set or title is not None,
+                )
+                pending = _pending_items(rows)
+                for item_id in pending:
+                    handle.events.add(
+                        ItemDiscarded(
+                            item_id=item_id, reason="not read before the session was recovered"
+                        )
+                    )
+                deleted = {str(raw.get("child_id")) for kind, raw in rows if kind == "ChildDeleted"}
+                children = [
+                    (info.name or info.title or info.id, info.id)
+                    for info in self.list(roots_only=False)
+                    if info.parent_id == session_id and info.id not in deleted
+                ] + [
+                    (held.title or held.id, held.id)
+                    for held in self.in_use(roots_only=False)
+                    if held.parent_id == session_id and held.id not in deleted
+                ]
+                handle.events.add(
+                    SessionRecovered(
+                        forked_from=session_id,
+                        original_title=original.title,
+                        note=_recovery_note(session_id, pending, children, damage),
+                        copied_by_event=damage is not None,
+                        skipped_events=damage[0] if damage is not None else 0,
+                        end_unreadable=damage[1] if damage is not None else False,
+                    )
+                )
+        except BaseException:
+            _remove_files(staging)
+            if placed:
+                self.delete(fork_id)
+            raise
+        return self.get(fork_id)
 
     def foreign_owner(self, session_id: str) -> tuple[int, str] | None:
         """``(pid, host)`` of a process on another machine holding the session, else None.
@@ -708,6 +1063,10 @@ class SessionStore:
                     _SETTING_EVENT_TYPES,
                 ).fetchall()
                 usage = _stored_usage(connection)
+                recovered_row = connection.execute(
+                    "SELECT data FROM events WHERE event_type = 'SessionRecovered' "
+                    "ORDER BY insertion_order DESC LIMIT 1"
+                ).fetchone()
             finally:
                 connection.close()
         except (OSError, sqlite3.Error):
@@ -743,6 +1102,12 @@ class SessionStore:
             elif event_type == "SessionReasoningChanged" and raw.get("level"):
                 reasoning = str(raw["level"])
 
+        forked_from: str | None = None
+        if recovered_row is not None:
+            recovered = self._decode_data(recovered_row[0], path)
+            if recovered is not None:
+                forked_from = _optional_str(recovered.get("forked_from"))
+
         title: str | None = None
         title_is_user_set = False
         for (data,) in title_rows:
@@ -775,6 +1140,7 @@ class SessionStore:
             turn_method=str(start.get("turn_method") or "handle"),
             title=title,
             title_is_user_set=title_is_user_set,
+            forked_from=forked_from,
             host=str(
                 start.get(
                     "host",
