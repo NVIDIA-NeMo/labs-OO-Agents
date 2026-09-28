@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-coder`: `/recover` in ACP sessions continues a session that is marked in use,
+  for example after a crash on another machine sharing the directory, in a new copy.
+  Without an argument it lists those sessions. The original file is never modified;
+  queued messages it never read and its subagent sessions are not carried over, and the
+  agent is told. `SessionStore.in_use()` and `SessionStore.fork()` are the store API.
 - Shell commands (`ShellTools.run`, `BashSession.run`) that print more than
   30,000 characters on stdout or stderr keep the first and last 15,000, with the
   standard truncation notice (`TruncatingStringIO`). Before, only the first
