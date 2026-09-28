@@ -51,6 +51,11 @@ to follow semantic versioning.
   --model ALIAS "task"` runs one task unattended and prints the result as JSON (exit 0 when
   the agent finished), and `nemo-harbor --agent-type coder` runs Harbor tasks the same way.
   Each run is a stored session in the workspace. `nooa_coder.run_task` is the API.
+- `nooa-coder`: one `SkillManager` (`self.skills`) for code skills, text skills and MCP
+  servers, with `search`, `activate`, `deactivate`, `read` and `doc`, and one small
+  `<skills>` block in place of the `<skills>` and `<mcp>` blocks. MCP sign-in uses the
+  MCP SDK's OAuth provider with a pasted redirect address (`/mcp auth NAME ADDRESS`);
+  tokens are in `~/.config/nooa/mcp_oauth.json`, so servers signed in before sign in once more.
 - `nooa-coder`: `/recover` in ACP sessions continues a session that is marked in use,
   for example after a crash on another machine sharing the directory, in a new copy.
   Without an argument it lists those sessions. The original file is never modified;
