@@ -38,7 +38,6 @@ from nooa.interactive import (
     apply_model_limits,
 )
 from nooa.llm_types import LLMResponse
-from nooa.runtime.channels import Channel
 from nooa.storage.json_snapshot import snapshot_to_json
 from nooa_coder.session.events import (
     ItemAdmitted,
@@ -218,7 +217,6 @@ class Session:
         # Per channel, (item, item_id) in put order: channels hold raw
         # objects, so this is how an item keeps its identity until consumed.
         self._ids: dict[str, deque[tuple[Any, str]]] = {}
-        self._hooked: dict[str, Channel[Any]] = {}
         self._futures: dict[str, asyncio.Future[Outcome]] = {}
         self._finished: OrderedDict[str, Any] = OrderedDict()
         self._consumed: list[str] = []  # consumed since the last turn settled
@@ -240,6 +238,17 @@ class Session:
         self._checkpoint_task: asyncio.Task[None] | None = None
         self._unsubscribe_agent = agent.event_manager.on("*", self._on_agent_event)
         self._unsubscribe_steers = agent.event_manager.on("BeforeTurn", self._flush_steers)
+        # The agent's queue channels publish every item they hand to a consumer
+        # (the loop's race and drain, agent get()) and every item they drop
+        # unconsumed (flush, clear, pop_last(), channel removed).
+        self._unsubscribe_items = (
+            agent.event_manager.on(
+                "ChannelItemConsumed", lambda e: self._on_consumed(e.channel, e.item)
+            ),
+            agent.event_manager.on(
+                "ChannelItemsDiscarded", lambda e: self._on_discarded(e.channel, e.items)
+            ),
+        )
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -296,6 +305,8 @@ class Session:
         await self._close_step("unsubscribing the steer flush", self._unsubscribe_steers)
         await self._close_step("stopping the agent's jobs", self.agent.queue_manager.shutdown)
         await self._close_step("closing the agent", self.agent.aclose)
+        for unsubscribe in self._unsubscribe_items:
+            await self._close_step("unsubscribing from its queues", unsubscribe)
         await self._close_step("closing its model client", self._close_owned_llm)
         await self._close_step("closing its record", self.handle.close)
         self._closed = True
@@ -530,7 +541,6 @@ class Session:
         target = self.agent.queue_manager.channels().get(channel)
         if target is None or target.mode != "queue":
             raise ValueError(f"Session {self.id!r} has no queue channel {channel!r}")
-        self._hook(target)
         event = ItemAdmitted(
             channel=channel,
             item_json=item_to_json(item),
@@ -555,31 +565,6 @@ class Session:
         return Receipt(
             session_id=self.id, channel=channel, item_id=event.item_id, delivered="queued"
         )
-
-    def _hook(self, channel: Channel[Any]) -> None:
-        """Observe ``channel``: consumption (the loop's race and drain, agent ``get()``)
-        and items dropped unconsumed (flush, clear, ``pop_last()``, channel removed).
-        """
-        if self._hooked.get(channel.name) is channel:
-            return
-        # Channel keeps one callback of each kind; chain any the agent installed.
-        previous_get = channel._on_get
-        previous_discard = channel._on_discard
-        name = channel.name
-
-        def on_get(item: Any) -> None:
-            self._on_consumed(name, item)
-            if previous_get is not None:
-                previous_get(item)
-
-        def on_discard(items: list[Any]) -> None:
-            self._on_discarded(name, items)
-            if previous_discard is not None:
-                previous_discard(items)
-
-        channel.set_on_get(on_get)
-        channel.set_on_discard(on_discard)
-        self._hooked[name] = channel
 
     def _on_consumed(self, channel: str, item: Any) -> None:
         entries = self._ids.get(channel)
