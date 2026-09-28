@@ -19,6 +19,6 @@ agents:
       api_base: https://inference-api.nvidia.com/v1
       enable_atif: false
       # git_ref: main          # optional branch/tag/SHA
-      # agent_type: bench      # registry key in packages/nooa-bench
+      # agent_type: bench      # registry key in packages/nooa-bench: bench, rlm or coder
 datasets:
   - path: /path/to/your/tasks/
