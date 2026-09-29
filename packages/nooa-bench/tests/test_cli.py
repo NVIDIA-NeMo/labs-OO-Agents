@@ -39,11 +39,11 @@ def _model(monkeypatch, *responses):
     """Make every model alias resolve to one scripted fake model; return the aliases asked for."""
     asked = []
 
-    def get_llm_client(alias, **kwargs):
+    def workspace_llm_client(alias, workspace, **kwargs):
         asked.append(alias)
         return CellLLM(list(responses))
 
-    monkeypatch.setattr("nooa_coder.coding.factory.get_llm_client", get_llm_client)
+    monkeypatch.setattr("nooa_coder.coding.factory.workspace_llm_client", workspace_llm_client)
     return asked
 
 
