@@ -210,6 +210,23 @@ async def test_run_stream_emits_output_chunks_and_finish(tmp_path):
     assert streamed[-1].kind == "done"
 
 
+async def test_run_stream_forwards_and_records_bounded_stdin(tmp_path):
+    shell, events = _observed_shell(tmp_path)
+    payload = "line\n" * 10_000
+    try:
+        streamed = [event async for event in shell.run_stream("cat", stdin=payload, timeout=5.0)]
+    finally:
+        await shell.close()
+    assert "".join(event.text for event in streamed if event.kind == "stdout") == payload
+    started = next(event for event in events if isinstance(event, TerminalCommandStarted))
+    finished = next(event for event in events if isinstance(event, TerminalCommandFinished))
+    assert started.stdin is not None
+    assert started.stdin_truncated
+    assert len(started.stdin) < len(payload)
+    assert finished.command_id == started.command_id
+    assert finished.exit_code == 0
+
+
 async def test_closing_stream_after_done_does_not_emit_a_second_finish(tmp_path):
     shell, events = _observed_shell(tmp_path)
     stream = shell.run_stream("printf 'hello\\n'")

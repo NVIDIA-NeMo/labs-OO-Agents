@@ -234,4 +234,8 @@ jobs:
             || { echo "::error::not a git checkout — gitleaks would pass vacuously"; exit 1; }
           test "$(git rev-parse --is-shallow-repository)" = "false" \
             || { echo "::error::shallow clone — gitleaks would miss history (need fetch-depth: 0)"; exit 1; }
-          ./gitleaks git --config .gitleaks.toml --redact --no-banner .
+          # Gitleaks defaults to scanning every fetched ref. With fetch-depth: 0,
+          # checkout fetches all remote branches, so a finding on an unrelated
+          # branch can fail an otherwise-clean PR. Scan the complete history
+          # reachable from the checked-out PR merge commit instead.
+          ./gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="HEAD" .

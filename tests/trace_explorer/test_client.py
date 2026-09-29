@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for trace explorer thin-client path (explorer_routes + client)."""
 
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import httpx
@@ -269,24 +270,95 @@ async def test_client_repr():
 
 
 @pytest.mark.asyncio
-async def test_client_bypasses_env_proxy(monkeypatch):
-    """A remote viewer must be reached directly even when HTTP(S)_PROXY is set.
-
-    Without trust_env=False the request would be routed through the env proxy
-    (the sandbox proxy), which times out against internal viewers. We assert the
-    transport actually chosen for the viewer URL is the client's direct
-    transport, not a proxy mount.
-    """
+@pytest.mark.parametrize("no_proxy", ["", "viewer.example"])
+async def test_client_honors_env_proxy_and_no_proxy(monkeypatch, no_proxy):
+    """The actual thin client uses a proxy unless NO_PROXY exempts the viewer."""
+    for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("NOOA_VIEWER_AUTH_TOKEN", raising=False)
     monkeypatch.setenv("HTTP_PROXY", "http://blackhole.invalid:3128")
     monkeypatch.setenv("HTTPS_PROXY", "http://blackhole.invalid:3128")
+    monkeypatch.setenv("NO_PROXY", no_proxy)
+    observed = []
 
-    client = TraceExplorerClient("http://viewer.internal:5001", "test-session")
+    class CapturingClient(httpx.AsyncClient):
+        async def send(self, request, **kwargs):
+            observed.append(self._transport_for_url(request.url) is self._transport)
+            return httpx.Response(200, json={"result": "ok"}, request=request)
 
-    async with httpx.AsyncClient(timeout=client._timeout, trust_env=False) as h:
-        url = httpx.URL("http://viewer.internal:5001/api/explorer/overview")
-        assert h._transport_for_url(url) is h._transport, (
-            "viewer request must go direct, not through the env proxy"
+    monkeypatch.setattr(httpx, "AsyncClient", CapturingClient)
+    client = TraceExplorerClient("http://viewer.example:5001", "test-session")
+    assert await client.get_overview() == "ok"
+    assert observed == [bool(no_proxy)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", [None, "   ", " test-viewer-token "])
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("host", ["viewer.example", "localhost:5001", "[::1]:5001"])
+@pytest.mark.parametrize(
+    "operation",
+    ["thin", "detect", "trace", "experiment", "errors", "search", "failures", "summary"],
+)
+async def test_all_viewer_requests_use_configured_auth(monkeypatch, token, operation, scheme, host):
+    """Every viewer entry point authenticates, without adding a header when unset."""
+    from nooa.trace_explorer import explorer
+
+    if token is None:
+        monkeypatch.delenv("NOOA_VIEWER_AUTH_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", token)
+    requests = []
+
+    async def handle(_transport, request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "result": "ok",
+                "events": _make_otlp_spans(),
+                "sessions": [{"session_id": "test-session", "spans": _make_otlp_spans()}],
+                "tests": [],
+            },
         )
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
+    url = f"{scheme}://{host}"
+    unencrypted = bool(token and token.strip() and scheme == "http")
+    with pytest.warns(UserWarning, match="unencrypted") if unencrypted else nullcontext():
+        if operation == "thin":
+            assert await TraceExplorerClient(url, "test-session").get_overview() == "ok"
+        elif operation == "detect":
+            assert await explorer._try_thin_client(url, "test-session") is not None
+        elif operation == "trace":
+            await explorer.TraceExplorer.from_viewer(url, "test-session")
+        elif operation == "experiment":
+            await explorer.TraceExplorer.load_experiment_sessions(url, "experiment")
+        elif operation == "errors":
+            await explorer._handle_experiment_errors(url, "experiment")
+        elif operation == "search":
+            await explorer._handle_experiment_search(url, "experiment", "pattern")
+        elif operation == "failures":
+            await explorer._handle_experiment_failures(url, "experiment")
+        else:
+            await explorer._handle_experiment(url, "experiment")
+    assert requests
+    expected = "Bearer test-viewer-token" if token and token.strip() else None
+    assert all(request.headers.get("Authorization") == expected for request in requests)
+
+
+def test_http_auth_warning_contains_no_credentials_or_endpoint(monkeypatch):
+    """The compatibility warning is actionable without disclosing connection details."""
+    from nooa.trace_explorer.client import _viewer_headers
+
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "offline-secret-sentinel")
+    with pytest.warns(UserWarning, match="unencrypted") as captured:
+        headers = _viewer_headers("http://private-viewer.example:5001")
+    assert headers == {"Authorization": "Bearer offline-secret-sentinel"}
+    text = str(captured[0].message)
+    assert "offline-secret-sentinel" not in text
+    assert "private-viewer" not in text
+    assert "HTTPS" in text
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,6 @@ from litellm.types.utils import Choices, Message, ModelResponse
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import ResolvedBlock, Role
@@ -96,7 +95,7 @@ def _gemini_response() -> ModelResponse:
     )
 
 
-def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
+def _render(response: LLMResponse) -> list[dict]:
     blocks = [
         ResolvedBlock(key="turn", content=response.content, role=Role.ASSISTANT, event=response)
     ]
@@ -120,8 +119,7 @@ def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
         for call in response.tool_calls
     )
     neutral = XMLBlockFormatter().format(blocks)
-    formatter = ResponsesProviderFormatter() if responses else OpenAIProviderFormatter()
-    return formatter.format(neutral)
+    return OpenAIProviderFormatter().format(neutral)
 
 
 def test_public_thinking_content_blocks_require_a_response(
@@ -305,7 +303,7 @@ async def test_summary_without_encrypted_content_is_portable_text(is_async, has_
         assert all(part.native is None for part in first.parts)
         restored = LLMResponse.model_validate_json(first.model_dump_json())
         with patch(target, return_value=raw) as replay:
-            rendered = _render(restored, responses=True)
+            rendered = _render(restored)
             if is_async:
                 await client.acall(rendered)
             else:
@@ -373,7 +371,7 @@ def test_reasoning_only_responses_turn_demotes_without_an_empty_message() -> Non
         with patch(
             "litellm.responses", return_value=_responses_output(RESPONSES_MESSAGE)
         ) as changed:
-            target.call(_render(first, responses=True))
+            target.call(_render(first))
 
         assert changed.call_args.kwargs["input"] == [
             {"role": "assistant", "content": "Check the evidence."}

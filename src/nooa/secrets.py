@@ -68,4 +68,54 @@ def load_secrets_into_env() -> list[str]:
     return applied
 
 
-__all__ = ["load_secrets_into_env"]
+def write_secret_env(path, name: str, value: str) -> None:
+    """Atomically save one credential with owner-only permissions.
+
+    This explicit write does not change the process environment. Frontends own
+    consent and must explain that an exported shell value still takes priority.
+    Secret-bearing YAML parser excerpts never escape this helper.
+    """
+    import re
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise ValueError("Secret variable must be a valid environment variable name")
+    if not isinstance(value, str) or not value:
+        raise ValueError("Secret value cannot be empty")
+    path = Path(path).resolve()
+    original = path.read_text() if path.exists() else None
+    try:
+        with path.open() as source:
+            data = yaml.safe_load(source) or {}
+    except FileNotFoundError:
+        data = {}
+    except yaml.YAMLError:
+        raise ValueError(f"Secrets file {path} contains invalid YAML; no changes made") from None
+    if isinstance(data, dict) and data.get("env") is None:
+        data["env"] = {}
+    if not isinstance(data, dict) or not isinstance(data.get("env", {}), dict):
+        raise ValueError(f"Secrets file {path} must contain an env mapping")
+    data.setdefault("env", {})[name] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            os.chmod(temporary, 0o600)
+            yaml.safe_dump(data, stream, sort_keys=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if (path.read_text() if path.exists() else None) != original:
+            raise ValueError(f"Secrets file {path} changed during write; retry after reloading")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+__all__ = ["load_secrets_into_env", "write_secret_env"]

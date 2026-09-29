@@ -12,12 +12,17 @@ Core contract:
 - ``self.repo`` for code navigation that returns ShellTools Match anchors
 - ``self.todo`` for optional structured progress tracking
 - Structured return: the agent must declare solution_description, evidence,
-  and command_to_verify when finishing -- forcing reflection before return.
+  and how_to_verify when finishing -- forcing reflection before return.
 """
 
 from __future__ import annotations
 
+from nooa_cli.tools.repo_tools import RepoTools
+
 from nooa import hidden as _hidden
+from nooa.tools.method_writing_lib import MethodWriting
+from nooa.tools.shell_tools import ShellTools
+from nooa.tools.todo import Todo, TodoManager
 
 _agentdoc_hidden_names = {"_hidden"}
 
@@ -26,15 +31,13 @@ with _hidden:
     import os
     from typing import TYPE_CHECKING, Any
 
-    from nooa_cli.tools.repo_tools import RepoTools
     from pydantic import BaseModel, Field
 
-    from nooa import Agent, CodeActStrategy, strategy
-    from nooa.agentdoc import doc, spec
+    from nooa import Agent, Context, no_trace, strategy
+    from nooa.agentdoc import doc
     from nooa.config import CodeActConfig
-    from nooa.context_blocks import DynamicContext
-    from nooa.tools.shell_tools import ShellTools
-    from nooa.tools.todo import TodoManager
+    from nooa.interactive import SummarizationConfig, install_summarizer
+    from nooa.strategies import CodeActV2
     from nooa.unifiedllm import FakeLLMClient
 
 if TYPE_CHECKING:
@@ -50,6 +53,20 @@ _OPTIONAL_TESTBED_ACTIVATE = (
     "fi"
 )
 
+_SOLVE_STRATEGY = CodeActV2(config=CodeActConfig(max_retries=10, cell_timeout=1800.0))
+_SOLVE_CONTEXT = {
+    "state": None,
+    "execution_context": None,
+    "python_cell_state": None,
+    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
+    # Method inputs remain live even if their prefill events are summarized.
+    # Reuse the framework's bounded parameter rendering rather than a raw copy.
+    "task": Context(
+        expr="runtime.current_call.format_parameters_as_code(tc=runtime.truncation_config)",
+        prefix=True,
+    ),
+}
+
 
 class TaskResult(BaseModel):
     """Structured result the agent must return when finishing a task."""
@@ -61,12 +78,31 @@ class TaskResult(BaseModel):
         description=(
             "Concrete evidence that the task is done: what tests passed, "
             "what output was produced, what behavior changed. Not a guess -- "
-            "cite the actual shell output you observed."
+            "cite the actual results you observed."
         )
     )
-    command_to_verify: str = Field(
-        description="A shell command a verifier can run to confirm correctness (exit 0 on success)."
+    how_to_verify: str = Field(
+        title="How to Verify",
+        description=(
+            "How a verifier can confirm correctness: concrete checks or steps and their "
+            "expected results. Include commands when appropriate; a shell command is not required."
+        ),
     )
+
+
+@_hidden
+class DelegationMergeError(ValueError):
+    """Worker completed, but Todo changes could not be merged safely.
+
+    ``result`` is the completed TaskResult; ``worker_state`` holds all worker
+    todos, including local dependencies. Inspect these and reconcile explicitly.
+    Parent state is unchanged. The completed worker need not be run again.
+    """
+
+    def __init__(self, message: str, result: TaskResult, worker_state: dict):
+        super().__init__(message)
+        self.result = result
+        self.worker_state = worker_state
 
 
 @_hidden
@@ -85,166 +121,195 @@ class BenchAgent(
     Agent,
     llm=FakeLLMClient(),
     context={
-        "context_usage": DynamicContext(expr="self._context_usage_block()"),
-        "todo_status": DynamicContext(expr="self.todo.status()"),
-        "task": DynamicContext(expr="self.problem_statement"),
+        "todo_status": Context(expr="self.todo.status()"),
+        "context_usage": Context(expr="self.context_stats.format() if self.context_stats else ''"),
     },
 ):
-    """Generic agent for code and system tasks in containers.
+    """You are an autonomous software engineering agent.
 
-    ## Tools
-
-    ```python
-    r = await self.shell.run("command")                     # persistent shell
-    r = await self.shell.read("file.py", lines=(1,50))      # view -> Match
-    defs = await self.repo.symbols("src/", query="Handler") # definitions -> Match anchors
-    refs = await self.repo.refs("Handler", path="src/")     # usages -> Match anchors
-    await self.shell.replace(defs[0], new_code)              # edit at Match
-    await self.shell.write_file("file.py", content)         # create/overwrite
-    ```
-
-    ## Workflow
-
-    1. **Understand** -- explore the codebase/environment, reproduce the issue
-    2. **Plan** -- write a plan based on todos
-    3. **Implement and verify** -- make the fix and run relevant tests
-    4. **Return** -- ``return_result(TaskResult(...))`` with evidence
-
-    ## Return format
-
-    When you are done, you MUST return a ``TaskResult``:
-
-    ```python
-    return_result(TaskResult(
-        solution_description="Root cause: missing URL-encoding in auth.py. Fixed with quote_plus().",
-        evidence="pytest tests/test_login.py passed (3 passed in 0.4s)",
-        command_to_verify="pytest tests/test_login.py -x",
-    ))
-    ```
-
-    Use ``self.todo`` to track progress on multi-step tasks.
-    Mark todos done as you complete them.
+    Understand the task and inspect relevant inputs before acting. Preserve unrelated
+    work. Define how success will be verified; for code changes, reproduce the failure
+    or add a failing test first. Make the smallest sufficient change. Never claim a
+    task is complete without verifying that it meets the requested requirements:
+    run the relevant checks and inspect their results. If verification is blocked,
+    report the blocker rather than claiming completion. Use todos only
+    when they clarify multi-step work. Keep an active Todo's title and description
+    aligned with the current understanding, and comment material findings, decisions,
+    completed steps, and verification—not routine narration. Finish with ``TaskResult``.
     """
 
     shell: ShellTools
     repo: RepoTools
+    todo: TodoManager
+    methodwriting: MethodWriting
 
-    def _context_usage_block(self) -> str:
-        """Return context-window usage plus a benchmark-agent compaction hint."""
-        if not self.context_stats:
-            return ""
-        return (
-            f"{self.context_stats.format()}\n"
-            "If event history is taking too much space, summarize older work "
-            "and call self.events.collapse(start_tag, end_tag, summary_text) "
-            "to replace it with a compact summary while keeping details accessible."
+    def __init__(
+        self,
+        llm: UnifiedLLM | None = None,
+        *,
+        summarization: SummarizationConfig | None = None,
+        working_dir: str | None = None,
+        delegation_depth: int = 0,
+        max_delegation_depth: int = 4,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**({"llm": llm} if llm is not None else {}), **kwargs)
+        cwd = working_dir or next(
+            (d for d in ("/testbed", "/app") if os.path.isdir(d)), os.getcwd()
         )
-
-    def __init__(self, llm: UnifiedLLM | None = None, **kwargs: Any) -> None:
-        super().__init__(llm=llm, **kwargs)
-        cwd = next((d for d in ("/testbed", "/app") if os.path.isdir(d)), os.getcwd())
+        self._delegation_depth = delegation_depth
+        self._max_delegation_depth = max_delegation_depth
+        self._summarization = summarization or SummarizationConfig()
         self._install_python_tools(cwd)
         self.todo = TodoManager()
-        self._seed_todos()
-        self.problem_statement = ""
-        # Base Agent hides context/events by default; BenchAgent's context_usage
-        # hint references them, so expose both APIs to the LLM here.
-        spec(self, "context", hidden=False)
-        spec(self, "events", hidden=False)
-        from nooa import Context
+        self.methodwriting = MethodWriting()
+        self.methodwriting.attach(self)
+        self.context_manager["python_cell_tools"] = Context(
+            doc(ShellTools, RepoTools, TodoManager, MethodWriting), prefix=True
+        )
+        self.context_manager["working_directory"] = Context(
+            expr="self._working_directory_context()"
+        )
+        install_summarizer(self._summarization, self)
 
-        self.context_manager["python_tools"] = Context(doc(RepoTools, ShellTools), prefix=True)
-        self.context_manager["todo"] = Context(doc(type(self.todo)), prefix=True)
+    @no_trace
+    def _working_directory_context(self) -> str:
+        """Render the application's shell location as a bounded context label."""
+        from html import escape
+
+        path = str(self.shell.cwd).replace("\n", "\\n").replace("\r", "\\r")
+        return "Working directory for self.shell: " + escape(path[:160], quote=False)
 
     def _install_python_tools(self, cwd: str) -> None:
         """Install shell/repo tools rooted at the same working directory."""
-        self.shell = ShellTools(cwd=cwd, init_command=_OPTIONAL_TESTBED_ACTIVATE)
+        self.shell = ShellTools(
+            cwd=cwd,
+            init_command=_OPTIONAL_TESTBED_ACTIVATE,
+        )
         self.repo = RepoTools(root=cwd, session=self.shell.session)
 
-    def _seed_todos(self) -> None:
-        """Preload the planning todo every benchmark task should start from."""
-        self.todo.add("Create a todo-based plan with clear dependencies")
+    @_hidden
+    async def close(self) -> None:
+        """Compatibility alias for the standard async cleanup contract."""
+        await self.aclose()
+
+    @_hidden
+    async def aclose(self) -> None:
+        """Drain background summaries and close the shell, leaving the LLM to its owner."""
+        try:
+            await super().aclose()
+        finally:
+            await self.shell.close()
 
     async def _run_evaluation(self, task_input: dict) -> dict:
         """Entry point called by the Harbor runner."""
-        # Read task fields generically (Harbor adapters vary in field names).
-        self.problem_statement = _problem_statement(task_input)
+        description = _problem_statement(task_input)
         instructions = task_input.get("system_prompt") or task_input.get("instructions") or ""
         initial_obs = task_input.get("initial_observation") or ""
 
-        if instructions:
-            self.context["instructions"] = instructions
-        if initial_obs:
-            self.context["initial_observation"] = initial_obs
+        self.context["instructions"] = instructions or None
+        self.context["initial_observation"] = initial_obs or None
 
-        # Reset shell to the task working dir.
         cwd = task_input.get("working_dir")
         if cwd:
             if not os.path.isdir(cwd):
                 raise ValueError(f"working_dir does not exist: {cwd!r}")
         else:
             cwd = next((d for d in ("/testbed", "/app") if os.path.isdir(d)), os.getcwd())
+        old_shell = self.shell
+        await old_shell.close()
         self._install_python_tools(cwd)
-        from nooa import Context
-
-        self.context_manager["todo"] = Context(doc(type(self.todo)), prefix=True)
         self.todo.clear()
-        self._seed_todos()
 
         try:
-            result = await self._solve_task(self.problem_statement)
+            result = await self._solve_task(description)
             if isinstance(result, TaskResult):
                 return {
-                    "response": result.command_to_verify,
+                    "response": result.how_to_verify,
                     "success": bool(result.solution_description),
                     "result": result.model_dump(),
                 }
-            # Fallback for non-structured returns
             result_str = str(result) if result is not None else ""
             return {"response": result_str, "success": True, "result": result}
         except Exception as e:
             _logger.error("BenchAgent failed: %s", e)
             return {"response": "", "success": False, "error": str(e)}
 
-    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=300, max_retries=10)))
-    async def _solve_task(self, description: str) -> TaskResult:
-        """Solve the task.
+    async def delegate(self, objective: str | Todo, supplied_context: Any = None) -> TaskResult:
+        """Ask an isolated subagent to complete a bounded objective.
 
-        You are an expert software engineer and system administrator working
-        inside a Linux container. Solve the task described below.
+        Pass a Todo as the first argument to make it the subagent's task. It receives an
+        independent task copy and can record comments or variables with ``self.todo``;
+        after successful execution and cleanup, changes are merged into the parent.
+        A string objective is used as the task text verbatim.
 
-        ## Task
-        {description}
+        ``supplied_context`` is passed as an ordinary method argument to the worker;
+        NOOA's standard parameter formatting displays it to the model.
+        To delegate a Todo, pass it as ``objective``, not ``supplied_context``.
 
-        ## Instructions
-        - Use ``await self.shell.run("command")`` to run shell commands.
-        - Use ``await self.shell.read("path")`` to view files.
-        - Use ``await self.repo.symbols(path, query="...")`` to find definitions.
-        - Use ``await self.repo.refs(name, path=".")`` to find usages.
-        - Use ``await self.shell.replace(...)`` to edit files or RepoTools matches.
-        - Use ``await self.shell.write_file(path, content)`` to create files.
-        - Use ``self.todo`` to track progress on multi-step work.
-        - You have root access; install packages as needed.
-        - Read task instructions carefully -- grading is strict and automated.
+        Conflicting edits, new worker-only dependencies, or removal of the delegated
+        Todo raise DelegationMergeError;
+        its ``result`` and ``worker_state`` preserve the completed work for recovery.
+        A failed worker or failed cleanup does not merge partial Todo changes.
 
-        ## Verification & Return
+        Use delegation when isolated context helps exploration, diagnosis, review, or
+        implementation. Recursive same-kind delegation is bounded by
+        ``max_delegation_depth`` (default 4). Independent calls may run concurrently
+        with ``asyncio.gather``. Inspect and integrate each result; you retain final
+        verification ownership.
+        """
+        if self._delegation_depth >= self._max_delegation_depth:
+            raise RuntimeError(f"maximum delegation depth ({self._max_delegation_depth}) reached")
+        todo_base = self.todo.copy_todo(objective) if isinstance(objective, Todo) else None
+        if todo_base is not None:
+            description = (
+                f"{todo_base.title}\n\nWork on active todo {todo_base.id}. Keep its title and "
+                "description aligned with the current understanding. Record material findings, "
+                "decisions, completed steps, and verification with self.todo.comment(...), not "
+                "routine narration; use self.todo.set_var(...) for structured artifacts."
+            )
+        else:
+            description = str(objective)
+        updated: Todo | None = None
+        worker_state: dict = {}
+        subagent = type(self)(
+            llm=self.llm,
+            working_dir=str(self.shell.cwd),
+            delegation_depth=self._delegation_depth + 1,
+            max_delegation_depth=self._max_delegation_depth,
+            summarization=self._summarization,
+        )
+        try:
+            if todo_base is not None:
+                subagent.todo = TodoManager.with_todo(todo_base)
+            result = await subagent._solve_task(description, supplied_context=supplied_context)
+            updated = subagent.todo.get(todo_base) if todo_base is not None else None
+            if todo_base is not None:
+                worker_state = subagent.todo.to_dict()
+            if todo_base is not None and updated is None:
+                raise DelegationMergeError(
+                    f"delegated todo {todo_base.id!r} disappeared", result, worker_state
+                )
+        finally:
+            await subagent.close()
+        if todo_base is not None and updated is not None:
+            try:
+                self.todo.merge_todo(updated, base=todo_base)
+            except ValueError as exc:
+                raise DelegationMergeError(str(exc), result, worker_state) from exc
+        return result
 
-        Before finishing, run the relevant tests to confirm your work is correct.
-        Then return a structured result explaining WHY you believe the task is done:
+    @_hidden
+    @strategy(
+        _SOLVE_STRATEGY,
+        context=_SOLVE_CONTEXT,
+    )
+    async def _solve_task(self, description: str, supplied_context: Any = None) -> TaskResult:
+        """Solve the supplied task completely.
 
-        ```python
-        return_result(TaskResult(
-            solution_description="The login handler didn't escape special chars in emails. Fixed by adding quote_plus() in auth.py:42.",
-            evidence="pytest tests/test_login.py -x passed: 5 passed in 1.2s",
-            command_to_verify="pytest tests/test_login.py -x",
-        ))
-        ```
-
-        ## Workflow
-
-        1. Explore and understand the task/codebase
-        2. Write a plan based on todos
-        3. Implement the solution and run tests to verify
-        4. Return ``TaskResult(...)`` with concrete evidence
+        Inspect before editing. Plan with ``self.todo`` only when useful. Make the
+        minimum sufficient change, preserve unrelated work, and run relevant tests.
+        Then call ``return_result(TaskResult(...))`` with the root cause and fix,
+        concrete observed evidence, and how to verify the result.
         """
         ...

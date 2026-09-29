@@ -312,7 +312,8 @@ class ShellTools(Skill):
     """
     Persistent shell + file ops, with grep that hands you editable Match objects.
 
-    Four methods — no new tools to learn:
+    For shell commands and file operations:
+    Always use these four methods rather than Python builtins:
         run(command, stdin=, timeout=)  — shell command (cd/env/cwd persist)
         read(path, lines=)             — view a file/region -> Match
         replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
@@ -438,23 +439,37 @@ class ShellTools(Skill):
     async def run_stream(
         self,
         command: Annotated[str, spec(description="Shell command to execute")],
-        timeout: Annotated[float, spec(description="Max seconds to wait before timeout")] = 30.0,
+        *,
+        stdin: Annotated[
+            str | None, spec(description="Text piped to stdin (replaces heredocs)")
+        ] = None,
+        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         """Stream command output line-by-line as it arrives, ending with a done event.
 
         Yields ``StreamEvent`` chunks (``.kind`` is "stdout"/"stderr", ``.text``
         the chunk) incrementally, then a final ``StreamDone`` (``.returncode``,
         ``.timed_out``) once the command completes. Runs in the persistent
-        session, like ``run``.
+        session, like ``run``. Pass a payload as ``stdin=`` instead of heredocs.
 
-        This is what ``pyp.arun(self.shell, ...)`` consumes to stream output::
+        Consume output directly and check the final exit status::
 
-            fails = await self.pyp.arun(self.shell, "make test").grep("FAIL").collect()
+            async for event in self.shell.run_stream("make test"):
+                if event.kind == "done":
+                    print("exit:", event.returncode, "timed out:", event.timed_out)
+                else:
+                    print(event.text, end="")
+
+        Args:
+            command: Shell command to execute.
+            stdin: Text piped to stdin (no quoting needed).
+            timeout: Max seconds before timeout.
         """
         session = await self._get_session()
+        run_cmd = self._with_stdin(command, stdin)
         timed_out = False
         exit_code = 0
-        async for stream_name, chunk in session.run_stream(command, timeout=timeout):
+        async for stream_name, chunk in session.run_stream(run_cmd, timeout=timeout):
             if stream_name == "__done__":
                 parts = chunk.split(",")
                 exit_code = int(parts[0])
@@ -472,7 +487,7 @@ class ShellTools(Skill):
 
         b64 = base64.b64encode(stdin.encode()).decode()
         return (
-            f"__nemo_in=$(mktemp); base64 -d <<<{b64} > $__nemo_in; "
+            f"__nemo_in=$(mktemp); base64 -d <<<'{b64}' > $__nemo_in; "
             f"({command}) < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
             f"( exit $__nemo_rc )"
         )
@@ -745,12 +760,25 @@ class ShellTools(Skill):
         1. replace(match, new_text) — replace the Match's line region.
         2. replace(path, old, new)  — old must match exactly once. new="" deletes.
 
+        A Match replaces its entire line region, not a substring within it.
+        Supplying new with a Match is an error; use the path form for old -> new.
+
         Args:
             target: A Match or file path string.
             old_or_new: For Match: the new text. For path: old text to find.
             new: Only for path form: the replacement text.
         """
         if isinstance(target, Match):
+            if new is not None:
+                raise ValueError(
+                    "replace(match, old, new) is ambiguous and no file was changed. "
+                    "A Match takes only the full replacement text for its entire line region: "
+                    "replace(match, new_text). For an old -> new substring replacement, use "
+                    "the path-string form replace(path, old, new); use match.resolved_path "
+                    "to keep the original file even if the shell directory changed. "
+                    "This guard prevents silently overwriting the whole matched region "
+                    "(possibly the entire file) with the old text."
+                )
             new_text = old_or_new
             resolved = Path(target.resolved_path)
             content = resolved.read_text()

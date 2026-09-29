@@ -392,7 +392,7 @@ export function Playground({ request, onClose }: PlaygroundProps) {
                       const fn = tc.function;
                       let code = fn.arguments;
                       let lang = "json";
-                      if (fn.name === "execute_python") {
+                      if (["execute_python", "python_cell"].includes(fn.name)) {
                         try {
                           const parsed = JSON.parse(fn.arguments);
                           if (parsed.code) {

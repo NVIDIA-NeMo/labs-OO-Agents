@@ -13,7 +13,6 @@ from nooa import Block, CacheBoundary
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
     MarkdownBlockFormatter,
     OpenAIProviderFormatter,
     XMLBlockFormatter,
@@ -99,87 +98,6 @@ class TestRenderContextBasic:
         assert [message["role"] for message in result] == ["assistant", "tool", "metadata"]
         assert result[-1] == CacheBoundary()
 
-    def test_boundary_prevents_plain_formatter_cross_segment_merge(self):
-        from nooa.events import PythonOutput, ResultStatus
-        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
-
-        event = ToolCallEvent(
-            tool_call_id="tc_1",
-            name="execute_python",
-            arguments={"code": "print(2)"},
-            result=ToolResult(tool_call_id="tc_1", content="status: complete"),
-        )
-        output = PythonOutput(
-            tool_call_id="tc_1",
-            execution_status=ResultStatus.COMPLETE,
-            execution_count=1,
-            stdout="2",
-        )
-        result = render_context(
-            [event, CacheBoundary(), output],
-            block_formatter=PlainCodeActBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-        ).output
-        assert [message["role"] for message in result] == [
-            "assistant",
-            "tool",
-            "metadata",
-            "user",
-        ]
-        assert result[2] == CacheBoundary()
-        assert "2" in result[3]["content"]
-
-    def test_plain_formatter_rejects_context_inside_event_history(self):
-        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
-
-        with pytest.raises(UnsupportedContextLayout, match="inserted inside event history"):
-            render_context(
-                [
-                    ToolCallEvent(
-                        tool_call_id="tc_1",
-                        name="run",
-                        arguments={},
-                        result=ToolResult(tool_call_id="tc_1", content="ok"),
-                    ),
-                    Block(key="interleaved", content="unsafe"),
-                ],
-                block_formatter=PlainCodeActBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
-            )
-
-    def test_plain_formatter_preserves_unmatched_python_output_position(self):
-        from nooa.events import PythonOutput, ResultStatus, Task
-        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
-
-        output = PythonOutput(
-            tool_call_id="unmatched",
-            execution_status=ResultStatus.COMPLETE,
-            execution_count=1,
-            stdout="earlier",
-        )
-        result = render_context(
-            [output, Task(prompt="later")],
-            block_formatter=PlainCodeActBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-        ).output
-
-        assert [message["role"] for message in result] == ["user", "user"]
-        assert "earlier" in result[0]["content"]
-        assert "later" in result[1]["content"]
-
-    def test_plain_formatter_rejects_system_block_after_user_block(self):
-        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
-
-        with pytest.raises(UnsupportedContextLayout, match="system block"):
-            render_context(
-                [
-                    Block(key="user", content="first", role=Role.USER),
-                    Block(key="system", content="late", role=Role.SYSTEM),
-                ],
-                block_formatter=PlainCodeActBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
-            )
-
     def test_boundary_cannot_split_canonical_tool_replay(self):
         response = LLMResponse(
             content="",
@@ -211,35 +129,6 @@ class TestRenderContextBasic:
             render_context(
                 [event],
                 block_formatter=XMLBlockFormatter(),
-                provider_formatter=OpenAIProviderFormatter(),
-            )
-
-    def test_incomplete_resolved_tool_event_cannot_use_python_output_as_result(self):
-        from nooa.events import PythonOutput, ResultStatus
-        from nooa.strategies.codeact_lite import PlainCodeActBlockFormatter
-
-        event = ToolCallEvent(
-            tool_call_id="tc_1",
-            name="execute_python",
-            arguments={"code": "print(2)"},
-            result=None,
-        )
-        orphan = ResolvedBlock(key="tool", content="", event=event, role=Role.ASSISTANT)
-        output = ResolvedBlock(
-            key="output",
-            content="",
-            event=PythonOutput(
-                tool_call_id="tc_1",
-                execution_status=ResultStatus.COMPLETE,
-                execution_count=1,
-                stdout="2",
-            ),
-            role=Role.USER,
-        )
-        with pytest.raises(UnsupportedContextLayout, match="has no result"):
-            render_context(
-                [orphan, output],
-                block_formatter=PlainCodeActBlockFormatter(),
                 provider_formatter=OpenAIProviderFormatter(),
             )
 
@@ -395,30 +284,6 @@ class TestRenderContextMarkdown:
         system_content = result[0]["content"]
         assert "# Instructions" in system_content
         assert "Follow these rules." in system_content
-
-
-class TestRenderContextAnthropic:
-    """Anthropic provider formatter tests."""
-
-    def test_anthropic_format(self):
-        """render_context() produces Anthropic-style output."""
-        blocks = [
-            ResolvedBlock(key="persona", content="Be helpful."),
-            ResolvedBlock(key="msg", content="Hello", role=Role.USER),
-        ]
-
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=AnthropicProviderFormatter(),
-        ).output
-
-        assert isinstance(result, dict)
-        assert "system" in result
-        assert "messages" in result
-        assert "Be helpful." in result["system"]
-        assert len(result["messages"]) == 1
-        assert result["messages"][0]["role"] == "user"
 
 
 class TestRenderContextToolCalls:

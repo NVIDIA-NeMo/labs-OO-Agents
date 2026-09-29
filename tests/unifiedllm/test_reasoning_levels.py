@@ -313,7 +313,7 @@ async def test_fake_does_not_report_success_for_unknown_reasoning(asynchronous):
     assert client.call_count == 0
 
 
-async def test_agent_authoring_skill_reasoning_example(tmp_path, monkeypatch):
+async def test_model_configuration_skill_reasoning_example(tmp_path, monkeypatch):
     """Execute the shipped skill's registry and selection example without inference."""
     from nooa.skill import _parse_skill_md
     from nooa.unifiedllm import registry
@@ -324,9 +324,9 @@ async def test_agent_authoring_skill_reasoning_example(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx.Client, "send", unexpected_request)
     monkeypatch.setattr(httpx.AsyncClient, "send", unexpected_request)
     name, _, skill = _parse_skill_md(
-        Path(__file__).resolve().parents[2] / "skills/nooa-agent-authoring"
+        Path(__file__).resolve().parents[2] / "skills/nooa-model-configuration"
     )
-    assert name == "nooa-agent-authoring"
+    assert name == "nooa-model-configuration"
     declarations = re.findall(r"```yaml\n(.*?)```", skill, re.DOTALL)
     assert len(declarations) == 1, "Provide one executable reasoning registry example"
     config = yaml.safe_load(declarations[0])["models"]["my-route"]

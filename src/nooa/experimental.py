@@ -32,14 +32,6 @@ def PurePythonStrategy(*args: Any, **kwargs: Any) -> Any:
     return _Cls(*args, **kwargs)
 
 
-def CodeActLiteStrategy(*args: Any, **kwargs: Any) -> Any:
-    """Create a CodeActLiteStrategy instance (experimental, emits FutureWarning)."""
-    _warn_experimental("CodeActLiteStrategy")
-    from nooa.strategies.codeact_lite import CodeActLiteStrategy as _Cls
-
-    return _Cls(*args, **kwargs)
-
-
 def ReflexionStrategy(*args: Any, **kwargs: Any) -> Any:
     """Create a ReflexionStrategy instance (experimental, emits FutureWarning)."""
     _warn_experimental("ReflexionStrategy")
@@ -49,7 +41,6 @@ def ReflexionStrategy(*args: Any, **kwargs: Any) -> Any:
 
 
 __all__ = [
-    "CodeActLiteStrategy",
     "PurePythonStrategy",
     "ReflexionStrategy",
 ]

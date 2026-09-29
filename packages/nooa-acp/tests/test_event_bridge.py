@@ -44,7 +44,8 @@ def _content_text(content: ContentToolCallContent) -> str:
     return block.text
 
 
-async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
+@pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
+async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name):
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
@@ -69,7 +70,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path):
     agent.event_manager.add(
         ToolCallEvent(
             tool_call_id="call-1",
-            name="execute_python",
+            name=tool_name,
             arguments={"code": "print('hello')"},
         )
     )
