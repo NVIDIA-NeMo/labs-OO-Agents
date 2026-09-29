@@ -26,6 +26,15 @@ def test_events_api_has_library_docstring():
 
 def test_method_writing_lib_has_library_docstring():
     _check_library_docstring(MethodWriting)
+    docstring = MethodWriting.__doc__ or ""
+    assert "@strategy(PredictStrategy())" in docstring
+    assert "asyncio.gather" in docstring
+    assert "@strategy(CodeActStrategy())" in docstring
+    assert "Arguments are passed" in docstring
+    assert "rendered automatically" in docstring
+    assert "{{" not in docstring
+    assert "}}" not in docstring
+    assert "Never use" not in docstring
 
 
 def test_method_writing_lib_is_instantiable():
