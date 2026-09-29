@@ -151,15 +151,14 @@ def command(
 
     def llm_factory(alias: str | None, workspace: Path) -> Any:
         # Called per session with the alias it asks for; None is the default.
-        # workspace is the seam for resolving aliases per workspace later.
-        del workspace
-        from nooa.unifiedllm import get_llm_client
+        # The alias resolves against the session workspace's configuration.
+        from nooa_coder.workspace import models
 
         name = alias or model
         overrides = (
             {"api_key": nvidia_api_key} if nvidia_api_key and name.startswith("nvidia_nim/") else {}
         )
-        return get_llm_client(name, client_type=client_type, **overrides)
+        return models.workspace_llm_client(name, workspace, client_type=client_type, **overrides)
 
     # A test script can run this command with its own model factory.
     obj = ctx.obj if isinstance(ctx.obj, dict) else {}
@@ -239,21 +238,21 @@ def _role_from_argv(argv: list[str]) -> tuple[bool, int | None, int | None]:
     return "--single-process" in argv, value("--worker-fd"), value("--id-base")
 
 
-def llm_config_summary() -> str:
-    """One line naming the LLM configuration files in force, for the start-up log.
+def llm_config_summary(workspace: Path) -> str:
+    """One line naming the LLM configuration files of a workspace, for the log.
 
     Answers "where is it loading the model configuration from?" without a
-    debugger: the layered chain (bundled, user, project, then the
-    ``NEMO_OO_LLM_CONFIG`` paths, highest priority last) and whether the
-    environment variable is set.
+    debugger: the layered chain (bundled, user, project, the workspace's
+    ``.nooa/llm_config.yaml``, then the ``NEMO_OO_LLM_CONFIG`` paths,
+    highest priority last) and whether the environment variable is set.
     """
-    from nooa.llm_config import llm_config_chain
+    from nooa_coder.workspace.models import llm_config_files
 
-    paths = [str(path) for path in llm_config_chain()]
+    paths = [str(path) for path in llm_config_files(workspace)]
     listed = ", ".join(paths) if paths else "none found"
     env = os.environ.get("NEMO_OO_LLM_CONFIG")
     source = f"NEMO_OO_LLM_CONFIG={env}" if env else "NEMO_OO_LLM_CONFIG not set"
-    return f"LLM configuration (lowest priority first): {listed}; {source}"
+    return f"LLM configuration for {workspace} (lowest priority first): {listed}; {source}"
 
 
 def _run_router(
@@ -297,9 +296,8 @@ def _run_worker(
     agent_factory: Any,
 ) -> None:
     # --tee and NOOA_ACP_MCP_TRACE are ignored here: the router records the
-    # client's side.
-    import logging
-
+    # client's side. The server logs each workspace's model configuration
+    # files when its first session starts: the workspace is not known yet.
     from nooa_coder.acp.server import CoderACPAgent
     from nooa_coder.acp.worker import run_worker
     from nooa_coder.coding.factory import create_session_agent
@@ -307,7 +305,6 @@ def _run_worker(
     from nooa_coder.session.store import SessionStore
 
     _configure_logging(f"nooa-coder worker {id_base >> 32}")
-    logging.getLogger("nooa_coder.acp").info(llm_config_summary())
 
     def new_registry(store: SessionStore) -> SessionRegistry:
         return SessionRegistry(

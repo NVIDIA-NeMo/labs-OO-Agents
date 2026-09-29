@@ -22,6 +22,12 @@ to follow semantic versioning.
 - `nooa connect` offers the NVIDIA Inference Hub (`inference-api.nvidia.com`,
   key in `NVIDIA_INFERENCE_API_KEY`) as a preset provider, after build.nvidia.com.
 - `nooa-coder`: the ACP model picker re-reads the model registry when a registry file changes, so an alias added with `nooa connect` in a terminal appears without restarting the server.
+- `nooa-coder`: a session in workspace W also reads `W/.nooa/llm_config.yaml`, the
+  file `nooa connect` writes when run in W: for the model picker, for the model client
+  of the session and of `set_model`, and for `default_llm_factory()`. It ranks above
+  the user and package-project files and below `NEMO_OO_LLM_CONFIG`. Each workspace's
+  aliases are kept apart, also when one process serves several workspaces. The server
+  logs a workspace's configuration files when its first session starts.
 - `import nooa` no longer loads the strategies, the LLM client or LiteLLM
   (about 3.3 s down to 0.3 s here). The strategy names, `LLMResponse` and
   `llm_config_chain` load on first use; `from nooa import CodeActStrategy`

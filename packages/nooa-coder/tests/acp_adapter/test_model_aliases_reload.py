@@ -21,29 +21,27 @@ def _write(path: Path, *aliases: str) -> None:
     os.utime(path, ns=(stamp, stamp))
 
 
-def test_an_alias_connected_after_start_up_appears(tmp_path, monkeypatch):
+def test_an_alias_connected_after_start_up_appears(tmp_path, workspace, monkeypatch):
     registry = tmp_path / "llm_config.yaml"
     _write(registry, "first")
     monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(registry))
-    monkeypatch.setattr(server, "_registry_seen", None)
 
-    assert "first" in server.model_aliases()
-    assert "second" not in server.model_aliases()
+    assert "first" in server.model_aliases(workspace)
+    assert "second" not in server.model_aliases(workspace)
 
     _write(registry, "first", "second")
-    assert {"first", "second"} <= set(server.model_aliases())
+    assert {"first", "second"} <= set(server.model_aliases(workspace))
 
 
-def test_an_unchanged_registry_is_not_reloaded(tmp_path, monkeypatch):
+def test_an_unchanged_registry_is_not_reloaded(tmp_path, workspace, monkeypatch):
+    from nooa_coder.workspace import models
+
     registry = tmp_path / "llm_config.yaml"
     _write(registry, "first")
     monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(registry))
-    monkeypatch.setattr(server, "_registry_seen", None)
-    server.model_aliases()
+    server.model_aliases(workspace)
 
     calls: list[int] = []
-    from nooa.unifiedllm import registry as registry_module
-
-    monkeypatch.setattr(registry_module, "reload_registry", lambda *a: calls.append(1))
-    server.model_aliases()
+    monkeypatch.setattr(models, "_read_models", lambda *a: calls.append(1) or {})
+    server.model_aliases(workspace)
     assert calls == []

@@ -191,40 +191,21 @@ async def _close_in_order(*closers: Callable[[], Any] | None) -> None:
         raise pending
 
 
-_registry_seen: tuple[Any, ...] | None = None
-"""The registry files' names, sizes and times when ``model_aliases`` last looked."""
+def model_aliases(workspace: Path) -> list[str]:
+    """The model aliases configured for ``workspace``, sorted.
 
-
-def _registry_files() -> tuple[Any, ...]:
-    from nooa.llm_config import llm_config_chain
-
-    files: list[tuple[str, int, int]] = []
-    for path in llm_config_chain():
-        with suppress(OSError):
-            status = path.stat()
-            files.append((str(path), status.st_mtime_ns, status.st_size))
-    return tuple(files)
-
-
-def model_aliases() -> list[str]:
-    """The model aliases configured in the NOOA model registry, sorted.
-
-    Read from disk again whenever a registry file was added, removed or
-    changed since the last call (a ``stat`` per file otherwise), so a model
-    connected with ``nooa connect`` in a terminal shows up in the picker
-    without restarting the server.
+    Its own ``.nooa/llm_config.yaml`` included (``workspace_models``). The
+    files are read again whenever one was added, removed or changed, so a
+    model connected with ``nooa connect`` in a terminal shows up in the
+    picker without restarting the server.
     """
-    global _registry_seen
-    from nooa.unifiedllm.registry import MODELS, reload_registry
+    from nooa_coder.workspace.models import workspace_models
 
     try:
-        files = _registry_files()
-        if files != _registry_seen:
-            reload_registry()
-        _registry_seen = files
+        return sorted(workspace_models(workspace))
     except Exception:
-        logger.warning("Could not load the model registry", exc_info=True)
-    return sorted(MODELS)
+        logger.warning("Could not load the model configuration of %s", workspace, exc_info=True)
+        return []
 
 
 class CoderACPAgent:
@@ -273,9 +254,19 @@ class CoderACPAgent:
         # The question each session's prompt is asking, so two prompts that
         # returned with the same turn ask it once.
         self._asking: dict[str, NeedInput] = {}
+        # Workspaces whose model configuration files were logged.
+        self._logged_config: set[Path] = set()
 
     def on_connect(self, conn: Client) -> None:
         self._conn = conn
+
+    def _log_llm_config(self, workspace: Path) -> None:
+        """Log the model configuration files of a workspace, the first time it is used."""
+        if workspace not in self._logged_config:
+            from nooa_coder.acp.cli import llm_config_summary
+
+            self._logged_config.add(workspace)
+            logger.info(llm_config_summary(workspace))
 
     # ---- registries ----------------------------------------------------
 
@@ -331,6 +322,7 @@ class CoderACPAgent:
     ) -> NewSessionResponse:
         del kwargs
         root = validate_workspace(cwd, additional_directories)
+        self._log_llm_config(root)
         options = SessionOptions(
             workspace=root,
             agent_spec=self._agent_spec_for(root),
@@ -371,6 +363,7 @@ class CoderACPAgent:
     ) -> LoadSessionResponse:
         del kwargs
         root = validate_workspace(cwd, additional_directories)
+        self._log_llm_config(root)
         registry = self.registry_for(root)
         live = self.session(session_id)
         if live is not None:
@@ -916,7 +909,7 @@ class CoderACPAgent:
         and a reasoning option when the current client declares levels."""
         options: list[Any] = []
         current = session.info.model or self._model
-        aliases = model_aliases()
+        aliases = model_aliases(session.options.workspace)
         if current and current not in aliases:
             aliases = [current, *aliases]
         if current and aliases:
