@@ -36,7 +36,9 @@ Over ACP, a `session/prompt` sent during a turn is queued, not steered.
 `_nooa/session/inject` queues or steers a message without a prompt request,
 and `_nooa/session/revoke_inject` takes one back; see `docs/acp-router.md`
 ("Messages during a turn") and the ACP RFD for message injection
-(agent-client-protocol PR #1261).
+(agent-client-protocol PR #1261). Pool steers with its own request,
+`_poolside/session_steer`, which the server advertises and handles the same
+way as a steer inject.
 
 A question the agent asks (`NeedInput`) goes to the client as a form when
 the client advertises `elicitation.form`, as a permission request when it

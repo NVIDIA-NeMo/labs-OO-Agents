@@ -113,6 +113,8 @@ _INJECT_METHOD = "nooa/session/inject"
 _REVOKE_METHOD = "nooa/session/revoke_inject"
 _POOL_FORM_METHOD = "poolside/elicitation"
 """Pool's form request; ``ext_method`` sends it as ``_poolside/elicitation``."""
+_POOL_STEER_METHOD = "poolside/session_steer"
+"""``_poolside/session_steer`` as ``ext_method`` receives it (without the underscore)."""
 
 SOURCE = "acp"
 """The source of items this adapter admits (the bridge does not echo them back)."""
@@ -463,7 +465,8 @@ class CoderACPAgent:
         return CloseSessionResponse()
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """``_nooa/session/inject``, ``revoke_inject`` (see ``_inject``) and ``delete``.
+        """``_nooa/session/inject``, ``revoke_inject`` (see ``_inject``), Pool's
+        ``_poolside/session_steer`` (see ``_pool_steer``) and ``delete``.
 
         ``_nooa/session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
 
@@ -474,6 +477,8 @@ class CoderACPAgent:
             return await self._inject(params)
         if method == _REVOKE_METHOD:
             return self._revoke_inject(params)
+        if method == _POOL_STEER_METHOD:
+            return await self._pool_steer(params)
         if method != _DELETE_METHOD:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
@@ -529,6 +534,32 @@ class CoderACPAgent:
             raise RequestError.resource_not_found(session_id) from None
         self._injects.setdefault(session_id, {})[receipt.item_id] = receipt
         return {"messageId": receipt.item_id, "delivered": receipt.delivered}
+
+    async def _pool_steer(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``_poolside/session_steer``: ``{sessionId, inputId, prompt}`` -> ``{inputId}``.
+
+        Pool sends what the person types during a running prompt. The text
+        steers the running turn as an inject with ``mode: "steer"`` does
+        (queued when no turn is running). A slash command is refused: steered
+        text is read by the model, so the command would not run.
+        """
+        session_id, input_id = params.get("sessionId"), params.get("inputId")
+        if not isinstance(session_id, str) or not isinstance(input_id, str):
+            raise RequestError.invalid_params({"reason": "sessionId and inputId are strings"})
+        blocks = params.get("prompt")
+        if not isinstance(blocks, list) or not all(isinstance(b, dict) for b in blocks):
+            raise RequestError.invalid_params({"reason": "prompt is required"})
+        session, _bridge = self._followed(session_id)
+        text = self._prompt_text([SimpleNamespace(**block) for block in blocks])
+        if _slash_invocation(text) is not None:
+            raise RequestError.invalid_params(
+                {"reason": "A slash command cannot steer a turn; send it after the turn ends"}
+            )
+        try:
+            await session.steer(text, source=SOURCE)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session_id) from None
+        return {"inputId": input_id}
 
     def _revoke_inject(self, params: dict[str, Any]) -> dict[str, Any]:
         """``_nooa/session/revoke_inject``: ``{sessionId, messageId}`` -> ``{revoked}``."""
