@@ -51,7 +51,7 @@ from acp.schema import (
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage, Done, NeedInput, RespondResult, Waiting
+from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa_coder.coding.activity import (
     FileEdit,
     TerminalCommandFinished,
@@ -80,7 +80,7 @@ _STOP = object()
 _MAX_TITLE_CODE_CHARS = 80
 
 # Values of return_result(...): the turn's result, not a cell's output.
-_TURN_RESULTS = (Done, NeedInput, Waiting, RespondResult)
+_TURN_RESULTS = (Done, NeedInput, Waiting)
 
 # Bound on a rendered Out[n] value; large results belong in the agent's
 # context, not repeated in full inside a client tool card.
