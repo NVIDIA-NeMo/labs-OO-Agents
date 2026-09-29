@@ -5,8 +5,13 @@
 from typing import Annotated, Literal
 
 import pytest
-from nooa_coder.acp.need_input import answer_from_content, need_input_schema
-from pydantic import BaseModel, Field
+from nooa_coder.acp.need_input import (
+    answer_from_content,
+    need_input_schema,
+    pool_answer,
+    pool_form_schema,
+)
+from pydantic import BaseModel, Field, ValidationError
 
 from nooa.interactive import NeedInput
 
@@ -155,3 +160,77 @@ def test_anything_else_falls_back_to_free_text(answer_type):
 def test_an_invalid_answer_for_a_type_is_kept_as_its_data():
     need = NeedInput(question="Deploy how?", answer_type=Deployment)
     assert answer_from_content(need, {"target": "x"}) == {"target": "x"}
+
+
+# ---- Pool forms: string properties only -------------------------------
+
+
+def test_a_pool_free_text_question_is_one_string_property():
+    need = NeedInput(question="Name the release?")
+    assert pool_form_schema(need) == {
+        "type": "object",
+        "properties": {"answer": {"type": "string", "title": "Name the release?"}},
+        "required": ["answer"],
+    }
+    assert pool_answer(need, {"answer": "Aurora"}) == "Aurora"
+
+
+def test_a_pool_form_declares_every_field_as_a_string_and_says_the_expected_type():
+    need = NeedInput(question="Deploy how?", answer_type=Deployment)
+    assert pool_form_schema(need) == {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string", "title": "Target", "description": "Where to deploy"},
+            "replicas": {"type": "string", "title": "Replicas", "description": "a whole number"},
+            "ratio": {"type": "string", "title": "Ratio", "description": "a number"},
+            "dry_run": {"type": "string", "title": "Dry Run", "description": "yes or no"},
+            "note": {"type": "string", "title": "Note"},
+            "regions": {
+                "type": "string",
+                "title": "Regions",
+                "description": "a comma-separated list of: us, eu",
+            },
+            "stage": {"type": "string", "title": "Stage", "description": "one of: dev, prod"},
+        },
+        "required": ["target", "replicas", "dry_run"],
+    }
+
+
+def test_pool_answers_are_converted_from_strings():
+    need = NeedInput(question="Deploy how?", answer_type=Deployment)
+    answer = pool_answer(
+        need,
+        {
+            "target": "staging",
+            "replicas": " 2 ",
+            "ratio": "",
+            "dry_run": "yes",
+            "note": "",
+            "regions": "us, eu",
+            "stage": "prod",
+        },
+    )
+    assert answer == Deployment(
+        target="staging", replicas=2, dry_run=True, regions=["us", "eu"], stage="prod"
+    )
+
+
+def test_a_pool_list_of_strings_is_a_comma_separated_list():
+    need = NeedInput(question="Names?", answer_type=Strings)
+    assert pool_form_schema(need)["properties"]["names"] == {
+        "type": "string",
+        "title": "Names",
+        "description": "a comma-separated list",
+    }
+    assert pool_answer(need, {"names": "a,b , c"}) == Strings(names=["a", "b", "c"])
+
+
+def test_a_pool_answer_that_does_not_convert_raises():
+    need = NeedInput(question="Deploy how?", answer_type=Deployment)
+    with pytest.raises(ValidationError):
+        pool_answer(need, {"target": "x", "replicas": "two", "dry_run": "yes"})
+
+
+@pytest.mark.parametrize("answer_type", [Nested, Mapping, Either])
+def test_a_pool_form_needs_simple_fields(answer_type):
+    assert pool_form_schema(NeedInput(question="?", answer_type=answer_type)) is None
