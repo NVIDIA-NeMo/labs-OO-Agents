@@ -178,14 +178,20 @@ class Capabilities:
 
 def probe_capabilities() -> Capabilities:
     """Probe the host once for every enforcement mechanism the sandbox uses."""
-    import resource
-
     is_linux = platform.system() == "Linux"
+    rlimit = False
+    if is_linux:
+        try:
+            import resource
+
+            rlimit = hasattr(resource, "RLIMIT_AS") and hasattr(resource, "RLIMIT_CPU")
+        except ImportError:
+            pass
     return Capabilities(
         linux=is_linux,
         landlock_abi=landlock_abi() if is_linux else 0,
         seccomp=seccomp_supported() if is_linux else False,
-        rlimit=hasattr(resource, "RLIMIT_AS") and hasattr(resource, "RLIMIT_CPU"),
+        rlimit=rlimit,
     )
 
 
@@ -212,7 +218,10 @@ def apply_rlimits(*, max_memory_mb: int = 0, max_cpu_seconds: int = 0) -> None:
     so an absolute cap below that baseline would break it instantly. The cap is
     ``current VmSize + max_memory_mb`` — i.e. how much more the cell may allocate.
     """
-    import resource
+    try:
+        import resource
+    except ImportError:
+        return  # resource module is not available on this platform (e.g. Windows)
 
     if max_memory_mb and max_memory_mb > 0:
         baseline = _self_vmsize_bytes()
