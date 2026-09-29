@@ -38,6 +38,17 @@ and `_nooa/session/revoke_inject` takes one back; see `docs/acp-router.md`
 ("Messages during a turn") and the ACP RFD for message injection
 (agent-client-protocol PR #1261).
 
+A question the agent asks (`NeedInput`) goes to the client as a form when
+the client advertises `elicitation.form`, as a permission request when it
+is a yes/no choice, and otherwise as text answered by the next message.
+When the client is Pool (`clientInfo.name` is `pool`), free-text and typed
+questions use Pool's `_poolside/elicitation` form instead. Pool shows string
+fields only, so every field is sent as a string with the expected type in its
+description ("a whole number", "yes or no", "a comma-separated list") and the
+answer is converted back; an answer that does not convert is asked once more,
+then left as text. Choices keep the permission request or text. If Pool fails
+the request, questions fall back to text for the rest of the connection.
+
 ## Recovering a session marked in use
 
 A session in use is marked by its lock file, so that no two processes write

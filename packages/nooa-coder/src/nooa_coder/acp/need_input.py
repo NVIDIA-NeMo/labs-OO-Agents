@@ -7,6 +7,11 @@ boolean, and multi-select arrays of strings), so a pydantic
 ``model_json_schema()`` cannot be passed through. ``need_input_schema``
 builds the form directly and returns ``None`` for anything it cannot
 flatten; the host then asks in free text.
+
+Pool's own form request (``_poolside/elicitation``) shows string fields
+only, so ``pool_form_schema`` declares every field as a string, says the
+expected type in its description, and ``pool_answer`` converts the strings
+back with the ``answer_type``.
 """
 
 import types
@@ -87,6 +92,81 @@ def answer_from_content(need: NeedInput, content: dict[str, Any] | None) -> Any:
         return need.answer_type.model_validate(content)
     except ValidationError:
         return content
+
+
+def pool_form_schema(need: NeedInput) -> dict[str, Any] | None:
+    """The Pool form for a free-text or typed question; ``None`` for anything else.
+
+    Every property is a string: Pool declines a form with any other type.
+    ``int``, ``float``, ``bool``, string ``Literal`` and lists of strings
+    (plain or ``Literal``) say what to enter in the property description;
+    ``X | None`` is ``X`` and not required.
+    """
+    if need.options is not None:
+        return None
+    if need.answer_type is None:
+        properties: dict[str, Any] = {_ANSWER: {"type": "string", "title": need.question}}
+        return {"type": "object", "properties": properties, "required": [_ANSWER]}
+    properties = {}
+    required: list[str] = []
+    for name, field in need.answer_type.model_fields.items():
+        annotation, optional, _ = _unwrap_optional(field.annotation)
+        hint = _pool_hint(annotation)
+        if hint is None:
+            return None
+        if field.description and hint:
+            description = f"{field.description} ({hint})"
+        else:
+            description = field.description or hint
+        prop = {"type": "string", "title": field.title or name.replace("_", " ").title()}
+        if description:
+            prop["description"] = description
+        properties[name] = prop
+        if field.is_required() and not optional:
+            required.append(name)
+    return {"type": "object", "properties": properties, "required": required}
+
+
+def pool_answer(need: NeedInput, content: dict[str, Any] | None) -> Any:
+    """The item to submit for an accepted Pool form; raises ``ValidationError``.
+
+    The text for a free-text question; else an ``answer_type`` instance,
+    from strings: an empty field is left out (its default applies) and a
+    list field is split on commas.
+    """
+    content = dict(content or {})
+    if need.answer_type is None:
+        return str(content.get(_ANSWER, ""))
+    values: dict[str, Any] = {}
+    for name, field in need.answer_type.model_fields.items():
+        text = str(content.get(name, "")).strip()
+        if not text:
+            continue
+        annotation, _, _ = _unwrap_optional(field.annotation)
+        is_list = get_origin(annotation) is list
+        values[name] = (
+            [item.strip() for item in text.split(",") if item.strip()] if is_list else text
+        )
+    return need.answer_type.model_validate(values)
+
+
+def _pool_hint(annotation: Any) -> str | None:
+    """What to type for a field, ``""`` for a plain string, ``None`` if not supported."""
+    if annotation is str:
+        return ""
+    hints = {int: "a whole number", float: "a number", bool: "yes or no"}
+    if annotation in hints:
+        return hints[annotation]
+    if (choices := _string_literals(annotation)) is not None:
+        return "one of: " + ", ".join(choices)
+    if get_origin(annotation) is list:
+        (item,) = get_args(annotation) or (None,)
+        item = _strip_annotated(item, [])
+        if item is str:
+            return "a comma-separated list"
+        if (choices := _string_literals(item)) is not None:
+            return "a comma-separated list of: " + ", ".join(choices)
+    return None
 
 
 def _strip_annotated(annotation: Any, metadata: list[Any]) -> Any:
@@ -195,4 +275,4 @@ def _property(annotation: Any, field: FieldInfo, name: str, metadata: list[Any])
     return None
 
 
-__all__ = ["answer_from_content", "need_input_schema"]
+__all__ = ["answer_from_content", "need_input_schema", "pool_answer", "pool_form_schema"]

@@ -60,6 +60,7 @@ from acp.schema import (
     ToolCallUpdate,
     UnstructuredCommandInput,
 )
+from pydantic import ValidationError
 
 from nooa.errors import GenerationError
 from nooa.interactive import NeedInput
@@ -69,7 +70,12 @@ from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
 from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
 from nooa_coder.acp.listing import list_sessions, validate_workspace
-from nooa_coder.acp.need_input import answer_from_content, need_input_schema
+from nooa_coder.acp.need_input import (
+    answer_from_content,
+    need_input_schema,
+    pool_answer,
+    pool_form_schema,
+)
 from nooa_coder.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
 from nooa_coder.acp.recover import COMMAND as RECOVER
 from nooa_coder.acp.recover import recover
@@ -105,6 +111,8 @@ DEFAULT_REASONING = "default"
 
 _INJECT_METHOD = "nooa/session/inject"
 _REVOKE_METHOD = "nooa/session/revoke_inject"
+_POOL_FORM_METHOD = "poolside/elicitation"
+"""Pool's form request; ``ext_method`` sends it as ``_poolside/elicitation``."""
 
 SOURCE = "acp"
 """The source of items this adapter admits (the bridge does not echo them back)."""
@@ -240,6 +248,8 @@ class CoderACPAgent:
         self._model = model
         self._conn: Client | None = None
         self.client_capabilities: ClientCapabilities | None = None
+        # The client is Pool and has not failed a ``_poolside/elicitation`` request.
+        self._pool_forms = False
         self._bridges: dict[str, ACPEventBridge] = {}
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
@@ -307,8 +317,9 @@ class CoderACPAgent:
         client_info: Implementation | None = None,
         **kwargs: Any,
     ) -> InitializeResponse:
-        del client_info, kwargs
+        del kwargs
         self.client_capabilities = client_capabilities
+        self._pool_forms = client_info is not None and client_info.name == "pool"
         return initialize_response(protocol_version)
 
     # ---- new -----------------------------------------------------------
@@ -649,12 +660,16 @@ class CoderACPAgent:
     async def _ask(self, session: Session, bridge: ACPEventBridge, need: NeedInput) -> Any:
         """Ask the client to answer ``need``: ``(item, source)``, ``None`` or ``_CANCELLED``.
 
-        A form when the client advertised ``elicitation.form`` and the
-        question flattens; else a permission request for a yes/no question;
-        else ``None`` (the question stays as text). A client error falls
-        back to ``None``.
+        Pool's own form for a free-text or typed question when the client
+        is Pool; else a form when the client advertised ``elicitation.form``
+        and the question flattens; else a permission request for a yes/no
+        question; else ``None`` (the question stays as text). A client error
+        falls back to ``None``.
         """
         conn = self._require_conn()
+        pool_schema = pool_form_schema(need) if self._pool_forms else None
+        if pool_schema is not None:
+            return await self._ask_pool(session, need, pool_schema)
         capabilities = self.client_capabilities
         forms = (
             capabilities is not None
@@ -675,6 +690,43 @@ class CoderACPAgent:
         options = need.options or []
         if sorted(option.lower() for option in options) == ["no", "yes"]:
             return await self._ask_yes_no(session, bridge, need.question, options)
+        return None
+
+    async def _ask_pool(self, session: Session, need: NeedInput, schema: dict[str, Any]) -> Any:
+        """Ask with Pool's ``_poolside/elicitation`` form; the result is as ``_ask``'s.
+
+        An answer that does not convert is asked once more with the error,
+        then left as text. A failed request turns Pool forms off for this
+        connection.
+        """
+        conn = self._require_conn()
+        question = f"{need.question}\n\n{need.reason}" if need.reason else need.question
+        message = question
+        for _attempt in range(2):
+            params = {
+                "sessionId": session.id,
+                "mode": "form",
+                "message": message,
+                "requestedSchema": schema,
+            }
+            response = await self._client_call(
+                session.id, conn.ext_method(_POOL_FORM_METHOD, params)
+            )
+            if response is _CANCELLED:
+                return response
+            if response is None:
+                self._pool_forms = False
+                return None
+            if not isinstance(response, dict) or response.get("action") != "accept":
+                return DECLINED, DECLINED_SOURCE
+            try:
+                return pool_answer(need, response.get("content")), SOURCE
+            except ValidationError as exc:
+                problems = "; ".join(
+                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                    for error in exc.errors()
+                )
+                message = f"{question}\n\nThat answer was not accepted: {problems}"
         return None
 
     async def _ask_yes_no(

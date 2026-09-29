@@ -22,7 +22,7 @@ from nooa_coder.session.items import (  # noqa: F401
     TaskResult,
 )
 from nooa_coder.session.loader import load_agent_class
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
@@ -57,6 +57,14 @@ class Answer(BaseModel):
     """A typed answer a scripted agent can ask for."""
 
     branch: str
+
+
+class Rollout(BaseModel):
+    """A typed answer with non-string fields a scripted agent can ask for."""
+
+    target: str = Field(description="Where to deploy")
+    replicas: int
+    dry_run: bool
 
 
 _counter = 0

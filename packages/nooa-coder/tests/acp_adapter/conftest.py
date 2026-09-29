@@ -17,12 +17,15 @@ class FakeClient:
     tests add the last kind), so tests can assert ordering across kinds.
     ``elicitation_answers`` and ``permission_answers`` are scripted replies,
     used in order; ``elicitation_gate`` (an Event) holds an elicitation open.
+    Extension requests are logged as ``("ext", method, params)`` and answered
+    from ``ext_answers`` (an exception there is raised).
     """
 
     def __init__(self) -> None:
         self.log: list[tuple[Any, ...]] = []
         self.elicitation_answers: list[Any] = []
         self.permission_answers: list[Any] = []
+        self.ext_answers: list[Any] = []
         self.elicitation_gate: asyncio.Event | None = None
         self.elicitation_started = asyncio.Event()
         self.changed = asyncio.Event()
@@ -43,6 +46,13 @@ class FakeClient:
     ) -> Any:
         self.log.append(("permission", session_id, tool_call, options))
         return self.permission_answers.pop(0)
+
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.log.append(("ext", method, params))
+        answer = self.ext_answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
 
     def updates(self, session_id: str | None = None, kind: type | None = None) -> list[Any]:
         return [
@@ -87,7 +97,7 @@ def client():
 async def make_adapter(client):
     """Build a ``CoderACPAgent`` over a registry of scripted-model agents.
 
-    ``make_adapter(models, agent_spec=..., capabilities=...)`` returns the
+    ``make_adapter(models, agent_spec=..., capabilities=..., client_info=...)`` returns the
     adapter, connected to ``client`` and initialized. Everything it built
     is closed after the test.
     """
@@ -105,13 +115,16 @@ async def make_adapter(client):
         llm_factory: Any = None,
         model: str | None = None,
         client_: Any = None,
+        client_info: Any = None,
     ) -> Any:
         def new_registry(store: Any) -> SessionRegistry:
             return SessionRegistry(store, agent_factory=models, llm_factory=llm_factory)
 
         adapter = CoderACPAgent(new_registry, agent_spec=agent_spec, model=model)
         adapter.on_connect(client_ or client)
-        await adapter.initialize(PROTOCOL_VERSION, client_capabilities=capabilities)
+        await adapter.initialize(
+            PROTOCOL_VERSION, client_capabilities=capabilities, client_info=client_info
+        )
         built.append(adapter)
         return adapter
 
