@@ -32,8 +32,6 @@ from nooa.interactive import (
     Done,
     InteractiveAgent,
     NeedInput,
-    RespondReason,
-    RespondResult,
     Waiting,
     apply_model_limits,
 )
@@ -381,7 +379,7 @@ class Session:
         """Give the running turn extra text; while idle this is ``submit(text)``.
 
         During a turn the text waits in a buffer that is flushed into a
-        ``Notification`` (``source="steer:<source>"``) right before the
+        ``Notification`` whose source names the sender right before the
         turn's next model call, so the model reads it in order with its own
         cell output. If no model call comes (the turn was already
         finishing), the text is admitted on ``user_messages`` when the turn
@@ -418,7 +416,9 @@ class Session:
             return
         steers, self._pending_steers = self._pending_steers, []
         for item_id, text, source in steers:
-            self.agent.event_manager.add(Notification(source=f"steer:{source}", description=text))
+            self.agent.event_manager.add(
+                Notification(source=_steer_source(source), description=text)
+            )
             self.handle.events.add(ItemConsumed(item_id=item_id))
             self._consumed.append(item_id)
 
@@ -1000,20 +1000,24 @@ class Session:
         return entries if limit is None else entries[-limit:]
 
 
+def _steer_source(source: str) -> str:
+    """The ``Notification.source`` sentence for a steer: who sent it."""
+    if source == "user":
+        return "New message from the user while you were working."
+    if source.startswith("parent:"):
+        name = source.removeprefix("parent:")
+        return f"New message from your parent agent {name} while you were working."
+    return f"New message from {source} while you were working."
+
+
 def _classify(result: Any) -> tuple[Any, OutcomeKind]:
-    """Map a turn method's return value to an outcome; ``RespondResult`` is the older form."""
+    """Map a turn method's return value to an outcome."""
     if isinstance(result, Done):
         return result, "done"
     if isinstance(result, NeedInput):
         return result, "need_input"
     if isinstance(result, Waiting):
         return result, "waiting"
-    if isinstance(result, RespondResult):
-        if result.kind is RespondReason.DONE:
-            return Done(explanation=result.explanation), "done"
-        if result.kind is RespondReason.WAIT:
-            return Waiting(explanation=result.explanation, on=["*"]), "waiting"
-        return NeedInput(question=result.explanation), "need_input"
     return TurnFailedError(f"turn returned {type(result).__name__}, not a turn result"), "error"
 
 

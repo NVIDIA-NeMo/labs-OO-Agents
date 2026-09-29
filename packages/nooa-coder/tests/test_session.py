@@ -293,9 +293,29 @@ async def test_steer_during_a_turn_reaches_the_next_model_call(make_session):
     assert "STEER-focus-on-tests" not in str(llm.calls[0].messages)
     assert "STEER-focus-on-tests" in str(llm.calls[1].messages)
     notes = [e for e in session.agent.event_manager.values() if isinstance(e, Notification)]
-    assert [(n.source, n.description) for n in notes] == [("steer:user", "STEER-focus-on-tests")]
+    assert [(n.source, n.description) for n in notes] == [
+        (
+            "New message from the user while you were working.",
+            "STEER-focus-on-tests",
+        )
+    ]
     user_lines = [e.content for e in session.transcript() if e.role == "user"]
     assert user_lines == ["write the parser", "STEER-focus-on-tests"]
+
+
+@pytest.mark.parametrize(
+    ("source", "sentence"),
+    [
+        ("user", "New message from the user while you were working."),
+        (
+            "parent:reviewer",
+            "New message from your parent agent reviewer while you were working.",
+        ),
+        ("host", "New message from host while you were working."),
+    ],
+)
+def test_a_steer_notification_names_its_sender(source, sentence):
+    assert session_module._steer_source(source) == sentence
 
 
 async def test_steer_after_the_last_model_call_becomes_the_next_message(make_session):
