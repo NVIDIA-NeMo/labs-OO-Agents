@@ -386,18 +386,16 @@ def provider_checks(
         "NOOA_TEST_OMITTED_REASONING", None
     )  # Optional A/B calls are outside the release budget.
     env.pop("OTLP_ENDPOINT", None)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    directory = Path(tempfile.mkdtemp(prefix="provider-validation-", dir=artifact_dir))
-    report = directory / "results.xml"
-    evidence = {
-        "outcome": "running",
-        "report": str(report),
-        "expected_cases": len(provider_cases()),
-    }
-    if manifest:
-        manifest.update(provider_validation=evidence)
+    evidence: dict[str, Any] = {"outcome": "running", "expected_cases": len(provider_cases())}
     step("Provider replay and cache checks (17 capped provider requests)")
+    directory = artifact_dir
     try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="provider-validation-", dir=artifact_dir))
+        report = directory / "results.xml"
+        evidence["report"] = str(report)
+        if manifest:
+            manifest.update(provider_validation=evidence)
         run(
             [
                 "uv",

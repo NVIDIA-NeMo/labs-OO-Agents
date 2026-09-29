@@ -992,6 +992,18 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
     assert len(calls) == 1
 
 
+def test_provider_gate_reports_unwritable_evidence_directory(mr, monkeypatch, tmp_path):
+    def unwritable(*_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(mr.tempfile, "mkdtemp", unwritable)
+    monkeypatch.setattr(mr, "run", lambda *_args, **_kwargs: pytest.fail("ran pytest"))
+    manifest = mr.ReleaseManifest(tmp_path / "manifest.json", {})
+    with pytest.raises(mr.ReleaseError, match="No space left on device"):
+        mr.provider_checks(tmp_path / "artifacts", manifest)
+    assert manifest.data["provider_validation"]["outcome"] == "failed"
+
+
 def test_provider_gate_cases_match_the_collected_live_tests(mr, tmp_path):
     """Renaming a test, module or family must change the gate's expected cases too."""
     report = tmp_path / "collected.xml"
