@@ -311,7 +311,9 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(
     assert resumed.usage is not None
     record_property("model", model_name)
     for phase, response in (("seed", seed), ("warm", warm), ("resumed", resumed)):
-        record_property(f"{phase}_usage", response.usage.model_dump_json())
+        record_property(
+            f"{phase}_usage", response.usage.model_dump_json() if response.usage else "null"
+        )
     print(
         json.dumps(
             {

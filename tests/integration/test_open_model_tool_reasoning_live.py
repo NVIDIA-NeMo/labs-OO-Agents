@@ -111,7 +111,7 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
             {
                 "family": family,
                 "phase": "seed",
-                "usage": seed.usage.model_dump(),
+                "usage": seed.usage.model_dump() if seed.usage else None,
                 "finish_reason": seed.finish_reason,
                 "reasoning_chars": len(seed.reasoning or ""),
             }
@@ -146,14 +146,16 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
     assert result.finish_reason == "stop"
     assert result.content
     record_property("model", model_name)
-    record_property("seed_usage", seed.usage.model_dump_json())
-    record_property("resumed_usage", result.usage.model_dump_json())
+    for phase, response in (("seed", seed), ("resumed", result)):
+        record_property(
+            f"{phase}_usage", response.usage.model_dump_json() if response.usage else "null"
+        )
     print(
         json.dumps(
             {
                 "family": family,
                 "phase": "resumed",
-                "usage": result.usage.model_dump(),
+                "usage": result.usage.model_dump() if result.usage else None,
                 "wire_reasoning_equal": True,
                 "sqlite_reasoning_equal": True,
             }
@@ -186,7 +188,11 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(
                     "only_reasoning_field_changed": True,
                     "error_type": error_type,
                     "finish_reason": omitted_result.finish_reason if omitted_result else None,
-                    "usage": omitted_result.usage.model_dump() if omitted_result else None,
+                    "usage": (
+                        omitted_result.usage.model_dump()
+                        if omitted_result and omitted_result.usage
+                        else None
+                    ),
                 }
             ),
             flush=True,
