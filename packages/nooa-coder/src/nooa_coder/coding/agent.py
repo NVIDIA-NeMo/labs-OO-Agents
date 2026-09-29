@@ -44,7 +44,7 @@ from nooa_coder.tools.repo_tools import RepoTools
 
 with hidden:
     from nooa.agents import TokenBudgetSummarizer
-    from nooa.runtime.channels import Channel, _ChannelReader
+    from nooa.runtime.channels import Channel, ChannelReader
     from nooa_coder.coding.conditions import require_result
     from nooa_coder.session.port import SessionPort
 
@@ -137,7 +137,7 @@ class CodingAgent(InteractiveAgent):
     _base_shell: Annotated[ShellTools, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _delegates_in: Annotated[Any, hidden, nosnapshot]
-    delegates: Annotated[_ChannelReader, nosnapshot]
+    delegates: Annotated[ChannelReader, nosnapshot]
     # The Session port, installed by the session that runs this agent. The
     # model uses the flat delegation methods below, not the port.
     session: Annotated[SessionPort | None, hidden, nosnapshot]
