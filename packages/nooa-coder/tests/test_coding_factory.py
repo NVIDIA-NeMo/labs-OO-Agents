@@ -350,7 +350,9 @@ def test_the_default_llm_factory_uses_the_workspace_default_model(workspace, mon
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")
     built: list[str] = []
-    monkeypatch.setattr(factory, "get_llm_client", lambda alias: built.append(alias) or alias)
+    monkeypatch.setattr(
+        factory, "workspace_llm_client", lambda alias, workspace: built.append(alias) or alias
+    )
     make = default_llm_factory()
     assert make(None, workspace) == "ws-model"
     assert make("named", workspace) == "named"
@@ -369,11 +371,11 @@ async def test_a_host_registry_builds_the_workspace_default_model(
     (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")
     built: list[TrackedLLM] = []
 
-    def fake_client(alias):
+    def fake_client(alias, workspace):
         built.append(TrackedLLM(alias, []))
         return built[-1]
 
-    monkeypatch.setattr(factory, "get_llm_client", fake_client)
+    monkeypatch.setattr(factory, "workspace_llm_client", fake_client)
     make = default_llm_factory()
     aliases: list[str | None] = []
 
