@@ -6,6 +6,7 @@ Provides some quickstart settings to get you started with some reasonable defaul
 
 import asyncio
 import os
+import sys
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -19,16 +20,14 @@ from nooa.unifiedllm.registry import get_llm_client
 # Load environment variables
 load_dotenv(override=True)
 
-# The examples run against any litellm-supported provider. By default they pick
-# whichever credential you have set (see the README's "API Keys"):
-#   * NVIDIA_API_KEY           -> NVIDIA build.nvidia.com NIM (public), served at
-#                                 integrate.api.nvidia.com (litellm `nvidia_nim/`)
-#   * OPENAI_API_KEY           -> OpenAI (public)
-#   * NOOA_QUICKSTART_MODEL    -> any registry alias or litellm model name, with
-#                                 its own key; installed bundled-config packages
-#                                 supply extra aliases through the registry
-# To use a specific model, set MODEL to any litellm name and provide its key,
-# e.g. MODEL = "claude-haiku-4-5" with ANTHROPIC_API_KEY.
+# The examples run against any litellm-supported provider. They use the first of:
+#   * NOOA_QUICKSTART_MODEL -> any registry alias or litellm model name. To set
+#                              up a model, run `uv run nooa connect`; it checks
+#                              the model and saves an alias, which you then name
+#                              here.
+#   * NVIDIA_API_KEY        -> NVIDIA build.nvidia.com NIM (public), served at
+#                              integrate.api.nvidia.com (litellm `nvidia_nim/`)
+#   * otherwise             -> OpenAI gpt-5-mini, which needs OPENAI_API_KEY
 if os.getenv("NOOA_QUICKSTART_MODEL"):
     MODEL = os.environ["NOOA_QUICKSTART_MODEL"]
     llm = get_llm_client(MODEL)
@@ -38,13 +37,15 @@ elif os.getenv("NVIDIA_API_KEY"):
     # pass NVIDIA_API_KEY (the build.nvidia.com convention) explicitly.
     MODEL = "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
     llm = get_llm_client(MODEL, api_key=os.environ["NVIDIA_API_KEY"])
-elif os.getenv("OPENAI_API_KEY"):
-    MODEL = "gpt-5-mini"
-    llm = get_llm_client(MODEL)
 else:
-    # No key set — default to OpenAI so the examples raise a clear
-    # missing-OPENAI_API_KEY error rather than a confusing one.
     MODEL = "gpt-5-mini"
+    if not os.getenv("OPENAI_API_KEY"):
+        print(
+            "No quickstart model is configured. Run `uv run nooa connect` to set up a "
+            "model, then set NOOA_QUICKSTART_MODEL to the alias it saves. Or set "
+            "OPENAI_API_KEY or NVIDIA_API_KEY.",
+            file=sys.stderr,
+        )
     llm = get_llm_client(MODEL)
 
 
