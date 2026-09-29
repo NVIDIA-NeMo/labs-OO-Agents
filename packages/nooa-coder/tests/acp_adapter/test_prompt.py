@@ -474,7 +474,10 @@ async def test_inject_is_advertised_for_the_router_too():
     from nooa_coder.acp.server import initialize_response
 
     meta = initialize_response(PROTOCOL_VERSION).agent_capabilities.field_meta
-    assert meta == {"dev.nooa/inject": {"queue": {}, "steer": {}, "revoke": {}}}
+    assert meta == {
+        "dev.nooa/inject": {"queue": {}, "steer": {}, "revoke": {}},
+        "poolside/session_steer": True,
+    }
 
 
 async def test_inject_queue_starts_a_turn_when_idle(make_adapter, workspace, client):
@@ -545,3 +548,60 @@ async def test_inject_checks_its_params(make_adapter, workspace):
             await adapter.ext_method("nooa/session/inject", params)
     with pytest.raises(RequestError):
         await _inject(adapter, "no-such-session", "queue", "x")
+
+
+# ---- _poolside/session_steer ---------------------------------------------------
+
+
+def _steer_params(session_id, text, input_id="steer-1"):
+    return {
+        "sessionId": session_id,
+        "inputId": input_id,
+        "prompt": [{"type": "text", "text": text}],
+    }
+
+
+async def test_a_pool_steer_reaches_the_running_turns_next_model_call(make_adapter, workspace):
+    started, block = fresh_events()
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Adjusted.")]})
+    adapter = await make_adapter(models)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("start")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    answer = await adapter.ext_method(
+        "poolside/session_steer", _steer_params(session_id, "use tabs", "steer-2")
+    )
+    assert answer == {"inputId": "steer-2"}
+    block.set()
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
+    assert "use tabs" in str(models.llms[None].calls[1].messages)
+    assert len(models.llms[None].calls) == 2
+    session = adapter.session(session_id)
+    assert [entry.content for entry in session.transcript() if entry.role == "user"] == [
+        "start",
+        "use tabs",
+    ]
+
+
+async def test_a_pool_steer_without_a_turn_is_queued(make_adapter, workspace, client):
+    adapter = await make_adapter(ScriptedModels({None: [reply("Got it.")]}))
+    session_id = await _new(adapter, workspace)
+    answer = await adapter.ext_method("poolside/session_steer", _steer_params(session_id, "hi"))
+    assert answer == {"inputId": "steer-1"}
+    await client.wait_for(lambda: "Got it." in client.texts(AgentMessageChunk, session_id))
+
+
+async def test_a_pool_steer_checks_its_params(make_adapter, workspace):
+    adapter = await make_adapter(ScriptedModels())
+    session_id = await _new(adapter, workspace)
+    with pytest.raises(RequestError) as unknown:
+        await adapter.ext_method("poolside/session_steer", _steer_params("no-such-session", "x"))
+    assert unknown.value.code == RequestError.resource_not_found("x").code
+    for params in (
+        {"sessionId": session_id, "prompt": [{"type": "text", "text": "x"}]},  # no inputId
+        {"sessionId": session_id, "inputId": "steer-1"},  # no prompt
+        _steer_params(session_id, "/usage"),  # a command is not steered
+    ):
+        with pytest.raises(RequestError) as invalid:
+            await adapter.ext_method("poolside/session_steer", params)
+        assert invalid.value.code == RequestError.invalid_params().code

@@ -84,6 +84,15 @@ injected message that nothing has taken yet and answers `{revoked: true}`.
 `agentCapabilities._meta["dev.nooa/inject"] = {"queue": {}, "steer": {}, "revoke": {}}`,
 from the router as well as in single-process mode.
 
+Pool steers with its own request. `initialize` also advertises
+`agentCapabilities._meta["poolside/session_steer"] = true`, and Pool then sends
+what the person types during a running prompt as `_poolside/session_steer`
+with `{sessionId, inputId, prompt}`. The text steers the running turn as in
+item 3 (queued when no turn is running), and the answer is `{inputId}`. A
+slash command is refused with `invalid_params`, since steered text is read by
+the model and the command would not run. The router routes the request by
+`sessionId` like any other session request.
+
 ## Lifetime
 
 - A worker runs in its own session and process group. Its standard input is

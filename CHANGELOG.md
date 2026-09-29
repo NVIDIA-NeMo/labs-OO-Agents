@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-coder`: the ACP server accepts Pool's steering. It advertises
+  `poolside/session_steer`, and a message typed in Pool during a running turn reaches
+  the turn's next model call (queued when no turn is running) instead of waiting in
+  Pool's queue.
 - `nooa-coder`: with Pool as the ACP client, free-text and typed questions (`NeedInput`)
   open Pool's form (`_poolside/elicitation`) instead of ending the turn as text. Typed
   fields are asked as strings and converted; a bad value is asked once more.

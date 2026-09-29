@@ -29,6 +29,13 @@ INJECT_CAPABILITY = {"dev.nooa/inject": {"queue": {}, "steer": {}, "revoke": {}}
 They follow the ACP RFD for message injection (agent-client-protocol PR #1261).
 """
 
+POOL_STEER_CAPABILITY = {"poolside/session_steer": True}
+"""``agentCapabilities._meta`` that makes Pool send ``_poolside/session_steer``.
+
+With it, Pool sends what the person types during a running turn as that
+request instead of keeping it in its own queue.
+"""
+
 
 def initialize_response(protocol_version: int) -> InitializeResponse:
     """The static answer to ``initialize``: what this agent supports.
@@ -55,7 +62,7 @@ def initialize_response(protocol_version: int) -> InitializeResponse:
                 list=SessionListCapabilities(),
                 close=SessionCloseCapabilities(),
             ),
-            field_meta=INJECT_CAPABILITY,
+            field_meta={**INJECT_CAPABILITY, **POOL_STEER_CAPABILITY},
         ),
         auth_methods=[],
         agent_info=Implementation(
@@ -118,4 +125,4 @@ async def open_stdio(
     return await stdio_streams(limit=DEFAULT_STDIO_BUFFER_LIMIT_BYTES)
 
 
-__all__ = ["INJECT_CAPABILITY", "initialize_response", "open_stdio"]
+__all__ = ["INJECT_CAPABILITY", "POOL_STEER_CAPABILITY", "initialize_response", "open_stdio"]

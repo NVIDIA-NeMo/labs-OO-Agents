@@ -261,6 +261,7 @@ async def test_initialize_is_answered_without_a_worker(harness):
         mode="json", by_alias=True, exclude_none=True, exclude_unset=True
     )
     assert frame.message == {"jsonrpc": "2.0", "id": 1, "result": expected}
+    assert frame.message["result"]["agentCapabilities"]["_meta"]["poolside/session_steer"]
     assert harness.spawned == []
 
 
@@ -360,6 +361,16 @@ async def test_two_sessions_get_two_workers_and_requests_route_by_session(harnes
     assert harness.workers[2].methods().count("session/prompt") == 1
     prompt = [f for f in harness.workers[2].received if f.method == "session/prompt"][0]
     assert prompt.session_id == "s2"
+
+
+async def test_a_pool_steer_goes_to_the_worker_of_its_session(harness):
+    await harness.initialize()
+    first, second = await harness.new_session(), await harness.new_session()
+    params = {"sessionId": second, "inputId": "steer-1", "prompt": []}
+    await harness.call("_poolside/session_steer", params)
+    assert harness.workers[1].methods().count("_poolside/session_steer") == 0
+    assert harness.workers[2].methods().count("_poolside/session_steer") == 1
+    assert first == "s1"
 
 
 async def test_worker_requests_reach_the_client_and_replies_route_back_by_id(harness):
