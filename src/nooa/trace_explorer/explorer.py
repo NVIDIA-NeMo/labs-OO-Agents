@@ -817,7 +817,7 @@ def _parse_execution_result(result_value: Any) -> tuple[str, Any, str | None]:
     Returns:
         Tuple of (stdout, returned_value, error_message)
     """
-    if not result_value:
+    if result_value is None:
         return "", None, None
 
     if isinstance(result_value, dict):
@@ -1247,7 +1247,7 @@ def _populate_session_turns_from_generation(
         else:
             # OI-first: code-exec output is ``output.value`` (same JSON as the
             # legacy ``result`` attr); fall back to ``result`` for old traces.
-            result_value = _io_decoded_value(attrs, "output", "result") or ""
+            result_value = _io_decoded_value(attrs, "output", "result")
             stdout, returned, error = _parse_execution_result(result_value)
             status_obj = span.get("status", {})
             error_msg = error or attrs.get("error.message") or status_obj.get("description")

@@ -11,9 +11,12 @@ import gc
 import itertools
 import json
 import resource
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from opentelemetry.sdk.trace import TracerProvider
@@ -134,6 +137,56 @@ def measure(serializer: Callable[[Any], str], value: Any, *, collect: bool = Tru
     return Measurement(elapsed_seconds=elapsed, output_chars=len(output))
 
 
+def measure_child(payload_kind: str, amount: int, serializer_name: str) -> dict[str, float | int]:
+    """Measure one serializer after payload allocation in an isolated process."""
+    serializers = serializer_variants()
+    if payload_kind == "native":
+        value = make_method_input(amount)
+    elif payload_kind == "entity":
+        value = make_entity_input(amount)
+    else:  # pragma: no cover - argparse constrains child invocations
+        raise ValueError(f"unknown payload kind: {payload_kind}")
+
+    gc.collect()
+    rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    result = measure(serializers[serializer_name], value, collect=False)
+    rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return {
+        "elapsed_seconds": result.elapsed_seconds,
+        "output_chars": result.output_chars,
+        "rss_growth_mib": (rss_after - rss_before) / 1024,
+    }
+
+
+def run_isolated(payload_kind: str, amount: int, serializer_name: str) -> dict[str, float | int]:
+    """Run one payload/serializer pair in a fresh interpreter."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--child-payload",
+            payload_kind,
+            "--child-amount",
+            str(amount),
+            "--child-serializer",
+            serializer_name,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def serializer_variants() -> dict[str, Callable[[Any], str]]:
+    """Return the serializer variants compared by the experiment."""
+    return {
+        "current": current_serializer,
+        "hook-before": hook_before_call,
+        "legacy": legacy_serializer,
+    }
+
+
 async def measure_event_loop_stall(value: Any) -> tuple[Measurement, float]:
     """Return serialization metrics and the largest delayed heartbeat."""
     stop = asyncio.Event()
@@ -187,46 +240,53 @@ def parse_args() -> argparse.Namespace:
         default=("current", "hook-before", "legacy"),
         help="Serializer variants to run (default: all)",
     )
+    parser.add_argument("--child-payload", choices=("native", "entity"), help=argparse.SUPPRESS)
+    parser.add_argument("--child-amount", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--child-serializer",
+        choices=("current", "hook-before", "legacy"),
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    serializers = {
-        "current": current_serializer,
-        "hook-before": hook_before_call,
-        "legacy": legacy_serializer,
-    }
-    selected_serializers = tuple((name, serializers[name]) for name in args.serializers)
-    print("size_mib exact_json_mib serializer elapsed_s output_chars max_rss_mib")
+    child_args = (args.child_payload, args.child_amount, args.child_serializer)
+    if any(value is not None for value in child_args):
+        if not all(value is not None for value in child_args):
+            raise SystemExit("all internal child arguments are required together")
+        print(json.dumps(measure_child(*child_args)))
+        return
+
+    selected_serializers = tuple(args.serializers)
+    print("size_mib exact_json_mib serializer elapsed_s output_chars rss_growth_mib")
     retained: dict[int, dict[str, Any]] = {}
     for size_mib in args.sizes_mib:
+        # Exact expansion is intentionally computed in the coordinator, never in
+        # a measured serializer process where it would contaminate peak RSS.
         value = make_method_input(size_mib)
         exact_json_mib = len(json.dumps(value)) / MIB
-        for name, serializer in selected_serializers:
-            result = measure(serializer, value)
-            max_rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        for name in selected_serializers:
+            result = run_isolated("native", size_mib, name)
             print(
                 f"{size_mib:8d} {exact_json_mib:14.2f} {name:13s} "
-                f"{result.elapsed_seconds:9.4f} {result.output_chars:12d} "
-                f"{max_rss_mib:11.1f}"
+                f"{result['elapsed_seconds']:9.4f} {result['output_chars']:12d} "
+                f"{result['rss_growth_mib']:14.1f}"
             )
         if size_mib == args.event_loop_mib:
             retained[size_mib] = value
         else:
             del value
 
-    print("entity_count serializer elapsed_s output_chars max_rss_mib")
+    print("entity_count serializer elapsed_s output_chars rss_growth_mib")
     for entity_count in args.entity_counts:
-        value = make_entity_input(entity_count)
-        for name, serializer in selected_serializers:
-            result = measure(serializer, value)
-            max_rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        for name in selected_serializers:
+            result = run_isolated("entity", entity_count, name)
             print(
-                f"{entity_count:12d} {name:13s} {result.elapsed_seconds:9.4f} "
-                f"{result.output_chars:12d} {max_rss_mib:11.1f}"
+                f"{entity_count:12d} {name:13s} {result['elapsed_seconds']:9.4f} "
+                f"{result['output_chars']:12d} {result['rss_growth_mib']:14.1f}"
             )
-        del value
 
     event_value = retained.get(args.event_loop_mib)
     if event_value is None:

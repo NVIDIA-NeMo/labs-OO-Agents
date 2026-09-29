@@ -10,10 +10,11 @@ from typing import Annotated, Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer
+from pydantic.fields import FieldInfo
 
 from nooa import hidden, spec
 from nooa.tracing._hooks_impl import OpenInferenceHooks
-from nooa.tracing._trace_json import Limits, trace_fields, trace_json
+from nooa.tracing._trace_json import Limits, _pydantic_fields, _State, trace_fields, trace_json
 
 
 def _parsed(value: Any, **limits: int) -> tuple[Any, tuple[str, ...], str]:
@@ -157,6 +158,19 @@ def test_pydantic_instance_attribute_hooks_are_not_called() -> None:
     armed = True
 
     assert json.loads(trace_json(value).text) == {"value": "visible"}
+
+
+def test_pre_2_10_pydantic_field_map_is_read_from_raw_namespace() -> None:
+    field = FieldInfo(annotation=str)
+
+    class LegacyModelLayout:
+        model_fields = {"value": field}
+
+    state = _State(Limits())
+
+    assert (
+        _pydantic_fields((LegacyModelLayout,), state) is LegacyModelLayout.__dict__["model_fields"]
+    )
 
 
 def test_pydantic_dict_descriptor_override_is_not_called() -> None:

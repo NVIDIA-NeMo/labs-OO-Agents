@@ -36,9 +36,12 @@ candidate entities, each containing nested trials with large outputs and metadat
 same candidate and trial are deliberately shared so the input consumes modest memory;
 the production serializer nevertheless formats them again at every list position.
 
-Key metrics are elapsed serialization time, output size, peak process RSS, and maximum
-asyncio heartbeat delay. Input sizes are estimates of the expanded JSON payload; exact
-encoded sizes are reported.
+Key metrics are elapsed serialization time, output size, serialization RSS growth, and
+maximum asyncio heartbeat delay. Every payload/serializer pair runs in a fresh child
+process. The child records its RSS high-water mark after payload allocation, so prior
+serializers and JSON-size calculation cannot contaminate the reported memory growth.
+Input sizes are estimates of the expanded JSON payload; exact encoded sizes are computed
+separately by the coordinator and reported.
 
 ## How to run
 

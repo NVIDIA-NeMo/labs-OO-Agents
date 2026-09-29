@@ -4,7 +4,9 @@
 
 import json
 
-from nooa.trace_explorer.explorer import _io_decoded_value, _io_json_field
+import pytest
+
+from nooa.trace_explorer.explorer import _io_decoded_value, _io_json_field, _parse_execution_result
 
 
 def _attributes() -> dict:
@@ -56,3 +58,16 @@ def test_io_decoding_obeys_mime_and_decodes_only_once():
     assert _io_decoded_value(json_string, "output") == '{"stdout": "literal"}'
     assert _io_decoded_value(plain_text, "output") == '{"stdout": "plain"}'
     assert _io_decoded_value(legacy, "output") == {"stdout": "legacy"}
+
+
+@pytest.mark.parametrize(
+    ("encoded", "decoded", "stdout"),
+    [("0", 0, "0"), ("false", False, "False"), ("[]", [], "[]")],
+)
+def test_falsy_json_execution_outputs_are_preserved(encoded, decoded, stdout):
+    attributes = {"output.value": encoded, "output.mime_type": "application/json"}
+
+    result = _io_decoded_value(attributes, "output", "result")
+
+    assert result == decoded
+    assert _parse_execution_result(result) == (stdout, None, None)

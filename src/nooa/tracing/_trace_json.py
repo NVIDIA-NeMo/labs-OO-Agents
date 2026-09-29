@@ -463,9 +463,14 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
         namespace = _raw_namespace(base)
         if namespace is None:
             return None
-        fields = namespace.get("__pydantic_fields__")
-        if fields is not None:
-            return fields if type(fields) is dict else None
+        # Pydantic stored the completed map directly as ``model_fields`` before
+        # 2.10, then moved it to ``__pydantic_fields__``. Read raw namespaces so
+        # neither layout invokes the metaclass descriptor exposed by newer
+        # releases.
+        for key in ("__pydantic_fields__", "model_fields"):
+            fields = namespace.get(key)
+            if fields is not None:
+                return fields if type(fields) is dict else None
     return None
 
 
