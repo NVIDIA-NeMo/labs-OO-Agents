@@ -87,3 +87,12 @@ def test_alias_without_api_base_fails_clearly(layers):
     reload_registry()
     with pytest.raises(pytest.fail.Exception, match="no api_base"):
         gate.gate_host("openai")
+
+
+def test_openai_cache_case_pins_the_responses_api(layers, monkeypatch):
+    """The case renders Responses input, so the alias must not choose the API style."""
+    from nooa.unifiedllm import ResponsesClient
+    from tests.integration.test_cache_resume_live import _client
+
+    monkeypatch.setenv("GATE_TEST_KEY", "unused")
+    assert isinstance(_client("openai"), ResponsesClient)

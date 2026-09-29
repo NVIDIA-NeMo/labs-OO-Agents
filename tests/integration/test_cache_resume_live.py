@@ -105,8 +105,10 @@ def _client(family):
         "retry_config": RetryConfig(max_retries=0, rate_limit_extra_retries=0),
     }
     if family == "openai":
+        # The case renders Responses input, so the API style is not the alias's choice.
         return gate_client(
             family,
+            client_type="responses",
             **config,
             reasoning={"effort": "medium"},
             include=["reasoning.encrypted_content"],
