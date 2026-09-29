@@ -626,7 +626,7 @@ class BashSession:
         if timed_out:
             proc = self._process
             if proc is not None:
-                recovered = await self._interrupt_and_recover(proc, sentinel, timeout)
+                recovered = await self._interrupt_and_recover(proc, sentinel, timeout, lines)
                 if not recovered:
                     self._diagnose_death("timeout_recovery_failed")
                     logger.warning("Timeout recovery failed — resetting session")
@@ -639,10 +639,12 @@ class BashSession:
         proc: asyncio.subprocess.Process,
         sentinel: str,
         original_timeout: float,
+        lines: list[str] | None = None,
     ) -> bool:
         """Kill child processes and wait for sentinel on control fd.
 
-        Graduated: SIGTERM children -> 5s -> SIGINT bash -> 2s.
+        Graduated: SIGTERM children -> 5s -> SIGINT bash -> 2s. Control lines
+        read before the sentinel (exit code, cwd) are appended to ``lines``.
         """
         ctrl = self._control_reader
         assert ctrl is not None
@@ -655,8 +657,11 @@ class BashSession:
                     return False
                 if not raw:
                     return False
-                if sentinel in raw.decode("utf-8", errors="replace"):
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if sentinel in line:
                     return True
+                if lines is not None:
+                    lines.append(line)
 
         async def kill_children(sig: int) -> None:
             killed_any = False

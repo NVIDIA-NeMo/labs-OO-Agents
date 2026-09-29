@@ -421,10 +421,9 @@ class ShellTools(Skill):
         stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
             run_cmd, timeout=timeout
         )
-        # Track cwd changes for read/replace/write_file path resolution
-        pwd_out, _, _, _ = await session.run_with_timeout_flag("pwd", timeout=5.0)
-        if pwd_out.strip():
-            self.cwd = Path(pwd_out.strip())
+        # The session reads the shell's directory in the same round trip; keep
+        # it for read/replace/write_file path resolution.
+        self.cwd = session.cwd
 
         matches: list[Match] | None = None
         # Match anchors are harvested from the shell's directory, so a search run
@@ -503,6 +502,7 @@ class ShellTools(Skill):
                 yield StreamEvent(kind=stream_name, text=chunk)
         finally:
             await stream.aclose()  # an early close stops the command
+        self.cwd = session.cwd
         yield StreamDone(kind="done", returncode=exit_code, timed_out=timed_out)
 
     @staticmethod

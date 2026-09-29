@@ -378,3 +378,50 @@ def test_run_documents_cwd_for_the_model():
     assert "cwd: str | Path | None = None" in rendered
     assert "cwd: Directory for this command only" in rendered
     assert "run(command, stdin=, timeout=, cwd=)" in doc(ShellTools)
+
+
+def _count_commands(shell):
+    """Record every script the shell's session sends to bash."""
+    sent = []
+    original = shell.session._send_and_wait
+
+    async def counting(script, sentinel, timeout):
+        sent.append(script)
+        return await original(script, sentinel, timeout)
+
+    shell.session._send_and_wait = counting
+    return sent
+
+
+async def test_run_follows_cd_with_one_command_per_call(sh, tmp_path):
+    """The directory comes from the command's own round trip, not a second ``pwd``."""
+    (tmp_path / "sub").mkdir()
+    try:
+        await sh.run("true")  # start the session before counting
+        sent = _count_commands(sh)
+        await sh.run("cd sub")
+        assert sh.cwd == (tmp_path / "sub").resolve()
+        assert len(sent) == 1
+    finally:
+        await sh.close()
+
+
+async def test_run_follows_cd_even_when_the_command_times_out(sh, tmp_path):
+    (tmp_path / "sub").mkdir()
+    try:
+        r = await sh.run("cd sub && sleep 20", timeout=0.5)
+        assert r.timed_out
+        assert sh.cwd == (tmp_path / "sub").resolve()
+    finally:
+        await sh.close()
+
+
+async def test_run_stream_follows_cd(sh, tmp_path):
+    (tmp_path / "sub").mkdir()
+    try:
+        [event async for event in sh.run_stream("cd sub")]
+        assert sh.cwd == (tmp_path / "sub").resolve()
+        (tmp_path / "sub" / "f.txt").write_text("here\n")
+        assert (await sh.read("f.txt")).text == "here\n"
+    finally:
+        await sh.close()
