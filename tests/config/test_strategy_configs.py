@@ -16,6 +16,7 @@ class TestCodeActConfig:
         c = CodeActConfig()
         assert c.max_iterations is None
         assert c.max_retries == 3
+        assert c.max_length_continuations == 3
         assert c.cell_timeout is None
         assert c.max_tokens is None
         assert c.temperature is None
@@ -26,6 +27,11 @@ class TestCodeActConfig:
         c = CodeActConfig()
         with pytest.raises(ValidationError):
             c.max_iterations = 5
+
+    def test_max_length_continuations_must_be_nonnegative(self):
+        assert CodeActConfig(max_length_continuations=0).max_length_continuations == 0
+        with pytest.raises(ValidationError):
+            CodeActConfig(max_length_continuations=-1)
 
     def test_merge_with(self):
         base = CodeActConfig()

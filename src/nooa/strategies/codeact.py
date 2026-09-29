@@ -29,6 +29,7 @@ from typing import (
     Annotated,
     Any,
     Literal,
+    NoReturn,
     get_args,
     get_origin,
 )
@@ -189,6 +190,53 @@ def _response_debug_details(response: LLMResponse) -> str:
     return "; ".join(parts)
 
 
+LENGTH_CONTINUATION_PROMPT = (
+    "Continue from exactly where you left off. Do not repeat text already produced."
+)
+
+LengthContinuationDecision = Literal[
+    "continue",
+    "reset",
+    "fail_empty",
+    "fail_tools",
+    "fail_bound",
+]
+
+
+def decide_length_continuation(
+    *,
+    finish_reason: str | None,
+    content: str,
+    has_tool_calls: bool,
+    continuation_count: int,
+    max_continuations: int,
+) -> LengthContinuationDecision:
+    """Decide whether a truncated assistant response should be continued.
+
+    Natural completion (any non-``length`` finish reason) resets the
+    consecutive-continuation counter. Empty content and tool-call-bearing
+    ``length`` responses keep the terminal error path. At most
+    *max_continuations* consecutive text continuations are allowed.
+    """
+    if finish_reason != "length":
+        return "reset"
+    if has_tool_calls:
+        return "fail_tools"
+    if not content.strip():
+        return "fail_empty"
+    if continuation_count >= max_continuations:
+        return "fail_bound"
+    return "continue"
+
+
+def _length_truncation_error() -> GenerationError:
+    return GenerationError(
+        "The model used all available output tokens before completing "
+        "a tool call. Increase `max_tokens` (16384 or more is often "
+        "needed for reasoning models such as GPT-5.5 and o-series)."
+    )
+
+
 # Small, deterministic expression subset accepted inside constructor-string
 # arguments.  The values supplied to these callables have already been reduced
 # to plain data by ``_safe_constructor_arg``; callbacks and object attributes
@@ -252,6 +300,8 @@ class CodeActSession:
     iteration: int = 0
     error_count: int = 0
     consecutive_text_only: int = 0
+    length_continuation_count: int = 0
+    length_segments: list[str] = field(default_factory=list)
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
@@ -286,6 +336,14 @@ class CodeActSession:
 
     def reset_text_only(self) -> None:
         self.consecutive_text_only = 0
+
+    def record_length_continuation(self, segment: str) -> None:
+        self.length_segments.append(segment)
+        self.length_continuation_count += 1
+
+    def reset_length_continuations(self) -> None:
+        self.length_continuation_count = 0
+        self.length_segments.clear()
 
     def record_output(self, execution_count: int, value: Any) -> None:
         """Record an execution output for Out[n] access."""
@@ -864,6 +922,75 @@ Standard Python builtins and agent instance (`self`) are available."""
             if session is not None:
                 await self._close_sandbox(session)
 
+    def _queue_length_continuation(
+        self,
+        session: CodeActSession,
+        runtime: RuntimeServices,
+        response: LLMResponse,
+    ) -> None:
+        """Record a truncated text segment and ask the model to resume."""
+        session.record_length_continuation(response.content)
+        get_harness_metrics().length_continuation(response.model_name)
+        runtime.event_manager.add(
+            DebugTrace(
+                content=(
+                    f"Length continuation {session.length_continuation_count}/"
+                    f"{self.config.max_length_continuations}: "
+                    f"{_response_debug_details(response)}"
+                )
+            )
+        )
+        runtime.event_manager.add(Error(content=LENGTH_CONTINUATION_PROMPT))
+        logger.debug(
+            "[CODEACT] Length continuation %s/%s for %s",
+            session.length_continuation_count,
+            self.config.max_length_continuations,
+            response.model_name or "unknown",
+        )
+
+    def _raise_length_truncation(
+        self,
+        session: CodeActSession,
+        runtime: RuntimeServices,
+        response: LLMResponse,
+        turn_state: _TurnState,
+    ) -> NoReturn:
+        """Abort the turn for an unrecoverable output-token truncation."""
+        session.record_error()
+        if not response.content and not response.tool_calls:
+            get_harness_metrics().empty_response()
+        runtime.event_manager.add(
+            DebugTrace(content=f"Truncated response: {_response_debug_details(response)}")
+        )
+        turn_state.is_final = True
+        raise _length_truncation_error()
+
+    def _apply_length_segments(
+        self,
+        session: CodeActSession,
+        runtime: RuntimeServices,
+        response: LLMResponse,
+        event_id: str | None,
+    ) -> LLMResponse:
+        """Stitch continued segments into an ephemeral response for downstream handling."""
+        segments = session.length_segments
+        if not segments or response.finish_reason == "error":
+            session.reset_length_continuations()
+            return response
+        metadata = {
+            "output_continued": True,
+            "segment_count": len(segments) + 1,
+            "continuation_note": (
+                "This reply was continued after the model hit the output-token limit."
+            ),
+        }
+        response.metadata.update(metadata)
+        if event_id:
+            runtime.event_manager.update(event_id, metadata=metadata)
+        stitched = "".join(segments) + response.content
+        session.reset_length_continuations()
+        return response.replace_text(stitched)
+
     async def _run_generation(
         self,
         runtime: RuntimeServices,
@@ -964,78 +1091,84 @@ Standard Python builtins and agent instance (`self`) are available."""
 
                 response = None
                 event_id = None
-                try:
-                    # generate() rebuilds the conversation from event_manager each call,
-                    # so events added in prior iterations change what the LLM sees.
-                    response, event_id = await runtime.generate(
-                        tools=tools,
-                        tool_choice=tool_choice,
-                        **self._build_sampling_kwargs(),
-                    )
-                except ReasoningReplayError:
-                    turn_state.is_final = True
-                    raise
-                except BlockSyntaxError as e:
-                    self._handle_block_syntax_error(e, session, runtime)
-                    continue
-
-                except Exception as e:
-                    # LLM API errors (rate limits, connection errors, timeouts, etc.)
-                    # Note: unifiedllm already has retry logic with exponential backoff
-                    # for 429, 500, 502, 503, 504 errors. This handles cases where
-                    # all retries are exhausted or the error is not retryable.
-                    session.record_error()
-                    error_name = type(e).__name__
-                    cause_parts = []
-                    exc: BaseException | None = e
-                    seen_ids: set[int] = set()
-                    while exc is not None and id(exc) not in seen_ids:
-                        seen_ids.add(id(exc))
-                        cause_parts.append(f"{type(exc).__name__}: {exc}")
-                        exc = exc.__cause__ or exc.__context__
-                    cause_chain = " <- ".join(cause_parts)
-                    error_msg = (
-                        f"LLM API error (attempt {session.error_count}/{session.max_retries}): "
-                        f"{cause_chain}"
-                    )
-                    get_harness_metrics().llm_api_error(cause_chain[:500])
-                    runtime.event_manager.add(Error(content=error_msg))
-                    logger.warning(
-                        f"[CODEACT] LLM API error (iter={session.iteration}, err={session.error_count}): "
-                        f"{cause_chain}",
-                        exc_info=True,
-                    )
-                    turn_state.exception = error_name
-                    if session.is_exhausted():
+                while True:
+                    try:
+                        # generate() rebuilds the conversation from event_manager each call,
+                        # so events added in prior iterations change what the LLM sees.
+                        response, event_id = await runtime.generate(
+                            tools=tools,
+                            tool_choice=tool_choice,
+                            **self._build_sampling_kwargs(),
+                        )
+                    except ReasoningReplayError:
                         turn_state.is_final = True
-                        raise GenerationError(
-                            f"LLM API error after {session.max_retries} retries. "
-                            f"Original error: {error_name}: {e}"
-                        ) from e
+                        raise
+                    except BlockSyntaxError as e:
+                        self._handle_block_syntax_error(e, session, runtime)
+                        response = None
+                        event_id = None
+                        break
+
+                    except Exception as e:
+                        # LLM API errors (rate limits, connection errors, timeouts, etc.)
+                        # Note: unifiedllm already has retry logic with exponential backoff
+                        # for 429, 500, 502, 503, 504 errors. This handles cases where
+                        # all retries are exhausted or the error is not retryable.
+                        session.record_error()
+                        error_name = type(e).__name__
+                        cause_parts = []
+                        exc: BaseException | None = e
+                        seen_ids: set[int] = set()
+                        while exc is not None and id(exc) not in seen_ids:
+                            seen_ids.add(id(exc))
+                            cause_parts.append(f"{type(exc).__name__}: {exc}")
+                            exc = exc.__cause__ or exc.__context__
+                        cause_chain = " <- ".join(cause_parts)
+                        error_msg = (
+                            f"LLM API error (attempt {session.error_count}/{session.max_retries}): "
+                            f"{cause_chain}"
+                        )
+                        get_harness_metrics().llm_api_error(cause_chain[:500])
+                        runtime.event_manager.add(Error(content=error_msg))
+                        logger.warning(
+                            f"[CODEACT] LLM API error (iter={session.iteration}, err={session.error_count}): "
+                            f"{cause_chain}",
+                            exc_info=True,
+                        )
+                        turn_state.exception = error_name
+                        if session.is_exhausted():
+                            turn_state.is_final = True
+                            raise GenerationError(
+                                f"LLM API error after {session.max_retries} retries. "
+                                f"Original error: {error_name}: {e}"
+                            ) from e
+                        response = None
+                        event_id = None
+                        break
+
+                    if response is None:
+                        break
+
+                    decision = decide_length_continuation(
+                        finish_reason=response.finish_reason,
+                        content=response.content,
+                        has_tool_calls=bool(response.tool_calls),
+                        continuation_count=session.length_continuation_count,
+                        max_continuations=self.config.max_length_continuations,
+                    )
+                    if decision == "continue":
+                        self._queue_length_continuation(session, runtime, response)
+                        continue
+                    if decision != "reset":
+                        self._raise_length_truncation(session, runtime, response, turn_state)
+                    response = self._apply_length_segments(
+                        session, runtime, response, event_id
+                    )
+                    break
 
                 # Skip rest of turn if LLM call failed
                 if response is None:
                     continue
-
-                # Output-limit responses are incomplete even when they carry
-                # partial text. Preserve the exact LLMResponse for diagnostics,
-                # but never let a text-only handler accept it as a successful
-                # result. Empty turns are filtered from provider projection.
-                if response.finish_reason == "length":
-                    session.record_error()
-                    if not response.content and not response.tool_calls:
-                        get_harness_metrics().empty_response()
-                    runtime.event_manager.add(
-                        DebugTrace(
-                            content=f"Truncated response: {_response_debug_details(response)}"
-                        )
-                    )
-                    turn_state.is_final = True
-                    raise GenerationError(
-                        "The model used all available output tokens before completing "
-                        "a tool call. Increase `max_tokens` (16384 or more is often "
-                        "needed for reasoning models such as GPT-5.5 and o-series)."
-                    )
 
                 # A provider-declared error is incomplete even if it includes
                 # partial text. Preserve that output for diagnostics, but do

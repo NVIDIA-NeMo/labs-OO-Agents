@@ -43,6 +43,10 @@ class CodeActConfig(BaseModel):
     # tool call before the run is aborted. A real tool call resets the counter.
     # Set to 0 to disable the guard.
     max_consecutive_text_only: int = 3
+    # Maximum consecutive output-token continuations when a text response is
+    # truncated with finish_reason="length". The counter resets on natural
+    # completion (stop) or a tool call. Set to 0 to disable auto-continuation.
+    max_length_continuations: int = Field(default=3, ge=0)
 
     @model_validator(mode="before")
     @classmethod
