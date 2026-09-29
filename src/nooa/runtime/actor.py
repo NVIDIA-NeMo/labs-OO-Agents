@@ -192,27 +192,6 @@ def _snapshot_llm_request(
     return _extract_trailing_context_envelope(messages)
 
 
-def _resolve_provider_formatter(llm_client: Any, default_formatter: Any) -> Any:
-    """Auto-select provider formatter based on LLM client type.
-
-    ResponsesClient needs ResponsesProviderFormatter to emit native Responses
-    API wire format.  All other clients (including Anthropic via LiteLLM) use
-    the agent's configured formatter.
-
-    This is intentionally runtime-dispatched rather than config-driven:
-    Anthropic formatting is handled by LiteLLM (so OpenAIProviderFormatter
-    works), but the Responses API has a fundamentally different wire shape
-    that LiteLLM does not translate, requiring its own formatter.
-    """
-    from nooa.unifiedllm import ResponsesClient
-
-    if isinstance(llm_client, ResponsesClient):
-        from nooa.context_blocks.formatter import ResponsesProviderFormatter
-
-        return ResponsesProviderFormatter()
-    return default_formatter
-
-
 # ---------------------------------------------------------------------------
 # Shared collapse/archival helpers (L4 boundary + error-driven archival)
 # ---------------------------------------------------------------------------
@@ -339,11 +318,17 @@ def _parse_context_window_tokens(exc: BaseException) -> int | None:
     return None
 
 
-def _context_window_for_error(llm_client: Any, exc: BaseException) -> int | None:
+def _context_window_for_error(
+    llm_client: Any, exc: BaseException, params: dict[str, Any] | None = None
+) -> int | None:
     """Return the provider-reported context window, falling back to the client."""
     reported = _parse_context_window_tokens(exc)
     if reported:
         return reported
+    if params is not None:
+        from nooa.unifiedllm.limits import context_limits_for
+
+        return context_limits_for(llm_client, params).context_window
     return getattr(llm_client, "context_window", None)
 
 
@@ -364,6 +349,8 @@ def _compute_reduced_max_tokens(
         reduced = original_max_tokens // 2
     else:
         return None
+    if original_max_tokens:
+        reduced = min(reduced, original_max_tokens)
     if reduced < _MIN_RECOVERY_OUTPUT_TOKENS:
         return None
     return reduced
@@ -889,6 +876,8 @@ class ActorRuntime:
         if self._current_method is None:
             raise RuntimeError("generate() called with no current method context")
 
+        from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
+
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
@@ -898,7 +887,7 @@ class ActorRuntime:
             call_args=self._current_call.args if self._current_call else (),
             call_kwargs=self._current_call.kwargs if self._current_call else {},
             tools=tools,
-            max_output_tokens=kwargs.get("max_tokens"),
+            request_params=kwargs,
         )
         _gen_hm = get_harness_metrics()
 
@@ -968,6 +957,7 @@ class ActorRuntime:
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
+                    self._update_context_limits(ctx.client, ctx.params)
                     # Tracing hook fires AFTER middleware pre-processing,
                     # so it sees the final (possibly modified) messages.
                     call_before_hook(
@@ -1004,7 +994,7 @@ class ActorRuntime:
                             raise
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc)
+                        _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
                         self._archive_on_context_error(
                             _ctx_window,
                             exc=_cw_exc,
@@ -1012,7 +1002,7 @@ class ActorRuntime:
                         _reduced = _compute_reduced_max_tokens(
                             _cw_exc,
                             _ctx_window,
-                            ctx.params.get("max_tokens"),
+                            context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
                         )
                         if _reduced is None:
                             raise
@@ -1023,17 +1013,18 @@ class ActorRuntime:
                         )
                         # Re-build messages after archival so the retry sees the
                         # reduced event store.
+                        ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
                         ctx.messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=ctx.params.get("tools"),
-                            max_output_tokens=_reduced,
+                            request_params=ctx.params,
+                            llm_client=ctx.client,
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, ctx.messages, current_generation_id or ""
                         )
-                        ctx.params["max_tokens"] = _reduced
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
@@ -1086,7 +1077,7 @@ class ActorRuntime:
                             raise
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc)
+                        _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
                         self._archive_on_context_error(
                             _ctx_window,
                             exc=_cw_exc,
@@ -1094,7 +1085,7 @@ class ActorRuntime:
                         _reduced = _compute_reduced_max_tokens(
                             _cw_exc,
                             _ctx_window,
-                            kwargs.get("max_tokens"),
+                            context_limits_for(llm_client, _kwargs).reserved_output_tokens,
                         )
                         if _reduced is None:
                             # Can't compute a reduced max_tokens, but archival already ran.
@@ -1111,19 +1102,19 @@ class ActorRuntime:
                         # Re-build messages after archival so the retry sees the
                         # reduced event store. Retrying with the same messages would
                         # fail again when input tokens exceed the context window.
+                        _recovery_kw = reduced_reply_params(llm_client, _kwargs, _reduced)
                         messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=tools,
-                            max_output_tokens=_reduced,
+                            request_params=_recovery_kw,
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, messages, current_generation_id or ""
                         )
                         # Reuse _kwargs (already has the per-(agent, strategy) key set)
                         # so recovery lands on the same shard as the original attempt.
-                        _recovery_kw = {**_kwargs, "max_tokens": _reduced}
                         response = await llm_client.acall(
                             messages,
                             tools=tools,
@@ -2663,10 +2654,8 @@ class ActorRuntime:
 
                 # Use the call_id already pushed by the wrapper so events added
                 # during this call have metadata["call_id"] matching the agent
-                # call stack.  NOTE: strategies may later mutate call.id (e.g.
-                # CodeActStrategy sets it to the task event tag), so
-                # _prepare_context uses _agent_call_id (the stack value) for
-                # EventQuery.current_call() filtering, not current_call.id.
+                # call stack and runtime.current_call.id. CodeAct stores its
+                # display-only Task event tag separately on call.task_tag.
                 call_id = self._agent_call_id or str(uuid4())
                 call = CurrentCall(
                     id=call_id,
@@ -2925,6 +2914,22 @@ class ActorRuntime:
 
         return build_result.blocks
 
+    def _update_context_limits(self, llm_client: Any, params: dict[str, Any]):
+        """Refresh budgets before dynamic context is rendered or a call is sent."""
+        from nooa.unifiedllm.limits import context_limits_for
+
+        fallback = self.truncation_config.response_reserve_tokens
+        limits = context_limits_for(llm_client, params, fallback_reserve=fallback)
+        if self._last_context_stats is not None:
+            self._last_context_stats = self._last_context_stats.model_copy(
+                update={
+                    "model_context_window": limits.context_window,
+                    "reserved_output_tokens": limits.reserved_output_tokens,
+                    "output_reserve_is_fallback": limits.reserve_is_fallback,
+                }
+            )
+        return limits
+
     async def _build_messages(
         self,
         method: Any,
@@ -2933,6 +2938,8 @@ class ActorRuntime:
         *,
         tools: list[Any] | None = None,
         max_output_tokens: int | None = None,
+        request_params: dict[str, Any] | None = None,
+        llm_client: Any = None,
     ) -> list[dict[str, Any]]:
         """Build messages for LLM API.
 
@@ -2945,32 +2952,29 @@ class ActorRuntime:
         stay as render_context fallback until provider usage is written after a
         successful call.
 
-        ``max_output_tokens`` is the completion budget of the upcoming call
-        (``kwargs["max_tokens"]`` at the generate() call site, or the reduced
-        value during context-window recovery). It is reserved out of the model
-        window for budgeting and utilization: the provider rejects any request
-        where prompt + completion budget exceeds the window, so the usable
-        input window is ``context_window - reserve``. When the call does not
-        set ``max_tokens`` explicitly, providers shrink the completion budget
-        to fit and no hard reserve applies — we then fall back to the
-        configured ``TruncationConfig.response_reserve_tokens`` as a planning
-        reserve (0 disables).
+        UnifiedLLM resolves the effective output allowance from client settings,
+        the selected reasoning level and ``request_params``. The usable window
+        is ``context_window - reserve``. Only an unknown cap falls back to the
+        truncation configuration's explicitly labelled planning reserve.
+        ``max_output_tokens`` is retained for direct callers of this helper.
         """
+        llm_client = llm_client if llm_client is not None else _current_llm_var.get()
+        params = dict(request_params or {})
+        if max_output_tokens is not None:
+            params["max_tokens"] = max_output_tokens
+        limits = self._update_context_limits(llm_client, params)
         hm = get_harness_metrics()
         with hm.timer("time_prepare_context"):
             blocks = await self._prepare_context(method, call_args, call_kwargs)
         tc = self.agent._truncation
-        llm_client = _current_llm_var.get()
 
         effective_context_limit = tc.max_context_tokens
-        ctx_window = getattr(llm_client, "context_window", None)
+        ctx_window = limits.context_window
 
         # Output-token reserve (see docstring). Per-call max_tokens is the
         # binding constraint when set; otherwise the configured planning
         # reserve.
-        reserved_output = max_output_tokens
-        if not reserved_output:
-            reserved_output = tc.response_reserve_tokens or None
+        reserved_output = limits.reserved_output_tokens
 
         # Default (unconfigured) context budget: up to half the USABLE window
         # (model window minus the output reserve).
@@ -2996,18 +3000,15 @@ class ActorRuntime:
             return round(len(text) * ratio)
 
         with hm.timer("time_render_context"):
-            provider_formatter = _resolve_provider_formatter(
-                llm_client, self.agent.render_config.provider_formatter
-            )
             result = render_context(
                 blocks,
                 block_formatter=self.agent.render_config.block_formatter,
-                provider_formatter=provider_formatter,
+                provider_formatter=self.agent.render_config.provider_formatter,
                 context_limit=effective_context_limit,
                 count_tokens=count_tokens,
                 event_format=tc.event_format,
                 event_format_resolver=self._event_format_for_event,
-                model_context_window=getattr(llm_client, "context_window", None),
+                model_context_window=ctx_window,
                 reserved_output_tokens=reserved_output,
             )
 
@@ -3036,6 +3037,8 @@ class ActorRuntime:
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
         messages = result.output
-        self._last_context_stats = result.stats
+        self._last_context_stats = result.stats.model_copy(
+            update={"output_reserve_is_fallback": limits.reserve_is_fallback}
+        )
         self._last_prompt_tokens_actual = None
         return messages

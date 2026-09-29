@@ -3,13 +3,11 @@
 """Tests for provider formatter image rendering.
 
 Verifies that PythonOutput events with images produce multi-part content
-in both OpenAI and Anthropic message formats. Both use LiteLLM's universal
-image_url format — no provider-specific conversion needed.
+using LiteLLM's universal image_url format — no provider-specific conversion.
 """
 
 from nooa.context_blocks.events import ResultStatus
 from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
     OpenAIProviderFormatter,
     XMLBlockFormatter,
 )
@@ -23,14 +21,6 @@ def _render_openai(blocks: list[ResolvedBlock]) -> list[dict]:
         blocks,
         block_formatter=XMLBlockFormatter(),
         provider_formatter=OpenAIProviderFormatter(),
-    ).output
-
-
-def _render_anthropic(blocks: list[ResolvedBlock]) -> dict:
-    return render_context(
-        blocks,
-        block_formatter=XMLBlockFormatter(),
-        provider_formatter=AnthropicProviderFormatter(),
     ).output
 
 
@@ -85,28 +75,6 @@ class TestOpenAIProviderFormatterImages:
         msg = result[1]
         assert isinstance(msg["content"], list)
         assert len(msg["content"]) == 3  # text + 2 images
-
-
-class TestAnthropicProviderFormatterImages:
-    def test_no_images_plain_content(self):
-        block = _make_python_output_block(stdout="hello", images=[])
-        result = _render_anthropic([block])
-        msg = result["messages"][0]
-        assert isinstance(msg["content"], str)
-
-    def test_with_images_uses_universal_format(self):
-        """Anthropic formatter uses LiteLLM's universal image_url format — LiteLLM converts."""
-        image_block = {
-            "type": "image_url",
-            "image_url": {"url": "data:image/png;base64,AAAA", "format": "image/png"},
-        }
-        block = _make_python_output_block(stdout="analyzed", images=[image_block])
-        result = _render_anthropic([block])
-        msg = result["messages"][0]
-        assert isinstance(msg["content"], list)
-        assert msg["content"][0]["type"] == "text"
-        assert "analyzed" in msg["content"][0]["text"]
-        assert msg["content"][1] == image_block
 
 
 class TestPlainFormatterExcludesImages:

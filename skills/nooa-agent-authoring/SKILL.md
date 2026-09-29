@@ -1,6 +1,6 @@
 ---
 name: nooa-agent-authoring
-description: Author agents with NVIDIA-labs Object Oriented Agents (NOOA). Use when configuring model registry entries or reasoning levels, writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
+description: Author agents with NVIDIA-labs Object Oriented Agents (NOOA). Use when writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
 compatibility: 'Python >= 3.12, uv, nooa package (CLI: nooa)'
 ---
 
@@ -43,104 +43,11 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 
 ## LLM clients and cascading
 
-```python
-from nooa.unifiedllm import get_llm_client, CompletionClient, RetryConfig
-
-llm = get_llm_client("gpt-4o-mini")                        # any litellm name passes through (needs provider key)
-llm = get_llm_client("qwen3.5-397b")                       # registry alias (public NIM via NVIDIA_API_KEY from build.nvidia.com)
-llm = get_llm_client("gpt-4o-mini", retry_config=RetryConfig(max_retries=5))  # retries default ON (max_retries=3)
-llm = CompletionClient(model="m", base_url="https://.../v1", api_key="...")  # any OpenAI-compatible endpoint
-```
-
-**Registry:** YAML has a top-level `models` mapping from aliases to entries with
-`model_name`, optional `api_base`, and `api_key_env`. Use `client_type: responses`
-for a Responses client. The framework discovers `llm_config.yaml` files and
-optional bundled configuration packages; NOOA does not ship a provider catalog.
-Inspect the actual paths with `from nooa.llm_config import llm_config_chain`.
-Inspect or refresh entries with
-`from nooa.unifiedllm.registry import reload_registry; configs = reload_registry()`.
-To load a specific file instead of discovery, pass its `Path` to `reload_registry`.
-
-Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
-
-**Caching:** the cached renderer inserts a `CacheBoundary()` block before live
-context. This UnifiedLLM type passes through the formatter in the message list,
-like `LLMResponse`; consumers do not translate its contents. Its public JSON
-view is `{"role": "metadata", "nooa_cache_boundary": true}`. Here `metadata`
-means a framework control record, not a system/user/assistant message for the
-model. UnifiedLLM consumes the boundary before provider dispatch and maps it to
-the selected provider's cache settings; the metadata record itself never goes
-to the model. Direct callers can put `CacheBoundary()` in their history too.
-`cache_breakpoint="auto"` is the default for both clients; no registry cache
-setting is needed. Completion marks recognized Anthropic routes and leaves other
-Chat caches implicit. Responses uses explicit caching when a boundary and eligible
-stable input exist, otherwise provider-default caching. `None` opts out of NOOA
-markers, not the provider's implicit caching. Explicit `"openai"`/`"anthropic"`
-settings force a mapping. Without a boundary, Completion and forced explicit
-Responses policies cache only leading instructions; automatic Responses adds no fields.
-`cache_control_injection_points` is removed; see
-[stable-prefix caching](../../docs/stable-prefix-caching.md) for migration and
-direct-call examples.
-
-### Configuring reasoning levels
-
-Declare choices for the **configured route**, not a model family inferred from
-its name. Each `reasoning_levels` label maps to exact request parameters;
-selection replaces whole top-level values, with no nested merge. Repeat any
-nested settings that must survive a level change.
-
-For a Responses route that accepts this request shape, adapt this
-`llm_config.yaml` example (replace the placeholder model and configure its key):
-
-```yaml
-models:
-  my-route:
-    model_name: openai/your-model
-    client_type: responses
-    reasoning: {effort: medium, summary: auto}
-    reasoning_default: medium
-    reasoning_levels:
-      low: {reasoning: {effort: low, summary: auto}}
-      medium: {reasoning: {effort: medium, summary: auto}}
-      high: {reasoning: {effort: high, summary: auto}}
-```
-
-```python
-from pathlib import Path
-from nooa.unifiedllm import get_llm_client
-from nooa.unifiedllm.registry import reload_registry
-
-reload_registry(Path("llm_config.yaml"))
-llm = get_llm_client("my-route", reasoning_level="high")  # persistent selection
-levels = llm.reasoning_levels
-default = llm.reasoning_default
-# Pass llm to an Agent through the normal cascade below.
-# For a direct UnifiedLLM call, override only this request:
-reply = await llm.acall(messages, reasoning_level="low")
-```
-
-- Omit `reasoning_levels` (or use null) for unknown support; `{}` declares
-  selection unsupported. The public property returns `None`, `()`, or a tuple
-  of valid labels respectively. Invalid selections raise, naming the choices.
-- `reasoning_default` is metadata, not a selection: if supplied it must name
-  a declared level and describe the base configuration. `reasoning_level=None`
-  on a call bypasses a persistent selection and uses those base parameters.
-- Declare levels/defaults on the registry entry or client constructor, never
-  per-call or in `extra_body`. Do not combine a selected level with a per-call
-  raw setting of the same key (including inside `extra_body`); that raises.
-  Level blocks cannot change routing, credentials, messages or framework controls.
-  Construct a new client when changing routes rather than reusing its level map.
-- Use provider documentation or catalogues as candidates, then check the actual
-  route's outgoing HTTP fields: SDKs and gateways may reject or silently drop
-  settings. HTTP acceptance alone does not prove a level was honored. Leave
-  unverified choices unknown rather than inventing mappings.
-- This controls effort, not retention of stored reasoning. Changing effort may
-  invalidate the cached prefix; labels are not comparable across providers.
-
-See [reasoning-level configuration](../../docs/reasoning-levels.md) for reserved
-keys, transport caveats, and bounded validation commands. The
-`examples/reasoning_levels/llm_config.yaml` entries require explicit loading;
-they are not automatically available registry aliases.
+Use an already configured registry alias with `get_llm_client("my-model")`.
+For endpoint setup, credentials, registry edits, reply budgets, reasoning-level
+configuration, caching or Connect diagnostics, use
+[nooa-model-configuration](../nooa-model-configuration/SKILL.md).
+The rest of this section covers how an agent selects and inherits its client.
 
 **Resolution cascade** for which LLM a method uses — first match wins:
 

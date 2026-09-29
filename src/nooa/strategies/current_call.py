@@ -8,7 +8,7 @@ Captures all context needed by strategies to generate code for a method call.
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, get_type_hints
 from uuid import uuid4
 
 from nooa.ellipsis_detection import get_pre_ellipsis_code
@@ -17,12 +17,20 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
 
 
-@dataclass(frozen=True)
+@dataclass
 class CurrentCall:
     """Represents a method call being generated.
 
-    This is an immutable snapshot of a method invocation, containing
-    all the context a strategy needs to generate code.
+    This is a mutable per-invocation record: strategies bind its task tag and
+    execution namespace during setup. Do not change ``id`` while using the call
+    as a set member or dictionary key; equality and hashing use that ID.
+    ``session_locals`` is the optional caller-owned seed/writeback dictionary for
+    carrying names between invocations. CodeAct copies it into a fresh execution
+    namespace and writes filtered names back when the call completes.
+    ``execution_locals`` refers to that live per-invocation namespace, including
+    names created by earlier cells and session internals such as ``Out``. Dynamic
+    context blocks use it while the call is running; it exists even when the caller
+    did not provide ``session_locals``. Strategies without a REPL may leave it unset.
 
     Attributes:
         id: Unique identifier for this call (for correlation/tracing).
@@ -60,7 +68,14 @@ class CurrentCall:
     is_async: bool = False
     return_type: type | None = None
     pre_ellipsis_code: str | None = None
-    session_locals: dict[str, Any] | None = None
+    session_locals: Annotated[
+        dict[str, Any] | None,
+        "Optional caller-owned seed/writeback state across invocations; not the live REPL namespace",
+    ] = None
+    execution_locals: Annotated[
+        dict[str, Any] | None,
+        "Live per-invocation REPL namespace for dynamic context, including new cell names and internals",
+    ] = None
     # Per-parameter spec overrides extracted from Annotated metadata.
     # Each value is a dict of kwargs from spec() — e.g. {"max_length": 20,
     # "max_string": 500}. Used by format_parameters_as_code to override the
@@ -71,6 +86,8 @@ class CurrentCall:
     # avoids re-parsing the stringified signature (which can't reliably split on
     # commas inside Annotated[...]/defaults).
     param_names: list[str] | None = None
+    # Display tag of CodeAct's Task event, separate from the correlation UUID.
+    task_tag: str | None = None
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""

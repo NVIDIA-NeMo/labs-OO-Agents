@@ -10,7 +10,6 @@ evaluation, no class — just a pure function.
 import pytest
 
 from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
     MarkdownBlockFormatter,
     OpenAIProviderFormatter,
     XMLBlockFormatter,
@@ -189,30 +188,6 @@ class TestRenderContextMarkdown:
         system_content = result[0]["content"]
         assert "# Instructions" in system_content
         assert "Follow these rules." in system_content
-
-
-class TestRenderContextAnthropic:
-    """Anthropic provider formatter tests."""
-
-    def test_anthropic_format(self):
-        """render_context() produces Anthropic-style output."""
-        blocks = [
-            ResolvedBlock(key="persona", content="Be helpful."),
-            ResolvedBlock(key="msg", content="Hello", role=Role.USER),
-        ]
-
-        result = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=AnthropicProviderFormatter(),
-        ).output
-
-        assert isinstance(result, dict)
-        assert "system" in result
-        assert "messages" in result
-        assert "Be helpful." in result["system"]
-        assert len(result["messages"]) == 1
-        assert result["messages"][0]["role"] == "user"
 
 
 class TestRenderContextToolCalls:

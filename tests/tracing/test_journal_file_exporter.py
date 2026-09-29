@@ -105,6 +105,64 @@ async def test_journal_file_is_stripped_and_import_reconstructs_messages(tmp_pat
         backend.stop()
 
 
+def test_journal_file_records_failed_call_input(tmp_path: Path):
+    import hashlib
+
+    import litellm
+    from opentelemetry import trace as otel_trace
+
+    from nooa.tracing import enable_tracing, exporters, flush_traces, set_session
+    from nooa.tracing._context_sideband import JournalPayload, set_journal_payload
+
+    enable_tracing(exporters=[exporters.journal_file(tmp_path)])
+    session_id = "failed-portable-journal"
+    set_session(session_id)
+    input_text = "PROMPT THAT CAUSED THE FAILURE"
+    input_hash = "sha256:" + hashlib.sha256(input_text.encode()).hexdigest()
+    payload = JournalPayload(
+        skeleton=[{"role": "user", "parts": [{"block_hash": input_hash}]}],
+        blocks={input_hash: input_text},
+    )
+    callback = next(
+        callback
+        for callback in litellm.callbacks
+        if type(callback).__name__ == "FileMessageJournalCallback"
+    )
+    kwargs = {"litellm_call_id": "failed-portable-call", "model": "gpt-3.5-turbo"}
+    messages = [{"role": "user", "content": input_text}]
+    tracer = otel_trace.get_tracer(__name__)
+    now = datetime.now(UTC)
+
+    with tracer.start_as_current_span("acompletion") as span:
+        span.set_attribute("openinference.span.kind", "LLM")
+        set_journal_payload(payload)
+        callback.log_pre_api_call("gpt-3.5-turbo", messages, kwargs)
+        span_id = format(span.get_span_context().span_id, "016x")
+        callback.log_failure_event(kwargs, RuntimeError("provider failed"), now, now)
+    flush_traces()
+
+    artifact = tmp_path / f"{session_id}.nooa.jsonl"
+    bodies = [json.loads(line) for line in artifact.read_text().splitlines()]
+    calls = [
+        body["nooaJournal"]["call"]
+        for body in bodies
+        if body.get("nooaJournal", {}).get("type") == "call"
+    ]
+    assert calls == [
+        {
+            "call_id": "failed-portable-call",
+            "session_id": session_id,
+            "model": "gpt-3.5-turbo",
+            "ts_start": now.timestamp(),
+            "ts_end": now.timestamp(),
+            "input_skeleton": payload.skeleton,
+            "output_messages": [],
+            "tokens": None,
+            "span_id": span_id,
+        }
+    ]
+
+
 def test_harbor_import_posts_journal_with_trial_session(monkeypatch, tmp_path: Path):
     from nooa_cli.commands import import_harbor
 

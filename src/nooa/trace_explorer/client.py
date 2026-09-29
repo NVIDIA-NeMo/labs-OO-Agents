@@ -16,9 +16,26 @@ Usage:
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
+
+from nooa.tracing._viewer_auth import apply_viewer_auth
+
+
+def _viewer_headers(url: str) -> dict[str, str]:
+    """Keep viewer/exporter HTTP compatibility while warning about cleartext auth."""
+    headers = apply_viewer_auth({})
+    if headers and urlsplit(url).scheme != "https":
+        warnings.warn(
+            "Viewer bearer authentication over HTTP is unencrypted. "
+            "Use HTTPS or a trusted local connection/tunnel.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return headers
 
 
 class TraceExplorerClient:
@@ -27,6 +44,10 @@ class TraceExplorerClient:
     Has the same public async API as TraceExplorer but executes all
     analysis server-side, avoiding the need to download and parse
     all spans locally.
+
+    HTTPS is recommended for bearer authentication. HTTP remains supported for
+    compatibility with the viewer and exporters, with an unencrypted-auth warning.
+    Proxy and NO_PROXY settings follow httpx's environment handling.
     """
 
     def __init__(self, base_url: str, session_id: str, *, timeout: float = 60.0):
@@ -58,7 +79,10 @@ class TraceExplorerClient:
         if params:
             all_params.update(params)
 
-        async with httpx.AsyncClient(timeout=self._timeout, trust_env=False) as client:
+        # Honor HTTP(S)_PROXY and NO_PROXY, just like the viewer loaders.
+        async with httpx.AsyncClient(
+            timeout=self._timeout, headers=_viewer_headers(self._base_url)
+        ) as client:
             try:
                 resp = await client.get(url, params=all_params)
                 if resp.status_code == 404:

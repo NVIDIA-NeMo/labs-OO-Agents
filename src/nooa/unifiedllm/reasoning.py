@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from nooa.unifiedllm.limits import REPLY_CAP_KEYS
+
 _DECLARATIONS = {"reasoning_levels", "reasoning_default"}
 # These select the client/request itself, not a provider's effort behavior.
 _RESERVED = _DECLARATIONS | {
@@ -70,6 +72,35 @@ class ReasoningConfig(BaseModel):
         return deepcopy(self.levels[level])
 
 
+def _replace_reply_cap(params: dict[str, Any], settings: dict[str, Any]) -> None:
+    """A cap override replaces all inherited spellings, including extra_body."""
+    extra = settings.get("extra_body")
+    supplied = {**settings, **(extra if isinstance(extra, Mapping) else {})}
+    keys = REPLY_CAP_KEYS & supplied.keys()
+    if not keys:
+        return
+    if len(keys) > 1:
+        raise ValueError("Use only one reply token limit field per configuration layer")
+    for key in REPLY_CAP_KEYS:
+        params.pop(key, None)
+    inherited_extra = params.get("extra_body")
+    if isinstance(inherited_extra, Mapping):
+        params["extra_body"] = {k: v for k, v in inherited_extra.items() if k not in REPLY_CAP_KEYS}
+
+
+def _promote_reply_cap(params: dict[str, Any]) -> dict[str, Any]:
+    """Caps are standard request settings; some transports ignore them in extra_body."""
+    extra = params.get("extra_body")
+    if isinstance(extra, Mapping):
+        for key in REPLY_CAP_KEYS & extra.keys():
+            params[key] = extra[key]
+        if REPLY_CAP_KEYS & extra.keys():
+            params["extra_body"] = {k: v for k, v in extra.items() if k not in REPLY_CAP_KEYS}
+    if len(REPLY_CAP_KEYS & params.keys()) > 1:
+        raise ValueError("Use only one reply token limit field")
+    return params
+
+
 def apply_reasoning_level(
     declaration: ReasoningConfig,
     model: str,
@@ -86,13 +117,15 @@ def apply_reasoning_level(
     """
     if _DECLARATIONS & overrides.keys():
         raise ValueError("reasoning_levels and reasoning_default belong on the client constructor")
-    params = {**defaults, **overrides}
+    params = dict(defaults)
+    _replace_reply_cap(params, overrides)
+    params.update(overrides)
     extra = params.get("extra_body")
     if isinstance(extra, Mapping) and (set(extra) & (_DECLARATIONS | {"reasoning_level"})):
         raise ValueError("Reasoning configuration cannot be passed through extra_body")
     level = params.pop("reasoning_level", default_selection)
     if level is None:
-        return params
+        return _promote_reply_cap(params)
     patch = declaration.settings(level)
     if (
         any(
@@ -104,6 +137,13 @@ def apply_reasoning_level(
     ):
         raise ValueError("Reasoning levels are route-specific; create a client for the new route")
     explicit_extra = overrides.get("extra_body")
+    explicit_keys = overrides.keys() | (
+        explicit_extra.keys() if isinstance(explicit_extra, Mapping) else set()
+    )
+    if REPLY_CAP_KEYS & patch.keys() and REPLY_CAP_KEYS & explicit_keys:
+        raise ValueError(
+            "reasoning_level conflicts with explicit request field(s): reply token limit"
+        )
     if conflict := patch.keys() & (
         overrides.keys() | (explicit_extra.keys() if isinstance(explicit_extra, Mapping) else set())
     ):
@@ -114,7 +154,9 @@ def apply_reasoning_level(
     # blocks in YAML; no provider-specific merge or inheritance rules live here.
     # Remove replaced defaults from extra_body too: SDKs otherwise merge those
     # back over the selected top-level values when assembling the HTTP body.
+    _replace_reply_cap(params, patch)
+    extra = params.get("extra_body")
     if isinstance(extra, Mapping) and patch.keys() & extra.keys():
         params["extra_body"] = {key: value for key, value in extra.items() if key not in patch}
     params.update(patch)
-    return params
+    return _promote_reply_cap(params)

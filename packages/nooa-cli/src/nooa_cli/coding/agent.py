@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
+from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
     InteractiveAgent,
@@ -144,16 +145,41 @@ class CodingAgent(InteractiveAgent):
         summary_tags = [tag for tag in tags if ".." in tag]
         summarizers = getattr(self, "_summarizers", [])
         summarizer = summarizers[0] if summarizers else None
+        config = getattr(summarizer, "config", None) if summarizer else None
+        pending = getattr(summarizer, "_pending_task", None) if summarizer else None
+        automatic = bool(getattr(summarizer, "_automatic_context_budget", False))
+        declared_policy = getattr(summarizer, "policy", None) if summarizer else None
+        policy = (
+            declared_policy
+            if isinstance(declared_policy, str) and declared_policy
+            else "token_budget"
+            if isinstance(summarizer, TokenBudgetSummarizer)
+            else "custom"
+            if summarizer is not None
+            else "none"
+        )
         stats = self.context_stats
         return {
             "active_events": len(tags),
             "summary_count": len(summary_tags),
             "summary_tags": summary_tags,
             "has_summarizer": summarizer is not None,
-            "policy": getattr(summarizer, "policy", "none") if summarizer else "none",
-            "current_tokens": getattr(stats, "total_tokens", 0) if stats else 0,
-            "max_tokens": getattr(summarizer, "max_tokens", 0) if summarizer else 0,
-            "preserve_recent": getattr(summarizer, "preserve_recent", 0) if summarizer else 0,
+            "policy": policy,
+            "current_tokens": getattr(stats, "prompt_tokens", 0) if stats else 0,
+            "max_tokens": getattr(config, "max_tokens", 0) if config else 0,
+            "threshold_fraction": (
+                getattr(summarizer, "_automatic_context_budget_percent", None)
+                if automatic
+                else None
+            ),
+            "preserve_recent": getattr(config, "preserve_recent", 0) if config else 0,
+            "compaction_pending": pending is not None,
+            "compaction_ready": bool(
+                pending is not None
+                and pending.done()
+                and getattr(summarizer, "_pending_summary", None)
+                and getattr(summarizer, "_pending_range", None)
+            ),
         }
 
     @hidden

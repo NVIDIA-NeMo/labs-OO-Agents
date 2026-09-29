@@ -345,7 +345,7 @@ class CodingACPAdapter:
                         "max_iterations=" in message or "max_retries=" in message
                     ):
                         return PromptResponse(stop_reason="max_turn_requests")
-                    raise
+                    raise RequestError(-32603, message, {"details": message}) from exc
                 if result is None:
                     await session.cancel_complete.wait()
                     # stop_reason and the tool card both carry the outcome, but

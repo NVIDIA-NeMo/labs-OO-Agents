@@ -369,6 +369,34 @@ class TestContextWindowStatsEdgeCases:
 class TestContextWindowStatsFormat:
     """Tests for the format() context block output."""
 
+    def test_format_is_concise_and_keeps_compaction_guidance(self):
+        stats = ContextWindowStats(
+            context_blocks_count=5,
+            events_count=12,
+            prompt_tokens=24000,
+            context_blocks_chars=10000,
+            events_chars=30000,
+            model_context_window=128000,
+            reserved_output_tokens=8000,
+        )
+        expected = (
+            "Context: 24,000 / 120,000 usable tokens (20.0%) · output reserve: 8,000\n"
+            "  Context blocks: ~6,000 tokens — 5 blocks\n"
+            "  Events:         ~18,000 tokens — 12 events\n"
+            "Compact history: self.events.collapse(start_tag, end_tag, summary_text=...); "
+            "see doc(self.events).\n"
+            "Add, remove, or edit context blocks: doc(self.context)."
+        )
+        assert stats.format() == expected
+        assert "self.events.collapse" in stats.format()
+        pending = stats.model_copy(update={"prompt_tokens": None})
+        assert pending.format().startswith("Context: awaiting first model response\n")
+        assert "self.events.collapse" in pending.format()
+
+        full = stats.model_copy(update={"prompt_tokens": 110000})
+        assert "Context is nearly full" in full.format()
+        assert "self.events.collapse" in full.format()
+
     def test_format_awaiting_first_response(self):
         """Before the first provider response, format() says so — no numbers."""
         stats = ContextWindowStats(
@@ -392,7 +420,8 @@ class TestContextWindowStatsFormat:
             prompt_tokens=700,
         )
         text = stats.format()
-        assert "Context usage: 700 tokens [provider-reported]" in text
+        assert "Context: 700 tokens\n" in text
+        assert "provider-reported" not in text
         assert "3 blocks" in text
         assert "8 events" in text
         assert "%" not in text  # no window → no percentage
@@ -408,7 +437,7 @@ class TestContextWindowStatsFormat:
             model_context_window=200_000,
         )
         text = stats.format()
-        assert "Context usage: 12,450 / 200,000 tokens (6.2%) [provider-reported]" in text
+        assert "Context: 12,450 / 200,000 tokens (6.2%)\n" in text
         # Breakdown is attributed (prefixed ~), only the header carries a %
         assert "Context blocks: ~" in text
         assert "Events:" in text
@@ -441,7 +470,7 @@ class TestContextWindowStatsFormat:
         )
         text = stats.format()
         assert "12,450 / 136,000 usable tokens" in text
-        assert "64,000 of the 200,000-token window reserved for output" in text
+        assert "output reserve: 64,000" in text
         # pct is against the usable window: 12450/136000 = 9.2%
         assert "(9.2%)" in text
 
@@ -461,7 +490,7 @@ class TestContextWindowStatsFormat:
         assert "Context is nearly full" in text
         assert "doc(self.events)" in text
         assert "self.context" in text
-        assert "ContextApi" in text
+        assert "doc(self.context)" in text
 
     def test_format_cleanup_guidance_when_dropped(self):
         """Cleanup guidance remains visible when blocks or events were dropped."""

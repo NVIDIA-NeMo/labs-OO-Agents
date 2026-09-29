@@ -8,7 +8,7 @@ import json
 import httpx
 import pytest
 
-from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -97,9 +97,7 @@ async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchro
             ),
         ],
         block_formatter=CachedBlockFormatter(),
-        provider_formatter=ResponsesProviderFormatter()
-        if style == "responses"
-        else OpenAIProviderFormatter(),
+        provider_formatter=OpenAIProviderFormatter(),
     ).output
     assert sum(isinstance(m, CacheBoundary) for m in messages) == 1
     if mode == "no-boundary":

@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
-from nooa.context_blocks.formatter import ResponsesProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -105,7 +105,7 @@ def render(response, state="live 1", formatter=None):
     return render_context(
         blocks(response, state),
         block_formatter=formatter or CachedBlockFormatter(),
-        provider_formatter=ResponsesProviderFormatter(),
+        provider_formatter=OpenAIProviderFormatter(),
     )
 
 
@@ -270,7 +270,7 @@ def test_rendered_reasoning_edit_discards_native_authority():
     original = turn()
     message = render(original).messages[1]
     edited = message.model_copy(update={"reasoning": "different reasoning"})
-    projected = ResponsesProviderFormatter().format([edited])[0]
+    projected = OpenAIProviderFormatter().format([edited])[0]
     assert type(projected) is dict
     assert projected["reasoning_content"] == "different reasoning"
     assert original.reasoning != "different reasoning"
@@ -458,7 +458,7 @@ def test_rendered_public_values_share_strings_but_no_native_objects():
     assert message.tool_calls[0].arguments is original.tool_calls[0].arguments
     assert not hasattr(message.tool_calls[0], "native")
     replacement = message.model_copy(update={"content": "edited"})
-    public = ResponsesProviderFormatter().format([replacement])
+    public = OpenAIProviderFormatter().format([replacement])
     assert isinstance(public[0], dict)
 
 

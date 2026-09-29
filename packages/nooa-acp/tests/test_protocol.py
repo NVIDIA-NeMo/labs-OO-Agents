@@ -25,6 +25,31 @@ from acp.schema import (
 _HANG_TIMEOUT = 30
 
 
+def test_protocol_subprocess_imports_this_checkout(tmp_path):
+    import json
+    import subprocess
+
+    from acp.transports import default_environment
+
+    root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, nooa, nooa_acp; print(json.dumps([nooa.__file__, nooa_acp.__file__]))",
+        ],
+        cwd=tmp_path,
+        env=default_environment(),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert [Path(path).resolve() for path in json.loads(result.stdout)] == [
+        root / "src/nooa/__init__.py",
+        root / "packages/nooa-acp/src/nooa_acp/__init__.py",
+    ]
+
+
 class _RecordingClient:
     def __init__(self) -> None:
         self.updates: list[tuple[str, object]] = []

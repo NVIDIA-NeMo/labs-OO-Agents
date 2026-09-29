@@ -11,11 +11,7 @@ import litellm
 import pytest
 
 from nooa.context_blocks.events import UserEvent
-from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
-    OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
-)
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     RenderedMessage,
@@ -179,12 +175,10 @@ def test_renderer_emits_a_standalone_boundary_before_provider_formatting():
     assert result.messages[:-1] == _render_result("state-b").messages[:-1]
 
 
-@pytest.mark.parametrize("formatter", [OpenAIProviderFormatter, ResponsesProviderFormatter])
-def test_boundary_formats_without_a_following_message(formatter):
+def test_boundary_formats_without_a_following_message():
     boundary = CacheBoundary()
     block = RenderedMessage(role=Role.METADATA, replay_message=boundary)
-    assert formatter().format([block])[0] is boundary
-    assert AnthropicProviderFormatter().format([block]) == {"system": "", "messages": []}
+    assert OpenAIProviderFormatter().format([block])[0] is boundary
 
 
 def test_boundary_beside_readonly_response_preserves_identity_and_native_parts():

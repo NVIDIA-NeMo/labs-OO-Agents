@@ -111,6 +111,12 @@ class TestInitialLlmMessagesNoErrors:
 
         assert fake_llm.call_count >= 1, "Expected at least one LLM call"
         assert_no_error_patterns_in_messages(fake_llm.last_messages)
+        system = "\n".join(
+            _message_content_as_text(message)
+            for message in fake_llm.last_messages
+            if message.get("role") == "system"
+        )
+        assert CodeActStrategy()._restrictions_text() in system
 
     @pytest.mark.asyncio
     async def test_assertion_fails_when_error_in_messages(self):

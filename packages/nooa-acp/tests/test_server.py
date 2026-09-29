@@ -1295,23 +1295,27 @@ async def test_adapter_maps_generation_limits_to_stop_reasons(
     await adapter.close()
 
 
-async def test_adapter_propagates_unrelated_generation_errors(tmp_path):
+async def test_adapter_propagates_generation_error_message_to_acp_client(tmp_path):
     client = _RecordingClient()
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
     session = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, session.session_id)
+    message = "LLM API error after retries: Missing credentials"
 
     with (
         patch.object(
             runtime.dispatcher,
             "submit",
-            side_effect=GenerationError("LLM API error after retries"),
+            side_effect=GenerationError(message),
         ),
-        pytest.raises(GenerationError, match="LLM API error"),
+        pytest.raises(RequestError) as raised,
     ):
         await adapter.prompt(session.session_id, [text_block("do the work")])
 
+    assert raised.value.code == -32603
+    assert str(raised.value) == message
+    assert raised.value.data == {"details": message}
     await adapter.close()
 
 

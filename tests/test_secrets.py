@@ -14,10 +14,35 @@ import os
 
 import pytest
 
-from nooa.secrets import load_secrets_into_env
+from nooa.secrets import load_secrets_into_env, write_secret_env
 
 _KEY = "NEMO_TEST_SECRET_KEY"
 _KEY2 = "NEMO_TEST_SECRET_KEY2"
+
+
+def test_write_secret_preserves_values_and_does_not_export(tmp_path, monkeypatch):
+    path = tmp_path / "secrets.yaml"
+    path.write_text("env:\n  OTHER: old-value\nmetadata: keep\n")
+    monkeypatch.delenv(_KEY, raising=False)
+    write_secret_env(path, _KEY, "new-value")
+    import yaml
+
+    assert yaml.safe_load(path.read_text()) == {
+        "env": {"OTHER": "old-value", _KEY: "new-value"},
+        "metadata": "keep",
+    }
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert _KEY not in os.environ
+
+
+def test_invalid_secret_yaml_is_not_disclosed_or_replaced(tmp_path):
+    path = tmp_path / "secrets.yaml"
+    original = "env: [PRIVATE-OLD-KEY"
+    path.write_text(original)
+    with pytest.raises(ValueError) as caught:
+        write_secret_env(path, _KEY, "PRIVATE-NEW-KEY")
+    assert "PRIVATE" not in str(caught.value)
+    assert path.read_text() == original
 
 
 @pytest.fixture
