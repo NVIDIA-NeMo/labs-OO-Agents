@@ -426,8 +426,10 @@ def install_debug_handler(dump_dir: Path | None = None) -> None:
 
     # Install SIGUSR2 handler (less commonly used than SIGUSR1)
     try:
-        signal.signal(signal.SIGUSR2, _debug_signal_handler)
-        _handler_installed = True
+        sig = getattr(signal, "SIGUSR2", None)
+        if sig is not None:
+            signal.signal(sig, _debug_signal_handler)
+            _handler_installed = True
     except (ValueError, OSError):
         # Can't set signal handler (not main thread, or platform issue)
         pass
