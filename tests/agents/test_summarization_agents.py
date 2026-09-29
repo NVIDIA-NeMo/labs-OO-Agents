@@ -8,7 +8,7 @@ Tests the SummarizationAgent base class and its implementations:
 """
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -489,6 +489,46 @@ class TestAgentSummarizerIntegration:
         assert summarizer._llm is summarizer_llm
         assert summarizer._llm is not fake_llm
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("summarizer_cls", [TokenBudgetSummarizer, MethodSummarizer])
+    async def test_summary_follows_parent_model_switches(
+        self, test_agent, fake_llm, summarizer_cls
+    ):
+        summarizer = summarizer_cls.install(test_agent)
+        try:
+            for summary, window in [("First summary", 4000), ("Second summary", 8000)]:
+                replacement = FakeLLMClient(scripted_responses=[_resp(f'{{"value": "{summary}"}}')])
+                replacement._context_window = window
+                test_agent.set_llm(replacement)
+
+                assert await summarizer.summarize("History to compact", 100) == summary
+                assert replacement.call_count == 1
+                assert fake_llm.call_count == 0
+                assert summarizer._input_token_budget() == int(window * 0.7)
+                assert summarizer._input_token_counter().__self__ is replacement
+        finally:
+            await test_agent.aclose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("override", ["constructor", "same_as_parent", "setter"])
+    async def test_summary_preserves_explicit_model(self, test_agent, override):
+        chosen = FakeLLMClient(scripted_responses=[_resp('{"value": "Explicit summary"}')])
+        if override == "same_as_parent":
+            test_agent.set_llm(chosen)
+        if override == "setter":
+            summarizer = MethodSummarizer.install(test_agent)
+            summarizer.set_llm(chosen)
+        else:
+            summarizer = MethodSummarizer.install(test_agent, llm=chosen)
+        replacement = FakeLLMClient()
+        test_agent.set_llm(replacement)
+        try:
+            assert await summarizer.summarize("History to compact", 100) == "Explicit summary"
+            assert chosen.call_count == 1
+            assert replacement.call_count == 0
+        finally:
+            await test_agent.aclose()
+
     def test_agent_standalone_without_summarizer(self, fake_llm):
         """Agent works fine without summarizer - they're decoupled."""
 
@@ -579,6 +619,32 @@ class TestSummarizationAsyncIntegration:
         # Summary should be pending application
         assert summarizer._pending_summary is not None
         assert summarizer._pending_summary == "Mocked summary of messages 1-3"
+
+    @pytest.mark.asyncio
+    async def test_scheduled_summary_resolves_one_client_for_sizing_and_generation(
+        self, test_agent, fake_llm
+    ):
+        """A parent switch before task execution controls both sizing and generation."""
+        old_counter = Mock(return_value=1)
+        fake_llm.count_tokens = old_counter
+        replacement = FakeLLMClient(scripted_responses=[_resp('{"value": "Replacement summary"}')])
+        replacement._context_window = 100
+        replacement_counter = Mock(return_value=1)
+        replacement.count_tokens = replacement_counter
+
+        for i in range(5):
+            test_agent.event_manager.add(Message(content=f"Message {i}"))
+        summarizer = SummarizationAgent(test_agent, config=TokenBudgetConfig(max_tokens=50_000))
+
+        summarizer._schedule_summarization("1", "5")
+        test_agent.set_llm(replacement)
+        assert summarizer._pending_task is not None
+        await summarizer._pending_task
+
+        assert summarizer._pending_summary == "Replacement summary"
+        assert replacement.call_count == 1
+        assert replacement_counter.call_count > 0
+        assert old_counter.call_count == 0
 
     @pytest.mark.asyncio
     async def test_apply_pending_summary_collapses_history(self, test_agent):

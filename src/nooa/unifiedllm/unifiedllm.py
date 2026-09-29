@@ -36,6 +36,7 @@ from nooa.unifiedllm.cache_policy import (
 from . import replay_state, response_parts
 from .errors import EmptyContentError
 from .http_config import HttpConfig
+from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
@@ -1219,6 +1220,47 @@ class UnifiedLLM(ABC):
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
         )
 
+    def get_context_limits(
+        self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
+    ) -> ContextLimits:
+        """Resolve context limits using the same settings as the next request.
+
+        Includes selected reasoning levels, per-call caps and extra_body. Does
+        not infer a reply cap from model metadata. ``fallback_reserve`` is only
+        a planning allowance when no cap is configured. For a per-call model
+        switch, never reuse the original model's window; pass an explicit
+        context_window or use a separately configured client for that model.
+        """
+        params = self._prepare_call_config(overrides or {})
+        body = {**params, **(params.get("extra_body") or {})}
+        caps = [body[k] for k in REPLY_CAP_KEYS if body.get(k) is not None]
+        if len(caps) > 1:
+            raise ValueError("Use only one reply token limit field")
+        cap = caps[0] if caps else None
+        if cap is not None and (type(cap) is not int or cap <= 0):
+            raise ValueError("Reply token limit must be a positive integer")
+        same_model = self._effective_model(params) == self.model
+        window = (overrides or {}).get("context_window")
+        if window is None and same_model:
+            window = self.context_window
+        if not isinstance(window, int) or window <= 0:
+            window = None
+        return ContextLimits(window, cap if cap is not None else fallback_reserve, cap is None)
+
+    def _with_reduced_reply_limit(self, overrides: dict[str, Any], limit: int) -> dict[str, Any]:
+        """Recovery keeps resolved effort settings, but lowers its reply cap."""
+        params = self._prepare_call_config(overrides)
+        extra = params.get("extra_body") or {}
+        key = next((k for k in REPLY_CAP_KEYS if k in extra or k in params), "max_tokens")
+        for alias in REPLY_CAP_KEYS:
+            params.pop(alias, None)
+        if extra:
+            params["extra_body"] = {k: v for k, v in extra.items() if k not in REPLY_CAP_KEYS}
+        params[key] = limit
+        # Do not re-apply a selected level's original cap on the retry.
+        params["reasoning_level"] = None
+        return params
+
     def _effective_model(self, call_config: dict[str, Any]) -> str:
         """Return the model this individual request will actually dispatch."""
         model = call_config.get("model", self.model)
@@ -2098,6 +2140,26 @@ class ReasoningCompletionClient(CompletionClient):
 
 
 class ResponsesClient(UnifiedLLM):
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Translate the shared reply cap once, respecting call and level overrides."""
+        config = super()._prepare_call_config(overrides)
+        names = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
+        selected = names & overrides.keys()
+        if not selected:
+            level = overrides.get("reasoning_level", self.reasoning_level)
+            patch = self._reasoning_config.settings(level) if level is not None else {}
+            selected = names & patch.keys()
+        if not selected:
+            selected = names & config.keys()
+        if len(selected) > 1:
+            raise ValueError("Set only one reply limit: max_tokens or max_output_tokens")
+        if selected:
+            value = config[next(iter(selected))]
+            for name in names:
+                config.pop(name, None)
+            config["max_output_tokens"] = value
+        return config
+
     def __init__(
         self,
         model: str,
@@ -2142,6 +2204,13 @@ class ResponsesClient(UnifiedLLM):
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
+
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        params = super()._prepare_call_config(overrides)
+        caps = REPLY_CAP_KEYS & params.keys()
+        if caps:
+            params["max_output_tokens"] = params.pop(next(iter(caps)))
+        return params
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Responses API schema format."""

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -163,7 +164,7 @@ def _public_json_default(value: Any) -> Any:
     return str(value)
 
 
-def _write_trajectory(agent: Any) -> None:
+def _write_trajectory(agent: Any) -> bool:
     """Dump the agent's full event history to LOGS_DIR/trajectory.json.
 
     The OTLP spans under ``agent/traces/`` remain the canonical record, but
@@ -172,33 +173,71 @@ def _write_trajectory(agent: Any) -> None:
     the final response.  Anyone looking there for the turn-by-turn trajectory
     previously found nothing.
     """
+    # Reused log directories must not label a previous task's data as this run.
+    out = LOGS_DIR / "trajectory.json"
+    try:
+        out.unlink(missing_ok=True)
+        (LOGS_DIR / "behavior.json").unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Could not invalidate old trajectory artifacts: %s", e)
+        return False
     manager = getattr(agent, "event_manager", None)
     if manager is None:
         logger.warning("Agent exposes no event_manager — no trajectory written")
-        return
+        return False
 
     try:
         events = [
             {
-                "event_id": event_id,
+                "event_id": event.id,
                 "event_type": type(event).__name__,
                 # Opaque provider replay state belongs only in the durable event
                 # backend and compatible provider requests, never debug exports.
                 **_public_json_default(event),
+                # Export only the framework classification flags needed by metrics;
+                # the rest of metadata may contain private provider state.
+                "prefill": bool(event.metadata.get("prefill")),
+                "synthetic": bool(event.metadata.get("synthetic")),
             }
-            for event_id, event in manager.items()
+            for event in manager.all_events()
         ]
     except Exception as e:  # never fail the task over a debug artifact
         logger.warning("Could not serialise trajectory: %s", e)
-        return
+        return False
 
-    out = LOGS_DIR / "trajectory.json"
     try:
         out.write_text(json.dumps(events, indent=2, default=_public_json_default))
-    except OSError as e:
+    except Exception as e:  # debug serialization must not invalidate a completed task
         logger.warning("Could not write %s: %s", out, e)
-        return
+        return False
     logger.info("Trajectory written → %s (%d events)", out, len(events))
+    return True
+
+
+def _write_behavior_report(model: str, agent_type: str) -> None:
+    """Write deterministic interface-behavior metrics beside the trajectory.
+
+    Behavior analysis is observability only: malformed or missing artifacts must
+    never turn a completed benchmark task into a failure.
+    """
+    trajectory = LOGS_DIR / "trajectory.json"
+    try:
+        from nooa_bench.behavior_analyzer import analyze_trajectory
+
+        change_id = os.environ.get("NOOA_INTERFACE_CHANGE_ID", "baseline")
+        report = analyze_trajectory(
+            trajectory,
+            model=model,
+            agent_type=agent_type,
+            change_id=change_id,
+            task_id=os.environ.get("NOOA_TASK_ID"),
+        )
+        out = LOGS_DIR / "behavior.json"
+        out.write_text(json.dumps(report.to_dict(), indent=2))
+    except Exception as e:  # noqa: BLE001 - analysis must not fail the benchmark
+        logger.warning("Could not write interface behavior report: %s", e)
+        return
+    logger.info("Behavior report written → %s", out)
 
 
 def _write_answer(result: dict[str, Any]) -> None:
@@ -236,32 +275,55 @@ async def _run(
 
     llm_client = get_llm_client(model, **llm_overrides)
 
-    # Instantiate agent.
-    AgentClass = _import_agent_class(agent_type)
-    agent: Any = AgentClass(llm=llm_client)
+    agent: Any = None
+    try:
+        # Instantiate inside the lifecycle guard so a constructor failure still
+        # closes the already-created model client.
+        AgentClass = _import_agent_class(agent_type)
+        agent = AgentClass(llm=llm_client)
 
-    # All agents share the same interface: {"user_message": instruction}.
-    # Benchmark-specific parsing (system prompts, data paths, etc.) happens
-    # inside the agent's _run_evaluation method.
-    from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
+        # All agents share the same interface: {"user_message": instruction}.
+        # Benchmark-specific parsing (system prompts, data paths, etc.) happens
+        # inside the agent's _run_evaluation method.
+        from nooa.runtime.token_usage import get_task_tokens, start_task_tokens
 
-    logger.info("Running agent %s (model=%s)...", agent_type, model)
-    start_task_tokens()
-    task_input: dict[str, Any] = {"user_message": instruction}
-    if working_dir:
-        task_input["working_dir"] = working_dir
-    result = await agent._run_evaluation(task_input)
-    result.update(get_task_tokens())
-    _write_result(result, model, agent_type)
-    _write_trajectory(agent)
-    _write_answer(result)
+        logger.info("Running agent %s (model=%s)...", agent_type, model)
+        start_task_tokens()
+        task_input: dict[str, Any] = {"user_message": instruction}
+        if working_dir:
+            task_input["working_dir"] = working_dir
+        result = await agent._run_evaluation(task_input)
+        result.update(get_task_tokens())
+        _write_result(result, model, agent_type)
+        if _write_trajectory(agent):
+            _write_behavior_report(model, agent_type)
+        _write_answer(result)
 
-    if result.get("success"):
-        logger.info("Agent completed successfully.")
-        return 0
-    else:
+        if result.get("success"):
+            logger.info("Agent completed successfully.")
+            return 0
         logger.error("Agent reported failure.")
         return 1
+    finally:
+        try:
+            close = getattr(agent, "close", None) if agent is not None else None
+            if callable(close):
+                close_result = close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+        except Exception:
+            # Cleanup must not replace the benchmark result or its original error.
+            # Cancellation still propagates, with client cleanup guaranteed below.
+            logger.warning("Agent cleanup failed", exc_info=True)
+        finally:
+            try:
+                aclose = getattr(llm_client, "aclose", None)
+                if callable(aclose):
+                    close_result = aclose()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+            except Exception:
+                logger.warning("Model client cleanup failed", exc_info=True)
 
 
 @click.command()

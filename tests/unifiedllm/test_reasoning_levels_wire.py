@@ -17,6 +17,64 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "examples/reasoning_levels/l
 MODELS = yaml.safe_load(CONFIG_PATH.read_text())["models"]
 
 
+@pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
+@pytest.mark.parametrize("selection", ["default", "level", "override", "alias", "extra"])
+@pytest.mark.parametrize("asynchronous", [True, False])
+async def test_context_reserve_matches_serialized_reply_cap(
+    style, selection, asynchronous, monkeypatch
+):
+    from nooa.unifiedllm import CompletionClient, ResponsesClient
+
+    bodies = []
+
+    def send_sync(http_client, request, **kwargs):
+        bodies.append(json.loads(request.content))
+        alias = {"chat": "example", "responses": "gpt-5.6-sol", "anthropic": "claude-sonnet-5"}[
+            style
+        ]
+        return httpx.Response(200, json=_reply(alias), request=request)
+
+    async def send(http_client, request, **kwargs):
+        return send_sync(http_client, request, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(httpx.Client, "send", send_sync)
+    monkeypatch.setattr(litellm, "drop_params", False)
+    cls = ResponsesClient if style == "responses" else CompletionClient
+    model = "anthropic/claude-sonnet-4-5" if style == "anthropic" else "openai/example"
+    cap_key = "max_output_tokens" if style == "responses" else "max_tokens"
+    overrides = {
+        "default": {},
+        "level": {"reasoning_level": "high"},
+        "override": {"max_tokens": 16_000},
+        "alias": {cap_key: 24_000},
+        "extra": {"extra_body": {cap_key: 20_000}},
+    }[selection]
+    async with cls(
+        model,
+        api_base="https://gateway.example.com/v1",
+        api_key="test",
+        context_window=128_000,
+        max_tokens=64_000,
+        reasoning_levels={"high": {cap_key: 48_000}},
+        retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+    ) as llm:
+        limits = llm.get_context_limits(overrides)
+        messages = [{"role": "user", "content": "hello"}]
+        if asynchronous:
+            await llm.acall(messages, **overrides)
+        else:
+            llm.call(messages, **overrides)
+    assert len(bodies) == 1
+    caps = [
+        v
+        for k, v in bodies[0].items()
+        if k in {"max_tokens", "max_completion_tokens", "max_output_tokens"}
+    ]
+    assert caps == [limits.reserved_output_tokens]
+    assert limits.usable_input_tokens == 128_000 - caps[0]
+
+
 @pytest.mark.parametrize("alias", MODELS)
 async def test_live_probe_uses_registry_configuration_without_route_assumptions(alias, monkeypatch):
     from nooa import secrets

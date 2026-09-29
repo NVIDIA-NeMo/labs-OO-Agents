@@ -380,6 +380,9 @@ class ContextWindowStats(BaseModel):
             )
         ),
     ] = None
+    output_reserve_is_fallback: bool = Field(
+        default=False, description="Reserve is a planning allowance, not a configured reply cap"
+    )
 
     @property
     def total_tokens(self) -> int | None:
@@ -445,26 +448,25 @@ class ContextWindowStats(BaseModel):
 
         Before the first provider response there is no token count yet::
 
-            Context usage: awaiting first model response (no provider token count yet)
+            Context: awaiting first model response
 
         With provider usage and a known model window::
 
-            Context usage: 12,450 / 200,000 tokens (6.2%) [provider-reported]
+            Context: 12,450 / 200,000 tokens (6.2%)
               Context blocks: ~8,200 tokens — 6 blocks
               Events:         ~4,250 tokens — 18 events
 
         The header total is the exact provider count; the per-category lines
         are attributed from it by character share (prefixed ``~``).
         """
+        guidance = (
+            "Compact history: "
+            "self.events.collapse(start_tag, end_tag, summary_text=...); "
+            "see doc(self.events).\n"
+            "Add, remove, or edit context blocks: doc(self.context)."
+        )
         if self.prompt_tokens is None:
-            return (
-                "Context usage: awaiting first model response (no provider token count yet)\n"
-                "Free space by collapsing older event history with "
-                "self.events.collapse(start_tag, end_tag, summary_text=...); "
-                "use doc(self.events) for the available event-history tools. "
-                "Use self.context (ContextApi) to summarize or remove large "
-                "context blocks."
-            )
+            return "Context: awaiting first model response\n" + guidance
 
         lines: list[str] = []
 
@@ -475,18 +477,15 @@ class ContextWindowStats(BaseModel):
             pct = self.prompt_tokens / usable * 100
             reserve = self.reserved_output_tokens or 0
             if reserve:
+                label = "planning reserve" if self.output_reserve_is_fallback else "output reserve"
                 lines.append(
-                    f"Context usage: {self.prompt_tokens:,} / {usable:,} usable tokens "
-                    f"({pct:.1f}%) [provider-reported; {reserve:,} of the "
-                    f"{window:,}-token window reserved for output]"
+                    f"Context: {self.prompt_tokens:,} / {usable:,} usable tokens "
+                    f"({pct:.1f}%) · {label}: {reserve:,}"
                 )
             else:
-                lines.append(
-                    f"Context usage: {self.prompt_tokens:,} / {window:,} tokens "
-                    f"({pct:.1f}%) [provider-reported]"
-                )
+                lines.append(f"Context: {self.prompt_tokens:,} / {window:,} tokens ({pct:.1f}%)")
         else:
-            lines.append(f"Context usage: {self.prompt_tokens:,} tokens [provider-reported]")
+            lines.append(f"Context: {self.prompt_tokens:,} tokens")
 
         # --- Context blocks line (attributed by character share) ---
         cb = self.context_blocks_tokens or 0
@@ -509,12 +508,6 @@ class ContextWindowStats(BaseModel):
             lines.append("Context is nearly full. Context blocks over budget are labeled EVICTED.")
 
         # --- Cleanup guidance ---
-        lines.append(
-            "Free space by collapsing older event history with "
-            "self.events.collapse(start_tag, end_tag, summary_text=...); "
-            "use doc(self.events) for the available event-history tools. "
-            "Use self.context (ContextApi) to summarize or remove large "
-            "context blocks."
-        )
+        lines.append(guidance)
 
         return "\n".join(lines)

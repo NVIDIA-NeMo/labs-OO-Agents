@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """XML formatter retained for cache-oriented configurations.
 
-Context views now choose prefix, event, and trailing placement. This formatter
-only serializes that order and leaves provider cache annotation to adapters.
+Context views choose prefix, event, boundary, and trailing placement. This
+formatter only serializes that order; UnifiedLLM maps cache boundaries to the
+selected provider.
 """
 
 from nooa.context_blocks.formatter import (
@@ -27,7 +28,7 @@ class CachedBlockFormatter(BlockFormatter):
     def format_description(self) -> str:
         return (
             "Your prompt is organized in XML context blocks: `<name>CONTENT</name>`.\n"
-            "Blocks produced by `self.context.set_dynamic()` carry an "
+            "Expression context blocks carry an "
             '`expr="..."` attribute whose value is the Python expression '
             "re-evaluated each turn.\n"
             'Event history: system entries in `<sys tag="N">`; '

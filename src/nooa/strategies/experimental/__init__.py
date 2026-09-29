@@ -8,10 +8,12 @@ Prefer the canonical import path:
 This module exists for backward compatibility.
 """
 
-from nooa.experimental import CodeActLiteStrategy, PurePythonStrategy, ReflexionStrategy
+from nooa.experimental import (
+    PurePythonStrategy,
+    ReflexionStrategy,
+)
 
 __all__ = [
-    "CodeActLiteStrategy",
     "PurePythonStrategy",
     "ReflexionStrategy",
 ]

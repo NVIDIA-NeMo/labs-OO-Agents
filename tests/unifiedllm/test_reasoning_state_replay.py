@@ -15,7 +15,6 @@ from litellm.types.utils import ModelResponse
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import ResolvedBlock, Role
@@ -134,12 +133,7 @@ def _response_blocks(response: LLMResponse) -> list[ResolvedBlock]:
     return blocks
 
 
-def _render_responses(response: LLMResponse) -> list[dict]:
-    neutral = XMLBlockFormatter().format(_response_blocks(response))
-    return ResponsesProviderFormatter().format(neutral)
-
-
-def _render_chat(response: LLMResponse) -> list[dict]:
+def _render(response: LLMResponse) -> list[dict]:
     neutral = XMLBlockFormatter().format(_response_blocks(response))
     return OpenAIProviderFormatter().format(neutral)
 
@@ -250,7 +244,7 @@ async def test_real_responses_message_structure_survives_json_resume(
         assert resumed.raw_response is None
         assert resumed.replay_scope is not None
         assert any(part.native is not None for part in resumed.parts)
-        rendered = _render_responses(resumed)
+        rendered = _render(resumed)
         if is_async:
             await client.acall(rendered)
         else:
@@ -265,9 +259,9 @@ async def test_real_responses_message_structure_survives_json_resume(
         # A public text edit must still invalidate the saved message structure.
         resumed = resumed.replace_text("edited answer")
         if is_async:
-            await client.acall(_render_responses(resumed))
+            await client.acall(_render(resumed))
         else:
-            client.call(_render_responses(resumed))
+            client.call(_render(resumed))
         assert bodies[2]["input"][0] == {"role": "assistant", "content": "edited answer"}
         assert "encrypted_content" not in json.dumps(bodies[2]["input"])
         assert "phase" not in json.dumps(bodies[2]["input"])
@@ -282,7 +276,7 @@ def test_responses_state_is_hidden_from_a_different_model() -> None:
         with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
             first = source.call([{"role": "user", "content": "think"}])
         with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
-            target.call(_render_responses(first))
+            target.call(_render(first))
 
         replay = call.call_args.kwargs["input"]
         assert all(item.get("type") != "reasoning" for item in replay)
@@ -301,7 +295,7 @@ def test_responses_model_override_uses_effective_replay_scope() -> None:
 
         with patch("litellm.responses", return_value=_responses(MESSAGE)) as call:
             client.call(
-                _render_responses(first),
+                _render(first),
                 model="anthropic/claude-sonnet-4-5",
             )
 
@@ -324,7 +318,7 @@ def test_completion_model_override_uses_effective_replay_scope() -> None:
 
         with patch("litellm.completion", return_value=_chat_response()) as call:
             client.call(
-                _render_chat(first),
+                _render(first),
                 tools=[TOOL],
                 model="anthropic/claude-sonnet-4-5",
             )
@@ -356,11 +350,11 @@ async def test_async_clients_use_effective_model_for_replay_scope() -> None:
             patch("litellm.acompletion", AsyncMock(return_value=_chat_response())) as chat_call,
         ):
             await responses.acall(
-                _render_responses(responses_first),
+                _render(responses_first),
                 model="anthropic/claude-sonnet-4-5",
             )
             await completion.acall(
-                _render_chat(completion_first),
+                _render(completion_first),
                 tools=[TOOL],
                 model="anthropic/claude-sonnet-4-5",
             )
@@ -386,7 +380,7 @@ def test_azure_responses_state_is_captured_replayed_and_requested() -> None:
             side_effect=[_responses(REASONING, MESSAGE), _responses(MESSAGE)],
         ) as call:
             first = client.call([{"role": "user", "content": "think"}])
-            client.call(_render_responses(first))
+            client.call(_render(first))
 
         assert first.replay_scope is not None
         assert first.replay_scope.startswith("responses:azure:")
@@ -411,7 +405,7 @@ def test_responses_state_replays_across_gateways() -> None:
         with patch("litellm.responses", return_value=_responses(REASONING, MESSAGE)):
             first = source_client.call([{"role": "user", "content": "think"}])
         with patch("litellm.responses", return_value=_responses(MESSAGE)) as target_call:
-            target_client.call(_render_responses(first))
+            target_client.call(_render(first))
 
         assert REASONING in target_call.call_args.kwargs["input"]
     finally:

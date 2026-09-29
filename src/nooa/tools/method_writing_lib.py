@@ -28,7 +28,7 @@ class MethodWriting(Skill):
 
         @strategy(PredictStrategy())
         async def detect_language(message: str) -> str:
-            \"\"\"Return the ISO 639-1 code for {{message}} (e.g. 'en', 'fr', 'ja').\"\"\"
+            \"\"\"Return the ISO 639-1 code for the supplied message (e.g. 'en', 'fr', 'ja').\"\"\"
             ...
 
         codes = await asyncio.gather(*(detect_language(m) for m in messages))
@@ -39,15 +39,15 @@ class MethodWriting(Skill):
 
         @strategy(CodeActStrategy())
         async def plan_itinerary(request: str) -> Itinerary:
-            \"\"\"Build a day-by-day travel itinerary from {{request}}.\"\"\"
+            \"\"\"Build a day-by-day travel itinerary from the supplied request.\"\"\"
             ...
 
         result = await plan_itinerary(payload)
 
     ## Rules
     - Use ``...`` (ellipsis) as the body — the framework implements the call
-      via LLM. The docstring IS the prompt: use ``{{param}}`` placeholders to
-      interpolate argument values.
+      via LLM. The docstring IS the prompt; arguments are rendered automatically.
+      Do not interpolate them into the instructions a second time.
 
     ## No heuristics for language understanding
     Never use keyword matching, regex, or hand-written rules for tasks
@@ -55,8 +55,6 @@ class MethodWriting(Skill):
     interpretation). These tasks need LLM reasoning — delegate to a
     ``@strategy(PredictStrategy())`` standalone function.
 
-    Load this skill:
-        doc(self.writing)
     """
 
     pass

@@ -8,7 +8,8 @@ These are instructions *for coding agents about the framework* — not `nooa.Ski
 
 | Skill | Use for |
 |---|---|
-| [`nooa-agent-authoring`](nooa-agent-authoring/SKILL.md) | Core authoring: Agent subclasses, generation methods (`...`), docstring prompts, structured output, strategies (CodeAct/Predict), visibility, orchestrators, subagents, LLM config, prompt debugging |
+| [`nooa-agent-authoring`](nooa-agent-authoring/SKILL.md) | Core authoring: Agent subclasses, generation methods (`...`), docstring prompts, structured output, strategies (CodeAct/Predict), visibility, orchestrators, subagents, prompt debugging |
+| [`nooa-model-configuration`](nooa-model-configuration/SKILL.md) | Model onboarding and diagnostics: Connect CLI/library, registry aliases, credentials, reply budgets, reasoning levels, caching and reasoning replay |
 | [`nooa-codeact-advanced`](nooa-codeact-advanced/SKILL.md) | Advanced strategy tuning: prefill (custom/disable/pre-ellipsis), loop guards, truncation tuning, code restrictions, execution internals, PredictConfig |
 | [`nooa-agentdoc`](nooa-agentdoc/SKILL.md) | Making types render beautiful docs for the LLM: `doc()`, `spec()`, `hidden`, `Annotated` descriptions, `pformat`/`pprint` tuning |
 | [`nooa-context-and-state`](nooa-context-and-state/SKILL.md) | Context blocks, event history and `EventQuery`, history summarization, persistence and memory |

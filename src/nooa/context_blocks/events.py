@@ -30,6 +30,9 @@ from nooa.context_blocks.roles import Role
 
 _logger = logging.getLogger(__name__)
 
+# Trace-only marker: no provider-issued tool call exists to replay.
+CODEACT_INLINE_RETURN = "codeact_inline_return"
+
 # === Global Event Registry ===
 
 # Mapping of event_type string -> EventBase subclass.

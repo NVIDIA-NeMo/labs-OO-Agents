@@ -326,7 +326,11 @@ class ActivityShellTools(Skill):
     async def run_stream(
         self,
         command: Annotated[str, spec(description="Shell command to execute")],
-        timeout: Annotated[float, spec(description="Max seconds to wait before timeout")] = 30.0,
+        *,
+        stdin: Annotated[
+            str | None, spec(description="Text piped to stdin (replaces heredocs)")
+        ] = None,
+        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         command_id = str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -337,12 +341,18 @@ class ActivityShellTools(Skill):
                 command=bounded_command,
                 working_directory=str(self.cwd),
                 command_truncated=command_truncated,
+                stdin=(
+                    pformat(stdin, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+                    if stdin is not None
+                    else None
+                ),
+                stdin_truncated=stdin is not None and len(stdin) > _MAX_EVENT_TEXT_CHARS,
             )
         )
         finished = False
         stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
         stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
-        stream = self._shell.run_stream(command, timeout=timeout)
+        stream = self._shell.run_stream(command, stdin=stdin, timeout=timeout)
         try:
             async for item in stream:
                 if isinstance(item, StreamDone):

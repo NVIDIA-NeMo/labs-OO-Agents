@@ -97,6 +97,62 @@ def test_collapse_returns_summary_tag():
     assert agent.events.get(last) is not None
 
 
+@pytest.mark.parametrize(
+    "start,end,previous",
+    [
+        (1, 3, None),
+        ("1", 3, None),
+        (1, "3", None),
+        ("1", "3", None),
+        ("1..2", 3, ("1", "2")),
+        (1, "2..3", ("2", "3")),
+        (1, 3, ("1", "2")),
+    ],
+)
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_collapse_accepts_existing_integer_tags(start, end, previous, backend, tmp_path, capsys):
+    from nooa.storage.sqlite import SQLiteStorageManager
+
+    agent = _TestAgent()
+    storage = SQLiteStorageManager(tmp_path / "events.db") if backend == "sqlite" else None
+    if storage is not None:
+        agent.event_manager.set_backend(storage.event_backend)
+    try:
+        tags = [agent.event_manager.add(Task(prompt=f"original {i}")) for i in range(3)]
+        assert tags == ["1", "2", "3"]
+        if previous:
+            agent.events.collapse(*previous, summary_text="earlier summary")
+        children = agent.events.keys()
+        capsys.readouterr()
+
+        result = agent.events.collapse(start, end, summary_text="combined summary")
+
+        assert result == "1..3"
+        assert agent.events.keys() == [result]
+        assert agent.events[result].children_tags == children
+        assert agent.events[result].summary_text == "combined summary"
+        assert all(agent.events.get(tag) is not None for tag in tags)
+        assert capsys.readouterr().out == ""
+    finally:
+        if storage is not None:
+            storage.close()
+
+
+@pytest.mark.parametrize("bad", [0, 999, True, False, 1.0, None])
+@pytest.mark.parametrize("side", ["start", "end"])
+def test_collapse_invalid_numeric_boundary_does_not_change_history(bad, side, capsys):
+    agent = _TestAgent()
+    tags = [agent.event_manager.add(Task(prompt="original")) for _ in range(3)]
+    before = agent.events.keys()
+    start, end = (bad, tags[-1]) if side == "start" else (tags[0], bad)
+    error = ValueError if type(bad) is int else TypeError
+    with pytest.raises(error, match="tag"):
+        agent.events.collapse(start, end, summary_text="must not be written")
+    assert agent.events.keys() == before
+    assert all(agent.events[tag].prompt == "original" for tag in tags)
+    assert "Please use strings" not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_summary_documents_working_archive_recovery(nested):
     """Recovery instructions come from the archive, not generated summary text."""

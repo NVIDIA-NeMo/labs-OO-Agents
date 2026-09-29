@@ -91,14 +91,9 @@ def test_hand_built_null_content_call_uses_the_same_public_builder():
     ],
 )
 @pytest.mark.parametrize("cached", [False, True])
-@pytest.mark.parametrize("responses", [False, True])
-def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached, responses):
+def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached):
     from nooa.context_blocks.events import ToolCallEvent, ToolResult
-    from nooa.context_blocks.formatter import (
-        OpenAIProviderFormatter,
-        ResponsesProviderFormatter,
-        XMLBlockFormatter,
-    )
+    from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
     from nooa.context_blocks.models import ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -143,7 +138,7 @@ def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached, r
     result = render_context(
         blocks,
         block_formatter=Formatter(),
-        provider_formatter=ResponsesProviderFormatter() if responses else OpenAIProviderFormatter(),
+        provider_formatter=OpenAIProviderFormatter(),
     )
     resolved = next(message for message in result.output if message.get("role") == "assistant")
     if shape == "truncated":

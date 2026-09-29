@@ -69,6 +69,8 @@ async def monitor(cmd: str):
     """Stream stdout lines from a shell command as they appear.
 
     Yields each line (stripped) as it's written to stdout.
+    Output is decoded as UTF-8 with undecodable bytes replaced, so a
+    command that emits non-UTF-8 output does not terminate the stream.
     stderr is merged into stdout.  Uses ``start_new_session=True``
     for process-group isolation so multiple concurrent monitors
     (and the agent itself) don't contend for ptys or interfere
@@ -84,7 +86,7 @@ async def monitor(cmd: str):
     assert proc.stdout is not None
     try:
         async for line in proc.stdout:
-            yield line.decode().rstrip("\n")
+            yield line.decode("utf-8", errors="replace").rstrip("\n")
         await proc.wait()
     finally:
         if proc.returncode is None:

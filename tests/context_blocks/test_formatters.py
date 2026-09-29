@@ -14,10 +14,8 @@ from nooa import CacheBoundary
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
     MarkdownBlockFormatter,
     OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import (
@@ -275,12 +273,13 @@ class TestXMLBlockFormatter:
         )
 
         assert all(not message.tool_calls for message in messages)
-        output = AnthropicProviderFormatter().format(messages)
-        assert output["system"] == ""
-        assert [message["content"] for message in output["messages"]] == (
-            [content] if content else []
-        )
-        assert all("tool_calls" not in message for message in output["messages"])
+        turns = [
+            message
+            for message in OpenAIProviderFormatter().format(messages)
+            if message["role"] != "system"
+        ]
+        assert [message["content"] for message in turns] == ([content] if content else [])
+        assert all("tool_calls" not in message for message in turns)
 
     @pytest.mark.parametrize("field", ["reasoning", "llm_state"])
     def test_replay_only_response_creates_private_carrier(self, field):
@@ -552,86 +551,6 @@ class TestOpenAIProviderFormatter:
             OpenAIProviderFormatter().format(messages)
 
 
-class TestAnthropicProviderFormatter:
-    def test_returns_dict_with_system_and_messages(self):
-        messages = [RenderedMessage(role=Role.SYSTEM, content="You are helpful.")]
-        result = AnthropicProviderFormatter().format(messages)
-        assert result == {"system": "You are helpful.", "messages": []}
-
-    def test_user_message(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(role=Role.USER, content="Hello"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert result["system"] == "System"
-        assert result["messages"] == [{"role": "user", "content": "Hello"}]
-
-    def test_assistant_message(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(role=Role.ASSISTANT, content="Hi!"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert result["messages"] == [{"role": "assistant", "content": "Hi!"}]
-
-    def test_tool_call_message(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(
-                role=Role.ASSISTANT,
-                tool_calls=(ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),),
-            ),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        msg = result["messages"][0]
-        assert msg["role"] == "assistant"
-        assert msg["content"][0]["type"] == "tool_use" and msg["content"][0]["id"] == "tc_1"
-
-    def test_tool_call_with_result(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(
-                role=Role.ASSISTANT,
-                tool_calls=(ToolCallInfo(id="tc_1", name="search", arguments={"q": "test"}),),
-            ),
-            RenderedMessage(role=Role.TOOL, content="Result", tool_call_id="tc_1"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert len(result["messages"]) == 2
-        assert result["messages"][0]["role"] == "assistant"
-        assert result["messages"][1]["role"] == "user"
-        assert result["messages"][1]["content"][0]["type"] == "tool_result"
-
-    def test_tool_role_mapped_to_user(self):
-        """TOOL role without tool_call_id falls back to user (matches old behavior)."""
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="System"),
-            RenderedMessage(role=Role.TOOL, content="Tool output"),
-        ]
-        result = AnthropicProviderFormatter().format(messages)
-        assert result["messages"][0]["role"] == "user"
-
-    def test_metadata_rejected(self):
-        messages = [
-            RenderedMessage(role=Role.USER, content="Hello"),
-            RenderedMessage(role=Role.METADATA, content="session-start"),
-        ]
-        with pytest.raises(UnsupportedContextLayout, match="metadata"):
-            AnthropicProviderFormatter().format(messages)
-
-    def test_cache_boundary_is_removed_from_native_payload(self):
-        messages = [
-            RenderedMessage(role=Role.SYSTEM, content="stable"),
-            RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()),
-            RenderedMessage(role=Role.USER, content="live"),
-        ]
-        assert AnthropicProviderFormatter().format(messages) == {
-            "system": "stable",
-            "messages": [{"role": "user", "content": "live"}],
-        }
-
-
 class TestEndToEndPipelines:
     """Compose BlockFormatter + ProviderFormatter through the neutral type."""
 
@@ -647,15 +566,15 @@ class TestEndToEndPipelines:
         assert "<persona>" in result[0]["content"]
         assert "Hello" in result[1]["content"]
 
-    def test_markdown_with_anthropic(self):
+    def test_markdown_with_openai(self):
         blocks = [
             ResolvedBlock(key="persona", content="You are helpful."),
             ResolvedBlock(key="msg", content="Hello", role=Role.USER),
         ]
         messages = MarkdownBlockFormatter().format(blocks)
-        result = AnthropicProviderFormatter().format(messages)
-        assert "# Persona" in result["system"]
-        assert result["messages"][0]["content"] == "# Msg\n\nHello"
+        result = OpenAIProviderFormatter().format(messages)
+        assert "# Persona" in result[0]["content"]
+        assert result[1]["content"] == "# Msg\n\nHello"
 
     def test_legacy_reasoning_items_fail_closed_without_provider_gate(self):
         """Removed opaque legacy fields are ignored and cannot be emitted."""
@@ -699,7 +618,7 @@ class TestEndToEndPipelines:
             ),
             RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()),
         ]
-        result = ResponsesProviderFormatter().format(messages)
+        result = OpenAIProviderFormatter().format(messages)
         assert result[-1] == CacheBoundary()
 
 
@@ -739,11 +658,11 @@ def _responses_wire(messages):
     from nooa.unifiedllm import ResponsesClient
 
     with ResponsesClient(model="openai/gpt-5.6") as client:
-        wire, _ = client._transform_messages(ResponsesProviderFormatter().format(messages))
+        wire, _ = client._transform_messages(OpenAIProviderFormatter().format(messages))
     return wire
 
 
-class TestResponsesProviderFormatterImages:
+class TestResponsesClientImages:
     """Responses API image blocks: image_url must be a URL STRING, not the
     Chat-Completions {"url": ...} object (regression — the object shape makes the
     API reject the request with 'expected an image URL, but got an object')."""
@@ -772,3 +691,20 @@ class TestResponsesProviderFormatterImages:
         # Fail fast instead of emitting an empty image_url the API rejects opaquely.
         with pytest.raises(ValueError, match="no 'url'"):
             _responses_wire(self._image_message({"detail": "high"}))
+
+
+def test_synthetic_inline_return_is_observable_but_not_replayed_to_provider():
+    event = ToolCallEvent(
+        tool_call_id="inline_1",
+        name="return_result",
+        arguments={"result": 42},
+        result=ToolResult(tool_call_id="inline_1", content="accepted"),
+        metadata={"synthetic": True, "synthetic_type": "codeact_inline_return"},
+    )
+    block = ResolvedBlock(key="completion", content="", role=Role.ASSISTANT, event=event)
+
+    from nooa.context_blocks.formatter import _event_block_to_messages
+
+    assert _event_block_to_messages(block, wrap_content=None) == []
+    rendered = XMLBlockFormatter().format([block])
+    assert all(not message.tool_calls for message in rendered)

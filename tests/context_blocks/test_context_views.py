@@ -28,7 +28,6 @@ from nooa.config.truncation_config import FormatConfig
 from nooa.context_blocks import (
     OpenAIProviderFormatter,
     Role,
-    UnsupportedContextLayout,
     XMLBlockFormatter,
     render_context,
 )
@@ -652,9 +651,7 @@ def test_event_expansion_preserves_position():
     assert "after" in output[2]["content"]
 
 
-def test_provider_preserves_or_rejects_layout():
-    from nooa.context_blocks import AnthropicProviderFormatter, ResponsesProviderFormatter
-
+def test_provider_formatter_preserves_layout_for_unifiedllm():
     items = (
         Block(key="first", content="first", role=Role.USER),
         Block(key="late_system", content="late", role=Role.SYSTEM),
@@ -665,19 +662,6 @@ def test_provider_preserves_or_rejects_layout():
         provider_formatter=OpenAIProviderFormatter(),
     ).output
     assert [message["role"] for message in openai] == ["user", "system"]
-
-    with pytest.raises(UnsupportedContextLayout):
-        render_context(
-            items,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=AnthropicProviderFormatter(),
-        )
-    responses = render_context(
-        items,
-        block_formatter=XMLBlockFormatter(),
-        provider_formatter=ResponsesProviderFormatter(),
-    ).output
-    assert [message["role"] for message in responses] == ["user", "system"]
 
 
 def test_default_agent_view_satisfies_protocol():

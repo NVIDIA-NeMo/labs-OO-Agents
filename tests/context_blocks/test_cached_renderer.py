@@ -11,10 +11,7 @@ from nooa.context_blocks.events import (
     ToolResult,
     UserEvent,
 )
-from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
-    OpenAIProviderFormatter,
-)
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     DynamicContext,
@@ -350,18 +347,3 @@ class TestCachedRendererEndToEndOpenAI:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert result == []
-
-
-class TestCachedRendererEndToEndAnthropic:
-    def test_returns_system_and_messages_dict(self):
-        result = render_context(
-            [_static_block("sys", "S"), _dynamic_block("plan", "P")],
-            block_formatter=CachedBlockFormatter(),
-            provider_formatter=AnthropicProviderFormatter(),
-        ).output
-        assert isinstance(result, dict)
-        assert "system" in result and "messages" in result
-        assert "<sys>" in result["system"]
-        assert len(result["messages"]) == 1
-        assert result["messages"][0]["role"] == "user"
-        assert "<plan>" in result["messages"][0]["content"]

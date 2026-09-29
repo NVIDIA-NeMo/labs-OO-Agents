@@ -3,19 +3,79 @@
 """Fake LLM client for deterministic testing."""
 
 import asyncio
+import copy
 import json
 from collections import deque
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from types import MappingProxyType
+from typing import Any, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
 
-from nooa.llm_types import CacheBoundary
-from nooa.unifiedllm.unifiedllm import LLMResponse, LLMUsage, Tool, ToolCall, UnifiedLLM
+from nooa.llm_types import CacheBoundary, LLMResponse, LLMUsage, ToolCall
+from nooa.unifiedllm.unifiedllm import Tool, UnifiedLLM
 
 from .cache_policy import apply_cache_policy
 from .replay_state import prepare_chat_messages
+
+
+class FakeLLMResponseExhaustedError(RuntimeError):
+    """Raised when strict fake-LLM execution has no scripted response left."""
+
+
+@dataclass(frozen=True, slots=True)
+class FakeLLMToolSnapshot:
+    """Immutable model-facing metadata captured for one fake LLM tool."""
+
+    name: str
+    description: str
+    parameters_model: type[BaseModel] | None
+
+
+@dataclass(frozen=True, slots=True)
+class FakeLLMCall:
+    """Read-only snapshot of one call made through :class:`FakeLLMClient`."""
+
+    index: int
+    messages: tuple[Mapping[str, Any], ...]
+    tools: tuple[Any, ...] | None
+    output_model: type[BaseModel] | None
+    kwargs: Mapping[str, Any]
+    response: LLMResponse | None
+    error: Exception | None
+
+
+def _snapshot(value: Any) -> Any:
+    """Detach mutable call inputs and freeze their container structure."""
+    if isinstance(value, Tool):
+        return FakeLLMToolSnapshot(
+            name=value.name,
+            description=value.description,
+            parameters_model=value.parameters_model,
+        )
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _snapshot(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_snapshot(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_snapshot(item) for item in value)
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        # Some test doubles deliberately wrap non-copyable runtime objects. Their
+        # surrounding container is still frozen; retain the opaque leaf by identity.
+        return value
+
+
+def _response_snapshot(response: LLMResponse) -> LLMResponse:
+    """Detach a recorded outcome without making fake calls reject opaque raw responses."""
+    try:
+        return cast(LLMResponse, response.model_copy(deep=True))  # type: ignore[no-untyped-call]
+    except Exception:
+        return cast(LLMResponse, response.model_copy())  # type: ignore[no-untyped-call]
 
 
 class FakeLLMClient(UnifiedLLM):
@@ -29,12 +89,16 @@ class FakeLLMClient(UnifiedLLM):
     def __init__(
         self,
         scripted_responses: list[LLMResponse] | None = None,
+        *,
+        strict_exhaustion: bool = False,
     ):
         """
         Initialize fake client.
 
         Args:
             scripted_responses: Pre-defined responses to return (in order).
+            strict_exhaustion: Raise when a call has no scripted response instead
+                of returning the compatibility empty response.
         """
         super().__init__(model="fake-model")
         # Each provider call owns one canonical response/event. Tests often use
@@ -44,7 +108,7 @@ class FakeLLMClient(UnifiedLLM):
         seen: set[int] = set()
         for response in scripted_responses or []:
             if id(response) in seen:
-                response = response.model_copy(
+                response = response.model_copy(  # type: ignore[no-untyped-call]
                     update={
                         "id": str(uuid4()),
                         "metadata": dict(response.metadata),
@@ -55,7 +119,9 @@ class FakeLLMClient(UnifiedLLM):
             seen.add(id(response))
             responses.append(response)
         self._response_queue = deque(responses)
+        self._strict_exhaustion = strict_exhaustion
         self._lock = asyncio.Lock()
+        self._calls: list[FakeLLMCall] = []
         self.call_count = 0
         self.last_messages: list[dict[str, Any]] = []
         self.last_tools: list[Tool] | None = None
@@ -69,6 +135,16 @@ class FakeLLMClient(UnifiedLLM):
     def count_tokens(self, text: str) -> int:
         """Fake token counter - rough estimate of 4 chars per token."""
         return len(text) // 4 + 1
+
+    @property
+    def calls(self) -> tuple[FakeLLMCall, ...]:
+        """Return the ordered, read-only transcript of calls made so far."""
+        return tuple(self._calls)
+
+    @property
+    def remaining_responses(self) -> int:
+        """Return the number of scripted responses that have not been consumed."""
+        return len(self._response_queue)
 
     async def acall(
         self,
@@ -84,27 +160,7 @@ class FakeLLMClient(UnifiedLLM):
         Thread-safe: uses asyncio.Lock to ensure concurrent calls get responses in order.
         """
         async with self._lock:
-            self._prepare_call_config(kwargs)
-            self.call_count += 1
-            # A non-provider test client must never observe private replay state.
-            self.last_messages, _, _ = apply_cache_policy(
-                prepare_chat_messages(messages, None), None, responses=False
-            )
-            self.last_tools = tools
-
-            # Return next response from queue, or empty response if none left
-            if self._response_queue:
-                return self._response_queue.popleft()
-            else:
-                # Return empty response if we've exhausted scripted responses
-                return LLMResponse(
-                    raw_response=None,
-                    content="",
-                    tool_calls=[],
-                    finish_reason="stop",
-                    reasoning=None,
-                    usage=None,
-                )
+            return self._scripted_call(messages, tools, output_model, kwargs)
 
     def call(
         self,
@@ -114,8 +170,17 @@ class FakeLLMClient(UnifiedLLM):
         **kwargs: Any,
     ) -> LLMResponse:
         """Synchronous version of acall for UnifiedLLM compatibility."""
-        # For sync call, we don't need locking since tests are usually single-threaded
-        self._prepare_call_config(kwargs)
+        return self._scripted_call(messages, tools, output_model, kwargs)
+
+    def _scripted_call(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        tools: list[Tool] | None,
+        output_model: type[BaseModel] | None,
+        kwargs: dict[str, Any],
+    ) -> LLMResponse:
+        """Consume one scripted response and record the normalized call."""
+        call_config = self._prepare_call_config(kwargs)
         self.call_count += 1
         self.last_messages, _, _ = apply_cache_policy(
             prepare_chat_messages(messages, None), None, responses=False
@@ -123,9 +188,16 @@ class FakeLLMClient(UnifiedLLM):
         self.last_tools = tools
 
         if self._response_queue:
-            return self._response_queue.popleft()
+            response = self._response_queue.popleft()
+            error = None
+        elif self._strict_exhaustion:
+            response = None
+            error = FakeLLMResponseExhaustedError(
+                f"FakeLLMClient has no scripted response for call {self.call_count}; "
+                "add a response or disable strict_exhaustion"
+            )
         else:
-            return LLMResponse(
+            response = LLMResponse(
                 raw_response=None,
                 content="",
                 tool_calls=[],
@@ -133,15 +205,50 @@ class FakeLLMClient(UnifiedLLM):
                 reasoning=None,
                 usage=None,
             )
+            error = None
+
+        self._calls.append(
+            FakeLLMCall(
+                index=self.call_count,
+                messages=_snapshot(self.last_messages),
+                tools=_snapshot(tools),
+                output_model=output_model,
+                kwargs=_snapshot(call_config),
+                response=_response_snapshot(response) if response is not None else None,
+                error=error,
+            )
+        )
+        if error is not None:
+            raise error
+        assert response is not None
+        return response
 
     def reset(self) -> None:
         """Reset call history."""
         self.call_count = 0
         self.last_messages = []
         self.last_tools = None
+        self._calls.clear()
 
     @classmethod
-    def with_code_responses(cls, code_strings: list[str]) -> "FakeLLMClient":
+    def _from_scripted_responses(
+        cls,
+        responses: list[LLMResponse],
+        *,
+        strict_exhaustion: bool,
+    ) -> "FakeLLMClient":
+        """Build through a convenience constructor without changing subclass defaults."""
+        if strict_exhaustion:
+            return cls(scripted_responses=responses, strict_exhaustion=True)
+        return cls(scripted_responses=responses)
+
+    @classmethod
+    def with_code_responses(
+        cls,
+        code_strings: list[str],
+        *,
+        strict_exhaustion: bool = False,
+    ) -> "FakeLLMClient":
         """
         Create a fake client that returns multiple code generation responses.
 
@@ -149,6 +256,7 @@ class FakeLLMClient(UnifiedLLM):
 
         Args:
             code_strings: List of code strings to return (in order)
+            strict_exhaustion: Raise after the final code response is consumed.
 
         Returns:
             FakeLLMClient configured with code responses
@@ -169,22 +277,31 @@ class FakeLLMClient(UnifiedLLM):
                     ),
                 )
             )
-        return cls(scripted_responses=responses)
+        return cls._from_scripted_responses(
+            responses,
+            strict_exhaustion=strict_exhaustion,
+        )
 
     @classmethod
-    def simple_message(cls, message: str) -> "FakeLLMClient":
+    def simple_message(
+        cls,
+        message: str,
+        *,
+        strict_exhaustion: bool = False,
+    ) -> "FakeLLMClient":
         """
         Create a fake client that returns a simple message.
 
         Args:
             message: Message content to return
+            strict_exhaustion: Raise after the message response is consumed.
 
         Returns:
             FakeLLMClient configured with message response
         """
         words = message.split()
-        return cls(
-            scripted_responses=[
+        return cls._from_scripted_responses(
+            [
                 LLMResponse(
                     raw_response=None,
                     content=message,
@@ -197,7 +314,8 @@ class FakeLLMClient(UnifiedLLM):
                         total_tokens=10 + len(words),
                     ),
                 )
-            ]
+            ],
+            strict_exhaustion=strict_exhaustion,
         )
 
     @classmethod
@@ -206,6 +324,8 @@ class FakeLLMClient(UnifiedLLM):
         tool_name: str,
         tool_args: dict[str, Any],
         message: str | None = None,
+        *,
+        strict_exhaustion: bool = False,
     ) -> "FakeLLMClient":
         """
         Create a fake client that returns a tool call.
@@ -214,12 +334,13 @@ class FakeLLMClient(UnifiedLLM):
             tool_name: Tool name
             tool_args: Tool arguments (will be JSON-serialized)
             message: Optional message before tool call
+            strict_exhaustion: Raise after the tool-call response is consumed.
 
         Returns:
             FakeLLMClient configured with tool call
         """
-        return cls(
-            scripted_responses=[
+        return cls._from_scripted_responses(
+            [
                 LLMResponse(
                     raw_response=None,
                     content=message or "",
@@ -234,7 +355,8 @@ class FakeLLMClient(UnifiedLLM):
                     reasoning=None,
                     usage=LLMUsage(input_tokens=10, output_tokens=5, total_tokens=15),
                 )
-            ]
+            ],
+            strict_exhaustion=strict_exhaustion,
         )
 
     @classmethod
@@ -242,6 +364,8 @@ class FakeLLMClient(UnifiedLLM):
         cls,
         reasoning: str,
         message: str,
+        *,
+        strict_exhaustion: bool = False,
     ) -> "FakeLLMClient":
         """
         Create a fake client that returns reasoning + message (o1-style).
@@ -249,12 +373,13 @@ class FakeLLMClient(UnifiedLLM):
         Args:
             reasoning: Internal reasoning text
             message: Final message
+            strict_exhaustion: Raise after the reasoning response is consumed.
 
         Returns:
             FakeLLMClient configured with reasoning
         """
-        return cls(
-            scripted_responses=[
+        return cls._from_scripted_responses(
+            [
                 LLMResponse(
                     raw_response=None,
                     content=message,
@@ -263,5 +388,6 @@ class FakeLLMClient(UnifiedLLM):
                     reasoning=reasoning,
                     usage=LLMUsage(input_tokens=15, output_tokens=10, total_tokens=25),
                 )
-            ]
+            ],
+            strict_exhaustion=strict_exhaustion,
         )
