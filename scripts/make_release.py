@@ -391,9 +391,10 @@ def provider_checks(
     Their model routes and credentials come from registry aliases installed with
     a bundled-config package, so a runner without that package fails this gate
     (the cases skip, and skips are rejected below).
-    The supplied alias wheel is loaded in uv's temporary environment, since the
-    locked project sync removes packages outside the lockfile. Local callers may
-    omit it when their registry aliases are otherwise available.
+    In CI the supplied alias wheel is loaded in uv's temporary environment, since
+    the locked project sync removes packages outside the lockfile. Local releases
+    use the aliases installed in the developer's environment, as the local
+    capability diff does.
     Seven cases make at most 17 capped calls without retries. A fresh report
     directory and exact case identities prevent stale or skipped evidence from
     satisfying the gate. Session databases and reports stay in private artifacts.
@@ -456,7 +457,7 @@ def provider_checks(
             )
         ):
             die(
-                f"Provider validation requires the {len(expected)} expected cases to pass exactly once; no skips. Check the alias package if cases were skipped (use --internal-wheel)."
+                f"Provider validation requires the {len(expected)} expected cases to pass exactly once; no skips. If cases were skipped, check that the model-alias package is installed."
             )
     except (ReleaseError, OSError, ET.ParseError) as exc:
         if manifest:
@@ -1562,7 +1563,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-capability",
         action="store_true",
-        help="skip the capability diff (docs-only releases; the LLM eval is the slow, costly step)",
+        help="skip the provider checks and capability diff (docs-only releases; both make paid LLM calls)",
     )
     parser.add_argument(
         "--allow-dirty", action="store_true", help="proceed with an unclean working tree"
@@ -1599,7 +1600,9 @@ def _parser() -> argparse.ArgumentParser:
         default="",
         help="canonical refs/pull/<number>/head ref authenticated by the private controller",
     )
-    parser.add_argument("--internal-wheel", type=Path, help="explicit internal model-alias wheel")
+    parser.add_argument(
+        "--internal-wheel", type=Path, help="explicit internal model-alias wheel (--ci only)"
+    )
     parser.add_argument("--controller-sha", help="exact nooa-dev commit that built the wheel")
     parser.add_argument("--artifact-dir", type=Path, help="private CI evidence output directory")
     parser.add_argument(
@@ -1846,7 +1849,15 @@ def ci_main(args: argparse.Namespace) -> int:
 
 
 def local_main(args: argparse.Namespace) -> int:
-    if args.create_draft or args.candidate_sha or args.candidate_ref or args.artifact_dir:
+    if (
+        args.create_draft
+        or args.candidate_sha
+        or args.candidate_ref
+        or args.artifact_dir
+        or args.internal_wheel
+    ):
+        # Locally, the provider checks and the capability diff both resolve
+        # model aliases from the developer's environment, so they agree.
         die("CI-only arguments require --ci")
 
     models = args.models.split(",") if args.models else GATE_MODELS
@@ -1855,14 +1866,19 @@ def local_main(args: argparse.Namespace) -> int:
         die("--models/--runs/--limit reduce the gate's power; pair them with --checks-only")
 
     head_sha, prev_tag, _prev_sha, existing = preflight(args.tag, args.allow_dirty)
+    if not args.skip_capability:
+        provider_preflight(None)
     fast_checks()
     build_and_smoke(args.tag, head_sha)
-    provider_checks(REPORT_PATH.parent, internal_wheel=args.internal_wheel)
 
     report = ""
     if args.skip_capability:
-        warn("capability diff SKIPPED — no evidence this release is free of regressions")
+        warn(
+            "provider checks and capability diff SKIPPED — no evidence this release "
+            "is free of regressions"
+        )
     else:
+        provider_checks(REPORT_PATH.parent)
         diff, _baseline, _candidate = capability_diff(
             prev_tag, head_sha, models, args.runs, args.limit
         )

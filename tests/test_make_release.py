@@ -1101,20 +1101,52 @@ def test_provider_gate_loads_alias_package_ephemerally(mr, monkeypatch, tmp_path
         mr.provider_checks(tmp_path, internal_wheel=wheel)
 
 
-def test_local_release_forwards_alias_wheel_to_provider_gate(mr, monkeypatch, tmp_path):
+def test_local_release_rejects_alias_wheel(mr, tmp_path):
+    """Local provider checks and capability diff both use the ambient registry."""
     wheel = tmp_path / "model_aliases.whl"
     args = mr._parser().parse_args(["v1.2.3", "--internal-wheel", str(wheel)])
+    with pytest.raises(mr.ReleaseError, match="require --ci"):
+        mr.local_main(args)
+
+
+def _stub_local_release(mr, monkeypatch, order):
     monkeypatch.setattr(mr, "preflight", lambda *_args: ("a" * 40, "v1.2.2", "b" * 40, None))
     monkeypatch.setattr(mr, "fast_checks", lambda: None)
-    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args: None)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args: order.append("build"))
+    monkeypatch.setattr(
+        mr, "provider_preflight", lambda wheel: order.append(("provider_preflight", wheel))
+    )
+    monkeypatch.setattr(
+        mr,
+        "provider_checks",
+        lambda *_args, **kwargs: order.append(("provider_checks", kwargs.get("internal_wheel"))),
+    )
+    clean = mr.Diff(markdown="clean")
+    monkeypatch.setattr(
+        mr,
+        "capability_diff",
+        lambda *_args, **_kwargs: order.append("capability") or (clean, None, None),
+    )
 
-    def providers(*_args, **kwargs):
-        assert kwargs["internal_wheel"] == wheel
-        raise mr.ReleaseError("reached provider gate")
 
-    monkeypatch.setattr(mr, "provider_checks", providers)
-    with pytest.raises(mr.ReleaseError, match="reached provider gate"):
-        mr.local_main(args)
+def test_local_release_checks_provider_setup_before_build(mr, monkeypatch):
+    order = []
+    _stub_local_release(mr, monkeypatch, order)
+    assert mr.local_main(mr._parser().parse_args(["v1.2.3", "--checks-only"])) == 0
+    assert order == [
+        ("provider_preflight", None),
+        "build",
+        ("provider_checks", None),
+        "capability",
+    ]
+
+
+def test_skip_capability_also_skips_paid_provider_checks(mr, monkeypatch):
+    order = []
+    _stub_local_release(mr, monkeypatch, order)
+    args = mr._parser().parse_args(["v1.2.3", "--skip-capability", "--checks-only"])
+    assert mr.local_main(args) == 0
+    assert order == ["build"]
 
 
 def test_existing_publication_workflow_still_uses_published_release_trigger():
