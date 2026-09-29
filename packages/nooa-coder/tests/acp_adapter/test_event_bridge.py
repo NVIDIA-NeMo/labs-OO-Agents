@@ -44,7 +44,7 @@ from nooa_coder.session.session import Session
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage, Done, NeedInput, RespondResult, Waiting
+from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa.llm_types import AssistantReasoning, LLMUsage
 from nooa.unifiedllm import FakeLLMClient
 
@@ -630,9 +630,9 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
         NeedInput(question="Which branch?", options=["main", "dev"]),
         Done(explanation="finished"),
         Waiting(explanation="job running", on=["jobs"]),
-        RespondResult(kind="DONE", explanation="answered"),
+        Done(explanation="answered", message="The answer is 42."),
     ],
-    ids=["need_input", "done", "waiting", "respond_result"],
+    ids=["need_input", "done", "waiting", "done_with_message"],
 )
 async def test_a_turn_result_is_not_shown_as_out(tmp_path, value):
     """``return_result(...)`` ends the turn; its value is not output for the card."""
