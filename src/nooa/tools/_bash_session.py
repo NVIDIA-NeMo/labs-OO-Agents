@@ -15,6 +15,7 @@ Architecture:
 
 import asyncio
 import base64
+import codecs
 import logging
 import os
 import secrets
@@ -31,6 +32,7 @@ MAX_OUTPUT_CHARS = 30_000
 """Characters kept of each of a command's stdout and stderr: the first and last half."""
 _BOUNDED_CHUNK_CHARS = 65_536  # Pieces fed to the truncating buffer by _bounded
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
+_STREAM_CHUNK = 65536  # Largest chunk run_stream reads (and yields) at once
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
 
@@ -341,12 +343,23 @@ class BashSession:
         yields ('__done__', 'exit_code,timed_out_flag') where timed_out_flag
         is '1' if the command timed out, '0' otherwise.
 
+        Chunks are yielded as they arrive; the command waits for the consumer
+        when its pipe is full, so memory stays bounded. Closing the stream
+        early (``aclose()``, ``break``, or cancellation) stops the command the
+        same way a timeout does and keeps the session usable.
+
         Concurrent calls are serialized via an internal lock.
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:
-            async for item in self._run_stream_unlocked(command, timeout):
-                yield item
+            stream = self._run_stream_unlocked(command, timeout)
+            try:
+                async for item in stream:
+                    yield item
+            finally:
+                # Close the inner stream while the lock is still held, so an
+                # early close stops the command before the next one can start.
+                await stream.aclose()
 
     async def _run_stream_unlocked(
         self, command: str, timeout: float
@@ -390,56 +403,64 @@ class BashSession:
 
         assert proc.stdout is not None and proc.stderr is not None
 
-        # Read stdout/stderr concurrently, yielding chunks as they arrive,
-        # while watching the control fd for the sentinel.
-        stdout_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
-        stderr_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
-
-        async def _read_stream(stream, name, queue):
-            try:
-                while True:
-                    chunk = await stream.read(4096)
-                    if not chunk:
+        # One read is outstanding per stream, and the next one starts only after
+        # the chunk has been yielded. A slow consumer therefore slows the command
+        # down (its pipe fills up) instead of growing a buffer here, and nothing
+        # is dropped or reordered within a stream.
+        streams = {"stdout": proc.stdout, "stderr": proc.stderr}
+        decoders = {
+            name: codecs.getincrementaldecoder("utf-8")(errors="replace") for name in streams
+        }
+        reads = {
+            name: asyncio.create_task(stream.read(_STREAM_CHUNK))
+            for name, stream in streams.items()
+        }
+        control = asyncio.create_task(self._read_control_until(sentinel, timeout))
+        finished = False
+        try:
+            while reads:
+                if control.done():
+                    # The command has ended, so the rest of its output is already
+                    # in the pipes. Read until they go quiet.
+                    done, _ = await asyncio.wait(
+                        reads.values(), timeout=_DRAIN_TIMEOUT, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if not done:
                         break
-                    queue.put_nowait((name, chunk.decode("utf-8", errors="replace")))
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-            finally:
-                queue.put_nowait(None)
-
-        stdout_task = asyncio.create_task(_read_stream(proc.stdout, "stdout", stdout_queue))
-        stderr_task = asyncio.create_task(_read_stream(proc.stderr, "stderr", stderr_queue))
-
-        ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
-
-        # Sentinel received — cancel readers and drain remaining.
-        stdout_task.cancel()
-        stderr_task.cancel()
-        for task in (stdout_task, stderr_task):
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        # Drain queues
-        for q in (stdout_queue, stderr_queue):
-            while not q.empty():
-                item = q.get_nowait()
-                if item is not None:
-                    yield item
-
-        # Greedy-drain remaining pipe data
-        for stream, name in [(proc.stdout, "stdout"), (proc.stderr, "stderr")]:
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(stream.read(4096), timeout=_DRAIN_TIMEOUT)
+                else:
+                    await asyncio.wait(
+                        (control, *reads.values()), return_when=asyncio.FIRST_COMPLETED
+                    )
+                for name, task in list(reads.items()):
+                    if not task.done():
+                        continue
+                    del reads[name]
+                    try:
+                        chunk = task.result()
+                    except Exception:
+                        chunk = b""
                     if not chunk:
-                        break
-                    yield (name, chunk.decode("utf-8", errors="replace"))
-                except (TimeoutError, Exception):
-                    break
+                        continue  # end of stream
+                    text = decoders[name].decode(chunk)
+                    if text:
+                        yield (name, text)
+                    reads[name] = asyncio.create_task(streams[name].read(_STREAM_CHUNK))
+            ctrl_lines, timed_out = await control
+            finished = True
+        finally:
+            for task in reads.values():
+                task.cancel()
+            await asyncio.gather(*reads.values(), return_exceptions=True)
+            if not finished:
+                # The consumer stopped early (aclose, break, or cancellation).
+                control.cancel()
+                await asyncio.gather(control, return_exceptions=True)
+                await self._stop_abandoned_command(proc, sentinel)
+
+        for name, decoder in decoders.items():
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                yield (name, tail)
 
         # Parse exit code
         exit_code = -1 if not ctrl_lines else 0
@@ -459,6 +480,40 @@ class BashSession:
             self._last_successful_command = time.time()
 
         yield ("__done__", f"{exit_code},{1 if timed_out else 0}")
+
+    async def _stop_abandoned_command(
+        self, proc: asyncio.subprocess.Process, sentinel: str
+    ) -> None:
+        """Stop a command whose stream was closed early, and resynchronise the shell.
+
+        Uses the same escalation as a timeout. The command's output is
+        discarded meanwhile, so a full pipe cannot keep it from reaching the
+        sentinel. If the shell does not come back, it is reset: the working
+        directory is kept, shell variables are lost.
+        """
+        if self._process is proc and proc.returncode is None:
+            assert proc.stdout is not None and proc.stderr is not None
+
+            async def discard(stream: asyncio.StreamReader) -> None:
+                try:
+                    while await stream.read(_STREAM_CHUNK):
+                        pass
+                except Exception:
+                    pass
+
+            drains = [asyncio.create_task(discard(s)) for s in (proc.stdout, proc.stderr)]
+            try:
+                recovered = await self._interrupt_and_recover(proc, sentinel, 0.0)
+                if recovered:
+                    await asyncio.sleep(_DRAIN_TIMEOUT)  # discard trailing output too
+            finally:
+                for task in drains:
+                    task.cancel()
+                await asyncio.gather(*drains, return_exceptions=True)
+            if recovered:
+                return
+            self._diagnose_death("run_stream_abandoned")
+        await self.reset()
 
     async def _send_and_wait(
         self, script: str, sentinel: str, timeout: float

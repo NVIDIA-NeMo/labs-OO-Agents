@@ -472,6 +472,7 @@ class ShellTools(Skill):
         the chunk) incrementally, then a final ``StreamDone`` (``.returncode``,
         ``.timed_out``) once the command completes. Runs in the persistent
         session, like ``run``. Pass a payload as ``stdin=`` instead of heredocs.
+        Leaving the loop early stops the command.
 
         Consume output directly and check the final exit status::
 
@@ -491,13 +492,17 @@ class ShellTools(Skill):
         run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
         timed_out = False
         exit_code = 0
-        async for stream_name, chunk in session.run_stream(run_cmd, timeout=timeout):
-            if stream_name == "__done__":
-                parts = chunk.split(",")
-                exit_code = int(parts[0])
-                timed_out = bool(int(parts[1])) if len(parts) > 1 else False
-                break
-            yield StreamEvent(kind=stream_name, text=chunk)
+        stream = session.run_stream(run_cmd, timeout=timeout)
+        try:
+            async for stream_name, chunk in stream:
+                if stream_name == "__done__":
+                    parts = chunk.split(",")
+                    exit_code = int(parts[0])
+                    timed_out = bool(int(parts[1])) if len(parts) > 1 else False
+                    break
+                yield StreamEvent(kind=stream_name, text=chunk)
+        finally:
+            await stream.aclose()  # an early close stops the command
         yield StreamDone(kind="done", returncode=exit_code, timed_out=timed_out)
 
     @staticmethod
