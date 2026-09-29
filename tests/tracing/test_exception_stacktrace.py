@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from typing import Any
 from unittest.mock import MagicMock
@@ -14,6 +15,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from otlp_test_helpers import read_all_otlp_jsonl_spans
 
+from nooa.events import ExecutionResult
 from nooa.tracing._hooks_impl import OpenInferenceHooks
 from nooa.tracing._otlp_file_exporter import OtlpJsonFileExporter
 
@@ -84,6 +86,30 @@ def test_agent_error_span_records_exception_stacktrace(hooks_and_spans):
 
     [span] = [s for s in read_spans() if s["name"] == "method.solve"]
     _assert_exception_stacktrace(span)
+
+
+def test_execution_result_error_is_preserved_in_bounded_output(hooks_and_spans):
+    """Stored errors remain available when no separate hook exception is supplied."""
+    hooks, read_spans = hooks_and_spans
+    agent = MagicMock()
+    ctx = hooks.before_code_execution(
+        agent=agent,
+        code="raise ValueError('boom')",
+        execution_id="exec-result-error",
+    )
+
+    hooks.after_code_execution(
+        agent=agent,
+        code="raise ValueError('boom')",
+        result=ExecutionResult(error=ValueError("boom")),
+        exception=None,
+        context=ctx,
+        execution_id="exec-result-error",
+    )
+
+    [span] = [s for s in read_spans() if s["name"] == "code_execution"]
+    assert span["attributes"]["output.mime_type"] == "application/json"
+    assert json.loads(span["attributes"]["output.value"])["error"] == "boom"
 
 
 @pytest.mark.parametrize(

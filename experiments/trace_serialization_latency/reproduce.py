@@ -92,9 +92,12 @@ def current_serializer(value: Any) -> str:
     return trace_fields(args=value["args"], kwargs=value["kwargs"]).text
 
 
-def hook_before_call(value: dict[str, Any]) -> str:
-    """Exercise the real synchronous hook that runs before an agent method."""
+def measure_hook_before_call(value: dict[str, Any], *, collect: bool = True) -> Measurement:
+    """Measure only the synchronous before hook, then close its span."""
+    if collect:
+        gc.collect()
     call_id = f"reproduction-{next(_CALL_IDS)}"
+    started = time.perf_counter()
     context = _HOOKS.before_agent_call(
         agent=_AGENT,
         method_name="run",
@@ -104,6 +107,7 @@ def hook_before_call(value: dict[str, Any]) -> str:
         parent_call_id=None,
     )
     output = context["span"].attributes["input.value"]
+    elapsed = time.perf_counter() - started
     _HOOKS.after_agent_call(
         agent=_AGENT,
         method_name="run",
@@ -111,7 +115,7 @@ def hook_before_call(value: dict[str, Any]) -> str:
         exception=None,
         context=context,
     )
-    return output
+    return Measurement(elapsed_seconds=elapsed, output_chars=len(output))
 
 
 def legacy_serializer(value: dict[str, Any]) -> str:
@@ -149,7 +153,10 @@ def measure_child(payload_kind: str, amount: int, serializer_name: str) -> dict[
 
     gc.collect()
     rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    result = measure(serializers[serializer_name], value, collect=False)
+    if serializer_name == "hook-before":
+        result = measure_hook_before_call(value, collect=False)
+    else:
+        result = measure(serializers[serializer_name], value, collect=False)
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return {
         "elapsed_seconds": result.elapsed_seconds,
@@ -182,7 +189,6 @@ def serializer_variants() -> dict[str, Callable[[Any], str]]:
     """Return the serializer variants compared by the experiment."""
     return {
         "current": current_serializer,
-        "hook-before": hook_before_call,
         "legacy": legacy_serializer,
     }
 
@@ -204,7 +210,7 @@ async def measure_event_loop_stall(value: Any) -> tuple[Measurement, float]:
     # Let the heartbeat establish its first deadline before synchronous tracing work.
     gc.collect()
     await asyncio.sleep(HEARTBEAT_SECONDS * 2)
-    result = measure(hook_before_call, value, collect=False)
+    result = measure_hook_before_call(value, collect=False)
     await asyncio.sleep(HEARTBEAT_SECONDS * 2)
     stop.set()
     await task

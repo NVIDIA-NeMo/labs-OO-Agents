@@ -638,16 +638,24 @@ class OpenInferenceHooks:
                 from nooa.events import _NO_RETURN, ExecutionResult
 
                 if type(result) is ExecutionResult:
-                    storage = _safe_stored_fields(result, ("stdout", "stderr", "returned_value"))
+                    storage = _safe_stored_fields(
+                        result, ("stdout", "stderr", "returned_value", "error")
+                    )
                     if storage is None:
                         result_preview = trace_json(result)
                     else:
                         returned_value = storage.get("returned_value", _NO_RETURN)
+                        stored_error = storage.get("error")
                         result_preview = trace_fields(
                             stdout=storage.get("stdout", ""),
                             stderr=storage.get("stderr", ""),
                             returned_value=(
                                 None if returned_value is _NO_RETURN else returned_value
+                            ),
+                            error=(
+                                _error_message(stored_error)
+                                if isinstance(stored_error, BaseException)
+                                else None
                             ),
                         )
                 else:
