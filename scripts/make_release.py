@@ -357,6 +357,28 @@ def provider_cases() -> set[tuple[str, str]]:
     return cases
 
 
+def provider_preflight(internal_wheel: Path | None) -> None:
+    """Fail before the build if the provider gate cannot run.
+
+    Resolves every release-gate alias the way the provider tests will, and
+    checks each alias's endpoint and credential variable. No provider call is
+    made; this only turns a late setup failure into an early one.
+    """
+    step("Provider gate setup (aliases and credential variables)")
+    run(
+        [
+            "uv",
+            "run",
+            "--frozen",
+            *(["--with", str(internal_wheel)] if internal_wheel else []),
+            "python",
+            "-m",
+            "tests.integration._release_gate",
+        ]
+    )
+    ok("release-gate aliases resolved and their credential variables are set")
+
+
 def provider_checks(
     artifact_dir: Path,
     manifest: ReleaseManifest | None = None,
@@ -376,10 +398,10 @@ def provider_checks(
     directory and exact case identities prevent stale or skipped evidence from
     satisfying the gate. Session databases and reports stay in private artifacts.
     """
-    # Credentials are not this runner's concern: each ``release-gate-<family>``
-    # registry alias names its own credential variable, and the private
-    # controller provides it. A missing credential fails the cases, which the
-    # count below rejects before any draft is created.
+    # Each ``release-gate-<family>`` registry alias names its own credential
+    # variable, and the private controller provides it. provider_preflight()
+    # checks those variables before the build; a credential that is set but
+    # rejected fails the cases, which the check below rejects.
     env = os.environ.copy()
     env.update(NOOA_RUN_OPEN_MODEL_REPLAY="1", NOOA_RUN_CACHE_RESUME_LIVE="1")
     env.pop(
@@ -1715,6 +1737,7 @@ def ci_main(args: argparse.Namespace) -> int:
             ci=True,
             allow_unmerged_candidate=unmerged_candidate,
         )
+        provider_preflight(internal_wheel)
         manifest.update(
             previous_release_tag=prev_tag,
             previous_release_sha=prev_sha,

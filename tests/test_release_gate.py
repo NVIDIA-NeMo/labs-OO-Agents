@@ -96,3 +96,38 @@ def test_openai_cache_case_pins_the_responses_api(layers, monkeypatch):
 
     monkeypatch.setenv("GATE_TEST_KEY", "unused")
     assert isinstance(_client("openai"), ResponsesClient)
+
+
+def test_problems_report_missing_alias_and_credential(layers, monkeypatch):
+    monkeypatch.delenv("GATE_TEST_KEY", raising=False)
+    problems = gate.gate_problems(("openai", "kimi"))
+    assert any("release-gate-openai" in p and "GATE_TEST_KEY" in p for p in problems)
+    assert any("release-gate-kimi" in p and "not installed" in p for p in problems)
+    monkeypatch.setenv("GATE_TEST_KEY", "set")
+    assert gate.gate_problems(("openai",)) == []
+
+
+def test_problems_report_shadowed_alias_and_missing_api_base(layers, monkeypatch):
+    monkeypatch.setenv("GATE_TEST_KEY", "set")
+    _write(
+        layers["user"] / "llm_config.yaml",
+        """
+        models:
+          release-gate-openai:
+            model_name: openai/some-other-route
+        """,
+    )
+    _write(
+        layers["bundled"],
+        """
+        models:
+          release-gate-openai:
+            model_name: openai/route-from-wheel
+          release-gate-kimi:
+            model_name: openai/kimi
+        """,
+    )
+    reload_registry()
+    problems = gate.gate_problems(("openai", "kimi"))
+    assert any("outside the bundled-config package" in p for p in problems)
+    assert any("release-gate-kimi" in p and "api_base" in p for p in problems)

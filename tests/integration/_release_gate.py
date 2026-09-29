@@ -17,12 +17,18 @@ route, so a gate alias that differs from the bundled-config definition fails.
 
 from __future__ import annotations
 
+import sys
 from urllib.parse import urlparse
 
 import pytest
 
 from nooa import llm_config
-from nooa.unifiedllm.registry import _load_models_from_yaml, get_llm_client, get_registry_config
+from nooa.unifiedllm.registry import (
+    _load_models_from_yaml,
+    get_llm_client,
+    get_registry_config,
+    resolve_api_key_from_config,
+)
 
 ALIAS_PREFIX = "release-gate-"
 
@@ -30,6 +36,7 @@ ALIAS_PREFIX = "release-gate-"
 # families in PROVIDER_TESTS; tests/test_make_release.py checks they match.
 CACHE_RESUME_FAMILIES = ("openai", "anthropic", "gemini")
 OPEN_MODEL_FAMILIES = ("deepseek", "kimi", "glm", "qwen")
+GATE_FAMILIES = CACHE_RESUME_FAMILIES + OPEN_MODEL_FAMILIES
 
 
 class GateAliasError(Exception):
@@ -103,3 +110,36 @@ def gate_client(family: str, **overrides):
     """
     _entry(family)
     return get_llm_client(gate_alias(family), **overrides)
+
+
+def gate_problems(families: tuple[str, ...] = GATE_FAMILIES) -> list[str]:
+    """Setup problems that would fail the gate, found without any provider call.
+
+    The release runner calls this (via ``python -m``) before building, so a
+    missing alias package, a shadowed alias or an unset credential variable
+    fails in seconds rather than after the build and smoke steps.
+    """
+    problems = []
+    for family in families:
+        alias = gate_alias(family)
+        try:
+            config = gate_config(family)
+        except GateAliasError as exc:
+            problems.append(str(exc))
+            continue
+        if not config:
+            problems.append(f"registry alias {alias!r} is not installed")
+            continue
+        if not _host(config):
+            problems.append(f"registry alias {alias!r} has no api_base")
+        key_env = config.get("api_key_env")
+        if key_env and resolve_api_key_from_config(alias, config) is None:
+            problems.append(f"registry alias {alias!r}: credential variable {key_env} is not set")
+    return problems
+
+
+if __name__ == "__main__":
+    found = gate_problems()
+    for problem in found:
+        print(problem, file=sys.stderr)
+    sys.exit(1 if found else 0)

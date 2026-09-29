@@ -790,6 +790,7 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     )
     monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "provider_preflight", lambda _wheel: None)
     monkeypatch.setattr(mr, "provider_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
     base = mr.ArmResults("base")
@@ -815,7 +816,8 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
 
 
 @pytest.mark.parametrize(
-    "failure_point", ["deterministic", "provider", "infrastructure", "hard-gate"]
+    "failure_point",
+    ["provider-preflight", "deterministic", "provider", "infrastructure", "hard-gate"],
 )
 def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, failure_point):
     args = _ci_args(mr, tmp_path)
@@ -827,7 +829,15 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
         lambda *_args, **_kwargs: ("a" * 40, "v1.2.2", "d" * 40, None),
     )
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
-    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    builds = []
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: builds.append(True))
+
+    def provider_preflight(wheel):
+        assert wheel == args.internal_wheel.resolve()
+        if failure_point == "provider-preflight":
+            raise mr.ReleaseError("release-gate-openai: NVIDIA_INFERENCE_API_KEY is not set")
+
+    monkeypatch.setattr(mr, "provider_preflight", provider_preflight)
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
     provider_calls = []
 
@@ -866,6 +876,8 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
     with pytest.raises(mr.ReleaseError):
         mr.ci_main(args)
     assert draft_calls == []
+    if failure_point == "provider-preflight":
+        assert builds == [] and provider_calls == []
     if failure_point == "provider":
         assert provider_calls == [True]
     manifest = json.loads((tmp_path / "artifacts" / "release-manifest.json").read_text())
@@ -884,6 +896,7 @@ def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monke
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
     monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "provider_preflight", lambda _wheel: None)
     provider_calls = []
     monkeypatch.setattr(
         mr, "provider_checks", lambda *_args, **_kwargs: provider_calls.append(True)
@@ -990,6 +1003,38 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
             mr.provider_checks(tmp_path, manifest)
         assert manifest.data["provider_validation"]["outcome"] == "failed"
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("with_wheel", [False, True])
+def test_provider_preflight_checks_aliases_without_provider_calls(
+    mr, monkeypatch, tmp_path, with_wheel
+):
+    wheel = tmp_path / "model_aliases.whl" if with_wheel else None
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "run", run)
+    mr.provider_preflight(wheel)
+    assert calls == [
+        ["uv", "run", "--frozen", *(["--with", str(wheel)] if wheel else [])]
+        + ["python", "-m", "tests.integration._release_gate"]
+    ]
+
+
+def test_provider_preflight_runs_the_real_alias_check(mr):
+    """Without the alias package the check fails before any build or paid call."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "tests.integration._release_gate"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        pytest.skip("release-gate aliases are installed in this environment")
+    assert "release-gate-openai" in proc.stderr
 
 
 def test_provider_gate_reports_unwritable_evidence_directory(mr, monkeypatch, tmp_path):
