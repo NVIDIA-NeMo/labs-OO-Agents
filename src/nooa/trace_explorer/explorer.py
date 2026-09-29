@@ -83,6 +83,7 @@ def get_quiet_mode() -> bool:
 
 
 _PYTHON_TOOL_NAMES = ("execute_python", "python_cell")
+_INCOMPLETE_PREVIEW_NOTICE = "Incomplete preview: trace value was truncated"
 
 
 def _is_python_tool(name: str) -> bool:
@@ -225,6 +226,8 @@ class ExecutionTurn:
     error_type: str | None = None  # Error type (e.g., "_ReturnResultSignal", "NameError")
     span_id: str = ""  # Span ID for reference
     tool_call_id: str = ""  # Tool call ID (e.g., "call_xxx" or "prefill_xxx")
+    input_preview_incomplete: bool = False
+    output_preview_incomplete: bool = False
 
 
 @dataclass
@@ -258,6 +261,8 @@ class AgentSession:
     error_message: str | None = None  # Error message from span attributes (error.message)
     strategy: str | None = None  # Strategy used (e.g., STRUCTURED_OUTPUT, CODE_ACT)
     call_id: str = ""  # agent.call_id from AGENT span (for generation span correlation)
+    input_preview_incomplete: bool = False
+    output_preview_incomplete: bool = False
 
     @property
     def duration_ms(self) -> float:
@@ -336,6 +341,11 @@ def _io_decoded_value(attrs: dict[str, Any], direction: str, *native_keys: str) 
         except (json.JSONDecodeError, TypeError):
             pass
     return value
+
+
+def _preview_incomplete(attrs: dict[str, Any], direction: str) -> bool:
+    """Return whether a canonical trace I/O preview is explicitly incomplete."""
+    return attrs.get(f"nooa.{direction}.preview.incomplete") is True
 
 
 def _io_json_field(
@@ -965,6 +975,8 @@ def _parse_trace_from_spans(spans: list[dict[str, Any]]) -> list[AgentSession]:
             error_message=attrs.get("error.message"),
             strategy=attrs.get("agent.strategy.name"),
             call_id=attrs.get("agent.call_id", ""),
+            input_preview_incomplete=_preview_incomplete(attrs, "input"),
+            output_preview_incomplete=_preview_incomplete(attrs, "output"),
         )
         sessions_by_span_id[span_id] = session
 
@@ -1074,6 +1086,10 @@ def _parse_trace_from_generation_spans(
             ),
             status=status,
             span_id=first_span.get("span_id", ""),  # Capture span_id for correlation
+            input_preview_incomplete=_preview_incomplete(attrs, "input"),
+            output_preview_incomplete=_preview_incomplete(
+                final_span.get("attributes", {}), "output"
+            ),
         )
 
         _populate_session_turns_from_generation(session, gen_key, spans, span_index)
@@ -1280,6 +1296,8 @@ def _populate_session_turns_from_generation(
                 error_type=error_type,
                 span_id=span.get("span_id", ""),
                 tool_call_id=attrs.get("tool_call_id", ""),
+                input_preview_incomplete=_preview_incomplete(attrs, "input"),
+                output_preview_incomplete=_preview_incomplete(attrs, "output"),
             )
             session.turns.append(turn)
 
@@ -1356,6 +1374,8 @@ class TurnInfo:
     error: str | None = None
     error_type: str | None = None  # Error type (e.g., "NameError", "_ReturnResultSignal")
     returned_value: Any = None
+    input_preview_incomplete: bool = False
+    output_preview_incomplete: bool = False
 
     duration_ms: float | None = None
 
@@ -1413,6 +1433,9 @@ class TurnInfo:
             return "\n".join(lines)
         else:
             lines = ["## Execution Turn", ""]
+            if self.input_preview_incomplete:
+                lines.append(f"> **{_INCOMPLETE_PREVIEW_NOTICE} (input)**")
+                lines.append("")
             lines.append("### Code Executed")
             lines.append("```python")
             lines.append(self.code or "")
@@ -1438,6 +1461,9 @@ class TurnInfo:
                 lines.append("```json")
                 lines.append(json.dumps(self.returned_value, indent=2, default=str))
                 lines.append("```")
+            if self.output_preview_incomplete:
+                lines.append("")
+                lines.append(f"> **{_INCOMPLETE_PREVIEW_NOTICE} (output)**")
             return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1467,6 +1493,8 @@ class TurnInfo:
                     "error": self.error,
                     "error_type": self.error_type,
                     "returned_value": self.returned_value,
+                    "input_preview_incomplete": self.input_preview_incomplete,
+                    "output_preview_incomplete": self.output_preview_incomplete,
                 }
             )
         return data
@@ -3196,11 +3224,15 @@ class TraceExplorer:
                 input_str = _pformat(input_data, max_string=800, max_length=50, max_depth=5)
                 input_str = " ".join(input_str.split())  # Collapse to single line
             lines.append(f"IN:  {input_str}")
+        if session.input_preview_incomplete:
+            lines.append(f"IN:  [{_INCOMPLETE_PREVIEW_NOTICE}]")
 
         # Output line (same as call graph OUT:)
         if session.result is not None:
             output_str = self._format_value_smart(session.result, concise=concise)
             lines.append(f"OUT: {output_str}")
+        if session.output_preview_incomplete:
+            lines.append(f"OUT: [{_INCOMPLETE_PREVIEW_NOTICE}]")
 
         # Error info for failed sessions
         if session.status != "OK":
@@ -3329,6 +3361,10 @@ class TraceExplorer:
                 lines.append(
                     f"  Turn {turn_num}: [{turn_type}]{reasoning_marker} {code_preview} → {status} ({duration:.0f}ms{tok_str})"
                 )
+                if exec_turn and (
+                    exec_turn.input_preview_incomplete or exec_turn.output_preview_incomplete
+                ):
+                    lines.append(f"    [{_INCOMPLETE_PREVIEW_NOTICE}]")
 
                 turn_num += 1
                 if exec_turn:
@@ -3347,6 +3383,8 @@ class TraceExplorer:
                 else:
                     code_preview = _first_code_line(exec_turn.code or "")
                 lines.append(f"  Turn {turn_num}: [EXEC] {code_preview} → {status}")
+                if exec_turn.input_preview_incomplete or exec_turn.output_preview_incomplete:
+                    lines.append(f"    [{_INCOMPLETE_PREVIEW_NOTICE}]")
                 turn_num += 1
                 i += 1
 
@@ -3500,6 +3538,8 @@ class TraceExplorer:
 
                 # Execution result as tool_response
                 if exec_turn:
+                    if exec_turn.input_preview_incomplete:
+                        lines.append(f"  <!-- {_INCOMPLETE_PREVIEW_NOTICE} (input) -->")
                     output = format_exec_output(exec_turn)
                     if output:
                         exec_status = "[ERR]" if exec_turn.error else "[OK]"
@@ -3509,6 +3549,8 @@ class TraceExplorer:
                         lines.append(f'  <tool_response{id_attr} status="{exec_status}">')
                         lines.extend(indent(trunc(output), "    "))
                         lines.append("  </tool_response>")
+                    if exec_turn.output_preview_incomplete:
+                        lines.append(f"  <!-- {_INCOMPLETE_PREVIEW_NOTICE} (output) -->")
 
                 lines.append("</turn>")
                 lines.append("")
@@ -3523,6 +3565,8 @@ class TraceExplorer:
 
                 # Standalone execution turn
                 output = format_exec_output(turn)
+                if turn.input_preview_incomplete:
+                    lines.append(f"<!-- {_INCOMPLETE_PREVIEW_NOTICE} (input) -->")
                 if output:
                     duration = f"{turn.duration_ms:.0f}ms" if turn.duration_ms else ""
                     status = "error" if turn.error else "ok"
@@ -3530,6 +3574,8 @@ class TraceExplorer:
                     lines.extend(indent(trunc(output), "  "))
                     lines.append("</turn>")
                     lines.append("")
+                if turn.output_preview_incomplete:
+                    lines.append(f"<!-- {_INCOMPLETE_PREVIEW_NOTICE} (output) -->")
                 turn_num += 1
                 i += 1
 
@@ -3896,6 +3942,9 @@ class TraceExplorer:
 
         lines.append(f'<exec_turn n="{turn_index}"{duration_str} status="{status}">')
 
+        if turn.input_preview_incomplete:
+            lines.append(f"  <!-- {_INCOMPLETE_PREVIEW_NOTICE} (input) -->")
+
         # Code executed (tool call). Preserve the provider-facing name when the
         # correlated LLM turn is available; legacy traces fall back to execute_python.
         if turn.code:
@@ -3938,6 +3987,9 @@ class TraceExplorer:
 
             lines.append("  </tool_response>")
 
+        if turn.output_preview_incomplete:
+            lines.append(f"  <!-- {_INCOMPLETE_PREVIEW_NOTICE} (output) -->")
+
         lines.append("</exec_turn>")
         return "\n".join(lines)
 
@@ -3975,6 +4027,8 @@ class TraceExplorer:
                 error_type=turn.error_type,
                 returned_value=turn.returned_value,
                 duration_ms=turn.duration_ms,
+                input_preview_incomplete=turn.input_preview_incomplete,
+                output_preview_incomplete=turn.output_preview_incomplete,
             )
 
     # =========================================================================

@@ -93,6 +93,8 @@ async def test_oi_only_execution_turn_recovers_code_and_output():
                 "input.mime_type": "application/json",
                 "output.value": exec_output,
                 "output.mime_type": "application/json",
+                "nooa.input.preview.incomplete": True,
+                "nooa.output.preview.incomplete": True,
             },
         ),
     ]
@@ -108,6 +110,12 @@ async def test_oi_only_execution_turn_recovers_code_and_output():
         # stdout + returned_value recovered from output.value (NOT native `result`)
         assert turn.stdout == "hello\n"
         assert turn.returned_value == "3"
+        assert turn.input_preview_incomplete is True
+        assert turn.output_preview_incomplete is True
+        turn_info = await trace.get_turn_data(session.session_id, session.turns.index(turn))
+        assert turn_info is not None
+        assert "Incomplete preview" in turn_info.full_content()
+        assert "Incomplete preview" in await trace.get_session(session.session_id)
         # generation result recovered from output.value
         assert session.result == "{'stock': 7}"
     finally:
@@ -132,6 +140,8 @@ async def test_oi_only_agent_span_recovers_args_kwargs_result():
                 "input.mime_type": "application/json",
                 "output.value": "{'stock': 7}",
                 "output.mime_type": "text/plain",
+                "nooa.input.preview.incomplete": True,
+                "nooa.output.preview.incomplete": True,
             },
         ),
     ]
@@ -142,6 +152,10 @@ async def test_oi_only_agent_span_recovers_args_kwargs_result():
         assert session.agent_name == "InventoryAgent"
         assert session.args == ["how many widgets?"]
         assert session.kwargs == {"k": 1}
+        assert session.input_preview_incomplete is True
+        assert session.output_preview_incomplete is True
+        detail = await trace.get_session(session.session_id)
+        assert detail.count("Incomplete preview") >= 2
         # output.value parsed back (it is valid-ish python/JSON repr string)
         assert session.result in ("{'stock': 7}", {"stock": 7})
     finally:
