@@ -178,14 +178,19 @@ class Capabilities:
 
 def probe_capabilities() -> Capabilities:
     """Probe the host once for every enforcement mechanism the sandbox uses."""
-    import resource
+    try:
+        import resource
+
+        has_rlimit = hasattr(resource, "RLIMIT_AS") and hasattr(resource, "RLIMIT_CPU")
+    except ImportError:
+        has_rlimit = False
 
     is_linux = platform.system() == "Linux"
     return Capabilities(
         linux=is_linux,
         landlock_abi=landlock_abi() if is_linux else 0,
         seccomp=seccomp_supported() if is_linux else False,
-        rlimit=hasattr(resource, "RLIMIT_AS") and hasattr(resource, "RLIMIT_CPU"),
+        rlimit=has_rlimit,
     )
 
 
