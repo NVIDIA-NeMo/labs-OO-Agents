@@ -111,8 +111,8 @@ class ItemWithdrawn(Metadata):
 class ItemDiscarded(Metadata):
     """An admitted item left its channel unconsumed and not withdrawn.
 
-    Code flushed or cleared the channel, took the item back with
-    ``pop_last()``, or removed the channel. A later load does not re-queue it.
+    Code flushed, cleared or removed the channel. A later load does not
+    re-queue it.
     """
 
     _role: ClassVar[Role] = Role.METADATA

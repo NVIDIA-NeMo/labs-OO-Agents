@@ -100,8 +100,7 @@ class ItemWithdrawnError(RuntimeError):
 class ItemDiscardedError(RuntimeError):
     """The item left its channel before any turn consumed it, without a withdraw.
 
-    Agent or host code flushed or cleared the channel, took the item back
-    with ``pop_last()``, or removed the channel.
+    Agent or host code flushed, cleared or removed the channel.
     """
 
 
@@ -238,7 +237,7 @@ class Session:
         self._unsubscribe_steers = agent.event_manager.on("BeforeTurn", self._flush_steers)
         # The agent's queue channels publish every item they hand to a consumer
         # (the loop's race and drain, agent get()) and every item they drop
-        # unconsumed (flush, clear, pop_last(), channel removed).
+        # unconsumed (flush, clear, channel removed).
         self._unsubscribe_items = (
             agent.event_manager.on(
                 "ChannelItemConsumed", lambda e: self._on_consumed(e.channel, e.item)
