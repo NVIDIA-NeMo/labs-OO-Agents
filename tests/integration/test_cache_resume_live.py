@@ -38,7 +38,7 @@ from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.retry_config import RetryConfig
-from tests.integration._release_gate import gate_client, gate_host
+from tests.integration._release_gate import CACHE_RESUME_FAMILIES, gate_client, gate_host
 
 pytestmark = [
     pytest.mark.integration,
@@ -48,7 +48,7 @@ pytestmark = [
     ),
 ]
 
-FAMILIES = ("openai", "anthropic", "gemini")
+FAMILIES = CACHE_RESUME_FAMILIES
 
 
 def _execute_python(code: str) -> str:

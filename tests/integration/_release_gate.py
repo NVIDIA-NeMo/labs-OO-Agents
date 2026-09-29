@@ -26,6 +26,11 @@ from nooa.unifiedllm.registry import _load_models_from_yaml, get_llm_client, get
 
 ALIAS_PREFIX = "release-gate-"
 
+# Families run by the release gate. scripts/make_release.py lists the same
+# families in PROVIDER_TESTS; tests/test_make_release.py checks they match.
+CACHE_RESUME_FAMILIES = ("openai", "anthropic", "gemini")
+OPEN_MODEL_FAMILIES = ("deepseek", "kimi", "glm", "qwen")
+
 
 class GateAliasError(Exception):
     """A gate alias exists but does not come from the bundled-config package."""

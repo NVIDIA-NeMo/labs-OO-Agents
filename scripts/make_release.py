@@ -329,6 +329,34 @@ def tool_versions(image_digest: str | None) -> dict[str, str]:
     return versions
 
 
+# Release-gate provider tests and the families each is parametrized over.
+# tests/test_make_release.py collects these tests and checks that pytest reports
+# exactly these case identities, so a renamed test or family fails offline.
+PROVIDER_TESTS = {
+    "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume": (
+        "openai",
+        "anthropic",
+        "gemini",
+    ),
+    "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume": (
+        "deepseek",
+        "kimi",
+        "glm",
+        "qwen",
+    ),
+}
+
+
+def provider_cases() -> set[tuple[str, str]]:
+    """JUnit (classname, name) identities the provider gate must see pass."""
+    cases = set()
+    for node, families in PROVIDER_TESTS.items():
+        path, function = node.split("::")
+        module = path.removesuffix(".py").replace("/", ".")
+        cases |= {(module, f"{function}[{family}]") for family in families}
+    return cases
+
+
 def provider_checks(
     artifact_dir: Path,
     manifest: ReleaseManifest | None = None,
@@ -361,7 +389,11 @@ def provider_checks(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="provider-validation-", dir=artifact_dir))
     report = directory / "results.xml"
-    evidence = {"outcome": "running", "report": str(report), "expected_cases": 7}
+    evidence = {
+        "outcome": "running",
+        "report": str(report),
+        "expected_cases": len(provider_cases()),
+    }
     if manifest:
         manifest.update(provider_validation=evidence)
     step("Provider replay and cache checks (17 capped provider requests)")
@@ -385,27 +417,14 @@ def provider_checks(
                 str(report),
                 "--basetemp",
                 str(directory / "sessions"),
-                "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume",
-                "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume",
+                *PROVIDER_TESTS,
             ],
             env=env,
             timeout=900,
             capture=False,
         )
         cases = ET.parse(report).findall(".//testcase")
-        expected = {
-            (
-                "tests.integration.test_cache_resume_live",
-                f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}]",
-            )
-            for family in ("openai", "anthropic", "gemini")
-        } | {
-            (
-                "tests.integration.test_open_model_tool_reasoning_live",
-                f"test_open_model_tool_reasoning_after_sqlite_resume[{family}]",
-            )
-            for family in ("deepseek", "kimi", "glm", "qwen")
-        }
+        expected = provider_cases()
         actual = {(case.get("classname"), case.get("name")) for case in cases}
         if (
             len(cases) != len(expected)
@@ -417,7 +436,7 @@ def provider_checks(
             )
         ):
             die(
-                "Provider validation requires the seven expected cases to pass exactly once; no skips. Check the alias package if cases were skipped (use --internal-wheel)."
+                f"Provider validation requires the {len(expected)} expected cases to pass exactly once; no skips. Check the alias package if cases were skipped (use --internal-wheel)."
             )
     except (ReleaseError, OSError, ET.ParseError) as exc:
         if manifest:
@@ -425,7 +444,7 @@ def provider_checks(
         die(f"Provider validation failed; inspect private evidence in {directory}: {exc}")
     if manifest:
         manifest.update(provider_validation={**evidence, "outcome": "passed"})
-    ok("all seven provider cases passed")
+    ok(f"all {evidence['expected_cases']} provider cases passed")
 
 
 # ---------------------------------------------------------------------------

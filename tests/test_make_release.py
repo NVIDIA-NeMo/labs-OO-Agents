@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -955,19 +957,7 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
         ]
         report = Path(cmd[cmd.index("--junitxml") + 1])
         count = {"empty": 0, "partial": 6}.get(outcome, 7)
-        identities = [
-            (
-                "tests.integration.test_cache_resume_live",
-                f"test_reasoning_and_prompt_cache_survive_sqlite_resume[{family}]",
-            )
-            for family in ("openai", "anthropic", "gemini")
-        ] + [
-            (
-                "tests.integration.test_open_model_tool_reasoning_live",
-                f"test_open_model_tool_reasoning_after_sqlite_resume[{family}]",
-            )
-            for family in ("deepseek", "kimi", "glm", "qwen")
-        ]
+        identities = sorted(mr.provider_cases())
         if outcome == "duplicate":
             identities[0] = identities[1]
         elif outcome == "wrong_name":
@@ -1000,6 +990,41 @@ def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome)
             mr.provider_checks(tmp_path, manifest)
         assert manifest.data["provider_validation"]["outcome"] == "failed"
     assert len(calls) == 1
+
+
+def test_provider_gate_cases_match_the_collected_live_tests(mr, tmp_path):
+    """Renaming a test, module or family must change the gate's expected cases too."""
+    report = tmp_path / "collected.xml"
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"NOOA_RUN_CACHE_RESUME_LIVE", "NOOA_RUN_OPEN_MODEL_REPLAY"}
+    }
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-m",
+            "integration",
+            "-o",
+            "junit_family=xunit1",
+            "--junitxml",
+            str(report),
+            *mr.PROVIDER_TESTS,
+        ],
+        cwd=REPO,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    cases = ET.parse(report).findall(".//testcase")
+    assert all(case.find("skipped") is not None for case in cases)  # no provider calls
+    assert {(case.get("classname"), case.get("name")) for case in cases} == mr.provider_cases()
+    assert len(cases) == len(mr.provider_cases())
 
 
 @pytest.mark.parametrize("with_wheel", [False, True])
