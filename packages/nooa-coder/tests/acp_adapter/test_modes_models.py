@@ -16,7 +16,7 @@ TIMEOUT = 30
 def aliases(monkeypatch):
     from nooa_coder.acp import server
 
-    monkeypatch.setattr(server, "model_aliases", lambda: ["fast", "smart"])
+    monkeypatch.setattr(server, "model_aliases", lambda workspace: ["fast", "smart"])
 
 
 async def test_set_mode_auto_is_accepted_and_reported(make_adapter, workspace, client):

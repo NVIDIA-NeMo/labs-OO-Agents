@@ -25,11 +25,11 @@ def served(monkeypatch):
 def requested(monkeypatch):
     calls: list = []
 
-    def fake_client(name, **kwargs):
+    def fake_client(name, workspace, **kwargs):
         calls.append((name, kwargs))
         return name
 
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_client)
+    monkeypatch.setattr("nooa_coder.workspace.models.workspace_llm_client", fake_client)
     return calls
 
 
@@ -66,6 +66,16 @@ def test_client_type_and_the_nvidia_key_reach_the_client(monkeypatch, served, re
         ("nvidia_nim/some/model", {"client_type": "responses", "api_key": "nvapi-test"}),
         ("openai/gpt", {"client_type": "responses"}),
     ]
+
+
+def test_the_factory_reads_the_session_workspace_configuration(served, tmp_path, monkeypatch):
+    monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)
+    (tmp_path / ".nooa").mkdir()
+    (tmp_path / ".nooa" / "llm_config.yaml").write_text(
+        "models:\n  mine:\n    model_name: openai/mine-model\n"
+    )
+    assert _invoke(["--model", "m"]).exit_code == 0
+    assert served["llm_factory"]("mine", tmp_path).model == "openai/mine-model"
 
 
 def test_a_relative_agent_file_is_resolved_where_the_command_runs(served, tmp_path, monkeypatch):
