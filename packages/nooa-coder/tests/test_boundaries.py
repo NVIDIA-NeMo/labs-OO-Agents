@@ -60,8 +60,6 @@ _PRIVATE_CORE_NAMES = {
     r"\b_open_connection\b": "SQLiteStorageManager(must_exist=, journal_mode=)",
     r"\b_read_lock_owner\b": "nooa.storage.read_lock_owner",
     r"\b_acquire_session_lock\b": "a read-only lock probe (store._lock_is_held)",
-    r"\b_ChannelReader\b": "nooa.runtime.channels.ChannelReader",
-    r"\b_re_register_hooks\b": "nooa.tracing.register_hooks_in_current_context",
     r"nooa\.tools\._\w+": "nooa.tools (BashSession, StreamEvent, StreamDone)",
     r"\._llm\b|[\"']_llm[\"']": "Agent.llm",
 }
