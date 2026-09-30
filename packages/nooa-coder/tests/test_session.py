@@ -287,30 +287,50 @@ async def test_steer_during_a_turn_reaches_the_next_model_call(make_session):
     assert len(llm.calls) == 2
     assert "STEER-focus-on-tests" not in str(llm.calls[0].messages)
     assert "STEER-focus-on-tests" in str(llm.calls[1].messages)
-    notes = [e for e in session._agent.event_manager.values() if isinstance(e, Notification)]
-    assert [(n.source, n.description) for n in notes] == [
-        (
-            "New message from the user while you were working.",
-            "STEER-focus-on-tests",
-        )
-    ]
+    [note] = [e for e in session._agent.event_manager.values() if isinstance(e, Notification)]
+    assert note.value == {"user_messages": ["STEER-focus-on-tests"]}
+    assert session._agent.events[note.tag].value == note.value
     user_lines = [e.content for e in session.transcript() if e.role == "user"]
     assert user_lines == ["write the parser", "STEER-focus-on-tests"]
 
 
+STEER_EVENT = (
+    '<sys tag="{tag}">\n'
+    "Notification(source='New message on user_messages from the user while you were working.', "
+    "description='Sent during this turn. The value has the form of the notification argument "
+    'of handle(); reach it as self.events["N"].value, where N is the tag of this event.\', '
+    "value={{'user_messages': ['STEER-focus-on-tests']}})\n"
+    "</sys>"
+)
+
+
+async def test_a_steer_is_shown_to_the_model_like_a_turn_input(make_session):
+    started, block = agents.fresh_events()
+    session, llm = make_session(cell(agents.BLOCKING_CELL), done("steered"))
+    pending = asyncio.ensure_future(session.prompt("write the parser"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    await session.steer("STEER-focus-on-tests")
+    block.set()
+    await asyncio.wait_for(pending, TIMEOUT)
+
+    [note] = [e for e in session._agent.event_manager.values() if isinstance(e, Notification)]
+    rendered = [m["content"] for m in llm.calls[1].messages if "STEER-focus-on-tests" in str(m)]
+    assert rendered == [STEER_EVENT.format(tag=note.tag)]
+
+
 @pytest.mark.parametrize(
-    ("source", "sentence"),
+    ("source", "sender"),
     [
-        ("user", "New message from the user while you were working."),
-        (
-            "parent:reviewer",
-            "New message from your parent agent reviewer while you were working.",
-        ),
-        ("host", "New message from host while you were working."),
+        ("user", "the user"),
+        ("acp", "the user"),
+        ("parent:reviewer", "your parent agent reviewer"),
+        ("host", "host"),
     ],
 )
-def test_a_steer_notification_names_its_sender(source, sentence):
-    assert session_module._steer_source(source) == sentence
+def test_a_steer_notification_names_its_channel_and_sender(source, sender):
+    assert session_module._steer_source(source) == (
+        f"New message on user_messages from {sender} while you were working."
+    )
 
 
 async def test_steer_after_the_last_model_call_becomes_the_next_message(make_session):

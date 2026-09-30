@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-coder`: a message steered into a running turn reaches the model in the form of
+  a turn's input: a `Notification` whose `value` is `{"user_messages": [text]}`, whose
+  `source` names the channel and the sender, and whose `description` says it came during
+  the turn and how to reach it (`self.events["N"].value`). A steer from an ACP client
+  counts as the user.
 - `nooa-coder`: the ACP server accepts Pool's steering. It advertises
   `poolside/session_steer`, and a message typed in Pool during a running turn reaches
   the turn's next model call (queued when no turn is running) instead of waiting in
