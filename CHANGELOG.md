@@ -18,6 +18,11 @@ to follow semantic versioning.
   It advertises `poolside/session_steer`, and each such message is queued for the next
   turn instead of waiting in Pool's own queue, where Esc drops it. It is not steered
   into the running turn until the Pool team says which of the two the request means.
+- `nooa-coder`: the open `session/prompt` stays open until the messages Pool handed over
+  with `_poolside/session_steer` during it are handled, in order, questions included, as
+  Pool expects; before, the prompt ended with its own turn and the next turn ran with no
+  prompt open, and Pool did not show its reply. Stop withdraws the ones no turn took and
+  lists them in one agent message.
 - `nooa-coder`: with Pool as the ACP client, free-text, choice and typed questions
   (`NeedInput`) open Pool's form (`_poolside/elicitation`) instead of ending the turn as
   text. Typed fields are asked as strings and converted; a choice question is one text

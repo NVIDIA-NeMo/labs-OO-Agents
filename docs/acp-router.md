@@ -90,10 +90,22 @@ what the person types during a running prompt as `_poolside/session_steer`
 with `{sessionId, inputId, prompt}` instead of keeping it in its own queue,
 where Esc drops it. The text is queued for the next turn as in item 1, not
 handed to the running turn's next model call. This is deliberate until the Pool team says
-whether the request means queue or steer. The answer is `{inputId}`. A slash
+whether the request means queue or steer. The answer is `{inputId}`, sent as
+soon as the message is admitted. A slash
 command is refused with `invalid_params`, and Pool then sends it as a normal
 prompt. The router routes the request by
-`sessionId` like any other session request.
+`sessionId` like any other session request, so the prompt and the message are
+handled by the same worker.
+
+Pool keeps its turn open until the messages it handed over this way are
+handled ("deferring turn close"), so the open `session/prompt` follows them:
+it returns `end_turn` only after the turns that handle them, in order, with
+their questions asked as for the prompt's own turn. A message the prompt's own
+turn already took resolves with that turn. Stop withdraws the messages no turn
+took (they would otherwise run with no prompt open) and lists them in one agent
+message, "Stopped before these messages were handled"; the prompt answers
+`cancelled`. A message sent this way with no prompt open is only queued.
+`_nooa/session/inject` messages never hold a prompt open.
 
 ## Lifetime
 
