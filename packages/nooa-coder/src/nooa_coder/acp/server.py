@@ -681,7 +681,9 @@ class CoderACPAgent:
         they were admitted, including ones admitted while this loop runs.
         Each is waited for as ``item_id`` is (``_finish_item``); the prompt
         returns ``end_turn`` when all are done, and stops at the first
-        other answer.
+        other answer. A question is not asked while a follower after it is
+        still waiting: the person's queued message comes first, and its turn
+        has the question in context.
         """
         self._open[session.id] = self._open.get(session.id, 0) + 1
         # Taken now: Stop pops the list but leaves in it the followers a
@@ -689,11 +691,15 @@ class CoderACPAgent:
         followers = self._followers.setdefault(session.id, [])
         asked: list[NeedInput] = []
         try:
-            response = await self._finish_item(session, bridge, item_id, asked)
+            response = await self._finish_item(
+                session, bridge, item_id, asked, later=lambda: bool(followers)
+            )
             while response.stop_reason == "end_turn" and followers:
                 receipt, _text = followers[0]
                 try:
-                    response = await self._finish_item(session, bridge, receipt.item_id, asked)
+                    response = await self._finish_item(
+                        session, bridge, receipt.item_id, asked, later=lambda: len(followers) > 1
+                    )
                 finally:
                     if followers and followers[0][0] is receipt:
                         followers.pop(0)
@@ -706,7 +712,13 @@ class CoderACPAgent:
                 self._followers.pop(session.id, None)
 
     async def _finish_item(
-        self, session: Session, bridge: ACPEventBridge, item_id: str, asked: list[NeedInput]
+        self,
+        session: Session,
+        bridge: ACPEventBridge,
+        item_id: str,
+        asked: list[NeedInput],
+        *,
+        later: Callable[[], bool],
     ) -> PromptResponse:
         """Wait for the turn that consumes ``item_id``; answer questions until it is done.
 
@@ -716,7 +728,8 @@ class CoderACPAgent:
         turn's final message, ends the item with ``end_turn``. ``asked``
         holds the questions this prompt already handled: an item consumed by
         the same turn as an earlier one resolves with the same question,
-        which is not asked again.
+        which is not asked again. While ``later()`` (followers wait after
+        this item), a question is left as text and the item is done.
         """
         while True:
             outcome = await session.outcome(item_id)
@@ -729,9 +742,10 @@ class CoderACPAgent:
                 not isinstance(outcome, NeedInput)
                 or self._asking.get(session.id) is outcome
                 or any(known is outcome for known in asked)
+                or later()
             ):
                 # Done; or a question another prompt of this turn is asking,
-                # or this prompt already asked.
+                # this prompt already asked, or a queued message answers first.
                 await bridge.flush()
                 return PromptResponse(stop_reason="end_turn")
             asked.append(outcome)

@@ -100,7 +100,9 @@ handled by the same worker.
 Pool keeps its turn open until the messages it handed over this way are
 handled ("deferring turn close"), so the open `session/prompt` follows them:
 it returns `end_turn` only after the turns that handle them, in order, with
-their questions asked as for the prompt's own turn. A message the prompt's own
+their questions asked as for the prompt's own turn, except that a question is
+not asked while a later message is still waiting: that message's turn comes
+first, and the question stays as text in its context. A message the prompt's own
 turn already took resolves with that turn. Stop withdraws the messages no turn
 took (they would otherwise run with no prompt open) and lists them in one agent
 message, "Stopped before these messages were handled"; the prompt answers

@@ -880,3 +880,67 @@ async def test_a_pool_steer_from_another_client_is_still_followed(make_adapter, 
     response = await asyncio.wait_for(prompt, TIMEOUT)
     client.log.append(("response", "prompt", response))
     assert _order(client, session_id)[-2:] == ["Second.", "response"]
+
+
+async def test_a_question_waits_while_a_pool_steer_is_queued(make_adapter, workspace, client):
+    """The person's queued message comes first: its turn may answer the question."""
+    started, block = fresh_events()
+    models = ScriptedModels(
+        {
+            None: [
+                cell(BLOCKING_CELL),
+                cell("return_result(NeedInput(question='Which branch?'))"),
+                reply("Using main."),
+            ]
+        }
+    )
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    await _pool_steer(adapter, session_id, "wait, use main")
+    block.set()
+    response = await asyncio.wait_for(prompt, TIMEOUT)
+    client.log.append(("response", "prompt", response))
+
+    assert response.stop_reason == "end_turn"
+    assert [entry for entry in client.log if entry[0] in ("ext", "permission")] == []
+    assert _order(client, session_id)[-3:] == ["Which branch?", "Using main.", "response"]
+    calls = models.llms[None].calls
+    assert len(calls) == 3
+    assert "wait, use main" in str(calls[2].messages)
+
+
+async def test_a_pool_steer_is_answered_while_a_form_is_open(make_adapter, workspace, client):
+    client.ext_gate = asyncio.Event()
+    client.ext_answers = [{"action": "accept", "content": {"answer": "Aurora"}}]
+    models = ScriptedModels(
+        {
+            None: [
+                cell("return_result(NeedInput(question='Name the release?'))"),
+                reply("Noted."),
+                cell(
+                    "[a] = notification['user_messages']\n"
+                    "self.message(repr(a))\n"
+                    "return_result(Done(explanation='answered'))"
+                ),
+            ]
+        }
+    )
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("tag it")]))
+    await client.wait_for(lambda: any(entry[0] == "ext" for entry in client.log))
+    answer = await asyncio.wait_for(_pool_steer(adapter, session_id, "a note"), 1)
+    assert answer == {"inputId": "steer-1"}
+    assert not prompt.done()
+    # The steered message's turn runs while the form is open (the session is idle).
+    await client.wait_for(lambda: "Noted." in client.texts(AgentMessageChunk, session_id))
+    client.ext_gate.set()
+    response = await asyncio.wait_for(prompt, TIMEOUT)
+    client.log.append(("response", "prompt", response))
+
+    assert response.stop_reason == "end_turn"
+    order = _order(client, session_id)
+    assert {"Noted.", "'Aurora'"} <= set(order[order.index("ext") :])
+    assert order[-1] == "response"
