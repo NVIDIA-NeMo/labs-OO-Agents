@@ -150,7 +150,11 @@ def strategy(
                 from nooa.standalone import create_standalone_wrapper
 
                 return create_standalone_wrapper(func, strat, llm)
-            return func  # type: ignore[return-value]  # non-generation standalone: nothing to wrap
+            raise RuntimeError(
+                f"@strategy(...) on a function without an '...' body does nothing — "
+                f"add '...' as the function body or remove the decorator."
+            )
+
 
         from nooa.runtime.method_wrapper import create_agent_method_wrapper
 
