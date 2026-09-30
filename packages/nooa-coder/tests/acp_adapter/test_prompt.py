@@ -561,9 +561,9 @@ def _steer_params(session_id, text, input_id="steer-1"):
     }
 
 
-async def test_a_pool_steer_reaches_the_running_turns_next_model_call(make_adapter, workspace):
+async def test_a_pool_steer_is_queued_for_the_next_turn(make_adapter, workspace, client):
     started, block = fresh_events()
-    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Adjusted.")]})
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Adjusted."), reply("Tabs.")]})
     adapter = await make_adapter(models)
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("start")]))
@@ -574,8 +574,17 @@ async def test_a_pool_steer_reaches_the_running_turns_next_model_call(make_adapt
     assert answer == {"inputId": "steer-2"}
     block.set()
     assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
-    assert "use tabs" in str(models.llms[None].calls[1].messages)
-    assert len(models.llms[None].calls) == 2
+    await client.wait_for(lambda: "Tabs." in client.texts(AgentMessageChunk, session_id))
+
+    calls = models.llms[None].calls
+    assert len(calls) == 3
+    running, following = (
+        "".join(str(message.get("content")) for message in call.messages) for call in calls[1:]
+    )
+    # The running turn got no steer, only the pending message in its queues block.
+    assert "Notification(" not in running
+    assert "{'user_messages': ['use tabs']}" not in running
+    assert "{'user_messages': ['use tabs']}" in following  # the next turn's input
     session = adapter.session(session_id)
     assert [entry.content for entry in session.transcript() if entry.role == "user"] == [
         "start",
