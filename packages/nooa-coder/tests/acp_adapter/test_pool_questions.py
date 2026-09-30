@@ -223,12 +223,91 @@ async def test_a_yes_no_question_to_pool_is_still_a_permission_request(
     assert len([e for e in client.log if e[0] == "permission"]) == 1
 
 
-async def test_other_choices_to_pool_stay_text(make_adapter, workspace, client):
-    models = ScriptedModels(
-        {None: [cell("return_result(NeedInput(question='Which?', options=['main', 'dev']))")]}
-    )
+def _ask_branch():
+    return cell("return_result(NeedInput(question='Which branch?', options=['main', 'dev']))")
+
+
+BRANCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {
+            "type": "string",
+            "title": "Which branch?",
+            "description": "One of: main, dev",
+            "enum": ["main", "dev"],
+        }
+    },
+    "required": ["answer"],
+}
+
+
+async def test_a_choice_question_is_a_one_field_pool_form(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
+    client.ext_answers = [{"action": "accept", "content": {"answer": "dev"}}]
     adapter = await make_adapter(models, client_info=POOL)
+    session_id, response = await _run(adapter, workspace)
+
+    assert response.stop_reason == "end_turn"
+    assert _requests(client) == [
+        (
+            POOL_ELICITATION,
+            {
+                "sessionId": session_id,
+                "mode": "form",
+                "message": "Which branch?",
+                "requestedSchema": BRANCH_SCHEMA,
+            },
+        )
+    ]
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'"
+
+
+async def test_a_choice_answer_matches_ignoring_case_and_spaces(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
+    client.ext_answers = [{"action": "accept", "content": {"answer": "  MAIN "}}]
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id, response = await _run(adapter, workspace)
+
+    assert response.stop_reason == "end_turn"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "'main'"
+
+
+async def test_a_choice_answer_that_is_not_a_choice_is_asked_again(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
+    client.ext_answers = [
+        {"action": "accept", "content": {"answer": "release"}},
+        {"action": "accept", "content": {"answer": "Dev"}},
+    ]
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id, response = await _run(adapter, workspace)
+
+    assert response.stop_reason == "end_turn"
+    [(_, first), (_, second)] = _requests(client)
+    assert first["message"] == "Which branch?"
+    assert second["message"] == "Which branch?\n\nThat answer was not one of: main, dev"
+    assert second["requestedSchema"] == BRANCH_SCHEMA
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'"
+
+
+async def test_a_second_answer_that_is_not_a_choice_falls_back_to_text(
+    make_adapter, workspace, client
+):
+    models = ScriptedModels({None: [_ask_branch()]})
+    bad = {"action": "accept", "content": {"answer": "release"}}
+    client.ext_answers = [bad, bad]
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id, response = await _run(adapter, workspace)
+
+    assert response.stop_reason == "end_turn"
+    assert len(_requests(client)) == 2
+    assert len(models.llms[None].calls) == 1  # nothing was submitted
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev"
+
+
+async def test_other_clients_keep_choice_questions_as_text(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_ask_branch()]})
+    adapter = await make_adapter(models, client_info=Implementation(name="zed", version="1"))
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
     assert _ext(client) == []
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Which?\n\n- main\n- dev"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev"
