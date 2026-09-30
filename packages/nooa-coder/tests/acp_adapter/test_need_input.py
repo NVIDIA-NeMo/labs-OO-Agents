@@ -190,7 +190,11 @@ def test_a_pool_form_declares_every_field_as_a_string_and_says_the_expected_type
                 "title": "Regions",
                 "description": "a comma-separated list of: us, eu",
             },
-            "stage": {"type": "string", "title": "Stage", "description": "one of: dev, prod"},
+            "stage": {
+                "type": "string",
+                "title": "Stage",
+                "oneOf": [{"const": "dev", "title": "dev"}, {"const": "prod", "title": "prod"}],
+            },
         },
         "required": ["target", "replicas", "dry_run"],
     }
@@ -236,16 +240,15 @@ def test_a_pool_form_needs_simple_fields(answer_type):
     assert pool_form_schema(NeedInput(question="?", answer_type=answer_type)) is None
 
 
-def test_a_pool_choice_question_is_one_string_property_with_the_choices():
+def test_a_pool_choice_question_is_a_one_of_picker():
     need = NeedInput(question="Which branch?", options=["main", "Dev"])
     assert pool_form_schema(need) == {
         "type": "object",
         "properties": {
             "answer": {
                 "type": "string",
-                "title": "Which branch?",
-                "description": "One of: main, Dev",
-                "enum": ["main", "Dev"],
+                "description": "Which branch?",
+                "oneOf": [{"const": "main", "title": "main"}, {"const": "Dev", "title": "Dev"}],
             }
         },
         "required": ["answer"],
@@ -262,3 +265,48 @@ def test_a_pool_answer_that_is_not_a_choice_raises():
 
 def test_a_yes_no_question_has_no_pool_form():
     assert pool_form_schema(NeedInput(question="Delete it?", options=["Yes", "No"])) is None
+
+
+class Release(BaseModel):
+    channel: Literal["stable", "beta"] = Field(description="Where it goes")
+    name: Literal["Aurora", "Borealis"] | str = Field(description="What to call it")
+    note: Literal["urgent"] | str | None = None
+
+
+def test_a_pool_literal_field_is_a_picker_and_literal_or_str_adds_free_text():
+    need = NeedInput(question="Release how?", answer_type=Release)
+    assert pool_form_schema(need) == {
+        "type": "object",
+        "properties": {
+            "channel": {
+                "type": "string",
+                "title": "Channel",
+                "description": "Where it goes",
+                "oneOf": [
+                    {"const": "stable", "title": "stable"},
+                    {"const": "beta", "title": "beta"},
+                ],
+            },
+            "name": {
+                "title": "Name",
+                "description": "What to call it",
+                "anyOf": [
+                    {
+                        "oneOf": [
+                            {"const": "Aurora", "title": "Aurora"},
+                            {"const": "Borealis", "title": "Borealis"},
+                        ]
+                    },
+                    {"type": "string"},
+                ],
+            },
+            "note": {
+                "title": "Note",
+                "anyOf": [{"oneOf": [{"const": "urgent", "title": "urgent"}]}, {"type": "string"}],
+            },
+        },
+        "required": ["channel", "name"],
+    }
+    answer = pool_answer(need, {"channel": "Beta", "name": "Vega", "note": ""})
+    assert answer == Release(channel="beta", name="Vega")
+    assert pool_answer(need, {"channel": "stable", "name": "Aurora"}).name == "Aurora"

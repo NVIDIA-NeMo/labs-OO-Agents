@@ -797,12 +797,15 @@ class CoderACPAgent:
         question = f"{need.question}\n\n{need.reason}" if need.reason else need.question
         message = question
         for _attempt in range(2):
-            params = {
+            params: dict[str, Any] = {
                 "sessionId": session.id,
                 "mode": "form",
                 "message": message,
                 "requestedSchema": schema,
             }
+            if len(schema["properties"]) > 1:
+                # Pool's own agent sends the field order with every multi-field form.
+                params["_meta"] = {"poolside/field_order": list(schema["properties"])}
             response = await self._client_call(
                 session.id, conn.ext_method(_POOL_FORM_METHOD, params)
             )
