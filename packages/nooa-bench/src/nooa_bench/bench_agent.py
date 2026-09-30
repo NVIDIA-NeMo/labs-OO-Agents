@@ -188,10 +188,15 @@ class BenchAgent(
         return "Working directory for self.shell: " + escape(path[:160], quote=False)
 
     def _install_python_tools(self, cwd: str) -> None:
-        """Install shell/repo tools rooted at the same working directory."""
+        """Install shell/repo tools rooted at the same working directory.
+
+        Background jobs survive shell close: benchmark verifiers run after the
+        agent exits and may check servers the agent started.
+        """
         self.shell = ShellTools(
             cwd=cwd,
             init_command=_OPTIONAL_TESTBED_ACTIVATE,
+            keep_background_on_close=True,
         )
         self.repo = RepoTools(root=cwd, session=self.shell.session)
 

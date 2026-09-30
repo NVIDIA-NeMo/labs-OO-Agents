@@ -31,7 +31,10 @@ the worker and merges no partial Todo state; the parent receives a cell timeout
 error and may try again. Cell timeouts do not consume the strategy's retry counter,
 so the enclosing harness budget is the overall limit on repeated delegations.
 Workers use the same agent type, model client and working directory, with their
-own execution context and shell. Delegation defaults to a maximum depth of four.
+own execution context and shell. Background jobs started through `self.shell`
+(`server &`) survive later command timeouts and shell close, so a verifier that
+runs after the agent exits can still reach servers the agent started; the
+benchmark container's teardown ends them. Delegation defaults to a maximum depth of four.
 Passing a Todo gives the worker an independent task copy; successful worker
 updates are merged after cleanup. Conflicts or worker-only dependencies raise
 `DelegationMergeError`, retaining the completed `result` and full `worker_state`

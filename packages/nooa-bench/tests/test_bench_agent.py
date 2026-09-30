@@ -18,9 +18,12 @@ from nooa.unifiedllm import AssistantReasoning, AssistantText, FakeLLMClient, LL
 
 
 class _FakeShell:
-    def __init__(self, cwd: str, init_command: str | None = None) -> None:
+    def __init__(
+        self, cwd: str, init_command: str | None = None, *, keep_background_on_close=False
+    ) -> None:
         self.cwd = cwd
         self.init_command = init_command
+        self.keep_background_on_close = keep_background_on_close
         self.commands: list[str] = []
         self._session = object()
 
@@ -282,7 +285,7 @@ async def test_run_evaluation_handles_non_task_result(monkeypatch, tmp_path, val
 async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_path, how_to_verify):
     shells: list[_FakeShell] = []
 
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         shell = _FakeShell(cwd)
         shells.append(shell)
         return shell
@@ -320,7 +323,7 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 async def test_run_evaluation_returns_failure_on_exception(monkeypatch, tmp_path):
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         return _FakeShell(cwd)
 
     async def fake_solve_task(description: str):
@@ -342,7 +345,7 @@ async def test_run_evaluation_returns_failure_on_exception(monkeypatch, tmp_path
 async def test_run_evaluation_clears_optional_context_between_tasks(monkeypatch, tmp_path):
     """Absent per-task metadata must not leak from an earlier evaluation."""
 
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         return _FakeShell(cwd)
 
     async def fake_solve_task(description: str):
@@ -373,7 +376,7 @@ async def test_run_evaluation_clears_optional_context_between_tasks(monkeypatch,
 async def test_run_evaluation_requires_problem_statement(monkeypatch, tmp_path):
     """BenchAgent rejects tasks without a usable task description."""
 
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         return _FakeShell(cwd)
 
     monkeypatch.setattr(bench_agent_module, "ShellTools", fake_make_shell)
@@ -419,6 +422,14 @@ def test_bench_agent_wires_repo_to_shell_session():
     assert agent.repo.session is agent.shell.session
 
 
+def test_bench_agent_shell_keeps_background_jobs_on_close():
+    """Servers the agent backgrounds must outlive it for the task verifier."""
+
+    agent = BenchAgent(llm=FakeLLMClient())
+
+    assert agent.shell.session._keep_background_on_close is True
+
+
 def test_tool_repr_shows_state():
     """pprint()/repr expose held tool state instead of object addresses."""
 
@@ -451,7 +462,7 @@ def test_bench_agent_does_not_preseed_todos():
 async def test_run_evaluation_clears_stale_todos(monkeypatch, tmp_path):
     """Per-task reset clears prior state without adding a ritual todo."""
 
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         return _FakeShell(cwd)
 
     async def fake_solve_task(description: str):

@@ -348,7 +348,14 @@ class ShellTools(Skill):
 
     """
 
-    def __init__(self, cwd: str = ".", init_command: str | None = None, **kwargs: Any):
+    def __init__(
+        self,
+        cwd: str = ".",
+        init_command: str | None = None,
+        *,
+        keep_background_on_close: bool = False,
+        **kwargs: Any,
+    ):
         super().__init__(**kwargs)
         self.cwd = Path(cwd).resolve()
         # Construct the session eagerly (it starts lazily on first run) so a
@@ -356,7 +363,12 @@ class ShellTools(Skill):
         # in the TUI — shares this shell's bash session instead of capturing None.
         # ``init_command`` (if given) runs once on session start, before any user
         # command, to set up the environment (e.g. activate a conda env).
-        self._session: BashSession = BashSession(cwd=str(self.cwd), init_command=init_command)
+        # ``keep_background_on_close`` lets background jobs outlive close().
+        self._session: BashSession = BashSession(
+            cwd=str(self.cwd),
+            init_command=init_command,
+            keep_background_on_close=keep_background_on_close,
+        )
 
     def __repr__(self) -> str:
         return f"ShellTools(cwd={self.cwd!s})"
