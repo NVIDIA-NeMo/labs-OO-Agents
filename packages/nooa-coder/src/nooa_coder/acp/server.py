@@ -258,6 +258,12 @@ class CoderACPAgent:
         # Receipts of prompts still waiting for their turn, by session: Stop
         # answers them "cancelled" and withdraws the ones not yet consumed.
         self._prompts: dict[str, list[Receipt]] = {}
+        # How many session/prompt requests of each session are waiting in
+        # ``_finish``, and the messages Pool handed over with
+        # ``_poolside/session_steer`` meanwhile (receipt, text), in order:
+        # the prompt stays open until they are handled (see ``_finish``).
+        self._open: dict[str, int] = {}
+        self._followers: dict[str, list[tuple[Receipt, str]]] = {}
         # Receipts of injected messages, by session and item id, for revoke.
         self._injects: dict[str, dict[str, Receipt]] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
@@ -544,6 +550,11 @@ class CoderACPAgent:
         message, and the next turn gets it in its notification. A slash
         command is refused, and Pool then sends it as a normal prompt after
         the turn.
+
+        Pool keeps its turn open until the messages it handed over are
+        handled, so the open prompt follows this one: it returns only after
+        the turn that handles it (``_finish``), and Stop withdraws it if no
+        turn took it yet (``cancel``). The answer goes out at once.
         """
         session_id, input_id = params.get("sessionId"), params.get("inputId")
         if not isinstance(session_id, str) or not isinstance(input_id, str):
@@ -561,9 +572,11 @@ class CoderACPAgent:
         # this request means queue or steer. Handling it at all keeps the
         # message out of Pool's own queue, where Esc drops it.
         try:
-            await session.submit(text, source=SOURCE)
+            receipt = await session.submit(text, source=SOURCE)
         except SessionClosedError:
             raise RequestError.resource_not_found(session_id) from None
+        if self._open.get(session_id):
+            self._followers.setdefault(session_id, []).append((receipt, text))
         return {"inputId": input_id}
 
     def _revoke_inject(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -607,8 +620,10 @@ class CoderACPAgent:
         the outcome of the turn that consumes it: the next turn, or the
         running one if the model takes the pending message from its queue
         (the queues context block lists it). A ``Waiting`` outcome keeps the
-        request open. Stop answers a waiting prompt ``cancelled`` and
-        withdraws its message if no turn took it. ``/name`` prompts naming a
+        request open, and so do messages Pool hands over during the prompt
+        (``_pool_steer``) until they are handled. Stop answers a waiting
+        prompt ``cancelled`` and withdraws its message if no turn took it.
+        ``/name`` prompts naming a
         session command run the command. To steer a running turn, clients
         use ``_nooa/session/inject`` with ``mode: "steer"``.
         """
@@ -659,12 +674,49 @@ class CoderACPAgent:
     async def _finish(
         self, session: Session, bridge: ACPEventBridge, item_id: str
     ) -> PromptResponse:
+        """Wait for the turn that consumes ``item_id``, then for the prompt's followers.
+
+        Followers are the messages Pool handed over with
+        ``_poolside/session_steer`` while this prompt was open, in the order
+        they were admitted, including ones admitted while this loop runs.
+        Each is waited for as ``item_id`` is (``_finish_item``); the prompt
+        returns ``end_turn`` when all are done, and stops at the first
+        other answer.
+        """
+        self._open[session.id] = self._open.get(session.id, 0) + 1
+        # Taken now: Stop pops the list but leaves in it the followers a
+        # turn took, whose outcome is then the cancelled turn's.
+        followers = self._followers.setdefault(session.id, [])
+        asked: list[NeedInput] = []
+        try:
+            response = await self._finish_item(session, bridge, item_id, asked)
+            while response.stop_reason == "end_turn" and followers:
+                receipt, _text = followers[0]
+                try:
+                    response = await self._finish_item(session, bridge, receipt.item_id, asked)
+                finally:
+                    if followers and followers[0][0] is receipt:
+                        followers.pop(0)
+            return response
+        finally:
+            self._open[session.id] -= 1
+            if not self._open[session.id]:
+                # Left over only when the prompt failed: they stay queued.
+                del self._open[session.id]
+                self._followers.pop(session.id, None)
+
+    async def _finish_item(
+        self, session: Session, bridge: ACPEventBridge, item_id: str, asked: list[NeedInput]
+    ) -> PromptResponse:
         """Wait for the turn that consumes ``item_id``; answer questions until it is done.
 
         A ``NeedInput`` the client can answer (a form, or a yes/no
         permission) is submitted and the same prompt waits for the next
         turn; otherwise the question, already sent by the bridge as the
-        turn's final message, ends the prompt with ``end_turn``.
+        turn's final message, ends the item with ``end_turn``. ``asked``
+        holds the questions this prompt already handled: an item consumed by
+        the same turn as an earlier one resolves with the same question,
+        which is not asked again.
         """
         while True:
             outcome = await session.outcome(item_id)
@@ -673,10 +725,16 @@ class CoderACPAgent:
                 # the cancel, which happens before this outcome resolves.
                 await bridge.flush()
                 return PromptResponse(stop_reason="cancelled")
-            if not isinstance(outcome, NeedInput) or self._asking.get(session.id) is outcome:
-                # Done; or a question another prompt of this turn is asking.
+            if (
+                not isinstance(outcome, NeedInput)
+                or self._asking.get(session.id) is outcome
+                or any(known is outcome for known in asked)
+            ):
+                # Done; or a question another prompt of this turn is asking,
+                # or this prompt already asked.
                 await bridge.flush()
                 return PromptResponse(stop_reason="end_turn")
+            asked.append(outcome)
             self._asking[session.id] = outcome
             try:
                 await bridge.flush()
@@ -936,6 +994,21 @@ class CoderACPAgent:
         # took returns "cancelled" with it. Injected messages stay queued.
         for receipt in self._prompts.pop(session_id, []):
             session.withdraw(receipt)
+        # Messages Pool handed over during the prompt go with it: the ones
+        # no turn took are withdrawn, so they do not run with no prompt
+        # open, and listed, so none is lost silently.
+        stopped = [
+            text
+            for receipt, text in self._followers.pop(session_id, [])
+            if session.withdraw(receipt)
+        ]
+        if stopped:
+            listed = "\n".join(f"- {text}" for text in stopped)
+            self._bridges[session_id].publish(
+                update_agent_message(
+                    text_block(f"Stopped before these messages were handled:\n\n{listed}")
+                )
+            )
         await session.cancel(by="user")
 
     # ---- modes and models ----------------------------------------------

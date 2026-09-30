@@ -39,7 +39,9 @@ and `_nooa/session/revoke_inject` takes one back; see `docs/acp-router.md`
 (agent-client-protocol PR #1261). Pool sends what the person types during a
 turn with its own request, `_poolside/session_steer`, which the server
 advertises. The message is queued for the next turn, not steered, until the
-Pool team says which of the two the request means.
+Pool team says which of the two the request means. The open prompt stays open
+until those messages are handled; Stop withdraws the ones no turn took and
+lists them.
 
 A question the agent asks (`NeedInput`) goes to the client as a form when
 the client advertises `elicitation.form`, as a permission request when it
