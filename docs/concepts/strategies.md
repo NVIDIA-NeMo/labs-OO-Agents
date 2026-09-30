@@ -1,18 +1,20 @@
 # Strategies
 
-A strategy decides how an agentic method uses an LLM. It does not change the
+A strategy decides how an agentic method uses a model client. It does not change the
 method's Python interface: callers still pass the same arguments and receive
 the declared return type.
 
-NOOA's two primary strategies cover most applications.
+NOOA's primary strategies cover most applications.
 
 | Strategy | Use it when | Execution model |
 |---|---|---|
 | `PredictStrategy` | A non-tool attempt can classify, extract, or produce the typed answer | Structured LLM attempt followed by validation; invalid output may be retried |
 | `CodeActStrategy` | The task needs tools, live Python objects, code execution, or iteration | Repeated LLM turns in a per-call Python REPL; locals persist across cells |
+| `DecideStrategy` | A decision model should produce probabilities, choices, or rubric scores | One typed request through the configured decision model; primitive results fall back to Predict when it is absent |
 
 CodeAct is the default. Select Predict explicitly when the task does not need
-the extra loop.
+the extra loop. See [Decision models](decisions.md) when calibrated decision
+evidence matters.
 
 ## Predict: one focused judgment
 

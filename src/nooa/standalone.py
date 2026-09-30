@@ -85,8 +85,10 @@ def _get_agent_cls(module_name: str) -> type:
         event_query = None
         _execution_config = None
 
-        def __init__(self, llm: Any, agent_id: str) -> None:
+        def __init__(self, llm: Any, decision_model: Any, agent_id: str) -> None:
+            """Initialize the per-call runtime state for a standalone function."""
             self._llm = llm
+            self._decision_model = decision_model
             self._truncation = TruncationConfig()
             self.render_config = RenderConfig()
             self.event_manager = EventManager()
@@ -154,11 +156,14 @@ def create_standalone_wrapper(
     func: Callable[..., Any],
     strategy: Any,
     llm: Any,
+    decision_model: Any = None,
 ) -> Callable[..., Any]:
     """Wrap a standalone generation function so it can be called directly.
 
     Each invocation creates a fresh agent stub (no shared state, history resets).
-    LLM resolution order: ``@strategy(llm=…)`` → parent-agent cascade → RuntimeError.
+    Model resolution order is an explicit decorator value followed by the
+    corresponding parent-agent model. A native decision call does not require
+    an otherwise unused chat LLM.
 
     Args:
         func: Original async function with an ellipsis body.
@@ -170,6 +175,9 @@ def create_standalone_wrapper(
             instance to cache on). Never a resolver callable: standalone
             functions have no agent instance to bind one against, so
             ``@strategy`` rejects callables here at decoration time.
+        decision_model: Optional decision model supplied by
+            ``@strategy(..., decision_model=...)``. When omitted, a calling
+            parent agent's decision model is inherited.
 
     Returns:
         Async callable with the same signature as *func*.
@@ -195,10 +203,29 @@ def create_standalone_wrapper(
     # Shared resolution lives in nooa.method_llm.resolve_alias so this path
     # and the agent-method path report identical errors.
     _alias_cache: dict[str, Any] = {}
+    _decision_alias_cache: dict[str, Any] = {}
 
     @wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        resolved_llm = llm
+        resolved_decision_model = decision_model
+        from nooa.runtime.context_vars import _parent_agent_var
+
+        parent = _parent_agent_var.get()
+        if isinstance(resolved_decision_model, str):
+            from nooa.decisions.resolution import resolve_decision_alias
+
+            resolved_decision_model = resolve_decision_alias(
+                resolved_decision_model,
+                _decision_alias_cache,
+                func.__name__,
+                origin="standalone decision_model=",
+            )
+        if resolved_decision_model is None and parent is not None:
+            resolved_decision_model = getattr(parent, "_decision_model", None)
+
+        # A native decision model wins before chat-model resolution, matching
+        # agent methods and avoiding construction of an unused alias client.
+        resolved_llm = None if resolved_decision_model is not None else llm
         if isinstance(resolved_llm, str):
             from nooa.method_llm import resolve_alias
 
@@ -208,22 +235,22 @@ def create_standalone_wrapper(
                 func.__name__,
                 origin="standalone @strategy(llm=...)",
             )
-        if resolved_llm is None:
-            # Cascade: inherit LLM from a calling agent if we're inside one
-            from nooa.runtime.context_vars import _parent_agent_var
-
-            parent = _parent_agent_var.get()
-            if parent is not None:
-                resolved_llm = getattr(parent, "_llm", None)
-        if resolved_llm is None:
+        if resolved_llm is None and resolved_decision_model is None and parent is not None:
+            resolved_llm = getattr(parent, "_llm", None)
+        if resolved_llm is None and resolved_decision_model is None:
             raise RuntimeError(
-                f"No LLM client for standalone function '{func.__name__}'. "
-                f"Pass llm=<client> to @strategy(..., llm=<client>)."
+                f"No LLM client or decision model for standalone function '{func.__name__}'. "
+                "Pass decision_model=<client> for a native DecideStrategy call, "
+                "or llm=<client> for chat generation or fallback."
             )
 
         # Fresh agent per call — no shared state, history resets automatically
         agent_cls = _get_agent_cls(func.__module__)
-        agent = agent_cls(llm=resolved_llm, agent_id=_standalone_agent_id)
+        agent = agent_cls(
+            llm=resolved_llm,
+            decision_model=resolved_decision_model,
+            agent_id=_standalone_agent_id,
+        )
 
         # ATIF exporter cascade: if an exporter is active in the surrounding
         # context, attach it to this child agent's
@@ -253,4 +280,5 @@ def create_standalone_wrapper(
     wrapper._needs_generation = True  # type: ignore[attr-defined]
     wrapper._plan_strategy = strategy  # type: ignore[attr-defined]
     wrapper._plan_llm = llm  # type: ignore[attr-defined]
+    wrapper._plan_decision_model = decision_model  # type: ignore[attr-defined]
     return wrapper

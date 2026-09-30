@@ -15,6 +15,7 @@ from nooa.metaclass import AgentMeta
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks import DynamicContext
+    from nooa.decisions import DecisionRequest, DecisionResponse
     from nooa.runtime.restrictions import RestrictionsConfig
     from nooa.strategies.current_call import CurrentCall
 
@@ -185,6 +186,41 @@ class RuntimeServices(Protocol):
         ...
 
 
+class DecisionRuntimeServices(RuntimeServices, Protocol):
+    """Additional runtime operation required only by decision strategies."""
+
+    @property
+    def has_decision_model(self) -> bool:
+        """Return whether the current call has a native decision model."""
+        ...
+
+    async def decision_state_inputs(
+        self,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+        """Resolve explicitly selected context and events for decision state.
+
+        Returns:
+            A pair containing resolved context blocks and selected chronological
+            events. ``None`` for events means that no event query opted in.
+        """
+        ...
+
+    async def decide(self, request: "DecisionRequest") -> "DecisionResponse":
+        """Evaluate one backend-neutral decision request and return its answers."""
+        ...
+
+    def record_decision_fallback(
+        self,
+        request: "DecisionRequest",
+        *,
+        answers: dict[str, Any] | None,
+        success: bool,
+        exception_type: str | None,
+    ) -> None:
+        """Persist one chat-LLM fallback outcome and its decision provenance."""
+        ...
+
+
 class GenerationStrategy(ABC, metaclass=AgentMeta):
     """Abstract base class for generation strategies with automatic method wrapping.
 
@@ -205,6 +241,11 @@ class GenerationStrategy(ABC, metaclass=AgentMeta):
         def analyze(self, data: str) -> dict:
             '''Analyze data.'''
     """
+
+    @property
+    def uses_decision_model(self) -> bool:
+        """Return whether this strategy prefers the agent's decision model."""
+        return False
 
     @property
     def name(self) -> str:
