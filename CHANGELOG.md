@@ -6,6 +6,9 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-coder`: `CodingAgent.plan()` and `CodingAgent.get_summarization_status()`, which
+  hosts read (the ACP bridge reads the plan after each Python cell), no longer record a
+  trace span per call.
 - `nooa-coder`: a message steered into a running turn reaches the model in the form of
   a turn's input: a `Notification` whose `value` is `{"user_messages": [text]}`, whose
   `source` names the channel and the sender, and whose `description` says it came during
