@@ -18,7 +18,8 @@ class FakeClient:
     ``elicitation_answers`` and ``permission_answers`` are scripted replies,
     used in order; ``elicitation_gate`` (an Event) holds an elicitation open.
     Extension requests are logged as ``("ext", method, params)`` and answered
-    from ``ext_answers`` (an exception there is raised).
+    from ``ext_answers`` (an exception there is raised); ``ext_gate`` holds
+    them open.
     """
 
     def __init__(self) -> None:
@@ -27,6 +28,7 @@ class FakeClient:
         self.permission_answers: list[Any] = []
         self.ext_answers: list[Any] = []
         self.elicitation_gate: asyncio.Event | None = None
+        self.ext_gate: asyncio.Event | None = None
         self.elicitation_started = asyncio.Event()
         self.changed = asyncio.Event()
 
@@ -49,6 +51,9 @@ class FakeClient:
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.log.append(("ext", method, params))
+        self.changed.set()
+        if self.ext_gate is not None:
+            await self.ext_gate.wait()
         answer = self.ext_answers.pop(0)
         if isinstance(answer, BaseException):
             raise answer

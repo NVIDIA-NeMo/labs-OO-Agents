@@ -22,7 +22,9 @@ to follow semantic versioning.
   with `_poolside/session_steer` during it are handled, in order, questions included, as
   Pool expects; before, the prompt ended with its own turn and the next turn ran with no
   prompt open, and Pool did not show its reply. Stop withdraws the ones no turn took and
-  lists them in one agent message.
+  lists them in one agent message. A question the agent asks while such a message is
+  still waiting is not opened as a form: the queued message's turn comes first and can
+  answer it.
 - `nooa-coder`: Pool forms show choices as a picker: a choice question and a string
   `Literal` field are a `oneOf` of `{const, title}` entries, and a `Literal[...] | str`
   field is the picker plus free text. A form with more than one field sends
