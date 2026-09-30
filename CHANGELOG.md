@@ -14,10 +14,10 @@ to follow semantic versioning.
   `source` names the channel and the sender, and whose `description` says it came during
   the turn and how to reach it (`self.events["N"].value`). A steer from an ACP client
   counts as the user.
-- `nooa-coder`: the ACP server accepts Pool's steering. It advertises
-  `poolside/session_steer`, and a message typed in Pool during a running turn reaches
-  the turn's next model call (queued when no turn is running) instead of waiting in
-  Pool's queue.
+- `nooa-coder`: the ACP server takes the messages typed in Pool during a running turn.
+  It advertises `poolside/session_steer`, and each such message is queued for the next
+  turn instead of waiting in Pool's own queue, where Esc drops it. It is not steered
+  into the running turn until the Pool team says which of the two the request means.
 - `nooa-coder`: with Pool as the ACP client, free-text, choice and typed questions
   (`NeedInput`) open Pool's form (`_poolside/elicitation`) instead of ending the turn as
   text. Typed fields are asked as strings and converted; a choice question is one text

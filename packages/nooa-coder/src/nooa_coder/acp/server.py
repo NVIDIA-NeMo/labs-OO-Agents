@@ -539,9 +539,11 @@ class CoderACPAgent:
         """``_poolside/session_steer``: ``{sessionId, inputId, prompt}`` -> ``{inputId}``.
 
         Pool sends what the person types during a running prompt. The text
-        steers the running turn as an inject with ``mode: "steer"`` does
-        (queued when no turn is running). A slash command is refused: steered
-        text is read by the model, so the command would not run.
+        is queued for the next turn on ``user_messages``, as ``session/prompt``
+        text sent during a turn is: the running turn sees it only as a pending
+        message, and the next turn gets it in its notification. A slash
+        command is refused, and Pool then sends it as a normal prompt after
+        the turn.
         """
         session_id, input_id = params.get("sessionId"), params.get("inputId")
         if not isinstance(session_id, str) or not isinstance(input_id, str):
@@ -555,8 +557,11 @@ class CoderACPAgent:
             raise RequestError.invalid_params(
                 {"reason": "A slash command cannot steer a turn; send it after the turn ends"}
             )
+        # Queued, not steered, on purpose until the Pool team says whether
+        # this request means queue or steer. Handling it at all keeps the
+        # message out of Pool's own queue, where Esc drops it.
         try:
-            await session.steer(text, source=SOURCE)
+            await session.submit(text, source=SOURCE)
         except SessionClosedError:
             raise RequestError.resource_not_found(session_id) from None
         return {"inputId": input_id}
