@@ -426,9 +426,11 @@ class Session:
         """Give the running turn extra text; while idle this is ``submit(text)``.
 
         During a turn the text waits in a buffer that is flushed into a
-        ``Notification`` whose source names the sender right before the
-        turn's next model call, so the model reads it in order with its own
-        cell output. If no model call comes (the turn was already
+        ``Notification`` right before the turn's next model call, so the
+        model reads it in order with its own cell output. The event has the
+        shape of a turn's input: its ``value`` is ``{"user_messages":
+        [text]}``, its ``source`` names the channel and the sender, and its
+        ``description`` says how to reach the items. If no model call comes (the turn was already
         finishing), the text is admitted on ``user_messages`` when the turn
         settles, with the same ``item_id``, and the next turn handles it.
         A steer is never lost.
@@ -467,7 +469,7 @@ class Session:
                 self._consumed.append(item_id)
                 self._pending_steers.pop(0)
                 self._agent.event_manager.add(
-                    Notification(source=_steer_source(source), description=text)
+                    Notification(source=_steer_source(source), description=_STEER_HINT, value={"user_messages": [text]})
                 )
             except (Exception, asyncio.CancelledError) as exc:
                 self._record_failure(exc, [item_id])
@@ -1197,14 +1199,25 @@ class Session:
         return entries if limit is None else entries[-limit:]
 
 
+_STEER_HINT = (
+    "Sent during this turn. The value has the form of the notification argument of "
+    'handle(); reach it as self.events["N"].value, where N is the tag of this event.'
+)
+"""The ``Notification.description`` of a steer: when it came and how to reach it."""
+
+_PERSON_SOURCES = ("user", "acp")
+"""Item sources that are the person: ``acp`` is a person typing in an ACP client."""
+
+
 def _steer_source(source: str) -> str:
-    """The ``Notification.source`` sentence for a steer: who sent it."""
-    if source == "user":
-        return "New message from the user while you were working."
-    if source.startswith("parent:"):
-        name = source.removeprefix("parent:")
-        return f"New message from your parent agent {name} while you were working."
-    return f"New message from {source} while you were working."
+    """The ``Notification.source`` sentence for a steer: its channel and who sent it."""
+    if source in _PERSON_SOURCES:
+        sender = "the user"
+    elif source.startswith("parent:"):
+        sender = "your parent agent " + source.removeprefix("parent:")
+    else:
+        sender = source
+    return f"New message on user_messages from {sender} while you were working."
 
 
 def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str | None]:
