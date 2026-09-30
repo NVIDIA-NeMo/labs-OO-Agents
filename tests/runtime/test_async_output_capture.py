@@ -85,17 +85,8 @@ sys.stderr.flush()
         assert result.error is None
         assert "error message" in result.stderr
 
-    @pytest.mark.skip(
-        reason="warnings.warn() uses Python's internal warning system, not sys.stderr.write(). "
-        "The warning is captured by pytest's warning capture, not our stream wrapper."
-    )
     async def test_warnings_captured(self, agent):
-        """warnings.warn() is captured in stderr.
-
-        NOTE: This test is skipped because warnings.warn() doesn't write directly
-        to sys.stderr - it uses Python's internal warning infrastructure which
-        pytest captures separately. Direct sys.stderr.write() IS captured.
-        """
+        """warnings.warn() is captured in stderr."""
         code = """
 import warnings
 warnings.warn("this is a warning")
