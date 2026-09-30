@@ -23,6 +23,10 @@ to follow semantic versioning.
   Pool expects; before, the prompt ended with its own turn and the next turn ran with no
   prompt open, and Pool did not show its reply. Stop withdraws the ones no turn took and
   lists them in one agent message.
+- `nooa-coder`: Pool forms show choices as a picker: a choice question and a string
+  `Literal` field are a `oneOf` of `{const, title}` entries, and a `Literal[...] | str`
+  field is the picker plus free text. A form with more than one field sends
+  `_meta["poolside/field_order"]`. Before, a choice was a text box listing the choices.
 - `nooa-coder`: with Pool as the ACP client, free-text, choice and typed questions
   (`NeedInput`) open Pool's form (`_poolside/elicitation`) instead of ending the turn as
   text. Typed fields are asked as strings and converted; a choice question is one text

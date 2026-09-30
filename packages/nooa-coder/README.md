@@ -50,9 +50,12 @@ When the client is Pool (`clientInfo.name` is `pool`), free-text, choice and
 typed questions use Pool's `_poolside/elicitation` form instead. Pool shows
 string fields only, so every field is sent as a string with the expected type
 in its description ("a whole number", "yes or no", "a comma-separated list")
-and the answer is converted back. Pool has no pick list: a choice question is
-one text field whose description lists the choices ("One of: main, dev"), and
-the answer matches a choice ignoring case. An answer that does not convert or
+and the answer is converted back. A choice question, and a string `Literal`
+field, is a picker (a `oneOf` of `{const, title}` entries); a
+`Literal[...] | str` field is the picker plus free text (`anyOf`). A form with
+more than one field sends `_meta["poolside/field_order"]` with the fields in
+model order. A choice answer typed as text matches a choice ignoring case. An
+answer that does not convert or
 match is asked once more, then left as text. Yes/no questions keep the
 permission request. If Pool fails the request, questions fall back to text for
 the rest of the connection.

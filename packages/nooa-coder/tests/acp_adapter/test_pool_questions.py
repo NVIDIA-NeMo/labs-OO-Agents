@@ -128,6 +128,8 @@ async def test_non_string_fields_are_asked_as_strings_and_converted(
     assert response.stop_reason == "end_turn"
     [(_, params)] = _requests(client)
     assert params["requestedSchema"] == ROLLOUT_SCHEMA
+    # A form with more than one field says the order to show them in.
+    assert params["_meta"] == {"poolside/field_order": ["target", "replicas", "dry_run"]}
     assert client.texts(AgentMessageChunk, session_id)[-1] == (
         "Rollout(target='prod', replicas=3, dry_run=False)"
     )
@@ -232,9 +234,8 @@ BRANCH_SCHEMA = {
     "properties": {
         "answer": {
             "type": "string",
-            "title": "Which branch?",
-            "description": "One of: main, dev",
-            "enum": ["main", "dev"],
+            "description": "Which branch?",
+            "oneOf": [{"const": "main", "title": "main"}, {"const": "dev", "title": "dev"}],
         }
     },
     "required": ["answer"],
