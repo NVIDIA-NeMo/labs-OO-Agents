@@ -523,3 +523,38 @@ async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
     envelope = str(messages[-1]["content"])
     assert envelope.lstrip().startswith("<context>")
     assert "<python_cell_tools" not in envelope
+
+
+class _CallRecorder:
+    """Instrumentation hooks that record which agent methods open a span."""
+
+    def __init__(self):
+        self.methods: list[str] = []
+
+    def before_agent_call(self, agent, method_name, *args, **kwargs):
+        self.methods.append(method_name)
+        return {}
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: {}
+
+
+def test_host_reads_record_no_span(tmp_path):
+    """``plan()`` and ``get_summarization_status()`` are host reads, not agent work."""
+    from nooa.runtime.hooks import get_hooks, set_hooks
+
+    class ProbedAgent(CodingAgent):
+        def probe(self) -> int:
+            return 1
+
+    agent = ProbedAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    recorder = _CallRecorder()
+    previous = get_hooks()
+    set_hooks(recorder)
+    try:
+        agent.probe()  # a traced method, so the recorder is known to work
+        assert agent.plan() == []
+        agent.get_summarization_status()
+    finally:
+        set_hooks(previous)
+    assert recorder.methods == ["probe"]

@@ -372,6 +372,7 @@ class CodingAgent(InteractiveAgent):
         return await connect_session_mcp(self, CoderOptions.load(self.cwd))
 
     @hidden
+    @no_trace
     def plan(self) -> list[PlanEntry]:
         """The todo list as ACP plan entries, read through ``Session.plan()``.
 
@@ -393,6 +394,7 @@ class CodingAgent(InteractiveAgent):
             for todo in self.todo.list_todos()
         ]
 
+    @no_trace
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""
         tags = self.event_manager.keys()
