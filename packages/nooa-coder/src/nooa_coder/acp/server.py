@@ -691,8 +691,8 @@ class CoderACPAgent:
     async def _ask(self, session: Session, bridge: ACPEventBridge, need: NeedInput) -> Any:
         """Ask the client to answer ``need``: ``(item, source)``, ``None`` or ``_CANCELLED``.
 
-        Pool's own form for a free-text or typed question when the client
-        is Pool; else a form when the client advertised ``elicitation.form``
+        Pool's own form for a free-text, choice or typed question when the
+        client is Pool (not yes/no); else a form when the client advertised ``elicitation.form``
         and the question flattens; else a permission request for a yes/no
         question; else ``None`` (the question stays as text). A client error
         falls back to ``None``.
@@ -726,8 +726,8 @@ class CoderACPAgent:
     async def _ask_pool(self, session: Session, need: NeedInput, schema: dict[str, Any]) -> Any:
         """Ask with Pool's ``_poolside/elicitation`` form; the result is as ``_ask``'s.
 
-        An answer that does not convert is asked once more with the error,
-        then left as text. A failed request turns Pool forms off for this
+        An answer that does not convert, or is not one of the choices, is
+        asked once more with the error, then left as text. A failed request turns Pool forms off for this
         connection.
         """
         conn = self._require_conn()
@@ -758,6 +758,8 @@ class CoderACPAgent:
                     for error in exc.errors()
                 )
                 message = f"{question}\n\nThat answer was not accepted: {problems}"
+            except ValueError as exc:
+                message = f"{question}\n\n{exc}"
         return None
 
     async def _ask_yes_no(

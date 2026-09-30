@@ -234,3 +234,31 @@ def test_a_pool_answer_that_does_not_convert_raises():
 @pytest.mark.parametrize("answer_type", [Nested, Mapping, Either])
 def test_a_pool_form_needs_simple_fields(answer_type):
     assert pool_form_schema(NeedInput(question="?", answer_type=answer_type)) is None
+
+
+def test_a_pool_choice_question_is_one_string_property_with_the_choices():
+    need = NeedInput(question="Which branch?", options=["main", "Dev"])
+    assert pool_form_schema(need) == {
+        "type": "object",
+        "properties": {
+            "answer": {
+                "type": "string",
+                "title": "Which branch?",
+                "description": "One of: main, Dev",
+                "enum": ["main", "Dev"],
+            }
+        },
+        "required": ["answer"],
+    }
+    assert pool_answer(need, {"answer": " dev "}) == "Dev"
+    assert pool_answer(need, {"answer": "MAIN"}) == "main"
+
+
+def test_a_pool_answer_that_is_not_a_choice_raises():
+    need = NeedInput(question="Which branch?", options=["main", "dev"])
+    with pytest.raises(ValueError, match="^That answer was not one of: main, dev$"):
+        pool_answer(need, {"answer": "release"})
+
+
+def test_a_yes_no_question_has_no_pool_form():
+    assert pool_form_schema(NeedInput(question="Delete it?", options=["Yes", "No"])) is None

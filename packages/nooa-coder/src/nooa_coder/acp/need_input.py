@@ -11,7 +11,9 @@ flatten; the host then asks in free text.
 Pool's own form request (``_poolside/elicitation``) shows string fields
 only, so ``pool_form_schema`` declares every field as a string, says the
 expected type in its description, and ``pool_answer`` converts the strings
-back with the ``answer_type``.
+back with the ``answer_type``. Pool has no pick list: a choice question is
+one string field that lists the choices, and ``pool_answer`` maps the text
+back to a choice.
 """
 
 import types
@@ -95,15 +97,26 @@ def answer_from_content(need: NeedInput, content: dict[str, Any] | None) -> Any:
 
 
 def pool_form_schema(need: NeedInput) -> dict[str, Any] | None:
-    """The Pool form for a free-text or typed question; ``None`` for anything else.
+    """The Pool form for a question; ``None`` for yes/no or a type it cannot flatten.
 
     Every property is a string: Pool declines a form with any other type.
-    ``int``, ``float``, ``bool``, string ``Literal`` and lists of strings
-    (plain or ``Literal``) say what to enter in the property description;
-    ``X | None`` is ``X`` and not required.
+    A choice question is one ``answer`` field whose description lists the
+    choices; it also carries the ``enum``, which Pool accepts and shows as a
+    text box. A yes/no question gives ``None``: the host asks it with a
+    permission request. ``int``, ``float``, ``bool``, string ``Literal`` and
+    lists of strings (plain or ``Literal``) say what to enter in the
+    property description; ``X | None`` is ``X`` and not required.
     """
     if need.options is not None:
-        return None
+        if sorted(option.lower() for option in need.options) == ["no", "yes"]:
+            return None
+        choice = {
+            "type": "string",
+            "title": need.question,
+            "description": "One of: " + ", ".join(need.options),
+            "enum": list(need.options),
+        }
+        return {"type": "object", "properties": {_ANSWER: choice}, "required": [_ANSWER]}
     if need.answer_type is None:
         properties: dict[str, Any] = {_ANSWER: {"type": "string", "title": need.question}}
         return {"type": "object", "properties": properties, "required": [_ANSWER]}
@@ -128,13 +141,21 @@ def pool_form_schema(need: NeedInput) -> dict[str, Any] | None:
 
 
 def pool_answer(need: NeedInput, content: dict[str, Any] | None) -> Any:
-    """The item to submit for an accepted Pool form; raises ``ValidationError``.
+    """The item to submit for an accepted Pool form; raises ``ValueError``.
 
-    The text for a free-text question; else an ``answer_type`` instance,
-    from strings: an empty field is left out (its default applies) and a
-    list field is split on commas.
+    The choice for a choice question: the text matches one ignoring case
+    and surrounding spaces, else ``ValueError`` says the choices. The text
+    for a free-text question. Else an ``answer_type`` instance, from
+    strings: an empty field is left out (its default applies) and a list
+    field is split on commas; ``ValidationError`` when it does not convert.
     """
     content = dict(content or {})
+    if need.options is not None:
+        text = str(content.get(_ANSWER, "")).strip().lower()
+        for option in need.options:
+            if option.strip().lower() == text:
+                return option
+        raise ValueError("That answer was not one of: " + ", ".join(need.options))
     if need.answer_type is None:
         return str(content.get(_ANSWER, ""))
     values: dict[str, Any] = {}

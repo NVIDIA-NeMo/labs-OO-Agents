@@ -43,13 +43,16 @@ way as a steer inject.
 A question the agent asks (`NeedInput`) goes to the client as a form when
 the client advertises `elicitation.form`, as a permission request when it
 is a yes/no choice, and otherwise as text answered by the next message.
-When the client is Pool (`clientInfo.name` is `pool`), free-text and typed
-questions use Pool's `_poolside/elicitation` form instead. Pool shows string
-fields only, so every field is sent as a string with the expected type in its
-description ("a whole number", "yes or no", "a comma-separated list") and the
-answer is converted back; an answer that does not convert is asked once more,
-then left as text. Choices keep the permission request or text. If Pool fails
-the request, questions fall back to text for the rest of the connection.
+When the client is Pool (`clientInfo.name` is `pool`), free-text, choice and
+typed questions use Pool's `_poolside/elicitation` form instead. Pool shows
+string fields only, so every field is sent as a string with the expected type
+in its description ("a whole number", "yes or no", "a comma-separated list")
+and the answer is converted back. Pool has no pick list: a choice question is
+one text field whose description lists the choices ("One of: main, dev"), and
+the answer matches a choice ignoring case. An answer that does not convert or
+match is asked once more, then left as text. Yes/no questions keep the
+permission request. If Pool fails the request, questions fall back to text for
+the rest of the connection.
 
 ## Recovering a session marked in use
 
