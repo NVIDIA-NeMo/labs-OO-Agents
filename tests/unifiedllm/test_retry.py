@@ -178,6 +178,18 @@ class TestIsRetryableError:
         assert is_retryable is True
         assert is_rate_limit is False
 
+    @pytest.mark.parametrize(
+        ("status_code", "expected"),
+        [(429, (True, True)), (503, (True, False)), (401, (False, False))],
+    )
+    def test_httpx_status_error_uses_response_status(self, status_code, expected):
+        """httpx stores structured status codes on the attached response."""
+        request = httpx.Request("POST", "https://example.test/decisions")
+        response = httpx.Response(status_code, request=request)
+        error = httpx.HTTPStatusError("request failed", request=request, response=response)
+
+        assert _is_retryable_error(error, RetryConfig()) == expected
+
     def test_internal_server_error_with_server_disconnected_message(self):
         """LiteLLM InternalServerError with server-disconnected text is retryable."""
         import litellm

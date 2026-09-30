@@ -149,11 +149,16 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     if isinstance(error, EmptyContentError) and config.retry_on_empty_content:
         return True, False
 
-    # Prefer the structured status code when the exception exposes one (LiteLLM /
-    # OpenAI APIStatusError subclasses carry ``.status_code`` — e.g. BadGatewayError
-    # has 502). A present but non-retryable status is terminal; do not let broad
-    # endpoint text matching retry permanent 4xx/auth/model errors.
+    # Inspect structured status data before falling back to message heuristics.
+    # LiteLLM and OpenAI APIStatusError subclasses expose ``.status_code``
+    # directly, while HTTPX stores it on ``HTTPStatusError.response.status_code``.
+    # A known non-retryable status must remain terminal: if broad text matching
+    # ran first, an endpoint or provider message could accidentally make a
+    # permanent 4xx authentication/model error look transient and retry it.
     status_code = getattr(error, "status_code", None)
+    if not isinstance(status_code, int):
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
     if isinstance(status_code, int):
         if status_code == 429:
             return (True, True) if 429 in config.retryable_status_codes else (False, False)
