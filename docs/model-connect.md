@@ -13,6 +13,27 @@ Start the guided setup with no arguments:
 uv run nooa connect
 ```
 
+Decision-model endpoints use the same flat registry and select their client
+through `client_type: decision`. Supply the exact model ID and complete System
+One request URL:
+
+```sh
+uv run nooa connect typesafe/jev-1.13 --as decisions \
+  --endpoint https://openrouter.ai/api/alpha/decisions \
+  --api-style systemone --api-key-env OPENROUTER_API_KEY
+```
+
+Connect sends one small boolean decision to validate the route and normalized
+response. It does not run chat-only tool, reasoning, session, catalogue, or
+reply-limit checks. Add `--no-probe` to prepare and save the entry without any
+request.
+
+In stage mode, decision endpoints support `plan`, `interfaces`, `routing`,
+`all`, and `save`. With `--api-style systemone`, `interfaces` sends only the
+decision probe and never tries the chat interfaces. `discover` and
+`--discovery-file` are rejected before any request because System One endpoints
+do not list models.
+
 ## Independent stages for agents
 
 Endpoint `/models` limits take priority over public catalogue limits, with sources

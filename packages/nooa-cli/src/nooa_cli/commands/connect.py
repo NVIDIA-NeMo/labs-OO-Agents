@@ -33,7 +33,7 @@ from ._connect_stages import STAGES
 @click.option("--endpoint", help="API base URL (otherwise prompted).")
 @click.option(
     "--api-style",
-    type=click.Choice(["chat", "responses", "anthropic"]),
+    type=click.Choice(["chat", "responses", "anthropic", "systemone"]),
     help="Request interface used by this model route.",
 )
 @click.option(

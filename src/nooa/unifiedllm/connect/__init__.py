@@ -27,7 +27,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -119,7 +119,12 @@ _RESERVED = {
     "api_style",
     "replay_vendor",
 }
-_PATHS = {"chat": "chat/completions", "responses": "responses", "anthropic": "messages"}
+_PATHS = {
+    "chat": "chat/completions",
+    "responses": "responses",
+    "anthropic": "messages",
+    "systemone": "",
+}
 
 
 @dataclass(frozen=True)
@@ -323,6 +328,10 @@ async def discover(
     uses the same fetcher. Limits apply to the whole discovery: 30 seconds,
     5 MiB and 5,000 entries. Redirects and automatic retries are disabled.
     """
+    if api_style == "systemone":
+        raise ValueError(
+            "System One decision endpoints do not list models; supply the exact decision model ID"
+        )
     if api_style not in _PATHS:
         raise ValueError("api_style must be chat, responses or anthropic")
     base = normalize_endpoint(endpoint)
@@ -600,6 +609,35 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     reject_credentials(entry)
     result = deepcopy(entry)
     result.setdefault("transport", "direct")
+    if result.get("client_type") == "decision":
+        if result.get("api_style") != "systemone":
+            raise ValueError("Decision entries require api_style: systemone")
+        if not isinstance(result.get("endpoint"), str) or not result["endpoint"].strip():
+            raise ValueError("Decision entries require a complete endpoint URL")
+        if reply_tokens is not None:
+            raise ValueError("Decision models do not use reply-token budgets")
+        forbidden = {
+            "max_tokens",
+            "max_output_tokens",
+            "reasoning_levels",
+            "reasoning_default",
+            "store",
+            "include",
+        }
+        present = sorted(forbidden & result.keys())
+        if present:
+            raise ValueError(
+                "Decision entries cannot configure chat-only fields: " + ", ".join(present)
+            )
+        provenance = result.setdefault("provenance", {})
+        if not isinstance(provenance, dict):
+            raise ValueError("provenance must be a mapping")
+        provenance.setdefault("probes", {})
+        provenance.setdefault(
+            "not_probed",
+            ["context_window", "reasoning", "tools", "sessions", "reply_limit"],
+        )
+        return result
     extra = result.get("extra_body") or {}
     if not isinstance(extra, dict):
         raise ValueError("extra_body must be a mapping")
@@ -754,6 +792,8 @@ def model_metadata(
 
 def entry_warnings(entry: dict) -> list[str]:
     """Configuration warnings shared by the wizard, library and stage reports."""
+    if entry.get("client_type") == "decision":
+        return []
     warnings = (
         []
         if entry.get("context_window")
@@ -789,6 +829,14 @@ def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
     Every configured probe sends the saved cap (or the selected level's cap).
     """
     entry = configure_entry(proposal.entry)
+    if entry.get("client_type") == "decision":
+        return replace(
+            proposal,
+            entry=entry,
+            token_estimate=sum(probe.token_estimate for probe in proposal.probes),
+            price_estimate=None,
+            session_checks=False,
+        )
     token_key = "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens"
     probes = []
     for probe in proposal.probes:
@@ -850,7 +898,7 @@ def plan(
     that charge. Servers can ignore caps, so this is not a billing limit.
     """
     if api_style not in _PATHS:
-        raise ValueError("api_style must be chat, responses or anthropic")
+        raise ValueError("api_style must be chat, responses, anthropic or systemone")
     api_base = normalize_endpoint(api_base)
     if (
         not alias.strip()
@@ -865,6 +913,60 @@ def plan(
         raise ValueError("output_tokens must be 1..4096 and budget_tokens must be positive")
     if not 1 <= reasoning_output_tokens <= 32768:
         raise ValueError("reasoning_output_tokens must be 1..32768")
+    if api_style == "systemone":
+        if catalogue is not None or endpoint_model is not None:
+            raise ValueError("Decision models do not use chat model catalogue metadata")
+        if reasoning_levels:
+            raise ValueError("Decision models do not configure reasoning levels")
+        if session_checks:
+            raise ValueError("Decision models are stateless and do not use session checks")
+        if reply_tokens is not None:
+            raise ValueError("Decision models do not use reply-token budgets")
+        entry = {
+            "model_name": model,
+            "client_type": "decision",
+            "api_style": "systemone",
+            "endpoint": api_base,
+            "api_key_env": api_key_env,
+            "provenance": {
+                "probes": {},
+                "requests_accepted": [],
+                "not_probed": [
+                    "context_window",
+                    "reasoning",
+                    "tools",
+                    "sessions",
+                    "reply_limit",
+                ],
+            },
+        }
+        body = {
+            "model": model,
+            "state": {"statement": "The support request requires a decision."},
+            "questions": {
+                "supported": {
+                    "type": "noul",
+                    "instructions": "Does the state contain a support request?",
+                }
+            },
+        }
+        proposal = ConnectPlan(
+            alias,
+            configure_entry(entry),
+            (Probe("routing", body, 512, uses_configured_cap=False),),
+            budget_tokens,
+            512,
+            None,
+        )
+        if existing_entry:
+            keys = ("model_name", "endpoint", "api_key_env", "client_type", "api_style")
+            if all(existing_entry.get(key) == proposal.entry.get(key) for key in keys):
+                previous = existing_entry.get("provenance", {}).get("probes", {})
+                if "routing" in previous:
+                    proposal.entry["provenance"]["probes"]["routing"] = deepcopy(
+                        previous["routing"]
+                    )
+        return proposal
     vendor = "anthropic" if api_style == "anthropic" else "openai"
     entry: dict[str, Any] = {
         "model_name": f"{vendor}/{model}",
@@ -1092,13 +1194,16 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                 params.pop(key, None)
         # A level can set the cap itself; do not pass a conflicting override.
         params["reasoning_level"] = label
-    client = client_from_config(
-        alias,
-        entry,
-        api_key=api_key,
-        retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
-        num_retries=0,
-        http_config=HttpConfig(read_timeout=probe.timeout_seconds),
+    client = cast(
+        Any,
+        client_from_config(
+            alias,
+            entry,
+            api_key=api_key,
+            retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+            num_retries=0,
+            http_config=HttpConfig(read_timeout=probe.timeout_seconds),
+        ),
     )
     settings_sent = []
     response_status = []
@@ -1131,12 +1236,62 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         if response_status:
             # LiteLLM can label a malformed HTTP-200 response as a 422 error.
             # Keep the observed status distinct from that local translation.
-            exc._connect_http_status = response_status[-1]
+            exc._connect_http_status = response_status[-1]  # type: ignore[attr-defined]
         raise
     finally:
         hooks.remove(capture)
         response_hooks.remove(capture_status)
         await client.aclose()
+
+
+async def _run_decision_probe(
+    alias: str,
+    entry: dict,
+    probe: Probe,
+    api_key: str | None,
+):
+    """Run one System One probe through the configured decision-client factory."""
+    from nooa.decisions import DecisionClient
+    from nooa.decisions.client import BooleanQuestion, DecisionRequest
+    from nooa.unifiedllm import RetryConfig
+    from nooa.unifiedllm.registry import client_from_config
+
+    response_status: list[int] = []
+
+    async def capture_status(response: httpx.Response) -> None:
+        response_status.append(response.status_code)
+
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    http_client = httpx.AsyncClient(
+        timeout=probe.timeout_seconds,
+        headers=headers,
+        event_hooks={"response": [capture_status]},
+    )
+    client = cast(
+        DecisionClient,
+        client_from_config(
+            alias,
+            entry,
+            api_key=api_key,
+            client=http_client,
+            retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+        ),
+    )
+    question = probe.body["questions"]["supported"]
+    request = DecisionRequest(
+        state=probe.body["state"],
+        questions={"supported": BooleanQuestion(question["instructions"])},
+    )
+    try:
+        response = await client.adecide(request)
+        return response, response_status[-1] if response_status else None
+    except Exception as exc:
+        if response_status:
+            exc._connect_http_status = response_status[-1]  # type: ignore[attr-defined]
+        raise
+    finally:
+        await client.aclose()
+        await http_client.aclose()
 
 
 async def run(
@@ -1163,6 +1318,8 @@ async def check_stage(
     """
     if stage not in {"routing", "tools", "reasoning", "session", "all"}:
         raise ValueError("Unknown check stage")
+    if proposal.entry.get("client_type") == "decision" and stage not in {"routing", "all"}:
+        raise ValueError("Decision models only support the routing check")
     probes = tuple(
         p
         for p in proposal.probes
@@ -1202,6 +1359,7 @@ def diagnostic_prompt(
             "api_style",
             "client_type",
             "api_base",
+            "endpoint",
             "api_key_env",
             "transport",
             "max_tokens",
@@ -1213,11 +1371,12 @@ def diagnostic_prompt(
         if key in entry
     }
     # Endpoints from arbitrary caller input may contain credentials or query data.
-    if "api_base" in context:
+    endpoint_key = "endpoint" if "endpoint" in context else "api_base"
+    if endpoint_key in context:
         try:
-            context["api_base"] = normalize_endpoint(context["api_base"])
+            context[endpoint_key] = normalize_endpoint(context[endpoint_key])
         except (TypeError, ValueError):
-            context["api_base"] = "[invalid endpoint omitted]"
+            context[endpoint_key] = "[invalid endpoint omitted]"
     outcomes = {name: public_record(record) for name, record in checks.items()}
     text = (
         f"Diagnose and fix NOOA Connect stage {stage!r}. "
@@ -1292,6 +1451,10 @@ async def run_steps(
     """
     if approved not in {"all", "minimal", "none"}:
         raise ValueError("approved must be all, minimal or none")
+    if proposal.entry.get("client_type") == "decision":
+        async for update in _run_decision_steps(proposal, approved=approved, api_key=api_key):
+            yield update
+        return
     entry = configure_entry(proposal.entry)
     provenance = entry["provenance"]
     records = provenance["probes"]
@@ -1613,6 +1776,122 @@ async def run_steps(
     yield ConnectResult(proposal.alias, entry)
 
 
+async def _run_decision_steps(
+    proposal: ConnectPlan,
+    *,
+    approved: Literal["all", "minimal", "none"],
+    api_key: str | None,
+) -> AsyncIterator[ProbeUpdate | ConnectResult]:
+    """Execute the single bounded decision-interface probe."""
+    entry = configure_entry(proposal.entry)
+    records = entry["provenance"]["probes"]
+    probe = proposal.probes[0]
+    previous = records.get(probe.name, {})
+    if (
+        previous.get("outcome") == "accepted"
+        and previous.get("request") == probe.body
+        and previous.get("client") == "decision"
+    ):
+        yield ProbeUpdate(probe.name, {**deepcopy(previous), "reason": "previous result reused"})
+        yield ConnectResult(proposal.alias, entry)
+        return
+
+    record: dict[str, Any] = {"outcome": "not_probed"}
+    records[probe.name] = record
+    if approved == "none":
+        record["reason"] = "not approved"
+        yield ProbeUpdate(probe.name, deepcopy(record))
+        entry["provenance"]["requests_accepted"] = []
+        entry["provenance"]["tokens_charged_to_budget"] = 0
+        yield ConnectResult(proposal.alias, entry)
+        return
+    if proposal.budget_tokens < probe.token_estimate:
+        record["reason"] = "budget exhausted"
+        yield ProbeUpdate(probe.name, deepcopy(record))
+        entry["provenance"]["requests_accepted"] = []
+        entry["provenance"]["tokens_charged_to_budget"] = 0
+        yield ConnectResult(proposal.alias, entry)
+        return
+
+    key = api_key
+    if key is None and entry.get("api_key_env"):
+        key = os.environ.get(entry["api_key_env"])
+        if not key:
+            raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
+
+    yield ProbeUpdate(probe.name, {"outcome": "running"})
+    started = time.monotonic()
+    deadline = asyncio.timeout(probe.timeout_seconds)
+    record["request_shape"] = {
+        "api_style": "systemone",
+        "timeout_seconds": probe.timeout_seconds,
+        "question_count": 1,
+    }
+    try:
+        async with deadline:
+            response, status = await _run_decision_probe(proposal.alias, entry, probe, key)
+        from nooa.decisions.client import BooleanAnswer
+
+        answer = response.answers["supported"]
+        if not isinstance(answer, BooleanAnswer):
+            raise TypeError("Decision probe did not return a boolean answer")
+        probability = answer.probability_true
+        if not math.isfinite(probability) or not 0 <= probability <= 1:
+            raise ValueError("Decision probe returned a probability outside [0, 1]")
+        usage = response.usage
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        reported = sum(
+            value
+            for value in (input_tokens, output_tokens)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        )
+    except Exception as exc:
+        from nooa.unifiedllm.connect._diagnostics import timeout_details
+
+        status = getattr(exc, "_connect_http_status", None)
+        record.update(
+            error=type(exc).__name__,
+            elapsed_seconds=round(time.monotonic() - started, 3),
+            outcome="not_probed",
+        )
+        if isinstance(status, int):
+            record["status_code"] = status
+            record["outcome"] = "rejected" if status in {400, 422} else "not_probed"
+            if 200 <= status < 300:
+                record.update(
+                    outcome="not_confirmed",
+                    reason="Reply not understood by the decision client",
+                )
+        record.update(timeout_details(exc, deadline_expired=deadline.expired()))
+        yield ProbeUpdate(probe.name, deepcopy(record))
+        entry["provenance"]["requests_accepted"] = []
+        entry["provenance"]["tokens_charged_to_budget"] = probe.token_estimate
+        yield ConnectResult(proposal.alias, entry)
+        return
+
+    record.update(
+        outcome="accepted",
+        elapsed_seconds=round(time.monotonic() - started, 3),
+        client="decision",
+        transport="httpx",
+        request=deepcopy(probe.body),
+        resolved_model=response.model,
+        probability_true=probability,
+        input_tokens=input_tokens if isinstance(input_tokens, int) else None,
+        output_tokens=output_tokens if isinstance(output_tokens, int) else None,
+        reported_tokens=reported,
+        checked_at=datetime.now(UTC).isoformat(),
+    )
+    if isinstance(status, int):
+        record["status_code"] = status
+    entry["provenance"]["requests_accepted"] = [probe.name]
+    entry["provenance"]["tokens_charged_to_budget"] = max(probe.token_estimate, reported)
+    yield ProbeUpdate(probe.name, deepcopy(record))
+    entry["provenance"]["warnings"] = entry_warnings(entry)
+    yield ConnectResult(proposal.alias, entry)
+
+
 async def check_interfaces(
     alias: str,
     model: str,
@@ -1651,6 +1930,10 @@ async def check_interfaces(
     "effort" template is meaningful across chat and responses together; an
     anthropic-only comparison needs a matching template (adaptive/budget/
     thinking) passed explicitly.
+
+    Pass ``styles=("systemone",)`` alone to send the single decision probe; a
+    decision endpoint is a different client type, so it is never mixed with
+    chat interfaces.
     """
     if (
         not styles
@@ -1658,6 +1941,10 @@ async def check_interfaces(
         or not 1 <= timeout_seconds <= 120
     ):
         raise ValueError("Choose supported interfaces and a timeout between 1 and 120 seconds")
+    if "systemone" in styles and set(styles) != {"systemone"}:
+        raise ValueError("systemone is a decision interface and cannot be mixed with chat styles")
+    if "systemone" in styles and reasoning_template:
+        raise ValueError("systemone decision models have no reasoning levels to probe")
     results = {}
     spent = 0
     for style in dict.fromkeys(styles):
@@ -1677,35 +1964,42 @@ async def check_interfaces(
             reasoning_levels=style_reasoning_levels,
             reasoning_output_tokens=reasoning_output_tokens,
         )
-        routing = replace(
-            proposal.probes[0],
-            timeout_seconds=timeout_seconds,
-            body={
-                **proposal.probes[0].body,
-                "max_output_tokens" if style == "responses" else "max_tokens": output_tokens,
-            },
-            token_estimate=output_tokens + 512,
-            uses_configured_cap=False,
-        )
-        level_probes = tuple(
-            replace(
-                p,
+        if style == "systemone":
+            # The decision probe has no reply-token field to cap.
+            probes: tuple[Probe, ...] = (
+                replace(proposal.probes[0], timeout_seconds=timeout_seconds),
+            )
+        else:
+            routing = replace(
+                proposal.probes[0],
                 timeout_seconds=timeout_seconds,
                 body={
-                    **p.body,
-                    "max_output_tokens" if style == "responses" else "max_tokens": (
-                        reasoning_output_tokens
-                    ),
+                    **proposal.probes[0].body,
+                    "max_output_tokens" if style == "responses" else "max_tokens": output_tokens,
                 },
-                token_estimate=reasoning_output_tokens + 512,
+                token_estimate=output_tokens + 512,
                 uses_configured_cap=False,
             )
-            for p in proposal.probes
-            if p.name.startswith("level:")
-        )
+            level_probes = tuple(
+                replace(
+                    p,
+                    timeout_seconds=timeout_seconds,
+                    body={
+                        **p.body,
+                        "max_output_tokens" if style == "responses" else "max_tokens": (
+                            reasoning_output_tokens
+                        ),
+                    },
+                    token_estimate=reasoning_output_tokens + 512,
+                    uses_configured_cap=False,
+                )
+                for p in proposal.probes
+                if p.name.startswith("level:")
+            )
+            probes = (routing, *level_probes)
         proposal = replace(
             proposal,
-            probes=(routing, *level_probes),
+            probes=probes,
             budget_tokens=max(0, budget_tokens - spent),
         )
         async with aclosing(run_steps(proposal, approved="all", api_key=api_key)) as steps:

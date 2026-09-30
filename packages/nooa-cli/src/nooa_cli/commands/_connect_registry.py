@@ -40,7 +40,7 @@ def credential_names(registry, endpoint):
     target = normalized(endpoint)
     names = []
     for entry, _ in registry.values():
-        address, name = entry.get("api_base"), entry.get("api_key_env")
+        address, name = entry.get("endpoint") or entry.get("api_base"), entry.get("api_key_env")
         if not isinstance(address, str) or not isinstance(name, str):
             continue
         try:
@@ -100,6 +100,7 @@ def diagnostic_context(
     alias=None,
     model=None,
     endpoint=None,
+    api_style=None,
     api_key_env=None,
     api_key=None,
     budget=None,
@@ -196,10 +197,16 @@ def diagnostic_context(
                         if context["credential_source"] == "pasted"
                         else ["--api-key-env", api_key_env or ""]
                     ),
-                    "--output-tokens",
-                    str(output_tokens),
-                    "--budget-tokens",
-                    str(min(remaining, 3 * (output_tokens + 512))),
+                    *(
+                        ["--api-style", "systemone", "--budget-tokens", str(min(remaining, 512))]
+                        if api_style == "systemone"
+                        else [
+                            "--output-tokens",
+                            str(output_tokens),
+                            "--budget-tokens",
+                            str(min(remaining, 3 * (output_tokens + 512))),
+                        ]
+                    ),
                 ]
             )
     if context["credential_source"] == "pasted":
