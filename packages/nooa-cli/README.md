@@ -1,6 +1,6 @@
 # nooa-cli
 
-CLI for [nemo-oo-agents](https://github.com/NVIDIA-NeMo/labs-OO-Agents). Ships the `nooa` command with subcommands for running evaluations, browsing traces, and managing config.
+CLI for [nooa](https://github.com/NVIDIA-NeMo/labs-OO-Agents). Ships the `nooa` command with subcommands for running evaluations, browsing traces, and managing config.
 
 ## Install
 
@@ -11,7 +11,7 @@ uv add nooa-cli
 uv add "nooa-cli[datascience]"
 ```
 
-`nooa-cli` automatically pulls in matching `nemo-oo-agents` (the core framework). The `[datascience]` extra adds libraries the LLM can use in REPL-generated code.
+`nooa-cli` automatically pulls in matching `nooa` (the core framework). The `[datascience]` extra adds libraries the LLM can use in REPL-generated code.
 
 ## Usage
 
