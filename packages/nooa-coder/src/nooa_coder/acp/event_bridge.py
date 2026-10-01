@@ -38,6 +38,7 @@ from acp.helpers import plan_entry
 from acp.interfaces import Client
 from acp.schema import (
     AgentMessageChunk,
+    AgentThoughtChunk,
     ContentToolCallContent,
     Cost,
     CurrentModeUpdate,
@@ -46,6 +47,7 @@ from acp.schema import (
     TextContentBlock,
     ToolCallLocation,
     UsageUpdate,
+    UserMessageChunk,
 )
 
 from nooa.agentdoc import pformat
@@ -176,6 +178,39 @@ def question_text(question: str, options: list[str] | None, reason: str | None =
     return text
 
 
+MAX_CHUNK_CHARS = 64_000
+"""Longest text one message or thought chunk carries.
+
+A longer text (a large paste, a long answer, a transcript entry replayed by
+``session/load``) goes out as several chunks of the same kind, which a
+client joins as it joins any stream of chunks. This keeps every message well
+under the 1 MiB that WebSocket clients accept by default (``websockets``):
+64,000 characters are at most about 384 KiB of JSON, even if every
+character needs a six-byte escape.
+"""
+
+_TEXT_CHUNKS = (AgentMessageChunk, UserMessageChunk, AgentThoughtChunk)
+
+
+def split_text_chunk(update: Any) -> list[Any]:
+    """``update`` as a list of updates, split when it is a text chunk over ``MAX_CHUNK_CHARS``."""
+    if not isinstance(update, _TEXT_CHUNKS) or not isinstance(update.content, TextContentBlock):
+        return [update]
+    text = update.content.text
+    if len(text) <= MAX_CHUNK_CHARS:
+        return [update]
+    return [
+        update.model_copy(
+            update={
+                "content": update.content.model_copy(
+                    update={"text": text[start : start + MAX_CHUNK_CHARS]}
+                )
+            }
+        )
+        for start in range(0, len(text), MAX_CHUNK_CHARS)
+    ]
+
+
 class ACPEventBridge:
     """Send one session's activity to an ACP client, in order, through one pump task.
 
@@ -289,7 +324,8 @@ class ACPEventBridge:
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
-            self._queue.put_nowait(end_line(update))
+            for part in split_text_chunk(update):
+                self._queue.put_nowait(part)
 
     def publish(self, update: Any) -> None:
         """Queue a host-originated session update on the ordered ACP stream."""
