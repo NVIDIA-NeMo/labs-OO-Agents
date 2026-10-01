@@ -4,8 +4,8 @@
 
 import pytest
 
-from nooa import Agent
-from nooa.context_blocks import DynamicContext
+from nooa import Agent, Context
+from nooa.context_blocks import DynamicContext, ExpressionContextBlock, LiteralContextBlock
 from nooa.context_blocks.exceptions import DynamicNotResolvedError, ProtectedBlockError
 from nooa.runtime.context import ContextApi
 from nooa.unifiedllm import FakeLLMClient
@@ -36,6 +36,31 @@ def test_setitem_raises_on_protected_key():
         ctx["system_prompt"] = "overwrite"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        Context("overwrite", prefix=True),
+        Context(expr="'overwrite'", prefix=True),
+        DynamicContext("'overwrite'"),
+    ],
+)
+def test_setitem_rejects_typed_values_for_protected_key(value):
+    ctx = _ctx()
+    with pytest.raises(ProtectedBlockError):
+        ctx["system_prompt"] = value
+
+
+def test_apply_override_can_replace_protected_key_with_context():
+    ctx = _ctx()
+    ctx._context.apply_override("system_prompt", Context("override", prefix=True))
+
+    block = ctx._context._blocks["system_prompt"]
+    assert isinstance(block, LiteralContextBlock)
+    assert block.value == "override"
+    assert block.prefix is True
+    assert "system_prompt" in ctx._context.protected_keys
+
+
 def test_setitem_accepts_dynamic_context_value():
     ctx = _ctx()
     ctx["dynamic"] = DynamicContext("'expr'")
@@ -47,7 +72,7 @@ def test_set_static_expr_lands_in_static_partition():
     ctx.set_static("live", expr="1 + 1")
     # Re-evaluated (DynamicContext marker) yet in the static/cacheable partition.
     assert ctx._context.is_static("live") is True
-    assert isinstance(ctx._context._blocks["live"], DynamicContext)
+    assert isinstance(ctx._context._blocks["live"], ExpressionContextBlock)
     assert ctx._context._blocks["live"].expr == "1 + 1"
 
 
@@ -113,7 +138,7 @@ def test_delitem_raises_for_missing_key():
 
 def test_delitem_raises_for_protected_key():
     ctx = _ctx()
-    ctx._context._blocks["guarded"] = "value"
+    ctx._context._blocks["guarded"] = LiteralContextBlock(key="guarded", value="value")
     ctx._context.protected_keys.add("guarded")
     with pytest.raises(ProtectedBlockError):
         del ctx["guarded"]
@@ -180,7 +205,7 @@ def test_pop_static_block():
 
 def test_pop_dynamic_block():
     ctx = _ctx()
-    ctx._context._blocks["dyn"] = DynamicContext("'hello'")
+    ctx.set_dynamic("dyn", "'hello'")
     ctx._context._dynamic_cache["dyn"] = "hello"
     assert ctx.pop("dyn") == "hello"
     assert "dyn" not in ctx
@@ -199,7 +224,7 @@ def test_pop_raises_for_missing_without_default():
 
 def test_pop_raises_for_protected_key():
     ctx = _ctx()
-    ctx._context._blocks["guarded"] = "value"
+    ctx._context._blocks["guarded"] = LiteralContextBlock(key="guarded", value="value")
     ctx._context.protected_keys.add("guarded")
     with pytest.raises(ProtectedBlockError):
         ctx.pop("guarded")
