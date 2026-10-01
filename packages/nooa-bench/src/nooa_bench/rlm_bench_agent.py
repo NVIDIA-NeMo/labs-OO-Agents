@@ -16,7 +16,13 @@ with _hidden:
     from typing import Any
 
     from nooa import strategy
-    from nooa_bench.bench_agent import _SOLVE_CONTEXT, _SOLVE_STRATEGY, BenchAgent, TaskResult
+    from nooa_bench.bench_agent import (
+        _SOLVE_CONTEXT,
+        _SOLVE_STRATEGY,
+        BenchAgent,
+        TaskResult,
+        _SolveDescription,
+    )
 
 
 class RLMBenchAgent(BenchAgent):
@@ -37,7 +43,9 @@ class RLMBenchAgent(BenchAgent):
         _SOLVE_STRATEGY,
         context=_SOLVE_CONTEXT,
     )
-    async def _solve_task(self, description: str, supplied_context: Any = None) -> TaskResult:
+    async def _solve_task(
+        self, description: _SolveDescription, supplied_context: Any = None
+    ) -> TaskResult:
         """Solve the supplied task completely.
 
         Inspect before editing. Use ``await self.delegate(objective, supplied_context)`` only
