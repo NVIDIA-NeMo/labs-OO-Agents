@@ -73,7 +73,7 @@ to follow semantic versioning.
     `default_llm_factory()` as the registry's `llm_factory`. Agent specs
     may name a file (`./agent.py:Class`, relative to the workspace), and
     the older `nooa_cli.*` coding-agent specs still load.
-  - `nooa-coder` (also `nooa coder`) serves the coding agent over ACP on
+  - `nooa coder` serves the coding agent over ACP on
     stdio, one process for every session, on the Session layer; the older
     `nooa-acp` is unchanged. Sessions: new, load (attaching to a live
     session and replaying its transcript), list (root sessions from every
@@ -92,10 +92,12 @@ to follow semantic versioning.
     context status, messages from other senders echoed as user chunks, and
     child sessions announced in `_meta["dev.nooa/children"]` with their
     tool cards mirrored into the parent. `/connect` points to the CLI.
-  - `nooa-coder --tee PATH` and `nooa-coder-tee --log PATH -- COMMAND...`
+  - `nooa coder --tee PATH` and `python -m nooa_coder.acp.tee --log PATH -- COMMAND...`
     record every ACP frame in both directions to a JSON Lines file (mode
     0600); `docs/acp-tee.md` has the Pool settings entry and what the log
     shows about Pool's behaviour.
+  - The `nooa-coder` package depends on `nooa-cli`, which provides the `nooa`
+    command; there is no separate `nooa-coder` script.
   - `nooa-coder` and `nooa-acp` need `agent-client-protocol` 0.12.1 or
     later (below 0.13). That release adds the library's HTTP and WebSocket
     transports and renames two schema fields: the multi-select item type is

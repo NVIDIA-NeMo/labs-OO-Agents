@@ -112,20 +112,19 @@ def test_the_command_is_the_nooa_coder_plugin():
     assert dict(discover_commands())["coder"] is command
 
 
-@pytest.mark.parametrize("argv", [["nooa-coder", "--help"], ["nooa", "coder", "--help"]])
-def test_the_console_scripts_run(argv):
-    path = shutil.which(argv[0])
-    assert path is not None, f"{argv[0]} is not installed; check [project.scripts]"
-    result = subprocess.run([path, *argv[1:]], capture_output=True, text=True, timeout=120)
+def test_nooa_coder_runs():
+    path = shutil.which("nooa")
+    assert path is not None, "nooa is not installed; nooa-coder depends on nooa-cli"
+    result = subprocess.run([path, "coder", "--help"], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
     assert "Serve the NOOA coding agent over ACP" in result.stdout
 
 
-def test_the_console_script_requires_a_model(monkeypatch):
+def test_nooa_coder_requires_a_model(monkeypatch):
     monkeypatch.delenv("NOOA_MODEL", raising=False)
-    path = shutil.which("nooa-coder")
+    path = shutil.which("nooa")
     assert path is not None
-    result = subprocess.run([path], capture_output=True, text=True, timeout=120)
+    result = subprocess.run([path, "coder"], capture_output=True, text=True, timeout=120)
     assert result.returncode == 2
     assert "--model" in result.stderr
 

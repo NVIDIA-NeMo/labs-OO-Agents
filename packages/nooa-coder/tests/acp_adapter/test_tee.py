@@ -3,7 +3,6 @@
 """The JSON-RPC tee: the external relay (``nooa-coder-tee``) and the in-process observer."""
 
 import json
-import shutil
 import signal
 import stat
 import subprocess
@@ -107,10 +106,13 @@ def test_relay_forwards_sigterm_to_the_server(tmp_path):
         stream.close()
 
 
-def test_relay_console_script_is_installed():
-    path = shutil.which("nooa-coder-tee")
-    assert path is not None, "nooa-coder-tee is not installed; check [project.scripts]"
-    result = subprocess.run([path, "--help"], capture_output=True, text=True, timeout=60)
+def test_relay_runs_as_a_module():
+    result = subprocess.run(
+        [sys.executable, "-m", "nooa_coder.acp.tee", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     assert result.returncode == 0, result.stderr
     assert "--log" in result.stdout
 

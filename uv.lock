@@ -1640,6 +1640,7 @@ dependencies = [
     { name = "agent-client-protocol" },
     { name = "click" },
     { name = "nooa", extra = ["mcp"] },
+    { name = "nooa-cli" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
@@ -1659,6 +1660,7 @@ requires-dist = [
     { name = "agent-client-protocol", specifier = ">=0.12.1,<0.13" },
     { name = "click", specifier = ">=8.1.0" },
     { name = "nooa", extras = ["mcp"], editable = "." },
+    { name = "nooa-cli", editable = "packages/nooa-cli" },
     { name = "pydantic", specifier = ">=2.5.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "tree-sitter", marker = "extra == 'ast'", specifier = ">=0.23.0" },
