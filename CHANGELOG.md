@@ -96,6 +96,11 @@ to follow semantic versioning.
     record every ACP frame in both directions to a JSON Lines file (mode
     0600); `docs/acp-tee.md` has the Pool settings entry and what the log
     shows about Pool's behaviour.
+  - `nooa-coder` and `nooa-acp` need `agent-client-protocol` 0.12.1 or
+    later (below 0.13). That release adds the library's HTTP and WebSocket
+    transports and renames two schema fields: the multi-select item type is
+    `StringMultiSelectItems`, and an ACP-transport MCP server's `id` is
+    `server_id`.
 
 - Groundwork for the session tree design, in shared code:
   - A cancelled CodeAct cell is now recorded for the model: an appended
