@@ -391,6 +391,14 @@ class ItemAdmittedUpdate(_Update):
     text: str = ""  # the whole item: the string itself, else its JSON
 
 
+class ItemConsumedUpdate(_Update):
+    """An admitted item was taken: by the turn loop, by agent code, or as a steer a model call saw."""
+
+    kind: Literal["item_consumed"] = "item_consumed"
+    channel: str
+    item_id: str
+
+
 class CancelledUpdate(_Update):
     """A running turn was cancelled."""
 
@@ -483,6 +491,7 @@ SessionEvent = Annotated[
     TurnStartedUpdate
     | TurnEndedUpdate
     | ItemAdmittedUpdate
+    | ItemConsumedUpdate
     | CancelledUpdate
     | TitleChangedUpdate
     | ModeChangedUpdate

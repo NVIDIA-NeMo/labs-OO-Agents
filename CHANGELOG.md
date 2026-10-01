@@ -14,6 +14,12 @@ to follow semantic versioning.
   `source` names the channel and the sender, and whose `description` says it came during
   the turn and how to reach it (`self.events["N"].value`). A steer from an ACP client
   counts as the user.
+- `nooa-coder`: a message typed in Pool during a turn now appears in Pool's conversation.
+  When a turn takes it, the server sends the input event Pool's own agent sends
+  (`session_info_update` with `_meta` `poolside/clientInputId` and `poolside/inputEventId`),
+  and answers `_poolside/session_steer` after it. Prompts and replayed user messages also
+  carry `poolside/inputEventId` for Pool. The Session reports a taken item as
+  `ItemConsumedUpdate`.
 - `nooa-coder`: the ACP server takes the messages typed in Pool during a running turn.
   It advertises `poolside/session_steer`, and each such message is queued for the next
   turn instead of waiting in Pool's own queue, where Esc drops it. It is not steered

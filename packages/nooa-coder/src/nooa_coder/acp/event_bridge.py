@@ -66,6 +66,7 @@ from nooa_coder.session.items import (
     CancelledUpdate,
     ChildCreatedUpdate,
     ItemAdmittedUpdate,
+    ItemConsumedUpdate,
     ModeChangedUpdate,
     ModelInfo,
     SessionInfo,
@@ -134,6 +135,13 @@ class _BestEffortUpdate:
     value: Any
 
 
+@dataclass(frozen=True, slots=True)
+class _Sent:
+    """Resolve ``future`` once the pump reaches it, without taking a flush's error."""
+
+    future: asyncio.Future[None]
+
+
 def _fenced_code(text: str, language: str) -> str:
     """Wrap text in a Markdown fence that cannot collide with its contents."""
     longest_run = max((len(match.group()) for match in re.finditer(r"`+", text)), default=0)
@@ -176,6 +184,26 @@ def question_text(question: str, options: list[str] | None, reason: str | None =
     if reason:
         text += "\n\n" + reason
     return text
+
+
+POOL_INPUT_EVENT_ID = "poolside/inputEventId"
+POOL_CLIENT_INPUT_ID = "poolside/clientInputId"
+
+
+def pool_input_event(item_id: str, client_input_id: str | None = None) -> SessionInfoUpdate:
+    """The update Pool's own agent sends when it takes a person's input.
+
+    Pool places a message it queued with ``_poolside/session_steer`` in the
+    conversation when it sees the steer's ``inputId`` as
+    ``poolside/clientInputId``; without it the message is never shown.
+    Every input also carries a ``poolside/inputEventId``: here the item id,
+    so it is the same live and when the transcript is replayed. Measured
+    with Pool 1.0.16 against its own agent (``pool acp``).
+    """
+    meta: dict[str, Any] = {POOL_INPUT_EVENT_ID: item_id}
+    if client_input_id is not None:
+        meta = {POOL_CLIENT_INPUT_ID: client_input_id, **meta}
+    return SessionInfoUpdate(session_update="session_info_update", field_meta=meta)
 
 
 MAX_CHUNK_CHARS = 64_000
@@ -247,6 +275,11 @@ class ACPEventBridge:
         self._plan: list[PlanEntry] = []
         self._children: list[dict[str, Any]] = []
         self._mirrors: dict[str, list[Callable[[], None]]] = {}
+        # Pool steers waiting for their item to be taken: item id ->
+        # (Pool's inputId, the future resolved once Pool has been told).
+        self._client_inputs: dict[str, tuple[str, asyncio.Future[None]]] = {}
+        # Recently taken item ids, for a steer registered after its item was taken.
+        self._taken: dict[str, None] = {}
         # By event type. Cards come from this session's agent and, mirrored,
         # from its children's; messages, thoughts and usage only from its own.
         self._card_handlers: dict[str, Callable[[Any, str | None], None]] = {
@@ -337,9 +370,45 @@ class ACPEventBridge:
 
     # ---- session updates ---------------------------------------------
 
+    def client_input_taken(self, item_id: str, client_input_id: str) -> asyncio.Future[None]:
+        """Tell Pool when the turn takes ``item_id``, the item of its steer ``client_input_id``.
+
+        Returns a future that resolves once ``pool_input_event`` has gone
+        out, after everything queued before it, so the steer's answer can
+        follow it as Pool's own agent does. It never resolves when the item
+        is never taken (withdrawn, discarded, the session closed): the caller
+        also waits for the item's outcome, and calls ``forget_client_input``.
+        """
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        if item_id in self._taken:
+            self._send_client_input(item_id, client_input_id, done)
+        else:
+            self._client_inputs[item_id] = (client_input_id, done)
+        return done
+
+    def forget_client_input(self, item_id: str) -> None:
+        self._client_inputs.pop(item_id, None)
+
+    def _send_client_input(
+        self, item_id: str, client_input_id: str, done: asyncio.Future[None]
+    ) -> None:
+        if self._closed:
+            if not done.done():
+                done.set_result(None)
+            return
+        self._enqueue(pool_input_event(item_id, client_input_id))
+        self._queue.put_nowait(_Sent(done))  # resolved once the update is sent
+
     def _on_session_update(self, update: Any) -> None:
         if isinstance(update, AgentEventUpdate):
             self._on_agent_event(update.event, None)
+        elif isinstance(update, ItemConsumedUpdate):
+            self._taken[update.item_id] = None
+            while len(self._taken) > 256:
+                del self._taken[next(iter(self._taken))]
+            waiting = self._client_inputs.pop(update.item_id, None)
+            if waiting is not None:
+                self._send_client_input(update.item_id, *waiting)
         elif isinstance(update, ItemAdmittedUpdate):
             if update.channel in _ECHOED_CHANNELS and update.source not in self._own_sources:
                 text = getattr(update, "text", "") or update.preview
@@ -666,6 +735,8 @@ class ACPEventBridge:
                 return
             if isinstance(item, asyncio.Future) and not item.done():
                 item.set_exception(self._stopped_error(cause))
+            elif isinstance(item, _Sent) and not item.future.done():
+                item.future.set_result(None)
             self._queue.task_done()
 
     async def _pump(self) -> None:
@@ -697,6 +768,10 @@ class ACPEventBridge:
                             item.set_result(None)
                         else:
                             item.set_exception(error)
+                    continue
+                if isinstance(item, _Sent):
+                    if not item.future.done():
+                        item.future.set_result(None)
                     continue
                 if isinstance(item, _BestEffortUpdate):
                     try:

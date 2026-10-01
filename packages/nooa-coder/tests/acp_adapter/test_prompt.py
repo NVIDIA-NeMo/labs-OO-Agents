@@ -574,11 +574,11 @@ async def test_a_pool_steer_is_queued_for_the_next_turn(make_adapter, workspace,
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("start")]))
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    answer = await adapter.ext_method(
-        "poolside/session_steer", _steer_params(session_id, "use tabs", "steer-2")
-    )
-    assert answer == {"inputId": "steer-2"}
+    steer = await _pool_steer(adapter, session_id, "use tabs", "steer-2")
+    await asyncio.sleep(0.05)
+    assert not steer.done()  # answered when a turn takes the message
     block.set()
+    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-2"}
     assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
     await client.wait_for(lambda: "Tabs." in client.texts(AgentMessageChunk, session_id))
 
@@ -628,9 +628,26 @@ POOL = Implementation(name="pool", version="1.0.16")
 
 
 async def _pool_steer(adapter, session_id, text, input_id="steer-1"):
-    return await adapter.ext_method(
-        "poolside/session_steer", _steer_params(session_id, text, input_id)
-    )
+    """Send a Pool steer; return its request as a task once the message is admitted.
+
+    The request is answered when a turn takes the message (or it is
+    withdrawn), so a test awaits the task where that should have happened.
+    """
+    admitted = asyncio.Event()
+
+    def on_update(update):
+        if getattr(update, "kind", "") == "item_admitted" and getattr(update, "text", "") == text:
+            admitted.set()
+
+    unsubscribe = adapter.session(session_id).subscribe(on_update)
+    try:
+        request = asyncio.create_task(
+            adapter.ext_method("poolside/session_steer", _steer_params(session_id, text, input_id))
+        )
+        await asyncio.wait_for(admitted.wait(), TIMEOUT)
+    finally:
+        unsubscribe()
+    return request
 
 
 def _order(client, session_id):
@@ -657,11 +674,12 @@ async def test_a_pool_steer_keeps_the_prompt_open_until_its_turn_ends(
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    answer = await _pool_steer(adapter, session_id, "queued second")
-    assert answer == {"inputId": "steer-1"}  # at once, not after the turn
+    steer = await _pool_steer(adapter, session_id, "queued second")
     started, second_block = fresh_events()
     first_block.set()
     await asyncio.wait_for(started.wait(), TIMEOUT)  # the steered message's turn runs
+    # Answered once the turn took the message, before that turn ends.
+    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-1"}
     await asyncio.sleep(0.05)
     assert not prompt.done()
     second_block.set()
@@ -931,8 +949,8 @@ async def test_a_pool_steer_is_answered_while_a_form_is_open(make_adapter, works
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("tag it")]))
     await client.wait_for(lambda: any(entry[0] == "ext" for entry in client.log))
-    answer = await asyncio.wait_for(_pool_steer(adapter, session_id, "a note"), 1)
-    assert answer == {"inputId": "steer-1"}
+    steer = await _pool_steer(adapter, session_id, "a note")
+    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-1"}
     assert not prompt.done()
     # The steered message's turn runs while the form is open (the session is idle).
     await client.wait_for(lambda: "Noted." in client.texts(AgentMessageChunk, session_id))
@@ -944,3 +962,97 @@ async def test_a_pool_steer_is_answered_while_a_form_is_open(make_adapter, works
     order = _order(client, session_id)
     assert {"Noted.", "'Aurora'"} <= set(order[order.index("ext") :])
     assert order[-1] == "response"
+
+
+# ---- Pool's input events: how Pool places a person's input in the conversation ----
+
+
+def _input_events(client, session_id):
+    """``(index in client.log, _meta)`` of each Pool input event sent for the session."""
+    from acp.schema import SessionInfoUpdate
+
+    return [
+        (index, entry[2].field_meta)
+        for index, entry in enumerate(client.log)
+        if entry[0] == "update"
+        and entry[1] == session_id
+        and isinstance(entry[2], SessionInfoUpdate)
+        and (entry[2].field_meta or {}).get("poolside/inputEventId")
+    ]
+
+
+def _user_item_ids(adapter, session_id):
+    return {
+        entry.content: entry.item_id
+        for entry in adapter.session(session_id).transcript()
+        if entry.role == "user"
+    }
+
+
+async def test_pool_is_told_when_a_turn_takes_its_steered_message(make_adapter, workspace, client):
+    """Pool shows a steered message when it sees its inputId; the steer's answer comes after."""
+    started, first_block = fresh_events()
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("First."), reply("Second.")]})
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    steer = await _pool_steer(adapter, session_id, "queued second", "steer-7")
+    assert [meta for _, meta in _input_events(client, session_id)] == [
+        {"poolside/inputEventId": _user_item_ids(adapter, session_id)["first"]}
+    ]
+    first_block.set()
+    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-7"}
+    answered_at = len(client.log)
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
+
+    ids = _user_item_ids(adapter, session_id)
+    events = _input_events(client, session_id)
+    assert [meta for _, meta in events] == [
+        {"poolside/inputEventId": ids["first"]},
+        {"poolside/clientInputId": "steer-7", "poolside/inputEventId": ids["queued second"]},
+    ]
+    assert events[1][0] < answered_at  # the event went out before the answer
+    assert "Second." in client.texts(AgentMessageChunk, session_id)
+
+
+async def test_stop_answers_a_steer_no_turn_took(make_adapter, workspace, client):
+    started, _block = fresh_events()
+    models = ScriptedModels({None: [cell(BLOCKING_CELL)]})
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    steer = await _pool_steer(adapter, session_id, "never mind")
+    await adapter.cancel(session_id)
+    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-1"}
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "cancelled"
+    assert not any(
+        "poolside/clientInputId" in meta for _, meta in _input_events(client, session_id)
+    )
+
+
+async def test_a_replay_to_pool_follows_each_user_message_with_its_input_event(
+    make_adapter, workspace, client
+):
+    adapter = await make_adapter(ScriptedModels({None: [reply("Hi.")]}), client_info=POOL)
+    session_id = await _new(adapter, workspace)
+    await asyncio.wait_for(adapter.prompt(session_id, [text_block("hello")]), TIMEOUT)
+    client.log.clear()
+    await adapter.load_session(str(workspace), session_id)
+
+    updates = [entry[2] for entry in client.log if entry[0] == "update" and entry[1] == session_id]
+    kinds = [update.session_update for update in updates]
+    user = kinds.index("user_message_chunk")
+    assert kinds[user + 1] == "session_info_update"
+    assert updates[user + 1].field_meta == {
+        "poolside/inputEventId": _user_item_ids(adapter, session_id)["hello"]
+    }
+
+
+async def test_other_clients_get_no_pool_input_events(make_adapter, workspace, client):
+    adapter = await make_adapter(ScriptedModels({None: [reply("Hi.")]}))
+    session_id = await _new(adapter, workspace)
+    await asyncio.wait_for(adapter.prompt(session_id, [text_block("hello")]), TIMEOUT)
+    await adapter.load_session(str(workspace), session_id)
+    assert _input_events(client, session_id) == []

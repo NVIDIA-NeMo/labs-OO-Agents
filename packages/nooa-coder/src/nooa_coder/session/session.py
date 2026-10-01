@@ -53,6 +53,7 @@ from nooa_coder.session.items import (
     CommandResult,
     CommandsChangedUpdate,
     ItemAdmittedUpdate,
+    ItemConsumedUpdate,
     ModeChangedUpdate,
     ModelChangedUpdate,
     ModelInfo,
@@ -418,6 +419,7 @@ class Session:
             )
             self.handle.events.add(ItemConsumed(item_id=item_id))
             self._consumed.append(item_id)
+            self._emit(ItemConsumedUpdate(session_id=self.id, channel="steer", item_id=item_id))
 
     def _admit_leftover_steers(self) -> None:
         """Steers no model call saw become ordinary messages for the next turn."""
@@ -569,6 +571,7 @@ class Session:
         if not self.handle.closed:
             self.handle.events.add(ItemConsumed(item_id=item_id))
         self._consumed.append(item_id)
+        self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
 
     def _on_discarded(self, channel: str, items: list[Any]) -> None:
         """Items left ``channel`` unconsumed: record it and fail their outcomes."""
