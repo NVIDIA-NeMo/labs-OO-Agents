@@ -68,6 +68,13 @@ to follow semantic versioning.
   the worker of its root. Workers exit when their root session closes, when
   the client disconnects, or when the router dies. `--single-process` keeps
   every session in one process. See `docs/acp-router.md`.
+- `nooa-coder --http` (also `nooa coder --http`) serves ACP over WebSocket at
+  `ws://HOST:PORT/acp` (default `127.0.0.1:8765`), the WebSocket profile of
+  the ACP remote transport proposal. Each connection gets its own router and
+  workers. Clients authenticate with the token in `NOOA_CODER_TOKEN`
+  (`Authorization: Bearer` or `?token=`); `--no-auth` is allowed on loopback
+  only. Browser origins other than loopback need `--allowed-origin`. No TLS:
+  use an SSH tunnel or a proxy. See `docs/acp-router.md`.
 
 - New workspace package `nooa-coder` (pre-release, not published yet; the
   `coder` extra installs it). It holds the Session layer of the session

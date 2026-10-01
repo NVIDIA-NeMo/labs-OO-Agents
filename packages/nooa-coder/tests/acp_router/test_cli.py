@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa-coder's roles: router by default, --single-process, and the hidden worker options."""
+"""nooa-coder's roles: router by default, --http, --single-process, and the hidden worker options."""
 
 import sys
 from pathlib import Path
@@ -35,6 +35,7 @@ def roles(monkeypatch):
     monkeypatch.setattr(cli, "reserve_stdio_for_acp", lambda: (0, 1))
     monkeypatch.setattr(cli, "_run_router", record("router"))
     monkeypatch.setattr(cli, "_run_worker", record("worker"))
+    monkeypatch.setattr(cli, "_run_http", lambda options, **kwargs: calls.update(http=options))
 
     async def fake_serve(**kwargs: Any) -> None:
         calls["single"] = kwargs
@@ -47,10 +48,11 @@ def _factory(alias: str | None, workspace: Path) -> Any:
     return None
 
 
-def test_help_describes_the_three_roles():
+def test_help_describes_the_four_roles():
     result = CliRunner().invoke(cli.command, ["--help"])
     assert result.exit_code == 0
     assert "router (default)" in result.output
+    assert "ws://HOST:PORT/acp" in result.output
     assert "--single-process" in result.output
     assert "worker" in result.output
     assert "--worker-fd" not in result.output.split("Options:")[1]  # hidden
@@ -77,6 +79,63 @@ def test_the_command_passes_the_role_options_to_run(served):
 def test_inconsistent_role_options_are_usage_errors(served, args):
     result = CliRunner().invoke(cli.command, ["--model", "m", *args])
     assert result.exit_code == 2
+
+
+def test_http_needs_a_token_or_no_auth(served, monkeypatch):
+    monkeypatch.delenv(cli.TOKEN_ENV, raising=False)
+    result = CliRunner().invoke(cli.command, ["--model", "m", "--http"])
+    assert result.exit_code == 2
+    assert cli.TOKEN_ENV in result.output
+    assert not served
+
+
+def test_http_takes_the_token_out_of_the_environment(served, monkeypatch):
+    """Workers and the cells they run inherit the environment; the token stays in the server."""
+    monkeypatch.setenv(cli.TOKEN_ENV, "s3cret")
+    args = ["--model", "m", "--http", "--port", "9001", "--allowed-origin", "https://a.example"]
+    result = CliRunner().invoke(cli.command, args)
+    assert result.exit_code == 0, result.output
+    assert served["http"] == cli.HttpOptions(
+        host="127.0.0.1", port=9001, token="s3cret", allowed_origins=("https://a.example",)
+    )
+    import os
+
+    assert cli.TOKEN_ENV not in os.environ
+
+
+def test_no_auth_is_only_for_loopback(served, monkeypatch):
+    monkeypatch.delenv(cli.TOKEN_ENV, raising=False)
+    result = CliRunner().invoke(cli.command, ["--model", "m", "--http", "--no-auth"])
+    assert result.exit_code == 0, result.output
+    assert served["http"].token is None
+    served.clear()
+    args = ["--model", "m", "--http", "--no-auth", "--host", "0.0.0.0"]
+    result = CliRunner().invoke(cli.command, args)
+    assert result.exit_code == 2
+    assert "loopback" in result.output
+    assert not served
+
+
+@pytest.mark.parametrize("extra", [["--single-process"], ["--tee", "frames.jsonl"]])
+def test_http_rejects_the_stdio_only_options(served, monkeypatch, extra):
+    monkeypatch.setenv(cli.TOKEN_ENV, "t")
+    result = CliRunner().invoke(cli.command, ["--model", "m", "--http", *extra])
+    assert result.exit_code == 2
+
+
+def test_a_worker_of_an_http_server_needs_no_token(served, monkeypatch):
+    """Workers re-run the server's command line, --http included."""
+    monkeypatch.delenv(cli.TOKEN_ENV, raising=False)
+    args = ["--model", "m", "--http", "--worker-fd", "7", "--id-base", "1"]
+    result = CliRunner().invoke(cli.command, args)
+    assert result.exit_code == 0, result.output
+    assert served["worker_fd"] == 7
+
+
+def test_run_serves_http_when_asked(roles):
+    options = cli.HttpOptions(host="127.0.0.1", port=1, token="t")
+    cli.run(llm_factory=_factory, single_process=False, http=options)
+    assert roles == {"http": options}
 
 
 def test_a_factory_in_the_context_object_replaces_the_default(served):

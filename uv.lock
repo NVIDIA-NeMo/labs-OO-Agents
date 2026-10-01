@@ -1643,6 +1643,7 @@ dependencies = [
     { name = "nooa-cli" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -1669,6 +1670,7 @@ requires-dist = [
     { name = "tree-sitter-python", marker = "extra == 'ast'", specifier = ">=0.23.0" },
     { name = "tree-sitter-rust", marker = "extra == 'ast'", specifier = ">=0.23.0" },
     { name = "tree-sitter-typescript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "websockets", specifier = ">=14" },
 ]
 provides-extras = ["ast"]
 

@@ -1,8 +1,8 @@
 # The nooa-coder router and its workers
 
 `nooa-coder` serves the NOOA coding agent over the Agent Client Protocol (ACP)
-on its standard input and output. It runs in one of three roles. A client such
-as Pool sees the same protocol in every role.
+on its standard input and output, or over WebSocket with `--http`. It runs in
+one of four roles. A client such as Pool sees the same protocol in every role.
 
 ## Roles
 
@@ -12,6 +12,12 @@ process, and the session runs there. `session/load` of a subagent's session
 goes to the worker that runs its root, so a root and its subagents always
 share one process. All other messages are forwarded, unchanged, to the
 session's worker.
+
+**Network (`--http`).** `nooa-coder --http [--host H] [--port P] [options]`.
+Clients connect over WebSocket at `ws://H:P/acp` (default
+`ws://127.0.0.1:8765/acp`). Each connection gets its own router, with its
+own workers, so a remote client gets what a client on standard input and
+output gets. See "Serving over the network" below.
 
 **Single process.** `nooa-coder --single-process [options]`. All sessions run
 in the one process that the client started. This is the P3 behaviour. Use it
@@ -137,6 +143,50 @@ message, "Stopped before these messages were handled"; the prompt answers
   then kills its own process group. This also works when a cell is keeping the
   worker's event loop busy.
 
+## Serving over the network
+
+`--http` follows the WebSocket profile of the ACP remote transport proposal
+("Streamable HTTP & WebSocket Transport" in the ACP repository): one endpoint,
+`/acp`, a WebSocket upgrade on it, and one JSON-RPC message per text frame,
+`initialize` first. The proposal lets a server offer only WebSocket. The
+Streamable HTTP profile (`POST` and server-sent events) is not served. The
+`acp` Python library's WebSocket client works with it
+(`acp.ws.create_websocket_stream`, with the `agent-client-protocol[http]`
+extra).
+
+Access:
+
+- The token is read from `NOOA_CODER_TOKEN` and removed from the environment,
+  so workers and the code they run do not see it. Clients send it as
+  `Authorization: Bearer <token>`, or as `?token=<token>` where they cannot
+  set headers (browsers). The server does not start without a token unless
+  `--no-auth` is given, and `--no-auth` is refused on an address other than
+  loopback.
+- A request with an `Origin` header (browsers send one) is refused unless the
+  origin is on loopback or given with `--allowed-origin`. So a web page cannot
+  reach a server on this machine.
+- The server binds to `127.0.0.1` by default and has no TLS. From another
+  machine, use an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 host`) or a proxy
+  that terminates TLS.
+
+Sessions are stored on disk as usual and outlive the connection: a client that
+reconnects loads its sessions with `session/load`. The session lock keeps two
+connections from running one session at once. Messages sent while a client
+was disconnected are not replayed. SIGTERM or Ctrl-C closes every connection,
+and each router stops its workers, which checkpoint their sessions.
+`--single-process` and `--tee` do not work with `--http`.
+
+The server accepts messages up to 50 MiB, as on standard input. The `acp`
+library's WebSocket client keeps the `websockets` default of 1 MiB per
+message, so a long transcript replayed by `session/load` can close its
+connection (code 1009). A client that loads large sessions should raise its
+limit (`max_size`).
+
+```bash
+export NOOA_CODER_TOKEN=$(openssl rand -hex 32)
+uv run nooa-coder --http --model MODEL_ALIAS
+```
+
 ## Running it
 
 From a checkout, with the environment created by `uv sync --all-extras`:
@@ -144,7 +194,8 @@ From a checkout, with the environment created by `uv sync --all-extras`:
 ```bash
 uv run nooa-coder --model MODEL_ALIAS                    # router
 uv run nooa-coder --model MODEL_ALIAS --single-process   # one process
-uv run nooa-coder --help                                 # lists the three roles
+uv run nooa-coder --model MODEL_ALIAS --http             # WebSocket, see above
+uv run nooa-coder --help                                 # lists the four roles
 ```
 
 ### Pool
