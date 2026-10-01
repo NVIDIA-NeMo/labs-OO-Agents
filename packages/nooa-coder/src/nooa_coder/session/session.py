@@ -54,6 +54,7 @@ from nooa_coder.session.items import (
     CommandResult,
     CommandsChangedUpdate,
     ItemAdmittedUpdate,
+    ItemConsumedUpdate,
     ModeChangedUpdate,
     ModelChangedUpdate,
     ModelInfo,
@@ -471,6 +472,7 @@ class Session:
                 self._agent.event_manager.add(
                     Notification(source=_steer_source(source), description=_STEER_HINT, value={"user_messages": [text]})
                 )
+                self._emit(ItemConsumedUpdate(session_id=self.id, channel="steer", item_id=item_id))
             except (Exception, asyncio.CancelledError) as exc:
                 self._record_failure(exc, [item_id])
                 return
@@ -643,6 +645,7 @@ class Session:
             return
         del entries[index]
         self._consumed.append(item_id)
+        self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
 
     def _on_discarded(self, channel: str, items: list[Any]) -> None:
         """Items left ``channel`` unconsumed: record it and fail their outcomes."""
@@ -699,11 +702,14 @@ class Session:
                 if known is obj and identity == item_id
             )
             del entries[index]
+        self._batch_consumed = [(channel, item_id) for channel, _, item_id in selected]
         self._consumed.extend(item_ids)
         self.info.status = "running"
 
     def _on_turn_began(self, _event: Any) -> None:
         self._turn_messages.clear()
+        for channel, item_id in self._batch_consumed:
+            self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
         self._emit(TurnStartedUpdate(session_id=self.id, item_ids=list(self._consumed)))
 
     def _on_turn_settled(self, event: TurnSettled) -> None:

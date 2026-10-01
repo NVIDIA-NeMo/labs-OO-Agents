@@ -138,7 +138,7 @@ async def test_subscribers_see_admission_then_turn_start_then_turn_end(make_sess
     session.start()
     await asyncio.wait_for(session.prompt("go"), TIMEOUT)
     kinds = [e.kind for e in seen if e.kind not in ("usage_changed", "agent_event")]
-    assert kinds == ["item_admitted", "turn_started", "turn_ended"]
+    assert kinds == ["item_admitted", "item_consumed", "turn_started", "turn_ended"]
 
     unsubscribe()
     count = len(seen)

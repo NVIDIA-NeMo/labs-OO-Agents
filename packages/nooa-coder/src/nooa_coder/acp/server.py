@@ -68,7 +68,7 @@ from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
-from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
+from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text, pool_input_event
 from nooa_coder.acp.listing import list_sessions, validate_workspace
 from nooa_coder.acp.need_input import (
     answer_from_content,
@@ -250,6 +250,8 @@ class CoderACPAgent:
         self._model = model
         self._conn: Client | None = None
         self.client_capabilities: ClientCapabilities | None = None
+        # The client is Pool (``clientInfo.name``): it gets Pool's input events.
+        self._pool_client = False
         # The client is Pool and has not failed a ``_poolside/elicitation`` request.
         self._pool_forms = False
         self._bridges: dict[str, ACPEventBridge] = {}
@@ -327,7 +329,8 @@ class CoderACPAgent:
     ) -> InitializeResponse:
         del kwargs
         self.client_capabilities = client_capabilities
-        self._pool_forms = client_info is not None and client_info.name == "pool"
+        self._pool_client = client_info is not None and client_info.name == "pool"
+        self._pool_forms = self._pool_client
         return initialize_response(protocol_version)
 
     # ---- new -----------------------------------------------------------
@@ -389,7 +392,7 @@ class CoderACPAgent:
             # Attach: the same Session; reuse this adapter's bridge if it has
             # one (a second bridge would send every update twice) and replay.
             bridge = self._bridges.get(session_id) or self._attach(live)
-            self._replay(bridge, live)
+            self._replay(bridge, live, pool=self._pool_client)
             await bridge.flush()
             self._defer_bootstrap_updates(live, [])
             return LoadSessionResponse(
@@ -403,7 +406,7 @@ class CoderACPAgent:
             _trace_as(session)
             bridge = self._attach(session)
             attached.append(bridge)
-            self._replay(bridge, session)
+            self._replay(bridge, session, pool=self._pool_client)
             warnings.extend(await self._prepare_tools(session, mcp_servers))
 
         try:
@@ -554,7 +557,13 @@ class CoderACPAgent:
         Pool keeps its turn open until the messages it handed over are
         handled, so the open prompt follows this one: it returns only after
         the turn that handles it (``_finish``), and Stop withdraws it if no
-        turn took it yet (``cancel``). The answer goes out at once.
+        turn took it yet (``cancel``).
+
+        Pool shows the message in the conversation when it sees the steer's
+        ``inputId`` in an input event (``pool_input_event``), which the bridge
+        sends when a turn takes the message. The answer follows that event,
+        as Pool's own agent answers; it also goes out when the message is
+        withdrawn or its turn ends without it.
         """
         session_id, input_id = params.get("sessionId"), params.get("inputId")
         if not isinstance(session_id, str) or not isinstance(input_id, str):
@@ -562,7 +571,7 @@ class CoderACPAgent:
         blocks = params.get("prompt")
         if not isinstance(blocks, list) or not all(isinstance(b, dict) for b in blocks):
             raise RequestError.invalid_params({"reason": "prompt is required"})
-        session, _bridge = self._followed(session_id)
+        session, bridge = self._followed(session_id)
         text = self._prompt_text([SimpleNamespace(**block) for block in blocks])
         if _slash_invocation(text) is not None:
             raise RequestError.invalid_params(
@@ -575,8 +584,11 @@ class CoderACPAgent:
             receipt = await session.submit(text, source=SOURCE)
         except SessionClosedError:
             raise RequestError.resource_not_found(session_id) from None
+        shown = bridge.client_input_taken(receipt.item_id, input_id)
         if self._open.get(session_id):
             self._followers.setdefault(session_id, []).append((receipt, text))
+        await _taken_or_settled(session, receipt.item_id, shown)
+        bridge.forget_client_input(receipt.item_id)
         return {"inputId": input_id}
 
     def _revoke_inject(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -638,6 +650,8 @@ class CoderACPAgent:
                     return handled
             await self._request_title(session, text)
             receipt = await session.submit(text, source=SOURCE)
+            if self._pool_client:
+                bridge.publish(pool_input_event(receipt.item_id))
             self._prompts.setdefault(session_id, []).append(receipt)
             try:
                 return await self._finish(session, bridge, receipt.item_id)
@@ -1295,8 +1309,12 @@ class CoderACPAgent:
         task.add_done_callback(finished)
 
     @staticmethod
-    def _replay(bridge: ACPEventBridge, session: Session) -> None:
-        """Queue the transcript as user and agent message chunks on the bridge."""
+    def _replay(bridge: ACPEventBridge, session: Session, *, pool: bool = False) -> None:
+        """Queue the transcript as user and agent message chunks on the bridge.
+
+        For Pool, each user message is followed by its input event, as Pool's
+        own agent replays them.
+        """
         for entry in session.transcript():
             if entry.role == "cancelled":
                 by = entry.content.removeprefix("Stopped by ").strip() or "user"
@@ -1311,6 +1329,8 @@ class CoderACPAgent:
             bridge.publish(
                 update_user_message(block) if entry.role == "user" else update_agent_message(block)
             )
+            if pool and entry.role == "user" and entry.item_id:
+                bridge.publish(pool_input_event(entry.item_id))
 
     @staticmethod
     def _prompt_text(prompt: list[Any]) -> str:
@@ -1429,6 +1449,27 @@ def _available_commands_update(commands: list[CommandInfo]) -> Any:
             )
         )
     return update_available_commands(available)
+
+
+async def _taken_or_settled(session: Session, item_id: str, shown: asyncio.Future[None]) -> None:
+    """Wait until Pool was told ``item_id`` was taken, or the item's outcome settles first.
+
+    The outcome settles without the item being taken when it is withdrawn
+    (Stop), discarded, or the session closes; any of those ends the wait.
+    """
+
+    async def settled() -> None:
+        with suppress(Exception):
+            await session.outcome(item_id)
+
+    outcome = asyncio.ensure_future(settled())
+    try:
+        await asyncio.wait({shown, outcome}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        outcome.cancel()
+        await asyncio.gather(outcome, return_exceptions=True)
+        if shown.done() and not shown.cancelled():
+            shown.exception()  # retrieved: a stopped bridge is not this request's error
 
 
 async def serve_connection(
