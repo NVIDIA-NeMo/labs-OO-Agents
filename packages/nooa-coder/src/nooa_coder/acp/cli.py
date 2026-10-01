@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Command-line entry points: ``nooa-coder`` and ``nooa coder``."""
+"""The ``nooa coder`` command, a plugin of the ``nooa`` command (``nooa_cli.commands``)."""
 
 from __future__ import annotations
 
@@ -211,9 +211,5 @@ async def _serve(
                 trace.close()
 
 
-def main() -> None:
-    command()
-
-
 if __name__ == "__main__":
-    main()
+    command()

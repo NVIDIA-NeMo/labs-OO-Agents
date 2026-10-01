@@ -1,23 +1,23 @@
 # Recording ACP traffic with the tee
 
-`nooa-coder` speaks the Agent Client Protocol (ACP) as JSON-RPC over its
+`nooa coder` speaks the Agent Client Protocol (ACP) as JSON-RPC over its
 standard input and output. To see exactly what a client such as Pool sends
 and what the server answers, record every frame with the tee. There are two
 ways to run it.
 
 ## The two tees
 
-**Inside the server** (`nooa-coder --tee PATH`). The server records the frames
+**Inside the server** (`nooa coder --tee PATH`). The server records the frames
 its ACP connection reads and writes, as parsed JSON-RPC messages. Use this
-with `nooa-coder` itself.
+with `nooa coder` itself.
 
-**Around any server** (`nooa-coder-tee --log PATH -- COMMAND...`). A relay
+**Around any server** (`python -m nooa_coder.acp.tee --log PATH -- COMMAND...`). A relay
 starts `COMMAND` as a child process and copies its standard input and output
 unchanged, line by line, logging each line. Use this to record a client
 against a different server, for example the older `nooa-acp`:
 
 ```bash
-nooa-coder-tee --log ~/acp-old.jsonl -- nooa-acp --model my-alias
+python -m nooa_coder.acp.tee --log ~/acp-old.jsonl -- nooa-acp --model my-alias
 ```
 
 The relay forwards SIGTERM to the child, closes the child's standard input
@@ -39,7 +39,7 @@ definitions, including their environment variables and headers.
 ## Pool settings
 
 Pool reads named agent servers from its settings file. The entry below runs
-`nooa-coder` from a checkout at `/localhome/local-pfurgale/dev/wt-p3` whose
+`nooa coder` from a checkout at `/localhome/local-pfurgale/dev/wt-p3` whose
 environment was created with `UV_PROJECT_ENVIRONMENT=.venv-host uv sync
 --all-extras`, and records the traffic with the in-server tee. Replace
 `MODEL_ALIAS` with a model alias from your NOOA model configuration:
@@ -54,7 +54,8 @@ agent_servers:
       - run
       - --project
       - /localhome/local-pfurgale/dev/wt-p3
-      - nooa-coder
+      - nooa
+      - coder
       - --model
       - MODEL_ALIAS
       - --tee
@@ -68,7 +69,8 @@ pool --agent-server nooa-coder
 ```
 
 Without `--tee` the server records nothing. To record a different server, put
-`nooa-coder-tee --log PATH --` in front of its command in the same way.
+`python -m nooa_coder.acp.tee --log PATH --` in front of its command in the same way
+(with `uv run --project ...` in front when the server runs from a checkout).
 
 The `command`/`args` shape follows Pool's `mcp_servers` entries; if the
 installed Pool version names the fields differently, keep the command line and
@@ -97,7 +99,7 @@ about Pool. Each is answered from the `in` frames Pool sends:
    whether Pool displayed them.
 4. **Can a user send a prompt while one is open?** Look for a second
    `session/prompt` request for the same `sessionId` before the first one's
-   response. If it appears, Pool allows it; `nooa-coder` treats it as a steer.
+   response. If it appears, Pool allows it; `nooa coder` treats it as a steer.
 5. **Does Pool set `clientCapabilities.elicitation.form`?** Read the params of
    the first `initialize` request.
 6. **Does it render enum and free-text forms?** Ask the agent something that

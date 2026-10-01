@@ -7,15 +7,13 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "nooa[mcp]",
+    # The `nooa` command; the server is its `coder` subcommand.
+    "nooa-cli",
     "agent-client-protocol>=0.12.1,<0.13",
     "click>=8.1.0",
     "pydantic>=2.5.0",
     "pyyaml>=6.0",
 ]
-
-[project.scripts]
-nooa-coder = "nooa_coder.acp.cli:main"
-nooa-coder-tee = "nooa_coder.acp.tee:main"
 
 [project.entry-points."nooa_cli.commands"]
 coder = "nooa_coder.acp.cli:command"
