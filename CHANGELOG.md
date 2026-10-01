@@ -60,7 +60,7 @@ to follow semantic versioning.
   (about 3.3 s down to 0.3 s here). The strategy names, `LLMResponse` and
   `llm_config_chain` load on first use; `from nooa import CodeActStrategy`
   and `from nooa import *` work as before.
-- `nooa-coder` command (package `nooa-coder`): the ACP server now runs as a
+- `nooa coder` (package `nooa-coder`): the ACP server now runs as a
   router by default, with one worker process for each root session. Each
   worker runs in its own process group and talks to the router over a Unix
   socket pair. The router answers `initialize` and `session/list` itself and
@@ -68,7 +68,7 @@ to follow semantic versioning.
   the worker of its root. Workers exit when their root session closes, when
   the client disconnects, or when the router dies. `--single-process` keeps
   every session in one process. See `docs/acp-router.md`.
-- `nooa-coder --http` (also `nooa coder --http`) serves ACP over WebSocket at
+- `nooa coder --http` serves ACP over WebSocket at
   `ws://HOST:PORT/acp` (default `127.0.0.1:8765`), the WebSocket profile of
   the ACP remote transport proposal. Each connection gets its own router and
   workers. Clients authenticate with the token in `NOOA_CODER_TOKEN`

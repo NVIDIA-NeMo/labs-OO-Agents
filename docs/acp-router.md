@@ -1,29 +1,29 @@
 # The nooa-coder router and its workers
 
-`nooa-coder` serves the NOOA coding agent over the Agent Client Protocol (ACP)
+`nooa coder` serves the NOOA coding agent over the Agent Client Protocol (ACP)
 on its standard input and output, or over WebSocket with `--http`. It runs in
 one of four roles. A client such as Pool sees the same protocol in every role.
 
 ## Roles
 
-**Router (the default).** `nooa-coder [options]`. The router answers
+**Router (the default).** `nooa coder [options]`. The router answers
 `initialize` and `session/list` itself. Each `session/new` starts a worker
 process, and the session runs there. `session/load` of a subagent's session
 goes to the worker that runs its root, so a root and its subagents always
 share one process. All other messages are forwarded, unchanged, to the
 session's worker.
 
-**Network (`--http`).** `nooa-coder --http [--host H] [--port P] [options]`.
+**Network (`--http`).** `nooa coder --http [--host H] [--port P] [options]`.
 Clients connect over WebSocket at `ws://H:P/acp` (default
 `ws://127.0.0.1:8765/acp`). Each connection gets its own router, with its
 own workers, so a remote client gets what a client on standard input and
 output gets. See "Serving over the network" below.
 
-**Single process.** `nooa-coder --single-process [options]`. All sessions run
+**Single process.** `nooa coder --single-process [options]`. All sessions run
 in the one process that the client started. This is the P3 behaviour. Use it
 to compare with the router or to debug.
 
-**Worker.** `nooa-coder [options] --worker-fd N --id-base B`. The router
+**Worker.** `nooa coder [options] --worker-fd N --id-base B`. The router
 starts workers; do not run this role by hand. A worker is a plain ACP server
 on one end of a Unix socket pair (file descriptor `N`). Its requests to the
 client (permission, elicitation, file and terminal requests) use ids from `B`
@@ -184,7 +184,7 @@ limit (`max_size`).
 
 ```bash
 export NOOA_CODER_TOKEN=$(openssl rand -hex 32)
-uv run nooa-coder --http --model MODEL_ALIAS
+uv run nooa coder --http --model MODEL_ALIAS
 ```
 
 ## Running it
@@ -192,10 +192,10 @@ uv run nooa-coder --http --model MODEL_ALIAS
 From a checkout, with the environment created by `uv sync --all-extras`:
 
 ```bash
-uv run nooa-coder --model MODEL_ALIAS                    # router
-uv run nooa-coder --model MODEL_ALIAS --single-process   # one process
-uv run nooa-coder --model MODEL_ALIAS --http             # WebSocket, see above
-uv run nooa-coder --help                                 # lists the four roles
+uv run nooa coder --model MODEL_ALIAS                    # router
+uv run nooa coder --model MODEL_ALIAS --single-process   # one process
+uv run nooa coder --model MODEL_ALIAS --http             # WebSocket, see above
+uv run nooa coder --help                                 # lists the four roles
 ```
 
 ### Pool
@@ -215,7 +215,8 @@ agent_servers:
       - run
       - --project
       - /localhome/local-pfurgale/dev/wt-p4
-      - nooa-coder
+      - nooa
+      - coder
       - --model
       - MODEL_ALIAS
       - --tee
