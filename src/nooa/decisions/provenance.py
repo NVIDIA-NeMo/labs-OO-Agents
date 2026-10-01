@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from nooa.decisions.client import DecisionQuestion
 
 
-LLM_FALLBACK_SCHEMA_VERSION = "decide-predict-v1"
+LLM_FALLBACK_SCHEMA_VERSION = "decide-predict-v2"
 
 
 def question_digest(questions: Mapping[str, DecisionQuestion]) -> str:

@@ -370,7 +370,7 @@ async def test_decision_llm_fallback_selection_is_observable(
     )
     assert completed["decision.source"] == "llm_fallback"
     assert completed["decision.requested_model"] == "fallback-model"
-    assert completed["decision.fallback_schema_version"] == "decide-predict-v1"
+    assert completed["decision.fallback_schema_version"] == "decide-predict-v2"
     assert completed["decision.question_digest"].startswith("sha256:")
     assert "decision.resolved_model" not in completed
     nested = [

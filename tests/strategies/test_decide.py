@@ -855,3 +855,93 @@ async def test_native_decisions_do_not_take_the_generation_lock() -> None:
     await agent.urgent("a")
 
     assert lock_states == [False]
+
+
+def _prompt_text(call) -> str:
+    return "\n".join(str(message.get("content", "")) for message in call.messages)
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_prompt_contains_compiled_questions() -> None:
+    class Priority(Enum):
+        LOW = "low"
+        HIGH = "high"
+
+    class Triage(BaseModel):
+        urgent: Annotated[
+            bool,
+            Instructions("Does it need immediate action?"),
+            Criteria(by_value={True: "Customers are blocked.", False: "It can wait."}),
+        ]
+        priority: Annotated[
+            Priority, Instructions("How important is it?"), Criteria("Minor", "Major")
+        ]
+
+    llm = FakeLLMClient([_chat_response('{"urgent": true, "priority": "high"}')])
+
+    class TriageAgent(Agent, llm=llm):
+        @strategy(DecideStrategy())
+        async def triage(self, message: str) -> Triage:
+            """Triage the message."""
+            ...
+
+    await TriageAgent().triage("Production is down")
+
+    prompt = _prompt_text(llm.calls[0])
+    for text in (
+        "Decision questions",
+        "Does it need immediate action?",
+        "Customers are blocked.",
+        "How important is it?",
+        '"value": "high"',
+        "Major",
+    ):
+        assert text in prompt
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_score_is_bounded_to_its_levels() -> None:
+    Severity = Annotated[float, Criteria("Cosmetic", "Degraded", "Outage")]
+    llm = FakeLLMClient([_chat_response('{"value": 7}'), _chat_response('{"value": 1.5}')])
+
+    class TriageAgent(Agent, llm=llm):
+        @strategy(DecideStrategy())
+        async def severity(self, message: str) -> Severity:
+            """Rate the severity of the report."""
+            ...
+
+    agent = TriageAgent()
+
+    assert await agent.severity("Checkout is slow") == 1.5
+    assert len(llm.calls) == 2
+    assert "Outage" in _prompt_text(llm.calls[0])
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_composite_score_is_bounded_and_restored() -> None:
+    class Assessment(BaseModel):
+        urgent: Annotated[bool, Instructions("Does it need immediate action?")]
+        severity: Annotated[
+            float,
+            Instructions("How severe is it?"),
+            Criteria("Cosmetic", "Degraded", "Outage"),
+        ]
+
+    llm = FakeLLMClient(
+        [
+            _chat_response('{"urgent": true, "severity": 3}'),
+            _chat_response('{"urgent": true, "severity": 2}'),
+        ]
+    )
+
+    class TriageAgent(Agent, llm=llm):
+        @strategy(DecideStrategy())
+        async def assess(self, message: str) -> Assessment:
+            """Assess the report."""
+            ...
+
+    result = await TriageAgent().assess("Production is down")
+
+    assert type(result) is Assessment
+    assert result == Assessment(urgent=True, severity=2)
+    assert len(llm.calls) == 2
