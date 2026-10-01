@@ -114,7 +114,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
-    agent.event_manager.add(AgentMessage(content="Final answer"))
+    agent.event_manager.add(AgentMessage(content="Final answer\n"))
     agent.event_manager.add(
         ToolCallEvent(
             tool_call_id="prefill-1",
@@ -1164,18 +1164,30 @@ async def test_detaching_leaves_open_cards_alone_even_if_the_session_closed_firs
     assert [u for _, u in client.updates if isinstance(u, ToolCallProgress)] == []
 
 
-def test_every_agent_message_ends_its_line():
-    """Clients join adjacent agent chunks: a message that ends mid-line runs into the next.
+async def test_a_long_message_goes_out_as_chunks_under_the_websocket_limit(tmp_path):
+    """Clients join chunks; no single message may pass 1 MiB, the WebSocket client default."""
+    import json
 
-    In Pool 1.0.16 a /usage table after "...billing." rendered as one paragraph,
-    with its opening fence glued to the previous text.
-    """
-    from acp import text_block, update_agent_message, update_agent_thought_text
-    from nooa_coder.acp.event_bridge import end_line
+    from acp import text_block, update_user_message
+    from nooa_coder.acp.event_bridge import MAX_CHUNK_CHARS
 
-    ended = end_line(update_agent_message(text_block("ending in billing.")))
-    assert ended.content.text == "ending in billing.\n"
-    already = update_agent_message(text_block("```text\nx\n```\n"))
-    assert end_line(already) is already
-    thought = update_agent_thought_text("thinking")
-    assert end_line(thought) is thought
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    # Worst case for the wire size: every character needs a six-byte escape.
+    long_text = "\x01" * (2 * MAX_CHUNK_CHARS + 5)
+    agent.event_manager.add(AgentMessage(content=long_text))
+    bridge.publish(update_user_message(text_block("short")))
+    await asyncio.wait_for(bridge.flush(), timeout=5)
+
+    agent_chunks = [u for _, u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert len(agent_chunks) == 3
+    assert "".join(chunk.content.text for chunk in agent_chunks) == long_text
+    for chunk in agent_chunks:
+        wire = json.dumps(chunk.model_dump(by_alias=True, exclude_none=True))
+        assert len(wire.encode()) < 1024 * 1024
+    assert [u.content.text for _, u in client.updates if isinstance(u, UserMessageChunk)] == [
+        "short"
+    ]
+    await bridge.close()
+    await agent.aclose()

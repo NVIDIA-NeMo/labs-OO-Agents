@@ -176,11 +176,11 @@ was disconnected are not replayed. SIGTERM or Ctrl-C closes every connection,
 and each router stops its workers, which checkpoint their sessions.
 `--single-process` and `--tee` do not work with `--http`.
 
-The server accepts messages up to 50 MiB, as on standard input. The `acp`
-library's WebSocket client keeps the `websockets` default of 1 MiB per
-message, so a long transcript replayed by `session/load` can close its
-connection (code 1009). A client that loads large sessions should raise its
-limit (`max_size`).
+The server accepts messages up to 50 MiB, as on standard input. WebSocket
+clients usually accept 1 MiB per message (the `websockets` default, which
+the `acp` library's client keeps). The server keeps under that: message and
+thought text longer than 64,000 characters goes out as several chunks, which
+clients join as usual, and tool cards are already shortened for display.
 
 ```bash
 export NOOA_CODER_TOKEN=$(openssl rand -hex 32)
