@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, cast
 
 from nooa.decisions.schema import compile_decision_schema
@@ -36,7 +37,19 @@ class DecideStrategy(GenerationStrategy):
             answers: dict[str, Any] | None = None
             exception_type: str | None = None
             try:
-                result = await runtime.execute_nested(PredictStrategy(), call)
+                # Give the chat model the same compiled questions a decision
+                # model would receive, and bound score answers to their levels.
+                docstring = "\n\n".join(
+                    part for part in (call.docstring, schema.fallback_guidance()) if part
+                )
+                fallback_call = dataclasses.replace(
+                    call,
+                    docstring=docstring,
+                    return_type=schema.fallback_result_type(),
+                )
+                result = schema.restore_fallback_result(
+                    await runtime.execute_nested(PredictStrategy(), fallback_call)
+                )
                 answers = schema.fallback_answers(result)
                 return result
             except BaseException as exc:

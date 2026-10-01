@@ -267,8 +267,11 @@ class RiskAgent(Agent, llm=llm, decision_model=general_decision_model):
 
 Resolution is method decision model, then agent decision model, then chat-LLM
 fallback. The fallback supports primitive `bool`, enum, `Literal`, and scored
-`float` results. Detailed decision objects and thresholded outputs require a
-native decision model because a chat completion does not provide calibrated
+`float` results. The fallback prompt includes the same compiled instructions,
+criteria, options, and score levels that a decision model would receive, and a
+score outside its levels fails validation and is retried like any Predict
+output. Detailed decision objects and thresholded outputs require a native
+decision model because a chat completion does not provide calibrated
 probability evidence.
 
 Every decision call, native or fallback, stores a `DecisionRecord` with the
