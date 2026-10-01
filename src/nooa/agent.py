@@ -130,6 +130,8 @@ class Agent(metaclass=AgentMeta):
     _strategy_decision_model_alias_cache: Annotated[
         "dict[str, UnifiedDecisionModel]", hidden, nosnapshot
     ]
+    # Per-class cache of clients resolved from agent-level decision_model aliases.
+    _agent_decision_alias_cache: Annotated["dict[str, UnifiedDecisionModel]", hidden, nosnapshot]
     _agent_truncation: Annotated["TruncationConfig", hidden]
     _agent_context_blocks: Annotated["dict[str, str | DynamicContext | None]", hidden]
     _agent_event_query: Annotated["EventQuery | None", hidden]
@@ -401,10 +403,17 @@ class Agent(metaclass=AgentMeta):
         if isinstance(selected, str):
             from nooa.decisions.resolution import resolve_decision_alias
 
+            # Share one client per class and alias: each DecisionClient owns a
+            # connection pool, and the agent never closes its decision model.
+            cls = type(self)
+            cache = cls.__dict__.get("_agent_decision_alias_cache")
+            if cache is None:
+                cache = {}
+                type.__setattr__(cls, "_agent_decision_alias_cache", cache)
             return resolve_decision_alias(
                 selected,
-                None,
-                self.__class__.__name__,
+                cache,
+                cls.__name__,
                 origin="agent decision_model=",
             )
         return cast("UnifiedDecisionModel", selected)

@@ -2705,8 +2705,18 @@ class ActorRuntime:
                 decorator_strategy = getattr(base_method, "_plan_strategy", None)
                 strategy = call_strategy or decorator_strategy or get_default_strategy()
 
-                # Only acquire lock if strategy requires it
-                if isinstance(strategy, GenerationStrategyABC) and strategy.requires_lock:
+                # Only acquire lock if strategy requires it. A decision strategy
+                # without a decision model falls back to chat generation, which
+                # shares event history and so needs the lock like Predict.
+                needs_lock = isinstance(strategy, GenerationStrategyABC) and (
+                    strategy.requires_lock
+                    or (
+                        strategy.uses_decision_model
+                        and getattr(base_method, "_plan_decision_model", None) is None
+                        and getattr(self.agent, "_decision_model", None) is None
+                    )
+                )
+                if needs_lock:
                     self._ensure_generation_lock_on_current_loop()
                     async with self._generation_lock:
                         return await self._execute_with_generation(
