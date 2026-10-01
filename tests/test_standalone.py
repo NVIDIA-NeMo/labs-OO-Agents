@@ -11,7 +11,7 @@ Covers:
 - CodeAct calling module-level functions and other standalone functions
 - ScopedContext: context blocks in system prompt, EventQuery filtering
 - Wrapper metadata: _standalone, _plan_strategy, _plan_llm, __name__, __doc__
-- Error cases: non-async function, stacked decorators, invalid context type
+- Error cases: missing ellipsis, non-async function, stacked decorators, invalid context type
 """
 
 from __future__ import annotations
@@ -177,15 +177,6 @@ class TestStandaloneMetadata:
 
         assert isinstance(fn._plan_strategy, CodeActStrategy)  # type: ignore[attr-defined]
 
-    def test_no_ellipsis_not_wrapped(self) -> None:
-        """A standalone function without ellipsis body is returned unchanged."""
-
-        @strategy(PredictStrategy())
-        async def fn(x: str) -> str:
-            return "static"
-
-        assert not hasattr(fn, "_standalone")
-
 
 # ---------------------------------------------------------------------------
 # Validation / error-path tests
@@ -193,6 +184,27 @@ class TestStandaloneMetadata:
 
 
 class TestStandaloneErrors:
+    @pytest.mark.parametrize(
+        "decorator",
+        [
+            strategy(),
+            strategy(PredictStrategy()),
+            strategy(llm=FakeLLMClient()),
+        ],
+        ids=["default-strategy", "explicit-strategy", "explicit-llm"],
+    )
+    def test_no_ellipsis_raises_at_definition_time(self, decorator: Any) -> None:
+        """A standalone @strategy function must declare generation with ``...``."""
+
+        with pytest.raises(
+            TypeError,
+            match=r"standalone function 'fn'.*add '\.\.\.' as the function body or remove the decorator",
+        ):
+
+            @decorator
+            async def fn(x: str) -> str:
+                return f"static: {x}"
+
     def test_non_async_raises_typeerror(self) -> None:
         with pytest.raises(TypeError, match="must be async"):
 
@@ -331,6 +343,39 @@ class TestStandaloneCodeActStrategy:
             ...
 
         assert await compute("3+4") == 7
+
+    @pytest.mark.asyncio
+    async def test_generated_helper_without_ellipsis_reports_error_and_recovers(self) -> None:
+        """CodeAct sees the definition error and can correct it on the next turn."""
+        fake_llm = RecordingFakeLLM(
+            scripted_responses=[
+                _resp(
+                    tool_calls=[
+                        _exec(
+                            "@strategy(PredictStrategy())\n"
+                            "async def classify_one(text: str) -> str:\n"
+                            '    """Classify the supplied text."""'
+                        )
+                    ]
+                ),
+                _resp(tool_calls=[_ret("recovered")]),
+            ]
+        )
+
+        @strategy(CodeActStrategy(), llm=fake_llm)
+        async def run_batch(texts: list[str]) -> str:
+            """Classify the supplied texts."""
+            ...
+
+        assert await run_batch(["great", "bad"]) == "recovered"
+        assert fake_llm.call_count == 2
+
+        recovery_context = "\n".join(
+            str(message.get("content", "")) if isinstance(message, dict) else str(message)
+            for message in fake_llm.all_calls[1]["messages"]
+        )
+        assert "@strategy(...) on standalone function 'classify_one'" in recovery_context
+        assert "add '...' as the function body or remove the decorator" in recovery_context
 
     @pytest.mark.asyncio
     async def test_default_strategy_executes(self) -> None:
