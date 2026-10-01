@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``nooa-coder --http``: ACP over WebSocket, one router per connection.
+"""``nooa coder --http``: ACP over WebSocket, one router per connection.
 
 The end-to-end cases run ``fixtures/fake_agent.py --http`` as a real
 process and talk to it with the ``acp`` library's own WebSocket client,

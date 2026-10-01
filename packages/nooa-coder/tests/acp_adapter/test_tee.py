@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The JSON-RPC tee: the external relay (``nooa-coder-tee``) and the in-process observer."""
+"""The JSON-RPC tee: the external relay (``python -m nooa_coder.acp.tee``) and the in-process observer."""
 
 import json
 import signal
@@ -154,7 +154,7 @@ def test_relay_records_a_frame_that_is_not_json_as_text(tmp_path, line):
     ]
 
 
-# ---- the in-process observer (nooa-coder --tee) ------------------------------
+# ---- the in-process observer (nooa coder --tee) -------------------------------
 
 
 def test_observer_records_frames_in_both_directions(tmp_path):
