@@ -44,6 +44,76 @@ class Router(Agent, llm=llm, decision_model=decision_model):
         ...
 ```
 
+## Decision-only agents
+
+An agent whose generated methods all use `DecideStrategy` does not need a chat
+LLM. Configure only the decision model:
+
+```python
+class SupportRouter(Agent, decision_model=decision_model):
+    @strategy(DecideStrategy())
+    async def department(self, message: str) -> Department:
+        """Choose the team that should handle the message."""
+        ...
+
+
+router = SupportRouter()
+try:
+    print(await router.department("I was charged twice for my invoice."))
+finally:
+    await decision_model.aclose()
+```
+
+Calling a non-decision generation method on such an agent, or reading
+`agent.llm`, raises a `RuntimeError` that asks for `llm=...`. Without a decision
+model, an agent still requires a chat LLM.
+
+[`examples/quickstart/16_decisions.py`](../../examples/quickstart/16_decisions.py)
+is a complete, runnable version with thresholded abstention and batching:
+
+```bash
+OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py
+```
+
+## Accept or abstain with a threshold
+
+A `Threshold` turns a decision into an accept-or-abstain rule. Use a detailed
+result type to see why a value was accepted or rejected:
+
+```python
+from nooa import ChoiceDecision, Threshold
+
+
+class SupportRouter(Agent, decision_model=decision_model):
+    @strategy(DecideStrategy())
+    async def confident_department(
+        self, message: str
+    ) -> Annotated[ChoiceDecision[Department], Threshold(0.8)]:
+        """Choose the team that should handle the message."""
+        ...
+
+
+decision = await router.confident_department(message)
+if decision.value is None:
+    send_to_manual_review(message, suggested=decision.selected)
+```
+
+The result fields are:
+
+- `selected`: the option the model ranked highest. It is always set.
+- `probabilities`: the probability of every option.
+- `value`: `selected` when `probabilities[selected] >= threshold`, otherwise
+  `None`.
+- `confidence`: a separate confidence value reported by the service. It is
+  useful for analysis but is **not** used for the threshold.
+
+So a result can have `probabilities[selected] == 0.54` and `value is None` for
+`Threshold(0.8)`, regardless of `confidence`. For booleans, `BooleanDecision`
+exposes `probability_true`, and `value` is `probability_true >= threshold`
+(default `0.5`). A primitive enum or `Literal` result with a `Threshold` must
+include `None` in its annotation, for example
+`Annotated[Department | None, Threshold(0.8)]`.
+
 ## Advanced usage
 
 ### Render trusted agent state into the instructions
@@ -260,6 +330,15 @@ example uses OpenRouter, but `UnifiedDecisionModel` is the provider-neutral
 interface consumed by the runtime. A supplied HTTP client remains owned by the
 caller; otherwise call
 `await decision_model.aclose()` when done.
+
+`api_key` is attached only to the HTTP client that `DecisionClient` creates. When
+you pass `client=`, configure authentication on that client yourself; `api_key`
+is then ignored:
+
+```python
+http = httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=60)
+decision_model = DecisionClient("typesafe/jev-1.13", endpoint=endpoint, client=http)
+```
 
 Decision models are intentionally distinct from `UnifiedLLM`: a chat client
 does not provide calibrated distributions. A configured registry alias with

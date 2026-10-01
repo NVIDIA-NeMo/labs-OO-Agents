@@ -204,6 +204,7 @@ If the viewer isn't running, tracing is silently disabled — no configuration n
 
 - **[Documentation](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** — human-oriented reading paths, core concepts, architecture, and safety guidance.
 - **[Framework tour](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/tour.md)** — a concise conceptual showcase of NOOA's core ideas and Python-first design.
+- **[Decision models](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/concepts/decisions.md)** — route classification, yes/no, and scoring methods to a calibrated decision model such as `typesafe/jev-1.13` with `DecideStrategy`; agents that only make decisions need no chat LLM. Runnable example: [`16_decisions.py`](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/quickstart/16_decisions.py).
 - **[Notebook tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** — the primary hands-on path for your first agent, strategy selection, CodeAct's live-object workflow, and composing subagents. More notebooks are planned.
 - **[Examples catalog](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** — runnable quickstarts, advanced mechanics, and complete benchmark systems, indexed by capability and setup requirements.
 - **[Paper](https://arxiv.org/abs/2607.20709)** — design principles, harness details, capability tests, and SWE-bench Verified / Terminal-Bench 2.0 results.
