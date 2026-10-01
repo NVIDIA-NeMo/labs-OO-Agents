@@ -344,6 +344,52 @@ async def test_run_tests_passes(tmp_path: Path):
     assert "passed" in output.lower(), output
 
 
+@pytest.mark.asyncio
+async def test_run_tests_passes_when_pythonpath_is_unset_and_shell_uses_nounset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """run_tests() must not expand an unset PYTHONPATH under ``set -u``."""
+
+    class _NounsetShell(_FakeShell):
+        async def run(self, command, timeout=120.0):
+            import os
+            import subprocess
+
+            from nooa.tools._results import RunResult
+
+            env = os.environ.copy()
+            env.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                ["bash", "-u", "-c", command],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            return RunResult(
+                stdout=result.stdout.strip(),
+                stderr=result.stderr.strip(),
+                returncode=result.returncode,
+            )
+
+    agent = _make_agent()
+    agent.shell = _NounsetShell()
+    libs = SkillWriting(agent, path=tmp_path)
+    await libs.create("rt_nounset", DESCRIPTION)
+    (tmp_path / "rt_nounset" / "rt_nounset.py").write_text(SIMPLE_SOURCE)
+    tests_dir = tmp_path / "rt_nounset" / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "test_rt_nounset.py").write_text(
+        "from rt_nounset.rt_nounset import add\ndef test_add(): assert add(1, 2) == 3\n"
+    )
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    output = await libs.run_tests("rt_nounset")
+
+    assert "passed" in output.lower(), output
+    assert "unbound variable" not in output.lower(), output
+
+
 # ---------------------------------------------------------------------------
 # SkillWriting.reload — failure reporting
 # ---------------------------------------------------------------------------
