@@ -149,7 +149,8 @@ Predict and CodeAct lock an agent instance while a generation call is active.
 Calling several agentic methods concurrently on the same instance therefore
 serializes by default. Create one agent instance per independent concurrent
 task. Custom strategies can opt out of locking when they do not share mutable
-runtime state.
+runtime state. `DecideStrategy` calls to a decision model do not lock and can
+run concurrently; its Predict fallback locks like Predict.
 
 ## Common mistakes
 

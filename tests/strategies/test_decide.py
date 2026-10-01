@@ -17,6 +17,7 @@ from nooa import (
     DecisionModelRequiredError,
     EventQuery,
     Instructions,
+    PredictStrategy,
     Threshold,
     strategy,
 )
@@ -771,3 +772,86 @@ def test_child_of_decision_only_parent_needs_its_own_llm_without_decisions() -> 
             Writer(decision_model=None)
     finally:
         _parent_agent_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_agent_decision_alias_is_shared_per_class(monkeypatch) -> None:
+    resolutions: list[str] = []
+
+    def resolve(alias: str):
+        resolutions.append(alias)
+        return FakeDecisionClient()
+
+    monkeypatch.setattr("nooa.unifiedllm.get_decision_model", resolve)
+
+    class TriageAgent(Agent, decision_model="decisions"):
+        pass
+
+    class OtherAgent(Agent, decision_model="decisions"):
+        pass
+
+    first, second = TriageAgent(), TriageAgent()
+    other = OtherAgent()
+
+    assert first.decision_model is second.decision_model
+    assert other.decision_model is not first.decision_model
+    assert resolutions == ["decisions", "decisions"]
+
+
+@pytest.mark.asyncio
+async def test_standalone_chat_function_keeps_llm_inside_decision_agent() -> None:
+    @strategy(PredictStrategy(), llm=FakeLLMClient([_chat_response('{"value": "hello"}')]))
+    async def greet(name: str) -> str:
+        """Greet the person."""
+        ...
+
+    class Router(Agent, llm=FakeLLMClient(), decision_model=FakeDecisionClient()):
+        async def run(self) -> str:
+            return await greet("Ada")
+
+    assert await Router().run() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_holds_the_generation_lock() -> None:
+    lock_states: list[bool] = []
+
+    class RecordingLLM(FakeLLMClient):
+        async def acall(self, *args, **kwargs):
+            lock_states.append(agent.runtime._generation_lock.locked())
+            return await super().acall(*args, **kwargs)
+
+    class TriageAgent(
+        Agent,
+        llm=RecordingLLM([_chat_response('{"value": true}'), _chat_response('{"value": false}')]),
+    ):
+        @strategy(DecideStrategy())
+        async def urgent(self, message: str) -> bool:
+            """Does the message require immediate action?"""
+            ...
+
+    agent = TriageAgent()
+    await asyncio.gather(agent.urgent("a"), agent.urgent("b"))
+
+    assert lock_states == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_native_decisions_do_not_take_the_generation_lock() -> None:
+    lock_states: list[bool] = []
+
+    class RecordingDecisionClient(FakeDecisionClient):
+        async def adecide(self, request: DecisionRequest) -> DecisionResponse:
+            lock_states.append(agent.runtime._generation_lock.locked())
+            return await super().adecide(request)
+
+    class TriageAgent(Agent, decision_model=RecordingDecisionClient()):
+        @strategy(DecideStrategy())
+        async def urgent(self, message: str) -> bool:
+            """Does the message require immediate action?"""
+            ...
+
+    agent = TriageAgent()
+    await agent.urgent("a")
+
+    assert lock_states == [False]

@@ -205,9 +205,13 @@ def create_standalone_wrapper(
     _alias_cache: dict[str, Any] = {}
     _decision_alias_cache: dict[str, Any] = {}
 
+    # Only decision strategies consume a decision model. Other strategies must
+    # keep their chat LLM even when called from an agent that has one.
+    _uses_decision_model = bool(getattr(strategy, "uses_decision_model", False))
+
     @wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        resolved_decision_model = decision_model
+        resolved_decision_model = decision_model if _uses_decision_model else None
         from nooa.runtime.context_vars import _parent_agent_var
 
         parent = _parent_agent_var.get()
@@ -220,7 +224,7 @@ def create_standalone_wrapper(
                 func.__name__,
                 origin="standalone decision_model=",
             )
-        if resolved_decision_model is None and parent is not None:
+        if _uses_decision_model and resolved_decision_model is None and parent is not None:
             resolved_decision_model = getattr(parent, "_decision_model", None)
 
         # A native decision model wins before chat-model resolution, matching
