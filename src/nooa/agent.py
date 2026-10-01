@@ -106,7 +106,7 @@ class Agent(metaclass=AgentMeta):
     event_query: Annotated["EventQuery | None", hidden, nosnapshot]
     render_config: Annotated["RenderConfig", hidden, nosnapshot]
     _agent_id: Annotated[str, hidden, nosnapshot]
-    _llm: Annotated["UnifiedLLM", hidden, nosnapshot]
+    _llm: Annotated["UnifiedLLM | None", hidden, nosnapshot]
     _decision_model: Annotated["UnifiedDecisionModel | None", hidden, nosnapshot]
     _truncation: Annotated["TruncationConfig", hidden, nosnapshot]
     context: Annotated["ContextApi", hidden, nosnapshot]
@@ -241,9 +241,11 @@ class Agent(metaclass=AgentMeta):
         self.event_manager = EventManager(backend=self._storage.event_backend)
 
         # Resolve LLM client with cascading resolution
+        # A resolved decision model makes the chat LLM optional, so an agent
+        # whose generated methods all use DecideStrategy needs no chat client.
         instance_llm = None if llm is INHERIT else llm
-        self._llm = self._resolve_llm(instance_llm)
         self._decision_model = self._resolve_decision_model(decision_model)
+        self._llm = self._resolve_llm(instance_llm, allow_missing=self._decision_model is not None)
 
         # Resolve and store truncation config (with merge semantics)
         self._truncation = self._resolve_truncation(truncation)
@@ -321,23 +323,26 @@ class Agent(metaclass=AgentMeta):
 
     @no_trace
     @hidden
-    def _resolve_llm(self, instance_llm: "UnifiedLLM | None") -> "UnifiedLLM":
+    def _resolve_llm(
+        self, instance_llm: "UnifiedLLM | None", *, allow_missing: bool = False
+    ) -> "UnifiedLLM | None":
         """Resolve which LLM to use via cascading resolution.
 
         Resolution order:
         1. Instance-level: MyAgent(llm=explicit_llm)
         2. Class hierarchy: class MyAgent(Agent, llm=class_llm) or inherited via MRO
         3. Runtime propagation: Parent agent via context variable
-        4. Error: No LLM found
+        4. None when ``allow_missing`` (a decision-only agent), otherwise error
 
         Args:
             instance_llm: LLM passed to __init__, or None if INHERIT was used
+            allow_missing: Return None instead of raising when no LLM is found
 
         Returns:
-            Resolved UnifiedLLM instance
+            Resolved UnifiedLLM instance, or None for a decision-only agent
 
         Raises:
-            ValueError: If no LLM can be resolved through cascading
+            ValueError: If no LLM can be resolved and ``allow_missing`` is false
         """
         # 1. Instance-level explicit
         if instance_llm is not None:
@@ -350,10 +355,12 @@ class Agent(metaclass=AgentMeta):
 
         # 3. Runtime parent propagation
         parent = _parent_agent_var.get()
-        if parent is not None and hasattr(parent, "_llm"):
+        if parent is not None and getattr(parent, "_llm", None) is not None:
             return parent._llm
 
-        # 4. No LLM found - provide helpful error
+        # 4. No LLM found - a decision model alone is enough, otherwise error
+        if allow_missing:
+            return None
         raise ValueError(
             f"No LLM available for {self.__class__.__name__}. "
             f"Resolution attempted:\n"
@@ -365,7 +372,8 @@ class Agent(metaclass=AgentMeta):
             f"  - Pass llm=my_llm to __init__\n"
             f"  - Set llm=my_llm in class definition\n"
             f"  - Inherit from an Agent class with an LLM\n"
-            f"  - Instantiate within a parent agent's generated code"
+            f"  - Instantiate within a parent agent's generated code\n"
+            f"  - Set decision_model=... if every generated method uses DecideStrategy"
         )
 
     @no_trace
@@ -485,7 +493,15 @@ class Agent(metaclass=AgentMeta):
         Public accessor for the LLM resolved at construction time (see
         ``_resolve_llm``). Framework/host code (e.g. the TUI's model
         switcher) reads this instead of reaching into ``_llm``.
+
+        Raises:
+            RuntimeError: If this is a decision-only agent with no chat LLM.
         """
+        if self._llm is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has a decision model but no chat LLM. "
+                "Pass llm=... to use chat generation."
+            )
         return self._llm
 
     @no_trace

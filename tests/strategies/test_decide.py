@@ -712,3 +712,62 @@ async def test_instance_can_disable_inherited_decision_model() -> None:
 
     assert await TriageAgent(decision_model=None).urgent("Routine request") is False
     assert decision_model.requests == []
+
+
+@pytest.mark.asyncio
+async def test_decision_only_agent_needs_no_chat_llm() -> None:
+    client = FakeDecisionClient()
+
+    class Router(Agent, decision_model=client):
+        @strategy(DecideStrategy())
+        async def urgent(self, message: str) -> bool:
+            """Does the message require immediate action?"""
+            ...
+
+    agent = Router()
+
+    assert await agent.urgent("Production is down") is True
+    assert len(client.requests) == 1
+    with pytest.raises(RuntimeError, match="decision model but no chat LLM"):
+        _ = agent.llm
+
+
+@pytest.mark.asyncio
+async def test_decision_only_agent_rejects_chat_strategy_methods() -> None:
+    class Router(Agent, decision_model=FakeDecisionClient()):
+        async def summarize(self, message: str) -> str:
+            """Summarize the message."""
+            ...
+
+    with pytest.raises(RuntimeError, match="decision-only agent"):
+        await Router().summarize("Production is down")
+
+
+def test_agent_without_llm_or_decision_model_still_fails() -> None:
+    class Router(Agent, decision_model=None):
+        pass
+
+    with pytest.raises(ValueError, match="No LLM available"):
+        Router()
+
+
+def test_child_of_decision_only_parent_needs_its_own_llm_without_decisions() -> None:
+    from nooa.runtime.context_vars import _parent_agent_var
+
+    class Router(Agent, decision_model=FakeDecisionClient()):
+        pass
+
+    class Writer(Agent):
+        pass
+
+    parent = Router()
+    token = _parent_agent_var.set(parent)
+    try:
+        child = Writer()
+        assert child.decision_model is parent.decision_model
+        with pytest.raises(RuntimeError, match="no chat LLM"):
+            _ = child.llm
+        with pytest.raises(ValueError, match="No LLM available"):
+            Writer(decision_model=None)
+    finally:
+        _parent_agent_var.reset(token)
