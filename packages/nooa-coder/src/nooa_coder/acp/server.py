@@ -1459,7 +1459,7 @@ async def serve_connection(
         observers=list(observers or []),
     )
     if id_base is not None:
-        # acp 0.11 has no option for the first request id: every
+        # acp 0.12 has no option for the first request id: every
         # agent-to-client request takes Connection._next_request_id and
         # increments it. Seed it before listen() so no request can go out
         # with the library's default of 0.

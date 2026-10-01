@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """The ``nooa coder`` command, a plugin of the ``nooa`` command (``nooa_cli.commands``).
 
-The server runs in one of three roles:
+The server runs in one of four roles:
 
 - Router (the default): the client speaks ACP to this process on standard
   input and output; each root session runs in its own worker process.
+- ``--http``: clients connect over WebSocket at ``ws://HOST:PORT/acp``
+  (``nooa_coder.acp.websocket``); each connection gets its own router and
+  workers, as on standard input and output.
 - ``--single-process``: every session runs in this process.
 - ``--worker-fd N --id-base B`` (hidden): a worker, started by the router on
   one end of a socket pair. Not for direct use.
@@ -21,10 +24,17 @@ import asyncio
 import os
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import click
+
+TOKEN_ENV = "NOOA_CODER_TOKEN"
+"""The environment variable ``--http`` reads its token from (and removes, so workers and cells never see it)."""
+
+DEFAULT_PORT = 8765
+"""The port ``--http`` listens on by default."""
 
 _acp_stdio: tuple[int, int] | None = None
 
@@ -115,6 +125,32 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     is_flag=True,
     help="Run every session in this process instead of one worker process per root session.",
 )
+@click.option(
+    "--http",
+    is_flag=True,
+    help=(
+        "Serve ACP over WebSocket at ws://HOST:PORT/acp instead of standard input/output. "
+        f"Clients send the token in {TOKEN_ENV} as 'Authorization: Bearer <token>' or ?token=."
+    ),
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Address --http listens on. Use an SSH tunnel or a TLS proxy to reach it from elsewhere.",
+)
+@click.option("--port", type=int, default=DEFAULT_PORT, show_default=True, help="Port for --http.")
+@click.option(
+    "--allowed-origin",
+    "allowed_origins",
+    multiple=True,
+    help="With --http, also accept this browser Origin (exact, e.g. https://app.example). Repeatable.",
+)
+@click.option(
+    "--no-auth",
+    is_flag=True,
+    help=f"With --http on a loopback address, accept connections without the {TOKEN_ENV} token.",
+)
 @click.option("--worker-fd", type=int, default=None, hidden=True)
 @click.option("--id-base", type=int, default=None, hidden=True)
 @click.pass_context
@@ -126,15 +162,22 @@ def command(
     sessions_dir: Path | None,
     tee: Path | None,
     single_process: bool,
+    http: bool,
+    host: str,
+    port: int,
+    allowed_origins: tuple[str, ...],
+    no_auth: bool,
     worker_fd: int | None,
     id_base: int | None,
 ) -> None:
-    """Serve the NOOA coding agent over ACP on standard input/output.
+    """Serve the NOOA coding agent over ACP on standard input/output, or over WebSocket.
 
     \b
     Roles:
       router (default)  The client talks to a router; each root session and
                         its subagents run in their own worker process.
+      --http            Clients connect at ws://HOST:PORT/acp; each
+                        connection gets its own router and workers.
       --single-process  Every session runs in this process.
       worker            Started by the router with --worker-fd and --id-base
                         on one end of a socket pair; not for direct use.
@@ -146,6 +189,27 @@ def command(
         raise click.UsageError("--worker-fd and --id-base go together.")
     if worker_fd is not None and single_process:
         raise click.UsageError("--single-process and --worker-fd cannot be used together.")
+    # A worker started by an --http server runs the same command line, so
+    # it sees --http too; it is a worker all the same.
+    token = os.environ.pop(TOKEN_ENV, None) or None
+    if http and worker_fd is None:
+        if single_process:
+            raise click.UsageError("--http runs a router per connection; drop --single-process.")
+        if tee is not None:
+            raise click.UsageError(
+                "--tee records standard input/output; it does not work with --http."
+            )
+        from nooa_coder.acp.websocket import is_loopback_host
+
+        if no_auth and not is_loopback_host(host):
+            raise click.UsageError(
+                f"--no-auth is only allowed on a loopback address, not on {host}."
+            )
+        if token is None and not no_auth:
+            raise click.UsageError(
+                f"--http needs a token: set {TOKEN_ENV} (for example to the output of "
+                "'openssl rand -hex 32'), or pass --no-auth on a loopback address."
+            )
     load_secrets_into_env()
     nvidia_api_key = os.getenv("NVIDIA_API_KEY")
 
@@ -171,7 +235,25 @@ def command(
         single_process=single_process,
         worker_fd=worker_fd,
         id_base=id_base,
+        http=HttpOptions(
+            host=host,
+            port=port,
+            token=None if no_auth else token,
+            allowed_origins=allowed_origins,
+        )
+        if http
+        else None,
     )
+
+
+@dataclass(frozen=True)
+class HttpOptions:
+    """Where and how ``--http`` listens; ``token`` ``None`` accepts any client."""
+
+    host: str
+    port: int
+    token: str | None
+    allowed_origins: tuple[str, ...] = ()
 
 
 def run(
@@ -185,6 +267,7 @@ def run(
     single_process: bool | None = None,
     worker_fd: int | None = None,
     id_base: int | None = None,
+    http: HttpOptions | None = None,
 ) -> None:
     """Serve ACP until the client leaves, in the role the options select.
 
@@ -222,6 +305,8 @@ def run(
                 acp_stdout=acp_stdout,
             )
         )
+    elif http is not None:
+        _run_http(http, sessions_dir=sessions_dir)
     else:
         _run_router(sessions_dir=sessions_dir, tee=tee, acp_stdin=acp_stdin, acp_stdout=acp_stdout)
 
@@ -282,6 +367,41 @@ def _run_router(
     finally:
         if frame_log is not None:
             frame_log.close()
+        logging.shutdown()
+
+
+def _run_http(options: HttpOptions, *, sessions_dir: Path | None) -> None:
+    import logging
+    import signal
+
+    from nooa_coder.acp.router import process_spawn
+    from nooa_coder.acp.websocket import Gate, serve_websocket
+
+    _configure_logging("nooa-coder http")
+    if options.token is None:
+        logging.getLogger(__name__).warning(
+            "--no-auth: any program on this machine can connect to %s:%d",
+            options.host,
+            options.port,
+        )
+
+    async def main() -> None:
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(signum, stop.set)
+        await serve_websocket(
+            host=options.host,
+            port=options.port,
+            spawn=process_spawn(list(sys.orig_argv)),
+            sessions_dir=sessions_dir,
+            gate=Gate(token=options.token, allowed_origins=options.allowed_origins),
+            stop=stop,
+        )
+
+    try:
+        asyncio.run(main())
+    finally:
         logging.shutdown()
 
 
