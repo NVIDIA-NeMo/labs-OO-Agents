@@ -6,6 +6,7 @@ import inspect
 from typing import Annotated, Any, Literal
 
 from nooa.agentdoc._pformat import _pformat_to_str as _pformat
+from nooa.agentdoc._pformat import render_document
 from nooa.agentdoc._structured import format_type as _format_type_impl
 from nooa.agentdoc.doc_config import DocConfig
 from nooa.agentdoc.format import (
@@ -87,114 +88,8 @@ def doc(
     if inline_depth < 0:
         raise ValueError("inline_depth must be a non-negative integer")
 
-    # Single object: use optimized path
-    if len(flat_objs) == 1:
-        return _pformat(
-            flat_objs[0],
-            concise=concise,
-            inline_depth=inline_depth,
-            max_length=None,
-            max_string=None,
-            max_depth=3,
-            instance_mode="type",
-        )
-
-    # Multiple objects: use multi-type formatting with deduplication
-    return _doc_multiple(flat_objs, concise=concise, inline_depth=inline_depth)
-
-
-def _doc_multiple(
-    objs: list[Any],
-    *,
-    concise: bool,
-    inline_depth: int,
-) -> str:
-    """Format multiple objects with deduplicated referenced types.
-
-    Args:
-        objs: List of objects to document
-        concise: If True, show first-line docstrings only
-        inline_depth: How deep to expand referenced types inline
-
-    Returns:
-        Formatted documentation with each type appearing exactly once
-    """
-    from nooa.agentdoc._discover import discover_referenced_types
-
-    sections: list[str] = []
-    seen_types: set[type] = set()
-
-    # Track primary contract types for deduplication. Instances document their
-    # type API, so their types must not reappear under Referenced Types.
-    for obj in objs:
-        if isinstance(obj, type):
-            seen_types.add(obj)
-        elif not (inspect.isfunction(obj) or inspect.ismethod(obj) or inspect.ismodule(obj)):
-            obj_type = type(obj)
-            if obj_type.__module__ != "builtins":
-                seen_types.add(obj_type)
-
-    # 1. Format each primary object (without their own referenced types section)
-    for obj in objs:
-        # Format with inline_depth=0 to suppress per-object referenced types
-        # We'll collect and show them all at the end
-        obj_doc = _pformat(
-            obj,
-            concise=concise,
-            inline_depth=0,  # Don't show references per-object
-            max_length=None,
-            max_string=None,
-            max_depth=3,
-            instance_mode="type",
-        )
-        sections.append(obj_doc)
-
-    # 2. Collect referenced types from all objects (if inline_depth > 0)
-    if inline_depth > 0:
-        all_referenced: list[type] = []
-
-        for obj in objs:
-            # Discover referenced types, excluding already-seen types
-            referenced = discover_referenced_types(obj, seen=seen_types)
-            for ref_type in referenced:
-                if ref_type not in seen_types:
-                    seen_types.add(ref_type)
-                    all_referenced.append(ref_type)
-
-        # 3. If inline_depth > 1, recursively discover from referenced types
-        current_level = all_referenced
-        for _ in range(inline_depth - 1):
-            if not current_level:
-                break
-            next_level: list[type] = []
-            for ref_type in current_level:
-                nested_refs = discover_referenced_types(ref_type, seen=seen_types)
-                for nested in nested_refs:
-                    if nested not in seen_types:
-                        seen_types.add(nested)
-                        next_level.append(nested)
-                        all_referenced.append(nested)
-            current_level = next_level
-
-        # 4. Format referenced types section if any found
-        if all_referenced:
-            sections.append("")
-            sections.append("## Referenced Types")
-
-            for ref_type in all_referenced:
-                # Format referenced types in concise mode
-                ref_doc = _pformat(
-                    ref_type,
-                    concise=True,  # Always concise for referenced types
-                    inline_depth=0,  # No nested references
-                    max_length=50,
-                    max_string=500,
-                    max_depth=3,
-                    instance_mode="type",
-                )
-                sections.append(ref_doc)
-
-    return "\n".join(sections)
+    # One shared pipeline handles both single- and multi-object documents.
+    return render_document(flat_objs, concise=concise, inline_depth=inline_depth)
 
 
 def methods(
