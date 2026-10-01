@@ -42,7 +42,7 @@ from nooa.events import (
     LLMCallStart,
     SystemPrompt,
 )
-from nooa.llm_types import LLMUsage
+from nooa.llm_types import CacheBoundary, LLMResponse, LLMUsage
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -60,6 +60,7 @@ from nooa.runtime.hooks import call_after_hook, call_before_hook
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
+_LLMMessage = dict[str, Any] | LLMResponse | CacheBoundary
 
 
 @contextmanager
@@ -143,7 +144,7 @@ warnings.filterwarnings(
 _TRAILING_CONTEXT_RE = _re.compile(r"^(.*?)(<context>.*?</context>)\s*\Z", _re.DOTALL)
 
 
-def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
+def _extract_trailing_context_envelope(messages: list[_LLMMessage]) -> str:
     """Pull the trailing ``<context>…</context>`` envelope from messages.
 
     ``CachedBlockFormatter`` emits dynamic SYSTEM-role blocks as a
@@ -170,7 +171,7 @@ def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
 
 
 def _snapshot_llm_request(
-    event_manager: Any, messages: list[dict[str, Any]], generation_id: str
+    event_manager: Any, messages: list[_LLMMessage], generation_id: str
 ) -> str:
     """Snapshot the rendered request for observability consumers (e.g. ATIF).
 
@@ -2630,32 +2631,20 @@ class ActorRuntime:
             # Strategy must be a GenerationStrategy instance
             if isinstance(strategy, GenerationStrategyABC):
                 # Use strategy's execute() method directly
-                from nooa.strategies.current_call import CurrentCall
+                from nooa.strategies.current_call import CurrentCall, merge_call_arguments
+
+                sig = inspect.signature(method)
+                merged_kwargs = merge_call_arguments(sig, args, kwargs)
 
                 # Expand {placeholders} in method docstring using call arguments
                 raw_docstring = getattr(method, "__doc__", None)
                 expanded_docstring = None
                 if raw_docstring:
-                    # Build context: map parameter names to argument values
-                    sig = inspect.signature(method)
-                    param_names = list(sig.parameters.keys())[1:]  # Skip 'self'
-                    arg_context = dict(zip(param_names, args, strict=False))
-                    arg_context.update(kwargs)
                     expanded_docstring = await self.expand_variables(
-                        raw_docstring, extra_context=arg_context, error_mode="silent"
+                        raw_docstring, extra_context=merged_kwargs, error_mode="silent"
                     )
 
                 # Build CurrentCall for the strategy
-                # Map positional args to parameter names for kwargs (like from_method does)
-                sig = inspect.signature(method)
-                param_names = [p for p in sig.parameters.keys() if p != "self"]
-                merged_kwargs = dict(kwargs)
-                for i, value in enumerate(args):
-                    if i < len(param_names):
-                        param_name = param_names[i]
-                        if param_name not in merged_kwargs:
-                            merged_kwargs[param_name] = value
-
                 # Extract return type annotation — use get_type_hints to
                 # resolve PEP 563 stringified annotations.
                 return_type = None
@@ -2697,6 +2686,32 @@ class ActorRuntime:
                     # Authoritative ordered names from the live signature (excludes
                     # 'self') so format_parameters_as_code never re-parses the string.
                     param_names=[p for p in sig.parameters if p != "self"],
+                    positional_param_names=[
+                        parameter.name
+                        for name, parameter in sig.parameters.items()
+                        if name != "self"
+                        and parameter.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_ONLY,
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        )
+                    ],
+                    var_positional_param_name=next(
+                        (
+                            parameter.name
+                            for name, parameter in sig.parameters.items()
+                            if name != "self" and parameter.kind is inspect.Parameter.VAR_POSITIONAL
+                        ),
+                        None,
+                    ),
+                    var_keyword_param_name=next(
+                        (
+                            parameter.name
+                            for name, parameter in sig.parameters.items()
+                            if name != "self" and parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        ),
+                        None,
+                    ),
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()
@@ -2962,7 +2977,7 @@ class ActorRuntime:
         max_output_tokens: int | None = None,
         request_params: dict[str, Any] | None = None,
         llm_client: Any = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[_LLMMessage]:
         """Build messages for LLM API.
 
         Calls _prepare_context() to gather and resolve all blocks,
