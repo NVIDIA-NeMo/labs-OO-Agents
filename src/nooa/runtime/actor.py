@@ -2838,7 +2838,12 @@ class ActorRuntime:
             decision_mode = "llm_fallback" if uses_decision_model else None
             active_model_name = getattr(llm_client, "model", "") or ""
         if llm_client is None and decision_model is None:
-            raise RuntimeError(f"No LLM client available for {method_name}")
+            raise RuntimeError(
+                f"No LLM client available for {method_name}. A decision-only agent "
+                "can run only DecideStrategy methods; pass llm=... for other strategies."
+                if getattr(self.agent, "_decision_model", None) is not None
+                else f"No LLM client available for {method_name}"
+            )
         if llm_client is not None and not callable(getattr(llm_client, "acall", None)):
             raise TypeError(
                 f"The effective LLM for '{method_name}' is incompatible with "
