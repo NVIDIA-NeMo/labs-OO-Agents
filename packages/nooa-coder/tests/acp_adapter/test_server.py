@@ -41,7 +41,7 @@ def test_initialize_advertises_sessions_mcp_and_the_agent():
     sessions = capabilities.session_capabilities
     assert sessions is not None
     assert sessions.list is not None and sessions.close is not None
-    # Not routed by the 0.11 library: advertising them would promise a failure.
+    # Not routed by the 0.12 library: advertising them would promise a failure.
     assert sessions.delete is None and sessions.resume is None and sessions.fork is None
     assert response.auth_methods == []
     assert response.agent_info is not None and response.agent_info.name == "nooa-coder"
@@ -104,7 +104,7 @@ async def test_startup_warnings_are_sent_as_an_agent_message(make_adapter, works
 
     adapter = await make_adapter(CoderModels(), agent_spec=CODER_SPEC)
     response = await adapter.new_session(
-        str(workspace), mcp_servers=[AcpMcpServer(name="remote", id="x", type="acp")]
+        str(workspace), mcp_servers=[AcpMcpServer(name="remote", server_id="x", type="acp")]
     )
     await client.wait_for(lambda: client.updates(response.session_id, AgentMessageChunk))
     [text] = client.texts(AgentMessageChunk, response.session_id)

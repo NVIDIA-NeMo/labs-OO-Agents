@@ -19,7 +19,7 @@ from acp.schema import (
     ElicitationNumberPropertySchema,
     ElicitationSchema,
     ElicitationStringPropertySchema,
-    UntitledMultiSelectItems,
+    StringMultiSelectItems,
 )
 from pydantic import ValidationError
 from pydantic.fields import FieldInfo
@@ -182,7 +182,7 @@ def _property(annotation: Any, field: FieldInfo, name: str, metadata: list[Any])
         if (choices := _string_literals(_strip_annotated(item, []))) is not None:
             return ElicitationMultiSelectPropertySchema(
                 type="array",
-                items=UntitledMultiSelectItems(type="string", enum=choices),
+                items=StringMultiSelectItems(type="string", enum=choices),
                 default=(
                     list(default)
                     if isinstance(default, (list, tuple)) and all(v in choices for v in default)

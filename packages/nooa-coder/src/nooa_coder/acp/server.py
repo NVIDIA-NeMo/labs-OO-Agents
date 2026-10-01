@@ -197,7 +197,7 @@ def model_aliases() -> list[str]:
 def initialize_response(protocol_version: int) -> InitializeResponse:
     """The static answer to ``initialize``: what this agent supports.
 
-    ``session/delete`` and ``logout`` are not advertised: the 0.11 library
+    ``session/delete`` and ``logout`` are not advertised: the 0.12 library
     does not route them, so a client calling them would get "method not
     found". Deleting is the ``_nooa/session/delete`` extension method.
     """
