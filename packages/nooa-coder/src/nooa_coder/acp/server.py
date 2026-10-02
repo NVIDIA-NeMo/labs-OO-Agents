@@ -14,37 +14,32 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
 import re
 import signal
 from collections.abc import Callable
-from contextlib import suppress
-from datetime import UTC, datetime
-from importlib.metadata import PackageNotFoundError, version
+from contextlib import AbstractContextManager, nullcontext, suppress
 from pathlib import Path
 from string import Formatter
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
 from acp import (
-    PROTOCOL_VERSION,
     InitializeResponse,
     LoadSessionResponse,
     NewSessionResponse,
     PromptResponse,
     RequestError,
-    run_agent,
     start_tool_call,
     text_block,
     update_agent_message,
     update_tool_call,
     update_user_message,
 )
-from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
+from acp.agent.connection import AgentSideConnection
 from acp.helpers import update_available_commands
 from acp.interfaces import Agent, Client
 from acp.schema import (
-    AgentCapabilities,
     AvailableCommand,
     AvailableCommandInput,
     ClientCapabilities,
@@ -53,14 +48,10 @@ from acp.schema import (
     HttpMcpServer,
     Implementation,
     ListSessionsResponse,
-    McpCapabilities,
     McpServerStdio,
     PermissionOption,
-    SessionCapabilities,
-    SessionCloseCapabilities,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
-    SessionListCapabilities,
     SessionMode,
     SessionModeState,
     SetSessionConfigOptionResponse,
@@ -69,7 +60,7 @@ from acp.schema import (
     ToolCallUpdate,
     UnstructuredCommandInput,
 )
-from acp.schema import SessionInfo as ACPSessionInfo
+from pydantic import ValidationError
 
 from nooa.errors import GenerationError
 from nooa.interactive import NeedInput
@@ -77,11 +68,25 @@ from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
-from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text
-from nooa_coder.acp.need_input import answer_from_content, need_input_schema
-from nooa_coder.coding.identity import CODING_AGENT, canonical_agent_spec
+from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text, pool_input_event
+from nooa_coder.acp.listing import list_sessions, validate_workspace
+from nooa_coder.acp.need_input import (
+    answer_from_content,
+    need_input_schema,
+    pool_answer,
+    pool_form_schema,
+)
+from nooa_coder.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
+from nooa_coder.acp.recover import COMMAND as RECOVER
+from nooa_coder.acp.recover import recover
 from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
-from nooa_coder.session.items import CommandInfo, Receipt, TurnCancelledOutcome
+from nooa_coder.session.items import (
+    CommandInfo,
+    CommandsChangedUpdate,
+    Receipt,
+    TurnCancelledOutcome,
+)
+from nooa_coder.session.loader import CODING_AGENT, canonical_agent_spec
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import ChildActiveElsewhereError, SessionRegistry
 from nooa_coder.session.session import (
@@ -90,13 +95,26 @@ from nooa_coder.session.session import (
     SessionClosedError,
     TurnFailedError,
 )
-from nooa_coder.session.store import InvalidSessionIdError, SessionNotFoundError
+from nooa_coder.session.store import (
+    InvalidSessionIdError,
+    SessionNotFoundError,
+    SessionStore,
+    sessions_root,
+)
 
 logger = logging.getLogger(__name__)
 
-_SESSION_PAGE_SIZE = 50
 _DELETE_METHOD = "nooa/session/delete"
 """``_nooa/session/delete`` as ``ext_method`` receives it (without the underscore)."""
+# The reasoning option's first choice: no level chosen, the model's own default applies.
+DEFAULT_REASONING = "default"
+
+_INJECT_METHOD = "nooa/session/inject"
+_REVOKE_METHOD = "nooa/session/revoke_inject"
+_POOL_FORM_METHOD = "poolside/elicitation"
+"""Pool's form request; ``ext_method`` sends it as ``_poolside/elicitation``."""
+_POOL_STEER_METHOD = "poolside/session_steer"
+"""``_poolside/session_steer`` as ``ext_method`` receives it (without the underscore)."""
 
 SOURCE = "acp"
 """The source of items this adapter admits (the bridge does not echo them back)."""
@@ -183,54 +201,32 @@ async def _close_in_order(*closers: Callable[[], Any] | None) -> None:
         raise pending
 
 
-def model_aliases() -> list[str]:
-    """The model aliases configured in the NOOA model registry, sorted."""
-    from nooa.unifiedllm.registry import MODELS, ensure_loaded
+def model_aliases(workspace: Path) -> list[str]:
+    """The model aliases configured for ``workspace``, sorted.
 
-    try:
-        ensure_loaded()
-    except Exception:
-        logger.warning("Could not load the model registry", exc_info=True)
-    return sorted(MODELS)
-
-
-def initialize_response(protocol_version: int) -> InitializeResponse:
-    """The static answer to ``initialize``: what this agent supports.
-
-    ``session/delete`` and ``logout`` are not advertised: the 0.12 library
-    does not route them, so a client calling them would get "method not
-    found". Deleting is the ``_nooa/session/delete`` extension method.
+    Its own ``.nooa/llm_config.yaml`` included (``workspace_models``). The
+    files are read again whenever one was added, removed or changed, so a
+    model connected with ``nooa connect`` in a terminal shows up in the
+    picker without restarting the server.
     """
+    from nooa_coder.workspace.models import workspace_models
+
     try:
-        package_version = version("nooa-coder")
-    except PackageNotFoundError:
-        package_version = "0.0.0"
-    return InitializeResponse(
-        protocol_version=min(protocol_version, PROTOCOL_VERSION),
-        agent_capabilities=AgentCapabilities(
-            load_session=True,
-            # McpCapabilities defaults to all-false, and a client that honours
-            # the handshake then filters its HTTP/SSE servers out of
-            # session/new. _create_mcp_tools connects both transports, so say
-            # so. `acp` stays off: it is unstable in the spec and not
-            # implemented here.
-            mcp_capabilities=McpCapabilities(http=True, sse=True),
-            session_capabilities=SessionCapabilities(
-                list=SessionListCapabilities(),
-                close=SessionCloseCapabilities(),
-            ),
-        ),
-        auth_methods=[],
-        agent_info=Implementation(
-            name="nooa-coder",
-            title="NVIDIA Labs Object Oriented Agents (NOOA)",
-            version=package_version,
-        ),
-    )
+        return sorted(workspace_models(workspace))
+    except Exception:
+        logger.warning("Could not load the model configuration of %s", workspace, exc_info=True)
+        return []
 
 
 class CoderACPAgent:
-    """One ACP connection's view of a ``SessionRegistry``.
+    """One ACP connection's view of the sessions this process runs.
+
+    Sessions are stored per workspace (``sessions_root``): a request's
+    ``cwd`` picks the store, and each store has its own
+    ``SessionRegistry``, built by ``new_registry(store)`` the first time
+    the client names that workspace. ``sessions_dir`` is one directory
+    for every workspace instead (``None``: ``NOOA_SESSIONS_DIR``, else each
+    workspace's ``.nooa/sessions``).
 
     ``agent_spec`` names the agent class for new sessions (``None``: the
     workspace's ``coding.agent_spec`` setting, else the coding agent).
@@ -240,31 +236,87 @@ class CoderACPAgent:
 
     def __init__(
         self,
-        registry: SessionRegistry,
+        new_registry: Callable[[SessionStore], SessionRegistry],
         *,
+        sessions_dir: Path | None = None,
         agent_spec: str | None = None,
         model: str | None = None,
     ) -> None:
-        self.registry = registry
+        self._new_registry = new_registry
+        self._sessions_dir = sessions_dir
+        # By store directory: two workspaces sharing one directory share a registry.
+        self._registries: dict[Path, SessionRegistry] = {}
         self._agent_spec = agent_spec
         self._model = model
         self._conn: Client | None = None
         self.client_capabilities: ClientCapabilities | None = None
+        # The client is Pool (``clientInfo.name``): it gets Pool's input events.
+        self._pool_client = False
+        # The client is Pool and has not failed a ``_poolside/elicitation`` request.
+        self._pool_forms = False
         self._bridges: dict[str, ACPEventBridge] = {}
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
-        self._chosen_models: dict[str, str] = {}
-        # Receipts of prompts that steered a running turn, by session.
-        self._steers: dict[str, list[Receipt]] = {}
+        # Receipts of prompts still waiting for their turn, by session: Stop
+        # answers them "cancelled" and withdraws the ones not yet consumed.
+        self._prompts: dict[str, list[Receipt]] = {}
+        # How many session/prompt requests of each session are waiting in
+        # ``_finish``, and the messages Pool handed over with
+        # ``_poolside/session_steer`` meanwhile (receipt, text), in order:
+        # the prompt stays open until they are handled (see ``_finish``).
+        self._open: dict[str, int] = {}
+        self._followers: dict[str, list[tuple[Receipt, str]]] = {}
+        # Receipts of injected messages, by session and item id, for revoke.
+        self._injects: dict[str, dict[str, Receipt]] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
         # session: session/cancel stops them.
         self._asks: dict[str, asyncio.Task[Any]] = {}
         # The question each session's prompt is asking, so two prompts that
         # returned with the same turn ask it once.
         self._asking: dict[str, NeedInput] = {}
+        # Workspaces whose model configuration files were logged.
+        self._logged_config: set[Path] = set()
 
     def on_connect(self, conn: Client) -> None:
         self._conn = conn
+
+    def _log_llm_config(self, workspace: Path) -> None:
+        """Log the model configuration files of a workspace, the first time it is used."""
+        if workspace not in self._logged_config:
+            from nooa_coder.acp.cli import llm_config_summary
+
+            self._logged_config.add(workspace)
+            logger.info(llm_config_summary(workspace))
+
+    # ---- registries ----------------------------------------------------
+
+    def registry_for(self, workspace: Path) -> SessionRegistry:
+        """The registry of the store that holds ``workspace``'s sessions."""
+        root = sessions_root(workspace, self._sessions_dir).resolve()
+        registry = self._registries.get(root)
+        if registry is None:
+            registry = self._registries[root] = self._new_registry(SessionStore(root))
+        return registry
+
+    def session(self, session_id: str) -> Session | None:
+        """The live session with this id, in any of this connection's registries."""
+        for registry in self._registries.values():
+            session = registry.get(session_id)
+            if session is not None:
+                return session
+        return None
+
+    def _registry_holding(self, session_id: str) -> SessionRegistry | None:
+        """The registry whose store has this session: live, else on disk."""
+        registries = list(self._registries.values())
+        for registry in registries:
+            if registry.get(session_id) is not None:
+                return registry
+        for registry in registries:
+            with suppress(InvalidSessionIdError):
+                if registry.store.path_for(session_id).exists():
+                    return registry
+        return None
 
     # ---- initialize ----------------------------------------------------
 
@@ -275,8 +327,10 @@ class CoderACPAgent:
         client_info: Implementation | None = None,
         **kwargs: Any,
     ) -> InitializeResponse:
-        del client_info, kwargs
+        del kwargs
         self.client_capabilities = client_capabilities
+        self._pool_client = client_info is not None and client_info.name == "pool"
+        self._pool_forms = self._pool_client
         return initialize_response(protocol_version)
 
     # ---- new -----------------------------------------------------------
@@ -289,7 +343,8 @@ class CoderACPAgent:
         **kwargs: Any,
     ) -> NewSessionResponse:
         del kwargs
-        root = self._validate_workspace(cwd, additional_directories)
+        root = validate_workspace(cwd, additional_directories)
+        self._log_llm_config(root)
         options = SessionOptions(
             workspace=root,
             agent_spec=self._agent_spec_for(root),
@@ -300,11 +355,12 @@ class CoderACPAgent:
         attached: list[ACPEventBridge] = []
 
         async def prepare(session: Session) -> None:
+            _trace_as(session)
             attached.append(self._attach(session))
-            warnings.extend(await self._prepare_agent(session, mcp_servers))
+            warnings.extend(await self._prepare_tools(session, mcp_servers))
 
         try:
-            session = await self.registry.create(options, prepare=prepare)
+            session = await self.registry_for(root).create(options, prepare=prepare)
         except BaseException:
             for bridge in attached:
                 self._bridges.pop(bridge.session_id, None)
@@ -328,13 +384,15 @@ class CoderACPAgent:
         **kwargs: Any,
     ) -> LoadSessionResponse:
         del kwargs
-        self._validate_workspace(cwd, additional_directories)
-        live = self.registry.get(session_id)
+        root = validate_workspace(cwd, additional_directories)
+        self._log_llm_config(root)
+        registry = self.registry_for(root)
+        live = self.session(session_id)
         if live is not None:
             # Attach: the same Session; reuse this adapter's bridge if it has
             # one (a second bridge would send every update twice) and replay.
             bridge = self._bridges.get(session_id) or self._attach(live)
-            self._replay(bridge, live)
+            self._replay(bridge, live, pool=self._pool_client)
             await bridge.flush()
             self._defer_bootstrap_updates(live, [])
             return LoadSessionResponse(
@@ -345,13 +403,14 @@ class CoderACPAgent:
         attached: list[ACPEventBridge] = []
 
         async def prepare(session: Session) -> None:
+            _trace_as(session)
             bridge = self._attach(session)
             attached.append(bridge)
-            self._replay(bridge, session)
-            warnings.extend(await self._prepare_agent(session, mcp_servers))
+            self._replay(bridge, session, pool=self._pool_client)
+            warnings.extend(await self._prepare_tools(session, mcp_servers))
 
         try:
-            session = await self.registry.load(session_id, prepare=prepare, host="acp")
+            session = await registry.load(session_id, prepare=prepare, host="acp")
         except BaseException as exc:
             for bridge in attached:
                 self._bridges.pop(bridge.session_id, None)
@@ -368,69 +427,39 @@ class CoderACPAgent:
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
     ) -> ListSessionsResponse:
-        """Root sessions with at least one message, most recent first.
+        """Root sessions with at least one message, most recent first (see ``list_sessions``).
 
-        ``cwd`` keeps one workspace; without it every workspace is listed
-        (the store is per user). Sessions held by another process are left
-        out: opening them would fail. ``_meta["dev.nooa/status"]`` is
-        ``running``, ``idle`` or ``retained`` for sessions live here, else
-        ``on_disk``.
+        Without ``cwd``, the stores of the workspaces this connection has
+        named; there is no index of every workspace.
         """
         del kwargs
-        root = self._validate_workspace(cwd, None) if cwd is not None else None
-        try:
-            offset = int(cursor) if cursor is not None else 0
-        except ValueError:
-            raise RequestError.invalid_params(
-                {"cursor": cursor, "reason": "Invalid cursor"}
-            ) from None
-        if offset < 0:
-            raise RequestError.invalid_params({"cursor": cursor, "reason": "Invalid cursor"})
-        store = self.registry.store
+        if cwd is not None:
+            self.registry_for(validate_workspace(cwd, None))
 
-        def scan() -> list[tuple[Any, bool]]:
-            # Pure filesystem work, one lock probe per session: off the loop.
-            return [
-                (info, store.is_active(info.id))
-                for info in store.list(workspace=root, roots_only=True)
-                if info.turn_count > 0
-            ]
+        def live(session_id: str) -> tuple[str, str | None] | None:
+            for registry in self._registries.values():
+                session = registry.get(session_id)
+                if session is not None:
+                    return registry.live_info(session).status, session.info.title
+            return None
 
-        found: list[tuple[Any, str]] = []
-        for info, active in await asyncio.to_thread(scan):
-            live = self.registry.get(info.id)
-            if live is not None:
-                status = self.registry.live_info(live).status
-                info = info.model_copy(update={"title": live.info.title or info.title})
-            elif active:
-                continue
-            else:
-                status = "on_disk"
-            workspace = info.workspace if Path(info.workspace).is_absolute() else None
-            workspace = workspace or (str(root) if root is not None else None)
-            if workspace is None:
-                continue  # ACP requires an absolute cwd for every entry
-            found.append((info.model_copy(update={"workspace": workspace}), status))
-        page = found[offset : offset + _SESSION_PAGE_SIZE]
-        sessions = [
-            ACPSessionInfo(
-                session_id=info.id,
-                cwd=info.workspace,
-                title=info.title or f"Untitled session [{info.id[:8]}]",
-                updated_at=datetime.fromtimestamp(info.last_active, UTC).isoformat(),
-                field_meta={"dev.nooa/status": status},
-            )
-            for info, status in page
-        ]
-        next_cursor = str(offset + len(page)) if len(found) > offset + len(page) else None
-        return ListSessionsResponse(sessions=sessions, next_cursor=next_cursor)
+        return await list_sessions(
+            self._store_for,
+            cwd=cwd,
+            cursor=cursor,
+            live=live,
+            known=[registry.store for registry in self._registries.values()],
+        )
+
+    def _store_for(self, workspace: Path) -> SessionStore:
+        return self.registry_for(workspace).store
 
     # ---- close and delete ----------------------------------------------
 
     async def close_session(self, session_id: str, **kwargs: Any) -> CloseSessionResponse:
         """Close a session; for a child whose parent is live, only stop following it."""
         del kwargs
-        session = self.registry.get(session_id)
+        session = self.session(session_id)
         bridge = self._bridges.pop(session_id, None)
         if session is None and bridge is None:
             raise RequestError.resource_not_found(session_id)
@@ -439,25 +468,137 @@ class CoderACPAgent:
                 await bridge.close(finish_open=False)
             return CloseSessionResponse()
         if session is not None:
-            await self.registry.close(session_id)
+            await session.close()
         if bridge is not None:
             await bridge.close()
         return CloseSessionResponse()
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """``_nooa/session/inject``, ``revoke_inject`` (see ``_inject``), Pool's
+        ``_poolside/session_steer`` (see ``_pool_steer``) and ``delete``.
+
+        ``_nooa/session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
+
+        ``cwd`` names the workspace whose store holds the session; without
+        it the stores of the workspaces this connection has named are searched.
+        """
+        if method == _INJECT_METHOD:
+            return await self._inject(params)
+        if method == _REVOKE_METHOD:
+            return self._revoke_inject(params)
+        if method == _POOL_STEER_METHOD:
+            return await self._pool_steer(params)
         if method != _DELETE_METHOD:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
         if not isinstance(session_id, str):
             raise RequestError.invalid_params({"reason": "sessionId must be a string"})
+        cwd = params.get("cwd")
+        if cwd is not None:
+            # Only the store is needed: the workspace itself may be gone.
+            if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+                raise RequestError.invalid_params({"cwd": cwd, "reason": "cwd must be absolute"})
+            self.registry_for(Path(cwd))
+        registry = self._registry_holding(session_id)
+        if registry is None:
+            raise RequestError.resource_not_found(session_id)
         bridge = self._bridges.pop(session_id, None)
         try:
-            await self.registry.delete(session_id, keep_files=bool(params.get("keepFiles")))
+            await registry.delete(session_id, keep_files=bool(params.get("keepFiles")))
         except (SessionNotFoundError, InvalidSessionIdError):
             raise RequestError.resource_not_found(session_id) from None
         if bridge is not None:
             await bridge.close()
         return {}
+
+    async def _inject(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``_nooa/session/inject``: ``{sessionId, mode: "queue"|"steer", prompt|text}``.
+
+        ``queue`` submits the message; ``steer`` hands it to the running
+        turn's next model call (queued when there is none). Answers
+        ``{messageId, delivered: "queued"|"steered"}`` at once. An injected
+        message is not a prompt request: Stop leaves it queued.
+        """
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str):
+            raise RequestError.invalid_params({"reason": "sessionId must be a string"})
+        mode = params.get("mode")
+        if mode not in ("queue", "steer"):
+            raise RequestError.invalid_params({"mode": mode, "reason": "mode is queue or steer"})
+        text = params.get("text")
+        if not isinstance(text, str):
+            blocks = params.get("prompt")
+            if not isinstance(blocks, list) or not all(isinstance(b, dict) for b in blocks):
+                raise RequestError.invalid_params({"reason": "prompt or text is required"})
+            text = self._prompt_text([SimpleNamespace(**block) for block in blocks])
+        elif not text.strip():
+            raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
+        session, _bridge = self._followed(session_id)
+        try:
+            if mode == "steer":
+                receipt = await session.steer(text, source=SOURCE)
+            else:
+                receipt = await session.submit(text, source=SOURCE)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session_id) from None
+        self._injects.setdefault(session_id, {})[receipt.item_id] = receipt
+        return {"messageId": receipt.item_id, "delivered": receipt.delivered}
+
+    async def _pool_steer(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``_poolside/session_steer``: ``{sessionId, inputId, prompt}`` -> ``{inputId}``.
+
+        Pool sends what the person types during a running prompt. The text
+        is queued for the next turn on ``user_messages``, as ``session/prompt``
+        text sent during a turn is: the running turn sees it only as a pending
+        message, and the next turn gets it in its notification. A slash
+        command is refused, and Pool then sends it as a normal prompt after
+        the turn.
+
+        Pool keeps its turn open until the messages it handed over are
+        handled, so the open prompt follows this one: it returns only after
+        the turn that handles it (``_finish``), and Stop withdraws it if no
+        turn took it yet (``cancel``).
+
+        Pool shows the message in the conversation when it sees the steer's
+        ``inputId`` in an input event (``pool_input_event``), which the bridge
+        sends when a turn takes the message. The answer follows that event,
+        as Pool's own agent answers; it also goes out when the message is
+        withdrawn or its turn ends without it.
+        """
+        session_id, input_id = params.get("sessionId"), params.get("inputId")
+        if not isinstance(session_id, str) or not isinstance(input_id, str):
+            raise RequestError.invalid_params({"reason": "sessionId and inputId are strings"})
+        blocks = params.get("prompt")
+        if not isinstance(blocks, list) or not all(isinstance(b, dict) for b in blocks):
+            raise RequestError.invalid_params({"reason": "prompt is required"})
+        session, bridge = self._followed(session_id)
+        text = self._prompt_text([SimpleNamespace(**block) for block in blocks])
+        if _slash_invocation(text) is not None:
+            raise RequestError.invalid_params(
+                {"reason": "A slash command cannot steer a turn; send it after the turn ends"}
+            )
+        # Queued, not steered, on purpose until the Pool team says whether
+        # this request means queue or steer. Handling it at all keeps the
+        # message out of Pool's own queue, where Esc drops it.
+        try:
+            receipt = await session.submit(text, source=SOURCE)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session_id) from None
+        shown = bridge.client_input_taken(receipt.item_id, input_id)
+        if self._open.get(session_id):
+            self._followers.setdefault(session_id, []).append((receipt, text))
+        await _taken_or_settled(session, receipt.item_id, shown)
+        bridge.forget_client_input(receipt.item_id)
+        return {"inputId": input_id}
+
+    def _revoke_inject(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``_nooa/session/revoke_inject``: ``{sessionId, messageId}`` -> ``{revoked}``."""
+        session_id, message_id = params.get("sessionId"), params.get("messageId")
+        if not isinstance(session_id, str) or not isinstance(message_id, str):
+            raise RequestError.invalid_params({"reason": "sessionId and messageId are strings"})
+        session, _bridge = self._followed(session_id)
+        receipt = self._injects.get(session_id, {}).pop(message_id, None)
+        return {"revoked": receipt is not None and session.withdraw(receipt)}
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
         del method, params
@@ -469,23 +610,34 @@ class CoderACPAgent:
         await asyncio.gather(*self._background, return_exceptions=True)
         bridges = list(self._bridges.values())
         self._bridges.clear()
+        empty = [
+            (registry, session.id)
+            for registry in self._registries.values()
+            for session in registry.sessions.values()
+            if session.parent_id is None and session.info.turn_count == 0
+        ]
         await _close_in_order(
-            self.registry.close_all,
+            *(registry.close_all for registry in self._registries.values()),
             *(bridge.close for bridge in bridges),
         )
+        for registry, session_id in empty:
+            await _discard_empty(registry, session_id)
 
     # ---- prompt and cancel ---------------------------------------------
 
     async def prompt(self, session_id: str, prompt: list[Any], **kwargs: Any) -> PromptResponse:
-        """Run a prompt; a prompt sent while a turn runs steers that turn.
+        """Run a prompt; a prompt sent while a turn runs is queued behind it.
 
-        Text goes in with ``steer`` (a plain submit while idle) and the
-        request waits for the outcome of the turn that consumed it. When a
-        turn is running, that turn's next model call sees the text and both
-        prompts return together; if the running turn was already finishing,
-        the text is handled by the next turn and this prompt returns with
-        that one. A ``Waiting`` outcome keeps the request open. ``/name``
-        prompts naming a session command run the command.
+        The text is submitted on ``user_messages`` and the request waits for
+        the outcome of the turn that consumes it: the next turn, or the
+        running one if the model takes the pending message from its queue
+        (the queues context block lists it). A ``Waiting`` outcome keeps the
+        request open, and so do messages Pool hands over during the prompt
+        (``_pool_steer``) until they are handled. Stop answers a waiting
+        prompt ``cancelled`` and withdraws its message if no turn took it.
+        ``/name`` prompts naming a
+        session command run the command. To steer a running turn, clients
+        use ``_nooa/session/inject`` with ``mode: "steer"``.
         """
         del kwargs
         session, bridge = self._followed(session_id)
@@ -497,18 +649,15 @@ class CoderACPAgent:
                 if handled is not None:
                     return handled
             await self._request_title(session, text)
-            receipt = await session.steer(text, source=SOURCE)
-            steered = receipt.delivered == "steered"
-            if steered:
-                # Stop must withdraw it if the model has not seen it yet;
-                # otherwise it would run as a new turn after the cancel.
-                self._steers.setdefault(session_id, []).append(receipt)
+            receipt = await session.submit(text, source=SOURCE)
+            if self._pool_client:
+                bridge.publish(pool_input_event(receipt.item_id))
+            self._prompts.setdefault(session_id, []).append(receipt)
             try:
                 return await self._finish(session, bridge, receipt.item_id)
             finally:
-                if steered:
-                    with suppress(ValueError):
-                        self._steers.get(session_id, []).remove(receipt)
+                with suppress(ValueError):
+                    self._prompts.get(session_id, []).remove(receipt)
         except ItemWithdrawnError:
             await bridge.flush()
             return PromptResponse(stop_reason="cancelled")
@@ -528,7 +677,7 @@ class CoderACPAgent:
         if session.id in self._title_checked:
             return
         self._title_checked.add(session.id)
-        if session.info.title or "system_messages" not in session.agent.queue_manager.channels():
+        if session.info.title or "system_messages" not in session.channels():
             return
         if any(entry.role == "user" for entry in session.transcript()):
             return
@@ -539,12 +688,62 @@ class CoderACPAgent:
     async def _finish(
         self, session: Session, bridge: ACPEventBridge, item_id: str
     ) -> PromptResponse:
+        """Wait for the turn that consumes ``item_id``, then for the prompt's followers.
+
+        Followers are the messages Pool handed over with
+        ``_poolside/session_steer`` while this prompt was open, in the order
+        they were admitted, including ones admitted while this loop runs.
+        Each is waited for as ``item_id`` is (``_finish_item``); the prompt
+        returns ``end_turn`` when all are done, and stops at the first
+        other answer. A question is not asked while a follower after it is
+        still waiting: the person's queued message comes first, and its turn
+        has the question in context.
+        """
+        self._open[session.id] = self._open.get(session.id, 0) + 1
+        # Taken now: Stop pops the list but leaves in it the followers a
+        # turn took, whose outcome is then the cancelled turn's.
+        followers = self._followers.setdefault(session.id, [])
+        asked: list[NeedInput] = []
+        try:
+            response = await self._finish_item(
+                session, bridge, item_id, asked, later=lambda: bool(followers)
+            )
+            while response.stop_reason == "end_turn" and followers:
+                receipt, _text = followers[0]
+                try:
+                    response = await self._finish_item(
+                        session, bridge, receipt.item_id, asked, later=lambda: len(followers) > 1
+                    )
+                finally:
+                    if followers and followers[0][0] is receipt:
+                        followers.pop(0)
+            return response
+        finally:
+            self._open[session.id] -= 1
+            if not self._open[session.id]:
+                # Left over only when the prompt failed: they stay queued.
+                del self._open[session.id]
+                self._followers.pop(session.id, None)
+
+    async def _finish_item(
+        self,
+        session: Session,
+        bridge: ACPEventBridge,
+        item_id: str,
+        asked: list[NeedInput],
+        *,
+        later: Callable[[], bool],
+    ) -> PromptResponse:
         """Wait for the turn that consumes ``item_id``; answer questions until it is done.
 
         A ``NeedInput`` the client can answer (a form, or a yes/no
         permission) is submitted and the same prompt waits for the next
         turn; otherwise the question, already sent by the bridge as the
-        turn's final message, ends the prompt with ``end_turn``.
+        turn's final message, ends the item with ``end_turn``. ``asked``
+        holds the questions this prompt already handled: an item consumed by
+        the same turn as an earlier one resolves with the same question,
+        which is not asked again. While ``later()`` (followers wait after
+        this item), a question is left as text and the item is done.
         """
         while True:
             outcome = await session.outcome(item_id)
@@ -553,10 +752,17 @@ class CoderACPAgent:
                 # the cancel, which happens before this outcome resolves.
                 await bridge.flush()
                 return PromptResponse(stop_reason="cancelled")
-            if not isinstance(outcome, NeedInput) or self._asking.get(session.id) is outcome:
-                # Done; or a question another prompt of this turn is asking.
+            if (
+                not isinstance(outcome, NeedInput)
+                or self._asking.get(session.id) is outcome
+                or any(known is outcome for known in asked)
+                or later()
+            ):
+                # Done; or a question another prompt of this turn is asking,
+                # this prompt already asked, or a queued message answers first.
                 await bridge.flush()
                 return PromptResponse(stop_reason="end_turn")
+            asked.append(outcome)
             self._asking[session.id] = outcome
             try:
                 await bridge.flush()
@@ -576,12 +782,16 @@ class CoderACPAgent:
     async def _ask(self, session: Session, bridge: ACPEventBridge, need: NeedInput) -> Any:
         """Ask the client to answer ``need``: ``(item, source)``, ``None`` or ``_CANCELLED``.
 
-        A form when the client advertised ``elicitation.form`` and the
-        question flattens; else a permission request for a yes/no question;
-        else ``None`` (the question stays as text). A client error falls
-        back to ``None``.
+        Pool's own form for a free-text, choice or typed question when the
+        client is Pool (not yes/no); else a form when the client advertised ``elicitation.form``
+        and the question flattens; else a permission request for a yes/no
+        question; else ``None`` (the question stays as text). A client error
+        falls back to ``None``.
         """
         conn = self._require_conn()
+        pool_schema = pool_form_schema(need) if self._pool_forms else None
+        if pool_schema is not None:
+            return await self._ask_pool(session, need, pool_schema)
         capabilities = self.client_capabilities
         forms = (
             capabilities is not None
@@ -602,6 +812,48 @@ class CoderACPAgent:
         options = need.options or []
         if sorted(option.lower() for option in options) == ["no", "yes"]:
             return await self._ask_yes_no(session, bridge, need.question, options)
+        return None
+
+    async def _ask_pool(self, session: Session, need: NeedInput, schema: dict[str, Any]) -> Any:
+        """Ask with Pool's ``_poolside/elicitation`` form; the result is as ``_ask``'s.
+
+        An answer that does not convert, or is not one of the choices, is
+        asked once more with the error, then left as text. A failed request turns Pool forms off for this
+        connection.
+        """
+        conn = self._require_conn()
+        question = f"{need.question}\n\n{need.reason}" if need.reason else need.question
+        message = question
+        for _attempt in range(2):
+            params: dict[str, Any] = {
+                "sessionId": session.id,
+                "mode": "form",
+                "message": message,
+                "requestedSchema": schema,
+            }
+            if len(schema["properties"]) > 1:
+                # Pool's own agent sends the field order with every multi-field form.
+                params["_meta"] = {"poolside/field_order": list(schema["properties"])}
+            response = await self._client_call(
+                session.id, conn.ext_method(_POOL_FORM_METHOD, params)
+            )
+            if response is _CANCELLED:
+                return response
+            if response is None:
+                self._pool_forms = False
+                return None
+            if not isinstance(response, dict) or response.get("action") != "accept":
+                return DECLINED, DECLINED_SOURCE
+            try:
+                return pool_answer(need, response.get("content")), SOURCE
+            except ValidationError as exc:
+                problems = "; ".join(
+                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                    for error in exc.errors()
+                )
+                message = f"{question}\n\nThat answer was not accepted: {problems}"
+            except ValueError as exc:
+                message = f"{question}\n\n{exc}"
         return None
 
     async def _ask_yes_no(
@@ -687,6 +939,8 @@ class CoderACPAgent:
         self, session: Session, bridge: ACPEventBridge, name: str, raw_args: str
     ) -> PromptResponse | None:
         """Run ``/name args``; ``None`` when it is not a command, so the text is a prompt."""
+        if name == RECOVER.name:
+            return await self._say(bridge, await self._recover(session, raw_args))
         if name not in {command.name for command in session.commands()}:
             if name == "connect":
                 message = _CONNECT_TEXT
@@ -700,7 +954,8 @@ class CoderACPAgent:
                 return None
             return await self._say(bridge, message)
         try:
-            result = await session.invoke_command(name, raw_args)
+            with _trace_scope(session):
+                result = await session.invoke_command(name, raw_args)
         except CoercionError as exc:
             message = f"/{name}: {exc.message}"
             if exc.hint:
@@ -723,11 +978,31 @@ class CoderACPAgent:
                 return await self._say(
                     bridge, f"/{name} produced no output, so nothing was sent to the agent."
                 )
-            channels = session.agent.queue_manager.channels()
+            channels = session.channels()
             channel = "slash_commands" if "slash_commands" in channels else "user_messages"
             receipt = await session.submit(result.text, channel=channel, source=SOURCE)
             return await self._finish(session, bridge, receipt.item_id)
         return await self._say(bridge, result.text)
+
+    async def _recover(self, session: Session, raw_args: str) -> str:
+        """``/recover``: over the store that holds ``session``, for its workspace."""
+        registry = self._registry_holding(session.id)
+        if registry is None:
+            return "/recover failed: this session's store is not known here."
+        open_here = {
+            session_id for known in self._registries.values() for session_id in known.sessions
+        }
+        try:
+            return await asyncio.to_thread(
+                recover,
+                registry.store,
+                session.info.workspace or None,
+                raw_args,
+                open_here=open_here,
+            )
+        except Exception as exc:
+            logger.warning("/recover failed in session %s", session.id, exc_info=True)
+            return f"/recover failed: {exc}"
 
     @staticmethod
     async def _say(bridge: ACPEventBridge, message: str) -> PromptResponse:
@@ -739,16 +1014,32 @@ class CoderACPAgent:
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         """Stop the running turn. The bridge closes its cards when the Session reports it."""
         del kwargs
-        session = self.registry.get(session_id)
+        session = self.session(session_id)
         if session is None or session_id not in self._bridges:
             return  # a notification: nothing to answer
         ask = self._asks.get(session_id)
         if ask is not None:
             ask.cancel()
-        # Steers the model has not read yet stop with the turn; the prompts
-        # that sent them return "cancelled" (withdraw fails for one it read).
-        for receipt in self._steers.pop(session_id, []):
+        # A prompt request must be answered: a prompt whose message no turn
+        # took is withdrawn and returns "cancelled"; the one the running turn
+        # took returns "cancelled" with it. Injected messages stay queued.
+        for receipt in self._prompts.pop(session_id, []):
             session.withdraw(receipt)
+        # Messages Pool handed over during the prompt go with it: the ones
+        # no turn took are withdrawn, so they do not run with no prompt
+        # open, and listed, so none is lost silently.
+        stopped = [
+            text
+            for receipt, text in self._followers.pop(session_id, [])
+            if session.withdraw(receipt)
+        ]
+        if stopped:
+            listed = "\n".join(f"- {text}" for text in stopped)
+            self._bridges[session_id].publish(
+                update_agent_message(
+                    text_block(f"Stopped before these messages were handled:\n\n{listed}")
+                )
+            )
         await session.cancel(by="user")
 
     # ---- modes and models ----------------------------------------------
@@ -769,9 +1060,14 @@ class CoderACPAgent:
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse:
-        """``model``: switch the session's model from its next turn on."""
+        """``model``: switch the model from the next turn on; ``reasoning``: the level."""
         del kwargs
         session, _bridge = self._followed(session_id)
+        if config_id == "reasoning" and isinstance(value, str):
+            await self._set_reasoning(session, value)
+            return SetSessionConfigOptionResponse(
+                config_options=self._config_options(session) or []
+            )
         if config_id != "model" or not isinstance(value, str):
             raise RequestError.invalid_params(
                 {"configId": config_id, "reason": "Unknown configuration option"}
@@ -784,36 +1080,83 @@ class CoderACPAgent:
             raise RequestError.invalid_params(
                 {"configId": config_id, "value": value, "reason": str(exc)}
             ) from exc
-        self._chosen_models[session.id] = value
         return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
 
+    @staticmethod
+    async def _set_reasoning(session: Session, level: str) -> None:
+        """Select a reasoning level the session's model declares (``Session.set_reasoning``).
+
+        The level applies from the next model call on; switching the model
+        later starts from that alias's default again.
+        """
+        try:
+            await session.set_reasoning(None if level == DEFAULT_REASONING else level)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session.id) from None
+        except ValueError as exc:
+            raise RequestError.invalid_params(
+                {"configId": "reasoning", "value": level, "reason": str(exc)}
+            ) from exc
+
     def _config_options(self, session: Session) -> list[Any] | None:
-        """The model select option: the registry's aliases plus the current model."""
-        current = (
-            self._chosen_models.get(session.id)
-            or session.info.model
-            or session.options.model
-            or self._model
-        )
-        aliases = model_aliases()
+        """The model select option (the registry's aliases plus the current model),
+        and a reasoning option when the current client declares levels."""
+        options: list[Any] = []
+        current = session.info.model or self._model
+        aliases = model_aliases(session.options.workspace)
         if current and current not in aliases:
             aliases = [current, *aliases]
-        if not current or not aliases:
-            return None
-        return [
-            SessionConfigOptionSelect(
-                id="model",
-                name="Model",
-                category="model",
-                description="The model this session uses from its next turn on.",
-                type="select",
-                current_value=current,
-                options=[SessionConfigSelectOption(value=alias, name=alias) for alias in aliases],
+        if current and aliases:
+            options.append(
+                SessionConfigOptionSelect(
+                    id="model",
+                    name="Model",
+                    category="model",
+                    description="The model this session uses from its next turn on.",
+                    type="select",
+                    current_value=current,
+                    options=[
+                        SessionConfigSelectOption(value=alias, name=alias) for alias in aliases
+                    ],
+                )
             )
-        ]
+        reasoning = self._reasoning_option(session)
+        if reasoning is not None:
+            options.append(reasoning)
+        return options or None
+
+    @staticmethod
+    def _reasoning_option(session: Session) -> Any | None:
+        """The reasoning select option: the client's declared levels, or nothing.
+
+        Offered only when the client declares levels and either a level was
+        chosen or the route has a default; otherwise there is no honest
+        current value to show.
+        """
+        model = session.model_info()
+        levels = model.reasoning_levels
+        if not levels:
+            return None
+        default_name = (
+            f"Model default ({model.reasoning_default})"
+            if model.reasoning_default
+            else "Model default"
+        )
+        return SessionConfigOptionSelect(
+            id="reasoning",
+            name="Reasoning",
+            category="thought_level",
+            description="How much the model reasons before answering, from its next call on.",
+            type="select",
+            current_value=model.reasoning_level or DEFAULT_REASONING,
+            options=[
+                SessionConfigSelectOption(value=DEFAULT_REASONING, name=default_name),
+                *(SessionConfigSelectOption(value=level, name=level) for level in levels),
+            ],
+        )
 
     def _followed(self, session_id: str) -> tuple[Session, ACPEventBridge]:
-        session = self.registry.get(session_id)
+        session = self.session(session_id)
         bridge = self._bridges.get(session_id)
         if session is None or bridge is None:
             raise RequestError.resource_not_found(session_id)
@@ -830,24 +1173,22 @@ class CoderACPAgent:
 
     def _attach(self, session: Session) -> ACPEventBridge:
         conn = self._require_conn()
-        bridge = ACPEventBridge(session, conn, resolve_child=self.registry.get)
+        bridge = ACPEventBridge(session, conn, resolve_child=self.session)
         self._bridges[session.id] = bridge
 
-        def forget_on_close(update: Any) -> None:
-            if getattr(update, "kind", None) == "closed":
+        def on_update(update: Any) -> None:
+            if isinstance(update, CommandsChangedUpdate):
+                bridge.publish(_available_commands_update(update.commands))
+            elif getattr(update, "kind", None) == "closed":
                 if self._bridges.get(session.id) is bridge:
                     del self._bridges[session.id]
                 unsubscribe()
 
-        unsubscribe = session.subscribe(forget_on_close)
-        commands = getattr(session.agent, "slash_commands", None)
-        set_on_change = getattr(commands, "set_on_change", None)
-        if callable(set_on_change):
-            set_on_change(lambda _commands: bridge.publish(_available_commands_update(session)))
+        unsubscribe = session.subscribe(on_update)
         return bridge
 
     def _parent_is_live(self, session: Session) -> bool:
-        return session.parent_id is not None and self.registry.get(session.parent_id) is not None
+        return session.parent_id is not None and self.session(session.parent_id) is not None
 
     def _require_conn(self) -> Client:
         if self._conn is None:
@@ -865,47 +1206,25 @@ class CoderACPAgent:
     def _modes(self, session: Session) -> SessionModeState:
         return SessionModeState(current_mode_id=session.info.mode or "auto", available_modes=_MODES)
 
-    async def _prepare_agent(self, session: Session, mcp_servers: list[Any] | None) -> list[str]:
-        """Give a new or loaded agent its host controls and MCP tools; return warnings.
+    async def _prepare_tools(self, session: Session, mcp_servers: list[Any] | None) -> list[str]:
+        """Give a new or loaded session its tools; return warnings.
 
-        Runs in the registry's ``prepare`` step, before any turn. A coding
-        agent gets the ``/skills`` and ``/mcp`` controls and connects the
-        MCP servers its workspace remembers; every agent with skills gets
-        the MCP servers the client sent.
+        Runs in the registry's ``prepare`` step, before any turn. The
+        agent's own set-up runs first (a coding agent connects the MCP
+        servers its workspace remembers), then the MCP servers the client
+        sent are registered as ``mcp.<name>``. A name that collides with
+        one the agent provides (``shell``, ``repo``) is skipped with a
+        warning, so the session stays usable instead of failing.
         """
-        from nooa_coder.coding.agent import CodingAgent
-        from nooa_coder.workspace.controls import behavior_commands
-        from nooa_coder.workspace.options import CoderOptions, connect_session_mcp
-
-        agent = session.agent
-        warnings: list[str] = []
-        if isinstance(agent, CodingAgent):
-            coder_options = CoderOptions.load(session.options.workspace)
-            agent.slash_commands.set_controls(
-                behavior_commands(
-                    agent,
-                    coder_options,
-                    workspace=Path(coder_options.working_dir),
-                    command_registry=agent.slash_commands,
-                )
-            )
-            warnings.extend(await connect_session_mcp(agent, coder_options))
+        warnings = await session.prepare_tools()
         tools, mcp_warnings = await self._create_mcp_tools(mcp_servers)
         warnings.extend(mcp_warnings)
-        skills = getattr(agent, "skills", None)
-        for name, tool in tools.items():
-            registry_name = f"mcp.{name}"
-            if skills is None:
-                warnings.append(f"MCP server {name!r} was not registered: the agent has no skills")
-                continue
-            try:
-                skills.register(registry_name, tool)
-                skills.activate([registry_name])
-            except ValueError as exc:
-                # A server name can collide with a core agent attribute
-                # (`shell`, `repo`) or a reserved one. Skipping it keeps the
-                # session usable instead of failing session/new.
-                warnings.append(f"MCP server {name!r} was not registered: {exc}")
+        failed = session.register_tools({f"mcp.{name}": tool for name, tool in tools.items()})
+        warnings.extend(
+            f"MCP server {name!r} was not registered: {failed[f'mcp.{name}']}"
+            for name in tools
+            if f"mcp.{name}" in failed
+        )
         return warnings
 
     async def _create_mcp_tools(
@@ -962,7 +1281,7 @@ class CoderACPAgent:
 
         async def publish() -> None:
             await asyncio.sleep(0)
-            bridge.publish_best_effort(_available_commands_update(session))
+            bridge.publish_best_effort(_available_commands_update(session.commands()))
             if warnings:
                 details = "\n".join(f"- {warning}" for warning in warnings)
                 bridge.publish_best_effort(
@@ -990,8 +1309,12 @@ class CoderACPAgent:
         task.add_done_callback(finished)
 
     @staticmethod
-    def _replay(bridge: ACPEventBridge, session: Session) -> None:
-        """Queue the transcript as user and agent message chunks on the bridge."""
+    def _replay(bridge: ACPEventBridge, session: Session, *, pool: bool = False) -> None:
+        """Queue the transcript as user and agent message chunks on the bridge.
+
+        For Pool, each user message is followed by its input event, as Pool's
+        own agent replays them.
+        """
         for entry in session.transcript():
             if entry.role == "cancelled":
                 by = entry.content.removeprefix("Stopped by ").strip() or "user"
@@ -1006,6 +1329,8 @@ class CoderACPAgent:
             bridge.publish(
                 update_user_message(block) if entry.role == "user" else update_agent_message(block)
             )
+            if pool and entry.role == "user" and entry.item_id:
+                bridge.publish(pool_input_event(entry.item_id))
 
     @staticmethod
     def _prompt_text(prompt: list[Any]) -> str:
@@ -1025,18 +1350,37 @@ class CoderACPAgent:
             raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
         return text
 
-    @staticmethod
-    def _validate_workspace(cwd: str, additional_directories: list[str] | None) -> Path:
-        if additional_directories:
-            raise RequestError.invalid_params(
-                {"reason": "Additional directories are not supported"}
-            )
-        root = Path(cwd).expanduser()
-        if not root.is_absolute() or not root.is_dir():
-            raise RequestError.invalid_params(
-                {"cwd": cwd, "reason": "cwd must be an existing absolute directory"}
-            )
-        return root.resolve()
+
+def _trace_as(session: Session) -> None:
+    """Make the ACP session id the trace session of the session's turns.
+
+    Turns run in the session's own loop context, so the id is set there by
+    a loop hook, and also in the calling request's context. The loop's
+    context is a fresh one, so the tracing hooks (kept in a context variable
+    where tracing was enabled) are registered there too; without that the
+    turns produce no spans at all. A subagent's session has no hook and so
+    no trace session of its own yet.
+    """
+    try:
+        import nooa.tracing as tracing
+    except ImportError:
+        return
+
+    def enter() -> None:
+        tracing.set_session(session.id)
+        tracing.register_hooks_in_current_context()
+
+    session.add_loop_context_hook(enter)
+    tracing.set_session(session.id)
+
+
+def _trace_scope(session: Session) -> AbstractContextManager[object]:
+    """The session's trace session for a command run in a request's context."""
+    try:
+        from nooa.tracing import session_scope
+    except ImportError:
+        return nullcontext()
+    return session_scope(session.id)
 
 
 def _slash_invocation(text: str) -> tuple[str, str] | None:
@@ -1049,6 +1393,19 @@ def _slash_invocation(text: str) -> tuple[str, str] | None:
     if not name:
         return None
     return name, parts[1] if len(parts) == 2 else ""
+
+
+async def _discard_empty(registry: SessionRegistry, session_id: str) -> None:
+    """At shutdown, a root session the client never wrote to leaves no file.
+
+    Clients open sessions they then abandon (a picker, a restart); without
+    this the store fills with files that list nothing. Only at shutdown: a
+    client may close a fresh session and load it again by id meanwhile.
+    """
+    try:
+        await registry.delete(session_id, keep_files=False)
+    except Exception:
+        logger.warning("Session %s: could not remove its empty file", session_id, exc_info=True)
 
 
 def _load_error(session_id: str, exc: BaseException) -> BaseException:
@@ -1074,10 +1431,11 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
     return exc
 
 
-def _available_commands_update(session: Session) -> Any:
-    commands: list[CommandInfo] = session.commands()
+def _available_commands_update(commands: list[CommandInfo]) -> Any:
+    """The session's commands, and the ones this adapter runs itself (``/recover``)."""
     available: list[AvailableCommand] = []
-    for command in commands:
+    names = {command.name for command in commands}
+    for command in [*commands, *(c for c in (RECOVER,) if c.name not in names)]:
         input_spec = (
             AvailableCommandInput(UnstructuredCommandInput(hint=command.input_hint))
             if command.input_hint
@@ -1093,50 +1451,71 @@ def _available_commands_update(session: Session) -> Any:
     return update_available_commands(available)
 
 
-class _WritePipeProtocol(asyncio.BaseProtocol):
-    """Flow control for the output pipe (as ``acp.stdio`` does for stdout)."""
+async def _taken_or_settled(session: Session, item_id: str, shown: asyncio.Future[None]) -> None:
+    """Wait until Pool was told ``item_id`` was taken, or the item's outcome settles first.
 
-    def __init__(self) -> None:
-        self._loop = asyncio.get_running_loop()
-        self._paused = False
-        self._drain_waiter: asyncio.Future[None] | None = None
+    The outcome settles without the item being taken when it is withdrawn
+    (Stop), discarded, or the session closes; any of those ends the wait.
+    """
 
-    def pause_writing(self) -> None:
-        self._paused = True
-        if self._drain_waiter is None:
-            self._drain_waiter = self._loop.create_future()
+    async def settled() -> None:
+        with suppress(Exception):
+            await session.outcome(item_id)
 
-    def resume_writing(self) -> None:
-        self._paused = False
-        if self._drain_waiter is not None and not self._drain_waiter.done():
-            self._drain_waiter.set_result(None)
-        self._drain_waiter = None
-
-    async def _drain_helper(self) -> None:
-        if self._paused and self._drain_waiter is not None:
-            await self._drain_waiter
+    outcome = asyncio.ensure_future(settled())
+    try:
+        await asyncio.wait({shown, outcome}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        outcome.cancel()
+        await asyncio.gather(outcome, return_exceptions=True)
+        if shown.done() and not shown.cancelled():
+            shown.exception()  # retrieved: a stopped bridge is not this request's error
 
 
-async def _stdio_streams(
-    input_fd: int, output_fd: int
-) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """A reader on ``input_fd`` and a writer on ``output_fd`` (the reserved real stdio)."""
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader(limit=DEFAULT_STDIO_BUFFER_LIMIT_BYTES)
-    await loop.connect_read_pipe(
-        lambda: asyncio.StreamReaderProtocol(reader),
-        os.fdopen(input_fd, "rb", buffering=0, closefd=False),
+async def serve_connection(
+    agent: Any,
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    id_base: int | None = None,
+    observers: list[Callable[[Any], None]] | None = None,
+) -> None:
+    """Serve ACP for ``agent`` on one stream pair until the peer closes it.
+
+    Used on standard input and output (``serve``) and on a router's
+    socket (the worker). ``id_base`` is the first id of the requests this
+    side sends to the client (permission, elicitation, file and terminal
+    requests); a router gives each worker its own range so replies can be
+    routed by id alone.
+    """
+    # session/close is registered by the library as unstable. initialize()
+    # advertises the close capability, so without this flag the agent
+    # promises a method that answers "method not found".
+    conn = AgentSideConnection(
+        cast(Agent, agent),
+        writer,
+        reader,
+        listening=False,
+        use_unstable_protocol=True,
+        observers=list(observers or []),
     )
-    protocol = _WritePipeProtocol()
-    transport, _ = await loop.connect_write_pipe(
-        lambda: protocol, os.fdopen(output_fd, "wb", buffering=0, closefd=False)
-    )
-    return reader, asyncio.StreamWriter(transport, protocol, None, loop)
+    if id_base is not None:
+        # acp 0.12 has no option for the first request id: every
+        # agent-to-client request takes Connection._next_request_id and
+        # increments it. Seed it before listen() so no request can go out
+        # with the library's default of 0.
+        # TODO(upstream): ask agent-client-protocol for a request-id option.
+        conn._conn._next_request_id = id_base
+    try:
+        await conn.listen()
+    finally:
+        await asyncio.shield(conn.close())
 
 
 async def serve(
-    registry: SessionRegistry,
+    new_registry: Callable[[SessionStore], SessionRegistry],
     *,
+    sessions_dir: Path | None = None,
     agent_spec: str | None = None,
     model: str | None = None,
     observers: list[Callable[[Any], None]] | None = None,
@@ -1148,8 +1527,11 @@ async def serve(
     ``input_fd`` and ``output_fd`` are the descriptors frames are read from
     and written to when stdio was reserved for ACP
     (``cli.reserve_stdio_for_acp``); ``None`` uses the process's stdio.
+    ``new_registry`` and ``sessions_dir`` are as for ``CoderACPAgent``.
     """
-    adapter = CoderACPAgent(registry, agent_spec=agent_spec, model=model)
+    adapter = CoderACPAgent(
+        new_registry, sessions_dir=sessions_dir, agent_spec=agent_spec, model=model
+    )
     # ACP clients may terminate their subprocess instead of closing stdin.
     # Let normal teardown checkpoint sessions and release their file claims.
     loop = asyncio.get_running_loop()
@@ -1175,19 +1557,8 @@ async def serve(
     except (NotImplementedError, RuntimeError):
         pass  # Non-Unix event loops or an embedded server outside the main thread.
     try:
-        # session/close is registered by the router as unstable. initialize()
-        # advertises the close capability, so without this flag the agent
-        # promises a method that answers "method not found".
-        streams: tuple[Any, Any] = (None, None)
-        if input_fd is not None and output_fd is not None:
-            reader, writer = await _stdio_streams(input_fd, output_fd)
-            streams = (writer, reader)
-        await run_agent(
-            cast(Agent, adapter),
-            *streams,
-            use_unstable_protocol=True,
-            observers=list(observers or []),
-        )
+        reader, writer = await open_stdio(input_fd, output_fd)
+        await serve_connection(adapter, reader, writer, observers=observers)
     except asyncio.CancelledError:
         if not terminating:
             raise
@@ -1201,4 +1572,12 @@ async def serve(
                 signal.signal(signal.SIGTERM, previous_sigterm)
 
 
-__all__ = ["CoderACPAgent", "initialize_response", "serve"]
+__all__ = [
+    "INJECT_CAPABILITY",
+    "CoderACPAgent",
+    "initialize_response",
+    "list_sessions",
+    "open_stdio",
+    "serve",
+    "serve_connection",
+]

@@ -13,6 +13,8 @@ dependencies = [
     "click>=8.1.0",
     "pydantic>=2.5.0",
     "pyyaml>=6.0",
+    # nooa coder --http (ACP over WebSocket).
+    "websockets>=14",
 ]
 
 [project.entry-points."nooa_cli.commands"]

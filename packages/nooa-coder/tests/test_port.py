@@ -34,14 +34,14 @@ def _turns(registry, session_id):
 
 async def test_the_port_is_installed_visible_and_not_snapshotted(registry, root_options, caplog):
     root = await registry.create(root_options)
-    port = root.agent.session
+    port = root._agent.session
     assert isinstance(port, SessionPort)
     assert (port.id, port.depth, port.max_depth) == (root.id, 0, root_options.max_depth)
-    assert "delegates" in root.agent.queue_manager.channels()
-    rendered = doc(root.agent)
+    assert "delegates" in root._agent.queue_manager.channels()
+    rendered = doc(root._agent)
     assert "delegate" in rendered and "Create a child session" in rendered
     with caplog.at_level(logging.WARNING):
-        snapshot = snapshot_to_json(root.agent)
+        snapshot = snapshot_to_json(root._agent)
     assert "session" not in snapshot["attributes"]
     assert "session" not in caplog.text
 
@@ -68,7 +68,7 @@ async def test_delegate_and_wait_returns_the_childs_done(registry, root_options,
     await until(lambda: registry.get(child_info.id) is None)
     await asyncio.sleep(0.05)
     assert len(_turns(registry, root.id)) == 1
-    assert root.agent.queue_manager.get_channel("delegates").qsize() == 0
+    assert root._agent.queue_manager.get_channel("delegates").qsize() == 0
 
 
 async def test_a_pydantic_result_arrives_as_its_own_class(registry, root_options, models):
@@ -88,7 +88,7 @@ async def test_a_pydantic_result_arrives_as_its_own_class(registry, root_options
     ]
     root = await registry.create(root_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="TaskResult")
-    assert root.agent.v.result == TaskResult(
+    assert root._agent.v.result == TaskResult(
         solution_description="patched", evidence="tests pass", how_to_verify="run tests"
     )
 
@@ -162,7 +162,7 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
     root = await registry.create(root_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="second: SECOND-MESSAGE")
-    assert root.agent.v.schema_title == "Answer"
+    assert root._agent.v.schema_title == "Answer"
     [child_options] = [o for o in models.built if o.name == "Helper"]
     assert (child_options.turn_method, child_options.retain) == ("handle", True)
     [helper] = registry.children(root.id)
@@ -206,7 +206,7 @@ async def test_a_child_ref_kept_in_vars_works_after_a_reload(
     fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=later)
     try:
         loaded = await fresh.load(root.id)
-        assert isinstance(loaded.agent.v.helper, ChildRef)
+        assert isinstance(loaded._agent.v.helper, ChildRef)
         outcome = await asyncio.wait_for(loaded.prompt("ping the helper"), TIMEOUT)
         assert isinstance(outcome, Done) and "PING" in outcome.explanation
     finally:
@@ -229,7 +229,7 @@ async def test_closing_a_child_fails_the_parents_wait(registry, root_options, mo
     root = await registry.create(root_options)
     pending = asyncio.ensure_future(root.prompt("go"))
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    await registry.close(root.agent.v.child_id)
+    await registry.close(root._agent.v.child_id)
     outcome = await asyncio.wait_for(pending, TIMEOUT)
     assert isinstance(outcome, Done) and outcome.explanation.startswith("failed:")
 
@@ -250,7 +250,7 @@ async def test_children_rename_and_usage(registry, root_options, models):
     root = await registry.create(root_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="A")
     assert root.info.title == "Renamed by the agent"
-    totals = root.agent.session.usage()
+    totals = root._agent.session.usage()
     assert (totals.input_tokens, totals.attributed_input_tokens) == (1, 7)
     assert (totals.attributed_output_tokens, totals.attributed_cost_usd) == (3, 0.25)
 
@@ -318,7 +318,7 @@ async def test_wait_takes_a_result_that_is_already_queued(registry, root_options
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="quick result")
     await asyncio.sleep(0.05)
     assert len(_turns(registry, root.id)) == 1
-    assert root.agent.queue_manager.get_channel("delegates").qsize() == 0
+    assert root._agent.queue_manager.get_channel("delegates").qsize() == 0
     assert len(registry.store.load_rows(root.id, frozenset({"ItemWithdrawn"}))) == 1
 
 
@@ -370,7 +370,7 @@ async def test_a_child_cancelled_during_wait_fails_the_wait(registry, root_optio
     root = await registry.create(root_options)
     pending = asyncio.ensure_future(root.prompt("go"))
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    assert await registry.get(root.agent.v.cid).cancel(by="user") is True
+    assert await registry.get(root._agent.v.cid).cancel(by="user") is True
     assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="failed: cancelled by user")
 
 
@@ -391,7 +391,7 @@ async def test_a_background_child_closed_mid_turn_wakes_the_parent(registry, roo
     root = await registry.create(root_options)
     pending = asyncio.ensure_future(root.prompt("go"))
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    await registry.close(root.agent.v.cid)
+    await registry.close(root._agent.v.cid)
     assert await asyncio.wait_for(pending, TIMEOUT) == Done(
         explanation="ChildFailed: cancelled by host"
     )
@@ -401,13 +401,13 @@ async def test_the_port_can_be_hidden_from_the_model(registry, root_options, mak
     hidden = await registry.create(
         root_options.model_copy(update={"agent_spec": "coder_test_agents:HiddenPortAgent"})
     )
-    assert isinstance(hidden.agent.session, SessionPort)
-    assert "Create a child session" not in doc(hidden.agent)
+    assert isinstance(hidden._agent.session, SessionPort)
+    assert "Create a child session" not in doc(hidden._agent)
 
     session, _ = make_session(start=False)
-    install_port(session.agent, session, registry, visible=False)
-    assert "Create a child session" not in doc(session.agent)
-    assert isinstance(session.agent.session, SessionPort)
+    install_port(session._agent, session, registry, visible=False)
+    assert "Create a child session" not in doc(session._agent)
+    assert isinstance(session._agent.session, SessionPort)
 
 
 async def test_closed_children_are_on_disk_everywhere(registry, root_options, models):
@@ -423,7 +423,7 @@ async def test_closed_children_are_on_disk_everywhere(registry, root_options, mo
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     [info] = registry.children(root.id)
     await until(lambda: registry.get(info.id) is None)
-    [ref] = root.agent.session.children()
+    [ref] = root._agent.session.children()
     assert ref.status == "on_disk" == registry.children(root.id)[0].status
     assert registry._ref_from_disk(info.id).status == "on_disk"
 
@@ -440,7 +440,7 @@ async def _two_roots_and_a_child(registry, root_options):
 
 async def test_a_session_cannot_act_on_another_sessions_live_child(registry, root_options):
     root, other, child = await _two_roots_and_a_child(registry, root_options)
-    port = other.agent.session
+    port = other._agent.session
     with pytest.raises(ChildFailedError, match="not a child"):
         await port.send_child(child.id, "hijack", channel="user_messages")
     with pytest.raises(ChildFailedError, match="not a child"):
@@ -455,8 +455,8 @@ async def test_a_session_cannot_act_on_another_sessions_live_child(registry, roo
     assert registry.store.load_rows(child.id, frozenset({"ItemAdmitted"})) == []
     assert registry._waiters == {}
     # The real parent still can.
-    assert root.agent.session.child_info(child.id).id == child.id
-    await root.agent.session.close_child(child.id)
+    assert root._agent.session.child_info(child.id).id == child.id
+    await root._agent.session.close_child(child.id)
     assert registry.get(child.id) is None
 
 
@@ -467,8 +467,8 @@ async def test_a_wrong_owner_cannot_take_the_parents_queued_result(registry, roo
     with pytest.raises(ChildFailedError, match="not a child"):
         registry.take_queued_result(other, child.id)
     assert list(registry._queued) == [(root.id, child.id)]
-    assert root.agent.queue_manager.get_channel("delegates").qsize() == 1
-    assert await root.agent.session.wait_child(child.id) == Done(explanation="for root")
+    assert root._agent.queue_manager.get_channel("delegates").qsize() == 1
+    assert await root._agent.session.wait_child(child.id) == Done(explanation="for root")
 
 
 async def test_waiters_are_per_parent(registry, root_options):
@@ -483,9 +483,9 @@ async def test_a_child_ref_is_bound_to_its_parent(registry, root_options):
     root, other, child = await _two_roots_and_a_child(registry, root_options)
     ref = registry.child_ref(child)
     assert ref.parent_id == root.id
-    [listed] = root.agent.session.children()
+    [listed] = root._agent.session.children()
     assert listed.parent_id == root.id
-    token = current_port.set(other.agent.session)
+    token = current_port.set(other._agent.session)
     try:
         with pytest.raises(ChildFailedError, match="belongs to"):
             await ref.send("hijack")
@@ -507,7 +507,7 @@ async def test_a_result_arrives_after_the_agent_removed_delegates(registry, root
     root = await registry.create(root_options)
     ended = []
     root.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
-    root.agent.queue_manager.remove_channel("delegates")
+    root._agent.queue_manager.remove_channel("delegates")
     child = await registry.create(
         root.options.inherit(name="Kid"), parent_id=root.id, initial_items=[("user_messages", "go")]
     )

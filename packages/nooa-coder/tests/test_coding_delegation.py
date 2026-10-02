@@ -59,7 +59,7 @@ async def test_delegate_returns_the_childs_done_with_its_task_result(
     root = await coder_registry.create(coder_options)
     outcome = await asyncio.wait_for(root.prompt("fix it"), TIMEOUT)
     assert outcome == Done(explanation="REPORT: off-by-one fixed")
-    assert isinstance(root.agent.v.result, TaskResult)
+    assert isinstance(root._agent.v.result, TaskResult)
     assert "CHILD-PROMPT: fix the parser" in _messages(coder_models, "Fix parser")
     # The child is a session of its own, with its own record.
     [child] = coder_registry.children(root.id)
@@ -88,7 +88,7 @@ async def test_a_spawned_childs_result_arrives_on_delegates_and_wakes_the_parent
     root = await coder_registry.create(coder_options)
     outcome = await asyncio.wait_for(root.prompt("review"), TIMEOUT)
     assert outcome == Done(explanation="review: REPORT: off-by-one fixed")
-    assert [ref.name for ref in root.agent.children()] == ["Review"]
+    assert [ref.name for ref in root._agent.children()] == ["Review"]
 
 
 CHILD_DICT_RESULT = (
@@ -165,7 +165,7 @@ async def test_a_todo_objective_goes_as_text_and_gets_the_report(
     prompt = _messages(coder_models, "Parser")
     for text in ("Fix the parser", "parse() drops the last line", "suspect the loop bound"):
         assert text in prompt
-    [todo] = root.agent.todo.list_todos()
+    [todo] = root._agent.todo.list_todos()
     assert [c.body for c in todo.comments][0] == "suspect the loop bound"
     assert "REPORT: off-by-one fixed" in todo.comments[-1].body
 

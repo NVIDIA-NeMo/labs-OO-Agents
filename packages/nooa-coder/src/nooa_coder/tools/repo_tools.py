@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
-from nooa.tools._bash_session import BashSession
+from nooa.tools import BashSession
 from nooa.tools.shell_tools import Match
 
 logger = logging.getLogger(__name__)
@@ -516,8 +516,11 @@ class RepoTools(Skill):
         r = await self.repo.symbols("src/", query="Handler")
         await self.shell.replace(r[0], new_code)
 
-    ``root`` sets the default base for relative paths and result display; it
-    is not a security boundary. Both an absolute ``path=`` argument and a
+    ``cwd`` is the base for relative paths: the wired session's current
+    directory, so a ``cd`` through ``self.shell`` moves these tools too
+    (``root`` without a session). ``root`` is the repository root: where
+    whole-tree searches start and what result paths are shown relative
+    to. Neither is a security boundary. Both an absolute ``path=`` argument and a
     shared ``session`` give the same filesystem access ``ShellTools.run()``
     already has in that session (host, or a Gym-seeded sandbox). Callers that
     need to keep an agent inside a tree must not wire a ``session`` (or
@@ -543,16 +546,26 @@ class RepoTools(Skill):
 
     def __repr__(self) -> str:
         session = "shared" if self._session is not None else "none"
-        return f"RepoTools(root={str(self._root)!r}, session={session}, has_rg={self._has_rg!r})"
+        return (
+            f"RepoTools(root={str(self._root)!r}, cwd={str(self.cwd)!r}, "
+            f"session={session}, has_rg={self._has_rg!r})"
+        )
 
     @property
     @hidden
     def root(self) -> Path:
-        """Default base for relative paths and result display.
+        """The repository root: start of whole-tree searches and base for result display.
 
         Not a security boundary — see the class docstring.
         """
         return self._root
+
+    @property
+    @hidden
+    def cwd(self) -> Path:
+        """Base for relative paths: the shared session's current directory, else ``root``."""
+        cwd = getattr(self._session, "cwd", None) if self._session is not None else None
+        return Path(cwd) if cwd else self._root
 
     @property
     @hidden
@@ -576,33 +589,47 @@ class RepoTools(Skill):
         path: Annotated[str, spec(description="File or directory to inspect")] = ".",
         query: Annotated[str, spec(description="Optional symbol-name substring filter")] = "",
         max_results: Annotated[int, spec(description="Maximum result lines")] = 50,
+        cwd: Annotated[
+            str | Path | None,
+            spec(
+                description=(
+                    "Directory relative paths resolve against for this call; "
+                    "defaults to the shell's current directory"
+                )
+            ),
+        ] = None,
     ) -> RepoResult:
-        """Find definitions under a file or directory.
+        """Find definitions under a file or directory; ``cwd`` defaults to the shell's current directory.
 
         Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
+        ``cwd`` (absolute, or relative to the shell's directory) does not move
+        the shell; results are still shown relative to ``root``.
         """
-        resolved = self._resolve(path)
+        base = self._base(cwd)
+        resolved = self._resolve(path, base)
         if not await self._path_exists(resolved):
             diagnostic = PathResolutionError(
                 "symbols",
                 path,
                 resolved,
-                base_name="self.repo.root",
-                base_path=self._root,
+                base_name="cwd" if cwd is not None else "self.repo.cwd",
+                base_path=base,
                 reason="not_found",
             )
             return RepoResult(query=path, lines=[], diagnostic=diagnostic)
         query_lower = query.lower()
 
         if await self._path_is_file(resolved):
-            file_result = await self._filemap(path, max_symbols=max_results if not query else 500)
+            file_result = await self._filemap(
+                str(resolved), max_symbols=max_results if not query else 500
+            )
             if file_result.diagnostic is not None:
                 diagnostic = PathResolutionError(
                     "symbols",
                     path,
                     resolved,
-                    base_name="self.repo.root",
-                    base_path=self._root,
+                    base_name="cwd" if cwd is not None else "self.repo.cwd",
+                    base_path=base,
                     reason="unreadable",
                     detail=file_result.diagnostic,
                 )
@@ -622,7 +649,9 @@ class RepoTools(Skill):
             )
 
         if query:
-            symbol_result = await self._search_symbol(query, path=path, max_results=max_results)
+            symbol_result = await self._search_symbol(
+                query, path=str(resolved), max_results=max_results
+            )
             return RepoResult(
                 query=query,
                 lines=symbol_result.matches,
@@ -631,7 +660,7 @@ class RepoTools(Skill):
                 truncated=symbol_result.truncated,
             )
 
-        map_result = await self._repo_map(paths=[path], max_files=max_results)
+        map_result = await self._repo_map(paths=[str(resolved)], max_files=max_results)
         anchors = map_result.anchors[:max_results]
         return RepoResult(
             query=path,
@@ -646,23 +675,35 @@ class RepoTools(Skill):
         name: Annotated[str, spec(description="Symbol or qualified name to find references for")],
         path: Annotated[str, spec(description="File or directory to search")] = ".",
         max_results: Annotated[int, spec(description="Maximum result lines")] = 50,
+        cwd: Annotated[
+            str | Path | None,
+            spec(
+                description=(
+                    "Directory relative paths resolve against for this call; "
+                    "defaults to the shell's current directory"
+                )
+            ),
+        ] = None,
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
         Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
+        ``cwd`` (absolute, or relative to the shell's directory) does not move
+        the shell; results are still shown relative to ``root``.
         """
-        resolved = self._resolve(path)
+        base = self._base(cwd)
+        resolved = self._resolve(path, base)
         if not await self._path_exists(resolved):
             diagnostic = PathResolutionError(
                 "refs",
                 path,
                 resolved,
-                base_name="self.repo.root",
-                base_path=self._root,
+                base_name="cwd" if cwd is not None else "self.repo.cwd",
+                base_path=base,
                 reason="not_found",
             )
             return RepoResult(query=name, lines=[], diagnostic=diagnostic)
-        result = await self._search_references(name, path=path, max_results=max_results)
+        result = await self._search_references(name, path=str(resolved), max_results=max_results)
         return RepoResult(
             query=name,
             lines=result.matches,
@@ -750,7 +791,7 @@ class RepoTools(Skill):
             return None
         fpath = Path(path_text)
         if not fpath.is_absolute():
-            fpath = self._root / fpath
+            fpath = self.cwd / fpath
         line_no = int(m.group(1))
         if cache is None:
             lines = await self._read_lines(fpath)
@@ -784,7 +825,7 @@ class RepoTools(Skill):
         Shows definitions but not their bodies.
 
         Args:
-            path: File path (relative to repo root).
+            path: File path (relative to ``cwd``, the shell's directory).
             max_symbols: Maximum symbols to show (default: 200).
 
         Returns:
@@ -848,7 +889,7 @@ class RepoTools(Skill):
         Files are sorted by relevance (recently modified first).
 
         Args:
-            paths: Specific directories to map (default: repo root).
+            paths: Specific directories to map (default: ``cwd``).
             depth: Directory depth to scan (default: 3).
             max_files: Maximum files to include (default: 50).
             max_symbols_per_file: Max symbols per file in the map (default: 20).
@@ -965,7 +1006,7 @@ class RepoTools(Skill):
 
         Args:
             name: Symbol name or partial name to search for.
-            path: Directory to search (default: repo root).
+            path: Directory to search (default: ``cwd``).
             max_results: Maximum results (default: 50).
 
         Returns:
@@ -1061,7 +1102,7 @@ class RepoTools(Skill):
 
         Args:
             name: Symbol name or qualified name (e.g. 'TraceExplorer.from_file').
-            path: Directory to search (default: repo root).
+            path: Directory to search (default: ``cwd``).
             max_results: Maximum results (default: 50).
 
         Returns:
@@ -1216,8 +1257,15 @@ class RepoTools(Skill):
             yield fpath
             count += 1
 
-    def _resolve(self, path: str) -> Path:
-        """Resolve a path relative to the repo root.
+    def _base(self, cwd: str | Path | None) -> Path:
+        """The base for one call: ``cwd`` (relative to the shell's directory), else ``cwd``."""
+        if cwd is None:
+            return self.cwd
+        base = Path(cwd)
+        return base if base.is_absolute() else self.cwd / base
+
+    def _resolve(self, path: str, base: Path | None = None) -> Path:
+        """Resolve a path relative to ``cwd`` (the shell's current directory).
 
         An absolute ``path`` (or one that walks out via ``..``) is returned
         as given, not clamped to ``self._root`` — intentional, see the class
@@ -1225,7 +1273,7 @@ class RepoTools(Skill):
         session's ``ShellTools.run()``, no narrower.
         """
         p = Path(path)
-        return p if p.is_absolute() else self._root / p
+        return p if p.is_absolute() else (base or self.cwd) / p
 
 
 if _MATCH_HAS_EDITABLE:

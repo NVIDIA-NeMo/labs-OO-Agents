@@ -25,11 +25,11 @@ def served(monkeypatch):
 def requested(monkeypatch):
     calls: list = []
 
-    def fake_client(name, **kwargs):
+    def fake_client(name, workspace, **kwargs):
         calls.append((name, kwargs))
         return name
 
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_client)
+    monkeypatch.setattr("nooa_coder.workspace.models.workspace_llm_client", fake_client)
     return calls
 
 
@@ -68,6 +68,16 @@ def test_client_type_and_the_nvidia_key_reach_the_client(monkeypatch, served, re
     ]
 
 
+def test_the_factory_reads_the_session_workspace_configuration(served, tmp_path, monkeypatch):
+    monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)
+    (tmp_path / ".nooa").mkdir()
+    (tmp_path / ".nooa" / "llm_config.yaml").write_text(
+        "models:\n  mine:\n    model_name: openai/mine-model\n"
+    )
+    assert _invoke(["--model", "m"]).exit_code == 0
+    assert served["llm_factory"]("mine", tmp_path).model == "openai/mine-model"
+
+
 def test_a_relative_agent_file_is_resolved_where_the_command_runs(served, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert _invoke(["--model", "m", "--agent", "agents/my_agent.py:MyAgent"]).exit_code == 0
@@ -76,17 +86,7 @@ def test_a_relative_agent_file_is_resolved_where_the_command_runs(served, tmp_pa
     assert served["agent_spec"] == "pkg.module:Agent"
 
 
-def test_agent_and_legacy_agent_exclude_each_other(served):
-    result = _invoke(["--model", "m", "--agent", "pkg:A", "--legacy-agent"])
-    assert result.exit_code == 2
-    assert "--legacy-agent" in result.output
-
-
-def test_legacy_agent_selects_the_coding_agent(served):
-    from nooa_coder.coding.identity import CODING_AGENT
-
-    assert _invoke(["--model", "m", "--legacy-agent"]).exit_code == 0
-    assert served["agent_spec"] == CODING_AGENT
+def test_without_agent_the_workspace_setting_decides(served):
     assert _invoke(["--model", "m"]).exit_code == 0
     assert served["agent_spec"] is None  # the workspace setting, else the coding agent
 
@@ -98,12 +98,6 @@ def test_sessions_dir_and_tee_are_passed_on(served, tmp_path):
     assert result.exit_code == 0, result.output
     assert served["sessions_dir"] == tmp_path / "s"
     assert served["tee"] == tmp_path / "t.jsonl"
-
-
-def test_worker_mode_is_not_available_yet(served):
-    result = _invoke(["--model", "m", "--worker", "/tmp/socket"])
-    assert result.exit_code == 2
-    assert "--worker" in result.output
 
 
 def test_the_command_is_the_nooa_coder_plugin():

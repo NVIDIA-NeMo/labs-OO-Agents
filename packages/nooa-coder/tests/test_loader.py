@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Loading agent classes from a module:Class spec, and the default agent factory."""
+"""Loading agent classes from a module:Class spec, and building one for a session."""
 
 import pytest
 from coder_test_agents import EchoAgent
-from nooa_coder.session.loader import AgentSpecError, default_agent_factory, load_agent_class
+from nooa_coder.coding.factory import create_session_agent
+from nooa_coder.session.loader import AgentSpecError, load_agent_class
 from nooa_coder.session.options import SessionOptions
 
 from nooa.storage import InMemoryStorageManager
@@ -31,11 +32,11 @@ def test_bad_specs_are_rejected(spec):
         load_agent_class(spec)
 
 
-def test_default_factory_passes_storage_and_llm(tmp_path):
+def test_the_session_factory_passes_storage_and_llm(tmp_path):
     storage = InMemoryStorageManager()
     llm = FakeLLMClient()
     options = SessionOptions(workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent", llm=llm)
-    agent = default_agent_factory(options, storage)
+    agent = create_session_agent(options, storage)
     assert isinstance(agent, EchoAgent)
     assert agent.llm is llm
     assert agent._storage is storage

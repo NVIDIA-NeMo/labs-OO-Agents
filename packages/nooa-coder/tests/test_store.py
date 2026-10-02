@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from nooa_coder.session.items import SessionInfo, TurnCancelled, Usage
-from nooa_coder.session.store import SessionNotFoundError, SessionStore
+from nooa_coder.session.store import SessionNotFoundError, SessionStore, sessions_root
 
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
@@ -28,11 +28,23 @@ def test_store_returns_the_single_session_info_model(sessions_dir):
     assert [i.id for i in store.list()] == [session_id]
 
 
-def test_default_directory_is_the_user_level_sessions_dir(_user_dir):
-    store = SessionStore()
-    assert store.root == _user_dir / "sessions"
-    with store.create() as handle:
-        assert handle.path.parent == _user_dir / "sessions"
+def test_sessions_live_in_the_workspace_by_default(tmp_path):
+    assert sessions_root(tmp_path) == tmp_path / ".nooa" / "sessions"
+    store = SessionStore(sessions_root(tmp_path))
+    with store.create(workspace=str(tmp_path)) as handle:
+        assert handle.path.parent == tmp_path / ".nooa" / "sessions"
+
+
+def test_nooa_sessions_dir_names_one_shared_directory(tmp_path, monkeypatch):
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("NOOA_SESSIONS_DIR", str(shared))
+    assert sessions_root(tmp_path / "one") == shared
+    assert sessions_root(tmp_path / "two") == shared
+
+
+def test_an_explicit_directory_wins_over_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOOA_SESSIONS_DIR", str(tmp_path / "shared"))
+    assert sessions_root(tmp_path, tmp_path / "given") == tmp_path / "given"
 
 
 def test_workspace_is_recorded_and_filters_the_listing(sessions_dir, tmp_path):
@@ -265,3 +277,178 @@ def test_timestamps_do_not_depend_on_the_readers_time_zone(sessions_dir, local_t
     assert info.created_at == moved.created_at == pytest.approx(created, abs=1e-3)
     assert entry.timestamp == moved_entry.timestamp
     assert before - 1 <= moved_entry.timestamp <= after + 1
+
+
+def test_create_records_the_workspace_as_a_resolved_absolute_path(tmp_path, monkeypatch):
+    from nooa_coder.session.store import SessionStore, sessions_root
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    store = SessionStore(sessions_root(workspace))
+    with store.create(workspace="../ws") as handle:
+        pass
+    assert store.get(handle.id).workspace == str(workspace.resolve())
+
+
+def _claim(store, session_id, pid):
+    claim_dir = store.path_for(session_id).with_suffix(".active")
+    claim_dir.mkdir()
+    (claim_dir / "owner-abc.json").write_text(json.dumps({"token": "abc", "pid": pid}))
+
+
+def _dead_pid():
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid  # finished and reaped: no such process
+
+
+def test_a_tui_claim_with_a_live_process_marks_the_session_active(tmp_path):
+    """The TUI claims a session through <id>.active/owner-*.json, not the file lock."""
+    import os
+
+    from nooa_coder.session.store import SessionStore
+
+    from nooa.storage.sqlite import SessionAlreadyActiveError
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    assert store.is_active(handle.id) is False
+    _claim(store, handle.id, os.getpid())
+    assert store.is_active(handle.id) is True
+    assert store.claim_owner(handle.id) == os.getpid()
+    with pytest.raises(SessionAlreadyActiveError) as excinfo:
+        store.open(handle.id)
+    assert excinfo.value.owner_pid == os.getpid()
+
+
+def test_a_tui_claim_whose_process_is_gone_does_not_block(tmp_path):
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    _claim(store, handle.id, _dead_pid())
+    assert store.is_active(handle.id) is False
+    with store.open(handle.id):
+        pass
+
+
+def test_the_lock_file_names_the_owner_and_is_blank_after_a_clean_close(tmp_path):
+    """Another machine sharing the directory cannot see the kernel lock; the record it can."""
+    import os
+    import socket
+
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    handle = store.create(workspace=str(tmp_path))
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    assert lock.read_text() == f"{os.getpid()} {socket.gethostname()}"
+    handle.close()
+    assert lock.read_text() == ""
+    assert store.is_active(handle.id) is False
+
+
+def test_a_session_held_on_another_machine_is_active_and_cannot_be_opened(tmp_path):
+    from nooa_coder.session.store import SessionStore
+
+    from nooa.storage.sqlite import SessionAlreadyActiveError
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    lock.write_text("4242 other-box")
+    assert store.foreign_owner(handle.id) == (4242, "other-box")
+    assert store.is_active(handle.id) is True
+    with pytest.raises(SessionAlreadyActiveError) as excinfo:
+        store.open(handle.id)
+    assert excinfo.value.owner_pid == 4242
+    assert "other-box" in str(excinfo.value) and str(lock) in str(excinfo.value)
+    # Reclaimed: the operator emptied the file.
+    lock.write_text("")
+    assert store.is_active(handle.id) is False
+    with store.open(handle.id):
+        pass
+
+
+def test_a_stale_record_from_this_machine_is_left_to_the_kernel_lock(tmp_path):
+    """A crash here leaves our own hostname behind; nothing holds the lock, so it is free."""
+    import socket
+
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    lock.write_text(f"999999 {socket.gethostname()}")
+    assert store.foreign_owner(handle.id) is None
+    assert store.is_active(handle.id) is False
+    with store.open(handle.id):
+        pass
+
+
+def test_session_files_use_the_rollback_journal_and_readers_leave_no_side_files(tmp_path):
+    import sqlite3
+
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    path = store.path_for(handle.id)
+    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+        assert db.execute("pragma journal_mode").fetchone()[0] == "delete"
+    # A file an older build left in WAL mode is converted when opened.
+    with sqlite3.connect(path) as db:
+        db.execute("pragma journal_mode=wal")
+    with store.open(handle.id):
+        pass
+    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+        assert db.execute("pragma journal_mode").fetchone()[0] == "delete"
+    # Listing and transcript reads create no -shm/-wal sidecars (rollback journal).
+    store.list()
+    store.load_transcript(handle.id)
+    assert not path.with_name(path.name + "-shm").exists()
+    assert not path.with_name(path.name + "-wal").exists()
+
+
+def test_the_liveness_probe_does_not_rewrite_the_lock_record(tmp_path):
+    """Checking whether a session is active must not make the checker look like the owner."""
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    handle = store.create(workspace=str(tmp_path))
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    record = lock.read_text()
+    assert record.split()[0].isdigit() and len(record.split()) == 2
+    assert store.is_active(handle.id) is True
+    assert lock.read_text() == record
+    handle.close()
+    assert store.is_active(handle.id) is False
+    assert lock.read_text() == ""
+
+
+def test_a_file_in_use_on_another_machine_is_not_read_when_listing(tmp_path, monkeypatch):
+    """Locks do not cross a shared mount, so such a file may be mid-write: skip it unread."""
+    from nooa_coder.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    store.path_for(handle.id).with_suffix(".lock").write_text("4242 other-box")
+    original = SessionStore._read_info
+
+    def guard(self, path):
+        if path.stem == handle.id:
+            raise AssertionError("a foreign-owned file must not be read")
+        return original(self, path)
+
+    monkeypatch.setattr(SessionStore, "_read_info", guard)
+    assert store.list() == []

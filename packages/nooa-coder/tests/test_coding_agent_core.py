@@ -385,3 +385,176 @@ def test_the_handle_prompt_names_every_input_channel():
         for channel in ("user_messages", "system_messages", "slash_commands", "delegates"):
             assert f'"{channel}"' in text, (cls.__name__, channel)
     assert "SessionInfo" not in (CodingAgent.get_summarization_status.__doc__ or "")
+
+
+async def test_cd_moves_the_repo_tools_with_the_shell(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        await agent.shell.run("cd sub")
+        assert agent.shell.cwd == sub.resolve()
+        assert agent.repo.cwd == agent.shell.cwd
+        assert agent.repo.root == tmp_path.resolve()
+        result = await agent.repo.symbols("x.py")
+        assert result.diagnostic is None
+        assert "only_in_sub" in str(result)
+        assert f"cwd={str(sub.resolve())!r}" in repr(agent.repo)
+        assert f"root={str(tmp_path.resolve())!r}" in repr(agent.repo)
+    finally:
+        await agent.aclose()
+
+
+async def test_the_state_block_shows_the_shell_directory_and_the_repo_root(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "process-cwd"
+    elsewhere.mkdir()
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=repo)
+    try:
+        await agent.shell.run("cd pkg")
+        rendered = agent._coding_state_context()
+        assert str((repo / "pkg").resolve()) in rendered
+        assert f"Repository root (the boundary for repo searches): {repo.resolve()}" in rendered
+        assert str(elsewhere) not in rendered
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("method", ["handle", "handle_batch"])
+async def test_the_turn_prompt_says_locals_last_one_call(tmp_path, method):
+    from nooa import build_prompt_data
+    from nooa.prompts import render_prompt_data
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        data = await build_prompt_data(getattr(agent, method), {"user_messages": ["hi"]})
+        rendered = " ".join(render_prompt_data(data).split())
+        assert (
+            "Python locals live for one method call; when the call returns they are gone. "
+            "Anything you need later goes in ``self.v`` (durable, snapshot-backed) or the todo "
+            "list. Do not rely on a variable from an earlier call."
+        ) in rendered
+    finally:
+        await agent.aclose()
+
+
+async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
+    (tmp_path / "caller.py").write_text("from sub.x import only_in_sub\nonly_in_sub()\n")
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        relative = await agent.repo.symbols("x.py", cwd="sub")
+        assert relative.diagnostic is None and "only_in_sub" in str(relative)
+        assert "sub/x.py" in str(relative)  # still shown relative to the root
+        absolute = await agent.repo.symbols("x.py", cwd=str(sub))
+        assert "only_in_sub" in str(absolute)
+        assert agent.shell.cwd == tmp_path.resolve()  # the shell did not move
+        assert agent.repo.cwd == tmp_path.resolve()
+        missing = await agent.repo.symbols("x.py")
+        assert missing.diagnostic is not None
+        refs = await agent.repo.refs("only_in_sub", cwd=str(tmp_path))
+        assert "caller.py" in str(refs)
+        refs_sub = await agent.repo.refs("only_in_sub", ".", cwd="sub")
+        assert "caller.py" not in str(refs_sub)
+    finally:
+        await agent.aclose()
+
+
+def test_the_repo_tool_docs_offer_cwd():
+    from nooa_coder.tools.repo_tools import RepoTools
+
+    from nooa.agentdoc import doc
+
+    rendered = str(doc(RepoTools, concise=True))
+    assert rendered.count("cwd") >= 2
+    assert "defaults to the shell's current directory" in rendered
+
+
+def test_context_block_helpers_are_not_traced():
+    """Evaluating a dynamic context block is prompt rendering, not agent work: no span."""
+    assert getattr(CodingAgent._coding_state_context, "_no_trace", False) is True
+
+
+@pytest.mark.parametrize("method", ["handle", "handle_batch"])
+def test_the_turn_methods_run_on_the_single_tool_strategy(method):
+    from nooa.strategies import CodeActV2
+
+    assert isinstance(getattr(CodingAgent, method)._plan_strategy, CodeActV2)
+    assert not isinstance(CodingAgent.name_session._plan_strategy, CodeActV2)
+
+
+async def _first_call_messages(tmp_path, method: str) -> list[dict]:
+    """The messages of the first model call of a ``method`` turn."""
+    from test_experimental_agent import python_cell
+
+    code = (
+        "return_result(Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c')))"
+    )
+    llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    try:
+        await getattr(agent, method)({"user_messages": ["hi"]})
+    finally:
+        await agent.aclose()
+    return llm.calls[0].messages
+
+
+@pytest.mark.parametrize("method", ["handle", "handle_batch"])
+async def test_the_turn_prompt_has_cell_state_and_no_state_dump(tmp_path, method):
+    messages = await _first_call_messages(tmp_path, method)
+    rendered = "\n".join(str(m.get("content", "")) for m in messages)
+    assert "<python_cell_state" in rendered
+    assert "<state " not in rendered and "<state>" not in rendered
+    # The stable agent keeps the context-usage block; it drives compaction.
+    assert "<context_usage" in rendered
+
+
+async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
+    """Stable tool docs sit in the leading system message, not the trailing context."""
+    messages = await _first_call_messages(tmp_path, "handle")
+    assert messages[0]["role"] == "system"
+    assert "<python_cell_tools>" in str(messages[0]["content"])
+    envelope = str(messages[-1]["content"])
+    assert envelope.lstrip().startswith("<context>")
+    assert "<python_cell_tools" not in envelope
+
+
+class _CallRecorder:
+    """Instrumentation hooks that record which agent methods open a span."""
+
+    def __init__(self):
+        self.methods: list[str] = []
+
+    def before_agent_call(self, agent, method_name, *args, **kwargs):
+        self.methods.append(method_name)
+        return {}
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: {}
+
+
+def test_host_reads_record_no_span(tmp_path):
+    """``plan()`` and ``get_summarization_status()`` are host reads, not agent work."""
+    from nooa.runtime.hooks import get_hooks, set_hooks
+
+    class ProbedAgent(CodingAgent):
+        def probe(self) -> int:
+            return 1
+
+    agent = ProbedAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    recorder = _CallRecorder()
+    previous = get_hooks()
+    set_hooks(recorder)
+    try:
+        agent.probe()  # a traced method, so the recorder is known to work
+        assert agent.plan() == []
+        agent.get_summarization_status()
+    finally:
+        set_hooks(previous)
+    assert recorder.methods == ["probe"]

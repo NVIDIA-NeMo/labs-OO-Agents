@@ -184,6 +184,11 @@ class SessionPort:
         await self._registry.close_child(self._session, child_id)
 
     @hidden
+    def info(self) -> SessionInfo:
+        """This session's metadata, with its live status."""
+        return self._registry.live_info(self._session)
+
+    @hidden
     def child_info(self, child_id: str) -> SessionInfo:
         """A child's metadata."""
         self._registry.check_owner(self._session, child_id)
@@ -224,6 +229,5 @@ def install_port(
         agent.queue_manager.queue("delegates")
     if session.parent_id is not None and "context" not in channels:
         agent.queue_manager.queue("context")
-    session.port = port
     session.add_loop_context_hook(lambda: current_port.set(port))
     return port

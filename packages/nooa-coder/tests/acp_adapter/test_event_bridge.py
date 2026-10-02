@@ -3,6 +3,7 @@
 """Tests for translating NOOA events into ACP updates."""
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -29,6 +30,7 @@ from nooa_coder.coding import (
     TerminalCommandStarted,
 )
 from nooa_coder.session.items import (
+    AgentEventUpdate,
     CancelledUpdate,
     ChildCreatedUpdate,
     ClosedUpdate,
@@ -38,22 +40,37 @@ from nooa_coder.session.items import (
     TitleChangedUpdate,
     TurnEndedUpdate,
 )
+from nooa_coder.session.session import Session
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage
+from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa.llm_types import AssistantReasoning, LLMUsage
 from nooa.unifiedllm import FakeLLMClient
 
 
 class _FakeSession:
-    """The part of a Session the bridge uses: its id, agent, info and updates."""
+    """The part of a Session the bridge uses: its id, info, updates, model info and status.
+
+    Like a Session, it forwards each agent event as an ``AgentEventUpdate``,
+    then counts a model call's usage (with the Session's own
+    ``_count_usage``) and emits a ``UsageChangedUpdate``.
+    """
 
     def __init__(self, agent: Any, session_id: str = "session-1") -> None:
         self.id = session_id
-        self.agent = agent
+        self._agent = agent
         self.info = SessionInfo(id=session_id)
         self.listeners: list[Any] = []
+        self.handle = SimpleNamespace(update_usage=lambda usage: None)
+        self._emit = self.emit
+        self._pending_model = None
+        agent.event_manager.on("*", self._on_agent_event)
+
+    def _on_agent_event(self, event: Any) -> None:
+        self.emit(AgentEventUpdate(session_id=self.id, event=event))
+        if isinstance(event, LLMResponse):
+            Session._count_usage(self, event)  # type: ignore[arg-type]
 
     def subscribe(self, listener: Any) -> Any:
         self.listeners.append(listener)
@@ -67,6 +84,15 @@ class _FakeSession:
     def emit(self, update: Any) -> None:
         for listener in list(self.listeners):
             listener(update)
+
+    def model_info(self) -> Any:
+        return Session.model_info(self)  # type: ignore[arg-type]
+
+    def _next_llm(self) -> Any:
+        return Session._next_llm(self)  # type: ignore[arg-type]
+
+    def plan(self) -> list[Any]:
+        return Session.plan(self)  # type: ignore[arg-type]
 
 
 class _RecordingClient:
@@ -88,7 +114,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
-    agent.event_manager.add(AgentMessage(content="Final answer"))
+    agent.event_manager.add(AgentMessage(content="Final answer\n"))
     agent.event_manager.add(
         ToolCallEvent(
             tool_call_id="prefill-1",
@@ -137,7 +163,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     started = cast(ToolCallStart, updates[1])
     assert started.kind == "other"
     assert started.status == "in_progress"
-    assert started.raw_input is None
+    assert started.raw_input == {"code": "print('hello')"}
     assert started.content is not None
     assert len(started.content) == 1
     source = _content_text(cast(ContentToolCallContent, started.content[0]))
@@ -151,7 +177,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     }
 
     completed = cast(ToolCallProgress, updates[2])
-    assert completed.title == "Ran Python"
+    assert completed.title == "python: print('hello')"
     assert completed.status == "completed"
     assert completed.content is not None
     assert len(completed.content) == 2
@@ -162,6 +188,60 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
     usage = cast(UsageUpdate, updates[3])
     assert usage.cost is not None
     assert usage.cost.amount == 0.25
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_the_usage_update_carries_the_token_totals(tmp_path):
+    from nooa_coder.session.items import Usage
+
+    llm = FakeLLMClient()
+    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent, "session-1")
+    session.info.usage = Usage(attributed_cached_input_tokens=5)
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    agent.event_manager.add(LLMResponse(usage=LLMUsage(input_tokens=40, cached_input_tokens=30)))
+    await bridge.flush()
+
+    [update] = [u for _, u in client.updates if isinstance(u, UsageUpdate)]
+    assert update.field_meta is not None
+    totals = update.field_meta["dev.nooa/usage"]
+    assert (totals["input_tokens"], totals["cached_input_tokens"]) == (40, 35)
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_the_python_card_names_its_code_like_the_shell_card(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    long_line = "total = " + " + ".join(str(n) for n in range(40))
+    code = f"\n\n  {long_line}\nprint(total)\n"
+
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="call-1", name="execute_python", arguments={"code": code})
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="call-1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="780\n",
+        )
+    )
+    await bridge.flush()
+
+    started = next(u for _, u in client.updates if isinstance(u, ToolCallStart))
+    assert started.raw_input == {"code": code}
+    assert started.title == "python: " + long_line[:79] + "…"
+    completed = next(u for _, u in client.updates if isinstance(u, ToolCallProgress))
+    assert completed.raw_input == {"code": code}
+    assert completed.title == started.title
+    assert completed.content is not None and len(completed.content) == 2
+    assert _content_text(cast(ContentToolCallContent, completed.content[1])) == (
+        "```text\n780\n```"
+    )
     await bridge.close()
     await agent.aclose()
 
@@ -193,7 +273,7 @@ async def test_bridge_marks_failed_python_output(tmp_path):
         for _, update in client.updates
         if isinstance(update, ToolCallProgress)
     )
-    assert progress.title == "Python failed"
+    assert progress.title == "python: raise RuntimeError('boom') (failed)"
     assert progress.status == "failed"
     assert progress.content is not None
     assert len(progress.content) == 2
@@ -225,7 +305,7 @@ async def test_bridge_retains_python_source_when_interrupted(tmp_path):
         for _, update in client.updates
         if isinstance(update, ToolCallProgress)
     )
-    assert progress.title == "Python interrupted"
+    assert progress.title == "python: await asyncio.sleep(30) (interrupted)"
     assert progress.status == "failed"
     assert progress.content is not None
     assert len(progress.content) == 2
@@ -544,6 +624,42 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
     await bridge.close()
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        NeedInput(question="Which branch?", options=["main", "dev"]),
+        Done(explanation="finished"),
+        Waiting(explanation="job running", on=["jobs"]),
+        Done(explanation="answered", message="The answer is 42."),
+    ],
+    ids=["need_input", "done", "waiting", "done_with_message"],
+)
+async def test_a_turn_result_is_not_shown_as_out(tmp_path, value):
+    """``return_result(...)`` ends the turn; its value is not output for the card."""
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="t1", name="execute_python", arguments={"code": "return_result(x)"}
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="t1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=2,
+            value=value,
+        )
+    )
+    await bridge.flush()
+
+    rendered = "".join(str(update) for _, update in client.updates)
+    assert "Out[" not in rendered, rendered
+    await bridge.close()
+
+
 async def test_synthetic_text_replies_are_not_rendered_as_python_runs(tmp_path):
     """codeact turns a prose-only reply into a synthetic execute_python call.
 
@@ -590,7 +706,7 @@ async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
         if isinstance(update, ToolCallProgress) and update.tool_call_id == "t3"
     ]
     assert closing and closing[-1].status == "failed", client.updates
-    assert closing[-1].title == "Unfinished"
+    assert closing[-1].title.endswith(" (unfinished)")
 
 
 async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
@@ -612,7 +728,7 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
     await bridge.flush()
 
     progress = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
-    assert progress[-1].title == "Cancelled"
+    assert progress[-1].title == "python: sleep(60) (cancelled)"
     await bridge.close()
 
 
@@ -730,7 +846,7 @@ async def test_a_cancelled_cell_is_a_failed_card_titled_cancelled_with_its_outpu
     await bridge.flush()
     [progress] = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
     assert progress.status == "failed"
-    assert progress.title == "Cancelled"
+    assert progress.title == "python: work() (cancelled)"
     assert "step 1 done" in str(progress.content)
 
 
@@ -746,7 +862,7 @@ async def test_the_cancelled_update_closes_open_cards_before_saying_so(bridged, 
     await bridge.flush()
     closed = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
     assert {(u.tool_call_id, u.status, u.title) for u in closed} == {
-        ("t1", "failed", "Cancelled"),
+        ("t1", "failed", "python: sleep() (cancelled)"),
         ("cmd-1", "failed", "Cancelled"),
     }
     assert _types(client)[-1] is AgentMessageChunk
@@ -777,7 +893,7 @@ async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):
     )
     await bridge.flush()
     [progress] = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
-    assert (progress.status, progress.title) == ("failed", "Unfinished")
+    assert (progress.status, progress.title) == ("failed", "python: x (unfinished)")
 
 
 async def test_reasoning_becomes_thought_chunks(bridged):
@@ -972,7 +1088,9 @@ async def test_usage_includes_cost_attributed_from_children(bridged):
     await bridge.flush()
     [usage] = [u for _, u in client.updates if isinstance(u, UsageUpdate)]
     assert usage.cost is not None and usage.cost.amount == 1.25
-    assert usage.field_meta is not None and "dev.nooa/context" in usage.field_meta
+    assert (
+        usage.field_meta is not None and "dev.nooa/context" not in usage.field_meta
+    )  # no private diagnostics on the wire
 
 
 async def test_a_resumed_sessions_cost_continues_from_what_it_already_spent(tmp_path):
@@ -1044,6 +1162,35 @@ async def test_detaching_leaves_open_cards_alone_even_if_the_session_closed_firs
     session.emit(ClosedUpdate(session_id="session-1"))  # starts a close that finishes cards
     await bridge.close(finish_open=False)
     assert [u for _, u in client.updates if isinstance(u, ToolCallProgress)] == []
+
+
+async def test_a_long_message_goes_out_as_chunks_under_the_websocket_limit(tmp_path):
+    """Clients join chunks; no single message may pass 1 MiB, the WebSocket client default."""
+    import json
+
+    from acp import text_block, update_user_message
+    from nooa_coder.acp.event_bridge import MAX_CHUNK_CHARS
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    # Worst case for the wire size: every character needs a six-byte escape.
+    long_text = "\x01" * (2 * MAX_CHUNK_CHARS + 5)
+    agent.event_manager.add(AgentMessage(content=long_text))
+    bridge.publish(update_user_message(text_block("short")))
+    await asyncio.wait_for(bridge.flush(), timeout=5)
+
+    agent_chunks = [u for _, u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert len(agent_chunks) == 3
+    assert "".join(chunk.content.text for chunk in agent_chunks) == long_text + "\n"
+    for chunk in agent_chunks:
+        wire = json.dumps(chunk.model_dump(by_alias=True, exclude_none=True))
+        assert len(wire.encode()) < 1024 * 1024
+    assert [u.content.text for _, u in client.updates if isinstance(u, UserMessageChunk)] == [
+        "short"
+    ]
+    await bridge.close()
+    await agent.aclose()
 
 
 def test_every_agent_message_ends_its_line():

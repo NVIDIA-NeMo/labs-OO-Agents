@@ -15,12 +15,9 @@ import hashlib
 import inspect
 import json
 import logging
-import sqlite3
-import uuid
 from collections import OrderedDict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -29,6 +26,7 @@ from pydantic import BaseModel
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification, PythonOutput, ResultStatus
 from nooa.interactive import (
+    AgentMessage,
     Done,
     InteractiveAgent,
     NeedInput,
@@ -44,15 +42,23 @@ from nooa_coder.session.events import (
     ItemWithdrawn,
     TurnEnded,
     TurnStarted,
+    UsageAttributed,
 )
 from nooa_coder.session.items import (
+    USAGE_FIELDS,
     AgentEventUpdate,
     CancelledUpdate,
     ClosedUpdate,
     CommandInfo,
     CommandResult,
+    CommandsChangedUpdate,
     ItemAdmittedUpdate,
+    ItemConsumedUpdate,
     ModeChangedUpdate,
+    ModelChangedUpdate,
+    ModelInfo,
+    PlanEntry,
+    ReasoningChangedUpdate,
     Receipt,
     SessionEvent,
     SessionInfo,
@@ -144,30 +150,6 @@ async def _aclose(client: Any) -> None:
         await aclose()
 
 
-def _write_snapshot(path: Path, blob: str) -> None:
-    """Insert one serialised snapshot into the session file's ``snapshots`` table.
-
-    Runs in a worker thread on its own connection. It cannot go through
-    the session's ``SQLiteStorageManager``: that one's connection belongs
-    to the event loop thread, and a second manager would try to take the
-    session's file lock, which this process already holds. The row
-    matches what ``SQLiteStorageManager.save_snapshot`` writes, so
-    ``restore_latest_snapshot`` reads it back. The caller holds the
-    storage manager's lock (see ``Session._checkpoint``).
-    """
-    uri = f"{path.resolve().as_uri()}?mode=rw"
-    connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    try:
-        connection.execute("PRAGMA busy_timeout=5000")
-        with connection:
-            connection.execute(
-                "INSERT INTO snapshots (snapshot_id, created_at, data) VALUES (?, ?, ?)",
-                (str(uuid.uuid4()), datetime.now(UTC).isoformat(), blob),
-            )
-    finally:
-        connection.close()
-
-
 def _preview(value: Any, limit: int = 120) -> str:
     text = value if isinstance(value, str) else repr(value)
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -177,7 +159,10 @@ class Session:
     """One agent, its turn loop and its durable record.
 
     Built by the registry, which calls :meth:`start` after publishing it.
-    Nobody else holds the agent.
+    Nobody else holds the agent: it is private (``_agent``), read only by
+    the registry in this package. Hosts use the methods and the update
+    stream (``subscribe``), which carries the agent's events as
+    ``AgentEventUpdate``.
     """
 
     def __init__(
@@ -195,7 +180,7 @@ class Session:
         self.depth: int = info.depth
         self.name: str | None = info.name
         self.options = options
-        self.agent = agent
+        self._agent = agent
         self.handle = handle
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
@@ -222,13 +207,14 @@ class Session:
         self._turn_task: asyncio.Task[Any] | None = None
         self._cancel_by: str | None = None
         self._interrupted: PythonOutput | None = None
+        # Agent message texts sent in the running turn (see _send_result_message).
+        self._turn_messages: set[str] = set()
         self._settled = asyncio.Event()
         self._settled.set()
         self._close_task: asyncio.Task[None] | None = None
         self._closing = False
         self._closed = False
         self._before_close: Callable[[], Awaitable[None]] | None = None
-        self.port: Any = None  # the agent's SessionPort, set by install_port()
         self._loop_context_hooks: list[Callable[[], object]] = []
         self._pending_steers: list[tuple[str, str, str]] = []  # (item_id, text, source)
         self._snapshot_digest: str | None = None
@@ -246,6 +232,13 @@ class Session:
                 "ChannelItemsDiscarded", lambda e: self._on_discarded(e.channel, e.items)
             ),
         )
+        if self.info.reasoning:
+            self._restore_reasoning(self.info.reasoning)
+        # The one listener of the agent's command registry: hosts see
+        # changes as CommandsChangedUpdate.
+        set_on_change = getattr(getattr(agent, "slash_commands", None), "set_on_change", None)
+        if callable(set_on_change):
+            set_on_change(self._on_commands_changed)
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -300,8 +293,8 @@ class Session:
         await self._close_step("waiting for the checkpoint", self.wait_for_checkpoint)
         await self._close_step("unsubscribing from agent events", self._unsubscribe_agent)
         await self._close_step("unsubscribing the steer flush", self._unsubscribe_steers)
-        await self._close_step("stopping the agent's jobs", self.agent.queue_manager.shutdown)
-        await self._close_step("closing the agent", self.agent.aclose)
+        await self._close_step("stopping the agent's jobs", self._agent.queue_manager.shutdown)
+        await self._close_step("closing the agent", self._agent.aclose)
         for unsubscribe in self._unsubscribe_items:
             await self._close_step("unsubscribing from its queues", unsubscribe)
         await self._close_step("closing its model client", self._close_owned_llm)
@@ -378,9 +371,11 @@ class Session:
         """Give the running turn extra text; while idle this is ``submit(text)``.
 
         During a turn the text waits in a buffer that is flushed into a
-        ``Notification`` whose source names the sender right before the
-        turn's next model call, so the model reads it in order with its own
-        cell output. If no model call comes (the turn was already
+        ``Notification`` right before the turn's next model call, so the
+        model reads it in order with its own cell output. The event has the
+        shape of a turn's input: its ``value`` is ``{"user_messages":
+        [text]}``, its ``source`` names the channel and the sender, and its
+        ``description`` says how to reach the items. If no model call comes (the turn was already
         finishing), the text is admitted on ``user_messages`` when the turn
         settles, with the same ``item_id``, and the next turn handles it.
         A steer is never lost.
@@ -415,11 +410,16 @@ class Session:
             return
         steers, self._pending_steers = self._pending_steers, []
         for item_id, text, source in steers:
-            self.agent.event_manager.add(
-                Notification(source=_steer_source(source), description=text)
+            self._agent.event_manager.add(
+                Notification(
+                    source=_steer_source(source),
+                    description=_STEER_HINT,
+                    value={"user_messages": [text]},
+                )
             )
             self.handle.events.add(ItemConsumed(item_id=item_id))
             self._consumed.append(item_id)
+            self._emit(ItemConsumedUpdate(session_id=self.id, channel="steer", item_id=item_id))
 
     def _admit_leftover_steers(self) -> None:
         """Steers no model call saw become ordinary messages for the next turn."""
@@ -453,26 +453,18 @@ class Session:
 
     def _remove_queued(self, channel_name: str, item_id: str) -> bool:
         entries = self._ids.get(channel_name)
-        channel = self.agent.queue_manager.channels().get(channel_name)
+        channel = self._agent.queue_manager.channels().get(channel_name)
         if not entries or channel is None:
             return False
         index = next((i for i, (_, known) in enumerate(entries) if known == item_id), None)
         if index is None:
             return False
-        obj = entries[index][0]
-        # Equal-identity items put earlier are ahead of this one in the
-        # channel (FIFO), so skip that many matches.
-        skip = sum(1 for other, _ in list(entries)[:index] if other is obj)
-        # Channel exposes no remove-by-item; edit its deque directly.
-        pending = channel._items
-        for position, queued in enumerate(pending):
-            if queued is obj:
-                if skip == 0:
-                    del pending[position]
-                    del entries[index]
-                    return True
-                skip -= 1
-        return False
+        # The same object queued twice is indistinguishable in the channel,
+        # so removing its first occurrence is removing this one.
+        if not channel.remove(entries[index][0]):
+            return False
+        del entries[index]
+        return True
 
     async def prompt(self, text: str, *, source: str = "user") -> Outcome:
         """Submit ``text`` and wait for the outcome of the turn that consumes it.
@@ -537,7 +529,7 @@ class Session:
         """
         if self._closed or (self._closing and not internal):
             raise SessionClosedError(f"Session {self.id!r} is closed")
-        target = self.agent.queue_manager.channels().get(channel)
+        target = self._agent.queue_manager.channels().get(channel)
         if target is None or target.mode != "queue":
             raise ValueError(f"Session {self.id!r} has no queue channel {channel!r}")
         event = ItemAdmitted(
@@ -549,6 +541,8 @@ class Session:
         event.item_id = item_id or str(event.id)
         if record:
             self.handle.events.add(event)
+            if channel == "user_messages":
+                self.info.turn_count += 1  # as the store counts it
         self._ids.setdefault(channel, deque()).append((item, event.item_id))
         target.put(item)
         self._emit(
@@ -574,9 +568,10 @@ class Session:
             return
         item_id = entries[index][1]
         del entries[index]
-        if not self.handle._closed:
+        if not self.handle.closed:
             self.handle.events.add(ItemConsumed(item_id=item_id))
         self._consumed.append(item_id)
+        self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
 
     def _on_discarded(self, channel: str, items: list[Any]) -> None:
         """Items left ``channel`` unconsumed: record it and fail their outcomes."""
@@ -589,7 +584,7 @@ class Session:
                 continue  # an item another producer put; it has no identity here
             item_id = entries[index][1]
             del entries[index]
-            if not self.handle._closed:
+            if not self.handle.closed:
                 self.handle.events.add(ItemDiscarded(item_id=item_id))
             self._resolve(
                 item_id,
@@ -604,7 +599,7 @@ class Session:
     async def _loop(self) -> None:
         for hook in self._loop_context_hooks:
             hook()
-        queues = self.agent.queue_manager
+        queues = self._agent.queue_manager
         while not self._closing:
             try:
                 wins = await queues.race()
@@ -678,12 +673,17 @@ class Session:
         self._interrupted = None
         self.info.status = "running"
         usage_before = self.info.usage.model_copy()
-        method = getattr(self.agent, self.options.turn_method)
+        self._turn_messages = set()
+        method = getattr(self._agent, self.options.turn_method)
         self._turn_task = asyncio.create_task(method(notification), name=f"session-turn:{self.id}")
         outcome: Any
         kind: OutcomeKind
         try:
             outcome, kind = _classify(await self._turn_task)
+            if self._send_result_message(outcome):
+                # Listeners hear of agent events one loop step later; let
+                # this message's update go out before turn_ended.
+                await asyncio.sleep(0)
         except asyncio.CancelledError as exc:
             current = asyncio.current_task()
             if current is not None and current.cancelling():
@@ -704,6 +704,23 @@ class Session:
             self._turn_task = None
         self._settle(outcome, kind, usage_before)
 
+    def _send_result_message(self, outcome: Any) -> bool:
+        """Show a ``Done``/``Waiting`` message as an agent message, inside the turn.
+
+        It goes through ``agent.message()`` like any reply, before the turn
+        is recorded as ended; text the turn already sent is not sent again.
+        Returns whether it sent one.
+        """
+        text = getattr(outcome, "message", None) if isinstance(outcome, Done | Waiting) else None
+        if not text or text in self._turn_messages:
+            return False
+        send = getattr(self._agent, "message", None)
+        if callable(send):
+            send(text)
+        else:
+            self._agent.event_manager.add(AgentMessage(content=text))
+        return True
+
     def _settle(self, outcome: Any, kind: OutcomeKind, usage_before: Usage) -> None:
         # Items stay in self._consumed / self._waiting until the end, so a
         # failure part way leaves them for _fail_turn to resolve.
@@ -722,6 +739,7 @@ class Session:
                 usage=usage,
             )
         )
+        self.info.reply_count += 1  # as the store counts it
         waiting = self._waiting + consumed
         if kind != "waiting":
             for item_id in waiting:
@@ -752,7 +770,7 @@ class Session:
         affected; the next settled turn tries again.
         """
         try:
-            blob = json.dumps(snapshot_to_json(self.agent), sort_keys=True)
+            blob = json.dumps(snapshot_to_json(self._agent), sort_keys=True)
         except Exception:
             logger.warning(
                 "Session %s: checkpoint could not serialise the agent", self.id, exc_info=True
@@ -763,24 +781,18 @@ class Session:
             return
         self._snapshot_digest = digest
         previous = self._checkpoint_task
-        path = self.handle.path
-        # The storage manager's lock serialises every write to this file in
-        # this process (the loop's event writes all take it). Holding it
-        # here means the two connections never contend for SQLite's write
-        # lock: the loop never waits in the busy handler or gets "database
-        # is locked"; at worst a loop-side write waits for this one insert.
-        db_lock = self.handle.storage._db_lock
-
-        def write_locked() -> None:
-            with db_lock:
-                _write_snapshot(path, blob)
+        # The storage manager takes its own lock, the one every event write
+        # in this process takes, so this write and the loop's writes never
+        # contend for SQLite's write lock; at worst a loop-side write waits
+        # for this one insert. The store opens it with check_same_thread=False.
+        save = self.handle.storage.save_snapshot_json
 
         async def write() -> None:
             if previous is not None:
                 with suppress(Exception):
                     await previous
             try:
-                await asyncio.to_thread(write_locked)
+                await asyncio.to_thread(save, blob)
             except Exception:
                 self._snapshot_digest = None
                 logger.warning("Session %s: checkpoint write failed", self.id, exc_info=True)
@@ -799,7 +811,7 @@ class Session:
         """Append ``TurnCancelled`` after the interrupted cell's output, and tell listeners."""
         interrupted = self._interrupted.tag if self._interrupted is not None else None
         self._interrupted = None
-        self.agent.event_manager.add(TurnCancelled(by=by, interrupted=interrupted))
+        self._agent.event_manager.add(TurnCancelled(by=by, interrupted=interrupted))
         self._emit(CancelledUpdate(session_id=self.id, by=by, interrupted=interrupted))
 
     def _record_finished(self, item_id: str, outcome: Any) -> None:
@@ -824,7 +836,46 @@ class Session:
         for item_id in list(self._futures):
             self._resolve(item_id, outcome)
 
+    # ---- tools -------------------------------------------------------
+
+    async def prepare_tools(self) -> list[str]:
+        """Run the agent's own tool set-up; return warnings for the user.
+
+        Awaits the agent's ``prepare_tools()`` hook if it has one (the
+        coding agent connects the MCP servers its workspace remembers).
+        A host calls this once, in the registry's ``prepare`` step, before
+        the first turn.
+        """
+        hook = getattr(self._agent, "prepare_tools", None)
+        if not callable(hook):
+            return []
+        return [str(warning) for warning in await hook()]
+
+    def register_tools(self, tools: Mapping[str, Any]) -> dict[str, str]:
+        """Register and activate each tool as an agent skill under its name.
+
+        Returns the tools that were not registered, name to reason (the
+        agent has no skills, or the name collides with one the agent
+        already provides); the others are registered. Call before the
+        first turn (the registry's ``prepare`` step).
+        """
+        skills = getattr(self._agent, "skills", None)
+        failed: dict[str, str] = {}
+        for name, tool in tools.items():
+            if skills is None:
+                failed[name] = "the agent has no skills"
+                continue
+            try:
+                skills.register(name, tool)
+                skills.activate([name])
+            except ValueError as exc:
+                failed[name] = str(exc)
+        return failed
+
     # ---- slash commands ----------------------------------------------
+
+    def _on_commands_changed(self, _commands: object) -> None:
+        self._emit(CommandsChangedUpdate(session_id=self.id, commands=self.commands()))
 
     def commands(self) -> list[CommandInfo]:
         """Slash commands of the agent's ``slash_commands`` registry, if it has one.
@@ -833,7 +884,7 @@ class Session:
         ``commands()`` returns objects with ``name``, ``description`` and
         ``argument_hint``, and ``invoke(name, raw_args)`` runs one.
         """
-        registry = getattr(self.agent, "slash_commands", None)
+        registry = getattr(self._agent, "slash_commands", None)
         if registry is None:
             return []
         return [
@@ -847,7 +898,7 @@ class Session:
 
     async def invoke_command(self, name: str, raw_args: str) -> CommandResult:
         """Run a slash command through the agent's registry; ``KeyError`` if unknown."""
-        registry = getattr(self.agent, "slash_commands", None)
+        registry = getattr(self._agent, "slash_commands", None)
         if registry is None:
             raise KeyError(name)
         result = await registry.invoke(name, raw_args)
@@ -884,25 +935,30 @@ class Session:
         turn and closes the old client if this session created it; a
         running turn keeps its model. A second call before that turn
         replaces (and closes) the first pending client. The alias is
-        recorded at once, so a load resumes on it.
+        recorded at once (``info.model``, and the store, so a load resumes
+        on it) and a ``ModelChangedUpdate`` is emitted.
         """
         if self._llm_factory is None:
             raise RuntimeError("set_model() needs the registry's llm_factory to build clients")
         self._ensure_open()
         client = self._llm_factory(alias, self.options.workspace)
         # Recorded now: a load before the next turn resumes on this model.
+        # The new client starts from its own reasoning default.
         self.handle.set_model(alias)
+        self.info.model = alias
+        self.info.reasoning = None
         previous, self._pending_model = self._pending_model, (alias, client)
         if previous is not None:
             await _aclose(previous[1])
+        self._emit(ModelChangedUpdate(session_id=self.id, model=alias))
 
     async def _apply_pending_model(self) -> None:
         pending, self._pending_model = self._pending_model, None
         if pending is None:
             return
         alias, client = pending
-        self.agent.set_llm(client)
-        apply_model_limits(self.agent)
+        self._agent.set_llm(client)
+        apply_model_limits(self._agent)
         old, self._owned_llm = self._owned_llm, client
         if old is not None:
             if self.llm_in_use(old):
@@ -912,6 +968,69 @@ class Session:
         # New same-model children share the new client.
         self.options = self.options.model_copy(update={"model": alias, "llm": client})
         self.info.model = alias
+
+    def channels(self) -> list[str]:
+        """Names of the agent's queue channels: where ``submit`` can put an item."""
+        return list(self._agent.queue_manager.channels())
+
+    def _next_llm(self) -> Any:
+        """The client the next model call uses: one a ``set_model`` left pending, else the agent's."""
+        if self._pending_model is not None:
+            return self._pending_model[1]
+        return getattr(self._agent, "llm", None)
+
+    def model_info(self) -> ModelInfo:
+        """The model the next call uses, as data: alias, context window, reasoning levels.
+
+        After a ``set_model`` whose client is not swapped in yet, this
+        describes that client: it is the one the next turn uses.
+        """
+        client = self._next_llm()
+        return ModelInfo(
+            alias=self.info.model,
+            context_window=getattr(client, "context_window", None),
+            reasoning_level=getattr(client, "reasoning_level", None),
+            reasoning_levels=list(getattr(client, "reasoning_levels", None) or ()),
+            reasoning_default=getattr(client, "reasoning_default", None),
+        )
+
+    async def set_reasoning(self, level: str | None) -> None:
+        """Choose a reasoning level the client declares; it applies from the next model call.
+
+        The level is set on the client the next call uses (see
+        ``model_info``), recorded (``info.reasoning``, and the store, so a
+        load restores it) and announced with a ``ReasoningChangedUpdate``.
+        A later ``set_model`` resets it: the new client starts from its own
+        default. A same-model child shares its parent's client, so a level
+        set on either applies to both.
+
+        Raises:
+            ValueError: If the client does not declare ``level``.
+        """
+        self._ensure_open()
+        client = self._next_llm()
+        levels = tuple(getattr(client, "reasoning_levels", None) or ())
+        if level is not None and level not in levels:
+            allowed = ", ".join(levels) if levels else "none for this model"
+            raise ValueError(f"Unknown reasoning level {level!r}; allowed: {allowed}")
+        # None clears the choice: the model's own default applies again.
+        client.reasoning_level = level
+        self.handle.set_reasoning(level)
+        self.info.reasoning = level
+        self._emit(ReasoningChangedUpdate(session_id=self.id, level=level))
+
+    def _restore_reasoning(self, level: str) -> None:
+        """Apply a recorded level on load, if the client still declares it."""
+        client = getattr(self._agent, "llm", None)
+        if level in tuple(getattr(client, "reasoning_levels", None) or ()):
+            client.reasoning_level = level
+        else:
+            logger.info(
+                "Session %s: the recorded reasoning level %r is not offered by the model; "
+                "using its default",
+                self.id,
+                level,
+            )
 
     async def set_mode(self, mode: str) -> None:
         """Record the permission mode (``auto`` or ``ask``); nothing enforces it yet.
@@ -927,14 +1046,23 @@ class Session:
         self.options = self.options.model_copy(update={"permission_mode": mode})
         self._emit(ModeChangedUpdate(session_id=self.id, mode=mode))
 
-    def add_attributed_usage(self, usage: Usage) -> None:
-        """Add a child's own usage to this session's attributed totals, and tell listeners."""
-        if not (usage.input_tokens or usage.output_tokens or usage.cost_usd):
+    def add_attributed_usage(self, usage: Usage, *, child_id: str = "") -> None:
+        """Add a child's own usage to this session's attributed totals, and tell listeners.
+
+        The addition is recorded (``UsageAttributed``) so a load rebuilds it.
+        """
+        own = usage.own()
+        if not any(getattr(own, name) for name in USAGE_FIELDS):
             return
         totals = self.info.usage
-        totals.attributed_input_tokens += usage.input_tokens
-        totals.attributed_output_tokens += usage.output_tokens
-        totals.attributed_cost_usd += usage.cost_usd
+        for name in USAGE_FIELDS:
+            attributed = f"attributed_{name}"
+            setattr(totals, attributed, getattr(totals, attributed) + getattr(own, name))
+        try:
+            self.handle.events.add(UsageAttributed(child_id=child_id, usage=own))
+        except Exception:
+            # A closed handle must not break the child's delivery.
+            logger.warning("Session %s: could not record a child's usage", self.id, exc_info=True)
         self.handle.update_usage(totals)
         self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
 
@@ -943,10 +1071,11 @@ class Session:
         if usage is None:
             return
         totals = self.info.usage
-        totals.input_tokens += usage.input_tokens
-        totals.output_tokens += usage.output_tokens
-        totals.cost_usd += usage.cost_usd
+        for name in USAGE_FIELDS:
+            setattr(totals, name, getattr(totals, name) + (getattr(usage, name, 0) or 0))
+        totals.last_input_tokens = usage.input_tokens or 0
         self.handle.update_usage(totals)
+        self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
 
     # ---- output ------------------------------------------------------
 
@@ -968,10 +1097,16 @@ class Session:
                 logger.warning("Session listener %r raised", listener, exc_info=True)
 
     def _on_agent_event(self, event: Any) -> None:
-        if event._role is Role.RUNTIME_EVENT:
+        # First, so listeners see the event before anything it causes here
+        # (the usage update of a model response).
+        if self._listeners:
+            self._emit(AgentEventUpdate(session_id=self.id, event=event))
+        if event.event_role is Role.RUNTIME_EVENT:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)
+        if isinstance(event, AgentMessage) and self._turn_task is not None:
+            self._turn_messages.add(event.content)
         if (
             isinstance(event, PythonOutput)
             and event.execution_status is ResultStatus.CANCELLED
@@ -982,16 +1117,22 @@ class Session:
             # before the event gets its tag, so keep the event and read the
             # tag when the turn settles.
             self._interrupted = event
-        update = AgentEventUpdate(
-            session_id=self.id, event_id=str(event.id), event_type=event.event_type
-        )
-        # Handlers run before the event manager stores the event; tell
-        # listeners on the next loop step, when event_manager.get(event_id)
-        # finds it.
+
+    def plan(self) -> list[PlanEntry]:
+        """The agent's plan for a host to show, as ACP plan entries; empty if it has none.
+
+        An agent offers it with a ``plan()`` method returning ``PlanEntry``
+        values or dicts with their fields (the coding agent derives them
+        from its todos). A failure is logged and reads as no plan.
+        """
+        hook = getattr(self._agent, "plan", None)
+        if not callable(hook):
+            return []
         try:
-            asyncio.get_running_loop().call_soon(self._emit, update)
-        except RuntimeError:  # no running loop: nothing to defer to
-            self._emit(update)
+            return [PlanEntry.model_validate(entry) for entry in hook()]
+        except Exception:
+            logger.warning("Session %s: could not read the agent's plan", self.id, exc_info=True)
+            return []
 
     def transcript(self, *, limit: int | None = None) -> list[TranscriptEntry]:
         """The session's transcript as a person would see it; the last ``limit`` entries."""
@@ -999,14 +1140,25 @@ class Session:
         return entries if limit is None else entries[-limit:]
 
 
+_STEER_HINT = (
+    "Sent during this turn. The value has the form of the notification argument of "
+    'handle(); reach it as self.events["N"].value, where N is the tag of this event.'
+)
+"""The ``Notification.description`` of a steer: when it came and how to reach it."""
+
+_PERSON_SOURCES = ("user", "acp")
+"""Item sources that are the person: ``acp`` is a person typing in an ACP client."""
+
+
 def _steer_source(source: str) -> str:
-    """The ``Notification.source`` sentence for a steer: who sent it."""
-    if source == "user":
-        return "New message from the user while you were working."
-    if source.startswith("parent:"):
-        name = source.removeprefix("parent:")
-        return f"New message from your parent agent {name} while you were working."
-    return f"New message from {source} while you were working."
+    """The ``Notification.source`` sentence for a steer: its channel and who sent it."""
+    if source in _PERSON_SOURCES:
+        sender = "the user"
+    elif source.startswith("parent:"):
+        sender = "your parent agent " + source.removeprefix("parent:")
+    else:
+        sender = source
+    return f"New message on user_messages from {sender} while you were working."
 
 
 def _classify(result: Any) -> tuple[Any, OutcomeKind]:
@@ -1036,6 +1188,7 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
         return {
             "question": outcome.question,
             "options": outcome.options,
+            "reason": getattr(outcome, "reason", None),
             "answer_schema": schema,
         }, None
     if kind == "waiting":
@@ -1056,8 +1209,4 @@ def _explanation(outcome: Any, kind: OutcomeKind) -> str:
 
 
 def _usage_delta(before: Usage, after: Usage) -> Usage:
-    return Usage(
-        input_tokens=after.input_tokens - before.input_tokens,
-        output_tokens=after.output_tokens - before.output_tokens,
-        cost_usd=after.cost_usd - before.cost_usd,
-    )
+    return Usage(**{name: getattr(after, name) - getattr(before, name) for name in USAGE_FIELDS})

@@ -35,17 +35,17 @@ _FAKE_AGENT = _FIXTURES / "fake_agent.py"
 
 @pytest.fixture(autouse=True)
 def _user_dir_for_subprocesses(tmp_path, monkeypatch):
-    """The server's sessions live under this user directory."""
+    """The server's user-level settings live here; its sessions in the workspace."""
     user = tmp_path / "user"
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user))
     monkeypatch.delenv("NOOA_SESSIONS_DIR", raising=False)
     return user
 
 
-def _store(user_dir):
+def _store(workspace):
     from nooa_coder.session.store import SessionStore
 
-    return SessionStore(user_dir / "sessions")
+    return SessionStore(workspace / ".nooa" / "sessions")
 
 
 class _RecordingClient:
@@ -153,7 +153,8 @@ async def test_a_session_runs_a_turn_over_stdio(tmp_path):
     assert isinstance(source.content, TextContentBlock)
     assert source.content.text.startswith("```python\n")
     completed = next(u for _, u in client.updates if isinstance(u, ToolCallProgress))
-    assert completed.title == "Ran Python"
+    assert completed.title == started.title
+    assert completed.title.startswith("python: ")
     assert "NOOA ACP smoke test passed.\n" in client.texts()
 
 
@@ -177,7 +178,7 @@ async def test_cancellation_finishes_open_tools_and_says_so(tmp_path):
         if isinstance(update, ToolCallProgress) and update.status == "failed"
     )
     assert failed.tool_call_id == started.tool_call_id
-    assert failed.title == "Cancelled"
+    assert failed.title == started.title + " (cancelled)"
     assert "Stopped at your request.\n" in client.texts()
 
 
@@ -233,7 +234,7 @@ async def test_a_question_is_answered_through_a_form_over_the_wire(tmp_path):
     assert client.texts()[-1] == "Using the answer.\n"
 
 
-async def test_the_delete_extension_works_over_the_wire(tmp_path, _user_dir_for_subprocesses):
+async def test_the_delete_extension_works_over_the_wire(tmp_path):
     client = _RecordingClient()
     async with _spawn(client, cwd=tmp_path) as (connection, _process):
         await connection.initialize(PROTOCOL_VERSION)
@@ -247,7 +248,7 @@ async def test_the_delete_extension_works_over_the_wire(tmp_path, _user_dir_for_
             == {}
         )
         assert (await connection.list_sessions()).sessions == []
-    assert not _store(_user_dir_for_subprocesses).path_for(session.session_id).exists()
+    assert not _store(tmp_path).path_for(session.session_id).exists()
 
 
 async def test_the_mcp_handoff_trace_records_names_only(tmp_path):
@@ -308,8 +309,8 @@ async def test_the_tee_records_the_conversation(tmp_path):
     assert stat.S_IMODE(log.stat().st_mode) == 0o600
 
 
-async def test_an_open_session_is_hidden_and_explains_itself(tmp_path, _user_dir_for_subprocesses):
-    store = _store(_user_dir_for_subprocesses)
+async def test_an_open_session_is_hidden_and_explains_itself(tmp_path):
+    store = _store(tmp_path)
     client = _RecordingClient()
     async with _spawn(client, cwd=tmp_path) as (connection, _process):
         await connection.initialize(PROTOCOL_VERSION)
@@ -333,11 +334,9 @@ async def test_an_open_session_is_hidden_and_explains_itself(tmp_path, _user_dir
 
 @pytest.mark.parametrize("shutdown", ["eof", "sigterm"])
 @pytest.mark.parametrize("during_turn", [False, True])
-async def test_client_shutdown_releases_sessions_for_resume(
-    tmp_path, _user_dir_for_subprocesses, shutdown, during_turn
-):
+async def test_client_shutdown_releases_sessions_for_resume(tmp_path, shutdown, during_turn):
     """A client need not call session/close before stopping its agent server."""
-    store = _store(_user_dir_for_subprocesses)
+    store = _store(tmp_path)
     client = _RecordingClient()
     args = ["--blocking"] if during_turn else []
     async with _spawn(client, *args, cwd=tmp_path) as (connection, process):

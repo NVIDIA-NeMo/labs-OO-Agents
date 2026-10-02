@@ -17,6 +17,7 @@ from coder_test_agents import (
     fresh_events,
     until,
 )
+from nooa_coder.coding.factory import create_session_agent
 from nooa_coder.session.events import TurnEnded
 from nooa_coder.session.registry import (
     ChildActiveElsewhereError,
@@ -48,7 +49,7 @@ async def test_a_failing_build_leaves_no_file_and_no_reservation(
     registry, root_options, sessions_dir
 ):
     failing = root_options.model_copy(update={"agent_spec": "coder_test_agents:FailingAgent"})
-    real = SessionRegistry(registry.store)  # default factory: really imports the spec
+    real = SessionRegistry(registry.store, agent_factory=create_session_agent)  # imports the spec
     with pytest.raises(RuntimeError, match="construction failed"):
         await real.create(failing)
     assert _db_files(sessions_dir) == []
@@ -85,7 +86,7 @@ async def test_the_parent_is_told_about_a_new_child(registry, root_options):
 async def test_initial_items_are_in_the_first_notification(registry, root_options, models):
     models.scripts["child"] = [done("got both")]
     root = await registry.create(root_options)
-    root.agent.queue_manager.queue("context")
+    root._agent.queue_manager.queue("context")
     child_options = root.options.inherit(name="child")
 
     def add_context_channel(options, storage):
@@ -147,7 +148,7 @@ async def test_close_goes_children_first(registry, root_options):
 
     await registry.close_all()
     assert order[-1] == "other" and registry.sessions == {}
-    store = SessionStore(root_options.sessions_dir)
+    store = registry.store
     assert {info.status for info in store.list(roots_only=False)} == {"on_disk"}
 
 
@@ -196,7 +197,7 @@ async def test_load_restores_state_and_requeues_unhandled_items(
         ended = []
         loaded.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
         await until(lambda: ended)
-        assert loaded.agent.v.note == "kept"
+        assert loaded._agent.v.note == "kept"
         [resumed] = resumed_events
         assert (resumed.session_id, resumed.restored) == (root.id, True)
         assert "LATER" in str(resumed_models.llms[None].calls[0].messages)
@@ -338,11 +339,13 @@ async def test_the_llm_factory_builds_owned_clients(root_options, sessions_dir):
             "alias-b": [[done("child ok")]],
         }
     )
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
         [root_llm] = factory.made
-        assert root.agent.llm is root_llm
+        assert root._agent.llm is root_llm
         assert factory.calls == [("alias-a", root_options.workspace)]
         assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
         child_llm = factory.made[1]
@@ -357,9 +360,11 @@ async def test_the_llm_factory_builds_owned_clients(root_options, sessions_dir):
 async def test_a_given_client_is_not_rebuilt_or_closed(root_options, sessions_dir):
     factory = ModelFactory()
     given = TrackedLLM("given", [])
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     root = await registry.create(root_options.model_copy(update={"model": "alias-a", "llm": given}))
-    assert root.agent.llm is given and factory.calls == []
+    assert root._agent.llm is given and factory.calls == []
     await registry.close_all()
     assert not given.closed
 
@@ -376,13 +381,15 @@ async def test_set_model_swaps_the_client_before_the_next_turn(root_options, ses
             "alias-b": [[done("on b")]],
         }
     )
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
         first = asyncio.ensure_future(root.prompt("one"))
         await asyncio.wait_for(started.wait(), TIMEOUT)
         await root.set_model("alias-b")  # built now; swapped in at the next turn
-        assert len(factory.made) == 2 and root.agent.llm is factory.made[0]
+        assert len(factory.made) == 2 and root._agent.llm is factory.made[0]
         with pytest.raises(ValueError, match="bad-alias"):
             await root.set_model("bad-alias")  # fails at the call
         block.set()
@@ -390,31 +397,48 @@ async def test_set_model_swaps_the_client_before_the_next_turn(root_options, ses
         assert await asyncio.wait_for(root.prompt("two"), TIMEOUT) == Done(explanation="on b")
         old, new = factory.made
         assert (old.closed, new.closed) == (True, False)
-        assert root.agent.llm is new
+        assert root._agent.llm is new
         assert (root.info.model, root.options.model) == ("alias-b", "alias-b")
     finally:
         await registry.close_all()
     assert new.closed
 
 
+async def test_set_model_records_the_alias_at_once_and_says_so(root_options, sessions_dir):
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=ModelFactory()
+    )
+    try:
+        root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
+        seen = []
+        root.subscribe(lambda e: seen.append(e) if e.kind == "model_changed" else None)
+        await root.set_model("alias-b")
+        assert root.info.model == "alias-b"
+        assert [e.model for e in seen] == ["alias-b"]
+    finally:
+        await registry.close_all()
+
+
 async def test_a_same_model_child_shares_the_parents_client(root_options, sessions_dir):
     factory = ModelFactory()
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
         [root_llm] = factory.made
         kid = await registry.create(
             root.options.inherit(name="kid", retain=True), parent_id=root.id
         )
-        assert kid.agent.llm is root_llm and len(factory.calls) == 1
+        assert kid._agent.llm is root_llm and len(factory.calls) == 1
         await registry.close(kid.id)
         assert not root_llm.closed  # the child did not own it
         reopened = await registry.open_child(root, kid.id)
-        assert reopened.agent.llm is root_llm and len(factory.calls) == 1
+        assert reopened._agent.llm is root_llm and len(factory.calls) == 1
         other = await registry.create(
             root.options.inherit(name="other", model="alias-b"), parent_id=root.id
         )
-        assert other.agent.llm is not root_llm and len(factory.calls) == 2
+        assert other._agent.llm is not root_llm and len(factory.calls) == 2
     finally:
         await registry.close_all()
     assert root_llm.closed
@@ -422,7 +446,9 @@ async def test_a_same_model_child_shares_the_parents_client(root_options, sessio
 
 async def test_set_model_keeps_a_client_a_child_still_uses(root_options, sessions_dir):
     factory = ModelFactory({"alias-b": [[done("on b")]]})
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
         kid = await registry.create(
@@ -431,8 +457,8 @@ async def test_set_model_keeps_a_client_a_child_still_uses(root_options, session
         await root.set_model("alias-b")
         assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="on b")
         old, new = factory.made
-        assert kid.agent.llm is old and not old.closed
-        assert root.agent.llm is new
+        assert kid._agent.llm is old and not old.closed
+        assert root._agent.llm is new
     finally:
         await registry.close_all()
     assert old.closed and new.closed
@@ -443,18 +469,20 @@ async def test_the_owned_client_closes_when_the_agent_close_fails(
     root_options, sessions_dir, monkeypatch, error
 ):
     factory = ModelFactory()
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
 
     async def broken_aclose():
         raise error
 
     # Agent.aclose() awaits the event manager's aclose(), which can raise.
-    monkeypatch.setattr(root.agent.event_manager, "aclose", broken_aclose)
+    monkeypatch.setattr(root._agent.event_manager, "aclose", broken_aclose)
     await asyncio.wait_for(registry.close(root.id), TIMEOUT)
     [llm] = factory.made
     assert llm.closed
-    assert root.handle._closed and root.info.status == "closed"
+    assert root.handle.closed and root.info.status == "closed"
     assert registry.get(root.id) is None
 
 
@@ -479,7 +507,9 @@ async def test_a_failing_handle_close_still_closes_the_session(registry, root_op
 
 async def test_mode_and_model_changes_survive_a_reload(root_options, sessions_dir):
     factory = ModelFactory()
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
         await root.set_mode("ask")
@@ -492,7 +522,9 @@ async def test_mode_and_model_changes_survive_a_reload(root_options, sessions_di
     assert registry.store.get(kid.id).mode == "ask"  # inherited at creation, and recorded
 
     fresh_factory = ModelFactory()
-    fresh = SessionRegistry(SessionStore(sessions_dir), llm_factory=fresh_factory)
+    fresh = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=fresh_factory
+    )
     try:
         loaded = await fresh.load(root.id)
         assert (loaded.options.permission_mode, loaded.info.mode) == ("ask", "ask")
@@ -632,7 +664,7 @@ async def test_a_throwaway_childs_turn_method_is_recorded(registry, root_options
 
 
 async def test_a_turn_cancelled_from_inside_fails_and_the_loop_goes_on(root_options, sessions_dir):
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     options = root_options.model_copy(update={"agent_spec": "coder_test_agents:SelfCancelAgent"})
     root = await registry.create(options)
     with pytest.raises(TurnFailedError, match="cancelled from inside"):
@@ -683,14 +715,16 @@ async def test_close_all_goes_on_when_one_close_fails(registry, root_options):
 
 async def test_a_failed_prepare_closes_the_half_built_session(root_options, sessions_dir):
     factory = ModelFactory()
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     closed = []
 
     async def prepare(session):
         async def on_close():
             closed.append(session.id)
 
-        session.agent.event_manager.on_close(on_close)
+        session._agent.event_manager.on_close(on_close)
         raise RuntimeError("bridge failed")
 
     with pytest.raises(RuntimeError, match="bridge failed"):
@@ -703,7 +737,9 @@ async def test_a_failed_prepare_closes_the_half_built_session(root_options, sess
 
 async def test_a_failed_agent_build_closes_the_owned_client(root_options, sessions_dir):
     factory = ModelFactory()
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     failing = root_options.model_copy(
         update={"model": "alias-a", "agent_spec": "coder_test_agents:FailingAgent"}
     )
@@ -716,11 +752,13 @@ async def test_a_failed_agent_build_closes_the_owned_client(root_options, sessio
 
 async def test_the_factorys_default_client_is_owned_too(root_options, sessions_dir):
     factory = ModelFactory({"default-model": [[done("default")]]})
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=factory)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
+    )
     root = await registry.create(root_options)  # no model: the factory's default
     [llm] = factory.made
     assert factory.calls == [(None, root_options.workspace)]
-    assert root.agent.llm is llm
+    assert root._agent.llm is llm
     assert root.info.model == "default-model"
     assert await asyncio.wait_for(root.prompt("go"), 5) == Done(explanation="default")
     await registry.close_all()

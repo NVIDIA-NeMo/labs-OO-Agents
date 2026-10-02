@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import shlex
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -368,7 +369,9 @@ class MCPControl(BehaviorControl):
             return ControlResult.ok(
                 ControlTable(
                     columns=["Server", "Approval", "Connection"], rows=rows, title="MCP servers"
-                )
+                ),
+                # The person also sees each server's endpoint and transport.
+                ControlMessage(registry.status(verbose=True)),
             )
         name = args[1]
         # Registry APIs accept globs; approval commands name one exact definition.
@@ -389,16 +392,127 @@ class MCPControl(BehaviorControl):
         )
 
 
+class TraceUrlControl(BehaviorControl):
+    """Show the viewer URL of the current trace session."""
+
+    @property
+    def name(self) -> str:
+        return "trace-url"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/trace-url": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if args:
+            return False, "Usage: /trace-url"
+        return True, None
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        """The URL from ``OTLP_ENDPOINT`` without its ``/v1/traces`` or ``/v1`` suffix.
+
+        The trace session is the one ``nooa.tracing`` holds in this context;
+        the ACP adapter sets it to the ACP session id for the session's
+        turns and for the commands it runs.
+        """
+        import os
+        import urllib.parse
+
+        try:
+            from nooa.tracing import get_session
+        except ImportError:
+            return ControlResult.err("Tracing package not installed.")
+        session_name = get_session()
+        if not session_name:
+            return ControlResult.err("No active trace session.")
+        base = os.environ.get("OTLP_ENDPOINT", "http://localhost:5001/v1/traces").rstrip("/")
+        for suffix in ("/v1/traces", "/v1"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        url = f"{base}/traces/view?session_id={urllib.parse.quote(session_name)}"
+        # A bare URL on its own is not rendered by every ACP client (Pool 1.0.16
+        # shows nothing); a text fence is, and keeps the URL copyable.
+        return ControlResult.ok(ControlMessage(f"Trace viewer:\n```text\n{url}\n```"))
+
+
+_USAGE_ROWS = (
+    ("Total tokens", "total_tokens"),
+    ("Input tokens", "input_tokens"),
+    ("Output tokens", "output_tokens"),
+    ("Cached input tokens (cache reads)", "cached_input_tokens"),
+    ("Cache-write input tokens", "cache_write_input_tokens"),
+    ("Reasoning tokens", "reasoning_tokens"),
+)
+
+
+class UsageControl(BehaviorControl):
+    """Token usage for this session so far."""
+
+    @property
+    def name(self) -> str:
+        return "usage"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/usage": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if args:
+            return False, "Usage: /usage"
+        return True, None
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        """This session's own totals; with subagents, a second block that adds theirs."""
+        port = getattr(self.agent, "session", None)
+        if port is None or not callable(getattr(port, "usage", None)):
+            return ControlResult.err("Token usage is not available: this agent has no session.")
+        usage = port.usage()
+        info = port.info() if callable(getattr(port, "info", None)) else None
+        lines = ["This session", *_usage_lines(usage.own())]
+        if usage.has_attributed():
+            lines += ["", "Including subagents", *_usage_lines(usage.with_attributed())]
+        if info is not None:
+            lines += ["", f"Turns: {info.turn_count}"]
+        body = "\n".join(lines)
+        return ControlResult.ok(ControlMessage(f"```text\n{body}\n```"))
+
+
+def _usage_lines(usage: Any) -> list[str]:
+    width = max(len(label) for label, _ in _USAGE_ROWS)
+    lines = [f"  {label:<{width}}  {getattr(usage, field):>12,}" for label, field in _USAGE_ROWS]
+    if usage.cost_usd:
+        lines.append(f"  {'Cost (USD)':<{width}}  {usage.cost_usd:>12.4f}")
+    return lines
+
+
 CONTROL_TYPES = {
     "skills": SkillsControl,
     "mcp": MCPControl,
+    "trace-url": TraceUrlControl,
+    "usage": UsageControl,
 }
 
 
-def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_registry: Any):
-    """Adapt shared operations to the host-neutral command catalog."""
-    from nooa_coder.coding.slash_commands import CodingSlashCommand
+@dataclass(frozen=True)
+class ControlCommand:
+    """One control as a slash command: its name, help text and what runs it.
 
+    The coding agent's command registry wraps each in its own command type
+    (``CodingSlashCommand.for_control``).
+    """
+
+    name: str
+    description: str
+    argument_hint: str
+    # Not compared: the same control built again is not a change.
+    invoke: Callable[..., Awaitable[Any]] = field(repr=False, compare=False)
+
+
+def behavior_commands(
+    agent: Any, config: Any, *, workspace: Path, command_registry: Any
+) -> list[ControlCommand]:
+    """The ``/skills``, ``/mcp``, ``/trace-url`` and ``/usage`` controls, as plain commands."""
     result = []
     for control_type in CONTROL_TYPES.values():
         control = control_type(
@@ -408,16 +522,16 @@ def behavior_commands(agent: Any, config: Any, *, workspace: Path, command_regis
             command_registry=command_registry,
         )
         result.append(
-            CodingSlashCommand(
+            ControlCommand(
                 name=control.name,
                 description=control_type.__doc__ or "",
                 argument_hint={
                     "skills": "<list|commands|add DIR|activate ID|deactivate ID>",
                     "mcp": "[status|approve NAME [CODE]|revoke NAME]",
+                    "trace-url": "",
+                    "usage": "",
                 }[control.name],
-                output_to_agent=False,
-                is_control=True,
-                _method=control.invoke,
+                invoke=control.invoke,
             )
         )
     return result

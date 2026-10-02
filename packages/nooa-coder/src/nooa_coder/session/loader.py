@@ -25,6 +25,29 @@ AgentFactory = Callable[[SessionOptions, StorageManager], InteractiveAgent]
 """Builds the agent for a session from its options and its storage."""
 
 
+CODING_AGENT = "nooa_coder.coding.agent:CodingAgent"
+EXPERIMENTAL_CODING_AGENT = "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent"
+LEGACY_AGENT_SPECS = {
+    "nooa_cli.tui.agent:TUIAgent": CODING_AGENT,
+    "nooa_cli.coding.legacy_agent:TUIAgent": CODING_AGENT,
+    "nooa_cli.tui.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
+    "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
+    # Spellings from before the coding agent moved to nooa-coder.
+    "nooa_cli.coding.agent:CodingAgent": CODING_AGENT,
+    "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_CODING_AGENT,
+    # What the nooa-acp server and the old TUI record as a session's agent.
+    "CodingAgent": CODING_AGENT,
+    "TUIAgent": CODING_AGENT,
+    "ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
+}
+"""Agent specs older hosts saved, and the spec that loads the class that replaced each."""
+
+
+def canonical_agent_spec(spec: str) -> str:
+    """The spec to load for ``spec``: its replacement if an older host saved it, else itself."""
+    return LEGACY_AGENT_SPECS.get(spec, spec)
+
+
 class AgentSpecError(ValueError):
     """The agent spec is malformed or does not name an ``InteractiveAgent`` class."""
 
@@ -46,8 +69,6 @@ def load_agent_class(spec: str, *, base: str | Path | None = None) -> type[Inter
     cannot be imported, a missing class, or a class that is not an
     ``InteractiveAgent``.
     """
-    from nooa_coder.coding.identity import canonical_agent_spec
-
     spec = canonical_agent_spec(spec)
     module_name, _, class_path = spec.rpartition(":")
     class_path = class_path.strip()
@@ -136,14 +157,6 @@ def _load_agent_file(file_path: Path) -> ModuleType:
             sys.path.remove(parent_str)
     _FILE_AGENT_MODULES[file_path] = (mtime, module)
     return module
-
-
-def default_agent_factory(options: SessionOptions, storage: StorageManager) -> InteractiveAgent:
-    """Instantiate ``options.agent_spec`` with the session's storage and ``options.llm``."""
-    agent_class = load_agent_class(options.agent_spec, base=options.workspace)
-    if options.llm is not None:
-        return agent_class(llm=options.llm, storage=storage)
-    return agent_class(storage=storage)
 
 
 def load_typed(type_name: str | None, data: Any) -> Any:

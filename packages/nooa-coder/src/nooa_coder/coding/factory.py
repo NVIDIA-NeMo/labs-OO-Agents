@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nooa.interactive import InteractiveAgent
-from nooa.unifiedllm import get_llm_client
+from nooa_coder.coding.slash_commands import CodingSlashCommand
 from nooa_coder.session.loader import load_agent_class
 from nooa_coder.workspace.controls import behavior_commands
+from nooa_coder.workspace.models import workspace_llm_client
 from nooa_coder.workspace.options import CoderOptions, configure_session_skills
 
 if TYPE_CHECKING:
@@ -95,13 +96,14 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
         # The /skills and /mcp controls belong to the agent, not to one host:
         # MCPApprovalRequired tells the user to run /mcp approve. set_controls()
         # also refreshes the skill commands.
+        controls = behavior_commands(
+            agent,
+            coder_options,
+            workspace=Path(coder_options.working_dir),
+            command_registry=agent.slash_commands,
+        )
         agent.slash_commands.set_controls(
-            behavior_commands(
-                agent,
-                coder_options,
-                workspace=Path(coder_options.working_dir),
-                command_registry=agent.slash_commands,
-            )
+            [CodingSlashCommand.for_control(control) for control in controls]
         )
     return agent
 
@@ -110,14 +112,14 @@ def default_llm_factory(*, workspace_default: str | None = None) -> LLMFactory:
     """A model factory for ``SessionRegistry(llm_factory=...)``.
 
     The registry calls it as ``factory(alias, workspace)`` for a session
-    without a client. A named alias is built with ``get_llm_client``. No
-    alias means the default model: ``workspace_default`` when given, else
-    the workspace's ``CoderOptions.default_model`` (its settings files, then
+    without a client. A named alias is built with ``workspace_llm_client``,
+    against the model configuration of that workspace. No alias means the
+    default model: ``workspace_default`` when given, else the workspace's ``CoderOptions.default_model`` (its settings files, then
     ``nooa.interactive.DEFAULT_MODEL``).
     """
 
     def make(alias: str | None, workspace: Path) -> Any:
         name = alias or workspace_default or CoderOptions.load(workspace).default_model
-        return get_llm_client(name)
+        return workspace_llm_client(name, workspace)
 
     return make

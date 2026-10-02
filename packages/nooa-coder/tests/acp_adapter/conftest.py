@@ -17,13 +17,18 @@ class FakeClient:
     tests add the last kind), so tests can assert ordering across kinds.
     ``elicitation_answers`` and ``permission_answers`` are scripted replies,
     used in order; ``elicitation_gate`` (an Event) holds an elicitation open.
+    Extension requests are logged as ``("ext", method, params)`` and answered
+    from ``ext_answers`` (an exception there is raised); ``ext_gate`` holds
+    them open.
     """
 
     def __init__(self) -> None:
         self.log: list[tuple[Any, ...]] = []
         self.elicitation_answers: list[Any] = []
         self.permission_answers: list[Any] = []
+        self.ext_answers: list[Any] = []
         self.elicitation_gate: asyncio.Event | None = None
+        self.ext_gate: asyncio.Event | None = None
         self.elicitation_started = asyncio.Event()
         self.changed = asyncio.Event()
 
@@ -43,6 +48,16 @@ class FakeClient:
     ) -> Any:
         self.log.append(("permission", session_id, tool_call, options))
         return self.permission_answers.pop(0)
+
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.log.append(("ext", method, params))
+        self.changed.set()
+        if self.ext_gate is not None:
+            await self.ext_gate.wait()
+        answer = self.ext_answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
 
     def updates(self, session_id: str | None = None, kind: type | None = None) -> list[Any]:
         return [
@@ -73,22 +88,27 @@ def workspace(tmp_path):
 
 
 @pytest.fixture
+def sessions_dir(workspace):
+    """Where the ``workspace`` fixture's sessions live by default."""
+    return workspace / ".nooa" / "sessions"
+
+
+@pytest.fixture
 def client():
     return FakeClient()
 
 
 @pytest.fixture
-async def make_adapter(sessions_dir, client):
+async def make_adapter(client):
     """Build a ``CoderACPAgent`` over a registry of scripted-model agents.
 
-    ``make_adapter(models, agent_spec=..., capabilities=...)`` returns the
+    ``make_adapter(models, agent_spec=..., capabilities=..., client_info=...)`` returns the
     adapter, connected to ``client`` and initialized. Everything it built
     is closed after the test.
     """
     from acp import PROTOCOL_VERSION
     from nooa_coder.acp.server import CoderACPAgent
     from nooa_coder.session.registry import SessionRegistry
-    from nooa_coder.session.store import SessionStore
 
     built: list[Any] = []
 
@@ -100,13 +120,16 @@ async def make_adapter(sessions_dir, client):
         llm_factory: Any = None,
         model: str | None = None,
         client_: Any = None,
+        client_info: Any = None,
     ) -> Any:
-        registry = SessionRegistry(
-            SessionStore(sessions_dir), agent_factory=models, llm_factory=llm_factory
-        )
-        adapter = CoderACPAgent(registry, agent_spec=agent_spec, model=model)
+        def new_registry(store: Any) -> SessionRegistry:
+            return SessionRegistry(store, agent_factory=models, llm_factory=llm_factory)
+
+        adapter = CoderACPAgent(new_registry, agent_spec=agent_spec, model=model)
         adapter.on_connect(client_ or client)
-        await adapter.initialize(PROTOCOL_VERSION, client_capabilities=capabilities)
+        await adapter.initialize(
+            PROTOCOL_VERSION, client_capabilities=capabilities, client_info=client_info
+        )
         built.append(adapter)
         return adapter
 
@@ -142,17 +165,17 @@ def file_spec():
 async def coder_adapter(make_adapter):
     """``coder_adapter(*responses)``: an adapter building real coding agents.
 
-    Sessions go through the registry's default agent factory
-    (``create_session_agent``), so workspace settings, skills and slash
+    Sessions are built by ``create_session_agent``, so workspace settings, skills and slash
     commands apply; each session's model is a strict fake scripted with
     ``responses`` (one list per session, in creation order).
     """
     from coder_test_agents import CODER_SPEC, ModelFactory
+    from nooa_coder.coding.factory import create_session_agent
 
     async def make(*scripts: list[Any], capabilities: Any = None) -> Any:
         factory = ModelFactory({"fake": [list(script) for script in scripts]})
         adapter = await make_adapter(
-            None,
+            create_session_agent,
             agent_spec=CODER_SPEC,
             llm_factory=factory,
             model="fake",

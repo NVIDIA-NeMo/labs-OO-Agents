@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
-from nooa import Context, hidden, strategy
+from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
@@ -21,7 +21,7 @@ from nooa.interactive import (
 from nooa.paths import get_project_dir
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
-from nooa.strategies import CodeActStrategy, PredictStrategy
+from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_coder.coding.activity import ActivityShellTools
@@ -37,6 +37,7 @@ from nooa_coder.session.items import (
     ChildQuestion,
     ChildRef,
     ChildResult,
+    PlanEntry,
     TaskResult,
 )
 from nooa_coder.session.registry import DepthLimitError
@@ -66,6 +67,15 @@ __all__ = [
     "session_title_request",
 ]
 
+# CodeActV2 replaces the framework context blocks with a concise self doc: the
+# ``state`` dump and the execution-context stub go, and the strategy adds its
+# own compact ``python_cell_state`` block.
+_V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
+    "state": None,
+    "execution_context": None,
+    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
+}
+
 
 class CodingAgent(InteractiveAgent):
     """You are a careful software-development agent working in one local repository.
@@ -73,6 +83,8 @@ class CodingAgent(InteractiveAgent):
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use the shell for files and commands, the repo
     tools for definitions and references, and todos for multi-step work.
+    ``cd`` moves ``self.shell`` and ``self.repo`` together; the repository
+    root bounds repo searches.
 
     Delegate bounded, context-heavy work (exploration, diagnosis, review, an
     independently verifiable change) to a child session with its own history:
@@ -205,7 +217,7 @@ class CodingAgent(InteractiveAgent):
         self.slash_commands = CodingSlashCommandRegistry(self, skills_dirs=skills_dirs or ())
 
         self.context["python_cell_tools"] = Context(
-            doc(RepoTools, ActivityShellTools, concise=True),
+            doc(RepoTools, ActivityShellTools, TodoManager, concise=True),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
@@ -222,15 +234,20 @@ class CodingAgent(InteractiveAgent):
         self._summarization = summarization or SummarizationConfig()
         install_summarizer(self._summarization, self)
 
+    @no_trace
     def _coding_state_context(self) -> str:
         """Describe coding-specific state without exposing stored values."""
         from html import escape
 
-        cwd = str(self.shell.cwd).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
-        cwd = escape(cwd[:159] + "…" if len(cwd) > 160 else cwd, quote=False)
+        def shown(path: object) -> str:
+            text = str(path).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+            return escape(text[:159] + "…" if len(text) > 160 else text, quote=False)
+
+        cwd, root = shown(self.shell.cwd), shown(self.repo.root)
         count = len(self.vars)
         return (
-            f"Working directory (already active for `self.shell`; persists across cells and turns): {cwd}\n"
+            f"Working directory (already active for `self.shell` and `self.repo`; persists across cells and turns): {cwd}\n"
+            f"Repository root (the boundary for repo searches): {root}\n"
             "Use relative paths; call `cd` only to intentionally change directories.\n"
             f"`self.v`: {count} persistent vars — inspect: `print(self.v.items())`; "
             "remove one: `del self.v.<name>`; clear all: `self.v.clear()`"
@@ -342,6 +359,42 @@ class CodingAgent(InteractiveAgent):
             raise RuntimeError("This agent is not running in a session")
         return self.session
 
+    @hidden
+    async def prepare_tools(self) -> list[str]:
+        """Connect the MCP servers this workspace remembers; return warnings.
+
+        Called through ``Session.prepare_tools()`` by a host before the
+        first turn. The ``/skills`` and ``/mcp`` controls come from the
+        agent factory.
+        """
+        from nooa_coder.workspace.options import CoderOptions, connect_session_mcp
+
+        return await connect_session_mcp(self, CoderOptions.load(self.cwd))
+
+    @hidden
+    @no_trace
+    def plan(self) -> list[PlanEntry]:
+        """The todo list as ACP plan entries, read through ``Session.plan()``.
+
+        A done todo is ``completed``, the active one ``in_progress``, the
+        rest ``pending``.
+        """
+        active = self.todo.active()
+        return [
+            PlanEntry(
+                content=todo.title,
+                status=(
+                    "completed"
+                    if todo.status == "done"
+                    else "in_progress"
+                    if active is not None and todo.id == active.id
+                    else "pending"
+                ),
+            )
+            for todo in self.todo.list_todos()
+        ]
+
+    @no_trace
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""
         tags = self.event_manager.keys()
@@ -393,7 +446,7 @@ class CodingAgent(InteractiveAgent):
         ...
 
     @hidden
-    @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))
+    @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
     async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
         """Handle one interactive turn: the newest request and anything else that arrived.
 
@@ -422,12 +475,18 @@ class CodingAgent(InteractiveAgent):
           still running and nothing else is left to do. ``on`` names what
           you wait for, for example ``["jobs"]``; the next turn starts when
           it delivers.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
         """
         ...
 
     @hidden
     @strategy(
-        CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result]))
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
+        context=_V2_CONTEXT,
     )
     async def handle_batch(self, notification: dict[str, list[Any]]) -> Done | Waiting:
         """Work on one task unattended and return a structured result.
@@ -453,6 +512,11 @@ class CodingAgent(InteractiveAgent):
         that says what blocked you and what you tried. Return
         ``Waiting(explanation=..., on=[...])`` only while a job you started
         is still running.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
         """
         ...
 
