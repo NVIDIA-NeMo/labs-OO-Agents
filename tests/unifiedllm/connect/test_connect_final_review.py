@@ -82,7 +82,8 @@ def test_catalogue_recommendation_cannot_allocate_the_whole_window():
 
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
-async def test_each_probe_sends_configured_cap_through_runtime(monkeypatch, style):
+@pytest.mark.parametrize("direct", [True, False])
+async def test_each_probe_sends_configured_cap_through_runtime(monkeypatch, style, direct):
     bodies = []
 
     def handle(request):
@@ -92,6 +93,7 @@ async def test_each_probe_sends_configured_cap_through_runtime(monkeypatch, styl
     mock_http(monkeypatch, handle)
     plan = proposal(
         style,
+        direct=direct,
         reply_tokens=8192,
         reasoning_levels={"custom": {"temperature": 0.5, "max_tokens": 12288}},
     )
@@ -101,8 +103,9 @@ async def test_each_probe_sends_configured_cap_through_runtime(monkeypatch, styl
     for record in result.entry["provenance"]["probes"].values():
         assert record["settings_sent"] is True
         assert record["tested_reply_tokens"] == record["configured_reply_tokens"]
-        assert record["transport"] == "litellm"  # This runtime predates direct SDK support.
-    assert result.entry["transport"] == "direct"  # Saved preference is forward-compatible.
+        assert record["transport"] == ("direct" if direct else "litellm")
+    assert result.entry["transport"] == ("direct" if direct else "litellm")
+    assert result.entry["direct"] is direct
 
 
 async def test_insufficient_budget_never_substitutes_smaller_cap(monkeypatch):
@@ -136,10 +139,10 @@ def test_diagnostic_scrubs_active_key_in_values_and_mapping_keys(monkeypatch):
     assert "private-test-key" not in prompt
 
 
-def test_new_entries_select_future_direct_transport_without_overwriting_explicit_choice():
+def test_new_entries_select_direct_without_overwriting_explicit_boolean():
     assert proposal().entry["transport"] == "direct"
     assert connect.configure_entry({"model_name": "openai/model"})["transport"] == "direct"
     assert (
-        connect.configure_entry({"model_name": "openai/model", "transport": "litellm"})["transport"]
+        connect.configure_entry({"model_name": "openai/model", "direct": False})["transport"]
         == "litellm"
     )

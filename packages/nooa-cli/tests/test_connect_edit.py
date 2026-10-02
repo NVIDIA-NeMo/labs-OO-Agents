@@ -43,12 +43,15 @@ def registry(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("selector", [[], ["saved"]])
-def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, selector):
+@pytest.mark.parametrize("litellm", [False, True])
+def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, selector, litellm):
     from nooa_cli.commands import _connect_prompts as _connect_prompts
 
     from nooa.unifiedllm import connect
 
     path, original = registry
+    original["direct"] = litellm  # Opposite of the requested CLI selection.
+    path.write_text(yaml.safe_dump({"models": {"saved": original}}))
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("Editing does not discover models or fetch metadata")
@@ -64,15 +67,16 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
     monkeypatch.setattr(_connect_prompts, "edit_model_details", edit)
     result = CliRunner().invoke(
         command,
-        ["--edit-model", *selector, "--no-probe"],
+        ["--edit-model", *selector, "--no-probe", *(["--litellm"] if litellm else [])],
         input=("saved\n" if not selector else "") + "use\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
     actual = yaml.safe_load(path.read_text())["models"]["saved"]
     assert actual["context_window"] == 64000
+    assert actual["direct"] is (not litellm)
+    assert actual["transport"] == ("litellm" if litellm else "direct")
     for key in (
         "model_name",
-        "transport",
         "max_tokens",
         "reasoning_levels",
         "extra_body",

@@ -267,9 +267,6 @@ def test_working_dir_reports_a_file_as_not_a_directory(tmp_path, monkeypatch):
 def test_enabled_reasoning_without_evidence_warns_once_before_save(
     tmp_path, monkeypatch, style, mode
 ):
-    if style == "anthropic" and mode == "usage":
-        # LiteLLM discards this non-native usage extension; direct can retain it.
-        monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     import json
 
     import httpx
@@ -755,7 +752,8 @@ def test_prompted_key_is_passed_to_probe_but_never_saved(tmp_path, monkeypatch):
     assert "temporary-secret" not in result.output + path.read_text()
 
 
-def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatch):
+@pytest.mark.parametrize("litellm", [False, True])
+def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatch, litellm):
     import click
     import httpx
 
@@ -787,9 +785,21 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         return httpx.Response(
             200,
             json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
                 "choices": [
-                    {"message": {"content": "323", "reasoning_content": "private test reasoning"}}
-                ]
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "323",
+                            "reasoning_content": "private test reasoning",
+                        },
+                    }
+                ],
             },
         )
 
@@ -801,7 +811,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     mock_http(monkeypatch, handle)
     result = CliRunner().invoke(
         command,
-        [],
+        ["--litellm"] if litellm else [],
         input=(
             "y\ncustom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
             "example-model\nmy-model\ny\nn\n"
@@ -815,6 +825,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     assert [r.method for r in requests] == ["GET"] + ["POST"] * 9
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
+    assert entry["direct"] is (not litellm)
+    assert entry["transport"] == ("litellm" if litellm else "direct")
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
     assert "reasoning returned" in result.output
     assert "acceptance alone" not in result.output
@@ -850,7 +862,22 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
         if responses_ok and request.url.path.endswith("responses"):
             return httpx.Response(200, json=response_body("responses"))
         if responses_ok and request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "test",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "323"},
+                        }
+                    ],
+                },
+            )
         return httpx.Response(401)
 
     monkeypatch.setattr(_connect_prompts, "prompt", prompt)
@@ -1013,7 +1040,22 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     def handle(request):
         sent.append(request)
         if request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "test",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "323"},
+                        }
+                    ],
+                },
+            )
         return httpx.Response(404)
 
     mock_http(monkeypatch, handle)
@@ -1183,8 +1225,6 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch
 
 
 def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monkeypatch):
-    # The exact count below includes LiteLLM's pre-HTTP interface rejection.
-    monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     import json
 
     import httpx
@@ -1194,7 +1234,22 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     def handle(request):
         bodies.append(json.loads(request.content))
         if request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "test",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "323"},
+                        }
+                    ],
+                },
+            )
         return httpx.Response(404)
 
     mock_http(monkeypatch, handle)
@@ -1226,13 +1281,14 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     assert [body["reasoning_effort"] for body in bodies if "reasoning_effort" in body] == [
         levels.split(",")[0],
         *levels.split(","),
+        *[levels.split(",")[0]] * 3,  # Direct session keeps configured effort.
     ]
     # Two interfaces reach HTTP; the runtime rejects the third before sending.
     # check_interfaces also probes the first level (max) per interface, cheaply,
     # to recommend which interface actually surfaces reasoning. Routing is then
     # rechecked at the configured cap; tools and all six levels run for real.
-    # The session seed is also attempted; this minimal mock lacks a finish reason.
-    assert len(bodies) == 12
+    # The SDK-valid mock also allows all three configured session turns.
+    assert len(bodies) == 15
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert "provenance" not in entry  # outcomes were checked on the wire; see bodies
 
@@ -1242,7 +1298,22 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
 
     def handle(request):
         if request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "test",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "323"},
+                        }
+                    ],
+                },
+            )
         return httpx.Response(404)
 
     mock_http(monkeypatch, handle)

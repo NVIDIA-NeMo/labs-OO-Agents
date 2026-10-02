@@ -96,6 +96,7 @@ def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
     entry["include"] = []
     record = {
         "source": "connect",
+        "transport": "direct" if entry.get("direct", True) else "litellm",
         "outcome": "rejected",
         "status_code": status,
         "reason": "The endpoint rejected encrypted reasoning; omitted from requests. Reasoning replay may be unavailable.",
@@ -116,6 +117,7 @@ _RESERVED = {
     "extra_body",
     "client",
     "transport",
+    "direct",
     "api_style",
     "replay_vendor",
 }
@@ -258,7 +260,7 @@ class Verdict:
 
 def verdict(entry: dict) -> Verdict:
     """Classify saved check evidence without making calls or guessing support."""
-    provenance = entry.get("provenance", {})
+    provenance = _transport_provenance(entry)
     missing = tuple(unobserved_reasoning_levels(entry))
     groups = {"passed": [], "attention": [], "skipped": []}
     for name, record in {
@@ -544,7 +546,7 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
     Frontends can show one warning without changing the saved probe outcomes.
     """
     missing = []
-    records = entry.get("provenance", {}).get("probes", {})
+    records = _transport_provenance(entry).get("probes", {})
     for label, params in entry.get("reasoning_levels", {}).items():
         record = records.get(f"level:{label}", {})
         if record.get("outcome") != "accepted" or record.get("reasoning_observed"):
@@ -568,12 +570,64 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
     return missing
 
 
-def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
+def _transport_provenance(entry: dict, *, selected: bool | None = None) -> dict:
+    """Detach evidence, discarding certification of a different client path.
+
+    The dispatch boolean, independent transport metadata and recorded transport
+    must agree. Legacy booleanless entries did not dispatch by metadata, so their
+    evidence cannot certify Connect's new default. Preserve catalogue/user data.
+    """
+    provenance = deepcopy(entry.get("provenance", {}))
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be a mapping")
+    selected = entry.get("direct", True) if selected is None else selected
+    transport = "direct" if selected else "litellm"
+    fields = (
+        "probes",
+        "session_checks",
+        "interfaces",
+        "requests_accepted",
+        "reasoning_observed",
+        "encrypted_reasoning",
+    )
+
+    def mismatched(value):
+        if isinstance(value, dict):
+            return (
+                "transport" in value
+                and value["transport"] != transport
+                or value.get("outcome") in {"accepted", "confirmed", "completed", "rejected"}
+                and "transport" not in value
+            ) or any(mismatched(child) for child in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(mismatched(child) for child in value)
+        return False
+
+    changed = (
+        "direct" not in entry
+        or selected != entry["direct"]
+        or entry.get("transport", transport) != transport
+        or any(mismatched(provenance.get(field)) for field in fields)
+    )
+    if changed:
+        for field in fields:
+            provenance.pop(field, None)
+    # Execution and stage isolation require a mapping even after invalidation.
+    provenance.setdefault("probes", {})
+    return provenance
+
+
+def configure_entry(
+    entry: dict, *, reply_tokens: int | None = None, direct: bool | None = None
+) -> dict:
     """Apply safe persisted defaults to a detached entry, without doing any I/O.
 
     ``max_tokens`` is the runtime cap on every interface. Published ceilings
     remain provenance, not request allocations. ``include: []`` is an explicit
     opt-out from carrying encrypted reasoning on stateless Responses calls.
+    Connect defaults to official SDKs; a stored ``direct=False`` is preserved,
+    and an explicit ``direct`` argument overrides it and invalidates old checks.
+    Metadata alone never selects a transport in ordinary registry clients.
     """
 
     def reject_credentials(value):
@@ -599,7 +653,21 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
 
     reject_credentials(entry)
     result = deepcopy(entry)
-    result.setdefault("transport", "direct")
+    selected = result.get("direct", True) if direct is None else direct
+    if not isinstance(selected, bool):
+        raise ValueError("direct must be a boolean")
+    result["provenance"] = _transport_provenance(result, selected=selected)
+    previous_rejection = entry.get("provenance", {}).get("encrypted_reasoning", {})
+    if (
+        previous_rejection.get("source") == "connect"
+        and previous_rejection.get("outcome") == "rejected"
+        and "encrypted_reasoning" not in result["provenance"]
+        and result.get("include") == []
+    ):
+        # A learned transport-specific opt-out is not a user-selected opt-out.
+        result["include"] = ["reasoning.encrypted_content"]
+    result["direct"] = selected
+    result["transport"] = "direct" if selected else "litellm"
     extra = result.get("extra_body") or {}
     if not isinstance(extra, dict):
         raise ValueError("extra_body must be a mapping")
@@ -762,7 +830,7 @@ def entry_warnings(entry: dict) -> list[str]:
         ]
     )
     cap = entry.get("max_tokens")
-    evidence = entry.get("provenance", {})
+    evidence = _transport_provenance(entry)
     records = {**evidence.get("probes", {}), **evidence.get("session_checks", {})}.values()
     if cap and not any(
         r.get("outcome") == "accepted"
@@ -841,6 +909,7 @@ def plan(
     existing_entry: dict | None = None,
     session_checks: bool = False,
     reply_tokens: int | None = None,
+    direct: bool | None = None,
 ) -> ConnectPlan:
     """Prepare requests without reading credentials, files or network resources.
 
@@ -873,6 +942,7 @@ def plan(
         # The Messages runtime adds /v1/messages; Chat/Responses expect an API base.
         "api_base": api_base.removesuffix("/v1") if api_style == "anthropic" else api_base,
         "api_key_env": api_key_env,
+        "direct": direct if direct is not None else (existing_entry or {}).get("direct", True),
     }
     provenance: dict[str, Any] = {
         "probes": {},
@@ -947,11 +1017,13 @@ def plan(
         entry["allowed_openai_params"] = sorted({key for patch in levels.values() for key in patch})
     if (default := reasoning.get("default_effort")) in levels:
         entry["reasoning_default"] = default
+    if existing_entry:
+        existing_entry = {**existing_entry, "provenance": _transport_provenance(existing_entry)}
     if api_style == "responses":
         entry["store"] = False
         entry["include"] = ["reasoning.encrypted_content"]
         provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
-        route_keys = ("model_name", "api_base", "api_key_env", "api_style")
+        route_keys = ("model_name", "api_base", "api_key_env", "api_style", "direct")
         if (
             existing_entry
             and all(existing_entry.get(key) == entry.get(key) for key in route_keys)
@@ -1027,7 +1099,7 @@ def plan(
     if existing_entry:
         # Each probe is also compared to its exact request in run_steps. Adding
         # a level must not invalidate an unchanged routing or tool check.
-        keys = ("model_name", "api_base", "api_key_env", "api_style")
+        keys = ("model_name", "api_base", "api_key_env", "api_style", "direct")
         if all(existing_entry.get(key) == entry.get(key) for key in keys):
             previous = existing_entry.get("provenance", {}).get("probes", {})
             provenance["probes"] = {
@@ -1102,6 +1174,14 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     )
     settings_sent = []
     response_status = []
+    transport = "direct" if client.direct else "litellm"
+    wire_evidence = {
+        "api_style": entry["api_style"],
+        "request_count": 0,
+        "telemetry": "owned httpx capture; LiteLLM callbacks unavailable for direct SDKs"
+        if client.direct
+        else "owned httpx capture",
+    }
 
     async def capture_status(response):
         response_status.append(response.status_code)
@@ -1115,7 +1195,14 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                 **{k: v for k, v in settings.items() if k not in REPLY_CAP_KEYS},
                 **expected,
             }
-        settings_sent.append(settings_on_wire(expected, json.loads(request.content)))
+        body = json.loads(request.content)
+        wire_evidence["request_count"] += 1
+        wire_evidence["reply_limits"] = {
+            k: body[k] for k in REPLY_CAP_KEYS if isinstance(body.get(k), int)
+        }
+        if isinstance(body.get("model"), str):
+            wire_evidence["model"] = body["model"][:512]
+        settings_sent.append(settings_on_wire(expected, body))
 
     hooks = client._http.httpx_async.event_hooks["request"]
     response_hooks = client._http.httpx_async.event_hooks["response"]
@@ -1124,10 +1211,10 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     try:
         params["timeout"] = probe.timeout_seconds
         response = await client.acall(messages=messages, **params)
-        transport = getattr(client, "transport", "litellm")
         observed = (len(settings_sent) == 1 and all(settings_sent)) if settings_sent else None
-        return response, observed, transport
+        return response, observed, transport, wire_evidence
     except Exception as exc:
+        exc.__dict__.update(_connect_transport=transport, _connect_wire_evidence=wire_evidence)
         if response_status:
             # LiteLLM can label a malformed HTTP-200 response as a 422 error.
             # Keep the observed status distinct from that local translation.
@@ -1204,6 +1291,7 @@ def diagnostic_prompt(
             "api_base",
             "api_key_env",
             "transport",
+            "direct",
             "max_tokens",
             "store",
             "include",
@@ -1313,9 +1401,12 @@ async def run_steps(
             and previous.get("request") == probe.body
             and previous.get("client") == "unifiedllm"
             and previous.get("settings_sent") is True
+            and previous.get("transport") == entry["transport"]
         ):
             if probe.name == "routing" and entry.get("include"):
-                provenance.setdefault("encrypted_reasoning", {})["outcome"] = "accepted"
+                provenance.setdefault("encrypted_reasoning", {}).update(
+                    outcome="accepted", transport=entry["transport"]
+                )
             yield ProbeUpdate(
                 probe.name, {**deepcopy(previous), "reason": "previous result reused"}
             )
@@ -1379,7 +1470,7 @@ async def run_steps(
         }
         try:
             async with deadline:
-                response, settings_sent, transport = await _run_probe(
+                response, settings_sent, transport, wire_evidence = await _run_probe(
                     proposal.alias, entry, probe, key
                 )
             usage = response.usage
@@ -1497,6 +1588,9 @@ async def run_steps(
 
             status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
             record["error"] = type(exc).__name__
+            if hasattr(exc, "_connect_transport"):
+                record["transport"] = exc.__dict__["_connect_transport"]
+                record["wire_evidence"] = exc.__dict__["_connect_wire_evidence"]
             record["elapsed_seconds"] = round(time.monotonic() - started, 3)
             if isinstance(status, int):
                 record["status_code"] = status
@@ -1529,6 +1623,7 @@ async def run_steps(
             elapsed_seconds=round(time.monotonic() - started, 3),
             client="unifiedllm",
             transport=transport,
+            wire_evidence=wire_evidence,
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,
             reasoning_encrypted=reasoning_encrypted,
@@ -1569,7 +1664,9 @@ async def run_steps(
         spent += max(0, tokens - probe.token_estimate)
         yield ProbeUpdate(probe.name, deepcopy(record))
         if probe.name == "routing" and entry.get("include"):
-            provenance.setdefault("encrypted_reasoning", {})["outcome"] = "accepted"
+            provenance.setdefault("encrypted_reasoning", {}).update(
+                outcome="accepted", transport=entry["transport"]
+            )
     provenance["requests_accepted"] = [
         name for name, item in records.items() if item["outcome"] == "accepted"
     ]
@@ -1623,6 +1720,7 @@ async def check_interfaces(
     output_tokens: int = 200,
     api_key: str | None = None,
     styles: tuple[str, ...] = ("chat", "responses", "anthropic"),
+    direct: bool = True,
     timeout_seconds: float = 30,
     reasoning_template: str | None = None,
     reasoning_level: str = "medium",
@@ -1676,6 +1774,7 @@ async def check_interfaces(
             output_tokens=output_tokens,
             reasoning_levels=style_reasoning_levels,
             reasoning_output_tokens=reasoning_output_tokens,
+            direct=direct,
         )
         routing = replace(
             proposal.probes[0],

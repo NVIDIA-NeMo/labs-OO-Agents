@@ -36,7 +36,7 @@ def make_plan(**kwargs):
 )
 def test_unobserved_reasoning_checks_use_settings_not_label_names(params, expected):
     entry = make_plan(reasoning_levels={"custom": params}).entry
-    record = {"outcome": "accepted", "reasoning_observed": False}
+    record = {"outcome": "accepted", "reasoning_observed": False, "transport": "direct"}
     entry["provenance"]["probes"]["level:custom"] = record
     original = deepcopy(entry)
     assert connect.unobserved_reasoning_levels(entry) == (["custom"] if expected else [])
@@ -119,7 +119,22 @@ async def test_run_transient_or_no_key_never_changes_environment(monkeypatch, ke
 
     async def post(self, url, **kwargs):
         requests.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+            },
+        )
 
     mock_post(monkeypatch, post)
     result = await connect.run(proposal, approved="minimal", api_key=key)
@@ -245,8 +260,18 @@ async def test_budget_stops_before_second_call_and_reconnect_skips_accepted(monk
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": "323"}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
             },
         )
 
@@ -356,13 +381,57 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
         (
             "chat",
             {"reasoning_effort": "high"},
-            {"choices": [{"message": {"content": "323", "reasoning_content": "reason"}}]},
+            {
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "323",
+                            "reasoning_content": "reason",
+                        },
+                    }
+                ],
+            },
         ),
-        ("chat", {"thinking": {"type": "enabled"}}, {"choices": [{"message": {"content": "323"}}]}),
+        (
+            "chat",
+            {"thinking": {"type": "enabled"}},
+            {
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+            },
+        ),
         (
             "chat",
             {"chat_template_kwargs": {"enable_thinking": True}},
-            {"choices": [{"message": {"content": "323"}}]},
+            {
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+            },
         ),
         (
             "responses",
@@ -378,10 +447,6 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
 )
 @pytest.mark.asyncio
 async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, patch, response):
-    if style == "chat" and "thinking" in patch:
-        # This case specifically exercises LiteLLM's local rejection; direct
-        # compatible transports forward unknown fields to the server.
-        monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     monkeypatch.setenv("CONNECT_TEST_KEY", "private-test-key")
     sent = []
 
@@ -401,6 +466,7 @@ async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, p
         style,
         "https://api.test/v1",
         "CONNECT_TEST_KEY",
+        direct=not (style == "chat" and "thinking" in patch),
         reasoning_levels={"high": patch},
     )
     result = await connect.run(proposal, approved="all")
@@ -428,13 +494,29 @@ async def test_budget_template_cannot_raise_approved_output_cap(monkeypatch):
 
     async def post(self, url, **kwargs):
         bodies.append(kwargs["json"])
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+            },
+        )
 
     mock_post(monkeypatch, post)
     proposal = make_plan(
+        direct=False,  # Negative control: LiteLLM rejects Chat thinking locally.
         reasoning_levels={
             "high": {"thinking": {"type": "enabled", "budget_tokens": 4096}, "max_tokens": 5120}
-        }
+        },
     )
     result = await connect.run(proposal, approved="all")
     assert len(bodies) == 2
@@ -448,7 +530,22 @@ async def test_alternate_cap_cannot_bypass_budget(monkeypatch):
 
     async def post(self, url, **kwargs):
         bodies.append(kwargs["json"])
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+            },
+        )
 
     mock_post(monkeypatch, post)
     result = await connect.run(
@@ -608,7 +705,22 @@ async def test_probe_cannot_multiply_generations_or_stream(monkeypatch, settings
 
     async def post(self, url, **kwargs):
         calls.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+            },
+        )
 
     mock_post(monkeypatch, post)
     result = await connect.run(
@@ -688,7 +800,22 @@ async def test_progress_events_arrive_before_and_after_each_request(monkeypatch)
     async def post(self, url, **kwargs):
         assert events[-1].outcome["outcome"] == "running"
         calls.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "323"},
+                    }
+                ],
+            },
+        )
 
     mock_post(monkeypatch, post)
     async for event in connect.run_steps(make_plan(), approved="all", api_key="test-key"):

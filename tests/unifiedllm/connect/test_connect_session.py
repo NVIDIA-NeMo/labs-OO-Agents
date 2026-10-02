@@ -239,7 +239,7 @@ async def test_selected_reasoning_level_and_cache_defaults_reach_wire(monkeypatc
 @pytest.mark.asyncio
 async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
     # Regression for legacy parameter filtering, which direct does not perform.
-    monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
+
     bodies = []
 
     def handle(request):
@@ -255,6 +255,7 @@ async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
         "chat",
         "https://api.test/v1",
         "",
+        direct=False,  # Negative control: legacy parameter filtering.
         reasoning_levels={"max": {"reasoning_effort": "max"}},
         reply_tokens=2048,
     )
@@ -273,7 +274,10 @@ async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unlisted_model_declared_effort_reaches_level_and_session_requests(monkeypatch):
+@pytest.mark.parametrize("direct", [True, False])
+async def test_unlisted_model_declared_effort_reaches_level_and_session_requests(
+    monkeypatch, direct
+):
     sent = []
 
     def handle(request):
@@ -290,6 +294,7 @@ async def test_unlisted_model_declared_effort_reaches_level_and_session_requests
         "chat",
         "https://api.test/v1",
         "",
+        direct=direct,
         reasoning_levels={"max": {"reasoning_effort": "max"}},
         session_checks=True,
         budget_tokens=65536,
