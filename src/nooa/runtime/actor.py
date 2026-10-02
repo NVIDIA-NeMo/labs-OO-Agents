@@ -917,8 +917,14 @@ class ActorRuntime:
         )
         return resolved_context, events
 
-    async def decide(self, request: "DecisionRequest") -> "DecisionResponse":
-        """Run a decision request through middleware and persist its outcome."""
+    async def decide(
+        self, request: "DecisionRequest", *, include_raw_response: bool = False
+    ) -> "DecisionResponse":
+        """Run a decision request through middleware and persist its outcome.
+
+        ``include_raw_response`` stores the response's raw body in the
+        ``DecisionRecord``. It is never added to trace attributes.
+        """
         if self._current_method is None:
             raise RuntimeError("decide() called with no current method context")
         client = cast("UnifiedDecisionModel | None", _current_decision_model_var.get())
@@ -1005,6 +1011,9 @@ class ActorRuntime:
                     resolved_model=resolved_model,
                     response_id=response.id if response is not None else None,
                     usage=LLMUsage.from_provider(response.usage) if response is not None else None,
+                    raw_response=response.raw
+                    if include_raw_response and response is not None
+                    else None,
                     success=success,
                     exception_type=exception_type,
                 )

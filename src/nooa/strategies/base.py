@@ -205,8 +205,14 @@ class DecisionRuntimeServices(RuntimeServices, Protocol):
         """
         ...
 
-    async def decide(self, request: "DecisionRequest") -> "DecisionResponse":
-        """Evaluate one backend-neutral decision request and return its answers."""
+    async def decide(
+        self, request: "DecisionRequest", *, include_raw_response: bool = False
+    ) -> "DecisionResponse":
+        """Evaluate one backend-neutral decision request and return its answers.
+
+        With ``include_raw_response``, the durable record also stores the
+        client's raw response body, when it has one.
+        """
         ...
 
     def record_decision_fallback(

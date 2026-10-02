@@ -303,6 +303,32 @@ Use `BooleanDecision`, `ChoiceDecision[E]`, or `ScoreDecision` instead of a
 primitive to retain the evidence. `ChoiceDecision.selected` preserves the
 backend selection even when a threshold makes `.value` become `None`.
 
+### Inspect the raw API response
+
+For advanced cases, such as reading fields a decision server adds beyond the
+standard answers, opt in when you create the strategy:
+
+```python
+class SupportAgent(Agent, decision_model=decision_model):
+    @strategy(DecideStrategy(include_raw_response=True))
+    async def department(self, message: str) -> ChoiceDecision[Department]:
+        """Choose the team that should handle the message."""
+        ...
+
+
+decision = await agent.department(message)
+decision.raw_response  # read-only mapping of the decision API's response body
+```
+
+`raw_response` is set on detailed results (`BooleanDecision`,
+`ChoiceDecision`, `ScoreDecision`); primitive results return only the value. In
+a composite, every detailed field shares the same response object. The same
+body is stored in the call's `DecisionRecord.raw_response`, and never in trace
+attributes. NOOA does not interpret it. It is excluded from equality, `repr`,
+and `model_dump()`, and it is `None` for LLM fallbacks, for responses created
+by `decision_call` middleware, and for decision clients that do not provide a
+raw body.
+
 If `decision_model` is omitted, primitive `bool`, enum, `Literal`, and `float`
 results fall back to a Predict-style call through `llm`. Composites containing
 only those primitive results can also fall back. Detailed decision objects and

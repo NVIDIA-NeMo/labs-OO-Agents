@@ -15,6 +15,18 @@ from nooa.strategies.current_call import CurrentCall
 class DecideStrategy(GenerationStrategy):
     """Compile the declared result, make one decision request, and reconstruct it."""
 
+    def __init__(self, *, include_raw_response: bool = False) -> None:
+        """Configure the strategy.
+
+        Args:
+            include_raw_response: Attach the decision API's raw response body to
+                each detailed decision result (``BooleanDecision``,
+                ``ChoiceDecision``, ``ScoreDecision``) as ``raw_response``, and
+                store it in the call's ``DecisionRecord``. Applies only to
+                native decision-model calls.
+        """
+        self.include_raw_response = include_raw_response
+
     @property
     def uses_decision_model(self) -> bool:
         """Prefer the agent's decision model over its chat LLM."""
@@ -68,8 +80,10 @@ class DecideStrategy(GenerationStrategy):
             context=context,
             events=events,
         )
-        response = await decision_runtime.decide(request)
-        return schema.reconstruct(response)
+        response = await decision_runtime.decide(
+            request, include_raw_response=self.include_raw_response
+        )
+        return schema.reconstruct(response, include_raw_response=self.include_raw_response)
 
 
 __all__ = ["DecideStrategy"]

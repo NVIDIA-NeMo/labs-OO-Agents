@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
 type Criterion = str | dict[str, JsonValue] | list[JsonValue] | None
 Probability = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
@@ -78,6 +79,30 @@ class Decision[T](BaseModel):
     """Base class for a normalized decision result."""
 
     value: T
+    _raw_response: Mapping[str, Any] | None = PrivateAttr(default=None)
+
+    @property
+    def raw_response(self) -> Mapping[str, Any] | None:
+        """Return the read-only decision API response this result was parsed from.
+
+        Set only for native calls made with
+        ``DecideStrategy(include_raw_response=True)``. Every decision parsed
+        from one response shares the same object. It is excluded from
+        equality, ``repr``, and serialization.
+        """
+        return self._raw_response
+
+    def __eq__(self, other: object) -> bool:
+        """Compare decisions by their fields, ignoring the attached raw response."""
+        if not isinstance(other, BaseModel):
+            return NotImplemented
+        self_type = self.__pydantic_generic_metadata__["origin"] or type(self)
+        other_type = other.__pydantic_generic_metadata__["origin"] or type(other)
+        return (
+            self_type is other_type
+            and self.__dict__ == other.__dict__
+            and self.__pydantic_extra__ == other.__pydantic_extra__
+        )
 
 
 class BooleanDecision(Decision[bool]):

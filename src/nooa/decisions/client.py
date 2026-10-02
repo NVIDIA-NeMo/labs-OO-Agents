@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 import httpx
 from pydantic import JsonValue
 
+from nooa._immutable_json import freeze
 from nooa.decisions.types import Criterion
 
 if TYPE_CHECKING:
@@ -80,6 +82,8 @@ class DecisionResponse:
     model: str
     id: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
+    # The complete, read-only response body, when the client has one.
+    raw: Mapping[str, Any] | None = None
 
 
 @runtime_checkable
@@ -267,6 +271,7 @@ class DecisionClient(UnifiedDecisionModel):
             model=str(data.get("model") or ""),
             id=str(data["id"]) if data.get("id") is not None else None,
             usage=usage,
+            raw=cast("Mapping[str, Any]", freeze(data)),
         )
 
 
