@@ -22,12 +22,11 @@ from uuid import uuid4
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
 from nooa.context_blocks import render_context
-from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
+from nooa.context_blocks.scoped import _scoped_blocks_var
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
-    from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
 
 from nooa.events import (
@@ -437,14 +436,6 @@ _decorator_context_var: contextvars.ContextVar[dict[str, Any] | None] = contextv
     "decorator_context", default=None
 )
 
-# Context variable for inherited decorator event query.
-# Set by _execute_with_generation() so that @strategy(ScopedContext(events=...))
-# event filtering propagates to nested method calls on the same agent.
-# Read by _prepare_context() and captured on CurrentCall for the selected view.
-_decorator_events_var: contextvars.ContextVar["EventQuery | None"] = contextvars.ContextVar(
-    "decorator_events", default=None
-)
-
 # Task-local stdout/stderr buffers for async-safe capture
 # Contextvars are per-task, so parallel async executions get isolated buffers
 _stdout_buffer_var: contextvars.ContextVar[io.StringIO | TruncatingStringIO | None] = (
@@ -830,17 +821,10 @@ class ActorRuntime:
         call-specific information.
 
         Example:
-            # In DynamicContext expressions
-            @strategy(
-                CodeActStrategy(),
-                ScopedContext(events={
-                    "history": DynamicContext(
-                        "self.runtime.event_manager.filter(call_id=self.runtime.current_call.id)"
-                    )
-                })
-            )
-            async def my_method(self):
-                ...  # Only sees events from this method's call
+            # Inside a context view's assemble(agent, call):
+            for event in agent.event_manager.values():
+                if event.metadata.get("call_id") == call.invocation_id:
+                    yield event
 
             # Or directly in code
             current_id = self.runtime.current_call.id
@@ -989,15 +973,6 @@ class ActorRuntime:
                     agent=self.agent,
                     runtime=self,
                     client=llm_client,
-                    filtered_history=any(
-                        query is not None
-                        for query in (
-                            self.agent.event_manager.get_event_query(),
-                            _scoped_events_var.get(),
-                            _decorator_events_var.get(),
-                            self.agent.event_query,
-                        )
-                    ),
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
@@ -2720,13 +2695,6 @@ class ActorRuntime:
                 if parent_ctx or own_ctx:
                     merged_ctx = {**(parent_ctx or {}), **(own_ctx or {})}
 
-                event_query = (
-                    self.agent.event_manager.get_event_query()
-                    or _scoped_events_var.get()
-                    or getattr(base_method, "_strategy_events", None)
-                    or _decorator_events_var.get()
-                    or getattr(self.agent, "event_query", None)
-                )
                 call = CurrentCall(
                     id=call_id,
                     method_name=method_name,
@@ -2747,7 +2715,6 @@ class ActorRuntime:
                     param_names=[p for p in sig.parameters if p != "self"],
                     agent=self.agent,
                     strategy=strategy,
-                    event_query=event_query,
                     model=llm_model_name or None,
                     context_window=getattr(llm_client, "context_window", None),
                     _context_format=resolved_truncation.context_block_format,
@@ -2774,14 +2741,6 @@ class ActorRuntime:
 
                 decorator_ctx_token = _decorator_context_var.set(merged_ctx)
 
-                # Propagate decorator events to nested calls:
-                # Use this method's EventQuery if present, otherwise inherit parent's
-                parent_evt = _decorator_events_var.get()
-                own_evt = getattr(getattr(method, "__func__", method), "_strategy_events", None)
-                # EventQuery: child overrides parent (not merged like context dicts)
-                active_evt = own_evt if own_evt is not None else parent_evt
-                decorator_evt_token = _decorator_events_var.set(active_evt)
-
                 try:
                     # Set current strategy context var (_prepare_context reads it)
                     strategy_token = _current_strategy_var.set(strategy)
@@ -2802,7 +2761,6 @@ class ActorRuntime:
                     _current_event_format_var.reset(event_format_token)
                     _current_context_view_var.reset(context_view_token)
                     _decorator_context_var.reset(decorator_ctx_token)
-                    _decorator_events_var.reset(decorator_evt_token)
             else:
                 raise TypeError(f"Expected GenerationStrategy instance, got {type(strategy)}")
         except BaseException as e:
@@ -2944,18 +2902,10 @@ class ActorRuntime:
                 else self.agent._truncation.context_block_format
             )
 
-        event_query = (
-            self.agent.event_manager.get_event_query()
-            or _scoped_events_var.get()
-            or getattr(base_method, "_strategy_events", None)
-            or _decorator_events_var.get()
-            or getattr(self.agent, "event_query", None)
-        )
         call = replace(
             base_call,
             agent=self.agent,
             strategy=strategy,
-            event_query=event_query,
             model=model,
             context_window=context_window,
             context_budget=(

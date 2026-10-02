@@ -31,7 +31,7 @@ class ContextView[Owner](Protocol):
 
 The runtime assembles the selected view for every LLM request and collects it into a `tuple[ContextItem, ...]`. Rendering preserves that item order except when expanding an atomic tool-call replay group. No additional assembled-context type is needed.
 
-`CurrentCall` is the immutable per-request view of an invocation. Its invocation identity and method inputs stay stable; mutable manager and scoped selections are captured again for each request. Views may read the resolved strategy, event query, `model`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
+`CurrentCall` is a per-request snapshot of an invocation. Its invocation identity and method inputs stay stable; mutable manager and scoped state are captured again for each request. Views may read the resolved strategy, `model`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
 
 ## Resolution
 
@@ -75,12 +75,20 @@ context_text(value, *, call) -> str
 async collect_context_items(view, owner, call) -> tuple[ContextItem, ...]
 apply_context_budget(items, *, call, evictable) -> tuple[ContextItem, ...]
 async evaluate_context_expression(expression, *, owner, call) -> object
-select_context_events(events, *, call) -> tuple[EventBase, ...]
+is_model_visible(event) -> bool
 ```
 
-`context_text` formats one value; `collect_context_items` validates and retains yielded order; expression evaluation binds `self` to `owner`; event selection reads active events, applies the resolved query with stable `call.invocation_id`, and excludes non-model events; budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
+`context_text` formats one value; `collect_context_items` validates and retains yielded order; expression evaluation binds `self` to `owner`; `is_model_visible` identifies nonempty model-facing events without selecting history. Budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
 
 Iterative views must explicitly include the task, model outputs, and execution feedback they need. Strategies produce these as typed events; rendering injects none. `self.events.query()` searches stored history, including archived events, so it is an inspection API rather than prompt selection. `call.invocation_id` stays stable while a strategy may change `call.id`. Tool schemas and execution policy remain strategy-owned.
+
+Views select active history directly. For example, a current-invocation view uses:
+
+```python
+for event in agent.event_manager.values():
+    if event.metadata.get("call_id") == call.invocation_id and is_model_visible(event):
+        yield event
+```
 
 ## Defaults
 
@@ -101,7 +109,8 @@ class DefaultAgentView(ContextView[Agent]):
         blocks = order_blocks(blocks, call.strategy.get_block_order())
         prefix, trailing = partition_blocks(blocks)
 
-        items = [*prefix, *skill_items, *visible_events(agent, call)]
+        history = [e for e in agent.event_manager.values() if is_model_visible(e)]
+        items = [*prefix, *skill_items, *history]
         boundaries = sum(isinstance(item, CacheBoundary) for item in items)
         if boundaries > 1:
             raise ValueError("multiple cache boundaries")
@@ -155,6 +164,7 @@ resolve view
 ```
 
 - The selected agent view owns content, membership, materialization, filtering, global order, adaptation, and budget policy.
+- Views own prompt compression and may call a summarizer on selected content. State compaction operates independently on stored state and replaces only the events it actually summarized. `TokenBudgetSummarizer` uses request usage as a trigger, not the rendered request as summary input.
 - A nested view owns the content and local order of its contribution.
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
 - The renderer expands items in place and emits no boundary text. A canonical assistant tool-call turn and its linked results form one atomic replay group; a boundary cannot split it.
@@ -172,5 +182,7 @@ Keep `agent.context`, context managers, event creation, strategy/scoped override
 These are the default application's context APIs, not requirements of `ContextView`. A custom view may use an independent state API. Native iterative strategies still use NOOA events unless replaced together with the strategy.
 
 Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` no longer chooses placement; and `render_context(context_limit=...)` reports the limit but leaves eviction to the view.
+
+`EventQuery`, agent `event_query=`, `ScopedContext(events=...)`, and manager query overrides are removed. Event membership is view code; event inspection and context-block overrides remain available.
 
 `DefaultAgentView` and its helpers use only public agent, call, manager, strategy, and event interfaces. `ActorRuntime` supplies call facts and budget support, resolves and collects the view, renders it, and handles transport and observability; it does not assemble context content.

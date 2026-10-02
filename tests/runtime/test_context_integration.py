@@ -564,28 +564,16 @@ class TestAgentContextParam:
         assert D is OrigDynamicContext
 
 
-class TestScopedContextCurrentCallFiltering:
-    """End-to-end test: ScopedContext(events=EventQuery.current_call()) must not
-    filter out the Task prompt.
-
-    Regression test for the bug where CodeActStrategy mutates call.id to a tag
-    number after creation, making it differ from the UUID that event_manager
-    injects into metadata["call_id"]. _prepare_context must use the agent call
-    stack ID (the UUID) so the Task event passes the filter and the LLM
-    receives the task prompt.
-    """
+class TestViewCurrentCallFiltering:
+    """A view selects its invocation while preserving the generated task."""
 
     @pytest.mark.asyncio
     async def test_llm_receives_task_prompt_with_scoped_current_call(self):
-        """LLM must receive the task prompt even with EventQuery.current_call().
-
-        Uses a real @strategy decorator with ScopedContext and CodeActStrategy,
-        then inspects the messages the FakeLLM actually received.
-        """
+        """Select the current task and exclude previous invocations."""
         import json
 
-        from nooa import EventQuery, strategy
-        from nooa.context_blocks import ScopedContext
+        from nooa import Block, is_model_visible, strategy
+        from nooa.events import Task
         from nooa.strategies.codeact import CodeActStrategy
         from nooa.unifiedllm import LLMResponse, ToolCall
 
@@ -609,16 +597,26 @@ class TestScopedContextCurrentCallFiltering:
             ]
         )
 
+        class CurrentView:
+            async def assemble(self, owner, call):
+                yield Block(key="instructions", content="Use execute_python and return_result.")
+                for event in owner.event_manager.values():
+                    if event.metadata.get("call_id") == call.invocation_id and is_model_visible(
+                        event
+                    ):
+                        yield event
+
         class AnalysisAgent(Agent, llm=fake_llm):
             @strategy(
                 CodeActStrategy(),
-                ScopedContext(events=EventQuery.current_call()),
+                context_view=CurrentView(),
             )
             async def analyze_feedback(self, text: str) -> str:
                 """Analyze customer feedback: {text}"""
                 ...
 
         agent = AnalysisAgent()
+        agent.event_manager.add(Task(prompt="EARLIER INVOCATION", metadata={"call_id": "old"}))
         result = await agent.analyze_feedback("Great product, but shipping was slow")
 
         assert result == "sentiment: positive"
@@ -628,9 +626,9 @@ class TestScopedContextCurrentCallFiltering:
         user_messages = [m for m in fake_llm.last_messages if m.get("role") == "user"]
         assert len(user_messages) >= 1, (
             "LLM must receive at least one user message containing the task prompt. "
-            "If this fails, EventQuery.current_call() is filtering out the Task event."
         )
         all_user_content = " ".join(str(m.get("content", "")) for m in user_messages)
+        assert "EARLIER INVOCATION" not in all_user_content
         assert "Analyze customer feedback" in all_user_content, (
             f"Task prompt not found in user messages sent to LLM. "
             f"User content was: {all_user_content!r}"
@@ -673,50 +671,6 @@ class TestDecoratorEventsIntegration:
             async def good_method(self) -> str: ...
 
         assert TestAgent.good_method._strategy_context == {"focus": "testing"}
-
-    @pytest.mark.asyncio
-    async def test_decorator_context_with_events(self):
-        """@strategy(context=ScopedContext(events={...})) sets decorator events."""
-        from nooa import strategy
-        from nooa.context_blocks import ScopedContext
-
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            @strategy(context=ScopedContext(events={"reminder": "Be thorough"}))
-            async def decorated_method(self) -> str:
-                return "result"
-
-        agent = TestAgent()
-        # Verify decorator was applied (method has _strategy_events attribute)
-        method = agent.__class__.decorated_method
-        assert hasattr(method, "_strategy_events")
-        assert method._strategy_events == {"reminder": "Be thorough"}
-
-    @pytest.mark.asyncio
-    async def test_decorator_context_with_both_context_and_events(self):
-        """@strategy(context=ScopedContext(context={...}, events={...})) works."""
-        from nooa import strategy
-        from nooa.context_blocks import ScopedContext
-
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            @strategy(
-                context=ScopedContext(
-                    context={"focus": "security"}, events={"reminder": "Check everything"}
-                )
-            )
-            async def comprehensive_method(self) -> str:
-                return "result"
-
-        agent = TestAgent()
-        # Verify both context and events were set
-        method = agent.__class__.comprehensive_method
-        assert hasattr(method, "_strategy_context")
-        assert hasattr(method, "_strategy_events")
-        assert method._strategy_context == {"focus": "security"}
-        assert method._strategy_events == {"reminder": "Check everything"}
 
     @pytest.mark.asyncio
     async def test_decorator_context_none_is_valid(self):

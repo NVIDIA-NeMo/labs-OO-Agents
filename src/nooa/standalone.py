@@ -83,7 +83,6 @@ def _get_agent_cls(module_name: str) -> type:
     class _StandaloneAgent:
         """Minimal agent stub: no framework blocks, fresh state per call."""
 
-        event_query = None
         _execution_config = None
 
         def __init__(self, llm: Any, agent_id: str) -> None:
@@ -149,7 +148,6 @@ def _make_adapter(func: Callable[..., Any], strategy: Any = None) -> Callable[..
     adapted._plan_llm = getattr(func, "_plan_llm", None)  # type: ignore[attr-defined]
     adapted._plan_strategy = strategy or getattr(func, "_plan_strategy", None)  # type: ignore[attr-defined]
     adapted._strategy_context = getattr(func, "_strategy_context", None)  # type: ignore[attr-defined]
-    adapted._strategy_events = getattr(func, "_strategy_events", None)  # type: ignore[attr-defined]
     adapted._strategy_context_view = getattr(func, "_strategy_context_view", None)  # type: ignore[attr-defined]
     adapted._needs_generation = True  # type: ignore[attr-defined]
     adapted._agent_decorator = "auto"  # type: ignore[attr-defined]

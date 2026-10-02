@@ -5,8 +5,6 @@
 Tests:
 1. agent._try_auto_enable_tracing — second call is a no-op
 2. agent._validate_llm_param — raises ValueError for None
-3. Agent.__init_subclass__ event_query path — sets _agent_event_query
-4. Agent._resolve_event_query — instance and class level resolution
 5. Agent.__type_info__ — classmethods and hidden fields
 6. Agent.__instance_values__ — exception swallowing
 7. strategies/prefill._get_complex_type — all branches
@@ -88,62 +86,6 @@ def test_validate_llm_param_ok_for_inherit():
     from nooa.agent import INHERIT, _validate_llm_param
 
     _validate_llm_param(INHERIT, "MyAgent")  # should not raise
-
-
-# ---------------------------------------------------------------------------
-# 3. __init_subclass__ event_query path — _agent_event_query is set
-# ---------------------------------------------------------------------------
-
-
-def test_init_subclass_sets_agent_event_query():
-    """Agent subclass with event_query= gets _agent_event_query set."""
-    from nooa.runtime.event_query import EventQuery
-
-    class EQAgent(Agent, llm=_TEST_LLM, event_query=EventQuery(call_id="current")):
-        async def work(self) -> str: ...
-
-    assert hasattr(EQAgent, "_agent_event_query")
-    assert isinstance(EQAgent._agent_event_query, EventQuery)
-    assert EQAgent._agent_event_query.call_id == "current"
-
-
-# ---------------------------------------------------------------------------
-# 4. _resolve_event_query — instance and class level
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_event_query_instance_overrides_class():
-    """Instance-level event_query overrides the class-level one."""
-    from nooa.runtime.event_query import EventQuery
-
-    class ClassEQAgent(Agent, llm=_TEST_LLM, event_query=EventQuery(call_id="current")):
-        async def work(self) -> str: ...
-
-    instance_eq = EventQuery(type="Error")
-    agent = ClassEQAgent(event_query=instance_eq)
-
-    assert agent.event_query is instance_eq
-
-
-def test_resolve_event_query_class_level_used_when_no_instance():
-    """Class-level event_query is used when none is given at instantiation."""
-    from nooa.runtime.event_query import EventQuery
-
-    class ClassOnlyEQAgent(Agent, llm=_TEST_LLM, event_query=EventQuery(type="Task")):
-        async def work(self) -> str: ...
-
-    agent = ClassOnlyEQAgent()
-    assert agent.event_query is ClassOnlyEQAgent._agent_event_query
-
-
-def test_resolve_event_query_none_when_not_specified():
-    """When no event_query at class or instance level, resolve returns None."""
-
-    class NoEQAgent(Agent, llm=_TEST_LLM):
-        async def work(self) -> str: ...
-
-    agent = NoEQAgent()
-    assert agent.event_query is None
 
 
 # ---------------------------------------------------------------------------

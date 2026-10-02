@@ -74,13 +74,18 @@ in the volatile suffix so the stable prefix remains reusable.
 The default context view marks where that volatile suffix begins. UnifiedLLM
 maps this boundary to provider-specific cache metadata when supported.
 
-Per-method overrides via `ScopedContext`:
+Per-method event selection belongs to the context view:
 
 ```python
-from nooa.context_blocks import ScopedContext
-from nooa import strategy, EventQuery
+from nooa import is_model_visible, strategy
 
-@strategy(context=ScopedContext(events=EventQuery.current_call()))
+class CurrentCallView:
+    async def assemble(self, agent, call):
+        for event in agent.event_manager.values():
+            if event.metadata.get("call_id") == call.invocation_id and is_model_visible(event):
+                yield event
+
+@strategy(context_view=CurrentCallView())
 async def solve(self, problem: str) -> str:
     """Solves with a clean view: only this call's events, no prior history."""
     ...
@@ -107,12 +112,8 @@ recent = agent.events.query(limit=20)
 errors = agent.events.query(type="Error")
 hits   = agent.events.query(query="timeout")            # text search; regex=True for regex
 
-# Filter what history a method's LLM sees
-from nooa import EventQuery
-EventQuery.current_call()      # only this call
-EventQuery.by_type("Message")
-EventQuery.last_n(50)
-# usable as: class kwarg `event_query=`, agent __init__ kwarg, or ScopedContext(events=...)
+# Views select from active history; query() also searches archived events.
+active = agent.event_manager.values()
 
 # Subscribe
 agent.event_manager.on("Message", lambda e: print(e.content))
@@ -140,6 +141,9 @@ TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(max_tokens=context
 ```
 
 Summarizers are themselves agents; they inherit the host agent's LLM by default. `agent.context_stats` reports context-window usage.
+
+Token-budget compaction summarizes stored events independently of the context view.
+Views may separately compress selected prompt content without replacing stored history.
 
 ## Persistent state
 

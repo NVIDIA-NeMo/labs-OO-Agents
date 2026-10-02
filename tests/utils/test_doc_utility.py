@@ -495,13 +495,12 @@ def test_underscore_field_visible_without_hidden():
 
 
 def test_framework_attrs_hidden_via_annotation():
-    """runtime, _event_manager, event_query, render_config should be hidden via Annotated[T, hidden]."""
+    """Runtime, event manager and render config are hidden via annotations."""
     from nooa import Agent
     from nooa.agentdoc.visibility import is_hidden_field
 
     assert is_hidden_field(Agent, "runtime") is True
     assert is_hidden_field(Agent, "event_manager") is True
-    assert is_hidden_field(Agent, "event_query") is True
     assert is_hidden_field(Agent, "render_config") is True
     assert is_hidden_field(Agent, "context") is True
     assert is_hidden_field(Agent, "events") is True

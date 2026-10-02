@@ -10,7 +10,7 @@ uv run python examples/quickstart/16_custom_context.py
 
 import re
 
-from nooa import Agent, Block, CacheBoundary, EventQuery, context_text, select_context_events
+from nooa import Agent, Block, CacheBoundary, context_text, is_model_visible
 from nooa.context_blocks import Role
 from nooa.util.quickstart import BaseModel, autorun, llm
 
@@ -58,8 +58,10 @@ class ResearchContextView:
                 "Answer only from selected research and cite source IDs."
             ),
         )
-        for event in select_context_events(owner.events, call=call):
-            yield event
+        # This view chooses only this invocation's active task and feedback.
+        for event in owner.event_manager.values():
+            if event.metadata.get("call_id") == call.invocation_id and is_model_visible(event):
+                yield event
         yield CacheBoundary()
 
         # A search changes ResearchContext; the next turn receives its selection.
@@ -81,7 +83,6 @@ class ResearchAgent(
     Agent,
     llm=llm,
     context_view=ResearchContextView(),
-    event_query=EventQuery.current_call(),
 ):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

@@ -185,7 +185,7 @@ async def test_automatic_summary_threshold_tracks_actual_call_cap(
     summarizer = agent._summarizers[0]
     assert summarizer.config.max_tokens == initial_threshold
     agent.event_manager.add(Message(content="remember this"))
-    llm.acall = AsyncMock(return_value=LLMResponse(content="summary"))
+    llm.acall = AsyncMock(return_value=LLMResponse(content='{"value":"summary"}'))
     ctx = LLMCallContext(
         agent=agent,
         runtime=agent.runtime,
