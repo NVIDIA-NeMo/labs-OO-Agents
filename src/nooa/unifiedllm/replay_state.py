@@ -113,12 +113,12 @@ def _configured_endpoint(params: dict[str, Any]) -> str | None:
     return params.get("base_url") or params.get("api_base")
 
 
-def _uses_native_openai_endpoint(api_params: dict[str, Any]) -> bool:
+def _uses_native_openai_endpoint(api_params: dict[str, Any], *, direct: bool = False) -> bool:
     endpoint = (
         _configured_endpoint(api_params)
-        or getattr(litellm, "api_base", None)
+        or (None if direct else getattr(litellm, "api_base", None))
         or os.getenv("OPENAI_BASE_URL")
-        or os.getenv("OPENAI_API_BASE")
+        or (None if direct else os.getenv("OPENAI_API_BASE"))
         or "https://api.openai.com/v1"
     )
     return _normalized_endpoint(endpoint) == "https://api.openai.com/v1"
@@ -234,7 +234,9 @@ def responses_output_text(output: list[Any]) -> str:
     )
 
 
-def reject_native_message(message: dict[str, Any], scope: str | None) -> None:
+def reject_native_message(
+    message: dict[str, Any], scope: str | None, *, reject_google_signature: bool = False
+) -> None:
     """Raw dictionaries are portable input, not a provider-state replay API."""
     private_keys = {LLM_STATE_KEY, "reasoning_items", "thinking_blocks", "provider_specific_fields"}
     nodes = [message]
@@ -255,6 +257,12 @@ def reject_native_message(message: dict[str, Any], scope: str | None) -> None:
             raise ReasoningReplayError("Malformed tool call function: expected a mapping.")
         nodes.append(function)
     for node in nodes:
+        extension = node.get("extra_content")
+        google = extension.get("google") if isinstance(extension, dict) else None
+        if reject_google_signature and isinstance(google, dict) and google.get("thought_signature"):
+            raise ReasoningReplayError(
+                "Google thought signatures require a canonical LLMResponse, not a wire dict."
+            )
         # SDK dumps include optional provider fields with null/empty values;
         # those carry no native state and are valid portable input.
         if any(node.get(key) for key in private_keys) or node.get("type") in {
@@ -300,6 +308,7 @@ def prepare_chat_messages(
     scope: str | None,
     *,
     anthropic_cache_marking: bool = False,
+    direct: bool = False,
 ) -> list[dict | CacheBoundary]:
     """Project stored turns; retain explicit fields in caller-written dictionaries.
 
@@ -346,7 +355,7 @@ def prepare_chat_messages(
         # copy that detaches caller-owned containers for the SDK.
         message = dict(original)
         reject_boundary_dict(message)
-        reject_native_message(message, scope)
+        reject_native_message(message, scope, reject_google_signature=direct)
         message = copy.deepcopy(message)
         if anthropic_cache_marking and isinstance(message.get("content"), str):
             # Same stability rationale as project_chat_turn's assistant-content
@@ -366,7 +375,9 @@ def prepare_chat_messages(
     return prepared
 
 
-def native_encrypted_reasoning_expected(api_params: dict[str, Any], scope: str | None) -> bool:
+def native_encrypted_reasoning_expected(
+    api_params: dict[str, Any], scope: str | None, *, direct: bool = False
+) -> bool:
     """Whether this call's route can return real ``reasoning.encrypted_content``.
 
     LiteLLM's provider resolution collapses every OpenAI-compatible gateway
@@ -381,7 +392,9 @@ def native_encrypted_reasoning_expected(api_params: dict[str, Any], scope: str |
     if scope and scope.startswith("responses:azure:"):
         return True
     return bool(
-        scope and scope.startswith("responses:openai:") and _uses_native_openai_endpoint(api_params)
+        scope
+        and scope.startswith("responses:openai:")
+        and _uses_native_openai_endpoint(api_params, direct=direct)
     )
 
 
