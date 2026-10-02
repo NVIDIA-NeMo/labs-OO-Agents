@@ -224,7 +224,7 @@ async def test_new_prompt_list_close_load_delete(mode, servers, workspace, tmp_p
 
     frame = await server.prompt(session_id)
     assert frame.message["result"] == {"stopReason": "end_turn"}
-    assert "Hi there." in server.texts(session_id, "agent_message_chunk")
+    assert "Hi there.\n" in server.texts(session_id, "agent_message_chunk")
 
     listed = await server.call("session/list", {})
     [entry] = listed.message["result"]["sessions"]
@@ -281,7 +281,7 @@ async def test_two_sessions_prompt_at_the_same_time(mode, servers, workspace):
     for request_id in requests:
         assert (await server.response(request_id)).message["result"] == {"stopReason": "end_turn"}
     for sid in (first, second):
-        assert "Hi there." in server.texts(sid, "agent_message_chunk")
+        assert "Hi there.\n" in server.texts(sid, "agent_message_chunk")
     if mode == "router":
         pids = server.worker_pids()
         assert len(set(pids)) == 2

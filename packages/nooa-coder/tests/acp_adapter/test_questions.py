@@ -161,7 +161,7 @@ async def test_a_questions_reason_follows_it(make_adapter, workspace, client):
     adapter = await make_adapter(models)
     session_id, _ = await _run(adapter, workspace)
     assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "Which branch?\n\n- main\n- dev\n\nBoth have the fix."
+        "Which branch?\n\n- main\n- dev\n\nBoth have the fix.\n"
     )
 
 
@@ -174,7 +174,7 @@ async def test_a_done_message_reaches_the_client_before_the_prompt_answers(
     adapter = await make_adapter(models)
     session_id, response = await _run(adapter, workspace)
     client.log.append(("response", "prompt", response))
-    assert client.texts(AgentMessageChunk, session_id) == ["All set."]
+    assert client.texts(AgentMessageChunk, session_id) == ["All set.\n"]
     kinds = [
         "message" if entry[0] == "update" and isinstance(entry[2], AgentMessageChunk) else entry[0]
         for entry in client.log
