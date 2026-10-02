@@ -23,10 +23,9 @@ Example:
 
 import asyncio
 import contextvars
-import json
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from nooa.agent import Agent
 from nooa.agentdoc import hidden
@@ -36,19 +35,6 @@ from nooa.metaclass import no_trace
 from nooa.strategies import PredictStrategy
 
 logger = logging.getLogger(__name__)
-
-# Inherited by the background task, never shared with concurrent parent work.
-_in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
-
-
-def _copy_request_containers(value: Any) -> Any:
-    """Detach mutable JSON containers; borrow tools, responses and other objects."""
-    if isinstance(value, dict):
-        return {key: _copy_request_containers(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_copy_request_containers(item) for item in value]
-    return value
-
 
 if TYPE_CHECKING:
     from nooa.config.summarizer_config import MethodSummarizerConfig, TokenBudgetConfig
@@ -185,7 +171,10 @@ class SummarizationAgent(Agent):
         override = self._summary_llm_override.get()
         if override is not None:
             return override
-        return self._target_agent.llm if self._inherits_parent_llm else self.llm
+        if self._inherits_parent_llm:
+            assert self._target_agent is not None
+            return self._target_agent.llm
+        return self.llm
 
     @hidden
     @no_trace
@@ -368,6 +357,7 @@ class SummarizationAgent(Agent):
         try:
             if history_markdown is None:
                 history_markdown = self._render_range_to_markdown(start_tag, end_tag)
+            assert history_markdown is not None
             logger.debug(
                 f"Scheduling summarization: {start_tag} -> {end_tag} "
                 f"({len(history_markdown)} chars)"
@@ -552,7 +542,7 @@ class SummarizationAgent(Agent):
         llm = self._summary_llm()
         counter = getattr(llm, "count_tokens", None)
         if callable(counter):
-            return counter
+            return cast(Callable[[str], int], counter)
         from nooa.token_counter import char_approximate_token_counter
 
         return char_approximate_token_counter
@@ -614,36 +604,19 @@ def context_budget(
 # Example Summarizers (Good Defaults)
 # =============================================================================
 class TokenBudgetSummarizer(SummarizationAgent):
-    """Summarize old events asynchronously when provider input exceeds the budget.
+    """Compact stored history when provider input usage exceeds the budget.
 
-    Fork the completed parent request with a trailing summary
-    instruction. Tools, model settings and cache key stay unchanged so the
-    provider can reuse its prefix. Only events present before that request
-    are eligible for collapse; the latest response/tool work stays active.
-
-    The fork never executes tools. A nonempty string returned through one
-    return_result call is read as data. Failed or unusable replies leave history
-    unchanged; there is no standalone retry. Filtered history is skipped because
-    the request cannot explain all events selected for collapse. Structured
-    parents drop their output schema on the fork so it can return summary text;
-    that schema change may reduce cache reuse.
-
-    Completed summaries apply at BeforeTurn, provided the selected event IDs
-    still match. Owners should await aclose() before closing the shared client.
-
-    Example:
-        from nooa.config.summarizer_config import TokenBudgetConfig
-        # Absolute limit
-        TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(max_tokens=80_000))
-
-        # Percentage of LLM context
-        TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(max_tokens=context_budget(my_llm, 0.8)))
+    Summary input is a frozen, bounded range of public stored-event content,
+    independent of the parent's context view. Recent events, non-model records
+    and incomplete tool-call groups stay active. Completed summaries apply only if the
+    source contents still match. The summary uses a dedicated Predict request
+    with the parent's effective client; parent tools and prompts are not copied.
     """
 
     _unsub_llm: Annotated[Callable[[], None] | None, hidden] = None
-    _pending_source: Annotated[tuple[tuple[str, str], ...] | None, hidden] = None
-    _warned_filtered: Annotated[bool, hidden] = False
-    _failed_forks: Annotated[int, hidden] = 0
+    _pending_source: Annotated[tuple[tuple[str, str, str], ...] | None, hidden] = None
+    _pending_source_text: Annotated[str | None, hidden] = None
+    _failed_summaries: Annotated[int, hidden] = 0
     _automatic_context_budget: Annotated[bool, hidden] = False
     _automatic_context_budget_percent: Annotated[float, hidden] = 0.8
 
@@ -653,22 +626,25 @@ class TokenBudgetSummarizer(SummarizationAgent):
         if self.target_event_manager is None:
             raise ValueError("Cannot install: target_event_manager is None")
         self._unsub_before = self.target_event_manager.on("BeforeTurn", self._handle_before_turn)
-        self._unsub_llm = self.target_event_manager.intercept("llm_call", self._fork_after_call)
+        self._unsub_llm = self.target_event_manager.intercept("llm_call", self._compact_after_call)
         self._unsub_close = self.target_event_manager.on_close(self.aclose)
-        if (
-            self._target_agent.event_query is not None
-            or self.target_event_manager.get_event_query() is not None
-        ):
-            self._warn_filtered_history()
+        self.event_manager.intercept("llm_call", self._validate_summary_response)
 
     @hidden
     @no_trace
-    def _warn_filtered_history(self) -> None:
-        if not self._warned_filtered:
-            logger.warning(
-                "Skipping token-budget summaries for filtered history; unseen events cannot be collapsed. The context overflow safety net still applies."
-            )
-            self._warned_filtered = True
+    async def _validate_summary_response(self, ctx: Any, nxt: Any) -> Any:
+        from nooa.events import Task
+
+        tasks = [event.id for event in self.event_manager.values() if isinstance(event, Task)]
+        if not tasks:
+            raise RuntimeError("Summary source task is no longer active")
+        ctx = await nxt(ctx)
+        active_ids = {event.id for event in self.event_manager.values()}
+        if not all(task_id in active_ids for task_id in tasks):
+            raise RuntimeError("Summary source task changed during dispatch")
+        if ctx.response is None or ctx.response.finish_reason in {"length", "error"}:
+            raise RuntimeError("Summary response did not complete")
+        return ctx
 
     @hidden
     @no_trace
@@ -676,24 +652,141 @@ class TokenBudgetSummarizer(SummarizationAgent):
         if self._unsub_llm:
             self._unsub_llm()
             self._unsub_llm = None
+        self._pending_source = None
+        self._pending_source_text = None
         super()._uninstall()
+
+    @staticmethod
+    @hidden
+    def _history_units(events: list["EventBase"]) -> list[tuple[int, int, bool]]:
+        """Find indivisible replay spans; hidden and unfinished units are retained."""
+        from nooa.context_blocks.events import ResultStatus, ToolCallEvent
+        from nooa.context_view import is_model_visible
+        from nooa.llm_types import LLMResponse
+
+        cuts = [True] * (len(events) + 1)
+        eligible = [is_model_visible(event) for event in events]
+        responses = {
+            event.id: index
+            for index, event in enumerate(events)
+            if isinstance(event, LLMResponse) and event.replay_tool_calls
+        }
+        executions: dict[str, list[int]] = {}
+        for index, event in enumerate(events):
+            if getattr(event, "images", None):
+                eligible[index] = False  # text-only summaries cannot preserve attachments
+            if isinstance(event, ToolCallEvent):
+                if event.llm_response_id:
+                    executions.setdefault(event.llm_response_id, []).append(index)
+                if (
+                    event.result is None
+                    or event.result.result_status == ResultStatus.RUNNING
+                    or (event.llm_response_id and event.llm_response_id not in responses)
+                ):
+                    eligible[index] = False
+            elif isinstance(event, LLMResponse) and not (
+                event.content or event.reasoning or event.replay_tool_calls
+            ):
+                eligible[index] = False  # opaque-only state has no summary text
+
+        for response_id, index in responses.items():
+            response = events[index]
+            assert isinstance(response, LLMResponse)
+            linked = executions.get(response_id, [])
+            start, end = min([index, *linked]), max([index, *linked]) + 1
+            for cut in range(start + 1, end):
+                cuts[cut] = False
+            expected = {tool.id for tool in response.replay_tool_calls}
+            actual = {
+                event.tool_call_id for i in linked if isinstance(event := events[i], ToolCallEvent)
+            }
+            if (
+                actual != expected
+                or len(linked) != len(expected)
+                or any(not eligible[i] for i in range(start, end))
+            ):
+                eligible[start:end] = [False] * (end - start)
+
+        units = []
+        start = 0
+        for end in range(1, len(events) + 1):
+            if cuts[end]:
+                units.append((start, end, all(eligible[start:end])))
+                start = end
+        return units
+
+    @staticmethod
+    @hidden
+    def _event_markdown(tag: str, event: "EventBase") -> str:
+        """Render public event content without persistence metadata or field truncation."""
+        from nooa.context_blocks import BlockMetadata, ResolvedBlock, format_message_content
+        from nooa.context_blocks.utils import truncating_pformat
+
+        block = ResolvedBlock(
+            key=f"event_{tag}",
+            content=truncating_pformat(event, max_string=None, max_length=None, max_depth=None),
+            role=event._role,
+            metadata=BlockMetadata(tag=tag),
+        )
+        return format_message_content(block, "markdown")
 
     @hidden
     @no_trace
-    async def _fork_after_call(self, ctx: Any, nxt: Any) -> Any:
-        """Branch the completed request; never clone or execute the parent agent.
+    def _snapshot_source(
+        self, client: "UnifiedLLM"
+    ) -> tuple[tuple[tuple[str, str, str], ...], str]:
+        """Freeze the oldest fitting contiguous range, retaining hidden/replay barriers."""
+        assert self.target_event_manager is not None
+        from nooa.events import Summary
+        from nooa.token_counter import char_approximate_token_counter
 
-        The request already contains the parent tools, rendered history and live
-        context. Appending an instruction preserves the cached prefix, including
-        its native responses. The source range is chosen before dispatch: the
-        response and tool work produced by this turn must not be collapsed by a
-        summary that never saw them.
-        """
-        if _in_summary_fork.get() or self._pending_task is not None:
+        pairs = self.target_event_manager.items()
+        events = [event for _, event in pairs]
+        limit = max(0, len(events) - self.config.preserve_recent)
+        budget = context_budget(client, percent=0.7, fallback=None)
+        count = getattr(client, "count_tokens", None) or char_approximate_token_counter
+        source: list[tuple[str, str, str]] = []
+        parts: list[str] = []
+        used = 0
+        has_original = False
+        for start, end, eligible in self._history_units(events):
+            if end > limit:
+                break
+            if not eligible:
+                if source and has_original:
+                    break
+                source, parts, used, has_original = [], [], 0, False
+                continue
+            rendered = [self._event_markdown(tag, event) for tag, event in pairs[start:end]]
+            # Parameters use repr; include escaping and conservative separators.
+            cost = sum(count(repr(part)) + count("\n\n") for part in rendered)
+            if budget is not None and used + cost > budget:
+                if source and has_original:
+                    break
+                source, parts, used, has_original = [], [], 0, False
+                continue
+            source.extend(
+                (tag, event.id, event.model_dump_json()) for tag, event in pairs[start:end]
+            )
+            parts.extend(rendered)
+            used += cost
+            has_original |= any(not isinstance(event, Summary) for event in events[start:end])
+        if not has_original:
+            return (), ""
+        return tuple(source), "\n\n".join(parts)
+
+    @hidden
+    @no_trace
+    async def _compact_after_call(self, ctx: Any, nxt: Any) -> Any:
+        """Observe usage; compact stored state rather than the parent's projection."""
+        if self._pending_task is not None or self._unsub_llm is None:
             return await nxt(ctx)
-        tags = self.target_event_manager.keys()
-        selected = tags[: -self.config.preserve_recent] if self.config.preserve_recent else tags
-        source = tuple((tag, self.target_event_manager[tag].id) for tag in selected)
+        source, text = (), ""
+        try:
+            if ctx.client is not None:
+                source, text = self._snapshot_source(ctx.client)
+        except Exception:
+            logger.warning("Could not snapshot summary source; history is unchanged", exc_info=True)
         ctx = await nxt(ctx)
         if self._automatic_context_budget and ctx.client is not None:
             budget = context_budget(
@@ -705,97 +798,43 @@ class TokenBudgetSummarizer(SummarizationAgent):
             self.config = self.config.model_copy(update={"max_tokens": budget})
         usage = ctx.response.usage if ctx.response is not None else None
         if (
-            self._pending_task is not None
+            self._unsub_llm is None
+            or self._pending_task is not None
             or not source
             or usage is None
             or usage.input_tokens <= self.config.max_tokens
+            or ctx.client is None
         ):
             return ctx
-        start, end = source[0][0], source[-1][0]
-        if ctx.filtered_history:
-            self._warn_filtered_history()
-            return ctx
-        if ctx.client is None:
-            logger.warning("Skipping summary fork: no effective client; history is unchanged.")
-            return ctx
-
-        # Allocate only at a fork, not every parent turn. Strings remain shared;
-        # dictionaries belong to the fork; read-only response/boundary objects
-        # travel unchanged so their provider state is not flattened or copied.
-        try:
-            messages = _copy_request_containers(ctx.messages)
-            params = _copy_request_containers(ctx.params)
-            params["output_model"] = None
-        except Exception:
-            logger.warning(
-                "Could not snapshot summary fork; parent call is unchanged", exc_info=True
-            )
-            return ctx
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Background memory compaction: summarize only events {start} through {end} "
-                    f"in approximately {self.config.target_chars} characters. Other events are "
-                    "context only. Preserve decisions, exact numbers, outcomes and pending work. "
-                    "Write only the summary as plain text. Do not continue the original task "
-                    "or call any tools. This is an isolated summary, not an execution turn."
-                ),
-            }
-        )
-        fork = ctx.model_copy(
-            update={
-                "messages": messages,
-                "params": params,
-                "response": None,
-            }
-        )
         self._pending_source = source
-        self._pending_range = (start, end)
-        self._pending_task = asyncio.create_task(self._run_fork(fork))
+        self._pending_source_text = text
+        self._pending_range = (source[0][0], source[-1][0])
+        self._pending_task = asyncio.create_task(self._run_state_summary(text, ctx.client))
         return ctx
 
     @hidden
     @no_trace
-    async def _run_fork(self, ctx: Any) -> None:
-        """Use the same policy chain; read a final answer without executing tools."""
-        token = _in_summary_fork.set(True)
+    async def _run_state_summary(self, text: str, client: "UnifiedLLM") -> None:
+        token = self._summary_llm_override.set(client)
         try:
-
-            async def dispatch(request: Any) -> Any:
-                params = dict(request.params)
-                params.setdefault("output_model", None)
-                request.response = await request.client.acall(request.messages, **params)
-                return request
-
-            result = await self.target_event_manager.run_middleware("llm_call", ctx, dispatch)
-            response = result.response
-            if response is None:
-                raise ValueError("Summary middleware returned no response")
-            text = response.content
-            if response.tool_calls:
-                # Read CodeAct's final value as data, never as an invocation.
-                if len(response.tool_calls) != 1 or response.tool_calls[0].name != "return_result":
-                    raise ValueError("Summary fork requested executable tools")
-                text = json.loads(response.tool_calls[0].arguments).get("result")
-            if not isinstance(text, str) or not text.strip():
-                raise ValueError("Summary fork must return nonempty text")
-            if response.finish_reason in {"length", "error"}:
-                raise ValueError(f"Summary fork did not complete: {response.finish_reason}")
-            self._pending_summary = text
-            self._failed_forks = 0
+            summary = await self.summarize(text, self.config.target_chars)
+            if not isinstance(summary, str) or not summary.strip():
+                raise ValueError("Summary must be nonempty text")
+            self._pending_summary = summary
+            self._failed_summaries = 0
         except Exception:
-            logger.warning("Summary fork failed; history is unchanged", exc_info=True)
+            logger.warning("Summary failed; history is unchanged", exc_info=True)
             self._pending_summary = None
-            self._failed_forks += 1
-            if self._failed_forks >= 2 and self._unsub_llm is not None:
+            self._failed_summaries += 1
+            if self._failed_summaries >= 2 and self._unsub_llm is not None:
                 self._unsub_llm()
                 self._unsub_llm = None
                 logger.warning(
-                    "Token-budget summarization disabled after two consecutive failed forks; history is unchanged. Fix the reported failure before reinstalling."
+                    "Token-budget summarization disabled after two consecutive failures; "
+                    "history is unchanged. Fix the reported failure before reinstalling."
                 )
         finally:
-            _in_summary_fork.reset(token)
+            self._summary_llm_override.reset(token)
             self.event_manager.clear()
 
     @hidden
@@ -803,36 +842,33 @@ class TokenBudgetSummarizer(SummarizationAgent):
     def _apply_pending_summary(self) -> None:
         if self._pending_task is not None and self._pending_task.done():
             if self._pending_source and self._pending_range:
-                current = tuple(
-                    (tag, event.id)
-                    for tag, event in self._get_events_in_range(*self._pending_range)
-                )
-                if current != self._pending_source:
-                    logger.warning(
-                        "Discarding stale summary: source events changed during the fork"
+                try:
+                    pairs = self._get_events_in_range(*self._pending_range)
+                    current = tuple(
+                        (tag, event.id, event.model_dump_json()) for tag, event in pairs
                     )
+                    text = "\n\n".join(self._event_markdown(tag, event) for tag, event in pairs)
+                except Exception:
+                    current = ()
+                    text = None
+                if current != self._pending_source or text != self._pending_source_text:
+                    logger.warning("Discarding stale summary: source events changed")
                     self._pending_summary = None
             self._pending_source = None
+            self._pending_source_text = None
         super()._apply_pending_summary()
 
     @classmethod
     def install(
         cls, agent: Agent, *, config: "TokenBudgetConfig | None" = None, **kwargs: Any
     ) -> SummarizationAgent:
-        """Install with a TokenBudgetConfig.
-
-        Args:
-            agent: Agent to attach to.
-            config: TokenBudgetConfig instance. Use TokenBudgetConfig(field=value) to override.
-            **kwargs: Unsupported; the fork always uses the parent's effective client.
-        """
-        unknown = set(kwargs)
-        if unknown:
+        """Install state compaction using the parent's effective client."""
+        if kwargs:
             raise TypeError(
-                f"TokenBudgetSummarizer.install() got unexpected keyword arguments: "
-                f"{sorted(unknown)}. Use config=TokenBudgetConfig(...); the client comes from the parent."
+                "TokenBudgetSummarizer.install() got unexpected keyword arguments: "
+                f"{sorted(kwargs)}. Use config=TokenBudgetConfig(...); the client comes from the parent."
             )
-        return super().install(agent, config=config, **kwargs)
+        return super().install(agent, config=config)
 
     def __init__(self, agent: Agent, **kwargs: Any) -> None:
         from nooa.config.summarizer_config import TokenBudgetConfig as _TBC
@@ -850,9 +886,7 @@ class MethodSummarizer(SummarizationAgent):
     Trigger: event.is_final == True (method completed)
     Action: Summarize all events from that method's generation_id
 
-    This method-completion summarizer still uses the base class's standalone
-    render path: unlike the token-budget summarizer, it has no parent request
-    to fork. It is not a fallback for TokenBudgetSummarizer.
+    Summary input comes from stored history, independently of context views.
 
     Example:
         from nooa.config.summarizer_config import MethodSummarizerConfig

@@ -51,18 +51,9 @@ def resolve_context_view(owner: Any, *, default: ContextView[Any]) -> ContextVie
     return cast(ContextView[Any], view if view is not None else default)
 
 
-def select_context_events(events: Any, *, call: "CurrentCall") -> tuple[EventBase, ...]:
-    """Select active, model-visible events using the call's resolved query."""
-    active = tuple(event for key in events.keys() if (event := events.get(key)) is not None)
-    selected = active
-    if call.event_query is not None:
-        selected = tuple(call.event_query.apply(list(active), current_call_id=call.invocation_id))
-    return tuple(
-        event
-        for event in selected
-        if getattr(event, "_role", Role.USER) not in (Role.RUNTIME_EVENT, Role.METADATA)
-        and not event.is_empty
-    )
+def is_model_visible(event: EventBase) -> bool:
+    """Whether an event carries model-facing content, without selecting history."""
+    return event._role not in (Role.RUNTIME_EVENT, Role.METADATA) and not event.is_empty
 
 
 async def collect_context_items[Owner](
@@ -170,5 +161,5 @@ __all__ = [
     "context_text",
     "evaluate_context_expression",
     "resolve_context_view",
-    "select_context_events",
+    "is_model_visible",
 ]

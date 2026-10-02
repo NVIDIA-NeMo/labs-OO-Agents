@@ -19,8 +19,8 @@ from nooa import (
     collect_context_items,
     context_text,
     evaluate_context_expression,
+    is_model_visible,
     resolve_context_view,
-    select_context_events,
     spec,
     strategy,
 )
@@ -547,8 +547,7 @@ def test_event_helper_uses_active_history_and_filters_non_model_events():
     agent.event_manager.add(empty)
     agent.event_manager.add(visible)
 
-    call = CurrentCall(id="changed", method_name="run", decorator="plan")
-    selected = select_context_events(agent.events, call=call)
+    selected = tuple(e for e in agent.event_manager.values() if is_model_visible(e))
 
     assert [event.tag for event in selected] == [summary_tag, visible.tag]
     assert metadata not in selected
@@ -579,8 +578,7 @@ def test_event_helper_preserves_native_only_assistant_replay():
     agent = Example()
     agent.event_manager.add(response)
 
-    call = CurrentCall(id="next", method_name="run", decorator="plan")
-    selected = select_context_events(agent.events, call=call)
+    selected = tuple(e for e in agent.event_manager.values() if is_model_visible(e))
     assert selected == (response,)
 
     rendered = render_context(
@@ -753,39 +751,9 @@ async def test_current_call_exposes_call_overridden_model_and_budget():
     )
 
 
-async def test_prepare_context_refreshes_mutable_manager_event_query():
-    from nooa.runtime.actor import _current_call_var, _current_context_view_var
-    from nooa.runtime.event_query import EventQuery
-
-    captured: list[CurrentCall] = []
-
-    class CaptureView:
-        async def assemble(self, owner, call):
-            captured.append(call)
-            yield Block(key="capture", content="capture")
-
-    class Example(Agent, llm=object()):
-        async def run(self) -> str: ...
-
-    agent = Example()
-    stale = EventQuery(query="stale")
-    current = EventQuery(query="current")
-    base = CurrentCall(id="1", method_name="run", decorator="plan", event_query=stale)
-    agent.event_manager.set_event_query(current)
-    call_token = _current_call_var.set(base)
-    view_token = _current_context_view_var.set(CaptureView())
-    try:
-        await agent.runtime._prepare_context(Example.run)
-    finally:
-        _current_context_view_var.reset(view_token)
-        _current_call_var.reset(call_token)
-    assert captured[-1].event_query is current
-
-
 async def test_prepare_context_refreshes_mutable_scoped_state():
     from nooa.context_blocks import ScopedContext
     from nooa.runtime.actor import _current_call_var, _current_context_view_var
-    from nooa.runtime.event_query import EventQuery
 
     captured: list[CurrentCall] = []
 
@@ -802,19 +770,16 @@ async def test_prepare_context_refreshes_mutable_scoped_state():
         id="1",
         method_name="run",
         decorator="plan",
-        event_query=EventQuery(query="stale"),
         _scoped_context={"stale": "stale"},
     )
-    current_query = EventQuery(query="current")
     call_token = _current_call_var.set(base)
     view_token = _current_context_view_var.set(CaptureView())
     try:
-        with ScopedContext(context={"current": "current"}, events=current_query):
+        with ScopedContext(context={"current": "current"}):
             await agent.runtime._prepare_context(Example.run)
     finally:
         _current_context_view_var.reset(view_token)
         _current_call_var.reset(call_token)
-    assert captured[-1].event_query is current_query
     assert captured[-1].scoped_context == {"current": "current"}
 
 

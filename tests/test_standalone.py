@@ -9,7 +9,7 @@ Covers:
 - History isolation: fresh EventManager per call (sequential + parallel)
 - exec_globals: module constants, helper functions, Pydantic return types
 - CodeAct calling module-level functions and other standalone functions
-- ScopedContext: context blocks in system prompt, EventQuery filtering
+- ScopedContext: context blocks in system prompt
 - Wrapper metadata: _standalone, _plan_strategy, _plan_llm, __name__, __doc__
 - Error cases: non-async function, stacked decorators, invalid context type
 """
@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from nooa import EventQuery, strategy
+from nooa import strategy
 from nooa.context_blocks import ScopedContext
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
@@ -643,26 +643,8 @@ class TestStandaloneScopedContext:
             assert MARKER in system_prompt, f"Call {i}: context marker missing from system prompt"
 
     @pytest.mark.asyncio
-    async def test_event_query_current_call_executes(self) -> None:
-        """ScopedContext(events=EventQuery.current_call()) runs without error."""
-        fake_llm = FakeLLMClient(
-            scripted_responses=[_resp(tool_calls=[_exec('return_result(result="ok")')])]
-        )
-
-        @strategy(
-            CodeActStrategy(),
-            ScopedContext(events=EventQuery.current_call()),
-            llm=fake_llm,
-        )
-        async def fn(text: str) -> str:
-            """Process {text}."""
-            ...
-
-        assert await fn("test") == "ok"
-
-    @pytest.mark.asyncio
-    async def test_context_and_events_together(self) -> None:
-        """ScopedContext with both context and events works end-to-end."""
+    async def test_scoped_context_runs_end_to_end(self) -> None:
+        """ScopedContext blocks reach a standalone generation."""
         CTX_MARKER = "COMBINED_CTX_MARKER_z3r1"
         fake_llm = FakeLLMClient(
             scripted_responses=[_resp(tool_calls=[_exec('return_result(result="combined")')])]
@@ -672,7 +654,6 @@ class TestStandaloneScopedContext:
             CodeActStrategy(),
             ScopedContext(
                 context={"hint": CTX_MARKER},
-                events=EventQuery.current_call(),
             ),
             llm=fake_llm,
         )

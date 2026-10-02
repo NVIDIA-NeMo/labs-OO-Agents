@@ -18,7 +18,6 @@ from nooa.default_context_view import visible_events
 from nooa.runtime.event_manager import EventManager
 from nooa.runtime.events import EventsApi
 from nooa.storage.sqlite import SQLiteEventBackend
-from nooa.strategies.current_call import CurrentCall
 
 # ---------------------------------------------------------------------------
 # Parametrized EventManager fixture
@@ -36,16 +35,10 @@ def event_manager(request, sqlite_conn):
         raise ValueError(f"Unknown backend param: {request.param!r}")
 
 
-def _visible(em, query=None):
+def _visible(em):
     agent = SimpleNamespace(event_manager=em)
     agent.events = EventsApi(agent)
-    call = CurrentCall(
-        id="call",
-        method_name="run",
-        decorator="plan",
-        event_query=query,
-    )
-    return visible_events(agent, call)
+    return visible_events(agent)
 
 
 def _event_key(event) -> str:
@@ -173,16 +166,15 @@ def test_phase_events_display_order_after_collapse(event_manager):
 
 
 def test_phase_events_with_type_query_on_real_event_manager(event_manager):
-    """EventQuery(type=...) filters correctly — uses values() not filter()."""
+    """A view can filter active history by event type."""
     from nooa.events import Error, Task
-    from nooa.runtime.event_query import EventQuery
 
     em = event_manager
     em.add(Task(prompt="do it"))  # "1"
     em.add(Error(content="oops"))  # "2"
     em.add(Task(prompt="retry"))  # "3"
 
-    blocks = _visible(em, EventQuery(type="Task"))
+    blocks = tuple(event for event in _visible(em) if isinstance(event, Task))
 
     assert len(blocks) == 2
     assert all(event.event_type == "Task" for event in blocks)
@@ -192,11 +184,10 @@ def test_phase_events_query_does_not_include_archived_events(event_manager):
     """Active query must not surface archived events — uses values(), not filter().
 
     Scenario: tasks 1-2 are collapsed into a Summary; task 3 is active.
-    An EventQuery(type="Task") must match only the active Task (tag "3"),
+    The view's type predicate must match only the active Task (tag "3"),
     not the archived originals (tags "1", "2") behind the Summary.
     """
     from nooa.events import Task
-    from nooa.runtime.event_query import EventQuery
 
     em = event_manager
     em.add(Task(prompt="first"))  # "1"
@@ -208,7 +199,7 @@ def test_phase_events_query_does_not_include_archived_events(event_manager):
     # active_tags: ["1..2" (Summary), "3" (Task)]; "1" and "2" are archived
     assert em.keys() == ["1..2", "3"]
 
-    blocks = _visible(em, EventQuery(type="Task"))
+    blocks = tuple(event for event in _visible(em) if isinstance(event, Task))
 
     # Only the active Task (tag "3") should match — archived tags "1" and "2" must not
     assert len(blocks) == 1, (

@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from nooa.runtime.context import ContextApi
     from nooa.runtime.context_manager import ContextManager
     from nooa.runtime.event_manager import EventManager
-    from nooa.runtime.event_query import EventQuery
     from nooa.runtime.events import EventsApi
     from nooa.storage.manager import StorageManager
     from nooa.unifiedllm import UnifiedLLM
@@ -103,7 +102,6 @@ class Agent(metaclass=AgentMeta):
     _storage: Annotated["StorageManager", hidden, nosnapshot]
     event_manager: Annotated["EventManager", hidden, nosnapshot]
     context_manager: Annotated["ContextManager", hidden, nosnapshot]
-    event_query: Annotated["EventQuery | None", hidden, nosnapshot]
     render_config: Annotated["RenderConfig", hidden, nosnapshot]
     _agent_id: Annotated[str, hidden, nosnapshot]
     _llm: Annotated["UnifiedLLM", hidden, nosnapshot]
@@ -125,7 +123,6 @@ class Agent(metaclass=AgentMeta):
     _strategy_llm_alias_cache: Annotated["dict[str, UnifiedLLM]", hidden, nosnapshot]
     _agent_truncation: Annotated["TruncationConfig", hidden]
     _agent_context_blocks: Annotated["dict[str, str | DynamicContext | None]", hidden]
-    _agent_event_query: Annotated["EventQuery | None", hidden]
     _context_view: Annotated["ContextView[Agent] | None", hidden, nosnapshot]
 
     # Enable tracing for Agent classes (convention for metaclass)
@@ -137,7 +134,6 @@ class Agent(metaclass=AgentMeta):
         truncation: "TruncationConfig | None" = None,
         execution: "ExecutionConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
-        event_query: "EventQuery | None" = None,
         context_view: "ContextView[Agent] | None" = None,
         **kwargs: Any,
     ):
@@ -151,7 +147,6 @@ class Agent(metaclass=AgentMeta):
                 - str: Static content
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
                 - None: Remove block
-            event_query: Default EventQuery for filtering events in context.
             context_view: Class-level complete context view.
             **kwargs: Additional arguments for multiple inheritance support.
         """
@@ -165,8 +160,6 @@ class Agent(metaclass=AgentMeta):
             cls._agent_truncation = truncation  # type: ignore[attr-defined]
         if context is not None:
             cls._agent_context_blocks = context  # type: ignore[attr-defined]
-        if event_query is not None:
-            cls._agent_event_query = event_query  # type: ignore[attr-defined]
         if context_view is not None:
             cls._context_view = context_view  # type: ignore[attr-defined]
 
@@ -181,7 +174,6 @@ class Agent(metaclass=AgentMeta):
         truncation: "TruncationConfig | None" = None,
         render_config: "RenderConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
-        event_query: "EventQuery | None" = None,
         storage: "StorageManager | None" = None,
         context_view: "ContextView[Agent] | None" = None,
     ):
@@ -195,7 +187,6 @@ class Agent(metaclass=AgentMeta):
                 - str: Static content
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
                 - None: Remove block
-            event_query: Instance-level EventQuery for filtering events in context.
             storage: Optional StorageManager for persistence. Defaults to
                 InMemoryStorageManager (no persistence, same as current behavior).
             context_view: Instance-level complete context view.
@@ -239,9 +230,6 @@ class Agent(metaclass=AgentMeta):
         from nooa.context_blocks.render_config import RenderConfig as _RC
 
         self.render_config = render_config or _RC()
-
-        # Resolve and store event query (instance overrides class-level)
-        self.event_query = self._resolve_event_query(event_query)
 
         if context_view is not None:
             self._context_view = context_view
@@ -432,35 +420,6 @@ class Agent(metaclass=AgentMeta):
             config = config.merge_with(instance_truncation)
 
         return config
-
-    @no_trace
-    @hidden
-    def _resolve_event_query(
-        self, instance_event_query: "EventQuery | None"
-    ) -> "EventQuery | None":
-        """Resolve event query with override semantics.
-
-        Resolution order (later overrides earlier):
-        1. Class-level: class MyAgent(Agent, event_query=...)
-        2. Instance-level: MyAgent(event_query=...)
-
-        Args:
-            instance_event_query: EventQuery passed to __init__
-
-        Returns:
-            Resolved EventQuery or None if no query specified
-        """
-        # Instance-level overrides class-level
-        if instance_event_query is not None:
-            return instance_event_query
-
-        # Check class-level
-        class_event_query = getattr(self.__class__, "_agent_event_query", None)
-        if class_event_query is not None:
-            return cast("EventQuery", class_event_query)
-
-        # No event query specified
-        return None
 
     @property
     @hidden

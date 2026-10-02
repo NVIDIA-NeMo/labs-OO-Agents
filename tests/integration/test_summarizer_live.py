@@ -75,7 +75,8 @@ async def exercise_summarization(client, family, monkeypatch):
         call_count += 1
         assert call_count <= 3, "Model-call budget exceeded"
         if call_count == 2:
-            assert "Background memory compaction" in messages[-1]["content"]
+            assert "history_markdown" in str(messages)
+            assert not params.get("tools"), "State compaction must not borrow parent tools"
             started.set()
             await release.wait()
         response = await real_call(messages, **params)
@@ -115,18 +116,18 @@ async def exercise_summarization(client, family, monkeypatch):
     )
     try:
         assert "READY" in await parent.reply("Acknowledge the notes with READY.")
-        assert summarizer._pending_task is not None, "Installed summarizer did not fork"
+        assert summarizer._pending_task is not None, "Installed summarizer did not schedule"
         await asyncio.wait_for(started.wait(), 5)
         assert not summarizer._pending_task.done(), "Parent must return before summary completes"
         assert not any(isinstance(e, Summary) for e in parent.event_manager.values())
-        source = dict(summarizer._pending_source)
+        source = {tag: identity for tag, identity, _ in summarizer._pending_source}
         recent = {tag: e.id for tag, e in parent.event_manager.items() if tag not in source}
-        before_fork = [(tag, e.id) for tag, e in parent.event_manager.items()]
+        before_summary = [(tag, e.id) for tag, e in parent.event_manager.items()]
         release.set()
         await asyncio.wait_for(summarizer._pending_task, 150)
         text = summarizer._pending_summary
-        assert [(tag, e.id) for tag, e in parent.event_manager.items()] == before_fork, (
-            "Fork wrote parent events or executed tools"
+        assert [(tag, e.id) for tag, e in parent.event_manager.items()] == before_summary, (
+            "Summary wrote parent events or executed tools"
         )
         assert text, "Background summary failed or returned unusable text"
         missing = [fact for fact in FACTS if fact not in text.lower()]
@@ -151,16 +152,11 @@ async def exercise_summarization(client, family, monkeypatch):
         assert not missing, f"Continuation lost a fact: {missing}"
         assert len(bodies) == len(responses) == call_count == 3
 
-        first, fork, continuation = bodies
+        first, summary_request, continuation = bodies
         key = "input" if family == "openai" else "messages"
-        assert {k: v for k, v in first.items() if k != key} == {
-            k: v for k, v in fork.items() if k != key
-        }, "Fork changed request settings"
-        if family == "openai":
-            assert fork[key][:-1] == first[key], "Fork changed the parent prefix"
-        else:
-            assert fork[key][:-1] == first[key][:-1], "Fork changed the parent prefix"
-            assert fork[key][-1]["content"][:-1] == first[key][-1]["content"]
+        assert summary_request[key] != first[key], "Summary reused the parent projection"
+        assert "summary smoke test" not in json.dumps(summary_request)
+        assert not summary_request.get("tools"), "Summary borrowed parent tools"
         # Summary renderers may quote/escape multiline text. Check its facts in
         # the outgoing request as well as the exact stored summary above.
         assert all(fact in json.dumps(continuation).lower() for fact in FACTS), (
@@ -203,4 +199,3 @@ async def test_installed_summarizer_applies_before_next_turn(family, monkeypatch
     ) as client:
         report = await exercise_summarization(client, family, monkeypatch)
     print(json.dumps(report), flush=True)
-    assert report["calls"][1]["cached_input_tokens"] > 0, "Summary did not reuse the parent cache"

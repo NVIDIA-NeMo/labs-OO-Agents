@@ -12,7 +12,7 @@ These are instructions *for coding agents about the framework* — not `nooa.Ski
 | [`nooa-model-configuration`](nooa-model-configuration/SKILL.md) | Model onboarding and diagnostics: Connect CLI/library, registry aliases, credentials, reply budgets, reasoning levels, caching and reasoning replay |
 | [`nooa-codeact-advanced`](nooa-codeact-advanced/SKILL.md) | Advanced strategy tuning: prefill (custom/disable/pre-ellipsis), loop guards, truncation tuning, code restrictions, execution internals, PredictConfig |
 | [`nooa-agentdoc`](nooa-agentdoc/SKILL.md) | Making types render beautiful docs for the LLM: `doc()`, `spec()`, `hidden`, `Annotated` descriptions, `pformat`/`pprint` tuning |
-| [`nooa-context-and-state`](nooa-context-and-state/SKILL.md) | Context blocks, event history and `EventQuery`, history summarization, persistence and memory |
+| [`nooa-context-and-state`](nooa-context-and-state/SKILL.md) | Context blocks, view-owned event selection, history summarization, persistence and memory |
 | [`nooa-tools-and-skills`](nooa-tools-and-skills/SKILL.md) | Methods as tools, built-in tools (`ShellTools`/`TodoManager`), MCP integration, agent skills (`Skill`/`TextSkill`), multimodal media |
 | [`nooa-channels`](nooa-channels/SKILL.md) | Reactive input: Channel/QueueManager, race() dispatch loops, spawn() background jobs, monitor/cron/tail producers |
 | [`nooa-self-extending`](nooa-self-extending/SKILL.md) | Agent-authored code: persistent skill libraries (self.libs), in-cell helpers and standalone @strategy sub-calls, @slash_command |

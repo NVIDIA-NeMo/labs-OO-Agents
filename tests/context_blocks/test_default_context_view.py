@@ -128,7 +128,7 @@ async def test_unregistered_framework_defaults_are_not_built():
     owner = SimpleNamespace(
         context_manager=MinimalManager(),
         active_skills=lambda: (),
-        events=SimpleNamespace(keys=lambda: [], get=lambda key: None),
+        event_manager=SimpleNamespace(values=lambda: []),
     )
     assert await collect_context_items(DefaultAgentView(), owner, _call(ExampleAgent())) == ()
 
@@ -141,7 +141,7 @@ async def test_unprotected_framework_declaration_is_still_materialized():
     owner = SimpleNamespace(
         context_manager=manager,
         active_skills=lambda: (),
-        events=SimpleNamespace(keys=lambda: [], get=lambda key: None),
+        event_manager=SimpleNamespace(values=lambda: []),
     )
     items = await collect_context_items(DefaultAgentView(), owner, _call(ExampleAgent()))
     assert next(
@@ -339,22 +339,11 @@ async def test_strategy_order_lists_keys_first_and_keeps_remainder_stable():
     assert keys[2:] == [key for key in [block.key for block in blocks] if key not in {"c", "a"}]
 
 
-def test_visible_events_uses_public_stable_invocation_id():
+def test_visible_events_includes_active_history_without_call_filter():
     event = Task(prompt="task", metadata={"call_id": "outer"}, tag="1")
-    events = SimpleNamespace(keys=lambda: ["1"], get=lambda key: event if key == "1" else None)
-    query = SimpleNamespace(
-        apply=lambda events, *, current_call_id: events if current_call_id == "outer" else []
-    )
-    agent = SimpleNamespace(events=events)
-    call = CurrentCall(
-        id="strategy-mutated",
-        method_name="run",
-        decorator="plan",
-        event_query=query,
-        _context_call_id="outer",
-    )
+    agent = SimpleNamespace(event_manager=SimpleNamespace(values=lambda: [event]))
 
-    assert visible_events(agent, call) == (event,)
+    assert visible_events(agent) == (event,)
 
 
 def test_default_module_imports_no_runtime_modules():

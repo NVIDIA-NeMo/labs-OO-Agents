@@ -128,8 +128,6 @@ class LLMCallContext(BaseModel):
         runtime: The ``ActorRuntime`` instance.
         client: Effective client for this call, including method-level overrides.
                 Read-only: route overrides belong in params, not a replacement client.
-        filtered_history: An event query restricted the rendered history. Consumers
-                          must not treat this request as the complete event archive.
         response: ``None`` on the way *in*; set to the ``LLMResponse`` by the
                   innermost handler on the way *out*.
     """
@@ -141,7 +139,6 @@ class LLMCallContext(BaseModel):
     agent: Agent | None = None
     runtime: ActorRuntime | None = None
     client: UnifiedLLM | None = Field(default=None, frozen=True)
-    filtered_history: bool = False
     response: LLMResponse | None = None
 
 

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Cache-sharing forks preserve the actual SDK body, not just message kwargs."""
+"""Dedicated state summaries do not inherit the parent projection or tools."""
 
 import json
 
@@ -23,7 +23,7 @@ def forbidden_tool(code: str) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", ["openai", "anthropic"])
-async def test_fork_wire_prefix_and_settings_are_identical(family, monkeypatch):
+async def test_state_summary_wire_is_independent_of_parent(family, monkeypatch):
     bodies = []
 
     def respond(request):
@@ -40,7 +40,13 @@ async def test_fork_wire_prefix_and_settings_are_identical(family, monkeypatch):
                         "type": "message",
                         "role": "assistant",
                         "status": "completed",
-                        "content": [{"type": "output_text", "text": "summary", "annotations": []}],
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"value":"summary"}',
+                                "annotations": [],
+                            }
+                        ],
                     }
                 ],
                 "usage": {"input_tokens": 1000, "output_tokens": 5, "total_tokens": 1005},
@@ -51,7 +57,7 @@ async def test_fork_wire_prefix_and_settings_are_identical(family, monkeypatch):
                 "type": "message",
                 "role": "assistant",
                 "model": "claude-sonnet-4-5",
-                "content": [{"type": "text", "text": "summary"}],
+                "content": [{"type": "text", "text": '{"value":"summary"}'}],
                 "stop_reason": "end_turn",
                 "stop_sequence": None,
                 "usage": {"input_tokens": 1000, "output_tokens": 5},
@@ -117,18 +123,12 @@ async def test_fork_wire_prefix_and_settings_are_identical(family, monkeypatch):
         assert summarizer._pending_summary == "summary"
         summarizer._uninstall()
     assert len(bodies) == 2
-    parent, fork = bodies
+    parent, summary = bodies
     key = "input" if family == "openai" else "messages"
-    assert {k: v for k, v in parent.items() if k != key} == {
-        k: v for k, v in fork.items() if k != key
-    }
-    if family == "openai":
-        assert fork[key][:-1] == parent[key]
-        assert "prompt_cache_breakpoint" in json.dumps(parent[key][:-1])
-    else:
-        # Anthropic coalesces adjacent user messages into one content list.
-        assert fork[key][:-1] == parent[key][:-1]
-        assert fork[key][-1]["content"][:-1] == parent[key][-1]["content"]
-        assert "cache_control" in json.dumps(parent[key])
-    assert "live=1" in json.dumps(fork[key])
-    assert "Background memory compaction" in json.dumps(fork[key][-1])
+    assert "stable facts" in json.dumps(summary[key])
+    assert "more facts" in json.dumps(summary[key])
+    assert "recent facts" not in json.dumps(summary[key])
+    assert "live=1" not in json.dumps(summary)
+    assert "fixed instructions" not in json.dumps(summary)
+    assert not summary.get("tools")
+    assert summary.get("prompt_cache_key") != "parent-shard"

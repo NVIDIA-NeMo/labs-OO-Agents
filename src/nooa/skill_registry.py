@@ -44,7 +44,6 @@ _RESERVED_ATTRS = frozenset(
         "_llm",
         "_agent_id",
         "render_config",
-        "event_query",
     }
 )
 
@@ -865,7 +864,9 @@ class SkillRegistry(Skill):
                 return result
 
             previous_name = source.module_name
-            previous_module = self._python_modules.pop(previous_name, None)
+            previous_module = (
+                self._python_modules.pop(previous_name, None) if previous_name is not None else None
+            )
             if previous_name is not None and sys.modules.get(previous_name) is previous_module:
                 sys.modules.pop(previous_name, None)
             self._python_modules[module_name] = sys.modules[module_name]

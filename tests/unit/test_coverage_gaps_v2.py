@@ -413,25 +413,6 @@ class TestEventManagerRegisterEventType:
         assert _EmptyTypeEvent().event_type == "_EmptyTypeEvent"
 
 
-class TestEventManagerSetEventQuery:
-    """set_event_query() stores the query (line 227)."""
-
-    def test_set_event_query_stores_value(self):
-        from nooa.runtime.event_manager import EventManager
-
-        em = EventManager()
-        mock_query = MagicMock()
-        em.set_event_query(mock_query)
-        assert em.get_event_query() is mock_query
-
-    def test_set_event_query_none(self):
-        from nooa.runtime.event_manager import EventManager
-
-        em = EventManager()
-        em.set_event_query(None)
-        assert em.get_event_query() is None
-
-
 class TestEventManagerWildcardHandlerException:
     """Wildcard handler that raises is logged and swallowed (lines 256-257)."""
 

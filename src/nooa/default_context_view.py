@@ -17,8 +17,8 @@ from nooa.context_view import (
     collect_context_items,
     context_text,
     evaluate_context_expression,
+    is_model_visible,
     resolve_context_view,
-    select_context_events,
 )
 
 if TYPE_CHECKING:
@@ -296,9 +296,9 @@ def partition_blocks(blocks: Sequence[Block]) -> tuple[tuple[Block, ...], tuple[
     return prefix, trailing
 
 
-def visible_events(agent: "Agent", call: "CurrentCall") -> tuple[EventBase, ...]:
-    """Select model-visible events using the invocation's resolved query."""
-    return select_context_events(agent.events, call=call)
+def visible_events(agent: "Agent") -> tuple[EventBase, ...]:
+    """Default policy: include all active, model-visible history in order."""
+    return tuple(event for event in agent.event_manager.values() if is_model_visible(event))
 
 
 class DefaultAgentView(ContextView["Agent"]):
@@ -445,7 +445,7 @@ class DefaultAgentView(ContextView["Agent"]):
         prefix, trailing = partition_blocks(blocks)
 
         items: list[ContextItem] = [*prefix, *custom_skill_items]
-        items.extend(visible_events(owner, call))
+        items.extend(visible_events(owner))
         boundary_count = sum(isinstance(item, CacheBoundary) for item in items)
         if boundary_count > 1:
             raise ValueError(

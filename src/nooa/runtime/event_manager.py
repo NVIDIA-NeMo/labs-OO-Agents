@@ -30,7 +30,6 @@ from nooa.runtime.context_vars import _current_event_format_var, _get_agent_call
 from nooa.runtime.event_backend import EventBackend, InMemoryBackend
 
 if TYPE_CHECKING:
-    from nooa.runtime.event_query import EventQuery
     from nooa.runtime.middleware import (
         AgentCallContext,
         AgentCallMiddleware,
@@ -131,9 +130,6 @@ class EventManager:
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
         self._close_callbacks: list[Callable[[], Awaitable[None]]] = []
         self._close_task: asyncio.Task[None] | None = None
-
-        # Runtime event query override (set via set_event_query())
-        self._event_query: EventQuery | None = None
 
         # Middleware engine — initialized here, methods defined below.
         # Uses lazy import of middleware types to avoid circular dependency
@@ -307,35 +303,6 @@ class EventManager:
     def set_backend(self, backend: EventBackend) -> None:
         """Swap the persistence backend; handlers and middleware are preserved."""
         self._backend = backend
-
-    def set_event_query(self, query: "EventQuery | None") -> None:
-        """Set runtime event query for filtering context events.
-
-        This overrides the agent-level and decorator-level event queries
-        at runtime. Useful for temporarily changing event visibility.
-
-        Args:
-            query: EventQuery to use for filtering, or None to clear.
-
-        Example:
-            from nooa import EventQuery
-
-            # Show only errors temporarily
-            agent.event_manager.set_event_query(EventQuery.by_type("Error"))
-            result = await agent.process()
-
-            # Restore to default
-            agent.event_manager.set_event_query(None)
-        """
-        self._event_query = query
-
-    def get_event_query(self) -> "EventQuery | None":
-        """Get current runtime event query.
-
-        Returns:
-            Current EventQuery or None if not set.
-        """
-        return self._event_query
 
     def _emit(self, event: EventBase) -> None:
         """Emit event to registered handlers.
@@ -630,7 +597,7 @@ class EventManager:
     def clear(self) -> None:
         """Clear all events and reset counters."""
         # Backend's clear() resets its tag counter; nothing else for the
-        # manager to reset since handlers/middleware/event_query are
+        # manager to reset since handlers/middleware are
         # subscriber state, not event state.
         self._backend.clear()
 

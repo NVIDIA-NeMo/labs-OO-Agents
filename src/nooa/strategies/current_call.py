@@ -47,7 +47,6 @@ class CurrentCall:
         pre_ellipsis_code: Setup code before `...` marker (optional, for prefill).
         agent: Active owner for component context views.
         strategy: Resolved strategy for this generation.
-        event_query: Resolved event filter visible to context views.
         model: Resolved model name, without client configuration or credentials.
         context_window: Resolved model input window.
         context_budget: Context-block budget for this model call.
@@ -100,7 +99,6 @@ class CurrentCall:
     # immutable invocation snapshot.
     agent: Any | None = field(default=None, repr=False, compare=False)
     strategy: Any | None = field(default=None, repr=False, compare=False)
-    event_query: Any | None = field(default=None, repr=False, compare=False)
     model: str | None = None
     context_window: int | None = None
     context_budget: int | None = None
