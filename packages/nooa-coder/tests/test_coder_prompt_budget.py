@@ -34,22 +34,13 @@ RESULT = (
 
 # (spec, turn method): (system prompt chars, all message chars)
 LIMITS = {
-    (CODER, "handle"): (
-        19_600,
-        23_400,
-    ),  # measured 19,510 / 23,307 after PR 0 (shell cwd=, result-field docs)
-    (CODER, "handle_batch"): (
-        19_600,
-        23_000,
-    ),  # measured 19,510 / 22,951 after PR 0 (shell cwd=, result-field docs)
-    (EXPERIMENTAL, "handle"): (
-        11_100,
-        13_300,
-    ),  # measured 11,049 / 13,222 after PR 0 (shell cwd=, result-field docs)
-    (EXPERIMENTAL, "handle_batch"): (
-        11_100,
-        13_900,
-    ),  # measured 13,608 after the P2a ownership/usage fixes
+    # After main's #415 rendered import lines from the declared module (about
+    # 430 characters): measured values plus headroom; the coding agent's
+    # system limit stops at the bench cap.
+    (CODER, "handle"): (20_000, 24_250),  # measured 19,959 / 23,756
+    (CODER, "handle_batch"): (20_000, 23_900),  # measured 19,959 / 23,400
+    (EXPERIMENTAL, "handle"): (11_800, 14_000),  # measured 11,543 / 13,716
+    (EXPERIMENTAL, "handle_batch"): (11_800, 14_350),  # measured 11,543 / 14,069
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
