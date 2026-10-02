@@ -5,7 +5,6 @@
 import contextlib
 import difflib
 import inspect
-import json
 import os
 import time
 import traceback
@@ -21,7 +20,10 @@ from openinference.semconv.trace import (
 from opentelemetry import trace
 from opentelemetry.trace import Span, Status, StatusCode
 
-from nooa.agentdoc import TruncatingStringIO, truncating_pformat
+from nooa.agentdoc import TruncatingStringIO
+from nooa.tracing._trace_json import TraceJSON, trace_fields, trace_json
+
+_TYPE_NAME = type.__dict__["__name__"]
 
 # Context variable for per-async-context active span tracking
 # This prevents context leakage during concurrent execution (e.g., parallel eval samples)
@@ -81,9 +83,33 @@ def end_active_spans(reason: str = "timeout") -> int:
 
 
 _ERROR_MESSAGE_LIMIT = 5_000
-_TRACE_MAX_DEPTH = 16  # prevent stack overflow on deeply nested objects
-_TRACE_MAX_LENGTH = 20  # keep trace attr serialization bounded on large containers
-_TRACE_MAX_STRING = 2_000  # avoid materializing multi-MB strings in trace attrs
+
+
+def _safe_type_name(value: Any, max_chars: int = 256) -> str:
+    """Return a bounded native type name without invoking instance hooks."""
+    cls = type(value)
+    try:
+        name = _TYPE_NAME.__get__(cls, type(cls))
+    except Exception:
+        return "object"
+    return name[:max_chars] if type(name) is str else "object"
+
+
+def _safe_stored_fields(value: Any, names: tuple[str, ...]) -> dict[str, Any] | None:
+    """Copy a small exact-string-key instance dictionary without keyed lookups."""
+    try:
+        storage = object.__getattribute__(value, "__dict__")
+    except Exception:
+        return None
+    if type(storage) is not dict or dict.__len__(storage) > 64:
+        return None
+    copied: dict[str, Any] = {}
+    for key, stored_value in dict.items(storage):
+        if type(key) is not str:
+            return None
+        if key in names:
+            copied[key] = stored_value
+    return copied
 
 
 def _error_message(exception: BaseException) -> str:
@@ -271,12 +297,10 @@ class OpenInferenceHooks:
         # trace viewer/explorer read ``input.value`` (with a native fallback for
         # older traces that used ``agent.args``/``agent.kwargs``).
         try:
-            span.set_attribute(
-                SpanAttributes.INPUT_VALUE,
-                self._safe_json_value({"args": args, "kwargs": kwargs}),
-            )
-            span.set_attribute(
-                SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value
+            self._set_json_preview(
+                span,
+                trace_fields(args=args, kwargs=kwargs),
+                direction="input",
             )
         except Exception:
             pass
@@ -347,10 +371,7 @@ class OpenInferenceHooks:
             with contextlib.suppress(Exception):
                 # OpenInference-standard output is the single canonical representation
                 # (the legacy ``agent.result`` attr is no longer emitted).
-                span.set_attribute(SpanAttributes.OUTPUT_VALUE, self._safe_serialize(result))
-                span.set_attribute(
-                    SpanAttributes.OUTPUT_MIME_TYPE, OpenInferenceMimeTypeValues.TEXT.value
-                )
+                self._set_json_preview(span, trace_json(result), direction="output")
 
         # End span
         span.end(end_time=time.time_ns())
@@ -474,11 +495,10 @@ class OpenInferenceHooks:
             # (the legacy ``generation.result`` attr is no longer emitted). The
             # ``result.type`` metadata has no OI equivalent and is retained.
             try:
-                span.set_attribute(SpanAttributes.OUTPUT_VALUE, self._safe_serialize(result))
+                self._set_json_preview(span, trace_json(result), direction="output")
                 span.set_attribute(
-                    SpanAttributes.OUTPUT_MIME_TYPE, OpenInferenceMimeTypeValues.TEXT.value
+                    "result.type", "None" if result is None else _safe_type_name(result)
                 )
-                span.set_attribute("result.type", type(result).__name__ if result else "None")
             except Exception:
                 pass
 
@@ -528,21 +548,19 @@ class OpenInferenceHooks:
         span.set_attribute(VIEWER_PLUGIN_ATTR, ViewerPlugin.CODE_EXECUTION)
         span.set_attribute("tool.name", "python_executor")
         span.set_attribute("agent.name", agent_name)
-        capped_code = code[:10000]  # Limit code length
         span.set_attribute("code.length", len(code))
         span.set_attribute("execution.id", execution_id)
         # OpenInference-standard input: JSON {"code": ...} is the single
         # canonical representation of the executed code (the legacy flat ``code``
         # attr is no longer emitted; ``code.length`` metadata is retained).
-        code_args_json = self._safe_json_value({"code": capped_code})
-        span.set_attribute(SpanAttributes.INPUT_VALUE, code_args_json)
-        span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value)
+        code_preview = trace_fields(code=code)
+        self._set_json_preview(span, code_preview, direction="input")
         # Tool-call identity. No model tool-call id here, so fall back to
         # the execution id.
         self._set_tool_call_attrs(
             span,
             function_name="python_executor",
-            arguments_json=code_args_json,
+            arguments_json=code_preview.text,
             tool_call_id=kwargs.get("tool_call_id") or execution_id,
         )
 
@@ -617,22 +635,38 @@ class OpenInferenceHooks:
         else:
             span.set_status(Status(StatusCode.OK))
             try:
-                # JSON-encoded {stdout, stderr, returned_value} — gives the
-                # ATIF exporter a parseable observation source. Falls back to
-                # the generic repr serializer when the
-                # result doesn't look like an ExecutionResult.
-                if any(hasattr(result, attr) for attr in ("stdout", "stderr", "returned_value")):
-                    result_str = self._safe_serialize_execution_result(result)
-                    out_mime = OpenInferenceMimeTypeValues.JSON.value
+                from nooa.events import _NO_RETURN, ExecutionResult
+
+                if type(result) is ExecutionResult:
+                    storage = _safe_stored_fields(
+                        result, ("stdout", "stderr", "returned_value", "error")
+                    )
+                    if storage is None:
+                        result_preview = trace_json(result)
+                    else:
+                        returned_value = storage.get("returned_value", _NO_RETURN)
+                        stored_error = storage.get("error")
+                        result_preview = trace_fields(
+                            stdout=storage.get("stdout", ""),
+                            stderr=storage.get("stderr", ""),
+                            returned_value=(
+                                None if returned_value is _NO_RETURN else returned_value
+                            ),
+                            error=(
+                                _error_message(stored_error)
+                                if isinstance(stored_error, BaseException)
+                                else None
+                            ),
+                        )
                 else:
-                    result_str = self._safe_serialize(result)
-                    out_mime = OpenInferenceMimeTypeValues.TEXT.value
+                    result_preview = trace_json(result)
                 # OpenInference-standard output is the single canonical representation
                 # (the legacy ``result`` attr is no longer emitted; ``result.type``
                 # metadata has no OI equivalent and is retained).
-                span.set_attribute(SpanAttributes.OUTPUT_VALUE, result_str)
-                span.set_attribute(SpanAttributes.OUTPUT_MIME_TYPE, out_mime)
-                span.set_attribute("result.type", type(result).__name__ if result else "None")
+                self._set_json_preview(span, result_preview, direction="output")
+                span.set_attribute(
+                    "result.type", "None" if result is None else _safe_type_name(result)
+                )
             except Exception:
                 pass
 
@@ -681,17 +715,14 @@ class OpenInferenceHooks:
         # Emit method-call input as the OpenInference-standard input.value (the
         # legacy ``method.args``/``method.kwargs`` attrs are no longer emitted).
         try:
-            args_json = self._safe_json_value({"args": args, "kwargs": kwargs})
-            span.set_attribute(SpanAttributes.INPUT_VALUE, args_json)
-            span.set_attribute(
-                SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value
-            )
+            args_preview = trace_fields(args=args, kwargs=kwargs)
+            self._set_json_preview(span, args_preview, direction="input")
             # Tool-call identity; fall back to the invocation id when the model
             # provided no tool-call id.
             self._set_tool_call_attrs(
                 span,
                 function_name=method_name,
-                arguments_json=args_json,
+                arguments_json=args_preview.text,
                 tool_call_id=extra_kwargs.get("tool_call_id") or invocation_id,
             )
         except Exception:
@@ -743,11 +774,10 @@ class OpenInferenceHooks:
             try:
                 # OpenInference-standard output is canonical (the legacy
                 # ``method.result`` attr is no longer emitted).
-                span.set_attribute(SpanAttributes.OUTPUT_VALUE, self._safe_serialize(result))
+                self._set_json_preview(span, trace_json(result), direction="output")
                 span.set_attribute(
-                    SpanAttributes.OUTPUT_MIME_TYPE, OpenInferenceMimeTypeValues.TEXT.value
+                    "result.type", "None" if result is None else _safe_type_name(result)
                 )
-                span.set_attribute("result.type", type(result).__name__ if result else "None")
             except Exception:
                 pass
 
@@ -799,17 +829,14 @@ class OpenInferenceHooks:
         # Emit tool arguments as the OpenInference-standard input.value (valid JSON);
         # the legacy ``tool.arguments`` attr is no longer emitted.
         with contextlib.suppress(Exception):
-            arguments_json = self._safe_json_value(arguments)
-            span.set_attribute(SpanAttributes.INPUT_VALUE, arguments_json)
-            span.set_attribute(
-                SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value
-            )
+            arguments_preview = trace_json(arguments)
+            self._set_json_preview(span, arguments_preview, direction="input")
             # Tool-call identity. Prefer the model-provided
             # tool_call_id; fall back to execution_id (#12).
             self._set_tool_call_attrs(
                 span,
                 function_name=tool_name,
-                arguments_json=arguments_json,
+                arguments_json=arguments_preview.text,
                 tool_call_id=kwargs.get("tool_call_id") or execution_id,
             )
 
@@ -866,11 +893,10 @@ class OpenInferenceHooks:
             try:
                 # OpenInference-standard output is canonical (the legacy
                 # ``tool.result`` attr is no longer emitted).
-                span.set_attribute(SpanAttributes.OUTPUT_VALUE, self._safe_serialize(result))
+                self._set_json_preview(span, trace_json(result), direction="output")
                 span.set_attribute(
-                    SpanAttributes.OUTPUT_MIME_TYPE, OpenInferenceMimeTypeValues.TEXT.value
+                    "result.type", "None" if result is None else _safe_type_name(result)
                 )
-                span.set_attribute("result.type", type(result).__name__ if result else "None")
             except Exception:
                 pass
 
@@ -966,108 +992,24 @@ class OpenInferenceHooks:
         return None
 
     @staticmethod
-    def _safe_serialize_execution_result(result: Any, max_chars: int = 50_000) -> str:
-        """Serialize an ExecutionResult to JSON, capping returned_value *before* encoding.
+    def _set_json_preview(span: Span, preview: TraceJSON, *, direction: str) -> None:
+        """Write one bounded JSON preview and its direction-scoped metadata."""
+        if direction == "input":
+            value_key = SpanAttributes.INPUT_VALUE
+            mime_key = SpanAttributes.INPUT_MIME_TYPE
+        elif direction == "output":
+            value_key = SpanAttributes.OUTPUT_VALUE
+            mime_key = SpanAttributes.OUTPUT_MIME_TYPE
+        else:
+            raise ValueError(f"unsupported trace preview direction: {direction}")
 
-        Unlike post-JSON slicing (``json_str[:50000]``), this approach always
-        produces valid JSON because truncation happens on the Python value, not
-        on the serialised string.
-        """
-        data: dict[str, Any] = {}
-        if hasattr(result, "stdout"):
-            data["stdout"] = truncating_pformat(
-                result.stdout,
-                max_chars=max_chars,
-                max_depth=_TRACE_MAX_DEPTH,
-                max_length=_TRACE_MAX_LENGTH,
-                max_string=_TRACE_MAX_STRING,
-            )
-        if hasattr(result, "stderr"):
-            data["stderr"] = truncating_pformat(
-                result.stderr,
-                max_chars=max_chars,
-                max_depth=_TRACE_MAX_DEPTH,
-                max_length=_TRACE_MAX_LENGTH,
-                max_string=_TRACE_MAX_STRING,
-            )
-        if hasattr(result, "returned_value"):
-            rv = result.returned_value
-            # Check for _NO_RETURN sentinel or None
-            if rv is None or (hasattr(rv, "__class__") and rv.__class__.__name__ == "object"):
-                data["returned_value"] = None
-            else:
-                data["returned_value"] = truncating_pformat(
-                    rv,
-                    max_chars=max_chars,
-                    max_depth=_TRACE_MAX_DEPTH,
-                    max_length=_TRACE_MAX_LENGTH,
-                    max_string=_TRACE_MAX_STRING,
-                )
-        return json.dumps(data)
-
-    @staticmethod
-    def _safe_serialize(obj: Any, max_chars: int = 50_000) -> str:
-        """Serialize an object to string for trace span attributes.
-
-        Delegates to ``truncating_pformat`` which handles all types (primitives,
-        Pydantic models, dicts, lists) and enforces a hard ``max_chars``
-        cap with head+tail truncation.
-
-        Trace span attributes are NOT visible to the agent — the agent sees
-        rendered, truncated context blocks.  These attributes exist only for
-        human inspection in the trace viewer, so a 50 K cap is generous.
-        """
-        try:
-            return truncating_pformat(
-                obj,
-                max_chars=max_chars,
-                max_depth=_TRACE_MAX_DEPTH,
-                max_length=_TRACE_MAX_LENGTH,
-                max_string=_TRACE_MAX_STRING,
-            )
-        except Exception:
-            return "<unserializable>"
-
-    @staticmethod
-    def _safe_json_value(obj: Any, max_chars: int = 50_000) -> str:
-        """Serialize ``obj`` to a **valid JSON** string for ``input.value`` /
-        ``output.value`` attributes tagged ``application/json``.
-
-        Non-JSON-serializable leaves fall back to their truncated pformat repr
-        (via ``_safe_serialize``) so the result is always valid JSON.
-
-        On overflow (encoded length > ``max_chars``) the **top-level dict structure
-        is preserved** — each value is re-serialized with a smaller budget — so a
-        ``{"args": …, "kwargs": …}`` / ``{"code": …}`` input still parses back to a
-        dict with those keys (readers like ``_io_json_field`` and the viewer extract
-        fields by key). Only a non-dict, or a dict that still overflows after
-        per-value bounding, collapses to a JSON string literal as a last resort.
-        """
-        try:
-            encoded = json.dumps(
-                obj,
-                default=lambda o: OpenInferenceHooks._safe_serialize(o, max_chars),
-            )
-            if len(encoded) <= max_chars:
-                return encoded
-            # Overflow: keep the top-level keys so field extraction still works,
-            # bounding each value rather than collapsing the whole object. The
-            # per-value budget leaves headroom for ``_safe_serialize``'s head+tail
-            # truncation (~2x the budget) plus JSON-escaping overhead.
-            if isinstance(obj, dict):
-                per_value = max(256, max_chars // (4 * max(1, len(obj))))
-                shaped = json.dumps(
-                    {
-                        str(k): OpenInferenceHooks._safe_serialize(v, per_value)
-                        for k, v in obj.items()
-                    }
-                )
-                if len(shaped) <= max_chars:
-                    return shaped
-        except Exception:
-            pass
-        # Last resort: a JSON string literal wrapping the bounded human-readable repr.
-        return json.dumps(OpenInferenceHooks._safe_serialize(obj, max_chars))
+        prefix = f"nooa.{direction}.preview"
+        span.set_attribute(value_key, preview.text)
+        span.set_attribute(mime_key, OpenInferenceMimeTypeValues.JSON.value)
+        span.set_attribute(f"{prefix}.version", 1)
+        span.set_attribute(f"{prefix}.incomplete", bool(preview.incomplete_paths))
+        if preview.incomplete_paths:
+            span.set_attribute(f"{prefix}.paths", preview.incomplete_paths)
 
     @staticmethod
     def _set_tool_call_attrs(
@@ -1087,8 +1029,8 @@ class OpenInferenceHooks:
           JSON) — mirror how an LLM span records a tool call, so OpenInference
           backends render these framework TOOL spans as calls.
 
-        ``arguments_json`` must already be a valid-JSON string (use
-        :meth:`_safe_json_value`).
+        ``arguments_json`` must already be a valid-JSON string produced by the
+        bounded trace-preview codec.
         """
         with contextlib.suppress(Exception):
             span.set_attribute(SpanAttributes.TOOL_ID, tool_call_id)
