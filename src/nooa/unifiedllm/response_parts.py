@@ -23,12 +23,28 @@ logger = logging.getLogger(__name__)
 
 
 def _require_encrypted_reasoning(item: dict) -> None:
-    if (
-        not isinstance(item, dict)
-        or item.get("type") != "reasoning"
-        or not isinstance(item.get("encrypted_content"), str)
-        or not item["encrypted_content"]
-    ):
+    _validate_native_reasoning(item, require_encrypted=True)
+
+
+def _validate_native_reasoning(
+    item: dict, *, require_encrypted: bool, has_text: bool = True
+) -> None:
+    """Validate a native reasoning item, optionally requiring a real envelope.
+
+    A present ``encrypted_content`` must always be a nonempty string. Whether
+    its *absence* is acceptable depends on the outgoing route: a call that can
+    only reach a native OpenAI/Azure endpoint must still get an envelope, but
+    a route that never returns one (every other OpenAI-compatible gateway,
+    per LiteLLM's provider-name collapse) can replay a summary-only item as
+    its native, non-truncated state -- provided there is actually summary text
+    to replay; an empty, encryption-less item carries no state at all.
+    """
+    if not isinstance(item, dict) or item.get("type") != "reasoning":
+        raise ReasoningReplayError("Malformed encrypted reasoning item.")
+    encrypted = item.get("encrypted_content")
+    if encrypted is not None and (not isinstance(encrypted, str) or not encrypted):
+        raise ReasoningReplayError("Malformed encrypted reasoning item.")
+    if encrypted is None and (require_encrypted or not has_text):
         raise ReasoningReplayError("Malformed encrypted reasoning item.")
 
 
@@ -73,7 +89,9 @@ def _restore_text(blocks: list[dict], text: str, separator: str) -> None:
         raise ReasoningReplayError("Malformed native text-block lengths in ordered archive.")
 
 
-def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, ...]:
+def capture_parts(
+    output: list[Any], scope: str | None, *, native_encrypted_reasoning: bool = False
+) -> tuple[AssistantPart, ...]:
     """Capture Responses output order without flattening away replay information.
 
     One assistant turn can contain multiple reasoning items, text messages and
@@ -84,11 +102,14 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
 
     opaque_item detaches mutable provider containers; frozen native data then
     survives storage and repeated requests without copying its string payloads.
-    Unrecognized routes retain portable parts only. A summary-only reasoning
-    item or an unsupported output shape makes the entire turn readable-only:
-    keep the answer/refusal, warn, and discard native state rather than replay
-    an incomplete provider turn. Missing or malformed supported fields raise
-    the terminal ReasoningReplayError.
+    Unrecognized routes retain portable parts only. An unsupported output shape
+    makes the entire turn readable-only: keep the answer/refusal, warn, and
+    discard native state rather than replay an incomplete provider turn.
+    A reasoning item with no ``encrypted_content`` is only demoted the same
+    way when ``native_encrypted_reasoning`` says this route could have
+    returned one -- otherwise its summary text is the model's native,
+    non-truncated reasoning state (see ``native_encrypted_reasoning_expected``).
+    Missing or malformed supported fields raise the terminal ReasoningReplayError.
     """
     unsupported = unsupported_responses_parts(output)
     if unsupported:
@@ -141,7 +162,7 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
                 )
             text = _capture_summary(native)
             part = AssistantReasoning(text=text)
-            if encrypted is None:
+            if encrypted is None and (native_encrypted_reasoning or not text):
                 portable_only = True
                 parts.append(part)
                 continue
@@ -169,7 +190,9 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
     return tuple(parts)
 
 
-def project_turn(turn: LLMResponse, scope: str | None) -> list[dict[str, Any]]:
+def project_turn(
+    turn: LLMResponse, scope: str | None, *, native_encrypted_reasoning: bool = False
+) -> list[dict[str, Any]]:
     """Reconstruct ordered Responses wire items, gated by the turn's replay scope.
 
     Compatible native parts restore the original item boundaries and metadata,
@@ -177,6 +200,15 @@ def project_turn(turn: LLMResponse, scope: str | None) -> list[dict[str, Any]]:
     preserves the history prefix needed for cache reuse; it does not itself
     select cache breakpoints or guarantee a hit. Incompatible/edited turns keep
     portable text and calls, never the old provider's opaque state.
+
+    A stored reasoning item without ``encrypted_content`` replays as-is when
+    this outgoing call's route couldn't have gotten one either (the common
+    case for every non-native-OpenAI gateway route). If the route now expects
+    a real envelope (``native_encrypted_reasoning`` true) but the stored item
+    never had one, that is a genuine incompatibility -- demote the whole turn
+    to portable text like any other incompatible turn (a scope mismatch),
+    rather than send a summary-only item to an endpoint that requires opaque
+    state or raise and abort the caller's turn outright.
 
     Only this adapter opens native data. It allocates request-owned containers
     and shares immutable string leaves; projecting a turn cannot mutate its
@@ -186,6 +218,19 @@ def project_turn(turn: LLMResponse, scope: str | None) -> list[dict[str, Any]]:
     compatible = scope is not None and turn.replay_scope == scope
     if compatible and _scope_provider(scope) not in {"openai", "azure"}:
         raise ReasoningReplayError("Native Responses replay only supports OpenAI and Azure.")
+    if compatible and native_encrypted_reasoning:
+        for part in turn.parts:
+            if (
+                isinstance(part, AssistantReasoning)
+                and part.native is not None
+                and part.native.get("encrypted_content") is None
+            ):
+                logger.warning(
+                    "Stored reasoning has no encrypted envelope but this route requires "
+                    "one; replaying portable text instead of native state."
+                )
+                compatible = False
+                break
     if turn.replay_scope and not compatible:
         logger.warning(
             "Incompatible assistant turn: replaying portable parts without native state."
@@ -205,7 +250,9 @@ def project_turn(turn: LLMResponse, scope: str | None) -> list[dict[str, Any]]:
             else:
                 continue
         elif native is not None:
-            _require_encrypted_reasoning(native)
+            _validate_native_reasoning(
+                native, require_encrypted=native_encrypted_reasoning, has_text=bool(part.text)
+            )
             _restore_summary(native, part.text)
             item = native
         elif part.text:

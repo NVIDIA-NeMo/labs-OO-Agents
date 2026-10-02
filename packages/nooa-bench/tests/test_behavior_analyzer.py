@@ -462,3 +462,17 @@ def test_trajectory_serialization_failure_is_nonfatal(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
     runner._write_trajectory(SimpleNamespace(event_manager=manager))
+
+
+def test_cancelled_cells_are_neither_attempts_nor_errors() -> None:
+    report = analyze_events(
+        [
+            {"event_type": "PythonOutput", "tool_call_id": "a", "execution_status": "cancelled"},
+            {"event_type": "PythonOutput", "tool_call_id": "b", "execution_status": "error"},
+            {"event_type": "PythonOutput", "tool_call_id": "c", "execution_status": "complete"},
+        ]
+    )
+
+    assert report.signals["execution_attempts"] == 2
+    assert report.signals["execution_errors"] == 1
+    assert report.rates["execution_error_rate"] == 0.5

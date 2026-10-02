@@ -17,6 +17,7 @@ Reference: "Executable Code Actions Elicit Better LLM Agents" (Wang et al.)
 """
 
 import ast
+import asyncio
 import inspect
 import json
 import logging
@@ -81,6 +82,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXECUTE_PYTHON_RECEIPT = "status: accepted"
+
+OUTPUT_TOKENS_EXHAUSTED_MESSAGE = (
+    "The model used all available output tokens before completing a tool call. "
+    "Increase `max_tokens` (16384 or more is often needed for reasoning models)."
+)
+"""The ``GenerationError`` message when a response stops at its output-token limit."""
+
+MAX_ITERATIONS_MESSAGE = (
+    "Generation failed after {iterations} iterations (max_iterations={max_iterations}). "
+    "Unable to complete `{method}`."
+)
+"""The ``GenerationError`` message (a ``str.format`` template) when iterations run out.
+
+Hosts map these two to protocol stop reasons, so they are named here rather
+than repeated as literals.
+"""
 
 
 @dataclass(frozen=True)
@@ -299,8 +316,11 @@ class CodeActSession:
                 f"Unable to generate valid code for `{self.target_method_name}`."
             )
         return GenerationError(
-            f"Generation failed after {self.iteration} iterations (max_iterations={self.max_iterations}). "
-            f"Unable to complete `{self.target_method_name}`."
+            MAX_ITERATIONS_MESSAGE.format(
+                iterations=self.iteration,
+                max_iterations=self.max_iterations,
+                method=self.target_method_name,
+            )
         )
 
     @asynccontextmanager
@@ -1031,11 +1051,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         )
                     )
                     turn_state.is_final = True
-                    raise GenerationError(
-                        "The model used all available output tokens before completing "
-                        "a tool call. Increase `max_tokens` (16384 or more is often "
-                        "needed for reasoning models such as GPT-5.5 and o-series)."
-                    )
+                    raise GenerationError(OUTPUT_TOKENS_EXHAUSTED_MESSAGE)
 
                 # A provider-declared error is incomplete even if it includes
                 # partial text. Preserve that output for diagnostics, but do
@@ -1777,6 +1793,48 @@ Standard Python builtins and agent instance (`self`) are available."""
         )
 
         return result
+
+    @staticmethod
+    def _record_cancelled_cell(
+        runtime: RuntimeServices,
+        tool_call_id: str,
+        execution_count: int,
+        cancel: asyncio.CancelledError,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Record a cell interrupted by cancellation so the model can see it.
+
+        Appends a ``PythonOutput`` with ``ResultStatus.CANCELLED`` and the
+        stdout/stderr the cell produced before the cancel. ``execute_code``
+        appends that partial output to the exception's ``execution_results``
+        list; when it is absent (the cancel landed before capture started) the
+        output is empty. The cell's tool-call event is left exactly as it was written:
+        a cancel is a later fact about the turn, recorded by appending, not by
+        rewriting an earlier event (which would also invalidate cached prompt
+        prefixes). ``metadata`` is the tag the cell's normal ``PythonOutput``
+        would carry (the prefill tag for a prefill step). ``_execute_code``
+        calls this and re-raises the cancellation.
+
+        The same exception passes through every enclosing cell of a nested
+        call, and each ``execute_code`` frame appends its own result, innermost
+        first. This is called right after this cell's frame unwound, so its
+        result is the last entry; it is removed so an enclosing cell takes its
+        own. Results left by inner cells that record nothing (other strategies)
+        stay earlier in the list and are never mistaken for this cell's output.
+        """
+        results = getattr(cancel, "execution_results", None)
+        partial = results.pop() if results else None
+        runtime.event_manager.add(
+            PythonOutput(
+                tool_call_id=tool_call_id,
+                execution_count=execution_count,
+                stdout=partial.stdout if partial is not None else "",
+                stderr=partial.stderr if partial is not None else "",
+                execution_status=ResultStatus.CANCELLED,
+                images=partial.images if partial is not None else [],
+                metadata=metadata,
+            )
+        )
 
     def _handle_return_result(
         self,
@@ -2682,9 +2740,16 @@ Standard Python builtins and agent instance (`self`) are available."""
             ),
         )
 
-        # Execute the code
+        # Execute the code. A cancel here is recorded exactly like a cancel in a
+        # model-written cell, with the prefill tag on the recorded output.
         result = await self._execute_code(
-            runtime, code, builtins, session, method_name, tool_call_id=prefill_id
+            runtime,
+            code,
+            builtins,
+            session,
+            method_name,
+            tool_call_id=prefill_id,
+            output_metadata={"prefill": True, "prefill_type": prefill_type},
         )
 
         # Merge captured locals into session (persists for next steps and LLM turns)
@@ -2740,8 +2805,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         session: CodeActSession,
         target_method_name: str,
         tool_call_id: str | None = None,
+        output_metadata: dict[str, Any] | None = None,
     ) -> Any:
-        """Execute Python code via the runtime."""
+        """Execute Python code via the runtime.
+
+        If the cell is cancelled while it runs, the cancel is recorded with
+        ``_record_cancelled_cell`` (tagged with ``output_metadata``) under
+        ``tool_call_id`` and the current execution count, then re-raised.
+        """
         from nooa.events import ExecutionResult
 
         logger.debug(
@@ -2766,74 +2837,83 @@ Standard Python builtins and agent instance (`self`) are available."""
         # delegate the cell to the guarded worker process. Routing through
         # execute_code (rather than the executor directly) keeps the execute_python
         # middleware, before/after_code_execution hooks and events firing.
+        run_kwargs: dict[str, Any]
         if session.sandbox_executor is not None:
-            from nooa.runtime.debug_handler import code_exec_context
+            # Validation of restrictions and the cell guard still runs on the parent.
+            run_kwargs = {"sandbox_executor": session.sandbox_executor}
+        else:
+            # Build execution namespace
+            strategy_extras: dict[str, Any] = {
+                "CodeActStrategy": type(self),
+            }
+            try:
+                from nooa.strategies.predict import PredictStrategy
 
-            with code_exec_context(code):
-                return await runtime.execute_code(
-                    code,
-                    validate=True,  # run restrictions/cell-guard validation on the parent
-                    wrap_in_function=True,
-                    timeout=self.config.cell_timeout,
-                    tool_call_id=tool_call_id,
-                    execution_count=session.execution_count,
-                    restrictions=self.config.restrictions,
-                    sandbox_executor=session.sandbox_executor,
-                )
+                strategy_extras["PredictStrategy"] = PredictStrategy
+            except ImportError:
+                pass
 
-        # Build execution namespace
-        strategy_extras: dict[str, Any] = {
-            "CodeActStrategy": type(self),
-        }
-        try:
-            from nooa.strategies.predict import PredictStrategy
-
-            strategy_extras["PredictStrategy"] = PredictStrategy
-        except ImportError:
-            pass
-
-        namespace = ExecutionNamespaceBuilder.build(
-            runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
-        )
-
-        # Pre-compile helper function defs so @strategy decorators can see
-        # _generated_source at decoration time. Helpers are never attached to the agent.
-        helper_compiler = HelperFunctionManager()
-        helper_result = helper_compiler.apply(
-            code,
-            runtime.agent,
-            session.session_locals,
-            namespace=namespace,
-        )
-
-        if helper_result.errors:
-            error_msg = "Failed to define helper function(s):\n" + "\n".join(
-                f"- {e}" for e in helper_result.errors
+            namespace = ExecutionNamespaceBuilder.build(
+                runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
             )
-            logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
-            return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
 
-        if helper_result.installed:
-            logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
+            # Pre-compile helper function defs so @strategy decorators can see
+            # _generated_source at decoration time. Helpers are never attached to the agent.
+            helper_compiler = HelperFunctionManager()
+            helper_result = helper_compiler.apply(
+                code,
+                runtime.agent,
+                session.session_locals,
+                namespace=namespace,
+            )
 
-        # Execute with session locals
-        execution_builtins = {**builtins, **session.session_locals}
+            if helper_result.errors:
+                error_msg = "Failed to define helper function(s):\n" + "\n".join(
+                    f"- {e}" for e in helper_result.errors
+                )
+                logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
+                return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
+
+            if helper_result.installed:
+                logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
+
+            # Execute with session locals
+            run_kwargs = {"builtins": {**builtins, **session.session_locals}}
 
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
 
         with code_exec_context(code):
-            return await runtime.execute_code(
-                code,
-                builtins=execution_builtins,
-                validate=True,
-                wrap_in_function=True,
-                timeout=self.config.cell_timeout,
-                tool_call_id=tool_call_id,
-                execution_count=session.execution_count,
-                restrictions=self.config.restrictions,
-            )
+            try:
+                return await runtime.execute_code(
+                    code,
+                    validate=True,
+                    wrap_in_function=True,
+                    timeout=self.config.cell_timeout,
+                    tool_call_id=tool_call_id,
+                    execution_count=session.execution_count,
+                    restrictions=self.config.restrictions,
+                    **run_kwargs,
+                )
+            except asyncio.CancelledError as cancel:
+                if tool_call_id is not None:
+                    # A failure to store the record (SQLite, serialization) must
+                    # not replace the cancellation, so it is logged instead.
+                    try:
+                        self._record_cancelled_cell(
+                            runtime,
+                            tool_call_id,
+                            session.execution_count,
+                            cancel,
+                            output_metadata or {},
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Could not record cancelled cell %s; re-raising the cancel",
+                            tool_call_id,
+                        )
+                raise
 
     def _format_execution_error(
         self,
@@ -3030,8 +3110,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     # is routed to "kind" and the kwargs fill the rest, so
                     # return_result("respond", content="hi") is equivalent to
                     # return_result(kind="respond", content="hi"). Do NOT remove
-                    # this branch: it is relied on in production (the TUI's
-                    # RespondResult and skills-sw SKILL.md).
+                    # this branch: it is relied on in production (skills-sw
+                    # SKILL.md).
                     model_fields = getattr(call.return_type, "model_fields", {})
                     if "kind" not in model_fields:
                         raise ValueError("Cannot mix positional and keyword arguments")

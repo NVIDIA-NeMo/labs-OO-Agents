@@ -314,7 +314,7 @@ class ShellTools(Skill):
 
     For shell commands and file operations:
     Always use these four methods rather than Python builtins:
-        run(command, stdin=, timeout=)  — shell command (cd/env/cwd persist)
+        run(command, stdin=, timeout=, cwd=)  — shell command (cd/env persist)
         read(path, lines=)             — view a file/region -> Match
         replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
         write_file(path, content)      — create/overwrite a file
@@ -389,6 +389,15 @@ class ShellTools(Skill):
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
         timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        cwd: Annotated[
+            str | Path | None,
+            spec(
+                description=(
+                    "Run this one command in this directory (relative to the shell's "
+                    "directory, or absolute) without changing the shell's directory"
+                )
+            ),
+        ] = None,
     ) -> ShellResult:
         """
         Run a shell command in the persistent session (cd/env/cwd survive).
@@ -405,9 +414,10 @@ class ShellTools(Skill):
             command: Shell command to execute.
             stdin: Text piped to stdin (no quoting needed).
             timeout: Max seconds before timeout.
+            cwd: Directory for this command only; the shell returns to its own.
         """
         session = await self._get_session()
-        run_cmd = self._with_stdin(command, stdin)
+        run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
         stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
             run_cmd, timeout=timeout
         )
@@ -417,7 +427,9 @@ class ShellTools(Skill):
             self.cwd = Path(pwd_out.strip())
 
         matches: list[Match] | None = None
-        _is_search = stdin is None and is_pure_search_command(command)
+        # Match anchors are harvested from the shell's directory, so a search run
+        # elsewhere gets none rather than anchors that could point at wrong files.
+        _is_search = stdin is None and cwd is None and is_pure_search_command(command)
         if _is_search:
             matches = await self._harvest_matches(command, stdout)
 
@@ -444,6 +456,15 @@ class ShellTools(Skill):
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
         timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        cwd: Annotated[
+            str | Path | None,
+            spec(
+                description=(
+                    "Run this one command in this directory (relative to the shell's "
+                    "directory, or absolute) without changing the shell's directory"
+                )
+            ),
+        ] = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         """Stream command output line-by-line as it arrives, ending with a done event.
 
@@ -464,9 +485,10 @@ class ShellTools(Skill):
             command: Shell command to execute.
             stdin: Text piped to stdin (no quoting needed).
             timeout: Max seconds before timeout.
+            cwd: As for run().
         """
         session = await self._get_session()
-        run_cmd = self._with_stdin(command, stdin)
+        run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
         timed_out = False
         exit_code = 0
         async for stream_name, chunk in session.run_stream(run_cmd, timeout=timeout):
@@ -479,8 +501,35 @@ class ShellTools(Skill):
         yield StreamDone(kind="done", returncode=exit_code, timed_out=timed_out)
 
     @staticmethod
+    def _in_directory(command: str, cwd: str | Path | None) -> str:
+        """Run ``command`` in ``cwd`` in the session's own shell, then return.
+
+        Not a subshell, so exported variables and other shell state persist as
+        for any command; only the directory goes back to where it was. ``CDPATH``
+        is cleared for the ``cd`` so a relative ``cwd`` is the shell directory's
+        child. If the ``cd`` fails, its error text and status are the result and
+        the command does not run. The newline before ``}`` keeps a trailing
+        comment in ``command`` from swallowing the closing brace.
+        """
+        if cwd is None:
+            return command
+        return (
+            "__nooa_back=$PWD; "
+            f"if CDPATH= cd -- {shlex.quote(str(cwd))}; then {{ {command}\n}}; "
+            '__nooa_rc=$?; cd -- "$__nooa_back"; else __nooa_rc=$?; fi; '
+            "( exit $__nooa_rc )"
+        )
+
+    @staticmethod
     def _with_stdin(command: str, stdin: str | None) -> str:
-        """Wrap a command so ``stdin`` is fed via a base64'd tempfile (no quoting)."""
+        """Wrap a command so ``stdin`` is fed via a base64'd tempfile (no quoting).
+
+        The command runs in a ``{ ...; }`` group, not a subshell, so ``cd``,
+        exports and other shell state persist as for any command. The
+        redirection lasts for the group only; the session then reads its own
+        commands again. The newline before ``}`` keeps a trailing comment in
+        ``command`` from swallowing the closing brace.
+        """
         if stdin is None:
             return command
         import base64
@@ -488,7 +537,7 @@ class ShellTools(Skill):
         b64 = base64.b64encode(stdin.encode()).decode()
         return (
             f"__nemo_in=$(mktemp); base64 -d <<<'{b64}' > $__nemo_in; "
-            f"({command}) < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
+            f"{{ {command}\n}} < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
             f"( exit $__nemo_rc )"
         )
 

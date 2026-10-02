@@ -11,6 +11,7 @@ import fcntl
 import json
 import logging
 import os
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -20,7 +21,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -617,23 +618,53 @@ class SessionAlreadyActiveError(Exception):
         self.owner_pid = owner_pid
 
 
-def _read_lock_pid(lock_path: str) -> int | None:
-    """Read the owner PID written by whichever process currently holds the lock.
+def read_lock_owner(lock_path: str) -> tuple[int | None, str | None]:
+    """The ``(pid, host)`` written by the process holding the lock; ``(None, None)`` if blank.
 
-    The lock file content is just ASCII digits (see ``_acquire_session_lock``).
-    Returns None if the file is missing, empty, or not parseable.
+    The lock file content is ``<pid> <hostname>`` (older files: just the pid;
+    see ``_acquire_session_lock``). A blank file means the owner closed
+    cleanly. Returns ``(None, None)`` if the file is missing, empty or not
+    parseable.
     """
     try:
         with open(lock_path, "rb") as f:
-            raw = f.read(32).strip()
+            raw = f.read(512).decode("utf-8", "replace").strip()
     except OSError:
-        return None
+        return None, None
     if not raw:
-        return None
+        return None, None
+    pid_text, _, host = raw.partition(" ")
     try:
-        return int(raw)
+        return int(pid_text), (host.strip() or None)
     except ValueError:
-        return None
+        return None, None
+
+
+def _read_lock_pid(lock_path: str) -> int | None:
+    """The owner PID recorded in the lock file, or None (see ``read_lock_owner``)."""
+    return read_lock_owner(lock_path)[0]
+
+
+def _lock_owner_record() -> bytes:
+    """What this process writes into a lock file it holds: ``<pid> <hostname>``.
+
+    The hostname lets a process on another machine sharing the directory
+    (a sandbox and its host) tell that the session is in use there, since
+    the kernel lock itself is not visible across the mount.
+    """
+    return f"{os.getpid()} {socket.gethostname()}".encode()
+
+
+def _blank_lock_if_ours(lock_path: str) -> None:
+    """Empty the lock file if it still names this process (a clean close)."""
+    pid, host = read_lock_owner(lock_path)
+    if pid != os.getpid() or (host is not None and host != socket.gethostname()):
+        return
+    try:
+        with open(lock_path, "r+b") as f:
+            f.truncate(0)
+    except OSError:
+        pass
 
 
 def _acquire_session_lock(lock_path: str) -> int:
@@ -645,9 +676,13 @@ def _acquire_session_lock(lock_path: str) -> int:
     process dies, so a genuine crash doesn't wedge the next run — no
     stale-file cleanup needed here.
 
-    Lock file contents: the ASCII decimal PID of the current owner. We
-    truncate before writing so a shorter PID can't leave trailing digits
-    from a longer predecessor.
+    Lock file contents: ``<pid> <hostname>`` of the current owner (read it
+    with ``read_lock_owner``). We truncate before writing so a shorter
+    record can't leave trailing bytes from a longer predecessor.
+
+    The caller releases the lock with ``fcntl.flock(fd, fcntl.LOCK_UN)``
+    and ``os.close(fd)``. Taking the lock only to test whether a session is
+    free still rewrites the record with this process's pid and host.
     """
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
@@ -669,10 +704,10 @@ def _acquire_session_lock(lock_path: str) -> int:
             )
         raise SessionAlreadyActiveError(msg, session_id=session_id, owner_pid=owner_pid) from None
 
-    # Holder now; replace any stale predecessor PID with ours.
+    # Holder now; replace any stale predecessor record with ours.
     os.lseek(fd, 0, os.SEEK_SET)
     os.ftruncate(fd, 0)
-    os.write(fd, str(os.getpid()).encode())
+    os.write(fd, _lock_owner_record())
     return fd
 
 
@@ -684,7 +719,7 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
     :class:`SessionAlreadyActiveError` instead of unlinking an open database.
     The lock file itself is intentionally retained: unlinking a flock target
     creates a race where another process can lock a different inode at the
-    same path.
+    same path. Its owner record is blanked before the lock is released.
 
     Returns:
         True when the main database existed, otherwise false.
@@ -706,6 +741,9 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
                 pass
         return existed
     finally:
+        # Blank the record before releasing, as a clean close does, so the
+        # retained lock file does not name this process as a live owner.
+        _blank_lock_if_ours(lock_path)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
@@ -724,23 +762,59 @@ class SQLiteStorageManager:
     Args:
         db_path: Path to SQLite database file. Use ":memory:" for in-memory
                  (useful for testing).
+        check_same_thread: Passed to ``sqlite3.connect``. ``False`` lets
+            other threads use the manager (see ``save_snapshot_json``).
+        must_exist: Refuse a missing file with ``sqlite3.OperationalError``
+            instead of creating it empty, and create nothing (no lock file
+            either). The file is opened with SQLite's ``mode=rw`` URI, so a
+            delete that races the open also raises. Not valid with
+            ``":memory:"``.
+        journal_mode: ``"wal"`` or ``"delete"`` to choose SQLite's journal.
+            ``None`` (the default) uses the rollback journal (``"delete"``)
+            on a detected virtiofs mount and WAL elsewhere. Choose
+            ``"delete"`` for a file another machine may open over a shared
+            mount: WAL keeps cross-process state in a shared-memory file
+            that two kernels do not share. A file left in WAL mode is
+            converted on open. ``synchronous=FULL`` is used in every mode.
 
     Raises:
         SessionAlreadyActiveError: If ``db_path`` is already open in another
             process.  The caller should start a fresh session instead of
             resuming this one.
+        sqlite3.OperationalError: If ``must_exist`` is set and the file is
+            missing.
+        ValueError: For ``must_exist`` with ``":memory:"`` or an unknown
+            ``journal_mode``.
     """
 
-    def __init__(self, db_path: str | Path = ":memory:", *, check_same_thread: bool = True) -> None:
-        # Safety invariant for check_same_thread=False: callers (the TUI)
-        # guarantee that all DB access is serialized through a single
-        # asyncio event loop on the agent thread. No concurrent writes.
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        *,
+        check_same_thread: bool = True,
+        must_exist: bool = False,
+        journal_mode: Literal["wal", "delete"] | None = None,
+    ) -> None:
+        if journal_mode not in (None, "wal", "delete"):
+            raise ValueError(f"journal_mode must be 'wal', 'delete' or None, got {journal_mode!r}")
+        if must_exist and str(db_path) == ":memory:":
+            raise ValueError("must_exist cannot be used with an in-memory database")
+        # Safety invariant for check_same_thread=False: every use of the
+        # connection holds self._db_lock (the event backend, the snapshot
+        # methods, close), so calls from several threads are serialised.
+        # save_snapshot_json() relies on this to run in a worker thread.
         self._db_path = str(db_path)
         self._check_same_thread = check_same_thread
+        self._must_exist = must_exist
+        self._journal_mode = journal_mode
         self._lock_fd: int | None = None
         self._closed = False
 
         if self._db_path != ":memory:":
+            # Check before locking so a missing file (or directory) creates no
+            # stray lock file. mode=rw below still covers a delete after this.
+            if must_exist and not Path(self._db_path).exists():
+                raise sqlite3.OperationalError(f"unable to open database file: {self._db_path}")
             lock_path = str(Path(self._db_path).with_suffix(".lock"))
             self._lock_fd = _acquire_session_lock(lock_path)
 
@@ -757,29 +831,33 @@ class SQLiteStorageManager:
 
     def _open_connection(self) -> sqlite3.Connection:
         """Create and configure a new SQLite connection."""
-        conn = sqlite3.connect(self._db_path, check_same_thread=self._check_same_thread)
+        if self._must_exist:
+            uri = f"{Path(self._db_path).resolve().as_uri()}?mode=rw"
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=self._check_same_thread)
+        else:
+            conn = sqlite3.connect(self._db_path, check_same_thread=self._check_same_thread)
         # Retry up to 5 s on SQLITE_BUSY before raising, giving concurrent
         # readers time to release shared locks on virtiofs/FUSE mounts.
         conn.execute("PRAGMA busy_timeout=5000")
-        if _is_virtiofs(self._db_path):
+        journal_mode = self._journal_mode
+        if journal_mode is None:
             # virtiofs (Docker Desktop file sharing) has weak fsync semantics.
-            # Avoid WAL entirely: its checkpoint step can lose pages on crash,
+            # Avoid WAL there: its checkpoint step can lose pages on crash,
             # producing zeroed pages. DELETE journal + FULL sync preserves the
             # original page until the replacement is durably committed.
-            conn.execute("PRAGMA journal_mode=DELETE")
-            conn.execute("PRAGMA synchronous=FULL")
-            logger.info(
-                "Detected virtiofs at %s — using journal_mode=DELETE + synchronous=FULL",
-                self._db_path,
-            )
-        else:
-            conn.execute("PRAGMA journal_mode=WAL")
-            # synchronous=FULL even on normal disks: with the default NORMAL,
-            # a disk-full (ENOSPC) during a WAL commit/checkpoint can persist
-            # partially-written or zeroed pages, surfacing later as
-            # "database disk image is malformed". FULL fsyncs before the commit
-            # is acknowledged, so an interrupted write rolls back cleanly.
-            conn.execute("PRAGMA synchronous=FULL")
+            journal_mode = "delete" if _is_virtiofs(self._db_path) else "wal"
+            if journal_mode == "delete":
+                logger.info(
+                    "Detected virtiofs at %s — using journal_mode=DELETE + synchronous=FULL",
+                    self._db_path,
+                )
+        conn.execute(f"PRAGMA journal_mode={journal_mode.upper()}")
+        # synchronous=FULL in every mode: with the default NORMAL, a disk-full
+        # (ENOSPC) during a WAL commit/checkpoint can persist partially-written
+        # or zeroed pages, surfacing later as "database disk image is
+        # malformed". FULL fsyncs before the commit is acknowledged, so an
+        # interrupted write rolls back cleanly.
+        conn.execute("PRAGMA synchronous=FULL")
         return conn
 
     def _reconnect(self) -> None:
@@ -815,14 +893,46 @@ class SQLiteStorageManager:
 
     def save_snapshot(self, agent: Agent) -> str:
         snapshot = AgentSnapshot.from_agent(agent)
-        data = snapshot_to_dict(snapshot)
-        snapshot_id = str(uuid.uuid4())
-        created_at = datetime.now(UTC).isoformat()
+        return self._insert_snapshot(json.dumps(snapshot_to_dict(snapshot)), None, None)
+
+    def save_snapshot_json(
+        self,
+        data: str,
+        *,
+        snapshot_id: str | None = None,
+        created_at: str | None = None,
+    ) -> str:
+        """Store an already serialised snapshot and return its ``snapshot_id``.
+
+        ``data`` is the JSON text of a snapshot (for example
+        ``json.dumps(snapshot_to_json(agent))``); it is checked to be JSON
+        and stored as given, so ``restore_snapshot`` reads it back.
+        ``snapshot_id`` defaults to a new UUID and ``created_at`` to the
+        current UTC time in ISO format; ``get_latest_snapshot_id`` orders by
+        ``created_at``.
+
+        The write takes this manager's lock, the same lock every event write
+        takes, so it never interleaves with them. That makes it safe to call
+        from a worker thread (``asyncio.to_thread``) to keep a large snapshot
+        write off the event loop, provided the manager was opened with
+        ``check_same_thread=False``; with the default ``True``, SQLite refuses
+        use of the connection from any thread but the one that opened it.
+
+        Raises:
+            ValueError: If ``data`` is not valid JSON.
+        """
+        json.loads(data)  # JSONDecodeError is a ValueError
+        return self._insert_snapshot(data, snapshot_id, created_at)
+
+    def _insert_snapshot(self, data: str, snapshot_id: str | None, created_at: str | None) -> str:
+        """Insert snapshot JSON text as given (no validation) and return its ``snapshot_id``."""
+        snapshot_id = snapshot_id or str(uuid.uuid4())
+        created_at = created_at or datetime.now(UTC).isoformat()
         with self._db_lock:
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO snapshots (snapshot_id, created_at, data) VALUES (?, ?, ?)",
-                    (snapshot_id, created_at, json.dumps(data)),
+                    (snapshot_id, created_at, data),
                 )
         return snapshot_id
 
@@ -883,6 +993,10 @@ class SQLiteStorageManager:
                         conn.close()
         finally:
             if self._lock_fd is not None:
+                # Blank the record before releasing, so a machine that cannot see
+                # the kernel lock reads "free" and not a stale owner.
+                if self._db_path != ":memory:":
+                    _blank_lock_if_ours(str(Path(self._db_path).with_suffix(".lock")))
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
                 os.close(self._lock_fd)
                 self._lock_fd = None

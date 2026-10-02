@@ -22,7 +22,7 @@ def test_leading_system_text_blocks_become_instructions_without_reordering(kind)
         wire, instructions = client._transform_messages(messages)
     assert instructions == "AB\n\nC"
     assert wire == [
-        {"role": "user", "content": "question"},
+        {"role": "user", "content": [{"type": "input_text", "text": "question"}]},
         {"role": "system", "content": [{"type": "input_text", "text": "live state"}]},
     ]
     assert messages == original

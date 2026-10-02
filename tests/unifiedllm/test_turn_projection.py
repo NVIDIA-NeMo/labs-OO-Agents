@@ -401,14 +401,18 @@ async def test_mocked_dispatch_resume_and_changing_live_suffix(monkeypatch, tmp_
         assert captured[-2][:-1] == captured[-1][:-1]
         assert captured[-2][-1] != captured[-1][-1]
         expected = output_items() + [
-            {"type": "function_call_output", "call_id": call_id, "output": "done"}
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": [{"type": "input_text", "text": "done"}],
+            }
             for call_id in ("call_1", "call_2")
         ]
         expected[-1]["output"] = [
             {"type": "input_text", "text": "done", "prompt_cache_breakpoint": {"mode": "explicit"}}
         ]
         assert captured[-1][:-1] == expected
-        assert "live 2" in captured[-1][-1]["content"]
+        assert "live 2" in captured[-1][-1]["content"][0]["text"]
     finally:
         await client.aclose()
 
@@ -447,7 +451,7 @@ def test_only_leading_system_messages_become_instructions(first_conversation):
                 SCOPE,
             )
             assert instructions == "First\n\nSecond"
-            assert wire[-1] == {"role": "system", "content": live}
+            assert wire[-1] == {"role": "system", "content": [{"type": "input_text", "text": live}]}
             if first_conversation == "turn":
                 assert wire[:-1] == output_items()
     finally:

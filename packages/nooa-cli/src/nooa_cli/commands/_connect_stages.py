@@ -51,6 +51,8 @@ def run_stage(
     budget_tokens,
     output_tokens,
     reasoning_output_tokens=4096,
+    reasoning_template=None,
+    reasoning_level="medium",
     reply_tokens=None,
     levels_file,
     context_window,
@@ -209,6 +211,9 @@ def run_stage(
                         budget_tokens=budget,
                         output_tokens=output_tokens,
                         api_key=key,
+                        reasoning_template=reasoning_template,
+                        reasoning_level=reasoning_level or "medium",
+                        reasoning_output_tokens=reasoning_output_tokens,
                     ):
                         if isinstance(event, connect.InterfaceResult):
                             result = event
@@ -218,6 +223,8 @@ def run_stage(
                     result = asyncio.run(interfaces())
                 data = asdict(result)
                 data["accepted"] = list(result.accepted)
+                data["reasoning_observed"] = result.reasoning_observed
+                data["recommended_style"] = result.recommended_style
                 checks = {
                     name: r.entry["provenance"]["probes"]["routing"]
                     for name, r in result.results.items()

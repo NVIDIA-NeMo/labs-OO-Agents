@@ -5,12 +5,15 @@
 import asyncio
 from collections.abc import Coroutine
 from contextlib import suppress
-from typing import Any, cast
+from typing import Any
 
 from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
+from pydantic import BaseModel
 
-from nooa.interactive import RespondReason, RespondResult
+from nooa.interactive import Done, NeedInput, Waiting
 from nooa.slash_dispatch import SlashCommandResult
+
+TurnResult = Done | NeedInput | Waiting
 
 
 class InteractiveSessionDispatcher:
@@ -24,7 +27,7 @@ class InteractiveSessionDispatcher:
     def active(self) -> bool:
         return self._cancelling or (self._active_task is not None and not self._active_task.done())
 
-    async def submit(self, text: str) -> RespondResult | None:
+    async def submit(self, text: str) -> TurnResult | None:
         self._ensure_idle()
         self.agent.queue_manager.get_channel("user_messages").put(text)
         return await self._run_active(self._dispatch())
@@ -34,10 +37,10 @@ class InteractiveSessionDispatcher:
         commands: CodingSlashCommandRegistry,
         name: str,
         raw_args: str,
-    ) -> tuple[SlashCommandResult, RespondResult | None] | None:
+    ) -> tuple[SlashCommandResult, TurnResult | None] | None:
         """Invoke and, when requested, dispatch a slash command as one cancellable turn."""
 
-        async def _invoke() -> tuple[SlashCommandResult, RespondResult | None]:
+        async def _invoke() -> tuple[SlashCommandResult, TurnResult | None]:
             result = await commands.invoke(name, raw_args)
             if not result.output_to_agent:
                 return result, None
@@ -68,7 +71,7 @@ class InteractiveSessionDispatcher:
             if self._active_task is task:
                 self._active_task = None
 
-    async def _dispatch(self) -> RespondResult:
+    async def _dispatch(self) -> TurnResult:
         while True:
             wins = await self.agent.queue_manager.race()
             notification: dict[str, list[Any]] = {}
@@ -78,9 +81,36 @@ class InteractiveSessionDispatcher:
                 if drained := channel.drain():
                     notification.setdefault(name, []).extend(drained)
 
-            result = cast(RespondResult, await self.agent.handle(notification))
-            if result.kind is not RespondReason.WAIT:
-                return result
+            result = await self.agent.handle(notification)
+            self._show(result)
+            # Keep the prompt open while the turn waits on a job or queue.
+            if isinstance(result, Waiting):
+                continue
+            return result
+
+    def _show(self, result: TurnResult) -> None:
+        """Send the person the text a typed result carries, as an agent message.
+
+        ``Done.message`` is the reply, ``Waiting.message`` the line shown while
+        waiting, and a ``NeedInput`` shows its question, its reason, and its
+        choices or the fields of its ``answer_type`` with their types and
+        descriptions. This server has no forms, so a typed answer still
+        arrives as the person's text reply. The agent is told not to send
+        these itself, so the host must.
+        """
+        if isinstance(result, NeedInput):
+            parts = [result.question]
+            if result.reason:
+                parts.append(result.reason)
+            if result.options:
+                parts.append("\n".join(f"- {option}" for option in result.options))
+            if result.answer_type is not None:
+                parts.append("Reply with these fields:\n" + _describe_fields(result.answer_type))
+            text: str | None = "\n\n".join(parts)
+        else:
+            text = result.message
+        if text:
+            self.agent.message(text)
 
     async def cancel(self) -> bool:
         """Cancel the foreground turn and background jobs without closing the session."""
@@ -104,3 +134,16 @@ class InteractiveSessionDispatcher:
     async def close(self) -> None:
         await self.cancel()
         await self.agent.close()
+
+
+def _describe_fields(model: type[BaseModel]) -> str:
+    """One ``- name (type): description`` line per field of ``model``."""
+    lines = []
+    for name, field in model.model_fields.items():
+        annotation = field.annotation
+        type_name = annotation.__name__ if isinstance(annotation, type) else str(annotation)
+        line = f"- {name} ({type_name})"
+        if field.description:
+            line += f": {field.description}"
+        lines.append(line)
+    return "\n".join(lines)

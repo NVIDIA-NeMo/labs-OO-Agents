@@ -508,3 +508,38 @@ async def test_puzzle_reaches_wire_and_scores_only_final_answer(
         "reasoning", result.entry, {"level:on": record}
     )
     assert not {"content", "reasoning", "response"} & record.keys()
+
+
+async def test_billed_reasoning_tokens_without_any_captured_part_is_not_observed(monkeypatch):
+    """Kimi/Qwen (confirmed live) bill real, nonzero reasoning_tokens on routes
+    that never put a reasoning item on the wire at all -- capture_parts has
+    nothing to attach, so response.parts stays empty. Treating billed tokens
+    alone as "reasoning observed" reports a false positive: there is nothing
+    captured, nothing to replay, nothing a user could ever inspect. Only an
+    actual reasoning part (visible text or not, per the empty-text Claude
+    case above) is real evidence.
+    """
+
+    async def fake_run_probe(alias, entry, probe, api_key):
+        response = LLMResponse(
+            parts=(),
+            finish_reason="stop",
+            usage=LLMUsage(
+                input_tokens=115, output_tokens=20, total_tokens=135, reasoning_tokens=53
+            ),
+        )
+        return response, True, "litellm"
+
+    monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
+    proposal = connect.plan(
+        "test",
+        "some-model",
+        "chat",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"on": {"reasoning_effort": "high"}},
+    )
+    result = await connect.check_stage(proposal, "reasoning", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:on"]
+    assert record["reasoning_observed"] is False
+    assert record["reasoning_tokens"] == 53

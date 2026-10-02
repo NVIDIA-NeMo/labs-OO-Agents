@@ -476,6 +476,79 @@ def test_python_output_none_value_is_preserved(backend):
     assert retrieved.value is None
 
 
+@pytest.mark.parametrize(
+    "value",
+    [None, "text", 3, 2.5, True, [1, "a", None], (1, 2), {"a": [1, {"b": False}]}],
+)
+def test_json_safe_skips_the_probe_for_plain_json_values(monkeypatch, value):
+    """Plain JSON values are returned as they are, without a trial ``to_json`` dump."""
+    import nooa.events as events
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("to_json should not be called for a plain JSON value")
+
+    monkeypatch.setattr(events, "to_json", fail)
+    assert events._json_safe(value) is value
+
+
+def test_plain_json_walk_refuses_a_large_container_before_queueing_it():
+    """A container larger than the remaining budget is refused without queueing its children."""
+    import tracemalloc
+
+    import nooa.events as events
+
+    big = list(range(events._PLAIN_JSON_MAX_ITEMS * 100))
+    wide = dict.fromkeys(map(str, range(events._PLAIN_JSON_MAX_ITEMS * 10)), 0)
+    tracemalloc.start()
+    try:
+        assert events._is_plain_json(big) is False
+        assert events._is_plain_json({"k": big}) is False
+        assert events._is_plain_json(wide) is False
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000  # queueing a million children would take tens of megabytes
+
+
+@pytest.mark.parametrize("value", [["a\udcff"], {"a\udcff": 1}, "a\udcff"])
+def test_python_output_with_a_lone_surrogate_string_still_serializes(backend, value):
+    """A string with a lone surrogate is not plain JSON, so it takes the fallback.
+
+    ``os.listdir`` on a non-UTF-8 filename returns such strings; pydantic-core
+    refuses to encode them, which used to wedge the event store.
+    """
+    event = PythonOutput(
+        tool_call_id="",
+        execution_status="complete",
+        execution_count=1,
+        value=value,
+    )
+    assert "udcff" in event.model_dump_json()
+    backend.store("surrogate", event)
+    assert backend.get("surrogate") is not None
+
+
+def test_json_safe_still_probes_other_values(monkeypatch):
+    """Anything else is still probed: native types pass, unencodable ones fall back."""
+    import asyncio
+    import datetime
+
+    import nooa.events as events
+
+    calls: list[object] = []
+    real = events.to_json
+
+    def counting(value, *args, **kwargs):
+        calls.append(value)
+        return real(value, *args, **kwargs)
+
+    monkeypatch.setattr(events, "to_json", counting)
+    stamp = datetime.datetime(2020, 1, 2)
+    assert events._json_safe(stamp) is stamp
+    assert "CancelledError" in events._json_safe([1, asyncio.CancelledError()])
+    assert len(calls) == 2
+
+
 def test_python_output_rich_diagnostic_roundtrip_preserves_every_channel(backend):
     """Source-aware failures must survive the backend used by resumed sessions."""
     diagnostic = (

@@ -6,6 +6,82 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect` offers the NVIDIA Inference Hub (`inference-api.nvidia.com`,
+  key in `NVIDIA_INFERENCE_API_KEY`) as a preset provider, after build.nvidia.com.
+- `import nooa` no longer loads the strategies, the LLM client or LiteLLM
+  (about 3.3 s down to 0.3 s here). The strategy names, `LLMResponse` and
+  `llm_config_chain` load on first use; `from nooa import CodeActStrategy`
+  and `from nooa import *` work as before.
+- Groundwork for the session tree design, in shared code:
+  - A cancelled CodeAct cell is now recorded for the model: an appended
+    `PythonOutput` with the new `ResultStatus.CANCELLED` carries the stdout
+    and stderr produced before the cancel. The cell's `ToolCallEvent` is
+    left as it was written. `execute_code` appends the partial
+    `ExecutionResult` (new `cancelled` flag) to the re-raised
+    `CancelledError`'s `execution_results` list, one entry per nested
+    cell, innermost first. The ACP bridge still shows
+    the cell as "Cancelled".
+  - `Notification.description` renders in full (up to 20,000 characters)
+    and `Notification.value` carries an optional object. Session hosts use
+    it for steering text, with a `source` that says in plain words who sent
+    the message.
+  - `nooa.interactive` adds the `Done`, `NeedInput` and `Waiting` turn
+    results and a `handle_batch()` turn method (`Done | Waiting`) for
+    unattended turns. `handle()` returns one of the three types.
+  - `RespondResult` and `RespondReason` are removed; `CodingAgent`, the ACP
+    dispatcher and the ARC-AGI-3 example use the typed results. To migrate,
+    return `Done` for `DONE`, `NeedInput` for `NEED_INPUT`, and `Waiting`
+    for `WAIT` or `GET_USER_INPUT`.
+  - The bench `TaskResult` gains an optional `report` field.
+  - A queue channel publishes two runtime events through the agent's event
+    manager: `ChannelItemConsumed` when `get()`, `drain()` or `race()` hands
+    an item to a consumer, and `ChannelItemsDiscarded` when `flush()`,
+    `clear()` or `remove_channel()` drops pending items. `remove()` and
+    `pop_last()` withdraw an item and publish nothing.
+    Subscribe with `event_manager.on(...)`; they are never recorded or shown
+    to the model.
+  - `nooa.strategies.codeact` names its two generation-limit messages,
+    `OUTPUT_TOKENS_EXHAUSTED_MESSAGE` and `MAX_ITERATIONS_MESSAGE`, so hosts
+    can map them without copying the wording.
+  - `TodoManager.status()` shows at most the two newest done todos when no
+    todo is active; the rest are counted.
+  - A session lock file records `<pid> <hostname>` and is blanked on a
+    clean close and after `delete_sqlite_database`, so another machine
+    sharing the directory can tell the session is in use.
+  - `Channel.remove(item)` withdraws one pending item by identity; it
+    publishes neither event.
+  - `EventBase.event_role` returns an event's provider role (its `_role`
+    class variable). It is not called `role` so a subclass can still
+    declare a field of that name.
+  - `SQLiteStorageManager.save_snapshot_json(data)` stores an already
+    serialised snapshot under the manager's own lock; with
+    `check_same_thread=False` it may be called from a worker thread.
+  - `SQLiteStorageManager` takes `must_exist=True` (a missing file raises
+    `sqlite3.OperationalError` and nothing is created, not even the lock
+    file) and `journal_mode="wal" | "delete"`
+    (default `None` keeps the virtiofs detection).
+  - `nooa.storage` exports `read_lock_owner`, which reads a session lock
+    file's owner record.
+  - `nooa.tools` exports `BashSession`, `StreamEvent` and `StreamDone`;
+    `nooa.runtime.channels.ChannelReader` is the public name of the channel
+    read facade; the private `_ChannelReader` name is removed.
+  - `nooa.tracing.register_hooks_in_current_context()` installs the tracing
+    hooks in a context that did not inherit them, for hosts that run agents
+    in fresh asyncio or thread contexts.
+- Tracing: a plain-HTTP `OTLP_ENDPOINT` for a viewer that serves HTTPS on
+  that port no longer counts as reachable. The probe recognises the 400
+  "HTTP request to an HTTPS server" reply, and `resolve_otlp_endpoint`
+  (used by the default exporter set-up and the bench runner) retries the
+  https twin and uses it, logging one warning that names both endpoints.
+  Before, tracing turned on and every export was dropped.
+- Connect no longer writes its session history into `llm_config.yaml`. Saved
+  aliases now contain only the discovered runtime settings; the whole
+  `provenance` block — probe requests and outcomes, token accounting,
+  catalogue metadata, limits, warnings — stays in the connect session
+  (visible via `--show-config` previews and `--stage` JSON) and never
+  reaches the registry. Existing verbose configs remain loadable; the next
+  save of an alias compacts it. A typical entry shrinks from ~550 lines to
+  ~40.
 - Remove `AnthropicProviderFormatter` and `ResponsesProviderFormatter` from
   `nooa.context_blocks`, and the runtime's client-type dispatch that swapped in
   the Responses one. Neither was on the live path: every client (including

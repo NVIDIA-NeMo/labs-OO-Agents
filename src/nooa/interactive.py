@@ -11,7 +11,8 @@ queues and re-enters ``handle()`` once per notification. It provides:
 * ``self.v`` — snapshot-backed persistent variables that survive turns
   and sessions,
 * ``message()`` — send a Markdown message to the user,
-* the ``handle()`` → ``RespondResult`` turn protocol,
+* the turn protocol: ``handle()`` returns ``Done``, ``NeedInput`` or
+  ``Waiting``; ``handle_batch()`` runs unattended turns and returns ``Done`` or ``Waiting``,
 * token-budget history summarization (``install_summarizer`` /
   ``apply_model_limits``).
 
@@ -19,10 +20,9 @@ queues and re-enters ``handle()`` once per notification. It provides:
 interactive hosts such as the TUI and ACP.
 """
 
-from enum import StrEnum
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from nooa import hidden, strategy
 from nooa.agentdoc import doc
@@ -37,7 +37,8 @@ with hidden:
     from nooa import Agent
     from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
-    from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
+    from nooa.events import _json_safe
+    from nooa.runtime.channels import Channel, ChannelReader, QueueManager
     from nooa.runtime.producers_skill import ProducersSkill
     from nooa.strategies import CodeActStrategy
     from nooa.tools.web_publisher import WebPublisher
@@ -88,72 +89,116 @@ with hidden:
     from nooa.unifiedllm import UnifiedLLM
 
 
-class RespondReason(StrEnum):
-    """Reason/action returned by ``handle()`` at the end of a turn."""
-
-    DONE = "DONE"
-    NEED_INPUT = "NEED_INPUT"
-    WAIT = "WAIT"
-    GET_USER_INPUT = "GET_USER_INPUT"
+def _non_blank(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("must not be blank")
+    return value
 
 
-RespondKind = Literal["DONE", "NEED_INPUT", "WAIT", "GET_USER_INPUT"]
+def _blank_to_none(value: str | None) -> str | None:
+    return None if value is None else (value.strip() or None)
 
 
-class RespondResult(BaseModel):
-    """Return value for ``handle()`` — signals what the outer loop should do next.
+class Done(BaseModel):
+    """Turn result: the work for this turn is finished.
 
-    Fields:
-
-    - ``kind`` — reason/action enum:
-        * ``RespondReason.DONE`` — the current request is complete.
-        * ``RespondReason.NEED_INPUT`` — the agent asked a question or needs
-          human input before continuing the current request.
-        * ``RespondReason.WAIT`` — the agent is waiting for a background job or
-          non-user queue/event before it can continue.
-        * ``RespondReason.GET_USER_INPUT`` — legacy spelling for waiting on
-          human input; prefer ``DONE`` or ``NEED_INPUT``.
-
-      All stop reasons use the same dispatcher wake path: race every declared
-      queue/event channel and re-enter ``handle()`` with the first arrival.
-      ``kind`` records why the agent stopped; it does not choose a different
-      queue primitive.
-    - ``explanation`` — required non-empty short reason why the agent is ending this
-      turn, or what external input/background event it is waiting for. The host
-      records and renders this line, so make it concrete: name the job/queue
-      being waited on, why it matters, or what user input is needed and why.
-
-
-    Use ``self.v.<name> = value`` for state that should survive across
-    turns (snapshot-backed).
-
-    Build from within the LLM's ``execute_python`` code::
-
-        return_result(
-            RespondReason.DONE,
-            explanation="answered the request; waiting for the next user message",
-        )
-
-    The older explicit model form is still valid::
-
-        return_result(RespondResult(kind="DONE", explanation="answered the request"))
+    ``message`` is the preferred way to answer the user on a turn that
+    handled a user message: put the reply here and the host shows it.
+    ``self.message()`` remains for text you want to show before the turn
+    ends. ``explanation`` stays a short status line. ``evidence`` is
+    optional: short factual lines a reviewer can check, used when you
+    verified something. ``result`` is set only when a delegated objective
+    or benchmark task completes; it is then a ``TaskResult`` (defined with
+    the bench and session code, so it is typed ``Any`` here).
     """
 
-    kind: RespondReason = Field(description="What the outer dispatcher should do next")
-    explanation: str = Field(
-        min_length=1,
-        description=("Required: why handle() returned, or what the dispatcher is waiting for."),
+    explanation: str = Field(description="Status line saying what was finished; not the reply")
+    message: str | None = Field(default=None, description="The reply to show the user")
+    evidence: list[str] = Field(
+        default_factory=list,
+        description='Short checkable facts, e.g. "pytest tests/x.py: 24 passed"',
+    )
+    result: Any | None = Field(
+        default=None, description="TaskResult when a delegated or bench task completes"
     )
 
-    @field_validator("explanation")
-    @classmethod
-    def _explanation_must_not_be_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("explanation is required")
-        return value
+    _check_explanation = field_validator("explanation")(_non_blank)
+    _check_message = field_validator("message")(_blank_to_none)
 
-    model_config = {"arbitrary_types_allowed": True}
+    @field_serializer("result", when_used="json")
+    def _serialize_result(self, value: Any) -> Any:
+        """Keep JSON dumps (the event store) from raising on an arbitrary object."""
+        return _json_safe(value)
+
+
+class NeedInput(BaseModel):
+    """Turn result: a question the agent cannot continue without.
+
+    ``question`` is the question itself; the host shows it to the person,
+    so do not also send it with ``self.message()``. Set ``options`` for a
+    single choice, or ``answer_type`` (a pydantic model class whose fields
+    are simple values: str, int, float, bool, or a list of str) for a typed
+    answer, or neither for free text. The host turns ``answer_type`` into a
+    form and the answer arrives in the next notification as an instance of
+    it. ``reason`` optionally says in one sentence why progress is not
+    possible or not desirable without the answer.
+    """
+
+    question: str = Field(description="The question to show the person")
+    reason: str | None = Field(
+        default=None, description="Why progress is not possible or not desirable without it"
+    )
+    options: list[str] | None = Field(
+        default=None, min_length=1, description="Choices for a single choice"
+    )
+    answer_type: type[BaseModel] | None = Field(
+        default=None,
+        description="Pydantic model class with simple fields; the answer comes back as an instance",
+    )
+
+    _check_question = field_validator("question")(_non_blank)
+
+    @field_validator("options")
+    @classmethod
+    def _options_not_blank(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else [_non_blank(option) for option in value]
+
+    @field_serializer("answer_type", when_used="json")
+    def _serialize_answer_type(self, value: type[BaseModel] | None) -> str | None:
+        """A class cannot be JSON-encoded; record it as ``module:qualname``."""
+        return None if value is None else f"{value.__module__}:{value.__qualname__}"
+
+    @model_validator(mode="after")
+    def _one_answer_shape(self) -> "NeedInput":
+        if self.options is not None and self.answer_type is not None:
+            raise ValueError("set options or answer_type, not both")
+        return self
+
+
+class Waiting(BaseModel):
+    """Turn result: waiting on a background job or queue, not on a person.
+
+    ``on`` lists what is being waited on by name: a queue channel
+    (``"delegates"``, ``"jobs"``), a spawned job's label, a subagent's name.
+    ``explanation`` says why, for the host. ``message`` is an optional line
+    the host shows the user. The host keeps the request open and runs the
+    next turn when one of them delivers.
+    """
+
+    explanation: str = Field(description="Why the turn is waiting")
+    message: str | None = Field(default=None, description="Line to show the user while waiting")
+    on: list[str] = Field(
+        min_length=1, description="Names of the channels, jobs or subagents being waited on"
+    )
+
+    _check_explanation = field_validator("explanation")(_non_blank)
+    _check_message = field_validator("message")(_blank_to_none)
+
+    @field_validator("on")
+    @classmethod
+    def _names_not_blank(cls, value: list[str]) -> list[str]:
+        return [_non_blank(name) for name in value]
 
 
 class AgentMessage(Metadata):
@@ -351,7 +396,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     _user_messages_in: Annotated[Channel, hidden, nosnapshot]
     # Read-only facade (just .get() / .status() / .name) is what the
     # LLM sees as ``self.user_messages``.
-    user_messages: Annotated[_ChannelReader, nosnapshot]
+    user_messages: Annotated[ChannelReader, nosnapshot]
     # Persistent variables for the LLM — survives across turns AND
     # across sessions (snapshot-backed). Accessed via the ``self.v``
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
@@ -440,14 +485,12 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     async def handle(
         self,
         notification: dict[str, list],
-    ) -> "RespondResult":
-        """Handle a single turn of the conversation.
+    ) -> Done | NeedInput | Waiting:
+        """Handle one interactive turn.
 
         Called once per inbound notification (or batch). Unpack
-        ``notification`` and do the work, then return a
-        ``RespondResult`` telling the outer dispatcher what to do next.
-
-        Use ``self.v.<name> = value`` for state that should survive
+        ``notification``, do the work, then end the turn with one typed
+        result. Use ``self.v.<name> = value`` for state that must survive
         across turns (snapshot-backed via ``self.vars``).
 
         ## Turn anatomy
@@ -463,38 +506,40 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Do ALL the work before returning. Use as many ``execute_python``
         calls as needed — explore, implement, test, iterate. A turn that
         returns after one or two cells when the task clearly needs more
-        is a bug. The only reasons to call ``return_result`` are:
-
-        1. You have genuinely completed everything the user asked for.
-        2. You need user input to proceed (ambiguity, confirmation).
-        3. You are waiting on a background job.
+        is a bug. End the turn only when the request is complete, when you
+        need an answer from the person, or when you are waiting on a
+        background job.
 
         ## Returning
 
-        End the turn with exactly one ``return_result(REASON_ENUM, explanation="...")``.
-        ``explanation`` is required and must be non-empty. The host records and renders it as the
-        visible stop reason, so be specific and user-facing: if waiting on a
-        job/queue, name which job and why; if asking for input, say what input
-        is needed and why.
+        A turn has exactly one terminal result: the value you return.
+        Everything else is intermediate. End the turn with one
+        ``return_result(...)`` of one of these:
 
-        - Request complete; wait for the next user message::
+        - ``Done(message=..., explanation=...)`` — the request is complete.
+          ``message`` is the reply the host shows the user; ``explanation``
+          is a short status line. Add ``evidence=[...]`` for checks you ran::
 
-              return_result(RespondReason.DONE, explanation="implemented the feature and verified focused tests")
+              return_result(Done(message="Added the flag and its test.", explanation="added flag"))
 
-        - Need human input before proceeding::
+          Use ``self.message()`` only for text to show before the turn ends.
 
-              return_result(RespondReason.NEED_INPUT, explanation="need the target branch before pushing the MR")
+        - ``NeedInput(question=...)`` — you cannot continue without an
+          answer. ``question`` is the question; the host shows it, so do
+          not also send it with ``message()``. Add ``options=[...]`` for a
+          single choice, or ``answer_type=SomeModel`` (a pydantic class you
+          define with simple fields) for a typed answer. The answer arrives
+          in the next notification. ``reason`` optionally says why you
+          need it::
 
-        - Waiting for a background job or producer queue::
+              return_result(NeedInput(question="Which branch should I push to?", options=["main", "dev"]))
 
-              return_result(RespondReason.WAIT, explanation="waiting for pytest job ci-42 to finish before reporting results")
+        - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
+          background job or queue, not on a person. ``message`` is shown to
+          the user; ``on`` names what you wait for: a channel, a job label,
+          a subagent::
 
-        All stop reasons use the same dispatcher wake path: the host races every
-        declared queue/event channel and re-enters ``handle()`` with the first
-        arrival. Use ``kind`` to say why you are stopping, not to select a
-        different queue primitive.
-
-
+              return_result(Waiting(message="Tests are running; I will report when they finish.", explanation="tests running", on=["jobs:ci-42"]))
 
         ## Available queues
 
@@ -513,7 +558,31 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         prompts such as keep-going continuations); a harness might add
         ``"job_outputs"``. The
         ``<queue_status>`` context block lists the pending count per
-        queue each turn. After any stop reason, the dispatcher races every
+        queue each turn. After any result, the dispatcher races every
         declared queue/event and re-enters with the first arrival.
+        """
+        ...
+
+    @hidden
+    @strategy(CodeActStrategy())
+    async def handle_batch(
+        self,
+        notification: dict[str, list],
+    ) -> Done | Waiting:
+        """Handle one unattended turn.
+
+        No person is watching this turn and nobody can answer a question,
+        so ``NeedInput`` is not allowed here and is rejected as a type
+        error. Unpack ``notification`` (channel name → list of items) and
+        do all the work.
+
+        A turn has exactly one terminal result: the value you return.
+        Everything else is intermediate. End with one ``return_result(...)``:
+
+        - ``Done(explanation=...)`` — the work is finished, or cannot go
+          further. If something blocks you, say what in ``explanation``.
+          Set ``result`` when the task asks for a structured result.
+        - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
+          background job or queue you started. ``on`` names it.
         """
         ...

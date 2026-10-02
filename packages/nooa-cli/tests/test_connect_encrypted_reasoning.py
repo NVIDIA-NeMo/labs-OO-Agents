@@ -167,4 +167,4 @@ def test_wizard_explains_and_saves_default_without_extra_question(tmp_path):
     assert "not to store replies" in result.output
     entry = yaml.safe_load(target.read_text())["models"]["local"]
     assert entry["include"] == ["reasoning.encrypted_content"]
-    assert entry["provenance"]["encrypted_reasoning"]["source"] == "connect"
+    assert "provenance" not in entry

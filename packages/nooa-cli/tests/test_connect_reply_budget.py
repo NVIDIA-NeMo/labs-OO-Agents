@@ -214,7 +214,8 @@ def test_stage_save_fills_defaults_and_reports_shadow(tmp_path, monkeypatch):
     entry = report["data"]["entry"]
     assert entry["max_tokens"] == 32768
     assert entry["include"] == ["reasoning.encrypted_content"]
-    assert yaml.safe_load(destination.read_text())["models"]["local"] == entry
+    persisted = {k: v for k, v in entry.items() if k != "provenance"}
+    assert yaml.safe_load(destination.read_text())["models"]["local"] == persisted
 
 
 def test_scripted_plan_honours_explicit_reply_cap():

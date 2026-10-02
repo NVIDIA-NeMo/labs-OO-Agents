@@ -64,6 +64,7 @@ class WizardState:
     prompt_key: Any = None
     proposal: Any = None
     provider: Any = None
+    reasoning_level: Any = None
     reasoning_output_tokens: Any = None
     reasoning_template: Any = None
     registry: Any = None
@@ -375,6 +376,16 @@ def check_interfaces(state: WizardState) -> bool:
             retry_styles = ("chat", "responses", "anthropic")
             interface_timeout = 30
             while True:
+                # Always test reasoning per interface, not just connectivity --
+                # "nooa connect" with no arguments should run the best check we
+                # have by default, not require the caller to already know to
+                # ask for it. If the user gave us their own --reasoning-template
+                # (e.g. for an Anthropic-only setup), that shape wins; "effort"
+                # is a reasonable default elsewhere, understood by chat and
+                # responses (and harmless if a style ignores/rejects it).
+                reasoning_level = state.reasoning_level or (
+                    state.levels.split(",")[0].strip() if state.levels else "medium"
+                )
                 state.interfaces = asyncio.run(
                     show_checks(
                         connect.check_interfaces(
@@ -387,6 +398,12 @@ def check_interfaces(state: WizardState) -> bool:
                             api_key=state.api_key,
                             styles=retry_styles,
                             timeout_seconds=interface_timeout,
+                            reasoning_template=state.reasoning_template or "effort",
+                            reasoning_level=reasoning_level,
+                            reasoning_output_tokens=(
+                                state.reasoning_output_tokens
+                                or connect.DEFAULT_REASONING_OUTPUT_TOKENS
+                            ),
                         ),
                         summary=False,
                     )
@@ -397,6 +414,8 @@ def check_interfaces(state: WizardState) -> bool:
                 )
                 available = state.interfaces.accepted
                 if available:
+                    if state.interfaces.recommended_style in available:
+                        state.default_style = state.interfaces.recommended_style
                     break
                 failed_checks = {
                     style: r.entry["provenance"]["probes"]["routing"]
@@ -516,14 +535,22 @@ def check_interfaces(state: WizardState) -> bool:
             click.echo(
                 "Interfaces that returned the expected response format: " + ", ".join(available)
             )
+            observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
+            click.echo(
+                "Interfaces that actually returned reasoning: "
+                + (", ".join(observed) if observed else "none")
+            )
         if state.interfaces and len(available) == 1:
             state.api_style = available[0]
             click.echo(f"Using {state.api_style} for {state.model}.")
         else:
             click.echo(f"Choose the request interface for {state.model}:")
-            click.echo(
-                "chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
-            )
+            legend = {
+                "chat": "chat = OpenAI-compatible",
+                "responses": "responses = OpenAI Responses",
+                "anthropic": "anthropic = Anthropic Messages",
+            }
+            click.echo("; ".join(legend[style] for style in available) + ".")
             state.api_style = prompts.prompt(
                 "API format",
                 choices=available,
@@ -547,14 +574,10 @@ def configure_metadata(state: WizardState) -> bool:
         state.candidate = {
             "id": state.editing.get("underlying_model", state.model),
             "context_length": state.editing.get("context_window"),
-            "top_provider": {
-                "max_completion_tokens": state.editing.get(
-                    "max_output_tokens",
-                    state.editing.get("provenance", {})
-                    .get("catalogue_limits", {})
-                    .get("max_completion_tokens"),
-                )
-            },
+            # Saved entries keep settings only, not the catalogue limits, and an
+            # edit does not look the model up, so its ceiling is known here only
+            # if the entry saved max_output_tokens. The saved cap is kept as is.
+            "top_provider": {"max_completion_tokens": state.editing.get("max_output_tokens")},
             "reasoning": {
                 "supported_efforts": list(state.editing.get("reasoning_levels", {})),
                 "default_effort": state.editing.get("reasoning_default"),

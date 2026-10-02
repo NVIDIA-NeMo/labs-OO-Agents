@@ -11,6 +11,7 @@ from typing import Any
 
 from nooa._immutable_json import json_containers
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
+from nooa.unifiedllm.cache_policy import wrap_anthropic_text
 
 from .replay_state import (
     ReasoningReplayError,
@@ -180,7 +181,9 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
     return tuple(parts)
 
 
-def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[str, str]]:
+def project_chat_turn(
+    turn: LLMResponse, scope: str | None, *, anthropic_cache_marking: bool = False
+) -> tuple[dict, dict[str, str]]:
     """Build request-owned Chat fields from an immutable assistant turn.
 
     Projection is the only outbound layer that interprets native part data.
@@ -242,7 +245,13 @@ def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[
         elif part.text:
             text.append(part.text)
     if text:
-        message["content"] = "\n\n".join(text)
+        joined = "\n\n".join(text)
+        # Anthropic's cache_control marker needs a content block, not a bare
+        # string; wrap unconditionally so the shape is stable whether or not
+        # this turn is the one apply_cache_policy marks. anthropic_cache_marking is
+        # the actual marking decision, not scope's resolved provider -- see
+        # prepare_chat_messages for why those can disagree.
+        message["content"] = [wrap_anthropic_text(joined)] if anthropic_cache_marking else joined
     elif message.get("tool_calls"):
         message["content"] = None
     return message, call_ids

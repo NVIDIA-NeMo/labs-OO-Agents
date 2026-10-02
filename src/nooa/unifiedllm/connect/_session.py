@@ -12,6 +12,10 @@ from . import REASONING_CHECK_PROMPT
 REPLY_CAP = 2048
 # Includes padding, schema/instructions, and up to two prior reply-sized items.
 TOKEN_RESERVATION = 3 * (8192 + 3 * REPLY_CAP)
+# Module-level so tests can monkeypatch it to 0 -- these three calls land back
+# to back on the same endpoint in production; spurious 5xx/rate-limit
+# failures are common enough there to be worth a short, fixed pace-out.
+SESSION_CALL_PACING_SECONDS = 0.5
 
 
 def reply_budget(entry, budget_tokens):
@@ -92,6 +96,56 @@ def _cache_markers(value):
     elif isinstance(value, list):
         for child in value:
             yield from _cache_markers(child)
+
+
+def _strip_cache_markers(value):
+    """Remove transient cache-breakpoint decoration so content can compare by identity.
+
+    A provider's own cache lookup does not require an earlier breakpoint to be
+    resent -- only the underlying content has to stay byte-identical. Stripping
+    the marker keys before comparing isolates real content drift from that
+    expected, harmless difference.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _strip_cache_markers(child)
+            for key, child in value.items()
+            if key not in {"cache_control", "prompt_cache_breakpoint"}
+        }
+    if isinstance(value, list):
+        return [_strip_cache_markers(child) for child in value]
+    return value
+
+
+def _history_prefix_stable(prior_body, later_body, key):
+    """Did every message an earlier turn sent survive, unchanged, as later history?
+
+    Explicit cache breakpoints only help the provider if the exact marked
+    message renders identically once it stops being "the newest eligible
+    block" and becomes ordinary history on a later turn. If the renderer
+    reconstructs that message with a different wire shape at that point (for
+    example a plain string that was list-wrapped only while carrying the
+    marker), the provider's literal-prefix cache match breaks there on every
+    later turn -- silently, since nothing else about the conversation looks
+    wrong. This compares ``prior_body``'s entire input list, markers aside,
+    against the same leading slice of ``later_body``'s input list, which is
+    exactly the byte-stability a growing explicit-breakpoint conversation
+    depends on.
+
+    Anthropic's cacheable prefix and marker can also live in a top-level
+    ``system`` field, separate from ``messages`` -- litellm renders a leading
+    system-role message that way. A regression confined to that field would
+    otherwise report as stable.
+    """
+    prior_list = [_strip_cache_markers(m) for m in prior_body.get(key, [])]
+    later_list = [_strip_cache_markers(m) for m in later_body.get(key, [])]
+    if len(later_list) < len(prior_list):
+        return False
+    if later_list[: len(prior_list)] != prior_list:
+        return False
+    return _strip_cache_markers(prior_body.get("system")) == _strip_cache_markers(
+        later_body.get("system")
+    )
 
 
 def _reasoning_values(response):
@@ -305,6 +359,8 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             attempts = []
             before = len(bodies)
             spent += reservation
+            if index > 0 and SESSION_CALL_PACING_SECONDS:
+                await asyncio.sleep(SESSION_CALL_PACING_SECONDS)
             try:
                 async with asyncio.timeout(120):
                     response = await client.acall(call_messages, **params)
@@ -327,10 +383,11 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             usage = response.usage
             total = usage.input_tokens + usage.output_tokens if usage else 0
             spent += max(0, total - reservation)
-            observed = bool(
-                any(p.kind == "reasoning" for p in response.parts)
-                or (usage and usage.reasoning_tokens)
-            )
+            # Billed usage.reasoning_tokens alone is not evidence -- confirmed
+            # live, Kimi/Qwen bill nonzero reasoning tokens on routes that
+            # never put a reasoning item on the wire, so there is nothing for
+            # capture_parts to attach and parts stays empty.
+            observed = any(p.kind == "reasoning" for p in response.parts)
             record = {
                 "outcome": "accepted",
                 "reasoning_observed": observed,
@@ -392,38 +449,45 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             settings_ok &= settings_on_wire(controls, wire)
             if index == 0:
                 first = response
-                replay = [m for m in messages if not isinstance(m, CacheBoundary)] + [first]
-                for call in first.tool_calls:
-                    if call.name != "probe_tool":
-                        yield ProbeUpdate(
-                            "session",
-                            {
-                                "outcome": "not_confirmed",
-                                "reason": "unexpected tool requested",
-                                "tokens_charged_to_budget": spent,
-                            },
-                        )
-                        return
-                    replay.append(
+            # Extend after every turn, not just the seed, so the next call is a
+            # genuine continuation: whatever this turn just sent (including any
+            # message an explicit cache breakpoint marked) must reappear as
+            # ordinary history next time, the same way a real multi-turn
+            # session grows. Reusing a frozen base across turns (the previous
+            # behavior) never lets a marked message become history within this
+            # probe, so it could never catch a renderer that reconstructs that
+            # message differently once replayed -- see the cache stability
+            # check below, which depends on this actually growing.
+            replay = [m for m in call_messages if not isinstance(m, CacheBoundary)] + [response]
+            for call in response.tool_calls:
+                if call.name != "probe_tool":
+                    yield ProbeUpdate(
+                        "session",
                         {
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "content": "Probe result recorded.",
-                        }
+                            "outcome": "not_confirmed",
+                            "reason": "unexpected tool requested",
+                            "tokens_charged_to_budget": spent,
+                        },
                     )
+                    return
+                replay.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": "Probe result recorded.",
+                    }
+                )
 
-        # Compare all provider fields; only the final user message may differ.
-        left, right = deepcopy(successful_bodies[1]), deepcopy(successful_bodies[2])
+        # "repeat" (successful_bodies[2]) is now a genuine continuation of
+        # "replay" (successful_bodies[1]) -- see the extension above. Everything
+        # "replay" actually sent, including whichever message an explicit cache
+        # breakpoint marked, must reappear byte-identical (that transient marker
+        # key aside) as a leading slice of "repeat"'s input for the provider's
+        # cache to extend across turns. A frozen replay base across both calls
+        # (the previous check) could never catch this: it never let a marked
+        # message become history within the probe at all.
         key = "input" if entry["api_style"] == "responses" else "messages"
-        for body in (left, right):
-            # Compare the input prefix independently from request control fields.
-            for cap_key in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
-                body.pop(cap_key, None)
-            if entry["api_style"] == "anthropic":
-                body[key][-1]["content"][-1]["text"] = "<volatile>"
-            else:
-                body[key][-1]["content"] = "<volatile>"
-        stable = left == right
+        stable = _history_prefix_stable(successful_bodies[1], successful_bodies[2], key)
         best = max(readings, key=lambda r: r["cached_input_tokens"] or 0)
         cached = best["cached_input_tokens"]
         seed_input = first.usage.input_tokens if first.usage else 0
@@ -433,7 +497,9 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         cache_reason = (
             "Reusable conversation cached"
             if substantial
-            else "Stable prefix changed between continuations; check the renderer and request settings"
+            else "A message from an earlier turn rendered differently once replayed as "
+            "history; explicit cache breakpoints will not accumulate hits across turns "
+            "until the renderer keeps that message's wire shape stable"
             if not stable
             else "Only a small portion was cached; try a longer prompt or check the server's caching support"
             if cached

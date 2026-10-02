@@ -203,8 +203,9 @@ controls, and `NO_COLOR` disables colors. The full YAML is hidden by default;
 `--show-config` previews the final entry before the save question. The agent
 `--stage` JSON interface is unchanged.
 
-The displayed **reported reply ceiling** is capability metadata saved under
-`provenance.catalogue_limits.max_completion_tokens`, not a request default.
+The displayed **reported reply ceiling** is capability metadata held under the
+session's `provenance.catalogue_limits.max_completion_tokens`, not a request default;
+it is never persisted to the registry.
 Every entry also has an actual **reply budget**, saved as `max_tokens` for all
 three interfaces. Responses translates that to `max_output_tokens` on the wire.
 Press Enter to accept the recommendation, choose a higher budget for high reasoning
@@ -465,9 +466,12 @@ wire interface for Connect and the forthcoming direct runtime. Connect does not
 infer a `replay_vendor` from an interface or model name.
 
 `provenance` contains diagnostic evidence and metadata, not runtime request
-settings. Catalogue identity belongs under `provenance.catalogue.id`, not
-`underlying_model`. Successful tools are recorded in `provenance.probes.tools`;
-Connect does not write an unused `tools: true` capability switch.
+settings. It lives in the connect session and in stage JSON, never in the
+saved registry: `connect.write` persists the discovered settings only, so the
+config stays the smallest capture of what Connect learned. Catalogue identity
+belongs under `provenance.catalogue.id`, not `underlying_model`. Successful
+tools are recorded in `provenance.probes.tools`; Connect does not write an
+unused `tools: true` capability switch.
 
 ## Library interface for the TUI
 

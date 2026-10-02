@@ -267,3 +267,114 @@ async def test_replace_match_at_eof_preserves_missing_newline(sh, tmp_path):
     match = await sh.read("f.py", (2, 2))
     await sh.replace(match, "b = 20")
     assert (tmp_path / "f.py").read_text() == "a = 1\nb = 20"
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+async def test_run_with_cwd_runs_there_and_leaves_the_shell_directory(sh, tmp_path, absolute):
+    (tmp_path / "sub" / "deeper").mkdir(parents=True)
+    home = sh.cwd
+    target = str((tmp_path / "sub").resolve()) if absolute else "sub"
+    try:
+        r = await sh.run("pwd", cwd=target)
+        assert r.success
+        assert r.stdout == str((tmp_path / "sub").resolve())
+        # A cd inside the scoped command does not move the shell either.
+        r = await sh.run("cd deeper && pwd", cwd=target)
+        assert r.stdout.endswith("deeper")
+        assert sh.cwd == home
+        assert (await sh.run("pwd")).stdout == str(home)
+    finally:
+        await sh.close()
+
+
+async def test_run_with_a_missing_cwd_fails_without_running_the_command(sh, tmp_path):
+    try:
+        r = await sh.run("touch marker; echo ran", cwd="missing")
+        assert not r.success
+        assert "missing" in r.stderr
+        assert "ran" not in r.stdout
+        assert not (tmp_path / "marker").exists()
+        assert (await sh.run("pwd")).stdout == str(sh.cwd)
+    finally:
+        await sh.close()
+
+
+async def test_run_with_cwd_keeps_environment_changes(sh, tmp_path):
+    """``cwd=`` runs in the session's own shell, not a subshell: exports persist."""
+    (tmp_path / "sub").mkdir()
+    try:
+        await sh.run("export NOOA_CWD_PROBE=kept", cwd="sub")
+        assert (await sh.run("echo $NOOA_CWD_PROBE")).stdout == "kept"
+    finally:
+        await sh.close()
+
+
+async def test_run_with_cwd_returns_the_command_status(sh, tmp_path):
+    (tmp_path / "sub").mkdir()
+    try:
+        r = await sh.run("false", cwd="sub")
+        assert r.returncode == 1
+        r = await sh.run("exit_code() { return 7; }; exit_code", cwd="sub")
+        assert r.returncode == 7
+        assert (await sh.run("pwd")).stdout == str(sh.cwd)
+    finally:
+        await sh.close()
+
+
+async def test_run_with_a_relative_cwd_ignores_cdpath(sh, tmp_path):
+    """A relative ``cwd`` is the shell directory's child, whatever CDPATH says."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "elsewhere" / "sub").mkdir(parents=True)
+    try:
+        await sh.run(f"export CDPATH={tmp_path / 'elsewhere'}")
+        r = await sh.run("pwd", cwd="sub")
+        assert r.stdout == str((tmp_path / "sub").resolve())
+    finally:
+        await sh.close()
+
+
+async def test_run_with_stdin_keeps_shell_changes(sh, tmp_path):
+    """``stdin=`` runs in the session's own shell, not a subshell: cd and exports persist."""
+    (tmp_path / "sub").mkdir()
+    try:
+        r = await sh.run("read value; export NOOA_STDIN_PROBE=$value", stdin="kept\n")
+        assert r.success
+        assert (await sh.run("echo $NOOA_STDIN_PROBE")).stdout == "kept"
+        await sh.run("cd sub", stdin="ignored\n")
+        assert sh.cwd == (tmp_path / "sub").resolve()
+    finally:
+        await sh.close()
+
+
+async def test_run_with_stdin_and_cwd_returns_to_the_shell_directory(sh, tmp_path):
+    (tmp_path / "sub").mkdir()
+    try:
+        home = sh.cwd
+        r = await sh.run("cat; pwd", stdin="line\n", cwd="sub")
+        assert r.stdout == f"line\n{(tmp_path / 'sub').resolve()}"
+        assert sh.cwd == home
+        assert (await sh.run("false", stdin="x\n")).returncode == 1
+        # The session keeps reading its own commands after the redirection ends.
+        assert (await sh.run("echo still here")).stdout == "still here"
+    finally:
+        await sh.close()
+
+
+async def test_run_stream_with_cwd_runs_there(sh, tmp_path):
+    (tmp_path / "sub").mkdir()
+    try:
+        events = [event async for event in sh.run_stream("pwd", cwd="sub")]
+        out = "".join(event.text for event in events if event.kind == "stdout")
+        assert out.strip() == str((tmp_path / "sub").resolve())
+        assert events[-1].returncode == 0
+    finally:
+        await sh.close()
+
+
+def test_run_documents_cwd_for_the_model():
+    from nooa.agentdoc import doc
+
+    rendered = doc(ShellTools.run)
+    assert "cwd: str | Path | None = None" in rendered
+    assert "cwd: Directory for this command only" in rendered
+    assert "run(command, stdin=, timeout=, cwd=)" in doc(ShellTools)

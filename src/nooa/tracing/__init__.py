@@ -24,12 +24,13 @@ Usage::
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import sys
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from opentelemetry import trace
@@ -55,6 +56,8 @@ from nooa.tracing._otlp_file_exporter import OtlpJsonFileExporter
 from nooa.tracing._otlp_http_exporter import OtlpJsonHttpExporter
 from nooa.tracing._session import get_session, session_scope, set_session
 from nooa.tracing._session_processor import SessionSpanProcessor
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -197,6 +200,18 @@ def probe_otlp_endpoint(endpoint: str, timeout: float | None = None) -> bool:
     Useful for external callers (e.g. the Harbor runner) that need to decide
     whether to send traces live vs. fall back to file export.
     """
+    return _probe(endpoint, timeout) == "up"
+
+
+_HTTPS_ONLY_REPLIES = (
+    "client sent an http request to an https server",  # Go net/http
+    "the plain http request was sent to https port",  # nginx
+)
+"""What servers answer (with 400) to plain HTTP on an HTTPS-only port."""
+
+
+def _probe(endpoint: str, timeout: float | None) -> Literal["up", "https_only", "down"]:
+    """Probe the viewer's health URL once: up, down, or answering "use HTTPS"."""
     if timeout is None:
         raw = os.getenv("OTLP_PROBE_TIMEOUT", "2.0")
         try:
@@ -211,12 +226,50 @@ def probe_otlp_endpoint(endpoint: str, timeout: float | None = None) -> bool:
         req = urllib.request.Request(health_url, headers=apply_viewer_auth({}), method="GET")
         with urllib.request.urlopen(req, timeout=timeout):
             pass
-        return True
-    except urllib.error.HTTPError:
-        # Server is up but returned an error (e.g. 400, 405) — still reachable
-        return True
+        return "up"
+    except urllib.error.HTTPError as exc:
+        # A plain-HTTP request to an HTTPS-only server gets a 400 saying so;
+        # every export would fail the same way. Any other error means the
+        # server is up.
+        return "https_only" if _is_https_only_reply(exc) else "up"
+    except Exception:
+        return "down"
+
+
+def _is_https_only_reply(exc: urllib.error.HTTPError) -> bool:
+    if exc.code != 400:
+        return False
+    try:
+        body = exc.read(512).decode("utf-8", "replace").lower()
     except Exception:
         return False
+    return any(reply in body for reply in _HTTPS_ONLY_REPLIES)
+
+
+def resolve_otlp_endpoint(endpoint: str, timeout: float | None = None) -> str | None:
+    """The endpoint to export to: ``endpoint`` if reachable, else its https
+    twin when the server only speaks HTTPS, else ``None``.
+
+    A configured ``http://host:port`` for a viewer that serves HTTPS on that
+    port is a common misconfiguration; the health probe tells the two apart.
+    The https twin is probed only when the server answered that it speaks
+    HTTPS only, so an endpoint with nothing listening costs one probe. The
+    upgrade is logged as one warning naming the configured ``http://``
+    endpoint and the ``https://`` endpoint used instead.
+    """
+    state = _probe(endpoint, timeout)
+    if state == "up":
+        return endpoint
+    if state == "https_only" and endpoint.startswith("http://"):
+        upgraded = "https://" + endpoint[len("http://") :]
+        if _probe(upgraded, timeout) == "up":
+            logger.warning(
+                "OTLP endpoint %s answers only over HTTPS; exporting to %s instead.",
+                endpoint,
+                upgraded,
+            )
+            return upgraded
+    return None
 
 
 def enable_tracing(
@@ -258,7 +311,7 @@ def enable_tracing(
     # --- Fast paths for no-arg (auto-probe) calls --------------------------
     if exporters is None:
         if _enabled and _provider is not None:
-            _re_register_hooks()
+            register_hooks_in_current_context()
             return
         if _probe_failed:
             return
@@ -275,7 +328,7 @@ def enable_tracing(
         # Task context from the calling thread each time, so hooks set in a previous
         # Task are invisible here.  Without this, task 2+ in a persistent subprocess
         # worker have no hooks → no AGENT/GENERATION spans.
-        _re_register_hooks()
+        register_hooks_in_current_context()
         return
 
     # --- First-time setup --------------------------------------------------
@@ -336,7 +389,7 @@ def enable_tracing(
     _provider = tracer_provider
 
     # Instrument nooa hooks; capture the instance for re-registration
-    # in future asyncio task contexts (see _re_register_hooks).
+    # in future asyncio task contexts (see register_hooks_in_current_context).
     with contextlib.suppress(ImportError):
         instrumentor = NOOAInstrumentor()
         instrumentor.instrument(tracer_provider=tracer_provider)
@@ -352,8 +405,18 @@ def enable_tracing(
     _enabled = True
 
 
-def _re_register_hooks() -> None:
-    """Re-register instrumentation hooks in the current async context.
+def register_hooks_in_current_context() -> None:
+    """Install the tracing hooks in the current context, if tracing is enabled.
+
+    Hooks live in a ContextVar, so a context created without copying the
+    one that ran :func:`enable_tracing` (a fresh ``contextvars.Context()``,
+    a thread started without ``copy_context()``, or an asyncio Task copied
+    from a context that never had them) runs agents with no hooks and emits
+    no AGENT/GENERATION spans. A host that runs agents that way calls this
+    at the start of each such context. It composes with any hooks already
+    set there, is a no-op when tracing is off, and is safe to call twice.
+
+    Details of the case it was written for:
 
     Hooks are stored in a ContextVar (``_instrumentation_hooks_var``).  When
     the eval pipeline uses a persistent subprocess worker, each task is run via
@@ -433,8 +496,9 @@ def _default_exporters() -> list[SpanExporter] | None:
     explicit_endpoint = os.getenv("OTLP_ENDPOINT")
     endpoint = explicit_endpoint or "http://localhost:5001/v1/traces"
 
-    if probe_otlp_endpoint(endpoint):
-        return [exporters_mod.journal(endpoint=endpoint)]
+    resolved = resolve_otlp_endpoint(endpoint)
+    if resolved is not None:
+        return [exporters_mod.journal(endpoint=resolved)]
 
     _probe_failed = True
 
@@ -535,6 +599,8 @@ __all__ = [
     "end_active_spans",
     "exporters",
     "probe_otlp_endpoint",
+    "register_hooks_in_current_context",
+    "resolve_otlp_endpoint",
     "set_session",
     "session_scope",
     "get_session",

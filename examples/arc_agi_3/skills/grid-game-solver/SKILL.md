@@ -81,13 +81,12 @@ of a new level, retrieve everything relevant from previous levels.
 ## Turn contract
 
 Every turn ends in exactly one of:
-- `self.submit_actions([...], rationale="prediction: ...")` then
-  `return_result(RespondReason.WAIT, explanation="waiting for the harness ...")` — the
-  normal case; or
+- `self.submit_actions([...], rationale="prediction: ...")` — the normal case; a
+  successful submit ends the turn by itself and waits for the next state; or
 - if the state is `WIN` (or the harness note says the run stopped): write the final
   reflection to the knowledge store, `message()` a short summary of the solution, and
-  `return_result(RespondReason.DONE, explanation="...")`.
+  `return_result(Done(explanation="..."))`.
 
 Never end a turn without submitting actions on an active game. Never fabricate a state —
 if `game_states` brought nothing and `<arc_game>` shows you already submitted for this
-turn, just WAIT again.
+turn, wait with `return_result(Waiting(explanation="...", on=["game_states"]))`.

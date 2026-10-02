@@ -28,7 +28,7 @@ def llm_factory() -> FakeLLMClient:
         {
             "code": (
                 "self.message('NOOA ACP smoke test passed.')\n"
-                "return_result(RespondReason.DONE, explanation='smoke test complete')"
+                "return_result(Done(explanation='smoke test complete'))"
             )
         },
     )

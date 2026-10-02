@@ -1298,6 +1298,7 @@ class ActorRuntime:
         # exited before they were assigned (caught by NameError previously).
         stdout_buffer: Any = None
         stderr_buffer: Any = None
+        media_buffer: Any = None
         # Set parent agent context for LLM inheritance by subagents
         parent_token = _parent_agent_var.set(self.agent)
         try:
@@ -1839,6 +1840,27 @@ class ActorRuntime:
 
         except asyncio.CancelledError as error:
             execution_exception = error
+            # A cancelled cell still produced output up to the cancel point. Build
+            # a partial result from the buffers captured so far and append it to
+            # the exception's ``execution_results`` list, so the strategy can show
+            # the model what ran. The buffers are still open here (they close in
+            # the finally below). The cancellation itself is re-raised unchanged.
+            # Nested execute_code calls see the same exception and each appends
+            # its own result, innermost first, so the frame that just unwound is
+            # always the last entry.
+            if stdout_buffer is not None and stderr_buffer is not None:
+                results = getattr(error, "execution_results", None)
+                if results is None:
+                    results = []
+                    error.execution_results = results  # type: ignore[attr-defined]
+                results.append(
+                    ExecutionResult(
+                        stdout=stdout_buffer.getvalue(),
+                        stderr=stderr_buffer.getvalue(),
+                        cancelled=True,
+                        images=media_buffer.blocks if media_buffer is not None else [],
+                    )
+                )
             raise
         finally:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.

@@ -23,17 +23,25 @@ def reject_legacy_cache_config(config: Mapping[str, Any]) -> None:
         )
 
 
+def wrap_responses_text(text: str, kind: str = "input_text") -> dict[str, Any]:
+    """The one stable Responses content-block shape for a string.
+
+    ``input_text`` for every non-assistant message, ``output_text`` for
+    assistant messages -- the wire-shape-stability wrap outside this module
+    (``unifiedllm._transform_messages``, run for every message regardless of
+    whether it's marked this turn) and marking below must produce the exact
+    same block shape, or a message renders differently once it stops being
+    "the newest eligible block" and the provider's literal-prefix cache
+    match breaks there on every later turn.
+    """
+    return {"type": kind, "text": text}
+
+
 def _mark_responses_content(content: Any) -> tuple[Any, bool]:
     """Mark the last cacheable input block, including stable images and files."""
     marker = {"mode": "explicit"}
     if isinstance(content, str):
-        return [
-            {
-                "type": "input_text",
-                "text": content,
-                "prompt_cache_breakpoint": marker,
-            }
-        ], True
+        return [{**wrap_responses_text(content), "prompt_cache_breakpoint": marker}], True
     if isinstance(content, list):
         for index in range(len(content) - 1, -1, -1):
             block = content[index]
@@ -78,19 +86,25 @@ def enable_openai_explicit_cache(api_params: dict[str, Any]) -> None:
     api_params["extra_body"] = extra
 
 
+def wrap_anthropic_text(text: str) -> dict[str, Any]:
+    """The one stable Anthropic content-block shape for a string.
+
+    The wire-shape-stability wrap outside this module (``chat_parts.
+    project_chat_turn``, ``replay_state.prepare_chat_messages`` -- both
+    already conditioned on whether marking applies this turn) and marking
+    below must produce the exact same block shape, for the same reason as
+    ``wrap_responses_text``.
+    """
+    return {"type": "text", "text": text}
+
+
 def _mark_anthropic(message: dict[str, Any]) -> dict[str, Any] | None:
     content = message.get("content")
     marker = {"type": "ephemeral"}
     if isinstance(content, str) and content:
         return {
             **message,
-            "content": [
-                {
-                    "type": "text",
-                    "text": content,
-                    "cache_control": marker,
-                }
-            ],
+            "content": [{**wrap_anthropic_text(content), "cache_control": marker}],
         }
     if isinstance(content, list):
         for i in range(len(content) - 1, -1, -1):

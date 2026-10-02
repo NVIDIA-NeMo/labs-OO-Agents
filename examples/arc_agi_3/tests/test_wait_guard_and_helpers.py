@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Mechanical-fix tests: WAIT-guard, helper dedent, background-reflect wiring, LLM timeout.
 
-WAIT-guard defect: an agent can end its turn with ``return_result(kind=WAIT)``
+WAIT-guard defect: an agent can end its turn with ``return_result(Waiting(...))``
 while nothing was submitted this turn (13 occurrences in the 20260716 fleet —
-harness and agent then idled the full 900s nudge timer). A WAIT that is not
+harness and agent then idled the full 900s nudge timer). A Waiting that is not
 backed by an actions.jsonl entry for the current turn must be rejected through
 the standard result-validation channel so the session continues and the agent
 submits for real.
@@ -72,11 +72,11 @@ _SUBMIT_CELL = "self.submit_actions(['UP', 'DOWN', 'UP'], 'recover: submit for r
 
 @pytest.mark.asyncio
 async def test_wait_via_direct_tool_call_without_submission_is_rejected(tmp_path):
-    """A bare return_result(WAIT) tool call with no submission must bounce."""
+    """A bare return_result(Waiting) tool call with no submission must bounce."""
     responses = [
         _tool_response(
             "return_result",
-            {"result": {"kind": "WAIT", "explanation": "submitted actions; waiting"}},
+            {"result": {"explanation": "submitted actions; waiting", "on": ["game_states"]}},
         ),
         _cell(_SUBMIT_CELL),
     ]
@@ -92,9 +92,11 @@ async def test_wait_via_direct_tool_call_without_submission_is_rejected(tmp_path
 
 @pytest.mark.asyncio
 async def test_wait_via_inline_return_result_without_submission_is_rejected(tmp_path):
-    """return_result(kind='WAIT') inside a cell without a submission must bounce."""
+    """return_result(Waiting(...)) inside a cell without a submission must bounce."""
     responses = [
-        _cell("return_result(kind='WAIT', explanation='submitted actions; waiting')"),
+        _cell(
+            "return_result(Waiting(explanation='submitted actions; waiting', on=['game_states']))"
+        ),
         _cell(_SUBMIT_CELL),
     ]
     agent, llm, state = _build_agent(tmp_path, responses)
@@ -108,7 +110,7 @@ async def test_wait_via_inline_return_result_without_submission_is_rejected(tmp_
 
 @pytest.mark.asyncio
 async def test_legitimate_wait_from_submit_actions_still_passes(tmp_path):
-    """The guard must NOT reject the WAIT produced by a real submission."""
+    """The guard must NOT reject the Waiting produced by a real submission."""
     agent, llm, state = _build_agent(tmp_path, [_cell(_SUBMIT_CELL)])
 
     result = await agent.handle({"game_states": [json.dumps(state)]})
@@ -116,10 +118,7 @@ async def test_legitimate_wait_from_submit_actions_still_passes(tmp_path):
     entries = [json.loads(x) for x in agent._actions_path.read_text().splitlines() if x]
     assert len(entries) == 1
     assert llm.call_count == 1  # no bounce for a backed WAIT
-    kind = getattr(result, "kind", None) or (
-        result.get("kind") if isinstance(result, dict) else None
-    )
-    assert str(kind).lower().endswith("wait")
+    assert isinstance(result, sa.Waiting)
 
 
 # --------------------------------------------------------------------------- #

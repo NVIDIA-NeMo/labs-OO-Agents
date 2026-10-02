@@ -92,6 +92,14 @@ from ._connect_stages import STAGES
     help="Deprecated compatibility option; reasoning checks now use the configured reply cap.",
 )
 @click.option(
+    "--reasoning-level",
+    default=None,
+    help=(
+        "Effort/label probed when interfaces are also checked for reasoning. "
+        "Defaults to the first --levels entry, or 'medium'."
+    ),
+)
+@click.option(
     "--max-tokens",
     "--reply-tokens",
     "reply_tokens",
@@ -146,6 +154,7 @@ def command(
     budget_tokens,
     output_tokens,
     reasoning_output_tokens,
+    reasoning_level,
     reply_tokens,
     show_config,
     output,
@@ -195,6 +204,8 @@ def command(
             budget_tokens=budget_tokens,
             output_tokens=output_tokens,
             reasoning_output_tokens=reasoning_output_tokens,
+            reasoning_template=reasoning_template if stage == "interfaces" else None,
+            reasoning_level=reasoning_level,
             reply_tokens=reply_tokens,
             levels_file=levels_file,
             context_window=context_window,
@@ -210,7 +221,8 @@ def command(
                     "--probe": probe != "all",
                     "--provider": provider,
                     "--catalogue-model": catalogue_model,
-                    "--reasoning-template": reasoning_template,
+                    "--reasoning-template": reasoning_template and stage != "interfaces",
+                    "--reasoning-level": reasoning_level and stage != "interfaces",
                     "--levels": levels,
                     "--show-config": show_config,
                     "--edit-model": edit_model is not None,
@@ -237,6 +249,7 @@ def command(
         discovery_file=discovery_file,
         no_catalogue=no_catalogue,
         reasoning_template=reasoning_template,
+        reasoning_level=reasoning_level,
         levels=levels,
         levels_file=levels_file,
         context_window=context_window,

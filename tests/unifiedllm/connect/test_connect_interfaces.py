@@ -240,3 +240,105 @@ def test_removed_level_does_not_leave_a_stale_accepted_probe():
         existing_entry=previous.entry,
     )
     assert "level:high" not in current.entry["provenance"]["probes"]
+
+
+@pytest.mark.asyncio
+async def test_recommended_style_prefers_the_interface_that_actually_shows_reasoning(monkeypatch):
+    """An interface can accept ordinary calls and still never surface reasoning.
+
+    Simulates a route like Kimi/Qwen over Hub Responses: usage bills reasoning
+    tokens but no "reasoning" item appears on the wire, while the same model's
+    Chat route returns readable reasoning_content. recommended_style must pick
+    the interface that actually showed reasoning, not just the first accepted.
+    """
+    chat_reply = response_body("chat")
+    chat_reply["choices"][0]["message"]["reasoning_content"] = "Think it through."
+    responses_reply = response_body("responses")
+
+    def handle(request):
+        style = PATHS[request.url.path]
+        return httpx.Response(200, json=chat_reply if style == "chat" else responses_reply)
+
+    mock_http(monkeypatch, handle)
+    events, result = await check(
+        api_key="temporary-secret",
+        styles=("responses", "chat"),
+        reasoning_template="effort",
+        reasoning_level="on",
+        reasoning_output_tokens=64,
+        budget_tokens=8192,
+    )
+    assert result.accepted == ("responses", "chat")
+    assert result.reasoning_observed == {"responses": False, "chat": True}
+    assert result.recommended_style == "chat"
+
+
+@pytest.mark.asyncio
+async def test_default_budget_covers_a_default_reasoning_probe(monkeypatch):
+    """check_interfaces's own default budget_tokens must be large enough for
+    its own default reasoning_output_tokens reservation, or a caller that
+    passes reasoning_template without an explicit budget_tokens gets every
+    reasoning probe silently skipped as budget-exhausted."""
+    sent = []
+
+    def handle(request):
+        style = PATHS[request.url.path]
+        body = json.loads(request.content)
+        sent.append(body)
+        return httpx.Response(200, json=REPLIES[style])
+
+    mock_http(monkeypatch, handle)
+    _, result = await check(
+        api_key="temporary-secret",
+        styles=("chat",),
+        reasoning_template="effort",
+        reasoning_level="on",
+    )
+    assert any("Compute 17" not in json.dumps(b) for b in sent)
+    assert result.results["chat"].entry["provenance"]["probes"]["level:on"]["outcome"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_budget_template_probe_keeps_its_own_reply_cap(monkeypatch):
+    """The "budget" template computes its own max_tokens (thinking budget +
+    1024) so the reply cap is always above the thinking budget, as Anthropic
+    requires. check_interfaces overrides the level probe's cap fields to
+    reasoning_output_tokens, but _run_probe discards a level probe's cap
+    fields entirely and re-derives the request from the client's own
+    reasoning_level config (still entry["reasoning_levels"], untouched by
+    that override) -- so the wire request keeps the template's real cap."""
+    sent = []
+
+    def handle(request):
+        style = PATHS[request.url.path]
+        body = json.loads(request.content)
+        if request.url.path == "/v1/messages":
+            sent.append(body)
+        return httpx.Response(200, json=REPLIES[style])
+
+    mock_http(monkeypatch, handle)
+    await check(
+        api_key="temporary-secret",
+        styles=("anthropic",),
+        reasoning_template="budget",
+        reasoning_level="on",
+        reasoning_output_tokens=4096,
+        budget_tokens=32768,
+    )
+    level_request = next(b for b in sent if b.get("thinking"))
+    assert level_request["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert level_request["max_tokens"] == 5120
+
+
+@pytest.mark.asyncio
+async def test_recommended_style_falls_back_to_first_accepted_without_reasoning_check(
+    monkeypatch,
+):
+    def handle(request):
+        style = PATHS[request.url.path]
+        return httpx.Response(200, json=REPLIES[style])
+
+    mock_http(monkeypatch, handle)
+    events, result = await check(api_key="temporary-secret")
+    assert result.reasoning_observed == {"chat": False, "responses": False, "anthropic": False}
+    assert result.recommended_style == "chat"

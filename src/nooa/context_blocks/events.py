@@ -72,6 +72,7 @@ class ResultStatus(StrEnum):
     RUNNING = "running"
     COMPLETE = "complete"
     ERROR = "error"
+    CANCELLED = "cancelled"  # interrupted by asyncio cancellation (e.g. a user cancel)
 
 
 # === Base Event ===
@@ -86,7 +87,7 @@ class EventBase(BaseModel):
 
     Subclasses define:
     - event_type: Auto-derived from class name (repr=False), or explicit override
-    - _role: ClassVar for provider role
+    - _role: ClassVar for provider role (read it through ``event_role``)
     - Public fields which are rendered via pformat()
 
     Auto-registration: When a subclass is defined, ``__init_subclass__``
@@ -97,6 +98,11 @@ class EventBase(BaseModel):
     """
 
     _role: ClassVar[Role] = Role.USER
+
+    @property
+    def event_role(self) -> Role:
+        """The provider role this event renders as (the ``_role`` class variable)."""
+        return type(self)._role
 
     @property
     def is_empty(self) -> bool:

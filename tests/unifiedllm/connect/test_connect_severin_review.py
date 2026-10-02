@@ -40,7 +40,9 @@ def test_empty_include_sequences_are_explicit_opt_outs(include):
     from nooa.unifiedllm.replay_state import add_encrypted_reasoning_include
 
     params = {"include": include, "api_base": "https://api.openai.com/v1"}
-    add_encrypted_reasoning_include(params, "responses:openai:https://api.openai.com/v1")
+    add_encrypted_reasoning_include(
+        params, "responses:openai:https://api.openai.com/v1", native_encrypted_reasoning=True
+    )
     assert "include" not in params
 
 

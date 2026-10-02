@@ -31,6 +31,7 @@ from nooa.unifiedllm.cache_policy import (
     enable_openai_explicit_cache,
     reject_boundary_dict,
     reject_legacy_cache_config,
+    wrap_responses_text,
 )
 
 from . import replay_state, response_parts
@@ -1106,6 +1107,75 @@ class TokenCalibration:
 _token_calibration = TokenCalibration()
 
 
+def _wrapped_block_text(value: Any) -> str | None:
+    """Join text from a list of input_text/output_text/text blocks, if any."""
+    if not isinstance(value, list):
+        return None
+    texts = [
+        block["text"]
+        for block in value
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    ]
+    return "\n".join(texts) if texts else None
+
+
+def _token_counter_block(block: Any) -> Any:
+    """Retag one Responses content block into a shape litellm's token_counter
+    recognizes (text/image_url/tool_use/tool_result/thinking/tool_reference).
+    Anything else (e.g. an already-portable block) passes through unchanged."""
+    if not isinstance(block, dict):
+        return block
+    if block.get("type") in {"input_text", "output_text"}:
+        return {**block, "type": "text"}
+    if block.get("type") == "input_image":
+        return {"type": "image_url", "image_url": block.get("image_url")}
+    return block
+
+
+def _token_counter_messages(
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+) -> list[Any]:
+    """Build a calibration-only view litellm.token_counter can actually count.
+
+    litellm's token_counter only recognizes text/image_url/tool_use/
+    tool_result/thinking/tool_reference block types and raises on
+    ResponsesClient's input_text/output_text/input_image blocks (see
+    _transform_messages), which would otherwise always fall through to the
+    per-message fallback below and silently drop that content from the
+    estimate -- collapsing it toward zero and inflating the calibration
+    ratio by whatever multiple was missed. The fallback itself only sums
+    "text" blocks, so an image billed real tokens by the API still counted
+    as zero even after falling back.
+
+    A native function_call_output item's wrapped `output` (see
+    _transform_messages) is invisible to token_counter entirely -- confirmed
+    against the real counter, a short and a very long tool result count
+    identically -- so it never raises and never falls back to the
+    per-message loop either; the text is just silently worth zero tokens.
+    Representing it as an ordinary role/content message gives it the same
+    real chat-template accounting every other message gets.
+    """
+    view = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            view.append(msg)
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            msg = {
+                **msg,
+                "content": [_token_counter_block(block) for block in content],
+            }
+        elif msg.get("type") == "function_call_output":
+            text = _wrapped_block_text(msg.get("output"))
+            if text is None and isinstance(msg.get("output"), str):
+                text = msg["output"]
+            if text:
+                msg = {"role": "tool", "content": text}
+        view.append(msg)
+    return view
+
+
 def _update_token_calibration(
     model: str,
     messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1144,22 +1214,23 @@ def _update_token_calibration(
     # Calibration is best-effort: it must NEVER raise out of the (already paid)
     # response path. The whole estimate — primary AND fallback — is guarded.
     try:
+        counted = _token_counter_messages(calibration_messages)
         try:
-            estimated = litellm.token_counter(model=model, messages=calibration_messages)
+            estimated = litellm.token_counter(model=model, messages=counted)
             if tools:
                 # Count the full messages+tools payload the way the API bills it,
                 # then take the larger of the bare and with-tools counts
                 # (with_tools is normally >= bare; max only guards a tokenizer
                 # that returns less with tools attached).
                 with_tools = litellm.token_counter(
-                    model=model, messages=calibration_messages, tools=cast(Any, tools)
+                    model=model, messages=counted, tools=cast(Any, tools)
                 )
                 estimated = max(estimated, with_tools)
         except Exception:
             # token_counter can reject some message/tool shapes; fall back to the
             # per-message text sum rather than skip calibration entirely.
             estimated = 0
-            for msg in calibration_messages:
+            for msg in counted:
                 content = msg.get("content")
                 if isinstance(content, str):
                     estimated += litellm.token_counter(model=model, text=content)
@@ -1324,10 +1395,24 @@ class UnifiedLLM(ABC):
     async def __aexit__(self, *exc_info):
         await self.aclose()
 
-    def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
+    def _resolve_cache_mapping(
+        self, model: str | None = None, *, responses: bool
+    ) -> Literal["auto", "openai", "anthropic"] | None:
+        """The single source of truth for which cache_control mapping applies.
+
+        Both the marking decision here and the rendering decision in
+        call()/acall() (whether content is pre-wrapped so marking doesn't
+        change a message's wire shape) must agree, or the exact class of bug
+        this stability fix exists to prevent reappears -- silently desynced
+        between two copies of the same logic.
+        """
         mapping = self.cache_breakpoint
         if mapping == "auto" and not responses:
             mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
+        return mapping
+
+    def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
+        mapping = self._resolve_cache_mapping(model, responses=responses)
         return apply_cache_policy(messages, mapping, responses=responses, instructions=instructions)
 
     def count_tokens(self, text: str) -> int:
@@ -1871,7 +1956,13 @@ class CompletionClient(UnifiedLLM):
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
-        projected_messages = replay_state.prepare_chat_messages(messages, state_scope)
+        # Scope's resolved provider (from litellm) and _resolve_cache_mapping
+        # can disagree for gateway-routed models; the latter -- not scope --
+        # decides whether Anthropic-style cache_control marking is applied.
+        cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
+        projected_messages = replay_state.prepare_chat_messages(
+            messages, state_scope, anthropic_cache_marking=cache_mapping == "anthropic"
+        )
         self._validate_provider_layout(projected_messages, effective_model)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
@@ -1964,7 +2055,13 @@ class CompletionClient(UnifiedLLM):
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
-        projected_messages = replay_state.prepare_chat_messages(messages, state_scope)
+        # Scope's resolved provider (from litellm) and _resolve_cache_mapping
+        # can disagree for gateway-routed models; the latter -- not scope --
+        # decides whether Anthropic-style cache_control marking is applied.
+        cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
+        projected_messages = replay_state.prepare_chat_messages(
+            messages, state_scope, anthropic_cache_marking=cache_mapping == "anthropic"
+        )
         self._validate_provider_layout(projected_messages, effective_model)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
@@ -2140,26 +2237,6 @@ class ReasoningCompletionClient(CompletionClient):
 
 
 class ResponsesClient(UnifiedLLM):
-    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
-        """Translate the shared reply cap once, respecting call and level overrides."""
-        config = super()._prepare_call_config(overrides)
-        names = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
-        selected = names & overrides.keys()
-        if not selected:
-            level = overrides.get("reasoning_level", self.reasoning_level)
-            patch = self._reasoning_config.settings(level) if level is not None else {}
-            selected = names & patch.keys()
-        if not selected:
-            selected = names & config.keys()
-        if len(selected) > 1:
-            raise ValueError("Set only one reply limit: max_tokens or max_output_tokens")
-        if selected:
-            value = config[next(iter(selected))]
-            for name in names:
-                config.pop(name, None)
-            config["max_output_tokens"] = value
-        return config
-
     def __init__(
         self,
         model: str,
@@ -2259,8 +2336,11 @@ class ResponsesClient(UnifiedLLM):
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
+            call_config, state_scope
+        )
         input_messages, instructions, openai_explicit = self._prepare_input(
-            messages, state_scope, effective_model
+            messages, state_scope, effective_model, native_encrypted_reasoning
         )
 
         api_params = {
@@ -2286,7 +2366,9 @@ class ResponsesClient(UnifiedLLM):
         if output_model is not None:
             api_params.update(_responses_output_params(output_model))
 
-        replay_state.add_encrypted_reasoning_include(api_params, state_scope)
+        replay_state.add_encrypted_reasoning_include(
+            api_params, state_scope, native_encrypted_reasoning=native_encrypted_reasoning
+        )
 
         http_client = self._http
         assert http_client is not None
@@ -2314,7 +2396,9 @@ class ResponsesClient(UnifiedLLM):
                 instructions=api_params.get("instructions"),
             )
 
-        return self._response_from_output(raw_response, state_scope, usage, output_model)
+        return self._response_from_output(
+            raw_response, state_scope, usage, output_model, native_encrypted_reasoning
+        )
 
     async def acall(
         self,
@@ -2334,8 +2418,11 @@ class ResponsesClient(UnifiedLLM):
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
+            call_config, state_scope
+        )
         input_messages, instructions, openai_explicit = self._prepare_input(
-            messages, state_scope, effective_model
+            messages, state_scope, effective_model, native_encrypted_reasoning
         )
 
         api_params = {
@@ -2361,7 +2448,9 @@ class ResponsesClient(UnifiedLLM):
         if output_model is not None:
             api_params.update(_responses_output_params(output_model))
 
-        replay_state.add_encrypted_reasoning_include(api_params, state_scope)
+        replay_state.add_encrypted_reasoning_include(
+            api_params, state_scope, native_encrypted_reasoning=native_encrypted_reasoning
+        )
 
         http_client = self._http
         assert http_client is not None
@@ -2389,17 +2478,25 @@ class ResponsesClient(UnifiedLLM):
                 instructions=api_params.get("instructions"),
             )
 
-        return self._response_from_output(raw_response, state_scope, usage, output_model)
+        return self._response_from_output(
+            raw_response, state_scope, usage, output_model, native_encrypted_reasoning
+        )
 
-    def _prepare_input(self, messages, state_scope, model):
+    def _prepare_input(self, messages, state_scope, model, native_encrypted_reasoning=False):
         """Choose cache markers only after canonical turn projection."""
-        input_messages, instructions = self._transform_messages(messages, state_scope)
+        input_messages, instructions = self._transform_messages(
+            messages, state_scope, native_encrypted_reasoning
+        )
         return self._prepare_cache_boundary(
             input_messages, responses=True, model=model, instructions=instructions
         )
 
-    def _response_from_output(self, raw_response, scope, usage, output_model):
-        parts = response_parts.capture_parts(raw_response.output, scope)
+    def _response_from_output(
+        self, raw_response, scope, usage, output_model, native_encrypted_reasoning=False
+    ):
+        parts = response_parts.capture_parts(
+            raw_response.output, scope, native_encrypted_reasoning=native_encrypted_reasoning
+        )
         response = LLMResponse(
             raw_response=raw_response,
             parts=parts,
@@ -2419,6 +2516,7 @@ class ResponsesClient(UnifiedLLM):
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         state_scope: str | None = None,
+        native_encrypted_reasoning: bool = False,
     ) -> tuple[list[dict[str, Any] | CacheBoundary], str | None]:
         """Expand turns at dispatch; only leading system messages become instructions."""
         instructions: list[str] = []
@@ -2430,7 +2528,13 @@ class ResponsesClient(UnifiedLLM):
             # Moving a later system message to instructions would reorder history.
             leading_system = leading_system and original.get("role") == "system"
             if isinstance(original, LLMResponse):
-                transformed.extend(response_parts.project_turn(original, state_scope))
+                transformed.extend(
+                    response_parts.project_turn(
+                        original,
+                        state_scope,
+                        native_encrypted_reasoning=native_encrypted_reasoning,
+                    )
+                )
                 continue
             if isinstance(original, CacheBoundary):
                 transformed.append(original)
@@ -2467,10 +2571,16 @@ class ResponsesClient(UnifiedLLM):
                         cache_control,
                     )
                     content = "".join(block.get("text", "") for block in content)
+                # Same stability rationale as the input_text wrapping below --
+                # a plain string here (including "") would render differently
+                # than its cache-marked list form once this tool result
+                # becomes history; apply_cache_policy's marker wraps a string
+                # unconditionally, so this must too.
+                output = [wrap_responses_text(content)]
                 item = {
                     "type": "function_call_output",
                     "call_id": msg["tool_call_id"],
-                    "output": content,
+                    "output": output,
                 }
                 if cache_control:
                     # This is caller-owned mutable metadata, not retained native
@@ -2524,6 +2634,17 @@ class ResponsesClient(UnifiedLLM):
                 # encoded images). LLMResponse took the projection path above,
                 # so this does not copy its retained reasoning blobs.
                 item = copy.deepcopy(msg)
+                if isinstance(item.get("content"), str):
+                    # Always emit input_text/output_text blocks in list form so a
+                    # message's wire shape is stable whether or not it happens to
+                    # be the one apply_cache_policy marks with a cache breakpoint
+                    # this turn. A plain string (including "") would flip to a
+                    # marked block on the turn it's cached and back to a bare
+                    # string the next turn, breaking the provider's
+                    # stable-prefix cache match -- apply_cache_policy's marker
+                    # wraps a string unconditionally, so this must too.
+                    kind = "output_text" if item.get("role") == "assistant" else "input_text"
+                    item["content"] = [wrap_responses_text(item["content"], kind)]
                 if isinstance(item.get("content"), list):
                     for block in item["content"]:
                         if block.get("type") == "text":
@@ -2539,6 +2660,16 @@ class ResponsesClient(UnifiedLLM):
                                 if image.get("detail"):
                                     block["detail"] = image["detail"]
                             block["type"] = "input_image"
+                if item.get("type") == "function_call_output" and isinstance(
+                    item.get("output"), str
+                ):
+                    # Same stability rationale as the tool-message conversion
+                    # branch above -- an already-native function_call_output
+                    # (not converted from a role="tool" message) took this
+                    # generic path unwrapped, so it still flipped shape
+                    # (including "", per apply_cache_policy's unconditional
+                    # string wrap) whenever apply_cache_policy marked it.
+                    item["output"] = [wrap_responses_text(item["output"])]
                 transformed.append(item)
         return transformed, "\n\n".join(instructions) or None
 

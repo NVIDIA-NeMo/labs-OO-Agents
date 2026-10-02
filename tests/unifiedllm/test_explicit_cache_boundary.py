@@ -283,8 +283,8 @@ def test_dynamic_system_messages_remain_after_the_cache_boundary(static_prefix: 
     assert enabled is True
     assert instructions is None
     assert wire[-2:] == [
-        {"role": "system", "content": "live state"},
-        {"role": "system", "content": "more live state"},
+        {"role": "system", "content": [{"type": "input_text", "text": "live state"}]},
+        {"role": "system", "content": [{"type": "input_text", "text": "more live state"}]},
     ]
     if static_prefix:
         assert wire[0]["content"][0] == {
@@ -410,7 +410,7 @@ def test_openai_can_mark_a_system_only_stable_prefix() -> None:
     assert instructions is None
     assert messages[0]["role"] == "system"
     assert messages[0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
-    assert "state-a" in messages[-1]["content"]
+    assert "state-a" in messages[-1]["content"][0]["text"]
 
 
 def test_openai_falls_back_to_instructions_behind_ineligible_output() -> None:
@@ -505,7 +505,9 @@ async def test_openai_fields_reach_the_serialized_http_body(stable_prefix: bool)
             "mode": "explicit"
         }
     else:
-        assert bodies[0]["input"] == [{"role": "user", "content": "changing state"}]
+        assert bodies[0]["input"] == [
+            {"role": "user", "content": [{"type": "input_text", "text": "changing state"}]}
+        ]
     assert "cache_boundary" not in repr(bodies[0])
     assert response.usage is not None
     assert response.usage.cached_input_tokens == 500
@@ -841,7 +843,10 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
         "user",
     ]
     assert messages[-2]["output"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
-    assert messages[-1] == {"role": "user", "content": "live state"}
+    assert messages[-1] == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "live state"}],
+    }
 
 
 def test_gemini_gets_no_invented_inline_cache_field() -> None:

@@ -30,9 +30,10 @@ from nooa_cli.commands import discover_commands
 
 from nooa.context_blocks.events import ToolCallEvent
 from nooa.errors import GenerationError
-from nooa.interactive import RespondReason, RespondResult
+from nooa.interactive import Done
 from nooa.skill import Skill, slash_command
 from nooa.slash_dispatch import SlashCommandResult
+from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
 from nooa.unifiedllm import FakeLLMClient
 
 
@@ -91,8 +92,7 @@ def _completed_llm() -> FakeLLMClient:
         "execute_python",
         {
             "code": (
-                "self.message('ACP response')\n"
-                "return_result(RespondReason.DONE, explanation='request complete')"
+                "self.message('ACP response')\nreturn_result(Done(explanation='request complete'))"
             )
         },
     )
@@ -354,7 +354,7 @@ async def test_adapter_dispatches_agent_facing_skill_command(tmp_path, monkeypat
 
     async def handle(notification):
         notifications.append(notification)
-        return RespondResult(kind=RespondReason.DONE, explanation="done")
+        return Done(explanation="done")
 
     with patch.object(runtime.agent, "handle", side_effect=handle):
         response = await adapter.prompt(
@@ -440,7 +440,7 @@ async def test_unknown_slash_command_is_forwarded_as_an_ordinary_prompt(tmp_path
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, created.session_id)
-    result = RespondResult(kind=RespondReason.DONE, explanation="done")
+    result = Done(explanation="done")
 
     with patch.object(
         runtime.dispatcher,
@@ -596,7 +596,7 @@ async def test_cancel_clears_agent_facing_slash_result_and_session_remains_usabl
 
     async def resumed_handle(notification):
         observed.append(notification)
-        return RespondResult(kind=RespondReason.DONE, explanation="done")
+        return Done(explanation="done")
 
     with patch.object(runtime.agent, "handle", side_effect=resumed_handle):
         resumed = await adapter.prompt(created.session_id, [text_block("continue")])
@@ -736,7 +736,7 @@ async def test_adapter_preserves_prompt_whitespace(tmp_path):
 
     session = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, session.session_id)
-    result = RespondResult(kind=RespondReason.DONE, explanation="done")
+    result = Done(explanation="done")
     submit = AsyncMock(return_value=result)
     with patch.object(runtime.dispatcher, "submit", submit):
         await adapter.prompt(session.session_id, [text_block("  indented\n")])
@@ -1094,7 +1094,7 @@ async def test_adapter_rejects_two_prompts_for_same_session(tmp_path):
     async def submit(_text: str):
         started.set()
         await release.wait()
-        return RespondResult(kind=RespondReason.DONE, explanation="done")
+        return Done(explanation="done")
 
     with patch.object(session.dispatcher, "submit", side_effect=submit):
         first = asyncio.create_task(adapter.prompt(created.session_id, [text_block("first")]))
@@ -1268,13 +1268,14 @@ async def test_adapter_skips_duplicate_mcp_names_without_failing_startup(tmp_pat
 @pytest.mark.parametrize(
     ("message", "stop_reason"),
     [
+        (OUTPUT_TOKENS_EXHAUSTED_MESSAGE, "max_tokens"),
         (
-            "Empty response: the model used all available output tokens on reasoning; "
-            "increase `max_tokens`.",
-            "max_tokens",
+            MAX_ITERATIONS_MESSAGE.format(iterations=10, max_iterations=10, method="work"),
+            "max_turn_requests",
         ),
         (
-            "Generation failed after 10 iterations (max_iterations=10).",
+            "Generation failed after 3 errors (max_retries=3). "
+            "Unable to generate valid code for `work`.",
             "max_turn_requests",
         ),
     ],
@@ -1507,7 +1508,7 @@ async def test_slash_command_still_reports_generation_limits(tmp_path):
     created = await adapter.new_session(str(tmp_path))
     session = await _session(adapter, created.session_id)
 
-    boom = GenerationError("Empty response: the model used all available output tokens")
+    boom = GenerationError(OUTPUT_TOKENS_EXHAUSTED_MESSAGE)
     with (
         # The session has no workspace commands, so force the slash branch.
         patch.object(CodingACPAdapter, "_slash_invocation", return_value=("anything", "now")),
@@ -1536,7 +1537,7 @@ async def test_a_turn_that_ends_early_closes_its_open_tool_cards(tmp_path):
         session.agent.event_manager.add(
             ToolCallEvent(tool_call_id="stale", name="execute_python", arguments={"code": "x"})
         )
-        raise GenerationError("Empty response: the model used all available output tokens")
+        raise GenerationError(OUTPUT_TOKENS_EXHAUSTED_MESSAGE)
 
     with patch.object(session.dispatcher, "submit", side_effect=open_a_card_then_fail):
         await adapter.prompt(created.session_id, [text_block("do the work")])

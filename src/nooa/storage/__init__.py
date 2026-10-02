@@ -13,6 +13,7 @@ from nooa.storage.sqlite import (
     SessionAlreadyActiveError,
     SQLiteStorageManager,
     delete_sqlite_database,
+    read_lock_owner,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "deserialize",
     "delete_sqlite_database",
     "nosnapshot",
+    "read_lock_owner",
     "serialize",
     "snapshotable",
     "snapshot_from_json",
