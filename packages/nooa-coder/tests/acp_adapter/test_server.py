@@ -172,7 +172,7 @@ async def test_loading_a_session_twice_sends_each_later_update_once(
 
     await asyncio.wait_for(session.prompt("again", source="acp"), TIMEOUT)
     await adapter.bridge(response.session_id).flush()
-    assert client.texts(AgentMessageChunk, response.session_id) == ["Second answer."]
+    assert client.texts(AgentMessageChunk, response.session_id) == ["Second answer.\n"]
 
 
 async def test_load_prepares_before_a_requeued_item_runs(
@@ -191,7 +191,7 @@ async def test_load_prepares_before_a_requeued_item_runs(
 
     second = await make_adapter(ScriptedModels({None: [cell("print('later')"), reply("Done.")]}))
     await second.load_session(str(workspace), response.session_id)
-    await client.wait_for(lambda: "Done." in client.texts(AgentMessageChunk))
+    await client.wait_for(lambda: "Done.\n" in client.texts(AgentMessageChunk))
     assert client.updates(response.session_id, ToolCallStart)
 
 

@@ -72,7 +72,7 @@ async def test_choosing_a_model_switches_the_next_turn(make_adapter, workspace, 
     assert [alias for alias, _ in factory.calls][-1] == "smart"
     result = await asyncio.wait_for(adapter.prompt(session_id, [text_block("hi")]), TIMEOUT)
     assert result.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "From the smart model."
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "From the smart model.\n"
 
 
 async def test_a_model_that_cannot_be_built_is_invalid(make_adapter, workspace):
