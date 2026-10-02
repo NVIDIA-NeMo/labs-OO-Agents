@@ -135,7 +135,58 @@ Both remain ordinary awaited methods returning validated Python values.
 develops this choice interactively. The
 [strategy guide](concepts/strategies.md) covers configuration and concurrency.
 
-## 4. Python remains the control plane
+## 4. One agent can use a specialized decision model
+
+Typed methods also let an agent route decision-shaped work to a model built for
+probabilities and choices while its chat LLM handles ordinary generation:
+
+```python
+import os
+from enum import StrEnum
+
+from nooa import Agent, DecisionClient, DecideStrategy, strategy
+
+
+class Department(StrEnum):
+    """Support team responsible for a message.
+
+    Attributes:
+        BILLING: Payments, invoicing, and refunds.
+        TECHNICAL: Bugs, outages, and integrations.
+    """
+
+    BILLING = "billing"
+    TECHNICAL = "technical"
+
+
+decision_model = DecisionClient(
+    "typesafe/jev-1.13",
+    endpoint="https://openrouter.ai/api/alpha/decisions",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
+
+
+class SupportAgent(Agent, llm=llm, decision_model=decision_model):
+    @strategy(DecideStrategy())
+    async def route(self, message: str) -> Department:
+        """Choose the team that should handle the request."""
+        ...
+
+    async def draft_reply(self, message: str) -> str:
+        """Draft a concise and helpful response."""
+        ...
+```
+
+The `route()` method uses the configured decision model; `draft_reply()` uses
+the chat LLM. If `decision_model` is omitted, primitive decisions such as this
+enum can use a Predict-style LLM fallback. Detailed results that retain
+probability distributions, and thresholds that consume probabilities, require
+a decision model rather than inventing evidence in the fallback.
+
+See [Decision models](concepts/decisions.md) for boolean, choice, score,
+threshold, composite-result, and lifecycle details.
+
+## 5. Python remains the control plane
 
 LLMs are useful for judgment; Python is better for rules that must always run.
 Keep each generation method focused on one LLM task, then put sequencing,
@@ -191,7 +242,7 @@ See [Orchestration](concepts/orchestration.md) for decomposition and evidence
 gates, and [Safety](concepts/safety.md) for the actual process and authorization
 boundaries.
 
-## 5. Objects compose into multi-agent systems
+## 6. Objects compose into multi-agent systems
 
 A subagent is another Python object with its own role, context, history, and
 tools. Pass handoffs through typed method arguments and coordinate them with
@@ -255,16 +306,17 @@ shows sequential, parallel, and model-directed composition. The
 [multi-agent guide](concepts/multi-agent-systems.md) covers isolation,
 persistence, and concurrency in more depth.
 
-## 6. The NOOA design in one view
+## 7. The NOOA design in one view
 
-The framework's shape can be summarized in six rules:
+The framework's shape can be summarized in seven rules:
 
 1. An ellipsis delegates one method to an LLM.
 2. A real body keeps exact behavior in Python.
 3. Public methods form the agent's discoverable capability surface.
 4. Return types turn model output into validated program data.
 5. Strategies choose the lightest execution loop for each method.
-6. Objects and ordinary Python compose the complete system.
+6. Specialized model capabilities can share the same typed-method interface.
+7. Objects and ordinary Python compose the complete system.
 
 That is the whole progression: begin with one method that thinks, add a narrow
 Python surface around it, and introduce more objects only when work needs an

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
     from nooa.context_blocks.render_config import RenderConfig
+    from nooa.decisions import UnifiedDecisionModel
     from nooa.runtime.actor import ActorRuntime
     from nooa.runtime.context import ContextApi
     from nooa.runtime.context_manager import ContextManager
@@ -105,7 +106,8 @@ class Agent(metaclass=AgentMeta):
     event_query: Annotated["EventQuery | None", hidden, nosnapshot]
     render_config: Annotated["RenderConfig", hidden, nosnapshot]
     _agent_id: Annotated[str, hidden, nosnapshot]
-    _llm: Annotated["UnifiedLLM", hidden, nosnapshot]
+    _llm: Annotated["UnifiedLLM | None", hidden, nosnapshot]
+    _decision_model: Annotated["UnifiedDecisionModel | None", hidden, nosnapshot]
     _truncation: Annotated["TruncationConfig", hidden, nosnapshot]
     context: Annotated["ContextApi", hidden, nosnapshot]
     events: Annotated["EventsApi", hidden, nosnapshot]
@@ -118,10 +120,18 @@ class Agent(metaclass=AgentMeta):
     _enable_tracing: Annotated[bool, hidden]
     _execution_config: Annotated["ExecutionConfig", hidden]
     _agent_llm: Annotated["UnifiedLLM | _InheritSentinel", hidden]
+    _agent_decision_model: Annotated[
+        "UnifiedDecisionModel | str | None | _InheritSentinel", hidden
+    ] = INHERIT
     # Per-instance cache of clients resolved from @strategy(llm="alias") strings.
     # Populated lazily by nooa.method_llm._resolve_alias, hidden so snapshots
     # and the LLM never see client objects through it.
     _strategy_llm_alias_cache: Annotated["dict[str, UnifiedLLM]", hidden, nosnapshot]
+    _strategy_decision_model_alias_cache: Annotated[
+        "dict[str, UnifiedDecisionModel]", hidden, nosnapshot
+    ]
+    # Per-class cache of clients resolved from agent-level decision_model aliases.
+    _agent_decision_alias_cache: Annotated["dict[str, UnifiedDecisionModel]", hidden, nosnapshot]
     _agent_truncation: Annotated["TruncationConfig", hidden]
     _agent_context_blocks: Annotated["dict[str, str | DynamicContext | None]", hidden]
     _agent_event_query: Annotated["EventQuery | None", hidden]
@@ -132,6 +142,7 @@ class Agent(metaclass=AgentMeta):
     def __init_subclass__(
         cls,
         llm: "UnifiedLLM | _InheritSentinel" = INHERIT,
+        decision_model: "UnifiedDecisionModel | str | None | _InheritSentinel" = INHERIT,
         truncation: "TruncationConfig | None" = None,
         execution: "ExecutionConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
@@ -142,6 +153,10 @@ class Agent(metaclass=AgentMeta):
 
         Args:
             llm: LLM client for this agent class. Omit to enable cascading.
+            decision_model: Optional decision model for ``DecideStrategy`` methods.
+                Pass a client or configured registry alias. Omit to inherit
+                from the class or parent agent. Pass ``None`` to disable an
+                inherited decision model and use the LLM fallback.
             truncation: Optional truncation configuration for stdout/stderr/pprint limits.
             execution: ExecutionConfig for framework-level execution guards.
             context: Class-level context block overrides.
@@ -157,6 +172,8 @@ class Agent(metaclass=AgentMeta):
 
         if llm is not INHERIT:
             cls._agent_llm = llm  # type: ignore[attr-defined]
+        if decision_model is not INHERIT:
+            cls._agent_decision_model = decision_model  # type: ignore[attr-defined]
         if truncation is not None:
             cls._agent_truncation = truncation  # type: ignore[attr-defined]
         if context is not None:
@@ -172,6 +189,7 @@ class Agent(metaclass=AgentMeta):
         self,
         llm: "UnifiedLLM | _InheritSentinel" = INHERIT,
         *,
+        decision_model: "UnifiedDecisionModel | str | None | _InheritSentinel" = INHERIT,
         truncation: "TruncationConfig | None" = None,
         render_config: "RenderConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
@@ -182,6 +200,10 @@ class Agent(metaclass=AgentMeta):
 
         Args:
             llm: LLM client to use. Omit to enable cascading resolution.
+            decision_model: Optional decision model for ``DecideStrategy`` methods.
+                Pass a client or configured registry alias. Omit to inherit
+                from the class or parent agent. Pass ``None`` to disable an
+                inherited decision model and use the LLM fallback.
             truncation: Optional truncation configuration.
             render_config: RenderConfig for block/provider formatter selection.
             context: Instance-level context block overrides.
@@ -221,8 +243,11 @@ class Agent(metaclass=AgentMeta):
         self.event_manager = EventManager(backend=self._storage.event_backend)
 
         # Resolve LLM client with cascading resolution
+        # A resolved decision model makes the chat LLM optional, so an agent
+        # whose generated methods all use DecideStrategy needs no chat client.
         instance_llm = None if llm is INHERIT else llm
-        self._llm = self._resolve_llm(instance_llm)
+        self._decision_model = self._resolve_decision_model(decision_model)
+        self._llm = self._resolve_llm(instance_llm, allow_missing=self._decision_model is not None)
 
         # Resolve and store truncation config (with merge semantics)
         self._truncation = self._resolve_truncation(truncation)
@@ -300,23 +325,26 @@ class Agent(metaclass=AgentMeta):
 
     @no_trace
     @hidden
-    def _resolve_llm(self, instance_llm: "UnifiedLLM | None") -> "UnifiedLLM":
+    def _resolve_llm(
+        self, instance_llm: "UnifiedLLM | None", *, allow_missing: bool = False
+    ) -> "UnifiedLLM | None":
         """Resolve which LLM to use via cascading resolution.
 
         Resolution order:
         1. Instance-level: MyAgent(llm=explicit_llm)
         2. Class hierarchy: class MyAgent(Agent, llm=class_llm) or inherited via MRO
         3. Runtime propagation: Parent agent via context variable
-        4. Error: No LLM found
+        4. None when ``allow_missing`` (a decision-only agent), otherwise error
 
         Args:
             instance_llm: LLM passed to __init__, or None if INHERIT was used
+            allow_missing: Return None instead of raising when no LLM is found
 
         Returns:
-            Resolved UnifiedLLM instance
+            Resolved UnifiedLLM instance, or None for a decision-only agent
 
         Raises:
-            ValueError: If no LLM can be resolved through cascading
+            ValueError: If no LLM can be resolved and ``allow_missing`` is false
         """
         # 1. Instance-level explicit
         if instance_llm is not None:
@@ -329,10 +357,12 @@ class Agent(metaclass=AgentMeta):
 
         # 3. Runtime parent propagation
         parent = _parent_agent_var.get()
-        if parent is not None and hasattr(parent, "_llm"):
+        if parent is not None and getattr(parent, "_llm", None) is not None:
             return parent._llm
 
-        # 4. No LLM found - provide helpful error
+        # 4. No LLM found - a decision model alone is enough, otherwise error
+        if allow_missing:
+            return None
         raise ValueError(
             f"No LLM available for {self.__class__.__name__}. "
             f"Resolution attempted:\n"
@@ -344,8 +374,49 @@ class Agent(metaclass=AgentMeta):
             f"  - Pass llm=my_llm to __init__\n"
             f"  - Set llm=my_llm in class definition\n"
             f"  - Inherit from an Agent class with an LLM\n"
-            f"  - Instantiate within a parent agent's generated code"
+            f"  - Instantiate within a parent agent's generated code\n"
+            f"  - Set decision_model=... if every generated method uses DecideStrategy"
         )
+
+    @no_trace
+    @hidden
+    def _resolve_decision_model(
+        self,
+        instance_model: "UnifiedDecisionModel | str | None | _InheritSentinel",
+    ) -> "UnifiedDecisionModel | None":
+        """Resolve the optional decision model from instance, class, or parent.
+
+        An explicit ``None`` disables inheritance so callers can deliberately
+        select the LLM fallback for ``DecideStrategy`` methods.
+        """
+        selected: Any
+        if instance_model is not INHERIT:
+            selected = instance_model
+        else:
+            selected = getattr(self.__class__, "_agent_decision_model", INHERIT)
+            if selected is INHERIT:
+                parent = _parent_agent_var.get()
+                selected = getattr(parent, "_decision_model", None) if parent is not None else None
+
+        if selected is None:
+            return None
+        if isinstance(selected, str):
+            from nooa.decisions.resolution import resolve_decision_alias
+
+            # Share one client per class and alias: each DecisionClient owns a
+            # connection pool, and the agent never closes its decision model.
+            cls = type(self)
+            cache = cls.__dict__.get("_agent_decision_alias_cache")
+            if cache is None:
+                cache = {}
+                type.__setattr__(cls, "_agent_decision_alias_cache", cache)
+            return resolve_decision_alias(
+                selected,
+                cache,
+                cls.__name__,
+                origin="agent decision_model=",
+            )
+        return cast("UnifiedDecisionModel", selected)
 
     @no_trace
     @hidden
@@ -431,7 +502,15 @@ class Agent(metaclass=AgentMeta):
         Public accessor for the LLM resolved at construction time (see
         ``_resolve_llm``). Framework/host code (e.g. the TUI's model
         switcher) reads this instead of reaching into ``_llm``.
+
+        Raises:
+            RuntimeError: If this is a decision-only agent with no chat LLM.
         """
+        if self._llm is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has a decision model but no chat LLM. "
+                "Pass llm=... to use chat generation."
+            )
         return self._llm
 
     @no_trace
@@ -445,6 +524,12 @@ class Agent(metaclass=AgentMeta):
         calling this — see ``apply_model_limits``.
         """
         self._llm = llm
+
+    @property
+    @hidden
+    def decision_model(self) -> "UnifiedDecisionModel | None":
+        """Return the decision model configured for this agent, if any."""
+        return self._decision_model
 
     @no_trace
     @hidden

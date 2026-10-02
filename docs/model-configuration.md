@@ -57,6 +57,27 @@ you know their exact shape; see [reasoning levels](reasoning-levels.md).
 Do not infer optional encrypted-reasoning or explicit-cache support from an
 OpenAI-compatible URL. Unknown capabilities remain untested.
 
+### Decision models
+
+Decision models use the same flat ``models`` registry. ``client_type`` selects
+the client implementation; aliases are ordinary names and are not grouped by
+model category:
+
+```yaml
+models:
+  decisions:
+    model_name: typesafe/jev-1.13
+    client_type: decision
+    api_style: systemone
+    endpoint: https://openrouter.ai/api/alpha/decisions
+    api_key_env: OPENROUTER_API_KEY
+```
+
+The ``endpoint`` is the complete decisions request URL; NOOA does not append a
+chat-style path. Use the alias through ``decision_model="decisions"`` on an
+agent or method. Calling ``get_llm_client("decisions")`` is rejected because a
+decision client does not implement chat generation.
+
 ## Check the file locally
 
 This loads the file and confirms that the alias exists without calling a model:
@@ -88,6 +109,15 @@ uv run nooa connect your-model --as my-model \
   --endpoint https://gateway.example/v1 --api-style chat \
   --api-key-env MY_MODEL_KEY --no-probe --no-catalogue \
   --output llm_config.yaml
+```
+
+The equivalent credential-free setup for a decision model is:
+
+```sh
+uv run nooa connect typesafe/jev-1.13 --as decisions \
+  --endpoint https://openrouter.ai/api/alpha/decisions \
+  --api-style systemone --api-key-env OPENROUTER_API_KEY \
+  --no-probe --no-catalogue --output llm_config.yaml
 ```
 
 You still confirm before saving or replacing an alias. For agent-assisted setup,

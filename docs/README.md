@@ -63,6 +63,7 @@ directory. For code you can run immediately, use the
 |---|---|
 | [Agents and methods](concepts/agents-and-methods.md) | What is an agent in NOOA, and what does `...` mean? |
 | [Strategies](concepts/strategies.md) | When should a method use Predict or CodeAct? |
+| [Decision models](concepts/decisions.md) | How do I use typed probability, choice, and score decisions? |
 | [Tools and visibility](concepts/tools-and-visibility.md) | How does generated code discover and call capabilities? |
 | [Prompts and context](concepts/prompts-and-context.md) | Where should instructions, inputs, and cross-call information live? |
 | [Local models](local-models.md) | How do I run NOOA with local models? |

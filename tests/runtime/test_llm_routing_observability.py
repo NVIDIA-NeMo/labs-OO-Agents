@@ -9,7 +9,8 @@ from typing import Any, cast
 
 import pytest
 
-from nooa import Agent, strategy
+from nooa import Agent, DecideStrategy, strategy
+from nooa.decisions.client import BooleanAnswer, DecisionRequest, DecisionResponse
 from nooa.runtime.hooks import set_hooks
 from nooa.strategies import CurrentCall, GenerationStrategy, PredictStrategy, RuntimeServices
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
@@ -30,11 +31,25 @@ def _llm(model: str, value: str) -> FakeLLMClient:
     return client
 
 
+class FakeDecisionModel:
+    """Return a deterministic boolean answer for routing tests."""
+
+    model = "decision-model"
+
+    async def adecide(self, request: DecisionRequest) -> DecisionResponse:
+        """Answer every single-output request with true."""
+        return DecisionResponse(
+            model=self.model,
+            answers={"result": BooleanAnswer(probability_true=0.9)},
+        )
+
+
 class RoutingHooks:
     """Capture generation hook metadata for routing assertions."""
 
     def __init__(self) -> None:
         self.generations: list[dict[str, Any]] = []
+        self.completed: list[dict[str, Any]] = []
 
     def before_generation(
         self,
@@ -63,8 +78,9 @@ class RoutingHooks:
         exception: Exception | None,
         context: Any,
         generation_id: str,
+        **kwargs: Any,
     ) -> None:
-        pass
+        self.completed.append({"generation_id": generation_id, **kwargs})
 
     def on_messages_built(
         self,
@@ -256,6 +272,113 @@ async def test_decorator_llm_selection_is_observable(routing_hooks: RoutingHooks
     assert decorator_llm.call_count == 1
     assert routing_hooks.generations[-1]["llm.model_name"] == "decorator-model"
     assert routing_hooks.generations[-1]["llm.selection_source"] == "decorator"
+
+
+@pytest.mark.asyncio
+async def test_native_decision_model_selection_is_observable(
+    routing_hooks: RoutingHooks,
+) -> None:
+    llm = _llm("chat-model", "unused")
+
+    class RoutingAgent(Agent, llm=llm, decision_model=FakeDecisionModel()):
+        @strategy(DecideStrategy())
+        async def urgent(self, text: str) -> bool:
+            """Determine whether the text is urgent."""
+            ...
+
+    set_hooks(cast(Any, routing_hooks))
+
+    assert await RoutingAgent().urgent("production is down") is True
+
+    assert llm.call_count == 0
+    generation = routing_hooks.generations[-1]
+    assert generation["decision.mode"] == "native"
+    assert generation["decision.model_name"] == "decision-model"
+    assert generation["decision.selection_source"] == "agent_decision_model"
+    assert "llm.model_name" not in generation
+    completed = routing_hooks.completed[-1]
+    assert completed["generation_id"] == generation["generation_id"]
+    assert completed["decision.source"] == "native"
+    assert completed["decision.requested_model"] == "decision-model"
+    assert completed["decision.resolved_model"] == "decision-model"
+    assert completed["decision.question_digest"].startswith("sha256:")
+    assert "decision.fallback_schema_version" not in completed
+
+
+@pytest.mark.asyncio
+async def test_method_decision_model_selection_is_observable(
+    routing_hooks: RoutingHooks,
+) -> None:
+    llm = _llm("chat-model", "unused")
+    agent_model = FakeDecisionModel()
+    method_model = FakeDecisionModel()
+    method_model.model = "method-decision-model"
+
+    class RoutingAgent(Agent, llm=llm, decision_model=agent_model):
+        @strategy(DecideStrategy(), decision_model=method_model)
+        async def urgent(self, text: str) -> bool:
+            """Determine whether the text is urgent."""
+            ...
+
+    set_hooks(cast(Any, routing_hooks))
+
+    assert await RoutingAgent().urgent("production is down") is True
+
+    assert llm.call_count == 0
+    generation = routing_hooks.generations[-1]
+    assert generation["decision.mode"] == "native"
+    assert generation["decision.model_name"] == "method-decision-model"
+    assert generation["decision.selection_source"] == "method_decision_model"
+
+
+@pytest.mark.asyncio
+async def test_decision_llm_fallback_selection_is_observable(
+    routing_hooks: RoutingHooks,
+) -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                raw_response=None,
+                content='{"value": true}',
+                tool_calls=[],
+                finish_reason="stop",
+            )
+        ]
+    )
+    llm.model = "fallback-model"
+
+    class RoutingAgent(Agent, llm=llm):
+        @strategy(DecideStrategy())
+        async def urgent(self, text: str) -> bool:
+            """Determine whether the text is urgent."""
+            ...
+
+    set_hooks(cast(Any, routing_hooks))
+
+    assert await RoutingAgent().urgent("production is down") is True
+
+    assert llm.call_count == 1
+    decision_generation = routing_hooks.generations[0]
+    assert decision_generation["decision.mode"] == "llm_fallback"
+    assert decision_generation["llm.model_name"] == "fallback-model"
+    assert decision_generation["llm.selection_source"] == "agent_default"
+    assert "decision.model_name" not in decision_generation
+    completed = next(
+        item
+        for item in routing_hooks.completed
+        if item["generation_id"] == decision_generation["generation_id"]
+    )
+    assert completed["decision.source"] == "llm_fallback"
+    assert completed["decision.requested_model"] == "fallback-model"
+    assert completed["decision.fallback_schema_version"] == "decide-predict-v2"
+    assert completed["decision.question_digest"].startswith("sha256:")
+    assert "decision.resolved_model" not in completed
+    nested = [
+        item
+        for item in routing_hooks.completed
+        if item["generation_id"] != decision_generation["generation_id"]
+    ]
+    assert all("decision.source" not in item for item in nested)
 
 
 @pytest.mark.asyncio

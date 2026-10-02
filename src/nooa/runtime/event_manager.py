@@ -35,6 +35,9 @@ if TYPE_CHECKING:
         AgentCallContext,
         AgentCallMiddleware,
         AgentCallNext,
+        DecisionCallContext,
+        DecisionCallMiddleware,
+        DecisionCallNext,
         ExecutePythonContext,
         ExecutePythonMiddleware,
         ExecutePythonNext,
@@ -141,6 +144,7 @@ class EventManager:
         self._middleware: dict[str, list[Any]] = {
             "agent_call": [],
             "llm_call": [],
+            "decision_call": [],
             "execute_python": [],
         }
         self._middleware_id: int = next(_em_id_counter)
@@ -364,7 +368,7 @@ class EventManager:
     def intercept(
         self,
         kind: str,
-        fn: "AgentCallMiddleware | LLMCallMiddleware | ExecutePythonMiddleware",
+        fn: "AgentCallMiddleware | LLMCallMiddleware | DecisionCallMiddleware | ExecutePythonMiddleware",
     ) -> Callable[[], None]:
         """Register middleware that wraps a lifecycle operation.
 
@@ -379,6 +383,8 @@ class EventManager:
             agent_call middleware        ← auth, rate limiting (traced async only)
               → llm_call middleware      ← per-call guardrails
                 → acall()
+              → decision_call middleware ← decision policies
+                → adecide()
               → execute_python middleware ← per-exec guardrails
                 → execute_code()
               → result recorded as event
@@ -402,7 +408,8 @@ class EventManager:
            first call. See :class:`~nooa.runtime.middleware.AgentCallContext`.
 
         Args:
-            kind: ``"agent_call"``, ``"llm_call"``, or ``"execute_python"``.
+            kind: ``"agent_call"``, ``"llm_call"``, ``"decision_call"``, or
+                ``"execute_python"``.
             fn: Async middleware ``(ctx, nxt) -> ctx``.
 
         Returns:
@@ -426,9 +433,9 @@ class EventManager:
     async def run_middleware(
         self,
         kind: str,
-        ctx: "AgentCallContext | LLMCallContext | ExecutePythonContext",
-        core: "AgentCallNext | LLMCallNext | ExecutePythonNext",
-    ) -> "AgentCallContext | LLMCallContext | ExecutePythonContext":
+        ctx: "AgentCallContext | LLMCallContext | DecisionCallContext | ExecutePythonContext",
+        core: "AgentCallNext | LLMCallNext | DecisionCallNext | ExecutePythonNext",
+    ) -> "AgentCallContext | LLMCallContext | DecisionCallContext | ExecutePythonContext":
         """Execute middleware chain for *kind*, finishing with *core*.
 
         When no middleware is registered, calls *core* directly (zero overhead).

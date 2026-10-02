@@ -164,6 +164,41 @@ def test_plan_then_explicit_save_has_no_http(monkeypatch, tmp_path):
     assert "Alias exists" in json.loads(blocked.stdout)["error"]["message"]
 
 
+def test_decision_model_can_be_saved_without_network_calls(monkeypatch, tmp_path):
+    """The wizard saves a flat decision entry selected by client_type."""
+    mock_http(monkeypatch, lambda request: pytest.fail("No HTTP request expected"))
+    output = tmp_path / "llm_config.yaml"
+
+    result = CliRunner().invoke(
+        command,
+        [
+            "decision-model",
+            "--as",
+            "decisions",
+            "--endpoint",
+            "https://decision.example/v1/systemone",
+            "--api-style",
+            "systemone",
+            "--api-key-env",
+            "DECISION_API_KEY",
+            "--no-probe",
+            "--no-catalogue",
+            "--yes",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    entry = yaml.safe_load(output.read_text())["models"]["decisions"]
+    assert entry["model_name"] == "decision-model"
+    assert entry["client_type"] == "decision"
+    assert entry["api_style"] == "systemone"
+    assert entry["endpoint"] == "https://decision.example/v1/systemone"
+    assert entry["api_key_env"] == "DECISION_API_KEY"
+    assert "max_tokens" not in entry
+
+
 @pytest.mark.parametrize(
     "args", [["--stage", "routing"], [*BASE, "--stage", "routing", "--no-probe"]]
 )
@@ -353,3 +388,80 @@ def test_reasoning_level_rejected_outside_interfaces_stage(monkeypatch):
     result = CliRunner().invoke(command, [*BASE, "--stage", "routing", "--reasoning-level", "high"])
     assert result.exit_code == 2
     assert "--reasoning-level" in result.output
+
+
+DECISION_STAGE = [
+    "decision-model",
+    "--endpoint",
+    "https://decision.example/v1/systemone",
+    "--api-style",
+    "systemone",
+    "--as",
+    "decisions",
+]
+
+
+def test_decision_discover_stage_is_a_usage_error_without_http(monkeypatch):
+    mock_http(monkeypatch, lambda request: pytest.fail("No HTTP request expected"))
+
+    result = CliRunner().invoke(command, [*DECISION_STAGE, "--stage", "discover"])
+
+    assert result.exit_code == 2
+    assert "do not list models" in json.loads(result.stdout)["error"]["message"]
+
+
+def test_decision_discovery_file_is_a_usage_error(monkeypatch, tmp_path):
+    mock_http(monkeypatch, lambda request: pytest.fail("No HTTP request expected"))
+    discovery = tmp_path / "discovery.json"
+    discovery.write_text("{}")
+
+    result = CliRunner().invoke(
+        command,
+        [*DECISION_STAGE, "--stage", "routing", "--discovery-file", str(discovery)],
+    )
+
+    assert result.exit_code == 2
+    assert "--discovery-file" in json.loads(result.stdout)["error"]["message"]
+
+
+def test_decision_interfaces_stage_probes_only_systemone(monkeypatch):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"model": "decision-model", "answers": {"supported": {"noul": 0.7}}},
+        )
+
+    mock_http(monkeypatch, handle)
+
+    result = CliRunner().invoke(command, [*DECISION_STAGE, "--stage", "interfaces"])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["data"]["accepted"] == ["systemone"]
+    assert [str(request.url) for request in requests] == ["https://decision.example/v1/systemone"]
+
+
+def test_decision_interfaces_rerun_hint_keeps_systemone(monkeypatch):
+    mock_http(monkeypatch, lambda request: httpx.Response(503))
+
+    result = CliRunner().invoke(command, [*DECISION_STAGE, "--stage", "interfaces"])
+
+    report = json.loads(result.stdout)
+    rerun = json.dumps(report)
+    assert "--api-style systemone" in rerun
+    assert "--output-tokens" not in rerun
+
+
+def test_decision_interfaces_rejects_reasoning_template(monkeypatch):
+    mock_http(monkeypatch, lambda request: pytest.fail("No HTTP request expected"))
+
+    result = CliRunner().invoke(
+        command,
+        [*DECISION_STAGE, "--stage", "interfaces", "--reasoning-template", "effort"],
+    )
+
+    assert result.exit_code == 2
+    assert "do not apply to --api-style systemone" in json.loads(result.stdout)["error"]["message"]
