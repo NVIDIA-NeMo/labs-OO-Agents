@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for secret scrubbing in telemetry."""
 
+import gc
 import json
 from unittest.mock import patch
 
@@ -24,6 +25,24 @@ def _reset_stats():
     stats.reset()
 
 
+@pytest.fixture
+def _no_collection_during_deep_recursion():
+    """Keep unrelated finalizers from running at the recursion limit.
+
+    These cases recurse until Python raises RecursionError. If the garbage
+    collector runs there and finalizes an object left by an earlier test, the
+    finalizer's own error cannot be handled ("Failed to process unraisable
+    exception") and the test fails depending on test order.
+    """
+    gc.collect()
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+
+
+@pytest.mark.usefixtures("_no_collection_during_deep_recursion")
 @pytest.mark.parametrize("shape", ["json", "mapping", "cycle", "decoded_recursion"])
 def test_excessive_nesting_redacts_the_entire_value(shape):
     if shape == "json":
