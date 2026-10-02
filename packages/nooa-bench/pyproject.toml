@@ -13,6 +13,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "nooa",
     "nooa-cli",
+    "nooa-coder",
     "click>=8.1",
 ]
 
@@ -27,6 +28,7 @@ nemo-harbor = "nooa_bench.runner:main"
 [tool.uv.sources]
 nooa = { workspace = true }
 nooa-cli = { workspace = true }
+nooa-coder = { workspace = true }
 
 [build-system]
 requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]

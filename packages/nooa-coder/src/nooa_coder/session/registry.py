@@ -34,7 +34,7 @@ from nooa_coder.session.items import (
     SessionStatus,
     TurnEndedUpdate,
 )
-from nooa_coder.session.loader import AgentFactory, default_agent_factory, load_typed
+from nooa_coder.session.loader import AgentFactory, load_typed
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.port import install_port
 from nooa_coder.session.session import Session, SessionClosedError
@@ -80,9 +80,11 @@ class SessionRegistry:
         agent_factory: AgentFactory | None = None,
         llm_factory: LLMFactory | None = None,
     ) -> None:
-        """``agent_factory(options, storage)`` builds each agent (default: import
-        ``options.agent_spec``). ``llm_factory(model_alias, workspace)`` builds
-        the model client for every session whose options carry no ``llm``;
+        """``agent_factory(options, storage)`` builds each agent (default: the
+        coding agent's ``create_session_agent``, which loads
+        ``options.agent_spec`` and gives a coding agent its workspace
+        settings). ``llm_factory(model_alias, workspace)`` builds the model
+        client for every session whose options carry no ``llm``;
         ``model_alias`` is ``options.model``, or ``None`` for the factory's
         default. The session owns that client and closes it. When the client
         has a non-empty ``alias`` attribute, it is recorded as ``info.model``.
@@ -91,7 +93,11 @@ class SessionRegistry:
         self.llm_factory = llm_factory
         self.sessions: dict[str, Session] = {}
         self._reserved: dict[str, asyncio.Future[Session | None]] = {}
-        self._agent_factory: AgentFactory = agent_factory or default_agent_factory
+        if agent_factory is None:
+            from nooa_coder.coding.factory import create_session_agent
+
+            agent_factory = create_session_agent
+        self._agent_factory: AgentFactory = agent_factory
         # Parent-side delivery state, by (parent id, child id): only the
         # child's own parent can wait for or take its results.
         self._waiters: dict[tuple[str, str], asyncio.Future[Done]] = {}
@@ -311,11 +317,12 @@ class SessionRegistry:
             waiter = None
         try:
             if kind == "done":
-                done = _rebuild_done(update)
+                # Built for both paths: ChildResult rebuilds a TaskResult sent as data.
+                result = ChildResult(child=ref, done=_rebuild_done(update))
                 if waiter is not None:
-                    waiter.set_result(done)
+                    waiter.set_result(result.done)
                 else:
-                    self._put(parent, child.id, ChildResult(child=ref, done=done), source)
+                    self._put(parent, child.id, result, source)
             elif kind in ("error", "cancelled"):
                 # A cancelled turn ends without a result: to the parent it is a failure.
                 error = (
@@ -460,7 +467,8 @@ class SessionRegistry:
         A live id returns the same Session (the caller subscribes and reads
         ``transcript()``). Otherwise the file is opened (claim-checked by
         the store: ``SessionAlreadyActiveError`` if another owner has it),
-        the agent is built and its latest snapshot restored,
+        the agent is built and its latest snapshot restored (then the
+        agent's ``after_restore()`` runs, if it has one),
         ``TuiSessionResumed`` is emitted, items admitted but never consumed
         or withdrawn are re-queued (``ItemRequeued``), and the session is
         published and started. Loading a child whose parent is not live is
@@ -491,6 +499,9 @@ class SessionRegistry:
             self._refuse_if_tree_active_elsewhere(session_id, handle.info.parent_id)
             session = await self._build(self._stored_options(handle.info, overrides), handle)
             restored = handle.storage.restore_latest_snapshot(session.agent)
+            after_restore = getattr(session.agent, "after_restore", None)
+            if restored and callable(after_restore):
+                after_restore()
             session.agent.event_manager.add(
                 TuiSessionResumed(session_id=session_id, restored=restored)
             )

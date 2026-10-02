@@ -1575,6 +1575,7 @@ dependencies = [
     { name = "click" },
     { name = "nooa" },
     { name = "nooa-cli" },
+    { name = "nooa-coder" },
 ]
 
 [package.metadata]
@@ -1582,6 +1583,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "nooa", editable = "." },
     { name = "nooa-cli", editable = "packages/nooa-cli" },
+    { name = "nooa-coder", editable = "packages/nooa-coder" },
 ]
 
 [[package]]
@@ -1635,15 +1637,34 @@ provides-extras = ["ast", "datascience"]
 name = "nooa-coder"
 source = { editable = "packages/nooa-coder" }
 dependencies = [
-    { name = "nooa" },
+    { name = "nooa", extra = ["mcp"] },
     { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+ast = [
+    { name = "tree-sitter" },
+    { name = "tree-sitter-go" },
+    { name = "tree-sitter-javascript" },
+    { name = "tree-sitter-python" },
+    { name = "tree-sitter-rust" },
+    { name = "tree-sitter-typescript" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "nooa", editable = "." },
+    { name = "nooa", extras = ["mcp"], editable = "." },
     { name = "pydantic", specifier = ">=2.5.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "tree-sitter", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-go", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-javascript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-python", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-rust", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-typescript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
 ]
+provides-extras = ["ast"]
 
 [[package]]
 name = "nooa-memory"

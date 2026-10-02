@@ -827,6 +827,9 @@ from nooa_bench import bench_agent
 assert bench_agent.BenchAgent
 for name in ('agent', 'activity', 'slash_commands', 'settings'):
     assert 'nooa_cli.coding.' + name not in sys.modules, name
+    assert 'nooa_coder.coding.' + name not in sys.modules, name
+assert 'nooa_coder.session.items' in sys.modules
+assert not [m for m in sys.modules if m.startswith('nooa_coder.coding')]
 """,
         ],
         check=True,
@@ -870,3 +873,13 @@ async def test_original_task_remains_after_prefill_compaction(tmp_path):
         assert "TaskResult" in rendered
     finally:
         await agent.close()
+
+
+def test_task_result_is_the_session_layers_class():
+    """Bench and the coding agent's children return one TaskResult class."""
+    from nooa_coder.session.items import TaskResult as SessionTaskResult
+
+    assert TaskResult is SessionTaskResult
+    fields = TaskResult.model_fields
+    assert "cite the actual results" in (fields["evidence"].description or "")
+    assert fields["how_to_verify"].title == "How to Verify"
