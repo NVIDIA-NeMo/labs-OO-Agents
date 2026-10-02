@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from nooa_coder.hosts.headless import Tree, open_tree
+    from nooa_coder.hosts.headless import TaskRun, Tree, open_tree, run_task
     from nooa_coder.session.items import (
         ChildFailed,
         ChildFailedError,
@@ -46,8 +46,7 @@ if TYPE_CHECKING:
 # `nooa coder` command, which `nooa` loads at startup with every plugin)
 # must not import the framework.
 _EXPORT_MODULES = {
-    "Tree": "hosts.headless",
-    "open_tree": "hosts.headless",
+    **dict.fromkeys(("TaskRun", "Tree", "open_tree", "run_task"), "hosts.headless"),
     **dict.fromkeys(
         (
             "ChildFailed ChildFailedError ChildQuestion ChildRef ChildResult CommandInfo "
@@ -109,6 +108,7 @@ __all__ = [
     "SessionRegistry",
     "SessionStore",
     "TaskResult",
+    "TaskRun",
     "TranscriptEntry",
     "Tree",
     "TurnCancelled",
@@ -118,4 +118,5 @@ __all__ = [
     "__version__",
     "load_agent_class",
     "open_tree",
+    "run_task",
 ]

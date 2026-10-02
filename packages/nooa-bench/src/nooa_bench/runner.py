@@ -315,7 +315,9 @@ async def _run(
                 result = await agent._run_evaluation(task_input)
         else:
             result = await agent._run_evaluation(task_input)
-        result.update(get_task_tokens())
+        # Counts an agent reports win: turns run in a session's own context
+        # (the coder agent) are invisible to this task's token counter.
+        result = {**get_task_tokens(), **result}
         _write_result(result, model, agent_type)
         nooa_trajectory_filename = "trajectory.nooa.json" if enable_atif else "trajectory.json"
         if _write_trajectory(agent, filename=nooa_trajectory_filename):
