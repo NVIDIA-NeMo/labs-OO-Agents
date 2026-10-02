@@ -38,11 +38,13 @@ RESULT = (
 # methods say locals last one method call, and the repo tools take ``cwd``.
 # Lowered when CodingAgent moved to CodeActV2 (2026-09-25; was 19,827 / 23,935
 # for handle): measured values plus about 2% headroom.
+# Raised when python_cell_tools added the TodoManager API (2026-10-02, about
+# 2,570 characters): measured values plus about 2% headroom.
 LIMITS = {
-    (CODER, "handle"): (11_500, 15_200),  # measured 11,279 / 14,879
-    (CODER, "handle_batch"): (11_500, 14_800),  # measured 11,279 / 14,523
-    (EXPERIMENTAL, "handle"): (11_200, 13_700),  # measured 11,162 / 13,627
-    (EXPERIMENTAL, "handle_batch"): (11_200, 14_300),  # measured 11,162 / 14,006 (P2a port docs)
+    (CODER, "handle"): (14_100, 17_800),  # measured 13,850 / 17,450
+    (CODER, "handle_batch"): (14_100, 17_450),  # measured 13,850 / 17,094
+    (EXPERIMENTAL, "handle"): (14_000, 16_500),  # measured 13,688 / 16,153
+    (EXPERIMENTAL, "handle_batch"): (14_000, 16_850),  # measured 13,688 / 16,506
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

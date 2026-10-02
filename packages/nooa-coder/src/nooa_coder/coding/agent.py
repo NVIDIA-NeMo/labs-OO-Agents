@@ -217,7 +217,7 @@ class CodingAgent(InteractiveAgent):
         self.slash_commands = CodingSlashCommandRegistry(self, skills_dirs=skills_dirs or ())
 
         self.context["python_cell_tools"] = Context(
-            doc(RepoTools, ActivityShellTools, concise=True),
+            doc(RepoTools, ActivityShellTools, TodoManager, concise=True),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
