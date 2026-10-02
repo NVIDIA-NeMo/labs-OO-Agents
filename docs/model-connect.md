@@ -444,7 +444,7 @@ discard comments. Literal credential fields are rejected at any nesting depth
 by the shared library, not only the JSON frontend.
 
 Unchanged accepted UnifiedLLM probes are reused when reconnecting. Older direct-HTTP
-checks are repeated: they did not test the runtime. Changing the route or
+checks are repeated: they did not test the runtime. Changing the route, transport, or
 level declarations changes which probe requests can be reused; unchanged requests
 on the same route remain reusable. `--output` chooses another
 file; load custom paths with `NEMO_OO_LLM_CONFIG` or `reload_registry(path)`.
@@ -454,16 +454,37 @@ higher-priority file shadows the saved alias.
 
 ### Saved routing and evidence fields
 
-New entries include `transport: direct`, selecting the SDK transport once direct
-support (#337) is installed. Earlier runtimes ignore this field and continue using
-LiteLLM; checks on those runtimes are not evidence of direct-transport behavior.
-Each completed check records the runtime's actual `transport` separately.
-If the runtime bypasses Connect's owned HTTP pool (for example an unauthenticated
-legacy fallback), accepted requests are labelled unobserved, not as settings
-proven missing from the wire.
-Edits preserve explicit `transport: litellm` choices. `api_style` identifies the
-wire interface for Connect and the forthcoming direct runtime. Connect does not
-infer a `replay_vendor` from an interface or model name.
+Connect inference uses the official OpenAI/Anthropic SDKs by default. Add
+`--litellm` to use LiteLLM instead, in the full wizard (including editing) or
+any inference/plan stage. New entries persist `direct: true` by default, or
+`direct: false` with `--litellm`, and matching informational `transport`
+metadata. **The boolean `direct` selects the runtime path**; `transport` and
+`api_style` metadata alone do not. Ordinary clients and older aliases without
+an explicit `direct: true` still use LiteLLM; Connect does not migrate them.
+Native Messages uses `anthropic/<model>`, compatible Chat and Responses use
+`openai/<model>` with the selected client type.
+
+Programmatic `plan`, `configure_entry`, and `check_interfaces` share Connect's
+direct default. `configure_entry` preserves a stored `direct: false`, as does
+`plan(existing_entry=...)` unless its `direct` argument overrides it. The CLI
+wizard explicitly selects its default on both new and edited entries; `--litellm`
+wins over saved settings. Edited entries do not retain stale probe/session evidence.
+
+`--stage save` preserves the input's tested transport when no flag is supplied
+(including old inputs without a boolean, which ran through LiteLLM). Switching
+a tested direct input with `--litellm` is rejected: rerun checks on LiteLLM first.
+An untested input can be switched. Discovery and catalogue remain metadata-only
+HTTP operations, unaffected by inference selection.
+
+Completed checks report actual `client.direct` as `transport`; bounded
+`wire_evidence` describes owned HTTP request capture, the actual serialized
+model/reply-limit fields where available, and the selected interface. Missing
+capture is unknown, not proof of dropped settings. These hooks also preserve
+transport/capture diagnostics on failed probe requests. Direct SDK calls bypass
+LiteLLM callbacks, provider LLM spans and LiteLLM request/response journals;
+outer agent tracing and usage remain available, and unavailable provider cost
+is not a claim of free inference. See [direct provider SDKs](direct-provider-sdks.md).
+Connect does not infer a `replay_vendor` from an interface or model name.
 
 `provenance` contains diagnostic evidence and metadata, not runtime request
 settings. It lives in the connect session and in stage JSON, never in the
@@ -507,7 +528,7 @@ budget before running additional probes. This reuses the exact accepted routing
 request; level and tool requests still need their own checks.
 There are no callbacks, terminal imports, prompts, agent instances or tool
 execution. Discovery uses HTTPX; generation checks lazily load UnifiedLLM and
-the current runtime (LiteLLM by default). No temporary registry entries or global
+the selected runtime (direct SDKs by default, or `direct=False` for LiteLLM). No temporary registry entries or global
 registry changes are needed. Each checked client is closed even if its call fails.
 The TUI keeps model selection, confirmation, secret persistence and switching;
 it can call these async functions directly without invoking Click or a subprocess.

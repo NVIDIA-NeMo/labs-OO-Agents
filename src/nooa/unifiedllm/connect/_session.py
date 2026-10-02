@@ -366,6 +366,14 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 record = {
                     "outcome": "not_confirmed",
                     "error": type(exc).__name__,
+                    "transport": "direct" if client.direct else "litellm",
+                    "wire_evidence": {
+                        "api_style": entry["api_style"],
+                        "request_count": len(bodies) - before,
+                        "telemetry": "owned httpx capture; LiteLLM callbacks unavailable for direct SDKs"
+                        if client.direct
+                        else "owned httpx capture",
+                    },
                     "tokens_charged_to_budget": spent,
                     "attempts": deepcopy(attempts),
                 }
@@ -396,7 +404,14 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 "tested_reasoning_level": level,
                 "configured_reply_tokens": configured_cap,
                 "tested_reply_tokens": reply_cap,
-                "transport": getattr(client, "transport", "litellm"),
+                "transport": "direct" if client.direct else "litellm",
+                "wire_evidence": {
+                    "api_style": entry["api_style"],
+                    "request_count": len(bodies) - before,
+                    "telemetry": "owned httpx capture; LiteLLM callbacks unavailable for direct SDKs"
+                    if client.direct
+                    else "owned httpx capture",
+                },
             }
             attempts.append(
                 {
@@ -515,6 +530,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 else "warning"
                 if stable and (explicit or entry["api_style"] == "chat")
                 else "not_confirmed",
+                "transport": "direct" if client.direct else "litellm",
                 "cached_input_tokens": cached,
                 "input_tokens": best["input_tokens"],
                 "readings": readings,
@@ -532,6 +548,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             "reasoning_retention",
             {
                 "outcome": "confirmed" if retained and settings_ok else "not_confirmed",
+                "transport": "direct" if client.direct else "litellm",
                 "reasoning_observed_by_turn": observations,
                 "settings_retained": settings_ok if controls else None,
                 "state_retained": retained if expected else None,
@@ -545,7 +562,14 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 else "No replayable reasoning returned; check reasoning/replay settings or try another interface. This does not mean reasoning is off",
             },
         )
-        yield ProbeUpdate("session", {"outcome": "completed", "tokens_charged_to_budget": spent})
+        yield ProbeUpdate(
+            "session",
+            {
+                "outcome": "completed",
+                "transport": "direct" if client.direct else "litellm",
+                "tokens_charged_to_budget": spent,
+            },
+        )
     finally:
         hooks.remove(capture)
         await client.aclose()

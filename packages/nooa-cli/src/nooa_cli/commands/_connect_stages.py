@@ -63,6 +63,7 @@ def run_stage(
     discovery_file=None,
     invalid_options=(),
     working_dir=False,
+    direct=None,
 ):
     """Return JSON; only an explicit --prompt-key enables a masked stdin prompt."""
     import asyncio
@@ -107,10 +108,41 @@ def run_stage(
                 or not isinstance(data.get("entry"), dict)
             ):
                 raise click.UsageError("Save input requires an alias string and an entry mapping")
+            stored_direct = data["entry"].get("direct", False)
+            provenance = data["entry"].get("provenance", {})
+            if not isinstance(provenance, dict):
+                raise click.UsageError("provenance must be a mapping")
+            if (
+                direct is not None
+                and direct != stored_direct
+                and (
+                    any(
+                        provenance.get(field)
+                        for field in (
+                            "probes",
+                            "session_checks",
+                            "interfaces",
+                            "requests_accepted",
+                            "reasoning_observed",
+                        )
+                    )
+                    or provenance.get("encrypted_reasoning", {}).get("outcome")
+                    in {"accepted", "rejected"}
+                    or document.get("checks")
+                    or data.get("checks")
+                )
+            ):
+                raise click.UsageError(
+                    "Transport differs from tested input; run checks again with --litellm before saving"
+                )
             try:
                 alias, entry = (
                     data["alias"],
-                    connect.configure_entry(data["entry"], reply_tokens=reply_tokens),
+                    connect.configure_entry(
+                        data["entry"],
+                        reply_tokens=reply_tokens,
+                        direct=stored_direct if direct is None else direct,
+                    ),
                 )
             except ValueError as exc:
                 raise click.UsageError(str(exc)) from None
@@ -163,6 +195,7 @@ def run_stage(
                 style,
                 endpoint,
                 key_env,
+                direct=True if direct is None else direct,
                 budget_tokens=budget,
                 output_tokens=output_tokens,
                 reasoning_output_tokens=reasoning_output_tokens,
@@ -193,6 +226,7 @@ def run_stage(
                 raise click.UsageError("Stage requires MODEL")
             if stage == "discover":
                 data = asdict(asyncio.run(connect.discover(endpoint, api_style=style, api_key=key)))
+                entry = {}  # Discovery is metadata-only, not an inference proposal.
                 ok = True
             elif stage == "plan":
                 if not model or not api_style:
@@ -211,6 +245,7 @@ def run_stage(
                         budget_tokens=budget,
                         output_tokens=output_tokens,
                         api_key=key,
+                        direct=True if direct is None else direct,
                         reasoning_template=reasoning_template,
                         reasoning_level=reasoning_level or "medium",
                         reasoning_output_tokens=reasoning_output_tokens,
@@ -274,6 +309,13 @@ def run_stage(
         else None
     )
     run_context = diagnostic_context(
+        direct=entry.get("direct")
+        if entry and stage not in {"discover", "catalogue"}
+        else (
+            (True if direct is None else direct)
+            if stage not in {"discover", "catalogue", "save"}
+            else None
+        ),
         target=output,
         alias=alias,
         model=model,

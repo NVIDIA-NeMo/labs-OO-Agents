@@ -19,6 +19,7 @@ class ProbeRecord(TypedDict, total=False):
     error_chain: list[str]
     timeout_kind: str
     request_shape: dict[str, Any]
+    wire_evidence: dict[str, Any]
     status_code: int
     reasoning_observed: bool
     reasoning_encrypted: bool

@@ -1,9 +1,17 @@
 # Opt-in direct provider SDKs
 
-The default transport remains **LiteLLM**. Use the strict boolean constructor
+Ordinary clients and registry aliases without `direct: true` default to **LiteLLM**. Use the strict boolean constructor
 setting `direct=True` to send through the official OpenAI or Anthropic SDK.
 There is no environment transport selector. Saved Connect `transport` or
 `api_style` metadata does not enable direct mode or select its protocol.
+
+**Connect is the exception at construction time:** `nooa connect` defaults to
+the direct SDK path and persists `direct: true`. `nooa connect --litellm` checks
+and saves `direct: false` instead, including wizard edits and inference stages.
+Programmatic Connect configuration shares that default while preserving explicit
+stored booleans. Stage save preserves the tested input transport and rejects
+a flag that would relabel existing evidence. Existing arbitrary aliases are
+not migrated. See [model Connect](model-connect.md#saved-routing-and-evidence-fields).
 
 ## Current-main compatibility
 

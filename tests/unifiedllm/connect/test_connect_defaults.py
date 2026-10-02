@@ -14,8 +14,9 @@ from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
 @pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("direct", [True, False])
 @pytest.mark.asyncio
-async def test_saved_defaults_reach_wire(tmp_path, monkeypatch, style, asynchronous):
+async def test_saved_defaults_reach_wire(tmp_path, monkeypatch, style, asynchronous, direct):
     sent = []
 
     def handle(request):
@@ -32,11 +33,20 @@ async def test_saved_defaults_reach_wire(tmp_path, monkeypatch, style, asynchron
     monkeypatch.setattr(httpx.Client, "__init__", init)
     monkeypatch.setattr(registry, "MODELS", {})
     model = "claude-sonnet-4-6" if style == "anthropic" else "gpt-5.1"
-    proposal = connect.plan("test", model, style, "https://api.test/v1", "", reply_tokens=1536)
+    proposal = connect.plan(
+        "test", model, style, "https://api.test/v1", "", reply_tokens=1536, direct=direct
+    )
+    checked = await connect.check_stage(proposal, "routing", api_key="test-key")
+    assert checked.entry["provenance"]["probes"]["routing"]["transport"] == (
+        "direct" if direct else "litellm"
+    )
+    sent.clear()
     path = tmp_path / "models.yaml"
-    connect.write(proposal.entry, path, alias="test")
+    connect.write(checked.entry, path, alias="test")
     registry.reload_registry(path)
     client = registry.get_llm_client("test", api_key="test-key")
+    assert client.direct is direct
+    assert yaml.safe_load(path.read_text())["models"]["test"]["direct"] is direct
     try:
         messages = [{"role": "user", "content": "Hello"}]
         if asynchronous:

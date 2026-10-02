@@ -157,7 +157,7 @@ async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings
         return client
 
     monkeypatch.setattr(registry, "client_from_config", accepted_without_owned_pool)
-    plan = connect.plan("model", "model", "chat", "http://localhost:8000/v1", "")
+    plan = connect.plan("model", "model", "chat", "http://localhost:8000/v1", "", direct=False)
     result = await connect.run(plan, approved="minimal")
     record = result.entry["provenance"]["probes"]["routing"]
     assert record["outcome"] == "not_confirmed"

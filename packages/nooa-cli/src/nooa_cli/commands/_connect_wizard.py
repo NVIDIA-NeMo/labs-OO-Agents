@@ -37,6 +37,7 @@ class WizardState:
     configured: Any = None
     context_window: Any = None
     data: Any = None
+    direct: bool = True
     default_style: Any = None
     discovery_endpoint: Any = None
     discovery_file: Any = None
@@ -92,6 +93,10 @@ async def display_checks(events, *, reasoning_levels=None, summary=True):
                     return event
                 missing = connect.unobserved_reasoning_levels(
                     {
+                        # Live events carry actual client identity, not legacy
+                        # persisted metadata. Keep the evidence validator enabled.
+                        "direct": event.outcome.get("transport") == "direct",
+                        "transport": event.outcome.get("transport", "litellm"),
                         "reasoning_levels": reasoning_levels or {},
                         "provenance": {"probes": {event.name: event.outcome}},
                     }
@@ -429,6 +434,7 @@ def check_interfaces(state: WizardState) -> bool:
                             budget_tokens=max(0, state.budget_tokens - state.interface_spent),
                             output_tokens=state.output_tokens,
                             api_key=state.api_key,
+                            direct=state.direct,
                             styles=retry_styles,
                             timeout_seconds=interface_timeout,
                             reasoning_template=state.reasoning_template or "effort",
@@ -477,6 +483,7 @@ def check_interfaces(state: WizardState) -> bool:
                         failed_checks,
                         api_key=state.api_key,
                         run_context=diagnostic_context(
+                            direct=state.direct,
                             target=state.path,
                             alias=state.alias,
                             model=state.model,
@@ -785,6 +792,7 @@ def configure_checks(state: WizardState) -> bool:
         state.api_style,
         state.endpoint,
         state.api_key_env,
+        direct=state.direct,
         catalogue=state.candidate,
         reasoning_levels=state.patches,
         budget_tokens=state.budget_tokens,
@@ -798,7 +806,7 @@ def configure_checks(state: WizardState) -> bool:
     )
     if state.editing is not None:
         # Preserve transport controls, custom parameters and exact level blocks.
-        merged = deepcopy(state.editing)
+        merged = connect.configure_entry(state.editing, direct=state.direct)
         for field in (
             "context_window",
             "max_output_tokens",
@@ -808,6 +816,8 @@ def configure_checks(state: WizardState) -> bool:
             merged.pop(field, None)
             if field in state.proposal.entry:
                 merged[field] = deepcopy(state.proposal.entry[field])
+        merged["direct"] = state.direct
+        merged["transport"] = "direct" if state.direct else "litellm"
         merged["api_key_env"] = state.api_key_env
         merged.setdefault("api_style", state.api_style)
         if state.proposal.entry.get("allowed_openai_params"):
@@ -818,10 +828,12 @@ def configure_checks(state: WizardState) -> bool:
         if "reasoning_levels" not in state.editing and not merged.get("reasoning_levels"):
             merged.pop("reasoning_levels", None)
         merged["provenance"] = {
-            **deepcopy(state.editing.get("provenance", {})),
+            **connect._transport_provenance(state.editing, selected=state.direct),
             **state.proposal.entry["provenance"],
         }
         merged["provenance"]["probes"] = {}  # Edits must not reuse stale evidence.
+        merged["provenance"].pop("session_checks", None)
+        merged["provenance"].pop("interfaces", None)
         state.proposal = replace(state.proposal, entry=merged)
         if state.api_style == "responses":
             for check in state.proposal.probes:
@@ -981,6 +993,7 @@ def run_checks(state: WizardState) -> bool:
                 checks,
                 api_key=state.api_key,
                 run_context=diagnostic_context(
+                    direct=state.direct,
                     target=state.path,
                     alias=state.alias,
                     model=state.model,
@@ -1133,6 +1146,7 @@ def run_wizard(**options):
                 {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},
                 api_key=state.api_key,
                 run_context=diagnostic_context(
+                    direct=state.direct,
                     target=state.path,
                     alias=state.alias,
                     model=state.model,
