@@ -224,7 +224,7 @@ async def test_new_prompt_list_close_load_delete(mode, servers, workspace, tmp_p
 
     frame = await server.prompt(session_id)
     assert frame.message["result"] == {"stopReason": "end_turn"}
-    assert "Hi there.\n" in server.texts(session_id, "agent_message_chunk")
+    assert "Hi there.\n\n" in server.texts(session_id, "agent_message_chunk")
 
     listed = await server.call("session/list", {})
     [entry] = listed.message["result"]["sessions"]
@@ -241,7 +241,7 @@ async def test_new_prompt_list_close_load_delete(mode, servers, workspace, tmp_p
     )
     assert "result" in frame.message, frame.message
     assert server.texts(session_id, "user_message_chunk") == ["hello\n"]
-    assert server.texts(session_id, "agent_message_chunk") == ["Hi there.\n"]
+    assert server.texts(session_id, "agent_message_chunk") == ["Hi there.\n\n"]
     assert (await server.call("session/close", {"sessionId": session_id})).message["result"] == {}
 
     frame = await server.call("_nooa/session/delete", {"sessionId": session_id})
@@ -281,7 +281,7 @@ async def test_two_sessions_prompt_at_the_same_time(mode, servers, workspace):
     for request_id in requests:
         assert (await server.response(request_id)).message["result"] == {"stopReason": "end_turn"}
     for sid in (first, second):
-        assert "Hi there.\n" in server.texts(sid, "agent_message_chunk")
+        assert "Hi there.\n\n" in server.texts(sid, "agent_message_chunk")
     if mode == "router":
         pids = server.worker_pids()
         assert len(set(pids)) == 2

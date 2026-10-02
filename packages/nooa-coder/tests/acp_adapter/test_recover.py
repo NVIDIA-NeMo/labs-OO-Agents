@@ -42,7 +42,7 @@ async def test_without_an_argument_it_lists_the_sessions_in_use(
     adapter = await make_adapter(ScriptedModels())
     session_id = (await adapter.new_session(str(workspace))).session_id
     assert await _recover(adapter, client, session_id) == (
-        "No session in this workspace is marked in use.\n"
+        "No session in this workspace is marked in use.\n\n"
     )
 
     stale = _stale(store, workspace, "Fix the parser")
@@ -64,7 +64,7 @@ async def test_recover_by_id_prefix_forks_the_session(
     text = await _recover(adapter, client, session_id, stale[:8])
 
     assert text == (
-        'Recovered "Fix the parser" as "Fix the parser (recovered)". Open /resume to continue it.\n'
+        'Recovered "Fix the parser" as "Fix the parser (recovered)". Open /resume to continue it.\n\n'
     )
     [fork] = [info for info in store.list() if info.forked_from == stale]
     assert fork.title == "Fix the parser (recovered)"
@@ -91,7 +91,7 @@ async def test_a_session_not_in_use_is_not_forked(make_adapter, workspace, sessi
 
     text = await _recover(adapter, client, session_id, handle.id[:8])
 
-    assert text == '"Closed cleanly" is not in use. Open /resume to continue it.\n'
+    assert text == '"Closed cleanly" is not in use. Open /resume to continue it.\n\n'
     assert all(info.forked_from is None for info in store.list())
 
 
@@ -115,7 +115,7 @@ async def test_an_argument_that_matches_nothing_says_so(make_adapter, workspace,
     adapter = await make_adapter(ScriptedModels())
     session_id = (await adapter.new_session(str(workspace))).session_id
     text = await _recover(adapter, client, session_id, "nothing-like-this")
-    assert text == 'No session in this workspace matches "nothing-like-this".\n'
+    assert text == 'No session in this workspace matches "nothing-like-this".\n\n'
 
 
 async def test_a_damaged_file_is_recovered_and_the_reply_says_what_was_lost(

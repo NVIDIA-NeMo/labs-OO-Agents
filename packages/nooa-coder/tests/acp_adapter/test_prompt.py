@@ -260,7 +260,7 @@ async def test_a_command_with_text_output_answers_without_a_turn(make_adapter, w
     session_id = await _new(adapter, workspace)
     response = await _prompt(adapter, session_id, "/model fast")
     assert response.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "model is fast\n"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "model is fast\n\n"
     agent = adapter.session(session_id)._agent
     assert isinstance(agent, CommandAgent)
     assert agent.slash_commands.invoked == [("model", "fast")]
@@ -311,10 +311,10 @@ async def test_each_session_is_its_own_trace_session(coder_adapter, workspace, c
     second = await _new(adapter, workspace)
     for session_id in (first, second):
         await _prompt(adapter, session_id, "which trace?")
-        assert client.texts(AgentMessageChunk, session_id)[-1] == session_id + "\n"
+        assert client.texts(AgentMessageChunk, session_id)[-1] == session_id + "\n\n"
         await _prompt(adapter, session_id, "/trace-url")
         assert client.texts(AgentMessageChunk, session_id)[-1] == (
-            f"Trace viewer:\n```text\nhttp://viewer:5001/traces/view?session_id={session_id}\n```\n"
+            f"Trace viewer:\n```text\nhttp://viewer:5001/traces/view?session_id={session_id}\n```\n\n"
         )
 
 
@@ -340,7 +340,7 @@ async def test_turns_run_with_the_tracing_hooks_registered(
     adapter = await coder_adapter([cell(_HOOKS_CELL)])
     session_id = await _new(adapter, workspace)
     await _prompt(adapter, session_id, "hooked?")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Hooks\n"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Hooks\n\n"
 
 
 async def test_usage_answers_with_the_token_totals(coder_adapter, workspace, client):
@@ -366,7 +366,7 @@ async def test_trace_url_answers_with_the_viewer_url(coder_adapter, workspace, c
     session_id = await _new(adapter, workspace)
     assert (await _prompt(adapter, session_id, "/trace-url")).stop_reason == "end_turn"
     assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "Trace viewer:\n```text\nhttp://viewer:5001/traces/view?session_id=trace-1\n```\n"
+        "Trace viewer:\n```text\nhttp://viewer:5001/traces/view?session_id=trace-1\n```\n\n"
     )
 
 
@@ -491,7 +491,7 @@ async def test_inject_queue_starts_a_turn_when_idle(make_adapter, workspace, cli
     session_id = await _new(adapter, workspace)
     answer = await _inject(adapter, session_id, "queue", "note this")
     assert answer["delivered"] == "queued" and answer["messageId"]
-    await client.wait_for(lambda: "Got it.\n" in client.texts(AgentMessageChunk, session_id))
+    await client.wait_for(lambda: "Got it.\n\n" in client.texts(AgentMessageChunk, session_id))
 
 
 async def test_inject_steer_reaches_the_running_turns_next_model_call(make_adapter, workspace):
@@ -539,7 +539,7 @@ async def test_a_queued_inject_survives_cancel(make_adapter, workspace, client):
     await adapter.cancel(session_id)
     assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "cancelled"
     await client.wait_for(
-        lambda: "Handled the note.\n" in client.texts(AgentMessageChunk, session_id)
+        lambda: "Handled the note.\n\n" in client.texts(AgentMessageChunk, session_id)
     )
 
 
@@ -580,7 +580,7 @@ async def test_a_pool_steer_is_queued_for_the_next_turn(make_adapter, workspace,
     block.set()
     assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-2"}
     assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
-    await client.wait_for(lambda: "Tabs.\n" in client.texts(AgentMessageChunk, session_id))
+    await client.wait_for(lambda: "Tabs.\n\n" in client.texts(AgentMessageChunk, session_id))
 
     calls = models.llms[None].calls
     assert len(calls) == 3
@@ -603,7 +603,7 @@ async def test_a_pool_steer_without_a_turn_is_queued(make_adapter, workspace, cl
     session_id = await _new(adapter, workspace)
     answer = await adapter.ext_method("poolside/session_steer", _steer_params(session_id, "hi"))
     assert answer == {"inputId": "steer-1"}
-    await client.wait_for(lambda: "Got it.\n" in client.texts(AgentMessageChunk, session_id))
+    await client.wait_for(lambda: "Got it.\n\n" in client.texts(AgentMessageChunk, session_id))
 
 
 async def test_a_pool_steer_checks_its_params(make_adapter, workspace):
@@ -687,7 +687,7 @@ async def test_a_pool_steer_keeps_the_prompt_open_until_its_turn_ends(
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
-    assert _order(client, session_id)[-3:] == ["First.\n", "Second.\n", "response"]
+    assert _order(client, session_id)[-3:] == ["First.\n\n", "Second.\n\n", "response"]
     assert len(models.llms[None].calls) == 4
 
 
@@ -719,7 +719,7 @@ async def test_pool_steers_are_handled_in_order_within_the_prompt(make_adapter, 
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
-    assert _order(client, session_id)[-4:] == ["First.\n", "A.\n", "B.\n", "response"]
+    assert _order(client, session_id)[-4:] == ["First.\n\n", "A.\n\n", "B.\n\n", "response"]
     calls = models.llms[None].calls
     assert len(calls) == 5
     assert "message a" in str(calls[2].messages) and "message b" not in str(calls[2].messages)
@@ -743,7 +743,7 @@ async def test_pool_steers_taken_by_one_turn_end_the_prompt_with_it(
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
-    assert _order(client, session_id)[-3:] == ["First.\n", "Both.\n", "response"]
+    assert _order(client, session_id)[-3:] == ["First.\n\n", "Both.\n\n", "response"]
     assert len(models.llms[None].calls) == 3
 
 
@@ -774,7 +774,7 @@ async def test_a_pool_steer_the_running_turn_takes_is_done_with_it(make_adapter,
 
     assert response.stop_reason == "end_turn"
     assert [entry[1] for entry in client.log if entry[0] == "ext"] == ["poolside/elicitation"]
-    assert _order(client, session_id)[-2:] == ["Pushed.\n", "response"]
+    assert _order(client, session_id)[-2:] == ["Pushed.\n\n", "response"]
     await asyncio.sleep(0.1)  # nothing is left to start another turn
     assert len(models.llms[None].calls) == 3
 
@@ -811,7 +811,7 @@ async def test_a_pool_steers_question_is_a_pool_form_inside_the_prompt(
     [(_, method, params)] = [entry for entry in client.log if entry[0] == "ext"]
     assert method == "poolside/elicitation"
     assert params["message"] == "Name the release?"
-    assert _order(client, session_id)[-2:] == ["'Aurora'\n", "response"]
+    assert _order(client, session_id)[-2:] == ["'Aurora'\n\n", "response"]
     assert _order(client, session_id).index("ext") < _order(client, session_id).index("response")
 
 
@@ -897,7 +897,7 @@ async def test_a_pool_steer_from_another_client_is_still_followed(make_adapter, 
     block.set()
     response = await asyncio.wait_for(prompt, TIMEOUT)
     client.log.append(("response", "prompt", response))
-    assert _order(client, session_id)[-2:] == ["Second.\n", "response"]
+    assert _order(client, session_id)[-2:] == ["Second.\n\n", "response"]
 
 
 async def test_a_question_waits_while_a_pool_steer_is_queued(make_adapter, workspace, client):
@@ -923,7 +923,7 @@ async def test_a_question_waits_while_a_pool_steer_is_queued(make_adapter, works
 
     assert response.stop_reason == "end_turn"
     assert [entry for entry in client.log if entry[0] in ("ext", "permission")] == []
-    assert _order(client, session_id)[-3:] == ["Which branch?\n", "Using main.\n", "response"]
+    assert _order(client, session_id)[-3:] == ["Which branch?\n\n", "Using main.\n\n", "response"]
     calls = models.llms[None].calls
     assert len(calls) == 3
     assert "wait, use main" in str(calls[2].messages)
@@ -953,14 +953,14 @@ async def test_a_pool_steer_is_answered_while_a_form_is_open(make_adapter, works
     assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-1"}
     assert not prompt.done()
     # The steered message's turn runs while the form is open (the session is idle).
-    await client.wait_for(lambda: "Noted.\n" in client.texts(AgentMessageChunk, session_id))
+    await client.wait_for(lambda: "Noted.\n\n" in client.texts(AgentMessageChunk, session_id))
     client.ext_gate.set()
     response = await asyncio.wait_for(prompt, TIMEOUT)
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
     order = _order(client, session_id)
-    assert {"Noted.\n", "'Aurora'\n"} <= set(order[order.index("ext") :])
+    assert {"Noted.\n\n", "'Aurora'\n\n"} <= set(order[order.index("ext") :])
     assert order[-1] == "response"
 
 
@@ -1013,7 +1013,7 @@ async def test_pool_is_told_when_a_turn_takes_its_steered_message(make_adapter, 
         {"poolside/clientInputId": "steer-7", "poolside/inputEventId": ids["queued second"]},
     ]
     assert events[1][0] < answered_at  # the event went out before the answer
-    assert "Second.\n" in client.texts(AgentMessageChunk, session_id)
+    assert "Second.\n\n" in client.texts(AgentMessageChunk, session_id)
 
 
 async def test_stop_answers_a_steer_no_turn_took(make_adapter, workspace, client):

@@ -187,21 +187,23 @@ def question_text(question: str, options: list[str] | None, reason: str | None =
 
 
 def end_line(update: Any) -> Any:
-    """``update``, with its text ending in a line break when it is a whole agent message.
+    """``update``, with its text ending in a blank line when it is a whole agent message.
 
     Every agent message the bridge sends is complete, but ACP has no end of
-    message: clients join consecutive agent chunks. Pool 1.0.16 joins them into
-    one paragraph even across ``messageId`` values, so a message that ends
-    mid-line runs into the next one, and a Markdown fence at the start of the
-    next one (``/usage``, ``/trace-url``) is no longer at the start of a line.
+    message: clients join consecutive agent chunks. Pool 1.0.16 joins them even
+    across ``messageId`` values, and a single line break is only a soft break in
+    Markdown: "Not posted.\n" followed by "Trace viewer:" rendered as one
+    paragraph, "Not posted. Trace viewer:". A blank line ends the paragraph, so
+    the next message (``/usage``, ``/trace-url`` included) starts its own.
     """
     if (
         isinstance(update, AgentMessageChunk)
         and isinstance(update.content, TextContentBlock)
         and update.content.text
-        and not update.content.text.endswith("\n")
+        and not update.content.text.endswith("\n\n")
     ):
-        content = update.content.model_copy(update={"text": update.content.text + "\n"})
+        ending = "\n" if update.content.text.endswith("\n") else "\n\n"
+        content = update.content.model_copy(update={"text": update.content.text + ending})
         return update.model_copy(update={"content": content})
     return update
 

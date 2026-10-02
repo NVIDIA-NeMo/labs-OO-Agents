@@ -155,7 +155,7 @@ async def test_a_session_runs_a_turn_over_stdio(tmp_path):
     completed = next(u for _, u in client.updates if isinstance(u, ToolCallProgress))
     assert completed.title == started.title
     assert completed.title.startswith("python: ")
-    assert "NOOA ACP smoke test passed.\n" in client.texts()
+    assert "NOOA ACP smoke test passed.\n\n" in client.texts()
 
 
 async def test_cancellation_finishes_open_tools_and_says_so(tmp_path):
@@ -179,7 +179,7 @@ async def test_cancellation_finishes_open_tools_and_says_so(tmp_path):
     )
     assert failed.tool_call_id == started.tool_call_id
     assert failed.title == started.title + " (cancelled)"
-    assert "Stopped at your request.\n" in client.texts()
+    assert "Stopped at your request.\n\n" in client.texts()
 
 
 async def test_cancelling_a_shell_command_reads_as_cancellation(tmp_path):

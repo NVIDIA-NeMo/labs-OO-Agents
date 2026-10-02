@@ -1182,7 +1182,7 @@ async def test_a_long_message_goes_out_as_chunks_under_the_websocket_limit(tmp_p
 
     agent_chunks = [u for _, u in client.updates if isinstance(u, AgentMessageChunk)]
     assert len(agent_chunks) == 3
-    assert "".join(chunk.content.text for chunk in agent_chunks) == long_text + "\n"
+    assert "".join(chunk.content.text for chunk in agent_chunks) == long_text + "\n\n"
     for chunk in agent_chunks:
         wire = json.dumps(chunk.model_dump(by_alias=True, exclude_none=True))
         assert len(wire.encode()) < 1024 * 1024
@@ -1194,17 +1194,21 @@ async def test_a_long_message_goes_out_as_chunks_under_the_websocket_limit(tmp_p
 
 
 def test_every_agent_message_ends_its_line():
-    """Clients join adjacent agent chunks: a message that ends mid-line runs into the next.
+    """Clients join adjacent agent chunks, and one line break is a soft break in Markdown.
 
-    In Pool 1.0.16 a /usage table after "...billing." rendered as one paragraph,
-    with its opening fence glued to the previous text.
+    In Pool 1.0.16 a /usage table after "...billing." rendered as one paragraph
+    with its opening fence glued to the text, and "Not posted.\n" followed by
+    "Trace viewer:" rendered as "Not posted. Trace viewer:". Every agent
+    message therefore ends with a blank line.
     """
     from acp import text_block, update_agent_message, update_agent_thought_text
     from nooa_coder.acp.event_bridge import end_line
 
     ended = end_line(update_agent_message(text_block("ending in billing.")))
-    assert ended.content.text == "ending in billing.\n"
-    already = update_agent_message(text_block("```text\nx\n```\n"))
+    assert ended.content.text == "ending in billing.\n\n"
+    one_break = end_line(update_agent_message(text_block("Not posted.\n")))
+    assert one_break.content.text == "Not posted.\n\n"
+    already = update_agent_message(text_block("```text\nx\n```\n\n"))
     assert end_line(already) is already
     thought = update_agent_thought_text("thinking")
     assert end_line(thought) is thought
