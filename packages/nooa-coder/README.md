@@ -68,6 +68,55 @@ match is asked once more, then left as text. Yes/no questions keep the
 permission request. If Pool fails the request, questions fall back to text for
 the rest of the connection.
 
+## Skills and MCP servers
+
+The coding agent reaches all its capabilities through one `SkillManager`,
+`self.skills`: code skills (`Skill` classes from `nooa.skills` entry points,
+workspace libraries and `.py` files in skill directories), text skills
+(`SKILL.md` directories) and MCP servers (`.mcp.json`, `coding.mcp_servers`
+in the settings files, and the servers an ACP client sends). The model uses:
+
+- `search(query, limit=10)`: one line per match with name, kind, state and
+  description. Searching loads nothing; an installed skill that is not
+  loaded is described by its package's summary.
+- `await activate(names)` / `await deactivate(names)`: a code skill is loaded
+  and becomes `self.<name>`; an MCP server is connected and its tools are
+  methods of `self.<server>` (deactivating keeps it connected); a text
+  skill's instructions arrive on the `system_messages` channel at the start
+  of the next turn.
+- `read(name)`: a text skill's instructions, as text.
+- `doc(name)`: the full description of one skill, with an MCP server's tools.
+
+The prompt holds one small block, which changes only when something is
+activated:
+
+```text
+<skills>
+Active: libwriting, methodwriting, repo, shell, todo, workspace_settings, github (mcp)
+38 more (code, text, MCP): self.skills.search('query'); await activate(['name']); read('name') for text skills
+</skills>
+```
+
+`/skills list` shows every skill with its kind and state; `/skills activate`
+and `/skills deactivate` save the choice for code skills in the workspace
+settings. `/mcp` shows the MCP servers and their state. A server runs only
+after the person approves its exact configuration with
+`/mcp approve NAME` (review) and `/mcp approve NAME CODE`.
+
+MCP sign-in uses the MCP SDK's OAuth support (discovery, client
+registration, PKCE, token refresh). Because a sandbox cannot receive a
+browser callback, sign-in is manual: the link is shown (as an agent message
+when the agent activated the server, in the command output for
+`/mcp approve`), the person opens it and signs in, then copies the address
+the browser ends on (the page may fail to load) and runs
+`/mcp auth NAME ADDRESS`. The agent is told when the server connects.
+Tokens are kept in `~/.config/nooa/mcp_oauth.json`, readable only by the
+user, so later connections need no sign-in. The `oauth_open_browser` and
+`oauth_manual` server settings are accepted but no longer used.
+
+A session saved before the skill manager loads normally; the old `<mcp>`
+block is dropped and the agent is told what was not restored.
+
 ## Recovering a session marked in use
 
 A session in use is marked by its lock file, so that no two processes write

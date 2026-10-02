@@ -231,7 +231,7 @@ class _Tool:
 async def test_register_tools_registers_and_activates_each_tool(make_session):
     session, _ = make_session(agent_spec="nooa_coder.coding.agent:CodingAgent", start=False)
     tool = _Tool()
-    assert session.register_tools({"mcp.remote": tool, "repo": _Tool()}) == {
+    assert await session.register_tools({"mcp.remote": tool, "repo": _Tool()}) == {
         "repo": "Cannot register skill 'repo' as agent attr 'repo': already provided by 'nemo.repo'"
     }
     assert "mcp.remote" in session._agent.skills.activated()
@@ -240,7 +240,7 @@ async def test_register_tools_registers_and_activates_each_tool(make_session):
 
 async def test_register_tools_on_an_agent_without_skills(make_session):
     session, _ = make_session(start=False)
-    assert session.register_tools({"mcp.remote": _Tool()}) == {
+    assert await session.register_tools({"mcp.remote": _Tool()}) == {
         "mcp.remote": "the agent has no skills"
     }
 
@@ -271,7 +271,7 @@ async def test_the_coding_agent_connects_the_servers_its_workspace_remembers(
                 raise RuntimeError("not approved")
             return names
 
-        session._agent.mcp.connect = connect
+        session._agent.skills.mcp.connect = connect
         assert await session.prepare_tools() == [
             "MCP server 'nowhere' was not connected: not approved"
         ]

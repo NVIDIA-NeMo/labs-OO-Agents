@@ -1219,7 +1219,7 @@ class CoderACPAgent:
         warnings = await session.prepare_tools()
         tools, mcp_warnings = await self._create_mcp_tools(mcp_servers)
         warnings.extend(mcp_warnings)
-        failed = session.register_tools({f"mcp.{name}": tool for name, tool in tools.items()})
+        failed = await session.register_tools({f"mcp.{name}": tool for name, tool in tools.items()})
         warnings.extend(
             f"MCP server {name!r} was not registered: {failed[f'mcp.{name}']}"
             for name in tools
