@@ -597,3 +597,25 @@ def test_python_output_rich_diagnostic_roundtrip_preserves_every_channel(backend
     assert retrieved.error == diagnostic
     assert "start = sens.index('missing')" in retrieved.error
     assert "^^^^^^^^^^^^^^^^^^^^^" in retrieved.error
+
+
+def test_decision_record_raw_response_round_trips(backend):
+    raw = {"model": "loaded-model", "answers": {}, "metadata": {"calibration": "none"}}
+    backend.store(
+        "decision-raw",
+        DecisionRecord(
+            decision_call_id="decision-call-2",
+            method_name="urgent",
+            generation_id="gen-003",
+            state="Production is down",
+            questions={},
+            requested_model="decision-model",
+            raw_response=raw,
+            success=True,
+        ),
+    )
+
+    retrieved = backend.get("decision-raw")
+
+    assert isinstance(retrieved, DecisionRecord)
+    assert retrieved.model_dump(mode="json")["raw_response"] == raw

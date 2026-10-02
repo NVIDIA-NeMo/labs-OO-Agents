@@ -33,6 +33,7 @@ from nooa.decisions.types import (
     ChoiceDecision,
     Criteria,
     Criterion,
+    Decision,
     DecisionModelRequiredError,
     Instructions,
     ScoreDecision,
@@ -168,8 +169,12 @@ class DecisionSchema:
             return self.result_type.model_validate(result.model_dump())
         return result
 
-    def reconstruct(self, response: DecisionResponse) -> Any:
-        """Validate a normalized response and create the declared return value."""
+    def reconstruct(self, response: DecisionResponse, *, include_raw_response: bool = False) -> Any:
+        """Validate a normalized response and create the declared return value.
+
+        With ``include_raw_response``, every detailed decision in the result
+        shares a reference to ``response.raw``.
+        """
         missing = {output.name for output in self.outputs} - set(response.answers)
         extra = set(response.answers) - {output.name for output in self.outputs}
         if missing or extra:
@@ -179,8 +184,17 @@ class DecisionSchema:
             for output in self.outputs
         }
         if self.composite:
-            return self.result_type.model_validate(values)
-        return values[self.outputs[0].name]
+            result = self.result_type.model_validate(values)
+            # Attach after validation, which may rebuild nested decisions.
+            decisions = [getattr(result, output.name) for output in self.outputs]
+        else:
+            result = values[self.outputs[0].name]
+            decisions = [result]
+        if include_raw_response and response.raw is not None:
+            for decision in decisions:
+                if isinstance(decision, Decision):
+                    decision._raw_response = response.raw
+        return result
 
     def require_llm_fallback_support(self) -> None:
         """Reject result shapes whose evidence cannot be produced by chat generation."""

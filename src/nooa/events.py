@@ -24,6 +24,7 @@ from typing import Annotated, Any, ClassVar, Literal
 from pydantic import BaseModel, Field, field_serializer
 from pydantic_core import PydanticSerializationError, to_json
 
+from nooa._immutable_json import NativeJSON
 from nooa.agentdoc import spec
 from nooa.context_blocks import EventBase as EventBase
 from nooa.context_blocks import ResultStatus as ResultStatus
@@ -532,6 +533,7 @@ class DecisionRecord(EventBase):  # type: ignore[misc]
     resolved_model: str | None = None
     response_id: str | None = None
     usage: LLMUsage | None = None
+    raw_response: NativeJSON | None = Field(default=None, repr=False)
     success: bool = False
     exception_type: str | None = None
 
