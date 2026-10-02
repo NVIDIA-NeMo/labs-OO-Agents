@@ -14,6 +14,7 @@ _DECLARATIONS = {"reasoning_levels", "reasoning_default"}
 # These select the client/request itself, not a provider's effort behavior.
 _RESERVED = _DECLARATIONS | {
     "reasoning_level",
+    "direct",
     "model",
     "api_base",
     "base_url",

@@ -38,6 +38,7 @@ YAML schema::
         top_p: 1.0                           # optional
         max_tokens: 4096                     # optional
         drop_params: true                    # optional, defaults to true
+        direct: true                         # optional, explicit official SDK opt-in
         store: false                         # optional Responses API control
         include:                             # optional Responses API output fields
           - reasoning.encrypted_content
@@ -408,9 +409,19 @@ def client_from_config(
         "store",
         "include",
         "cache_breakpoint",
+        "direct",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]
+
+    # base_url was not a legacy alias default. Forward it only for SDK opt-in;
+    # explicit caller overrides still follow the preexisting pass-through path.
+    if (
+        overrides.get("direct", params.get("direct")) is True
+        and "base_url" in config
+        and "base_url" not in overrides
+    ):
+        params["base_url"] = config["base_url"]
 
     # Registry aliases can centrally tune or disable the clients' default endpoint
     # retry behavior. ``retry_config: false`` means a single attempt for every

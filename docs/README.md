@@ -66,6 +66,7 @@ directory. For code you can run immediately, use the
 | [Tools and visibility](concepts/tools-and-visibility.md) | How does generated code discover and call capabilities? |
 | [Prompts and context](concepts/prompts-and-context.md) | Where should instructions, inputs, and cross-call information live? |
 | [Local models](local-models.md) | How do I run NOOA with local models? |
+| [Direct provider SDKs](direct-provider-sdks.md) | How do I opt into SDK routing while keeping LiteLLM as the default? |
 | [Orchestration](concepts/orchestration.md) | How do I make a workflow deterministic without turning it into one giant prompt? |
 | [Multi-agent systems](concepts/multi-agent-systems.md) | When should I use another agent, and what state does it share? |
 | [Tracing](concepts/tracing.md) | How do I inspect the complete Python and LLM call tree? |
