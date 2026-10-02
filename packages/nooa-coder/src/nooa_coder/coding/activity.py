@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_EVENT_TEXT_CHARS = 10_000
 _MAX_COMMAND_OUTPUT_CHARS = 30_000
+"""Characters of each stream a terminal card shows: the shell's own per-stream limit
+(``MAX_OUTPUT_CHARS`` of the core shell session), so the card shows what the model got."""
 _MAX_DIFF_INPUT_CHARS = 1_000_000
 _MAX_DIFF_INPUT_LINES = 20_000
 
@@ -343,8 +345,8 @@ class ActivityShellTools(Skill):
             )
             raise
 
-        stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
-        stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
+        stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS)
+        stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS)
         stdout_buffer.write(result.stdout)
         stderr_buffer.write(result.stderr)
         output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
@@ -398,8 +400,8 @@ class ActivityShellTools(Skill):
             )
         )
         finished = False
-        stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
-        stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
+        stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS)
+        stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS)
         stream = self._shell.run_stream(command, stdin=stdin, timeout=timeout, cwd=cwd)
         try:
             async for item in stream:
