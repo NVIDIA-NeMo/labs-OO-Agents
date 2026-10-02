@@ -67,8 +67,8 @@ async def test_a_form_answer_goes_to_the_agent_and_the_same_prompt_continues(
     ]
     assert kinds[kinds.index("elicitation") - 1] == "AgentMessageChunk"
     assert client.texts(AgentMessageChunk, session_id)[-2:] == [
-        "Which branch?\n\n- main\n- dev\n",
-        "Using dev.\n",
+        "Which branch?\n\n- main\n- dev\n\n",
+        "Using dev.\n\n",
     ]
     assert "dev" in str(models.llms[None].calls[1].messages[-2:])
     assert client.updates(session_id, UserMessageChunk) == []
@@ -144,7 +144,7 @@ async def test_without_forms_other_questions_end_the_turn_as_text(make_adapter, 
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
     assert not [e for e in client.log if e[0] in ("elicitation", "permission")]
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev\n"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev\n\n"
 
 
 async def test_cancel_while_a_form_is_open_ends_the_prompt_cancelled(
