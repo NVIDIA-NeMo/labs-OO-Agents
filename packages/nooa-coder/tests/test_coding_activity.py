@@ -304,6 +304,24 @@ async def test_activity_payloads_are_bounded(tmp_path):
     assert streamed[-1].kind == "done"
 
 
+async def test_the_card_shows_as_much_output_as_the_command_returned(tmp_path):
+    """The card keeps the shell's own per-stream limit, so it shows what the model got."""
+    shell, events = _observed_shell(tmp_path)
+    try:
+        result = await shell.run("python3 -c \"print('z' * 20000)\"")
+        streamed = [item async for item in shell.run_stream("python3 -c \"print('w' * 20000)\"")]
+    finally:
+        await shell.close()
+
+    outputs = [event for event in events if isinstance(event, TerminalCommandOutput)]
+    assert outputs[0].stdout == result.stdout
+    assert result.stdout.strip() == "z" * 20000
+    assert outputs[0].truncated is False
+    assert outputs[1].stdout.strip() == "w" * 20000
+    assert outputs[1].truncated is False
+    assert streamed[-1].kind == "done"
+
+
 async def test_cancelling_a_command_is_not_reported_as_an_error(tmp_path):
     """Cancellation is a user action, not a command failure.
 
