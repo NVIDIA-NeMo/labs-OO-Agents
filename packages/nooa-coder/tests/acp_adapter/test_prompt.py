@@ -40,7 +40,7 @@ async def test_a_done_turn_ends_the_prompt_after_its_messages(make_adapter, work
         if entry[0] != "update" or isinstance(entry[2], AgentMessageChunk)
     ]
     assert kinds[-2:] == ["update", "response"]
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Hello there."
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Hello there.\n"
 
 
 async def test_prompt_text_includes_resource_links(make_adapter, workspace):
@@ -137,7 +137,7 @@ async def test_cancel_closes_the_cards_before_the_prompt_answers_cancelled(
     failed = [u for u in client.updates(session_id, ToolCallProgress) if u.status == "failed"]
     assert [(u.tool_call_id, u.title) for u in failed] == [(started_card.tool_call_id, "Cancelled")]
     assert "cell started" in str(failed[0].content)  # partial output kept
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Stopped at your request."
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Stopped at your request.\n"
     order = [
         entry[0] if entry[0] == "response" else type(entry[2]).__name__ for entry in client.log
     ]
@@ -186,7 +186,7 @@ async def test_the_session_is_usable_after_a_cancel(make_adapter, workspace, cli
     await adapter.cancel(session_id)
     assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "cancelled"
     assert (await _prompt(adapter, session_id, "again")).stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Back again."
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Back again.\n"
 
 
 # ---- errors from the turn ----------------------------------------------------
@@ -237,7 +237,7 @@ async def test_a_command_with_text_output_answers_without_a_turn(make_adapter, w
     session_id = await _new(adapter, workspace)
     response = await _prompt(adapter, session_id, "/model fast")
     assert response.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "model is fast"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "model is fast\n"
     agent = adapter.registry.get(session_id).agent
     assert isinstance(agent, CommandAgent)
     assert agent.slash_commands.invoked == [("model", "fast")]
@@ -260,7 +260,7 @@ async def test_a_command_meant_for_the_agent_runs_a_turn(coder_adapter, workspac
     assert response.stop_reason == "end_turn"
     [llm] = adapter.test_models.made
     assert "Review two words" in str(llm.calls[0].messages)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Reviewed."
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Reviewed.\n"
 
 
 async def test_host_controls_answer_as_text(coder_adapter, workspace, client):
@@ -306,7 +306,7 @@ async def test_a_failing_command_reports_the_failure(make_adapter, workspace, cl
 
     agent.slash_commands.invoke = broken
     assert (await _prompt(adapter, session_id, "/model x")).stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "/model failed: command exploded"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "/model failed: command exploded\n"
 
 
 async def test_a_command_for_the_agent_with_no_output_says_so(make_adapter, workspace, client):
@@ -323,7 +323,7 @@ async def test_a_command_for_the_agent_with_no_output_says_so(make_adapter, work
     agent.slash_commands.invoke = empty
     assert (await _prompt(adapter, session_id, "/model")).stop_reason == "end_turn"
     assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "/model produced no output, so nothing was sent to the agent."
+        "/model produced no output, so nothing was sent to the agent.\n"
     )
 
 

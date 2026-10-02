@@ -133,7 +133,7 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
         ToolCallProgress,
         UsageUpdate,
     ]
-    assert cast(AgentMessageChunk, updates[0]).content.text == "Final answer"
+    assert cast(AgentMessageChunk, updates[0]).content.text == "Final answer\n"
     started = cast(ToolCallStart, updates[1])
     assert started.kind == "other"
     assert started.status == "in_progress"
@@ -253,7 +253,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     # Positive control: prove the bridge is actually forwarding before asserting
     # an absence. Without it this passes even with every handler unsubscribed.
     assert any(
-        isinstance(update, AgentMessageChunk) and update.content.text == "alive"
+        isinstance(update, AgentMessageChunk) and update.content.text == "alive\n"
         for _, update in client.updates
     )
     assert not any(isinstance(update, UsageUpdate) for _, update in client.updates)
@@ -442,7 +442,7 @@ async def test_cancelled_flush_does_not_stop_update_pump(tmp_path):
     messages = [
         update.content.text for _, update in client.updates if isinstance(update, AgentMessageChunk)
     ]
-    assert messages == ["First", "Second"]
+    assert messages == ["First\n", "Second\n"]
     await bridge.close()
     await agent.aclose()
 
@@ -481,7 +481,7 @@ async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
     await bridge.flush()
 
     assert any(
-        isinstance(update, AgentMessageChunk) and update.content.text == "second turn"
+        isinstance(update, AgentMessageChunk) and update.content.text == "second turn\n"
         for update in client.updates
     )
     await bridge.close()
@@ -750,7 +750,7 @@ async def test_the_cancelled_update_closes_open_cards_before_saying_so(bridged, 
         ("cmd-1", "failed", "Cancelled"),
     }
     assert _types(client)[-1] is AgentMessageChunk
-    assert _messages(client) == ["Stopped at your request."]
+    assert _messages(client) == ["Stopped at your request.\n"]
     assert bridge._open == {}
 
 
@@ -764,7 +764,7 @@ async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
         )
     )
     await bridge.flush()
-    assert _messages(client) == ["Which branch?\n\n- main\n- dev"]
+    assert _messages(client) == ["Which branch?\n\n- main\n- dev\n"]
 
 
 async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):
@@ -1044,3 +1044,20 @@ async def test_detaching_leaves_open_cards_alone_even_if_the_session_closed_firs
     session.emit(ClosedUpdate(session_id="session-1"))  # starts a close that finishes cards
     await bridge.close(finish_open=False)
     assert [u for _, u in client.updates if isinstance(u, ToolCallProgress)] == []
+
+
+def test_every_agent_message_ends_its_line():
+    """Clients join adjacent agent chunks: a message that ends mid-line runs into the next.
+
+    In Pool 1.0.16 a /usage table after "...billing." rendered as one paragraph,
+    with its opening fence glued to the previous text.
+    """
+    from acp import text_block, update_agent_message, update_agent_thought_text
+    from nooa_coder.acp.event_bridge import end_line
+
+    ended = end_line(update_agent_message(text_block("ending in billing.")))
+    assert ended.content.text == "ending in billing.\n"
+    already = update_agent_message(text_block("```text\nx\n```\n"))
+    assert end_line(already) is already
+    thought = update_agent_thought_text("thinking")
+    assert end_line(thought) is thought

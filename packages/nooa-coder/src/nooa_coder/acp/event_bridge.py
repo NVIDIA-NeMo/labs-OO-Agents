@@ -36,11 +36,13 @@ from acp import (
 from acp.helpers import plan_entry
 from acp.interfaces import Client
 from acp.schema import (
+    AgentMessageChunk,
     ContentToolCallContent,
     Cost,
     CurrentModeUpdate,
     PlanEntry,
     SessionInfoUpdate,
+    TextContentBlock,
     ToolCallLocation,
     UsageUpdate,
 )
@@ -147,6 +149,26 @@ def question_text(question: str, options: list[str] | None) -> str:
 
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
+
+
+def end_line(update: Any) -> Any:
+    """``update``, with its text ending in a line break when it is a whole agent message.
+
+    Every agent message the bridge sends is complete, but ACP has no end of
+    message: clients join consecutive agent chunks. Pool 1.0.16 joins them into
+    one paragraph even across ``messageId`` values, so a message that ends
+    mid-line runs into the next one, and a Markdown fence at the start of the
+    next one (``/usage``, ``/trace-url``) is no longer at the start of a line.
+    """
+    if (
+        isinstance(update, AgentMessageChunk)
+        and isinstance(update.content, TextContentBlock)
+        and update.content.text
+        and not update.content.text.endswith("\n")
+    ):
+        content = update.content.model_copy(update={"text": update.content.text + "\n"})
+        return update.model_copy(update={"content": content})
+    return update
 
 
 class ACPEventBridge:
@@ -263,7 +285,7 @@ class ACPEventBridge:
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
-            self._queue.put_nowait(update)
+            self._queue.put_nowait(end_line(update))
 
     def publish(self, update: Any) -> None:
         """Queue a host-originated session update on the ordered ACP stream."""
