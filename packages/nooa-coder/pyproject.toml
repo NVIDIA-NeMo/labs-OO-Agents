@@ -1,0 +1,36 @@
+[project]
+name = "nooa-coder"
+dynamic = ["version"]
+description = "Session layer, session tree and in-process host for NOOA interactive agents"
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "nooa",
+    "pydantic>=2.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/NVIDIA-NeMo/labs-OO-Agents"
+Repository = "https://github.com/NVIDIA-NeMo/labs-OO-Agents"
+Issues = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/issues"
+
+[tool.uv.sources]
+nooa = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"
+bump = true
+metadata = false
+fallback-version = "0.0.6"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nooa_coder"]

@@ -59,6 +59,7 @@ nooa-cli = { workspace = true }
 nooa-acp = { workspace = true }
 nooa-memory = { workspace = true }
 nooa-bench = { workspace = true }
+nooa-coder = { workspace = true }
 
 [tool.uv]
 # Extra index URLs to search for packages (in addition to PyPI)
@@ -72,6 +73,7 @@ members = [
     "packages/nooa-acp",
     "packages/nooa-memory",
     "packages/nooa-bench",
+    "packages/nooa-coder",
 ]
 
 
@@ -89,6 +91,7 @@ cli = ["nooa-cli"]
 memory = ["nooa-memory"]
 bench = ["nooa-bench"]
 acp = ["nooa-acp"]
+coder = ["nooa-coder"]
 # ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
 # Install with `pip install "nooa[arc]"` (or `uv sync --extra arc`).
 arc = [
@@ -223,11 +226,14 @@ testpaths = [
     "packages/nooa-cli/tests",
     "packages/nooa-acp/tests",
     "packages/nooa-bench/tests",
+    "packages/nooa-coder/tests",
     "tests/trace_explorer",
 ]
 pythonpath = [
     "src",
     "packages/nooa-cli/src",
+    "packages/nooa-coder/src",
+    "packages/nooa-coder/tests",
 ]
 addopts = "-v --tb=short --import-mode=importlib -m 'not integration and not stress and not sandbox'"
 markers = [
@@ -321,6 +327,7 @@ venv = ".venv"
 extraPaths = [
     "src",
     "packages/nooa-cli/src",
+    "packages/nooa-coder/src",
 ]
 include = [
     "src",
