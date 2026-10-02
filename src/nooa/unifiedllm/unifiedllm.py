@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import litellm
 from pydantic import BaseModel, RootModel
@@ -42,6 +42,9 @@ from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
+
+if TYPE_CHECKING:
+    from .direct import DirectTransport
 
 logger = logging.getLogger(__name__)
 
@@ -1229,11 +1232,20 @@ class UnifiedLLM(ABC):
         self,
         model: str,
         *,
+        direct: bool = False,
         reasoning_levels: dict[str, dict[str, Any]] | None = None,
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
         **config,
     ):
+        if type(direct) is not bool:
+            raise ValueError("direct must be a boolean")
+        extra = config.get("extra_body")
+        if direct and extra is not None and not isinstance(extra, Mapping):
+            raise ValueError("extra_body must be a mapping")
+        if isinstance(extra, Mapping) and "direct" in extra:
+            raise ValueError("direct is a constructor-only setting, not a wire field")
+        self.direct = direct
         reject_legacy_cache_config(config)
         # Freeze prevents field assignment, not mutations inside nested Any
         # settings. Detach this small configuration once, never the history.
@@ -1249,7 +1261,14 @@ class UnifiedLLM(ABC):
         self.cache_breakpoint = None
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
-        self._http: _ClientHttp | None = None
+        self._http: _ClientHttp | DirectTransport | None = None
+
+    def _direct_transport(self) -> "DirectTransport":
+        """Narrow the owned transport for official-SDK-only operations."""
+        from .direct import DirectTransport
+
+        assert isinstance(self._http, DirectTransport)
+        return self._http
 
     @property
     def reasoning_levels(self) -> tuple[str, ...] | None:
@@ -1263,6 +1282,11 @@ class UnifiedLLM(ABC):
         return self._reasoning_config.default
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        extra = overrides.get("extra_body")
+        if self.direct and extra is not None and not isinstance(extra, Mapping):
+            raise ValueError("extra_body must be a mapping")
+        if "direct" in overrides or (isinstance(extra, Mapping) and "direct" in extra):
+            raise ValueError("direct is a constructor-only setting")
         return apply_reasoning_level(
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
         )
@@ -1315,6 +1339,18 @@ class UnifiedLLM(ABC):
             raise ValueError("model must be a non-empty string")
         return model
 
+    def _replay_scope(self, model, style, params):
+        if not self.direct:
+            return replay_state.replay_scope(model, style, params)
+        import hashlib
+
+        wire_model, provider = self._direct_transport().route(model, params)
+        if provider not in {"openai", "anthropic", "deepseek", "gemini"} or (
+            style == "responses" and provider != "openai"
+        ):
+            return None
+        return f"{style}:{provider}:sha256:{hashlib.sha256(wire_model.encode()).hexdigest()}"
+
     def _validate_cache_breakpoint_model(self, effective_model: str) -> None:
         """Reject applying a model-declared cache mapping to a call override."""
         if self.cache_breakpoint not in {None, "auto"} and effective_model != self.model:
@@ -1323,9 +1359,13 @@ class UnifiedLLM(ABC):
                 "with a per-call model override"
             )
 
-    @staticmethod
-    def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
+    def _validate_request_config(self, name: str, call_config: dict[str, Any]) -> None:
         """Keep provider payloads and routing on their validated top-level paths."""
+        if self.direct:
+            managed = {"messages", "input", "system", "instructions"}
+            if managed & call_config.keys():
+                raise ValueError("Conversation fields are managed by UnifiedLLM; use messages")
+            self._direct_transport().validate({"model": self.model, **call_config})
         reject_legacy_cache_config(call_config)
         if name in call_config:
             raise ValueError(
@@ -1382,7 +1422,10 @@ class UnifiedLLM(ABC):
         """
         mapping = self.cache_breakpoint
         if mapping == "auto" and not responses:
-            mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
+            if self.direct:
+                mapping = "anthropic" if self._direct_transport().api_style == "anthropic" else None
+            else:
+                mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
         return mapping
 
     def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
@@ -1841,6 +1884,8 @@ class CompletionClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "anthropic"] | None = "auto",
+        *,
+        direct: bool = False,
         **config,
     ):
         """
@@ -1867,17 +1912,37 @@ class CompletionClient(UnifiedLLM):
                 other routes use provider-default caching. ``None`` disables
                 NOOA markers. Without a boundary, only leading instructions
                 are marked.
-            **config: Additional configuration passed to litellm (api_key, api_base, etc.)
+            direct: Strict boolean official SDK opt-in; default False keeps LiteLLM.
+                Constructor-only, never sent on the wire. See docs/direct-provider-sdks.md
+                for supported routes and the direct-mode tracing limitations.
+            **config: Additional provider configuration (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
             raise ValueError(
                 "CompletionClient cache_breakpoint must be 'auto', 'anthropic', or None"
             )
-        super().__init__(model, **config)
+        super().__init__(model, direct=direct, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
-        self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
+        if self.direct:
+            from .direct import DirectTransport
+
+            style = "anthropic" if model.startswith("anthropic/") else "chat"
+            # Native Messages uses 529 for overload. Extend only this client's
+            # default status policy; an explicitly supplied set is authoritative.
+            if style == "anthropic" and (
+                retry_config is None
+                or "retryable_status_codes" not in retry_config.model_fields_set
+            ):
+                self.retry_config = self.retry_config.model_copy(
+                    update={
+                        "retryable_status_codes": self.retry_config.retryable_status_codes | {529}
+                    }
+                )
+            self._http = DirectTransport(model, style, self.config, self._http_config)
+        else:
+            self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Completion API schema format"""
@@ -1892,6 +1957,8 @@ class CompletionClient(UnifiedLLM):
 
     def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""
+        if self.direct:
+            return None
         routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
         if self._effective_model(call_config) != self.model or any(
             call_config.get(key) != self.config.get(key) for key in routing_fields
@@ -1900,7 +1967,7 @@ class CompletionClient(UnifiedLLM):
             # the corresponding call parameters. Let it build the correct client
             # for overrides; these calls use LiteLLM's default HTTP pool settings.
             return None
-        assert self._http is not None
+        assert isinstance(self._http, _ClientHttp)
         return self._http.async_client if is_async else self._http.sync_client
 
     def call(
@@ -1921,13 +1988,16 @@ class CompletionClient(UnifiedLLM):
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
+        state_scope = self._replay_scope(effective_model, "chat", call_config)
         # Scope's resolved provider (from litellm) and _resolve_cache_mapping
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
         messages = replay_state.prepare_chat_messages(
-            messages, state_scope, anthropic_cache_marking=cache_mapping == "anthropic"
+            messages,
+            state_scope,
+            anthropic_cache_marking=cache_mapping == "anthropic",
+            direct=self.direct,
         )
 
         # Choose the stable-prefix breakpoint on projected provider messages.
@@ -1977,8 +2047,20 @@ class CompletionClient(UnifiedLLM):
             api_params.setdefault("client", http_client)
 
         def _make_call():
-            raw_response = _collect_sync(litellm.completion(**api_params))
+            raw_response = (
+                self._direct_transport().call(api_params)
+                if self.direct
+                else _collect_sync(litellm.completion(**api_params))
+            )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
+            if self.direct and not reasoning:
+                # Inspect for retry only; signed blocks own the public capture.
+                blocks = getattr(raw_response.choices[0].message, "thinking_blocks", None) or []
+                reasoning = "\n".join(
+                    block.get("thinking", "") for block in blocks if block.get("type") == "thinking"
+                )
+                if not reasoning and blocks:
+                    reasoning = "[redacted thinking]"
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
             # Raise EmptyContentError to trigger retry if configured
@@ -2021,13 +2103,16 @@ class CompletionClient(UnifiedLLM):
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
+        state_scope = self._replay_scope(effective_model, "chat", call_config)
         # Scope's resolved provider (from litellm) and _resolve_cache_mapping
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
         messages = replay_state.prepare_chat_messages(
-            messages, state_scope, anthropic_cache_marking=cache_mapping == "anthropic"
+            messages,
+            state_scope,
+            anthropic_cache_marking=cache_mapping == "anthropic",
+            direct=self.direct,
         )
 
         # Choose the stable-prefix breakpoint on projected provider messages.
@@ -2077,8 +2162,20 @@ class CompletionClient(UnifiedLLM):
             api_params.setdefault("client", http_client)
 
         async def _make_call():
-            raw_response = await _collect_async(await _litellm_acompletion(api_params))
+            raw_response = (
+                await self._direct_transport().acall(api_params)
+                if self.direct
+                else await _collect_async(await _litellm_acompletion(api_params))
+            )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
+            if self.direct and not reasoning:
+                # Inspect for retry only; signed blocks own the public capture.
+                blocks = getattr(raw_response.choices[0].message, "thinking_blocks", None) or []
+                reasoning = "\n".join(
+                    block.get("thinking", "") for block in blocks if block.get("type") == "thinking"
+                )
+                if not reasoning and blocks:
+                    reasoning = "[redacted thinking]"
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
             # Raise EmptyContentError to trigger retry if configured
@@ -2231,6 +2328,8 @@ class ResponsesClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "openai"] | None = "auto",
+        *,
+        direct: bool = False,
         **config,
     ):
         """
@@ -2260,15 +2359,23 @@ class ResponsesClient(UnifiedLLM):
                 Anthropic cache mapping is supported by CompletionClient only.
                 With ``"openai"`` and no eligible stable block, warns and keeps
                 explicit mode without a breakpoint, avoiding all cache writes.
-            **config: Additional configuration passed to litellm (api_key, api_base, etc.)
+            direct: Strict boolean official SDK opt-in; default False keeps LiteLLM.
+                Constructor-only, never sent on the wire. See docs/direct-provider-sdks.md
+                for supported routes and the direct-mode tracing limitations.
+            **config: Additional provider configuration (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
             raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
-        super().__init__(model, **config)
+        super().__init__(model, direct=direct, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
-        self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
+        if self.direct:
+            from .direct import DirectTransport
+
+            self._http = DirectTransport(model, "responses", self.config, self._http_config)
+        else:
+            self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         params = super()._prepare_call_config(overrides)
@@ -2323,9 +2430,9 @@ class ResponsesClient(UnifiedLLM):
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        state_scope = self._replay_scope(effective_model, "responses", call_config)
         native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
-            call_config, state_scope
+            call_config, state_scope, direct=self.direct
         )
         input_messages, instructions, openai_explicit = self._prepare_input(
             messages, state_scope, effective_model, native_encrypted_reasoning
@@ -2360,11 +2467,14 @@ class ResponsesClient(UnifiedLLM):
         add_session_affinity_header(api_params)
 
         http_client = self._http
-        assert http_client is not None
-        if http_client.sync_client is not None:
-            api_params.setdefault("client", http_client.sync_client)
+        if not self.direct:
+            assert isinstance(http_client, _ClientHttp)
+            if http_client.sync_client is not None:
+                api_params.setdefault("client", http_client.sync_client)
 
         def _make_call():
+            if self.direct:
+                return self._direct_transport().call(api_params)
             return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
@@ -2406,9 +2516,9 @@ class ResponsesClient(UnifiedLLM):
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        state_scope = self._replay_scope(effective_model, "responses", call_config)
         native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
-            call_config, state_scope
+            call_config, state_scope, direct=self.direct
         )
         input_messages, instructions, openai_explicit = self._prepare_input(
             messages, state_scope, effective_model, native_encrypted_reasoning
@@ -2443,11 +2553,14 @@ class ResponsesClient(UnifiedLLM):
         add_session_affinity_header(api_params)
 
         http_client = self._http
-        assert http_client is not None
-        if http_client.async_client is not None:
-            api_params.setdefault("client", http_client.async_client)
+        if not self.direct:
+            assert isinstance(http_client, _ClientHttp)
+            if http_client.async_client is not None:
+                api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
+            if self.direct:
+                return await self._direct_transport().acall(api_params)
             return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
@@ -2531,7 +2644,9 @@ class ResponsesClient(UnifiedLLM):
                 continue
             msg = dict(original)
             reject_boundary_dict(msg)
-            replay_state.reject_native_message(msg, state_scope)
+            replay_state.reject_native_message(
+                msg, state_scope, reject_google_signature=self.direct
+            )
             if isinstance(msg.get("content"), list) and any(
                 not isinstance(block, dict) for block in msg["content"]
             ):
