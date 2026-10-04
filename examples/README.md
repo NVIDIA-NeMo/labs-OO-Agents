@@ -49,6 +49,21 @@ features. Each file is standalone and includes its exact run command.
 If you are new to NOOA, run examples 1–6 in order. After that, choose by the
 capability you need rather than treating the remaining files as required steps.
 
+### Text skill API
+
+`TextSkill(path=...)` returns a regular `Skill` whose documentation comes from
+`SKILL.md`. Use its root-relative file manifest and root-scoped `ShellTools`:
+
+```python
+skill = TextSkill(path=ASSETS / "frontend-design")
+print([file.path for file in skill.files])
+content = (await skill.shell.read("assets/prompt.txt")).text
+output = await skill.shell.run("python3 scripts/check.py")
+```
+
+The former `read_file()` and `run_script()` helpers are removed. Registry
+reloads rebuild the documentation, file manifest, and skill-local shell.
+
 ## Advanced mechanics
 
 These examples isolate lower-level extension points. Read the source first;
