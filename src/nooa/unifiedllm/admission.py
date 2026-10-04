@@ -68,6 +68,19 @@ class AdmissionPermit(Protocol):
 
 
 @runtime_checkable
+class CooldownAdmissionPermit(AdmissionPermit, Protocol):
+    """Optional permit feedback for a shared provider-directed cooldown.
+
+    Existing controllers need only implement :class:`AdmissionPermit`. The
+    provider task calls this extension before releasing its slot when an
+    overload response supplies a valid ``Retry-After`` delay.
+    """
+
+    async def cooldown(self, delay_s: float) -> None:
+        """Extend the group's not-before time without retrying the attempt."""
+
+
+@runtime_checkable
 class AdmissionController(Protocol):
     """Pluggable admission boundary for one asynchronous provider attempt.
 
@@ -104,7 +117,7 @@ def _current_admission_controller() -> AdmissionController | None:
 @dataclass(slots=True)
 class _Waiter:
     loop: asyncio.AbstractEventLoop
-    future: asyncio.Future[None]
+    wakeup: asyncio.Event
     queued_at: float
     queue_depth: int
     state: Literal["queued", "granted", "acquired", "cancelled"] = "queued"
@@ -121,20 +134,40 @@ class _Permit:
         self._release_lock = threading.Lock()
 
     def release(self) -> None:
+        """Return the permit once, even when called from another thread."""
         with self._release_lock:
             if self._released:
                 return
             self._released = True
         self._group.release()
 
+    async def cooldown(self, delay_s: float) -> None:
+        """Publish feedback while this permit still owns its active slot."""
+        with self._release_lock:
+            if not self._released:
+                self._group.cooldown(delay_s)
+
 
 class _AdmissionGroup:
     """A FIFO permit pool that can serve waiters from multiple event loops."""
 
-    def __init__(self, identity: str, display_name: str, max_in_flight: int):
+    def __init__(
+        self,
+        identity: str,
+        display_name: str,
+        max_in_flight: int,
+        requests_per_second: float | None = None,
+        max_cooldown: float | None = None,
+    ):
+        """Create one jointly scheduled FIFO group with monotonic clocks."""
         self.identity = identity
         self.display_name = display_name
         self.max_in_flight = max_in_flight
+        self.requests_per_second = requests_per_second
+        self.max_cooldown = max_cooldown
+        self._interval = 0.0 if requests_per_second is None else 1.0 / requests_per_second
+        self._next_admission = 0.0
+        self._cooldown_until = 0.0
         self._lock = threading.Lock()
         self._active = 0
         self._queued = 0
@@ -159,20 +192,26 @@ class _AdmissionGroup:
         queue_timeout: float | None,
         observer: AdmissionObserver,
     ) -> _Permit:
+        """Wait for concurrency and the shared monotonic admission gate."""
         started = time.perf_counter()
         loop = asyncio.get_running_loop()
 
         with self._lock:
-            if self._active < self.max_in_flight and not self._waiters:
+            now = time.monotonic()
+            if (
+                self._active < self.max_in_flight
+                and not self._waiters
+                and now >= self._not_before_locked()
+            ):
                 self._active += 1
+                self._next_admission = now + self._interval
                 immediate = True
                 waiter = None
                 queue_depth = 0
             else:
                 immediate = False
-                future = loop.create_future()
                 queue_depth = self._queued_count_locked() + 1
-                waiter = _Waiter(loop, future, started, queue_depth)
+                waiter = _Waiter(loop, asyncio.Event(), started, queue_depth)
                 self._waiters.append(waiter)
                 self._queued += 1
 
@@ -185,10 +224,10 @@ class _AdmissionGroup:
         assert waiter is not None
         try:
             if queue_timeout is None:
-                await asyncio.shield(waiter.future)
+                await self._wait_for_grant(waiter)
             else:
                 async with asyncio.timeout(queue_timeout):
-                    await asyncio.shield(waiter.future)
+                    await self._wait_for_grant(waiter)
         except TimeoutError as error:
             self._cancel_waiter(waiter)
             wait_s = time.perf_counter() - started
@@ -209,18 +248,84 @@ class _AdmissionGroup:
             )
             raise
 
-        with self._lock:
-            if waiter.state != "granted":
-                raise RuntimeError(
-                    f"Invalid admission waiter state after wake-up: {waiter.state!r}"
-                )
-            waiter.state = "acquired"
-
         wait_s = time.perf_counter() - started
         return self._permit_with_observation(
             observer,
             self._observation("admitted_after_wait", True, wait_s, waiter.queue_depth),
         )
+
+    async def _wait_for_grant(self, waiter: _Waiter) -> None:
+        """Let only the FIFO head own a pacing timer on its own event loop.
+
+        No concurrency slot is held while waiting for time. Waking a new head
+        on release/cancellation also avoids a timer tied to an abandoned loop.
+        """
+        while True:
+            with self._lock:
+                self._pump_locked()
+                if waiter.state == "granted":
+                    waiter.state = "acquired"
+                    return
+                waiter.wakeup.clear()
+                delay = None
+                if self._waiters[0] is waiter and self._active < self.max_in_flight:
+                    delay = max(0.0, self._not_before_locked() - time.monotonic())
+            try:
+                async with asyncio.timeout(delay):
+                    await waiter.wakeup.wait()
+            except TimeoutError:
+                # The shared not-before time may have been extended meanwhile.
+                # Re-check it under the group lock rather than granting early.
+                continue
+
+    def _not_before_locked(self) -> float:
+        """Return the joint pacing/cooldown gate while holding the lock."""
+        return max(self._next_admission, self._cooldown_until)
+
+    def _wake_head_locked(self) -> None:
+        """Wake the FIFO head to reconsider capacity and its delay timer."""
+        while self._waiters:
+            waiter = self._waiters[0]
+            try:
+                waiter.loop.call_soon_threadsafe(waiter.wakeup.set)
+                return
+            except RuntimeError:
+                self._waiters.popleft()
+                self._queued -= 1
+                waiter.state = "cancelled"
+
+    def _pump_locked(self) -> None:
+        """Grant available slots without accumulating missed pacing credits."""
+        while self._waiters and self._active < self.max_in_flight:
+            now = time.monotonic()
+            if now < self._not_before_locked():
+                return
+            waiter = self._waiters.popleft()
+            self._queued -= 1
+            waiter.state = "granted"
+            self._active += 1
+            try:
+                waiter.loop.call_soon_threadsafe(self._deliver_grant, waiter)
+            except RuntimeError:
+                waiter.state = "cancelled"
+                self._active -= 1
+                continue
+            self._next_admission = now + self._interval
+            self._wake_head_locked()
+
+    def cooldown(self, delay_s: float) -> None:
+        """Extend shared cooldown monotonically, with a per-report bound."""
+        delay = _validated_positive_option(delay_s, "delay_s")
+        if delay is None:
+            raise TypeError("delay_s must be a positive number")
+        if self.max_cooldown is None:
+            return
+        with self._lock:
+            self._cooldown_until = max(
+                self._cooldown_until,
+                time.monotonic() + min(delay, self.max_cooldown),
+            )
+            self._wake_head_locked()
 
     def _permit_with_observation(
         self,
@@ -264,6 +369,7 @@ class _AdmissionGroup:
         }
 
     def _cancel_waiter(self, waiter: _Waiter) -> None:
+        """Remove a cancelled waiter and wake its FIFO successor."""
         release_grant = False
         with self._lock:
             if waiter.state == "queued":
@@ -276,6 +382,7 @@ class _AdmissionGroup:
                     self._waiters.remove(waiter)
                 except ValueError:
                     pass
+                self._wake_head_locked()
             elif waiter.state == "granted":
                 # Capacity was transferred to this waiter, but cancellation or
                 # timeout won before its task claimed the grant.
@@ -287,41 +394,20 @@ class _AdmissionGroup:
             self.release()
 
     def release(self) -> None:
+        """Return concurrency and dispatch eligible FIFO waiters."""
         with self._lock:
             if self._active <= 0:
                 raise RuntimeError("Admission permit accounting underflow")
-
-            while self._waiters:
-                waiter = self._waiters.popleft()
-                if waiter.state != "queued":
-                    continue
-                waiter.state = "granted"
-                self._queued -= 1
-                # The active slot transfers to the waiter, so _active does not
-                # change. Delivery happens on the waiter's own event loop.
-                try:
-                    waiter.loop.call_soon_threadsafe(self._deliver_grant, waiter)
-                except RuntimeError:
-                    # A closed loop cannot accept the grant. Skip this waiter
-                    # and transfer the same slot to the next one.
-                    waiter.state = "cancelled"
-                    continue
-                return
-
             self._active -= 1
+            self._pump_locked()
+            self._wake_head_locked()
 
     def _deliver_grant(self, waiter: _Waiter) -> None:
-        release_grant = False
+        """Deliver a reserved slot on the waiter's event loop."""
         with self._lock:
             if waiter.state != "granted":
                 return
-            if waiter.future.cancelled():
-                waiter.state = "cancelled"
-                release_grant = True
-            elif not waiter.future.done():
-                waiter.future.set_result(None)
-        if release_grant:
-            self.release()
+            waiter.wakeup.set()
 
 
 _groups_lock = threading.RLock()
@@ -350,14 +436,23 @@ def _validated_limit(max_in_flight: int | None) -> int | None:
 
 
 def _validated_timeout(queue_timeout: float | None) -> float | None:
-    if queue_timeout is None:
+    """Validate a queue deadline duration."""
+    return _validated_positive_option(queue_timeout, "queue_timeout")
+
+
+def _validated_positive_option(value: float | None, name: str) -> float | None:
+    """Validate an optional finite, positive numeric policy setting."""
+    if value is None:
         return None
-    if isinstance(queue_timeout, bool) or not isinstance(queue_timeout, int | float):
-        raise TypeError("queue_timeout must be a positive number or None")
-    value = float(queue_timeout)
-    if value <= 0 or not math.isfinite(value):
-        raise ValueError("queue_timeout must be finite and greater than zero")
-    return value
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{name} must be a positive number or None")
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise ValueError(f"{name} must be finite and greater than zero") from error
+    if result <= 0 or not math.isfinite(result):
+        raise ValueError(f"{name} must be finite and greater than zero")
+    return result
 
 
 def _named_group_identity(label: str) -> tuple[str, str]:
@@ -400,7 +495,10 @@ def _get_or_create_group(
     identity: str,
     display_name: str,
     max_in_flight: int | None,
+    requests_per_second: float | None = None,
+    max_cooldown: float | None = None,
 ) -> _AdmissionGroup | None:
+    """Reuse a group only when all shared policy settings agree."""
     with _groups_lock:
         existing = _groups.get(identity)
         if max_in_flight is None:
@@ -411,8 +509,16 @@ def _get_or_create_group(
                     f"Conflicting max_in_flight for admission group {display_name!r}: "
                     f"existing={existing.max_in_flight}, requested={max_in_flight}"
                 )
+            for name, value in (
+                ("requests_per_second", requests_per_second),
+                ("max_cooldown", max_cooldown),
+            ):
+                if getattr(existing, name) != value:
+                    raise ValueError(f"Conflicting {name} for admission group {display_name!r}")
             return existing
-        group = _AdmissionGroup(identity, display_name, max_in_flight)
+        group = _AdmissionGroup(
+            identity, display_name, max_in_flight, requests_per_second, max_cooldown
+        )
         _groups[identity] = group
         return group
 
@@ -427,11 +533,22 @@ class AdmissionPolicy:
         concurrency_group: str | None,
         queue_timeout: float | None,
         api_base: str | None,
+        requests_per_second: float | None = None,
+        max_cooldown: float | None = None,
     ):
+        """Validate wrapper settings and join its named or inferred group."""
         self.max_in_flight = _validated_limit(max_in_flight)
         if self.max_in_flight is None:
             raise ValueError("max_in_flight is required for process-local admission")
         self.queue_timeout = _validated_timeout(queue_timeout)
+        self.requests_per_second = _validated_positive_option(
+            requests_per_second, "requests_per_second"
+        )
+        self.max_cooldown = _validated_positive_option(max_cooldown, "max_cooldown")
+        if self.requests_per_second is not None and not math.isfinite(
+            1.0 / self.requests_per_second
+        ):
+            raise ValueError("requests_per_second must have a finite reciprocal")
 
         if concurrency_group is not None:
             self.identity, self.display_name = _named_group_identity(concurrency_group)
@@ -440,7 +557,13 @@ class AdmissionPolicy:
         else:
             raise ValueError("max_in_flight requires concurrency_group or api_base")
 
-        _get_or_create_group(self.identity, self.display_name, self.max_in_flight)
+        _get_or_create_group(
+            self.identity,
+            self.display_name,
+            self.max_in_flight,
+            self.requests_per_second,
+            self.max_cooldown,
+        )
 
     async def acquire(self, observer: AdmissionObserver) -> _Permit:
         """Acquire process-local capacity for one provider attempt."""
@@ -448,6 +571,8 @@ class AdmissionPolicy:
             self.identity,
             self.display_name,
             self.max_in_flight,
+            self.requests_per_second,
+            self.max_cooldown,
         )
         assert group is not None
         return await group.acquire(queue_timeout=self.queue_timeout, observer=observer)
@@ -467,16 +592,25 @@ class AdmissionControlConfig:
     concurrency_group: str | None = None
     queue_timeout: float | None = None
     controller: AdmissionController | None = None
+    requests_per_second: float | None = None
+    max_cooldown: float | None = None
 
     def __post_init__(self) -> None:
+        """Validate either an injected controller or one explicit local policy."""
         if self.controller is not None:
             if any(
                 value is not None
-                for value in (self.max_in_flight, self.concurrency_group, self.queue_timeout)
+                for value in (
+                    self.max_in_flight,
+                    self.concurrency_group,
+                    self.queue_timeout,
+                    self.requests_per_second,
+                    self.max_cooldown,
+                )
             ):
                 raise ValueError(
                     "controller cannot be combined with max_in_flight, "
-                    "concurrency_group, or queue_timeout"
+                    "concurrency_group, queue_timeout, requests_per_second, or max_cooldown"
                 )
             if not isinstance(self.controller, AdmissionController):
                 raise TypeError("controller must implement AdmissionController")
@@ -488,6 +622,10 @@ class AdmissionControlConfig:
             )
         _validated_limit(self.max_in_flight)
         _validated_timeout(self.queue_timeout)
+        rate = _validated_positive_option(self.requests_per_second, "requests_per_second")
+        if rate is not None and not math.isfinite(1.0 / rate):
+            raise ValueError("requests_per_second must have a finite reciprocal")
+        _validated_positive_option(self.max_cooldown, "max_cooldown")
         if self.concurrency_group is not None:
             _named_group_identity(self.concurrency_group)
 
@@ -506,6 +644,8 @@ class AdmissionControlConfig:
             concurrency_group=self.concurrency_group,
             queue_timeout=self.queue_timeout,
             api_base=api_base,
+            requests_per_second=self.requests_per_second,
+            max_cooldown=self.max_cooldown,
         )
 
 
@@ -526,4 +666,5 @@ __all__ = [
     "AdmissionPolicy",
     "AdmissionTimeoutError",
     "AdmissionUnavailableError",
+    "CooldownAdmissionPermit",
 ]

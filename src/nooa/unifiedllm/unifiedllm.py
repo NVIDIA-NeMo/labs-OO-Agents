@@ -36,7 +36,8 @@ from nooa.unifiedllm.cache_policy import (
 )
 
 from . import replay_state, response_parts
-from .admission import _current_admission_controller
+from .admission import CooldownAdmissionPermit, _current_admission_controller
+from .cooldown import retry_after_delay
 from .errors import EmptyContentError
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
@@ -1586,8 +1587,21 @@ async def _run_async_provider_call[T](
         return await (unadmitted_call or call)()
 
     async def run_and_release() -> T:
+        """Publish optional overload feedback before returning concurrency."""
         try:
             return await call()
+        except Exception as error:
+            if isinstance(permit, CooldownAdmissionPermit):
+                try:
+                    delay = retry_after_delay(error)
+                    if delay is not None:
+                        await permit.cooldown(delay)
+                except Exception:
+                    # Feedback must not replace the provider failure or
+                    # skip permit cleanup. Do not log provider headers or
+                    # exception messages, which can contain credentials.
+                    logger.warning("Could not publish shared LLM cooldown")
+            raise
         finally:
             permit.release()
 
