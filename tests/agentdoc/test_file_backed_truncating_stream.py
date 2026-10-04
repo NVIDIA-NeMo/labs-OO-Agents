@@ -75,13 +75,19 @@ class TestFileBackedBasicBehavior:
         finally:
             buf.cleanup()
 
-    def test_unicode_round_trip(self, buf):
+    def test_unicode_round_trip(self, monkeypatch):
         """Unicode characters survive the write-read round trip in both memory and file."""
-        text = "Hello 世界! 🚀 café"
-        buf.write(text)
-        assert buf.getvalue() == text
-        with open(buf.file_path) as f:
-            assert f.read() == text
+        # Exercise a non-UTF-8 default even on UTF-8 CI hosts.
+        monkeypatch.setattr("io.text_encoding", lambda encoding, stacklevel=2: encoding or "cp1252")
+        buf = FileBackedTruncatingStringIO(limit=100)
+        try:
+            text = "Hello 世界! 🚀 café"
+            buf.write(text)
+            assert buf.getvalue() == text
+            with open(buf.file_path, encoding="utf-8") as f:
+                assert f.read() == text
+        finally:
+            buf.cleanup()
 
 
 class TestFileBackedFileOutput:
@@ -197,6 +203,17 @@ class TestFileBackedTruncationNotice:
 
 class TestFileBackedErrorHandling:
     """Verify graceful fallback when file I/O fails."""
+
+    def test_fallback_on_unencodable_text(self, buf):
+        """Lone surrogates cannot be encoded as UTF-8 but remain usable in memory."""
+        text = "before\ud800after"
+        assert buf.write(text) == len(text)
+        assert buf.getvalue() == text
+        assert buf.write("x" * 200) == 200
+        assert buf.chars_written == len(text) + 200
+        value = buf.getvalue()
+        assert "not recoverable" in value
+        assert "full untruncated output" not in value
 
     def test_fallback_on_invalid_dir(self):
         """Invalid dir falls back to in-memory-only; no file path in notice."""
