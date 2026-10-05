@@ -34,12 +34,13 @@ from nooa.storage.snapshot_vars import SnapshotVars
 with hidden:
     from collections.abc import Callable
 
-    from nooa import Agent
+    from nooa import Agent, no_trace
     from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
     from nooa.events import _json_safe
     from nooa.runtime.channels import Channel, ChannelReader, QueueManager
     from nooa.runtime.producers_skill import ProducersSkill
+    from nooa.runtime.turn_loop import TurnLoop
     from nooa.strategies import CodeActStrategy
     from nooa.tools.web_publisher import WebPublisher
 
@@ -391,6 +392,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # ``self.user_messages``) directly, not through a string-keyed
     # registry lookup.
     queue_manager: Annotated[QueueManager, hidden, nosnapshot]
+    # Drives handle() from the channels once a host calls turns.start().
+    # Hidden: the model must not cancel or await its own turns.
+    turns: Annotated[TurnLoop, hidden, nosnapshot]
     # Producer-side Channel (full put / pop_last / snapshot / etc.)
     # — hidden, since the LLM has no business calling those.
     _user_messages_in: Annotated[Channel, hidden, nosnapshot]
@@ -409,6 +413,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self.queue_manager = QueueManager(event_manager=self.event_manager)
         self._user_messages_in = self.queue_manager.queue("user_messages")
         self.user_messages = self._user_messages_in.reader
+        self.event_manager.on_close(self.queue_manager.shutdown)
+        self.turns = TurnLoop(self)
         self.producers = ProducersSkill()
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
@@ -429,6 +435,29 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             from nooa import Context
 
             self.context["web"] = Context(doc(self.web), prefix=True)
+
+    @hidden
+    @no_trace
+    async def aclose(self) -> None:
+        """Stop owned turns/jobs before the caller releases shared resources.
+
+        Self-close from an executing turn is rejected; its external owner must
+        close after settlement. This avoids joining one's own task indirectly.
+        """
+        if self.turns.in_turn:
+            raise RuntimeError("an executing turn cannot close its own agent")
+        # Register for this close epoch; the manager shields and joins cleanup.
+        # Last registered runs first, before other components release resources.
+        self.event_manager.on_close(self._close_runtime)
+        await super().aclose()
+
+    @hidden
+    @no_trace
+    async def _close_runtime(self) -> None:
+        try:
+            await self.turns.stop()
+        finally:
+            await self.queue_manager.shutdown()
 
     @property
     def v(self) -> AgentVars:

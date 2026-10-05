@@ -27,7 +27,7 @@ from nooa.events import (
     Summary,
 )
 from nooa.runtime.context_vars import _current_event_format_var, _get_agent_call_stack
-from nooa.runtime.event_backend import EventBackend, InMemoryBackend
+from nooa.runtime.event_backend import EventBackend, InMemoryBackend, _validate_fresh_batch
 
 if TYPE_CHECKING:
     from nooa.runtime.event_query import EventQuery
@@ -199,6 +199,29 @@ class EventManager:
 
         return str(event.id)
 
+    def record_batch(self, events: list[EventBase]) -> list[str]:
+        """Atomically append fresh durable events, without observer delivery.
+
+        This explicit recorder path is for mandatory ledger transitions.
+        A backend without atomic append support fails rather than degrading
+        to partial single-event writes. Runtime events and summaries are not
+        accepted. Tags must support ordinary mutable Pydantic field assignment:
+        frozen tags/models, assignment validation and custom setters are rejected
+        before mutation. Use add() for ordinary context/observer events.
+        """
+        if any(
+            not isinstance(event, EventBase)
+            or event._role == Role.RUNTIME_EVENT
+            or isinstance(event, Summary)
+            for event in events
+        ):
+            raise ValueError("record_batch requires fresh durable non-summary events")
+        append = getattr(self._backend, "append_batch", None)
+        if append is None:
+            raise TypeError("backend does not support atomic batch recording")
+        _validate_fresh_batch(events, self._backend)
+        return append(events)
+
     def register_event_type(self, cls: type[EventBase]) -> None:
         """Register a custom EventBase subclass for deserialization.
 
@@ -350,13 +373,13 @@ class EventManager:
         for handler in list(self._handlers[event_type]):
             try:
                 handler(event)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Event handler %r raised", handler, exc_info=True)
 
         for handler in list(self._handlers["*"]):
             try:
                 handler(event)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Wildcard handler %r raised", handler, exc_info=True)
 
     # === Middleware (intercept) ===
