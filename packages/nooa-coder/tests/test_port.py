@@ -535,7 +535,6 @@ async def test_a_failed_delivery_keeps_a_finished_throwaway_child_available(
     assert ended[1]["explanation"] == "kid done"
 
 
-
 async def test_a_wait_cut_short_leaves_the_result_for_the_delegates_channel(
     registry, root_options, models
 ):
