@@ -467,9 +467,9 @@ class Session:
         while self._pending_steers:
             item_id, text, source = self._pending_steers[0]
             try:
-                self.handle.events.add(ItemConsumed(item_id=item_id))
-                self._consumed.append(item_id)
-                self._pending_steers.pop(0)
+                # Ordinary event add may fail before storage/delivery. Retain
+                # the admission until it succeeds; failure after observer delivery
+                # is ambiguous and can replay, not silently lose the instruction.
                 self._agent.event_manager.add(
                     Notification(
                         source=_steer_source(source),
@@ -477,6 +477,9 @@ class Session:
                         value={"user_messages": [text]},
                     )
                 )
+                self.handle.events.add(ItemConsumed(item_id=item_id))
+                self._consumed.append(item_id)
+                self._pending_steers.pop(0)
                 self._emit(ItemConsumedUpdate(session_id=self.id, channel="steer", item_id=item_id))
             except (Exception, asyncio.CancelledError) as exc:
                 self._record_failure(exc, [item_id])

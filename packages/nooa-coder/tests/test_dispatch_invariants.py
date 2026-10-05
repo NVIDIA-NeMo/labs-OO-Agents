@@ -313,3 +313,88 @@ async def test_steer_record_failure_retains_buffer_and_fails_relevant_prompt(mak
         raw["item_id"] in {r.item_id for r in receipts} for _, raw in rows(session, "ItemConsumed")
     )
     session.handle.events.add = add
+
+
+async def test_failed_steer_notification_retains_unconsumed_recovery(make_session, monkeypatch):
+    from nooa.events import Notification
+
+    started, block = agents.fresh_events()
+    session, _ = make_session(cell(agents.BLOCKING_CELL), done("finished"))
+    first = asyncio.ensure_future(session.prompt("first"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    receipts = [await session.steer("steer-a"), await session.steer("steer-b")]
+    updates = []
+    session.subscribe(updates.append)
+    add = session._agent.event_manager.add
+
+    def fail(event, **kwargs):
+        if isinstance(event, Notification):
+            raise OSError("notification unavailable")
+        return add(event, **kwargs)
+
+    monkeypatch.setattr(session._agent.event_manager, "add", fail)
+    block.set()
+    with pytest.raises(TurnFailedError):
+        await asyncio.wait_for(first, TIMEOUT)
+    assert session._agent.turns.paused
+    ids = [r.item_id for r in receipts]
+    assert [item_id for item_id, _, _ in session._pending_steers] == ids
+    assert not any(raw["item_id"] in ids for _, raw in rows(session, "ItemConsumed"))
+    assert not any(e.kind == "item_consumed" and e.item_id in ids for e in updates)
+    for receipt in receipts:
+        with pytest.raises(TurnFailedError):
+            await session.outcome(receipt.item_id)
+    monkeypatch.setattr(session._agent.event_manager, "add", add)
+    session.resume_dispatch()
+    await agents.until(
+        lambda: all(
+            any(raw["item_id"] == item_id for _, raw in rows(session, "ItemConsumed"))
+            for item_id in ids
+        ),
+        TIMEOUT,
+    )
+    assert session._pending_steers == []
+
+
+@pytest.mark.parametrize("failure", ["before_delivery", "after_delivery"])
+async def test_failed_steer_notification_replays_on_load(
+    registry, root_options, models, sessions_dir, monkeypatch, failure
+):
+    from nooa_coder.session.registry import SessionRegistry
+    from nooa_coder.session.store import SessionStore
+
+    from nooa.events import Notification
+
+    started, block = agents.fresh_events()
+    models.scripts[None] = [cell(agents.BLOCKING_CELL), done("finished")]
+    root = await registry.create(root_options)
+    first = asyncio.ensure_future(root.prompt("first"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    receipt = await root.steer("recover-this-steer")
+    add = root._agent.event_manager.add
+    delivered = []
+    root._agent.event_manager.on("Notification", delivered.append)
+
+    def fail(event, **kwargs):
+        if isinstance(event, Notification):
+            if failure == "after_delivery":
+                add(event, **kwargs)
+            raise OSError("notification delivery ambiguous")
+        return add(event, **kwargs)
+
+    monkeypatch.setattr(root._agent.event_manager, "add", fail)
+    block.set()
+    with pytest.raises(TurnFailedError):
+        await asyncio.wait_for(first, TIMEOUT)
+    assert not any(raw["item_id"] == receipt.item_id for _, raw in rows(root, "ItemConsumed"))
+    assert bool(delivered) == (failure == "after_delivery")
+    await registry.close_all()
+    later = agents.ScriptedModels({None: [done("replayed")]})
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=later)
+    try:
+        loaded = await fresh.load(root.id)
+        await asyncio.wait_for(loaded.outcome(receipt.item_id), TIMEOUT)
+        assert "recover-this-steer" in str(later.llms[None].calls[0].messages)
+        assert any(raw["item_id"] == receipt.item_id for _, raw in rows(loaded, "ItemRequeued"))
+    finally:
+        await fresh.close_all()
