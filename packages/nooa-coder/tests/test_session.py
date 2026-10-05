@@ -497,7 +497,7 @@ async def test_a_loop_with_no_channels_left_closes_the_session(make_session):
 
 async def test_withdraw_a_steer_that_became_a_message(make_session):
     session, _ = make_session(start=False)
-    turns = session.agent.turns
+    turns = session._agent.turns
     turns._turn = asyncio.ensure_future(asyncio.sleep(10))  # a turn is running
     turns._settled.clear()
     session.info.status = "running"

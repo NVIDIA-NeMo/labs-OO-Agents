@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, SerializeAsAny, ValidationError, field_validator
 
+from nooa.context_blocks import EventBase
 from nooa.interactive import Done, NeedInput
 from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
 

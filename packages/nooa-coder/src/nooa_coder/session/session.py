@@ -393,7 +393,8 @@ class Session:
         self._ensure_open()
         if self._agent.turns.dispatch_error is not None:
             raise TurnFailedError(
-                "dispatch is blocked; repair and resume_dispatch()", self._agent.turns.dispatch_error
+                "dispatch is blocked; repair and resume_dispatch()",
+                self._agent.turns.dispatch_error,
             )
 
     def requeue(self, item: Any, *, channel: str, source: str, item_id: str) -> Receipt:
@@ -470,7 +471,11 @@ class Session:
                 self._consumed.append(item_id)
                 self._pending_steers.pop(0)
                 self._agent.event_manager.add(
-                    Notification(source=_steer_source(source), description=_STEER_HINT, value={"user_messages": [text]})
+                    Notification(
+                        source=_steer_source(source),
+                        description=_STEER_HINT,
+                        value={"user_messages": [text]},
+                    )
                 )
                 self._emit(ItemConsumedUpdate(session_id=self.id, channel="steer", item_id=item_id))
             except (Exception, asyncio.CancelledError) as exc:
@@ -1180,7 +1185,7 @@ class Session:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)
-        if isinstance(event, AgentMessage) and self._agent.turns.in_turn:
+        if isinstance(event, AgentMessage) and self.info.status == "running":
             self._turn_messages.add(event.content)
 
     def plan(self) -> list[PlanEntry]:

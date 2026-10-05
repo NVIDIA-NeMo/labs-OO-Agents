@@ -493,10 +493,6 @@ class SessionHandle:
     def path(self) -> Path:
         return self._store.path_for(self.id)
 
-    @property
-    def closed(self) -> bool:
-        return self._closed
-
     def set_title(self, title: str, *, user_set: bool = False) -> None:
         """Persist a title and update this handle's current metadata."""
         self._ensure_open()

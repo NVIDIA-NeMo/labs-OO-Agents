@@ -163,9 +163,9 @@ async def test_items_the_original_never_read_are_not_queued_again_in_the_fork(
     await asyncio.wait_for(started.wait(), TIMEOUT)
     unread = await root.submit("NEVER-READ")
     # A crash: the loop dies mid-turn and the file is let go.
-    root._loop_task.cancel()
+    root._agent.turns._task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
-        await root._loop_task
+        await root._agent.turns._task
     root.handle.close()
     first.cancel()
     store = SessionStore(sessions_dir)
