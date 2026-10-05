@@ -454,7 +454,7 @@ async def test_the_owned_client_closes_when_the_agent_close_fails(
     await asyncio.wait_for(registry.close(root.id), TIMEOUT)
     [llm] = factory.made
     assert llm.closed
-    assert root.handle._closed and root.info.status == "closed"
+    assert root.handle.closed and root.info.status == "closed"
     assert registry.get(root.id) is None
 
 
@@ -515,7 +515,7 @@ async def test_prepare_runs_before_publish_and_start(registry, root_options, mod
 
     async def prepare(session):
         assert registry.get(session.id) is None  # not published yet
-        assert session._loop_task is None  # not started yet
+        assert not session.agent.turns.started  # not started yet
         session.subscribe(seen.append)
 
     child = await registry.create(
@@ -549,7 +549,7 @@ async def test_prepare_on_load_sees_requeued_turns_but_not_on_attach(
     root_id = root.id
     await root.cancel()
     # Leave an unhandled item behind: close before the loop can consume it.
-    root._loop_task.cancel()
+    root.agent.turns._task.cancel()
     await root.submit("LEFT-BEHIND")
     await registry.close_all()
 
@@ -637,7 +637,7 @@ async def test_a_turn_cancelled_from_inside_fails_and_the_loop_goes_on(root_opti
     root = await registry.create(options)
     with pytest.raises(TurnFailedError, match="cancelled from inside"):
         await asyncio.wait_for(root.prompt("one"), 5)
-    assert not root._loop_task.done()
+    assert not root.agent.turns._task.done()
     assert await asyncio.wait_for(root.prompt("two"), 5) == Done(explanation="finished")
     [first, _] = [raw for _, raw in registry.store.load_rows(root.id, frozenset({"TurnEnded"}))]
     assert first["outcome_kind"] == "error"
@@ -749,9 +749,9 @@ async def test_a_steer_buffered_at_a_crash_is_requeued(
     await asyncio.wait_for(started.wait(), TIMEOUT)
     receipt = await root.steer("STEER-CRASH")
     # Crash: the loop dies without settling the turn, and the file is let go.
-    root._loop_task.cancel()
+    root.agent.turns._task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
-        await root._loop_task
+        await root.agent.turns._task
     root.handle.close()
     first.cancel()
 
@@ -769,3 +769,74 @@ async def test_a_steer_buffered_at_a_crash_is_requeued(
         assert receipt.item_id in requeued
     finally:
         await fresh.close_all()
+
+
+async def test_paused_parent_durably_receives_child_finish_and_consumes_on_resume(
+    registry, root_options, models, monkeypatch
+):
+    models.scripts[None] = [done("parent resumed")]
+    models.scripts["child"] = [done("child finished")]
+    parent = await registry.create(root_options)
+    original = parent.handle.events.record_batch
+
+    def fail(_events):
+        raise OSError("parent dispatch blocked")
+
+    monkeypatch.setattr(parent.handle.events, "record_batch", fail)
+    with pytest.raises(TurnFailedError, match="parent dispatch blocked"):
+        await asyncio.wait_for(parent.prompt("initial"), TIMEOUT)
+    monkeypatch.setattr(parent.handle.events, "record_batch", original)
+    assert parent.agent.turns.paused
+    for action in (parent.submit, parent.prompt, parent.steer):
+        with pytest.raises(TurnFailedError, match="dispatch is blocked"):
+            await action("external rejected")
+    child = await registry.create(
+        parent.options.inherit(name="child"),
+        parent_id=parent.id,
+        initial_items=[("user_messages", "child work")],
+    )
+    await until(lambda: child.closing)
+    delegate_queue = parent.agent.queue_manager.get_channel("delegates")
+    [result] = delegate_queue.snapshot()
+    assert result.child.id == child.id and result.done.explanation == "child finished"
+    admissions = registry.store.load_rows(parent.id, frozenset({"ItemAdmitted"}))
+    [admitted] = [raw for _, raw in admissions if raw["channel"] == "delegates"]
+    assert admitted["source"] == "child:child"
+    assert parent.agent.turns.paused and not models.llms[None].calls
+    seen = []
+    parent.subscribe(lambda update: seen.append(update) if update.kind == "turn_ended" else None)
+    parent.resume_dispatch()
+    await until(lambda: seen)
+    consumed = registry.store.load_rows(parent.id, frozenset({"ItemConsumed"}))
+    assert admitted["item_id"] in {raw["item_id"] for _, raw in consumed}
+    assert delegate_queue.snapshot() == []
+    assert seen[-1].outcome_kind == "done"
+    assert registry.take_queued_result(parent, child.id) is None
+
+
+async def test_failed_parent_delivery_does_not_auto_close_child(
+    registry, root_options, models, monkeypatch
+):
+    from nooa_coder.session.events import ItemAdmitted
+
+    models.scripts["child"] = [done("durable child result")]
+    parent = await registry.create(root_options)
+    parent.agent.turns.pause()
+    original = parent.handle.events.add
+
+    def fail(event, **kwargs):
+        if isinstance(event, ItemAdmitted) and event.channel == "delegates":
+            raise OSError("delivery ledger failed")
+        return original(event, **kwargs)
+
+    monkeypatch.setattr(parent.handle.events, "add", fail)
+    child = await registry.create(
+        parent.options.inherit(name="child"),
+        parent_id=parent.id,
+        initial_items=[("user_messages", "work")],
+    )
+    await until(lambda: child.info.status == "idle" and models.llms["child"].calls)
+    assert not child.closing and registry.get(child.id) is child
+    assert parent.agent.queue_manager.get_channel("delegates").snapshot() == []
+    [ended] = registry.store.load_rows(child.id, frozenset({"TurnEnded"}))
+    assert ended[1]["explanation"] == "durable child result"

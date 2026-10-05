@@ -20,7 +20,7 @@ from typing import Any
 from nooa.events import TuiSessionResumed
 from nooa.interactive import Done
 from nooa.storage.sqlite import SessionAlreadyActiveError
-from nooa_coder.session.events import ChildDeleted, ItemRequeued
+from nooa_coder.session.events import ChildDeleted
 from nooa_coder.session.items import (
     ChildCreatedUpdate,
     ChildFailed,
@@ -126,7 +126,7 @@ class SessionRegistry:
             parent = self.sessions.get(parent_id)
             if parent is None:
                 raise KeyError(f"Parent session {parent_id!r} is not live here")
-            if parent._closing or parent._closed:
+            if parent.closing:
                 raise SessionClosedError(f"Parent session {parent_id!r} is closing")
         depth = parent.depth + 1 if parent is not None else 0
         if depth > options.max_depth:
@@ -155,7 +155,7 @@ class SessionRegistry:
             if prepare is not None:
                 await prepare(session)
             for channel, item in initial_items:
-                session._admit(item, channel=channel, source=initial_source)
+                session.admit(item, channel=channel, source=initial_source)
             session.start()
         except BaseException:
             await self._close_half_built(session)
@@ -213,14 +213,15 @@ class SessionRegistry:
             handle=handle,
             owned_llm=owned_llm,
             llm_factory=self.llm_factory,
+            before_close=lambda: self._close_children(handle.id),
+            llm_in_use=lambda llm: any(
+                other.id != handle.id and other.options.llm is llm
+                for other in self.sessions.values()
+            ),
         )
         resolved = getattr(owned_llm, "alias", None)
         if isinstance(resolved, str) and resolved:
             session.info.model = resolved
-        session._before_close = lambda: self._close_children(session.id)
-        session.llm_in_use = lambda llm: any(
-            other is not session and other.options.llm is llm for other in self.sessions.values()
-        )
         install_port(agent, session, self)
         return session
 
@@ -299,7 +300,7 @@ class SessionRegistry:
         while ancestor is not None:
             ancestor.add_attributed_usage(update.usage)
             ancestor = self.sessions.get(ancestor.parent_id) if ancestor.parent_id else None
-        if parent is None or parent._closing or parent._closed:
+        if parent is None or parent.closing:
             return
         kind = update.outcome_kind
         if kind not in ("done", "need_input", "error", "cancelled"):
@@ -309,6 +310,7 @@ class SessionRegistry:
         waiter = self._waiters.pop((parent.id, child.id), None)
         if waiter is not None and waiter.done():
             waiter = None
+        delivered = False
         try:
             if kind == "done":
                 done = _rebuild_done(update)
@@ -342,9 +344,10 @@ class SessionRegistry:
                         )
                     )
                 _admit_delegate(parent, question, source)
+            delivered = True
         finally:
-            # A finished throwaway child is closed even if its delivery failed.
-            if kind != "need_input" and not child.options.retain:
+            # Keep a child's own durable result available if parent admission fails.
+            if delivered and kind != "need_input" and not child.options.retain:
                 # Not from inside this callback: closing awaits the child's own loop.
                 task = asyncio.get_running_loop().create_task(self.close(child.id))
                 self._background.add(task)
@@ -595,13 +598,11 @@ class SessionRegistry:
                 )
                 continue
             item = load_typed(str(raw.get("item_type", "")), str(raw.get("item_json", "null")))
-            session.handle.events.add(ItemRequeued(item_id=item_id))
-            session._admit(
+            session.requeue(
                 item,
                 channel=channel,
                 source=str(raw.get("source", "")),
                 item_id=item_id,
-                record=False,
             )
 
     # ---- delete ------------------------------------------------------
@@ -687,7 +688,7 @@ def _admit_delegate(parent: Session, item: Any, source: str) -> Receipt:
     queues = parent.agent.queue_manager
     if "delegates" not in queues.channels():
         queues.queue("delegates")
-    return parent._admit(item, channel="delegates", source=source)
+    return parent.admit(item, channel="delegates", source=source)
 
 
 def _live_status(session: Session) -> SessionStatus:

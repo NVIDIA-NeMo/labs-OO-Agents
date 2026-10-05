@@ -516,7 +516,7 @@ async def test_a_result_arrives_after_the_agent_removed_delegates(registry, root
     await until(lambda: registry.get(child.id) is None, TIMEOUT)
 
 
-async def test_a_failed_delivery_still_closes_a_finished_throwaway_child(
+async def test_a_failed_delivery_keeps_a_finished_throwaway_child_available(
     registry, root_options, models, monkeypatch
 ):
     models.scripts["Kid"] = [done("kid done")]
@@ -529,4 +529,7 @@ async def test_a_failed_delivery_still_closes_a_finished_throwaway_child(
     child = await registry.create(
         root.options.inherit(name="Kid"), parent_id=root.id, initial_items=[("user_messages", "go")]
     )
-    await until(lambda: registry.get(child.id) is None, TIMEOUT)
+    await until(lambda: child.info.status == "idle" and models.llms["Kid"].calls, TIMEOUT)
+    assert registry.get(child.id) is child and not child.closing
+    [ended] = registry.store.load_rows(child.id, frozenset({"TurnEnded"}))
+    assert ended[1]["explanation"] == "kid done"

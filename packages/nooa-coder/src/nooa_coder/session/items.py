@@ -7,13 +7,12 @@ no live objects. Sessions, hosts and parent agents exchange these values;
 live agents never cross.
 """
 
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from nooa.context_blocks import EventBase
-from nooa.context_blocks.roles import Role
 from nooa.interactive import Done, NeedInput
+from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:
     from nooa_coder.session.port import SessionPort
@@ -321,20 +320,3 @@ SessionEvent = Annotated[
     Field(discriminator="kind"),
 ]
 """What ``Session.subscribe()`` listeners receive: data only."""
-
-
-class TurnCancelled(EventBase):
-    """A person, a parent or the host stopped the turn before it finished.
-
-    Appended to the agent's events when a cancel takes effect, after the
-    interrupted cell's output, so the model sees at its next turn that it
-    was stopped rather than that a cell failed. ``by`` says who stopped it
-    (``"user"``, ``"parent:<name>"``, ``"host"``); ``interrupted`` is the
-    tag of the interrupted cell's ``PythonOutput``, or ``None`` when the
-    turn was stopped between cells (for example during a model call).
-    """
-
-    _role: ClassVar[Role] = Role.USER
-
-    by: str
-    interrupted: str | None = None

@@ -20,7 +20,6 @@ from nooa.storage.sqlite import (
     SessionAlreadyActiveError,
     SQLiteStorageManager,
     _acquire_session_lock,
-    _is_virtiofs,
     delete_sqlite_database,
 )
 from nooa_coder.session.events import (
@@ -99,29 +98,6 @@ class SessionNotFoundError(FileNotFoundError):
     """Raised when a durable session does not exist or lacks start metadata."""
 
 
-class _ExistingSQLiteStorageManager(SQLiteStorageManager):
-    """Storage for a session file that must already exist.
-
-    ``SQLiteStorageManager`` opens with a plain ``sqlite3.connect(path)``,
-    which creates an empty database when the file is gone, so a delete
-    racing an open would leave a new empty file behind. Opening with the
-    ``mode=rw`` URI fails instead. Replace this subclass with the
-    ``must_exist`` option once #382 lands. The pragmas match the base
-    class's ``_open_connection``.
-    """
-
-    def _open_connection(self) -> sqlite3.Connection:
-        uri = f"{Path(self._db_path).resolve().as_uri()}?mode=rw"
-        connection = sqlite3.connect(uri, uri=True, check_same_thread=self._check_same_thread)
-        connection.execute("PRAGMA busy_timeout=5000")
-        if _is_virtiofs(self._db_path):
-            connection.execute("PRAGMA journal_mode=DELETE")
-        else:
-            connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
-        return connection
-
-
 class SessionHandle:
     """An agent-runtime-owned session database and metadata writer.
 
@@ -167,6 +143,10 @@ class SessionHandle:
     @property
     def path(self) -> Path:
         return self._store.path_for(self.id)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     def set_title(self, title: str, *, user_set: bool = False) -> None:
         """Persist a title and update this handle's current metadata."""
@@ -263,7 +243,9 @@ class SessionStore:
             raise FileExistsError(f"Session {session_id!r} already exists")
 
         offset = datetime.now().astimezone().utcoffset()
-        storage = SQLiteStorageManager(path)
+        # check_same_thread=False: the session's checkpoint writes from a
+        # worker thread (save_snapshot_json takes the manager's lock).
+        storage = SQLiteStorageManager(path, check_same_thread=False)
         events = EventManager(backend=storage.event_backend)
         for event_type in SESSION_EVENT_TYPES:
             events.register_event_type(event_type)
@@ -312,7 +294,7 @@ class SessionStore:
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
         try:
-            storage = _ExistingSQLiteStorageManager(path)
+            storage = SQLiteStorageManager(path, check_same_thread=False, must_exist=True)
         except sqlite3.OperationalError as exc:
             if path.exists():
                 raise
