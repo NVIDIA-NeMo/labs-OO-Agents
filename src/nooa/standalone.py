@@ -208,21 +208,47 @@ def create_standalone_wrapper(
     # Only decision strategies consume a decision model. Other strategies must
     # keep their chat LLM even when called from an agent that has one.
     _uses_decision_model = bool(getattr(strategy, "uses_decision_model", False))
+    # A function parameter named decision_model shadows the call-site override.
+    _has_user_decision_model_param = "decision_model" in inspect.signature(func).parameters
 
     @wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        resolved_decision_model = decision_model if _uses_decision_model else None
+        from nooa.decisions.resolution import is_decision_model, resolve_decision_alias
         from nooa.runtime.context_vars import _parent_agent_var
+
+        call_decision_model = None
+        if not _has_user_decision_model_param:
+            call_decision_model = kwargs.pop("decision_model", None)
+        if call_decision_model is not None:
+            if not _uses_decision_model:
+                raise TypeError(
+                    f"decision_model= applies only to DecideStrategy functions; "
+                    f"'{func.__name__}' uses {type(strategy).__name__}."
+                )
+            if not isinstance(call_decision_model, str) and not is_decision_model(
+                call_decision_model
+            ):
+                raise TypeError(
+                    f"call argument decision_model= for standalone function "
+                    f"{func.__name__!r} must be a decision model or alias; got "
+                    f"{type(call_decision_model).__name__}"
+                )
+
+        # Same precedence as agent methods: call site, decorator, then parent.
+        if call_decision_model is not None:
+            resolved_decision_model = call_decision_model
+            origin = "call argument decision_model="
+        else:
+            resolved_decision_model = decision_model if _uses_decision_model else None
+            origin = "standalone decision_model="
 
         parent = _parent_agent_var.get()
         if isinstance(resolved_decision_model, str):
-            from nooa.decisions.resolution import resolve_decision_alias
-
             resolved_decision_model = resolve_decision_alias(
                 resolved_decision_model,
                 _decision_alias_cache,
                 func.__name__,
-                origin="standalone decision_model=",
+                origin=origin,
             )
         if _uses_decision_model and resolved_decision_model is None and parent is not None:
             resolved_decision_model = getattr(parent, "_decision_model", None)

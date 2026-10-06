@@ -265,8 +265,20 @@ class RiskAgent(Agent, llm=llm, decision_model=general_decision_model):
         ...
 ```
 
-Resolution is method decision model, then agent decision model, then chat-LLM
-fallback. The fallback supports primitive `bool`, enum, `Literal`, and scored
+A single call can also override the model, exactly like `llm=`:
+
+```python
+await agent.detect_fraud(transaction, decision_model=review_decision_model)
+```
+
+Resolution is call argument, then method decorator, then agent, then the calling
+parent agent, then chat-LLM fallback. Each level accepts a client or a configured
+alias; the call argument and method decorator also accept a callable that
+receives the agent. A method parameter named `decision_model` is passed to the
+method instead of selecting a model. Standalone functions accept a client or
+alias as a call argument, but not a callable.
+
+The fallback supports primitive `bool`, enum, `Literal`, and scored
 `float` results. The fallback prompt includes the same compiled instructions,
 criteria, options, and score levels that a decision model would receive, and a
 score outside its levels fails validation and is retried like any Predict

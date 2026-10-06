@@ -2722,6 +2722,7 @@ class ActorRuntime:
                     strategy.requires_lock
                     or (
                         strategy.uses_decision_model
+                        and kwargs.get("decision_model") is None
                         and getattr(base_method, "_plan_decision_model", None) is None
                         and getattr(self.agent, "_decision_model", None) is None
                     )
@@ -2763,13 +2764,20 @@ class ActorRuntime:
         """Execute a method that needs LLM generation."""
         base_method = getattr(method, "__func__", method)
         try:
-            has_user_llm_param = "llm" in inspect.signature(method).parameters
+            method_params = inspect.signature(method).parameters
         except (TypeError, ValueError):
-            has_user_llm_param = False
+            method_params = {}
+        has_user_llm_param = "llm" in method_params
+        has_user_decision_model_param = "decision_model" in method_params
 
         # Extract framework parameters (don't pass to generated method)
         call_strategy = kwargs.pop("_strategy", None)
         call_llm = kwargs.pop("llm", _MISSING) if not has_user_llm_param else _MISSING
+        call_decision_model = (
+            kwargs.pop("decision_model", _MISSING)
+            if not has_user_decision_model_param
+            else _MISSING
+        )
         call_session_locals = kwargs.pop("_session_locals", None)
 
         # Get strategy with priority: call-level > decorator > default
@@ -2804,8 +2812,25 @@ class ActorRuntime:
         plan_decision_model = getattr(base_method, "_plan_decision_model", None)
         decision_model = None
         decision_model_selection_source: str | None = None
+        if call_decision_model is not _MISSING and call_decision_model is not None:
+            if not uses_decision_model:
+                raise TypeError(
+                    f"decision_model= applies only to DecideStrategy methods; "
+                    f"'{method_name}' uses {type(strategy).__name__}."
+                )
         if uses_decision_model:
-            if plan_decision_model is not None:
+            # Same precedence as llm=: call site, then decorator, then agent.
+            if call_decision_model is not _MISSING and call_decision_model is not None:
+                from nooa.decisions.resolution import resolve_method_decision_model
+
+                decision_model = resolve_method_decision_model(
+                    call_decision_model,
+                    self.agent,
+                    method_name,
+                    origin="call argument decision_model=",
+                )
+                decision_model_selection_source = "call_site"
+            elif plan_decision_model is not None:
                 from nooa.decisions.resolution import resolve_method_decision_model
 
                 decision_model = resolve_method_decision_model(

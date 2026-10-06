@@ -332,6 +332,30 @@ async def test_method_decision_model_selection_is_observable(
 
 
 @pytest.mark.asyncio
+async def test_call_site_decision_model_selection_is_observable(
+    routing_hooks: RoutingHooks,
+) -> None:
+    llm = _llm("chat-model", "unused")
+    call_model = FakeDecisionModel()
+    call_model.model = "call-decision-model"
+
+    class RoutingAgent(Agent, llm=llm, decision_model=FakeDecisionModel()):
+        @strategy(DecideStrategy(), decision_model=FakeDecisionModel())
+        async def urgent(self, text: str) -> bool:
+            """Determine whether the text is urgent."""
+            ...
+
+    set_hooks(cast(Any, routing_hooks))
+
+    assert await RoutingAgent().urgent("production is down", decision_model=call_model) is True
+
+    assert llm.call_count == 0
+    generation = routing_hooks.generations[-1]
+    assert generation["decision.model_name"] == "call-decision-model"
+    assert generation["decision.selection_source"] == "call_site"
+
+
+@pytest.mark.asyncio
 async def test_decision_llm_fallback_selection_is_observable(
     routing_hooks: RoutingHooks,
 ) -> None:

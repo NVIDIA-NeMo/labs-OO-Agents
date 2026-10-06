@@ -81,8 +81,10 @@ def resolve_method_decision_model(
     spec: Any,
     agent: Any,
     method_name: str,
+    *,
+    origin: str = "decision_model=",
 ) -> UnifiedDecisionModel:
-    """Resolve a method-level decision model against its agent instance."""
+    """Resolve a method or call-site decision model against its agent instance."""
     if is_decision_model(spec):
         return cast("UnifiedDecisionModel", spec)
     if isinstance(spec, str):
@@ -93,21 +95,21 @@ def resolve_method_decision_model(
                 setattr(agent, _INSTANCE_CACHE_ATTR, cache)
             except (AttributeError, TypeError):
                 cache = None
-        return resolve_decision_alias(spec, cache, method_name)
+        return resolve_decision_alias(spec, cache, method_name, origin=origin)
     if not callable(spec):
         raise TypeError(
-            f"decision_model for {method_name!r} must be a client, alias, or callable; "
+            f"{origin} for {method_name!r} must be a client, alias, or callable; "
             f"got {type(spec).__name__}"
         )
     try:
         resolved = spec(agent)
     except Exception as exc:
         raise RuntimeError(
-            f"The decision_model callable for {method_name!r} raised {type(exc).__name__}: {exc}"
+            f"The {origin} callable for {method_name!r} raised {type(exc).__name__}: {exc}"
         ) from exc
     if not is_decision_model(resolved):
         raise TypeError(
-            f"The decision_model callable for {method_name!r} returned "
+            f"The {origin} callable for {method_name!r} returned "
             f"{type(resolved).__name__}, which does not implement adecide()"
         )
     return cast("UnifiedDecisionModel", resolved)

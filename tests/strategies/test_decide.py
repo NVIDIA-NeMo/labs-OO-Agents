@@ -945,3 +945,135 @@ async def test_llm_fallback_composite_score_is_bounded_and_restored() -> None:
     assert type(result) is Assessment
     assert result == Assessment(urgent=True, severity=2)
     assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_call_site_decision_model_overrides_method_and_agent() -> None:
+    agent_model = FakeDecisionClient()
+    method_model = FakeDecisionClient()
+    call_model = FakeDecisionClient()
+
+    class TriageAgent(Agent, decision_model=agent_model):
+        @strategy(DecideStrategy(), decision_model=method_model)
+        async def urgent(self, message: str) -> bool:
+            """Is this urgent?"""
+            ...
+
+        @strategy(DecideStrategy())
+        async def plain(self, message: str) -> bool:
+            """Is this urgent?"""
+            ...
+
+    agent = TriageAgent()
+    await agent.urgent("a", decision_model=call_model)
+    await agent.urgent("b")
+    await agent.plain("c", decision_model=call_model)
+    await agent.plain("d")
+
+    assert [r.state["inputs"]["message"] for r in call_model.requests] == ["a", "c"]
+    assert [r.state["inputs"]["message"] for r in method_model.requests] == ["b"]
+    assert [r.state["inputs"]["message"] for r in agent_model.requests] == ["d"]
+
+
+@pytest.mark.asyncio
+async def test_call_site_decision_model_supports_alias_and_resolver(monkeypatch) -> None:
+    aliased = FakeDecisionClient()
+    resolved = FakeDecisionClient()
+    resolutions: list[str] = []
+
+    def resolve(alias: str):
+        resolutions.append(alias)
+        return aliased
+
+    monkeypatch.setattr("nooa.unifiedllm.get_decision_model", resolve)
+
+    class TriageAgent(Agent, decision_model=FakeDecisionClient()):
+        backup = resolved
+
+        @strategy(DecideStrategy())
+        async def urgent(self, message: str) -> bool:
+            """Is this urgent?"""
+            ...
+
+    agent = TriageAgent()
+    await agent.urgent("a", decision_model="decisions")
+    await agent.urgent("b", decision_model="decisions")
+    await agent.urgent("c", decision_model=lambda self: self.backup)
+
+    assert resolutions == ["decisions"]
+    assert len(aliased.requests) == 2
+    assert len(resolved.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_call_site_decision_model_is_recorded_as_call_site() -> None:
+    call_model = FakeDecisionClient()
+    call_model.model = "call-model"
+
+    class TriageAgent(Agent, decision_model=FakeDecisionClient()):
+        @strategy(DecideStrategy())
+        async def urgent(self, message: str) -> bool:
+            """Is this urgent?"""
+            ...
+
+    agent = TriageAgent()
+    await agent.urgent("a", decision_model=call_model)
+
+    record = agent.event_manager.filter(type="DecisionRecord")[0]
+    assert isinstance(record, DecisionRecord)
+    assert record.requested_model == "call-model"
+
+
+@pytest.mark.asyncio
+async def test_user_parameter_named_decision_model_is_not_an_override() -> None:
+    client = FakeDecisionClient()
+
+    class TriageAgent(Agent, decision_model=client):
+        @strategy(DecideStrategy())
+        async def urgent(self, message: str, decision_model: str) -> bool:
+            """Is this urgent?"""
+            ...
+
+    await TriageAgent().urgent("a", decision_model="jev")
+
+    assert client.requests[0].state == {"inputs": {"message": "a", "decision_model": "jev"}}
+
+
+@pytest.mark.asyncio
+async def test_call_site_decision_model_rejected_for_chat_strategies() -> None:
+    class Writer(Agent, llm=FakeLLMClient(), decision_model=FakeDecisionClient()):
+        @strategy(PredictStrategy())
+        async def summarize(self, message: str) -> str:
+            """Summarize the message."""
+            ...
+
+    with pytest.raises(TypeError, match="only to DecideStrategy"):
+        await Writer().summarize("a", decision_model=FakeDecisionClient())
+
+
+@pytest.mark.asyncio
+async def test_standalone_call_site_decision_model(monkeypatch) -> None:
+    decorated = FakeDecisionClient()
+    aliased = FakeDecisionClient()
+    resolutions: list[str] = []
+
+    def resolve(alias: str):
+        resolutions.append(alias)
+        return aliased
+
+    monkeypatch.setattr("nooa.unifiedllm.get_decision_model", resolve)
+
+    @strategy(DecideStrategy(), decision_model=decorated)
+    async def urgent(message: str) -> bool:
+        """Is this urgent?"""
+        ...
+
+    await urgent("a", decision_model="decisions")
+    await urgent("b", decision_model="decisions")
+    await urgent("c")
+
+    assert resolutions == ["decisions"]
+    assert [r.state["inputs"]["message"] for r in aliased.requests] == ["a", "b"]
+    assert [r.state["inputs"]["message"] for r in decorated.requests] == ["c"]
+    with pytest.raises(TypeError, match="must be a decision model or alias"):
+        await urgent("d", decision_model=lambda agent: decorated)
