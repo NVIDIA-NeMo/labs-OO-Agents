@@ -90,7 +90,10 @@ _TURN_RESULTS = (Done, NeedInput, Waiting)
 _MAX_VALUE_CHARS = 10_000
 
 OWN_SOURCES = frozenset({"acp", "user:declined"})
-"""Item sources this adapter admits itself; the client already shows those."""
+"""Already-visible client input/permission answers and silent decline markers.
+
+Accepted form answers use ``acp:form-answer`` instead, so admission echoes them.
+"""
 
 _ECHOED_CHANNELS = frozenset({"user_messages", "steer"})
 

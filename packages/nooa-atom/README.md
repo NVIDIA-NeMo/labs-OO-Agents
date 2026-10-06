@@ -82,6 +82,15 @@ clients still receive an enum for `options` when they support standard forms.
 If Pool fails the request, questions fall back to text for the rest of the
 connection.
 
+Accepted Pool and standard ACP form answers are echoed once as user messages before
+any subsequent agent reply. Typed answers display their validated JSON; text answers
+keep their text. Ordinary prompts/injections and yes/no permission answers are not
+re-echoed. Invalid standard form answers are not admitted and leave the question as
+text (Pool retries once). Declined/dismissed forms still submit the silent
+`(declined to answer)` marker; stopping an open form submits nothing. Loading a
+session replays every admitted user item once, including the stored decline marker,
+as before.
+
 These picker/text shapes were measured in Pool 1.0.16. Its built-in agent's
 wire capture accepts unlisted text for both single-field and multi-field
 `anyOf[oneOf, string]` forms. This is a Pool extension, not general JSON Schema

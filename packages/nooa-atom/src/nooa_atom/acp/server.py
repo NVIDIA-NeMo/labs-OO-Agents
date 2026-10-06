@@ -117,7 +117,10 @@ _POOL_STEER_METHOD = "poolside/session_steer"
 """``_poolside/session_steer`` as ``ext_method`` receives it (without the underscore)."""
 
 SOURCE = "acp"
-"""The source of items this adapter admits (the bridge does not echo them back)."""
+"""Already-visible client prompts/injections and permission answers; do not echo."""
+
+FORM_ANSWER_SOURCE = "acp:form-answer"
+"""Accepted NeedInput form answers, echoed once by the admission bridge."""
 
 DECLINED = "(declined to answer)"
 """What the agent receives when the person declines or dismisses a question."""
@@ -807,7 +810,11 @@ class AtomACPAgent:
             if response is None or response is _CANCELLED:
                 return response
             if response.action == "accept":
-                return answer_from_content(need, response.content), SOURCE
+                try:
+                    return answer_from_content(need, response.content), FORM_ANSWER_SOURCE
+                except (ValidationError, ValueError):
+                    # Invalid client data is not an answer; leave the question as text.
+                    return None
             return DECLINED, DECLINED_SOURCE
         options = need.options or []
         if sorted(option.lower() for option in options) == ["no", "yes"]:
@@ -846,7 +853,7 @@ class AtomACPAgent:
             if not isinstance(response, dict) or response.get("action") != "accept":
                 return DECLINED, DECLINED_SOURCE
             try:
-                return pool_answer(need, response.get("content")), SOURCE
+                return pool_answer(need, response.get("content")), FORM_ANSWER_SOURCE
             except ValidationError as exc:
                 problems = "; ".join(
                     f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"

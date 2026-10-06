@@ -157,9 +157,21 @@ def test_anything_else_falls_back_to_free_text(answer_type):
     assert need_input_schema(NeedInput(question="?", answer_type=answer_type)) is None
 
 
-def test_an_invalid_answer_for_a_type_is_kept_as_its_data():
+def test_an_invalid_answer_for_a_type_is_rejected():
     need = NeedInput(question="Deploy how?", answer_type=Deployment)
-    assert answer_from_content(need, {"target": "x"}) == {"target": "x"}
+    with pytest.raises(ValidationError):
+        answer_from_content(need, {"target": "x"})
+
+
+@pytest.mark.parametrize("content", [None, {}, {"answer": ""}, {"answer": " "}, {"answer": 2}])
+def test_an_invalid_standard_text_answer_is_rejected(content):
+    with pytest.raises(ValueError):
+        answer_from_content(NeedInput(question="Name?"), content)
+
+
+def test_an_unlisted_standard_choice_is_rejected():
+    with pytest.raises(ValueError):
+        answer_from_content(NeedInput(question="Branch?", options=["main", "dev"]), {"answer": "x"})
 
 
 # ---- Pool forms: string properties only -------------------------------

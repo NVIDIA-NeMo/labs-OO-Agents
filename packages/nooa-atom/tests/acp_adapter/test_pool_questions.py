@@ -3,6 +3,7 @@
 """A NeedInput question to Pool: its ``_poolside/elicitation`` form, string fields only."""
 
 import asyncio
+import json
 
 import pytest
 from acp import RequestError, text_block
@@ -11,6 +12,7 @@ from acp.schema import (
     AllowedOutcome,
     Implementation,
     RequestPermissionResponse,
+    UserMessageChunk,
 )
 from atom_test_agents import ScriptedModels, cell, reply
 
@@ -32,6 +34,22 @@ async def _run(adapter, workspace, text="push it"):
     session_id = (await adapter.new_session(str(workspace))).session_id
     response = await asyncio.wait_for(adapter.prompt(session_id, [text_block(text)]), TIMEOUT)
     return session_id, response
+
+
+def _assert_echo(client, adapter, session_id, expected):
+    """Exactly one admitted answer, before the agent's reply; no prompt echo."""
+    assert client.texts(UserMessageChunk, session_id) == [expected]
+    conversation = [
+        u
+        for u in client.updates(session_id)
+        if isinstance(u, (AgentMessageChunk, UserMessageChunk))
+    ]
+    assert isinstance(conversation[-2], UserMessageChunk)
+    assert isinstance(conversation[-1], AgentMessageChunk)
+    assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
+        "push it",
+        expected,
+    ]
 
 
 def _requests(client):
@@ -74,6 +92,7 @@ async def test_a_free_text_question_is_a_one_field_pool_form(make_adapter, works
             },
         )
     ]
+    _assert_echo(client, adapter, session_id, "Aurora")
     assert client.texts(AgentMessageChunk, session_id)[-1] == "'Aurora'\n\n"
 
 
@@ -98,6 +117,9 @@ async def test_a_string_answer_type_is_a_pool_form(make_adapter, workspace, clie
         "properties": {"branch": {"type": "string", "title": "Branch"}},
         "required": ["branch"],
     }
+    [echo] = client.texts(UserMessageChunk, session_id)
+    assert json.loads(echo) == {"branch": "dev"}
+    _assert_echo(client, adapter, session_id, echo)
     assert client.texts(AgentMessageChunk, session_id)[-1] == "Answer(branch='dev')\n\n"
 
 
@@ -131,6 +153,9 @@ async def test_non_string_fields_are_asked_as_strings_and_converted(
     assert params["requestedSchema"] == ROLLOUT_SCHEMA
     # A form with more than one field says the order to show them in.
     assert params["_meta"] == {"poolside/field_order": ["target", "replicas", "dry_run"]}
+    [echo] = client.texts(UserMessageChunk, session_id)
+    assert json.loads(echo) == {"target": "prod", "replicas": 3, "dry_run": False}
+    _assert_echo(client, adapter, session_id, echo)
     assert client.texts(AgentMessageChunk, session_id)[-1] == (
         "Rollout(target='prod', replicas=3, dry_run=False)\n\n"
     )
@@ -153,6 +178,9 @@ async def test_a_value_that_does_not_convert_is_asked_again_with_the_error(
     assert second["message"].startswith("Deploy how?\n\nThat answer was not accepted: replicas: ")
     assert "integer" in second["message"]
     assert second["requestedSchema"] == ROLLOUT_SCHEMA
+    [echo] = client.texts(UserMessageChunk, session_id)
+    assert json.loads(echo) == {"target": "prod", "replicas": 2, "dry_run": False}
+    _assert_echo(client, adapter, session_id, echo)
     assert client.texts(AgentMessageChunk, session_id)[-1] == (
         "Rollout(target='prod', replicas=2, dry_run=False)\n\n"
     )
@@ -167,16 +195,19 @@ async def test_a_second_bad_value_falls_back_to_text(make_adapter, workspace, cl
 
     assert response.stop_reason == "end_turn"
     assert len(_requests(client)) == 2
+    assert client.updates(session_id, UserMessageChunk) == []
     assert len(models.llms[None].calls) == 1  # nothing was submitted
     assert client.texts(AgentMessageChunk, session_id)[-1] == "Deploy how?\n\n"
 
 
-async def test_a_declined_pool_form_tells_the_agent(make_adapter, workspace, client):
+@pytest.mark.parametrize("action", ["decline", "cancel"])
+async def test_a_declined_pool_form_tells_the_agent(make_adapter, workspace, client, action):
     models = ScriptedModels({None: [_ask_rollout(), reply("Okay.")]})
-    client.ext_answers = [{"action": "decline"}]
+    client.ext_answers = [{"action": action}]
     adapter = await make_adapter(models, client_info=POOL)
-    _session_id, response = await _run(adapter, workspace)
+    session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
+    assert client.updates(session_id, UserMessageChunk) == []
     assert "(declined to answer)" in str(models.llms[None].calls[1].messages)
 
 
@@ -220,9 +251,10 @@ async def test_a_yes_no_question_to_pool_is_still_a_permission_request(
         RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id="Yes"))
     ]
     adapter = await make_adapter(models, client_info=POOL)
-    _session_id, response = await _run(adapter, workspace)
+    session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
     assert _ext(client) == []
+    assert client.updates(session_id, UserMessageChunk) == []
     assert len([e for e in client.log if e[0] == "permission"]) == 1
 
 
@@ -263,6 +295,7 @@ async def test_a_choice_question_is_a_one_field_pool_form(make_adapter, workspac
             },
         )
     ]
+    _assert_echo(client, adapter, session_id, "dev")
     assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'\n\n"
 
 
@@ -273,6 +306,7 @@ async def test_a_choice_answer_matches_ignoring_case_and_spaces(make_adapter, wo
     session_id, response = await _run(adapter, workspace)
 
     assert response.stop_reason == "end_turn"
+    _assert_echo(client, adapter, session_id, "main")
     assert client.texts(AgentMessageChunk, session_id)[-1] == "'main'\n\n"
 
 
@@ -310,6 +344,7 @@ async def test_an_invalid_choice_answer_is_asked_again(make_adapter, workspace, 
     )
     assert second["message"] == "Which branch?\n\n" + error
     assert second["requestedSchema"] == BRANCH_SCHEMA
+    _assert_echo(client, adapter, session_id, "dev")
     assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'\n\n"
 
 
@@ -322,6 +357,7 @@ async def test_a_second_blank_choice_answer_falls_back_to_text(make_adapter, wor
 
     assert response.stop_reason == "end_turn"
     assert len(_requests(client)) == 2
+    assert client.updates(session_id, UserMessageChunk) == []
     assert len(models.llms[None].calls) == 1  # nothing was submitted
     assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev\n\n"
 
@@ -345,6 +381,7 @@ async def test_an_alternative_is_submitted_without_retry(make_adapter, workspace
     assert response.stop_reason == "end_turn"
     assert len(_requests(client)) == 1
     assert _requests(client)[0][1]["requestedSchema"] == BRANCH_SCHEMA
+    _assert_echo(client, adapter, session_id, text)
     assert client.texts(AgentMessageChunk, session_id)[-1] == repr(text) + "\n\n"
 
 
@@ -361,6 +398,7 @@ async def test_cancel_while_a_pool_choice_form_is_open(make_adapter, workspace, 
 
     assert response.stop_reason == "cancelled"
     assert len(_requests(client)) == 1
+    assert client.updates(session_id, UserMessageChunk) == []
     assert len(models.llms[None].calls) == 1  # no alternative was submitted
     assert len(client.ext_answers) == 1  # pending form response was not consumed
 

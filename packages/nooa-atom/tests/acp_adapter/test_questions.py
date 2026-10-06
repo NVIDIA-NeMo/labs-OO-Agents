@@ -10,6 +10,7 @@ from acp.schema import (
     AcceptElicitationResponse,
     AgentMessageChunk,
     AllowedOutcome,
+    CancelElicitationResponse,
     ClientCapabilities,
     DeclineElicitationResponse,
     DeniedOutcome,
@@ -71,12 +72,28 @@ async def test_a_form_answer_goes_to_the_agent_and_the_same_prompt_continues(
         "Using dev.\n\n",
     ]
     assert "dev" in str(models.llms[None].calls[1].messages[-2:])
-    assert client.updates(session_id, UserMessageChunk) == []
+    assert client.texts(UserMessageChunk, session_id) == ["dev"]
+    conversation = [
+        u
+        for u in client.updates(session_id)
+        if isinstance(u, (AgentMessageChunk, UserMessageChunk))
+    ]
+    assert isinstance(conversation[-2], UserMessageChunk)
+    assert conversation[-1].content.text == "Using dev.\n\n"
+    assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
+        "push it",
+        "dev",
+    ]
+    assert len(models.llms[None].calls) == 2
 
 
-async def test_a_declined_form_tells_the_agent(make_adapter, workspace, client):
+@pytest.mark.parametrize(
+    "answer",
+    [DeclineElicitationResponse(action="decline"), CancelElicitationResponse(action="cancel")],
+)
+async def test_a_declined_form_tells_the_agent(make_adapter, workspace, client, answer):
     models = ScriptedModels({None: [_ask("Which branch?", ["main", "dev"]), reply("Okay.")]})
-    client.elicitation_answers = [DeclineElicitationResponse(action="decline")]
+    client.elicitation_answers = [answer]
     adapter = await make_adapter(models, capabilities=FORMS)
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
@@ -90,7 +107,8 @@ async def test_a_free_text_question_uses_a_one_field_form(make_adapter, workspac
         AcceptElicitationResponse(action="accept", content={"answer": "Aurora"})
     ]
     adapter = await make_adapter(models, capabilities=FORMS)
-    _session_id, response = await _run(adapter, workspace)
+    session_id, response = await _run(adapter, workspace)
+    assert client.texts(UserMessageChunk, session_id) == ["Aurora"]
     assert response.stop_reason == "end_turn"
     assert "Aurora" in str(models.llms[None].calls[1].messages)
 
@@ -125,6 +143,7 @@ async def test_without_forms_a_yes_no_question_is_a_permission_request(
     ]
     assert done.status == "completed"
     assert "Yes" in str(models.llms[None].calls[1].messages[-2:])
+    assert client.updates(session_id, UserMessageChunk) == []
 
 
 async def test_a_refused_permission_is_a_declined_answer(make_adapter, workspace, client):
@@ -196,6 +215,7 @@ async def test_cancel_while_a_form_is_open_ends_the_prompt_cancelled(
     response = await asyncio.wait_for(prompt, TIMEOUT)
     assert response.stop_reason == "cancelled"
     assert len(models.llms[None].calls) == 1  # nothing was submitted
+    assert client.updates(session_id, UserMessageChunk) == []
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("client error")])
@@ -209,3 +229,189 @@ async def test_a_failing_form_request_falls_back_to_text(make_adapter, workspace
     adapter = await make_adapter(models, capabilities=FORMS)
     _session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
+
+
+async def test_a_typed_standard_form_echoes_serialized_validated_answer(
+    make_adapter, workspace, client
+):
+    import json
+
+    models = ScriptedModels(
+        {
+            None: [
+                cell("return_result(NeedInput(question='Deploy how?', answer_type=Rollout))"),
+                reply("Deploying."),
+            ]
+        }
+    )
+    client.elicitation_answers = [
+        AcceptElicitationResponse(
+            action="accept", content={"target": "prod", "replicas": 3, "dry_run": False}
+        )
+    ]
+    adapter = await make_adapter(models, capabilities=FORMS)
+    session_id, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    [echo] = client.texts(UserMessageChunk, session_id)
+    assert json.loads(echo) == {"target": "prod", "replicas": 3, "dry_run": False}
+    conversation = [
+        u
+        for u in client.updates(session_id)
+        if isinstance(u, (AgentMessageChunk, UserMessageChunk))
+    ]
+    assert isinstance(conversation[-2], UserMessageChunk)
+    assert conversation[-1].content.text == "Deploying.\n\n"
+    assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
+        "push it",
+        echo,
+    ]
+    assert len(models.llms[None].calls) == 2
+
+
+@pytest.mark.parametrize(
+    "typed,content",
+    [
+        (False, None),
+        (False, {}),
+        (False, {"answer": ""}),
+        (False, {"answer": " "}),
+        (False, {"answer": 2}),
+        (False, {"answer": "release"}),
+        (True, {"target": "prod"}),
+        (True, {"target": "prod", "replicas": "two", "dry_run": False}),
+    ],
+)
+async def test_invalid_standard_form_answers_are_not_admitted_or_echoed(
+    make_adapter, workspace, client, typed, content
+):
+    ask = (
+        cell("return_result(NeedInput(question='Deploy how?', answer_type=Rollout))")
+        if typed
+        else _ask("Which branch?", ["main", "dev"])
+    )
+    models = ScriptedModels({None: [ask]})
+    client.elicitation_answers = [AcceptElicitationResponse(action="accept", content=content)]
+    adapter = await make_adapter(models, capabilities=FORMS)
+    session_id, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    assert client.updates(session_id, UserMessageChunk) == []
+    assert len(models.llms[None].calls) == 1
+    assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
+        "push it"
+    ]
+
+
+@pytest.mark.parametrize("pool", [False, True])
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_form_answer_replay_preserves_admitted_sources_once(
+    make_adapter, workspace, client, pool, accepted
+):
+    from acp.schema import Implementation
+    from nooa_coder.session.events import ItemAdmitted
+
+    models = ScriptedModels({None: [_ask("Name?"), reply("Okay.")]})
+    if pool:
+        client.ext_answers = [
+            {"action": "accept", "content": {"answer": "Aurora"}}
+            if accepted
+            else {"action": "decline"}
+        ]
+    else:
+        client.elicitation_answers = [
+            AcceptElicitationResponse(action="accept", content={"answer": "Aurora"})
+            if accepted
+            else DeclineElicitationResponse(action="decline")
+        ]
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1.0.16") if pool else None,
+    )
+    session_id, _ = await _run(adapter, workspace)
+    answer = "Aurora" if accepted else "(declined to answer)"
+    assert client.texts(UserMessageChunk, session_id) == ([answer] if accepted else [])
+    session = adapter.session(session_id)
+    admitted = [
+        e
+        for e in session.handle.events.all_events()
+        if isinstance(e, ItemAdmitted) and e.channel == "user_messages"
+    ]
+    assert [e.source for e in admitted] == [
+        "acp",
+        "acp:form-answer" if accepted else "user:declined",
+    ]
+    assert len(models.llms[None].calls) == 2
+
+    client.log.clear()
+    await adapter.load_session(str(workspace), session_id)
+    # Replay deliberately includes stored declines; live declines remain silent.
+    assert client.texts(UserMessageChunk, session_id) == ["push it\n", answer + "\n"]
+    conversation = [
+        u
+        for u in client.updates(session_id)
+        if isinstance(u, (AgentMessageChunk, UserMessageChunk))
+    ]
+    assert [type(u) for u in conversation] == [
+        UserMessageChunk,
+        AgentMessageChunk,
+        UserMessageChunk,
+        AgentMessageChunk,
+    ]
+    if pool:
+        updates = client.updates(session_id)
+        for entry in session.transcript():
+            if entry.role == "user":
+                index = next(
+                    i
+                    for i, u in enumerate(updates)
+                    if isinstance(u, UserMessageChunk) and u.content.text == entry.content + "\n"
+                )
+                assert updates[index + 1].field_meta == {"poolside/inputEventId": entry.item_id}
+    # Loading twice must reuse the bridge; subsequent prompts must not double-echo.
+    await adapter.load_session(str(workspace), session_id)
+    client.log.clear()
+    session.admit("from another host", source="tui")
+    await adapter.bridge(session_id).flush()
+    assert client.texts(UserMessageChunk, session_id) == ["from another host"]
+
+
+async def test_mcp_sign_in_callback_is_not_admitted_or_echoed(
+    coder_adapter, workspace, client, monkeypatch
+):
+    from nooa_coder.session.events import ItemAdmitted
+    from nooa_coder.skills.mcp_servers import MCPServers
+
+    completed = []
+
+    async def complete_sign_in(self, name, address):
+        completed.append((name, address))
+        return "Signed in to remote."
+
+    monkeypatch.setattr(MCPServers, "complete_sign_in", complete_sign_in)
+    adapter = await coder_adapter([reply("Hi.")])
+    session_id, _ = await _run(adapter, workspace, text="hello")
+    session = adapter.session(session_id)
+    before = len(session.handle.events.filter(type="ItemAdmitted"))
+    client.log.clear()
+    address = "https://callback.invalid/?code=UNIQUE_SENTINEL&state=STATE_SENTINEL"
+    response = await adapter.prompt(session_id, [text_block("/mcp auth remote " + address)])
+    assert response.stop_reason == "end_turn"
+    assert completed == [("remote", address)]
+    assert len(session.handle.events.filter(type="ItemAdmitted")) == before
+    assert client.updates(session_id, UserMessageChunk) == []
+    assert (
+        len(
+            [
+                e
+                for e in session.handle.events.all_events()
+                if isinstance(e, ItemAdmitted) and e.channel == "user_messages"
+            ]
+        )
+        == 1
+    )
+    await adapter.load_session(str(workspace), session_id)
+    visible = str(client.log) + str(session.transcript())
+    assert "Signed in to remote." in visible
+    assert "UNIQUE_SENTINEL" not in visible
+    assert "STATE_SENTINEL" not in visible
+    assert address not in visible

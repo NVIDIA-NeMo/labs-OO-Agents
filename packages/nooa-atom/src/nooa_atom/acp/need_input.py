@@ -28,7 +28,6 @@ from acp.schema import (
     ElicitationStringPropertySchema,
     StringMultiSelectItems,
 )
-from pydantic import ValidationError
 from pydantic.fields import FieldInfo
 
 from nooa.interactive import NeedInput
@@ -83,17 +82,20 @@ def need_input_schema(need: NeedInput) -> ElicitationSchema | None:
 def answer_from_content(need: NeedInput, content: dict[str, Any] | None) -> Any:
     """The item to submit for an accepted form.
 
-    The chosen option or the text for ``options`` and free-text questions;
-    an ``answer_type`` instance for typed ones (the raw content when it does
-    not validate, so the agent still sees what the person entered).
+    The chosen option or nonblank text for untyped questions; a validated
+    ``answer_type`` instance for typed ones. Invalid content raises instead
+    of admitting (and echoing) an answer the form did not accept.
     """
-    content = dict(content or {})
-    if need.answer_type is None:
-        return str(content.get(_ANSWER, ""))
-    try:
+    if not isinstance(content, dict):
+        raise ValueError("That answer must be an object of form fields.")
+    if need.answer_type is not None:
         return need.answer_type.model_validate(content)
-    except ValidationError:
-        return content
+    answer = content.get(_ANSWER)
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("Enter a nonblank text answer.")
+    if need.options is not None and answer not in need.options:
+        raise ValueError("Choose a listed answer.")
+    return answer
 
 
 def pool_form_schema(need: NeedInput) -> dict[str, Any] | None:

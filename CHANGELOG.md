@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: accepted Pool and standard ACP `NeedInput` form answers now echo
+  once as user messages before the agent continues, through the existing admission
+  bridge. Typed answers display their serialized JSON. Ordinary prompts/injections,
+  yes/no permissions and live decline/cancel behavior are unchanged. Invalid standard
+  form answers stay as text questions rather than being admitted as raw data.
 - `nooa-coder` is now `nooa-atom` (NOOA Atom), with no aliases for the old names:
   the package `nooa_atom` (extra `nooa[atom]`), the command `nooa atom`, the
   environment variables `NOOA_ATOM_TOKEN` and `NOOA_ATOM_LOG_LEVEL`, the ACP agent
