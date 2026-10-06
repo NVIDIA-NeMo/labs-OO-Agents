@@ -81,9 +81,9 @@ async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace
         assert agent.cwd == workspace.resolve()
         assert agent.llm is llm
         assert agent.libs._path == workspace / ".nooa" / "libs"
-        # configure_session_skills ran: the MCP registry and workspace settings.
-        assert {"nemo.mcp", "nooa.workspace_settings"} <= set(agent.skills.activated())
-        assert hasattr(agent, "mcp")
+        # configure_session_skills ran: the MCP servers and workspace settings.
+        assert "nooa.workspace_settings" in agent.skills.activated()
+        assert agent.skills.mcp.project_dir == workspace.resolve() / ".nooa"
     finally:
         await registry.close_all()
 
@@ -203,7 +203,8 @@ async def test_a_narrow_subclass_keeps_the_workspace_wiring_and_is_warned(worksp
     with caplog.at_level("WARNING", logger="nooa_coder.coding.factory"):
         agent = create_session_agent(options, InMemoryStorageManager())
     try:
-        assert {"nemo.mcp", "nooa.workspace_settings"} <= set(agent.skills.activated())
+        assert "nooa.workspace_settings" in agent.skills.activated()
+        assert agent.skills.mcp is not None
         assert "mcp" in {c.name for c in agent.slash_commands.commands()}
         warnings = [r.getMessage() for r in caplog.records if "NarrowCoder" in r.getMessage()]
         assert len(warnings) == 1

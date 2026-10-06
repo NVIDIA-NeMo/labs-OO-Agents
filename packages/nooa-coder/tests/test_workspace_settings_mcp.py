@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from nooa_coder.workspace.mcp_registry import MCPRegistry
+from nooa_coder.skills.mcp_servers import MCPServers
 from nooa_coder.workspace.options import CoderOptions
 from nooa_coder.workspace.workspace_settings import WorkspaceSettings
 
@@ -21,7 +21,7 @@ def workspace_settings(tmp_path, monkeypatch):
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     monkeypatch.delenv("NEMO_OO_PROJECT_DIR", raising=False)
 
-    registry = MCPRegistry(
+    registry = MCPServers(
         mcp_file=tmp_path / ".mcp.json",
         approval_path=tmp_path / "approvals.json",
         watch_settings=True,
@@ -29,7 +29,7 @@ def workspace_settings(tmp_path, monkeypatch):
     )
     options = CoderOptions(working_dir=str(workspace))
     ws = WorkspaceSettings(options)
-    ws._agent = SimpleNamespace(mcp=registry)
+    ws._agent = SimpleNamespace(skills=SimpleNamespace(mcp=registry))
     return ws, registry, workspace
 
 
@@ -123,7 +123,6 @@ async def test_remember_mcp_keeps_a_connected_server_connected(workspace_setting
     registry.register("live", url="https://example.com/mcp")
     registry._connected["live"] = object()
     detached = []
-    monkeypatch.setattr(registry, "deactivate", lambda names: detached.extend(names))
     monkeypatch.setattr(registry, "_detach", lambda name: detached.append(name))
 
     ws.remember_mcp("live")
@@ -131,8 +130,7 @@ async def test_remember_mcp_keeps_a_connected_server_connected(workspace_setting
     saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
     assert saved["coding"]["mcp_servers"]["live"]["transport"] == "streamable-http"
     assert detached == []
-    assert "live" in registry._connected
-    assert registry._servers["live"] == saved["coding"]["mcp_servers"]["live"]
+    assert registry.connected() == ["live"]
 
 
 @pytest.mark.parametrize(

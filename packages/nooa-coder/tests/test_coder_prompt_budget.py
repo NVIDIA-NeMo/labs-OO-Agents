@@ -38,15 +38,17 @@ RESULT = (
 # methods say locals last one method call, and the repo tools take ``cwd``.
 # Lowered when CodingAgent moved to CodeActV2 (2026-09-25; was 19,827 / 23,935
 # for handle): measured values plus about 2% headroom.
+# Lowered when one <skills> block replaced the <skills> and <mcp> blocks
+# (2026-09-28): measured values plus about 2% headroom.
 # Raised when python_cell_tools added the TodoManager API (2026-10-02, about
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
 LIMITS = {
-    (CODER, "handle"): (14_550, 18_250),  # measured 14,281 / 17,881
-    (CODER, "handle_batch"): (14_550, 17_900),  # measured 14,281 / 17,525
-    (EXPERIMENTAL, "handle"): (14_400, 16_950),  # measured 14,119 / 16,584
-    (EXPERIMENTAL, "handle_batch"): (14_400, 17_300),  # measured 14,119 / 16,937
+    (CODER, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
+    (CODER, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
+    (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
+    (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -93,3 +95,59 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     assert len(system) <= system_limit
     assert len(rendered) <= total_limit
     assert len(system) < BENCH_SYSTEM_LIMIT
+
+
+class _InstalledSkill:
+    """An installed ``nooa.skills`` entry point with a unique description."""
+
+    def __init__(self, index: int) -> None:
+        from nooa.skill import Skill
+
+        self.name = f"budget.helper_{index:02d}"
+        self.value = f"budget_skills:Helper{index:02d}"
+        self.dist = None
+        self.description = f"Budget helper number {index:02d} with a unique description"
+        self._skill = type(f"Helper{index:02d}", (Skill,), {"__doc__": self.description})
+
+    def load(self):
+        return self._skill
+
+
+async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, sessions_dir):
+    """With this machine's installed skills and 40 more, the ``<skills>`` block stays small.
+
+    The other tests here turn installed skills off, which hid how the prompt
+    grows with them. Each skill is found through ``self.skills.search()``;
+    none is named or described in the prompt until it is activated.
+    """
+    import importlib.metadata
+    import re
+
+    extra = [_InstalledSkill(index) for index in range(40)]
+    monkeypatch.setattr(
+        "nooa.skill_registry.entry_points",
+        lambda *, group: [*importlib.metadata.entry_points(group=group), *extra],
+    )
+    llm = FakeLLMClient(
+        [python_cell("return_result(Done(explanation='x'))", "call_1")], strict_exhaustion=True
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    try:
+        root = await registry.create(
+            SessionOptions(
+                workspace=workspace, agent_spec=CODER, llm=llm, sessions_dir=sessions_dir
+            )
+        )
+        await asyncio.wait_for(root.prompt("hello"), 30)
+    finally:
+        await registry.close_all()
+    rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    [block] = re.findall(r"<skills[^>]*>\n(.*?)\n</skills>", rendered, re.DOTALL)
+    print(block)
+    assert len(block) < 400
+    assert re.search(r"^\d+ more \(", block.splitlines()[-1])
+    for skill in extra:
+        assert skill.description not in rendered
+        assert skill.name.split(".")[-1] not in rendered
