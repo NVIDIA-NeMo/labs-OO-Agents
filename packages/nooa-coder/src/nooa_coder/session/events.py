@@ -56,6 +56,18 @@ class SessionModelChanged(Metadata):
     model: str = ""
 
 
+class SessionReasoningChanged(Metadata):
+    """The session's reasoning level changed (``set_reasoning``); a load restores it.
+
+    A ``SessionModelChanged`` after it resets the level: a new model starts
+    from its own default.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    level: str | None = None
+
+
 class SessionTitleUpdated(Metadata):
     """The latest human- or agent-selected session title."""
 
@@ -63,14 +75,6 @@ class SessionTitleUpdated(Metadata):
 
     title: str = ""
     user_set: bool = False
-
-
-class SessionUserMessage(Metadata):
-    """Raw user text accepted by the agent runtime as a conversation turn."""
-
-    _role: ClassVar[Role] = Role.METADATA
-
-    content: str = ""
 
 
 class ItemAdmitted(Metadata):
@@ -112,12 +116,14 @@ class ItemDiscarded(Metadata):
     """An admitted item left its channel unconsumed and not withdrawn.
 
     Code flushed, cleared or removed the channel. A later load does not
-    re-queue it.
+    re-queue it. ``reason`` says why, when the writer gave one (a recovered
+    copy of a session discards the items its original never read).
     """
 
     _role: ClassVar[Role] = Role.METADATA
 
     item_id: str = ""
+    reason: str = ""
 
 
 class ItemRequeued(Metadata):
@@ -162,12 +168,55 @@ class ChildDeleted(Metadata):
     name: str | None = None
 
 
+class UsageAttributed(Metadata):
+    """A child's own usage from one of its turns, added to this session's attributed totals.
+
+    Recorded in every ancestor, so a load rebuilds the attributed totals.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    child_id: str = ""
+    usage: Usage = Field(default_factory=Usage)
+
+
+class SnapshotRestoreFailed(Metadata):
+    """The saved agent state could not be restored when the session was loaded."""
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    error: str = ""
+
+
+class SessionRecovered(EventBase):
+    """This session is a copy of ``forked_from``, made by ``SessionStore.fork``.
+
+    The model sees it on the next turn: ``note`` says what was not carried
+    over (items the original never read, its subagent sessions, events a
+    damaged file lost). ``copied_by_event`` is set when the file could not
+    be copied whole and was copied event by event; ``skipped_events`` then
+    counts the events that could not be read, and ``end_unreadable`` says
+    the end of the file could not be read, so the newest events may be
+    missing without being counted. ``original_title`` is the original's
+    title as the copy read it.
+    """
+
+    _role: ClassVar[Role] = Role.USER
+
+    forked_from: str
+    original_title: str | None = None
+    note: str = ""
+    copied_by_event: bool = False
+    skipped_events: int = 0
+    end_unreadable: bool = False
+
+
 SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     SessionStarted,
     SessionTitleUpdated,
     SessionModeChanged,
     SessionModelChanged,
-    SessionUserMessage,
+    SessionReasoningChanged,
     ItemAdmitted,
     ItemConsumed,
     ItemWithdrawn,
@@ -177,6 +226,9 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     TurnEnded,
     ChildDeleted,
     TurnCancelled,
+    SnapshotRestoreFailed,
+    UsageAttributed,
+    SessionRecovered,
 )
 """Event types registered on every session's storage backend.
 

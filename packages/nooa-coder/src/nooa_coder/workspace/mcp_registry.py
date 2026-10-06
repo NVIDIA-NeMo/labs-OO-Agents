@@ -12,6 +12,7 @@ import json
 import keyword
 import logging
 import os
+import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -231,7 +232,7 @@ class MCPRegistry(Skill):
     def _config_path(self) -> Path:
         """Return the project-local interactive host settings.yaml path."""
         from nooa.paths import get_project_dir
-        from nooa_coder.coding.settings import _SETTINGS_FILENAME as SETTINGS_FILENAME
+        from nooa_coder.workspace.settings import SETTINGS_FILENAME
 
         return (
             (self._project_dir / SETTINGS_FILENAME)
@@ -290,12 +291,7 @@ class MCPRegistry(Skill):
             return []
 
         from nooa.layered_config import load_layered_yaml
-        from nooa_coder.coding.settings import (
-            _SETTINGS_ENV_VAR as SETTINGS_ENV_VAR,
-        )
-        from nooa_coder.coding.settings import (
-            _SETTINGS_FILENAME as SETTINGS_FILENAME,
-        )
+        from nooa_coder.workspace.settings import SETTINGS_ENV_VAR, SETTINGS_FILENAME
 
         data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=self._project_dir)
         legacy = data.get("tui", {})
@@ -638,20 +634,25 @@ class MCPRegistry(Skill):
     # Status / context block
     # ------------------------------------------------------------------
 
-    def status(self) -> str:
+    def status(self, verbose: bool = False) -> str:
         """Render the ``<mcp>`` block, mirroring ``SkillRegistry.status()``.
 
-        Three sections of uniform ``self.<attr>   <one-line summary>`` rows so a
-        server is never invisible while its client is still alive:
+        Three sections so a server is never invisible while its client is
+        still alive:
 
-        * **Active** — connected and listed for the agent (callable now).
+        * **Active** — connected and listed for the agent (callable now), one
+          ``self.<attr>   <tool names>`` row each.
         * **Connected (inactive)** — session/client still open, hidden from the
-          agent until re-activated.
-        * **Configured** — known but not connected; how to connect.
+          agent until re-activated; one row each.
+        * **Configured** — known but not connected; names only, as one wrapped
+          list, with how to connect.
 
-        Matches the ``<skills>`` block so the two read identically. It is
-        rendered on every turn, so the text is kept until the config file,
-        the approvals file, the inline servers or the connections change.
+        ``verbose=True`` gives each configured server its own row with its
+        endpoint, transport and approval state (for the ``/mcp status``
+        control). Matches the ``<skills>`` block so the two read identically.
+        The compact block is rendered on every turn, so its text is kept
+        until the config file, the approvals file, the inline servers or the
+        connections change.
         """
         key = (
             _file_state(self._mcp_file or Path(".mcp.json")),
@@ -659,14 +660,15 @@ class MCPRegistry(Skill):
             json.dumps(self._servers, sort_keys=True, default=str),
             tuple(sorted((name, id(tool)) for name, tool in self._connected.items())),
             frozenset(self._activated),
+            verbose,
         )
         if self._status_cache is not None and self._status_cache[0] == key:
             return self._status_cache[1]
-        text = self._render_status()
+        text = self._render_status(verbose)
         self._status_cache = (key, text)
         return text
 
-    def _render_status(self) -> str:
+    def _render_status(self, verbose: bool) -> str:
         configured = self.discovered()
         if not configured:
             return "No MCP servers configured."
@@ -699,10 +701,25 @@ class MCPRegistry(Skill):
         if available:
             if lines:
                 lines.append("")
-            lines.append("Configured MCP servers (connect with self.mcp.connect(['name'])):")
-            for name in available:
-                safe_name = _safe_display(name)
-                lines.append(f"  {safe_name:24s} {self._server_summary(name)}")
+            if verbose:
+                lines.append("Configured MCP servers (connect with self.mcp.connect(['name'])):")
+                for name in available:
+                    safe_name = _safe_display(name)
+                    lines.append(f"  {safe_name:24s} {self._server_summary(name)}")
+            else:
+                lines.append(
+                    f"Configured MCP servers ({len(available)};"
+                    " connect with self.mcp.connect(['name'])):"
+                )
+                lines.extend(
+                    textwrap.wrap(
+                        ", ".join(_safe_display(name) for name in available),
+                        width=100,
+                        initial_indent="  ",
+                        subsequent_indent="  ",
+                        break_on_hyphens=False,
+                    )
+                )
 
         return "\n".join(lines)
 

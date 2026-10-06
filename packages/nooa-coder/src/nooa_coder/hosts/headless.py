@@ -16,7 +16,7 @@ from nooa_coder.session.loader import AgentFactory
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import SessionRegistry
 from nooa_coder.session.session import Session
-from nooa_coder.session.store import SessionStore
+from nooa_coder.session.store import SessionStore, sessions_root
 
 
 @dataclass(frozen=True)
@@ -35,8 +35,16 @@ async def open_tree(
 
     Sessions are closed children first, on normal exit and on an
     exception, so a crashed run leaves no live claim on any session file.
+    Sessions are stored in ``sessions_root(options.workspace,
+    options.sessions_dir)``. ``agent_factory`` builds each agent (default:
+    ``create_session_agent``).
     """
-    registry = SessionRegistry(SessionStore(options.sessions_dir), agent_factory=agent_factory)
+    if agent_factory is None:
+        from nooa_coder.coding.factory import create_session_agent
+
+        agent_factory = create_session_agent
+    store = SessionStore(sessions_root(options.workspace, options.sessions_dir))
+    registry = SessionRegistry(store, agent_factory=agent_factory)
     try:
         root = await registry.create(options)
         yield Tree(registry=registry, root=root)

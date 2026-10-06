@@ -70,8 +70,8 @@ async def test_a_turn_whose_start_cannot_be_recorded_does_not_run(make_session):
     assert isinstance(error.value.error, sqlite3.OperationalError)
     assert len(llm.calls) == 0  # the model was never called
     assert session.info.status == "idle"
-    assert session.agent.turns.paused
-    assert session.agent.queue_manager.get_channel("user_messages").snapshot() == ["one"]
+    assert session._agent.turns.paused
+    assert session._agent.queue_manager.get_channel("user_messages").snapshot() == ["one"]
     with pytest.raises(TurnFailedError, match="dispatch is blocked"):
         await session.prompt("two")
     session.resume_dispatch()
@@ -81,7 +81,7 @@ async def test_a_turn_whose_start_cannot_be_recorded_does_not_run(make_session):
 async def test_cancel_returns_when_recording_the_cancel_fails(make_session):
     started, _ = agents.fresh_events()
     session, _ = make_session(cell(agents.BLOCKING_CELL), done("after"))
-    events = session.agent.event_manager
+    events = session._agent.event_manager
     add = events.add
 
     def failing_add(event, **kwargs):

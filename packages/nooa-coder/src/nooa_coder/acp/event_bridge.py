@@ -1,17 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Translate a Session's updates and its agent's events into ACP session updates.
+"""Translate a Session's updates into ACP session updates.
 
-One bridge per session id per adapter. It listens in two places: the
-Session's updates (``subscribe``: titles, modes, turn ends, cancels,
-children, admitted items, close) and the agent's own event stream (tool
-cells, messages, file edits, terminal commands, model responses), which
-carries runtime events the Session's passthrough leaves out. Both are
-synchronous, so updates reach the client in the order things happened.
+One bridge per session id per adapter. It listens to the Session's
+updates only (``subscribe``): titles, modes, turn ends, cancels,
+children, admitted items, close, and the agent's events (tool cells,
+messages, file edits, terminal commands, model responses) as
+``AgentEventUpdate``. The stream is synchronous and ordered, so updates
+reach the client in the order things happened. The bridge never holds
+the agent: status beyond the updates comes from ``model_info()`` and
+``plan()``.
 """
 
 import asyncio
-import json
 import logging
 import re
 from collections.abc import Callable
@@ -37,6 +38,7 @@ from acp.helpers import plan_entry
 from acp.interfaces import Client
 from acp.schema import (
     AgentMessageChunk,
+    AgentThoughtChunk,
     ContentToolCallContent,
     Cost,
     CurrentModeUpdate,
@@ -45,12 +47,13 @@ from acp.schema import (
     TextContentBlock,
     ToolCallLocation,
     UsageUpdate,
+    UserMessageChunk,
 )
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage
+from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa_coder.coding.activity import (
     FileEdit,
     TerminalCommandFinished,
@@ -58,10 +61,14 @@ from nooa_coder.coding.activity import (
     TerminalCommandStarted,
 )
 from nooa_coder.session.items import (
+    USAGE_FIELDS,
+    AgentEventUpdate,
     CancelledUpdate,
     ChildCreatedUpdate,
     ItemAdmittedUpdate,
+    ItemConsumedUpdate,
     ModeChangedUpdate,
+    ModelInfo,
     SessionInfo,
     TitleChangedUpdate,
     TurnEndedUpdate,
@@ -72,6 +79,11 @@ from nooa_coder.session.items import (
 logger = logging.getLogger(__name__)
 
 _STOP = object()
+
+_MAX_TITLE_CODE_CHARS = 80
+
+# Values of return_result(...): the turn's result, not a cell's output.
+_TURN_RESULTS = (Done, NeedInput, Waiting)
 
 # Bound on a rendered Out[n] value; large results belong in the agent's
 # context, not repeated in full inside a client tool card.
@@ -109,15 +121,25 @@ class BridgedSession(Protocol):
     """What the bridge needs from a Session."""
 
     id: str
-    agent: Any
     info: SessionInfo
 
     def subscribe(self, listener: Callable[[Any], None]) -> Callable[[], None]: ...
+
+    def model_info(self) -> ModelInfo: ...
+
+    def plan(self) -> list[Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class _BestEffortUpdate:
     value: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _Sent:
+    """Resolve ``future`` once the pump reaches it, without taking a flush's error."""
+
+    future: asyncio.Future[None]
 
 
 def _fenced_code(text: str, language: str) -> str:
@@ -135,20 +157,33 @@ def _python_content(code: str, output: str | None = None) -> list[ContentToolCal
     return content
 
 
+def _python_title(code: str, status: str | None = None) -> str:
+    """``python: <first code line>``, like the shell card's ``$ <command>``.
+
+    A card's title is what a collapsed card shows, so it names the code; a
+    status word (``failed``, ``cancelled``...) is appended when the cell did
+    not complete.
+    """
+    first = next((line.strip() for line in code.splitlines() if line.strip()), "")
+    if len(first) > _MAX_TITLE_CODE_CHARS:
+        first = first[: _MAX_TITLE_CODE_CHARS - 1] + "…"
+    title = f"python: {first}" if first else "python"
+    return f"{title} ({status})" if status else title
+
+
 def cancel_text(by: str) -> str:
     """What the conversation says when a turn was stopped by ``by``."""
     return "Stopped at your request." if by == "user" else f"Stopped by {by}."
 
 
-def question_text(question: str, options: list[str] | None) -> str:
-    """A ``NeedInput`` question as the agent's final message of the turn."""
-    if not options:
-        return question
-    return question + "\n\n" + "\n".join(f"- {option}" for option in options)
-
-
-def _json_safe(value: Any) -> Any:
-    return json.loads(json.dumps(value, default=str))
+def question_text(question: str, options: list[str] | None, reason: str | None = None) -> str:
+    """A ``NeedInput`` question as the agent's final message of the turn; its reason last."""
+    text = question
+    if options:
+        text += "\n\n" + "\n".join(f"- {option}" for option in options)
+    if reason:
+        text += "\n\n" + reason
+    return text
 
 
 def end_line(update: Any) -> Any:
@@ -173,6 +208,59 @@ def end_line(update: Any) -> Any:
     return update
 
 
+POOL_INPUT_EVENT_ID = "poolside/inputEventId"
+POOL_CLIENT_INPUT_ID = "poolside/clientInputId"
+
+
+def pool_input_event(item_id: str, client_input_id: str | None = None) -> SessionInfoUpdate:
+    """The update Pool's own agent sends when it takes a person's input.
+
+    Pool places a message it queued with ``_poolside/session_steer`` in the
+    conversation when it sees the steer's ``inputId`` as
+    ``poolside/clientInputId``; without it the message is never shown.
+    Every input also carries a ``poolside/inputEventId``: here the item id,
+    so it is the same live and when the transcript is replayed. Measured
+    with Pool 1.0.16 against its own agent (``pool acp``).
+    """
+    meta: dict[str, Any] = {POOL_INPUT_EVENT_ID: item_id}
+    if client_input_id is not None:
+        meta = {POOL_CLIENT_INPUT_ID: client_input_id, **meta}
+    return SessionInfoUpdate(session_update="session_info_update", field_meta=meta)
+
+
+MAX_CHUNK_CHARS = 64_000
+"""Longest text one message or thought chunk carries.
+
+A longer text (a large paste, a long answer, a transcript entry replayed by
+``session/load``) goes out as several chunks of the same kind, which a
+client joins as it joins any stream of chunks. This keeps every message well
+under the 1 MiB that WebSocket clients accept by default (``websockets``):
+64,000 characters are at most about 384 KiB of JSON, even if every
+character needs a six-byte escape.
+"""
+
+_TEXT_CHUNKS = (AgentMessageChunk, UserMessageChunk, AgentThoughtChunk)
+
+
+def split_text_chunk(update: Any) -> list[Any]:
+    """``update`` as a list of updates, split when it is a text chunk over ``MAX_CHUNK_CHARS``."""
+    if not isinstance(update, _TEXT_CHUNKS) or not isinstance(update.content, TextContentBlock):
+        return [update]
+    text = update.content.text
+    if len(text) <= MAX_CHUNK_CHARS:
+        return [update]
+    return [
+        update.model_copy(
+            update={
+                "content": update.content.model_copy(
+                    update={"text": text[start : start + MAX_CHUNK_CHARS]}
+                )
+            }
+        )
+        for start in range(0, len(text), MAX_CHUNK_CHARS)
+    ]
+
+
 class ACPEventBridge:
     """Send one session's activity to an ACP client, in order, through one pump task.
 
@@ -190,7 +278,6 @@ class ACPEventBridge:
         own_sources: frozenset[str] = OWN_SOURCES,
     ) -> None:
         self.session = session
-        self.agent = session.agent
         self.client = client
         self.session_id = session.id
         self._resolve_child = resolve_child
@@ -207,44 +294,50 @@ class ACPEventBridge:
         # wins, whoever started the close.
         self._finish_open = True
         self._open: dict[ToolKey, _OpenCard] = {}
-        # What the session spent before this bridge was attached (a resumed or
-        # re-followed session), plus what it spends from here on.
-        self._cost_usd = session.info.usage.cost_usd
-        self._used: int | None = None  # input tokens of the latest model call
         self._plan: list[PlanEntry] = []
         self._children: list[dict[str, Any]] = []
         self._mirrors: dict[str, list[Callable[[], None]]] = {}
+        # Pool steers waiting for their item to be taken: item id ->
+        # (Pool's inputId, the future resolved once Pool has been told).
+        self._client_inputs: dict[str, tuple[str, asyncio.Future[None]]] = {}
+        # Recently taken item ids, for a steer registered after its item was taken.
+        self._taken: dict[str, None] = {}
+        # By event type. Cards come from this session's agent and, mirrored,
+        # from its children's; messages, thoughts and usage only from its own.
+        self._card_handlers: dict[str, Callable[[Any, str | None], None]] = {
+            "ToolCallEvent": self._on_tool_call,
+            "PythonOutput": self._on_python_output,
+            "FileEdit": self._on_file_edit,
+            "TerminalCommandStarted": self._on_terminal_started,
+            "TerminalCommandOutput": self._on_terminal_output,
+            "TerminalCommandFinished": self._on_terminal_finished,
+        }
+        self._own_handlers: dict[str, Callable[[Any], None]] = {
+            "AgentMessage": self._on_agent_message,
+            "LLMResponse": self._on_llm_response,
+        }
         self._unsubscribers: list[Callable[[], None]] = [
-            *self._subscribe_agent(self.agent.event_manager, source=None),
             session.subscribe(self._on_session_update),
         ]
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
 
     # ---- subscriptions -----------------------------------------------
 
-    def _subscribe_agent(
-        self, event_manager: Any, *, source: str | None
-    ) -> list[Callable[[], None]]:
-        """Wire the handlers onto one agent's events.
+    def _on_agent_event(self, event: EventBase, source: str | None) -> None:
+        """One agent event, from an ``AgentEventUpdate``.
 
         ``source`` is ``None`` for this session's own agent, else the id of
         a child whose tool cards are mirrored (cards only: a child's
         messages, thoughts and usage are not this conversation's).
         """
-        handlers: list[tuple[str, Callable[[Any], None]]] = [
-            ("ToolCallEvent", lambda event: self._on_tool_call(event, source)),
-            ("PythonOutput", lambda event: self._on_python_output(event, source)),
-            ("FileEdit", lambda event: self._on_file_edit(event, source)),
-            ("TerminalCommandStarted", lambda event: self._on_terminal_started(event, source)),
-            ("TerminalCommandOutput", lambda event: self._on_terminal_output(event, source)),
-            ("TerminalCommandFinished", lambda event: self._on_terminal_finished(event, source)),
-        ]
+        card = self._card_handlers.get(event.event_type)
+        if card is not None:
+            card(event, source)
+            return
         if source is None:
-            handlers += [
-                ("AgentMessage", self._on_agent_message),
-                ("LLMResponse", self._on_llm_response),
-            ]
-        return [event_manager.on(event_type, handler) for event_type, handler in handlers]
+            own = self._own_handlers.get(event.event_type)
+            if own is not None:
+                own(event)
 
     def _mirror(self, child: BridgedSession) -> None:
         """Mirror a child's tool cards (and its own children's) into this session."""
@@ -253,17 +346,16 @@ class ACPEventBridge:
 
         def on_child_update(update: Any) -> None:
             kind = getattr(update, "kind", None)
-            if isinstance(update, ChildCreatedUpdate):
+            if isinstance(update, AgentEventUpdate):
+                self._on_agent_event(update.event, child.id)
+            elif isinstance(update, ChildCreatedUpdate):
                 # Announced like this session's own children, so the client
                 # knows the id before cards arrive under it.
                 self._on_child_created(update)
             elif kind == "closed":
                 self._unmirror(child.id)
 
-        self._mirrors[child.id] = [
-            *self._subscribe_agent(child.agent.event_manager, source=child.id),
-            child.subscribe(on_child_update),
-        ]
+        self._mirrors[child.id] = [child.subscribe(on_child_update)]
 
     def _unmirror(self, child_id: str) -> None:
         for unsubscribe in self._mirrors.pop(child_id, []):
@@ -287,7 +379,8 @@ class ACPEventBridge:
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
-            self._queue.put_nowait(end_line(update))
+            for part in split_text_chunk(end_line(update)):
+                self._queue.put_nowait(part)
 
     def publish(self, update: Any) -> None:
         """Queue a host-originated session update on the ordered ACP stream."""
@@ -299,8 +392,46 @@ class ACPEventBridge:
 
     # ---- session updates ---------------------------------------------
 
+    def client_input_taken(self, item_id: str, client_input_id: str) -> asyncio.Future[None]:
+        """Tell Pool when the turn takes ``item_id``, the item of its steer ``client_input_id``.
+
+        Returns a future that resolves once ``pool_input_event`` has gone
+        out, after everything queued before it, so the steer's answer can
+        follow it as Pool's own agent does. It never resolves when the item
+        is never taken (withdrawn, discarded, the session closed): the caller
+        also waits for the item's outcome, and calls ``forget_client_input``.
+        """
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        if item_id in self._taken:
+            self._send_client_input(item_id, client_input_id, done)
+        else:
+            self._client_inputs[item_id] = (client_input_id, done)
+        return done
+
+    def forget_client_input(self, item_id: str) -> None:
+        self._client_inputs.pop(item_id, None)
+
+    def _send_client_input(
+        self, item_id: str, client_input_id: str, done: asyncio.Future[None]
+    ) -> None:
+        if self._closed:
+            if not done.done():
+                done.set_result(None)
+            return
+        self._enqueue(pool_input_event(item_id, client_input_id))
+        self._queue.put_nowait(_Sent(done))  # resolved once the update is sent
+
     def _on_session_update(self, update: Any) -> None:
-        if isinstance(update, ItemAdmittedUpdate):
+        if isinstance(update, AgentEventUpdate):
+            self._on_agent_event(update.event, None)
+        elif isinstance(update, ItemConsumedUpdate):
+            self._taken[update.item_id] = None
+            while len(self._taken) > 256:
+                del self._taken[next(iter(self._taken))]
+            waiting = self._client_inputs.pop(update.item_id, None)
+            if waiting is not None:
+                self._send_client_input(update.item_id, *waiting)
+        elif isinstance(update, ItemAdmittedUpdate):
             if update.channel in _ECHOED_CHANNELS and update.source not in self._own_sources:
                 text = getattr(update, "text", "") or update.preview
                 self._enqueue(update_user_message_text(text))
@@ -336,7 +467,12 @@ class ACPEventBridge:
             # item decides whether to also open a form.
             question = str(update.outcome.get("question", ""))
             options = update.outcome.get("options")
-            self._enqueue(update_agent_message(text_block(question_text(question, options))))
+            reason = update.outcome.get("reason")
+            self._enqueue(
+                update_agent_message(
+                    text_block(question_text(question, options, str(reason) if reason else None))
+                )
+            )
         elif update.outcome_kind == "error":
             # A turn ending on an error does not always write the PythonOutput
             # for a cell it announced; close its card rather than leave it
@@ -390,7 +526,7 @@ class ACPEventBridge:
         self._enqueue(
             start_tool_call(
                 self._wire_id(key),
-                "Running Python",
+                _python_title(code),
                 # Zed 1.14 treats every ``execute`` tool as a terminal card.
                 # A plain-content execute card has neither a terminal nor an
                 # output disclosure, so its source cannot be opened. Python is
@@ -398,6 +534,7 @@ class ACPEventBridge:
                 kind="other",
                 status="in_progress",
                 content=_python_content(code),
+                raw_input={"code": code},
             )
         )
 
@@ -414,8 +551,9 @@ class ACPEventBridge:
             # A cell whose last line is a bare expression produces no stdout:
             # the result arrives as ``value`` and codeact shows it to the model
             # as Out[n]. Without this the client is told there was no output
-            # while the agent is reasoning from one.
-            if event.value is not None:
+            # while the agent is reasoning from one. A turn result from
+            # return_result(...) is not output: the turn's own messages show it.
+            if event.value is not None and not isinstance(event.value, _TURN_RESULTS):
                 rendered = pformat(event.value, max_string=_MAX_VALUE_CHARS, unquote_strings=True)
                 parts.append(f"Out[{event.execution_count}]: {rendered}")
             cancelled = event.execution_status is ResultStatus.CANCELLED
@@ -425,12 +563,8 @@ class ACPEventBridge:
                 if event.execution_status in (ResultStatus.ERROR, ResultStatus.CANCELLED)
                 else "completed"
             )
-            title = (
-                "Cancelled"
-                if cancelled
-                else "Python failed"
-                if status == "failed"
-                else "Ran Python"
+            title = _python_title(
+                code, "cancelled" if cancelled else "failed" if status == "failed" else None
             )
             self._enqueue(
                 update_tool_call(
@@ -438,6 +572,7 @@ class ACPEventBridge:
                     title=title,
                     status=status,
                     content=_python_content(code, output),
+                    raw_input={"code": code},
                 )
             )
         if source is None:
@@ -564,56 +699,42 @@ class ACPEventBridge:
         reasoning = event.reasoning
         if reasoning:
             self._enqueue(update_agent_thought_text(reasoning))
-        usage = event.usage
-        if usage is None:
-            return
-        self._cost_usd += usage.cost_usd
-        self._used = usage.input_tokens
-        self._publish_usage()
 
     # ---- derived updates ---------------------------------------------
 
     def _publish_usage(self) -> None:
-        """Context use and cost (own plus what children spent) as a usage update."""
-        context_window = getattr(getattr(self.agent, "llm", None), "context_window", None)
-        if context_window is None or self._used is None:
+        """Context use and cost (own plus what children spent) as a usage update.
+
+        ACP's usage update has no token counts beyond the context in use, so
+        the session's totals (own plus children's, cached and reasoning
+        tokens included) go in ``_meta["dev.nooa/usage"]``. Nothing is sent
+        before the session's first model call: there is no context in use.
+        """
+        context_window = self.session.model_info().context_window
+        usage = self.session.info.usage
+        used = usage.last_input_tokens
+        if context_window is None or not used:
             return
-        attributed = self.session.info.usage.attributed_cost_usd
-        meta: dict[str, Any] | None = None
-        status = getattr(self.agent, "get_summarization_status", None)
-        if callable(status):
-            try:
-                meta = {"dev.nooa/context": _json_safe(status())}
-            except Exception:
-                logger.debug("Could not read the context status", exc_info=True)
+        totals = usage.with_attributed()
+        meta_totals = totals.model_dump(
+            include={name for name in USAGE_FIELDS if name != "cost_usd"}
+        )
+        meta: dict[str, Any] = {"dev.nooa/usage": meta_totals}
         self._enqueue(
             UsageUpdate(
                 session_update="usage_update",
-                used=self._used,
-                size=max(context_window, self._used),
-                cost=Cost(amount=self._cost_usd + attributed, currency="USD"),
+                used=used,
+                size=max(context_window, used),
+                cost=Cost(amount=totals.cost_usd, currency="USD"),
                 field_meta=meta,
             )
         )
 
     def _publish_plan(self) -> None:
-        """Send the agent's todos as an ACP plan when they changed."""
-        todo: Any = getattr(self.agent, "todo", None)
-        if not callable(getattr(todo, "list_todos", None)):
-            return
-        active = todo.active() if callable(getattr(todo, "active", None)) else None
+        """Send the agent's plan (``Session.plan()``) as an ACP plan update when it changed."""
         entries = [
-            plan_entry(
-                item.title,
-                status=(
-                    "completed"
-                    if item.status == "done"
-                    else "in_progress"
-                    if active is not None and item.id == active.id
-                    else "pending"
-                ),
-            )
-            for item in todo.list_todos()
+            plan_entry(entry.content, status=entry.status, priority=entry.priority)
+            for entry in self.session.plan()
         ]
         if entries == self._plan:
             return
@@ -636,6 +757,8 @@ class ACPEventBridge:
                 return
             if isinstance(item, asyncio.Future) and not item.done():
                 item.set_exception(self._stopped_error(cause))
+            elif isinstance(item, _Sent) and not item.future.done():
+                item.future.set_result(None)
             self._queue.task_done()
 
     async def _pump(self) -> None:
@@ -667,6 +790,10 @@ class ACPEventBridge:
                             item.set_result(None)
                         else:
                             item.set_exception(error)
+                    continue
+                if isinstance(item, _Sent):
+                    if not item.future.done():
+                        item.future.set_result(None)
                     continue
                 if isinstance(item, _BestEffortUpdate):
                     try:
@@ -724,7 +851,10 @@ class ACPEventBridge:
             self._enqueue(
                 update_tool_call(
                     self._wire_id(key),
-                    title=title or ("Python interrupted" if card.kind == "python" else None),
+                    # A Python card keeps its code in the title, with the reason.
+                    title=_python_title(card.code, (title or "interrupted").lower())
+                    if card.kind == "python"
+                    else title,
                     status="failed",
                     content=content,
                 )

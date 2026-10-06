@@ -38,35 +38,38 @@ definitions, including their environment variables and headers.
 
 ## Pool settings
 
-Pool reads named agent servers from its settings file. The entry below runs
-`nooa coder` from a checkout at `/localhome/local-pfurgale/dev/wt-p3` whose
-environment was created with `UV_PROJECT_ENVIRONMENT=.venv-host uv sync
---all-extras`, and records the traffic with the in-server tee. Replace
-`MODEL_ALIAS` with a model alias from your NOOA model configuration:
+Pool reads named agent servers from `~/.config/poolside/settings.yaml`.
+The entry below runs `nooa coder` from a checkout whose environment was
+created with `UV_PROJECT_ENVIRONMENT=.venv-host uv sync --all-extras`, and
+records the traffic with the in-server tee. Replace `CHECKOUT` with the
+checkout's path and `MODEL_ALIAS` with a model alias from your NOOA model
+configuration:
 
 ```yaml
 agent_servers:
   nooa-coder:
-    command: /usr/bin/env
+    type: custom
+    command: CHECKOUT/.venv-host/bin/nooa
     args:
-      - UV_PROJECT_ENVIRONMENT=.venv-host
-      - uv
-      - run
-      - --project
-      - /localhome/local-pfurgale/dev/wt-p3
-      - nooa
       - coder
       - --model
       - MODEL_ALIAS
       - --tee
       - /tmp/nooa-coder-acp.jsonl
+    env:
+      NEMO_OO_LLM_CONFIG: /path/to/llm_config.yaml  # optional
 ```
 
 Then start Pool in the repository you want to work on:
 
 ```bash
-pool --agent-server nooa-coder
+pool -s nooa-coder
 ```
+
+Sessions are stored in the workspace Pool was started in, under
+`.nooa/sessions`, next to the sessions of the older `nooa-acp` server. Add
+`--sessions-dir DIR` (or set `NOOA_SESSIONS_DIR`) to keep the sessions of all
+workspaces in one directory.
 
 Without `--tee` the server records nothing. To record a different server, put
 `python -m nooa_coder.acp.tee --log PATH --` in front of its command in the same way

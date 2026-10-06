@@ -119,12 +119,13 @@ def test_status_reads_the_config_again_only_after_it_changes(tmp_path, monkeypat
     monkeypatch.setattr(
         approval, "_load_server_config", lambda *a, **k: reads.append(a) or load(*a, **k)
     )
-    first = registry.status()
+    # The compact block names servers only; the detail rows carry the state.
+    first = registry.status(verbose=True)
     assert "[approval required]" in first
-    assert registry.status() == first
+    assert registry.status(verbose=True) == first
     assert len(reads) == 1
     # Approving (another file) and editing the config both show up.
     registry._approve("tool", registry._approval_request("tool").confirmation)
-    assert "[approval required]" not in registry.status()
+    assert "[approval required]" not in registry.status(verbose=True)
     mcp_file.write_text(json.dumps({"mcpServers": {"other": {"command": "run-other-tool"}}}))
-    assert "run-other-tool" in registry.status()
+    assert "other" in registry.status() and "run-other-tool" in registry.status(verbose=True)

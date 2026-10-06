@@ -7,10 +7,11 @@ import inspect
 import json
 import logging
 import sqlite3
+import threading
 
 import coder_test_agents as agents
 import pytest
-from coder_test_agents import ask, cell, done, reply, until, wait_on
+from coder_test_agents import ask, cell, done, plain_agent_factory, reply, until, wait_on
 from nooa_coder.session import session as session_module
 from nooa_coder.session.items import (
     CommandInfo,
@@ -20,7 +21,6 @@ from nooa_coder.session.items import (
     TurnCancelledOutcome,
     TurnEndedUpdate,
 )
-from nooa_coder.session.loader import default_agent_factory
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.session import (
     ItemDiscardedError,
@@ -56,7 +56,7 @@ async def test_admission_is_recorded_before_any_turn_runs(make_session):
         '"hello"',
         "user",
     )
-    assert session.agent.queue_manager.get_channel("user_messages").qsize() == 1
+    assert session._agent.queue_manager.get_channel("user_messages").qsize() == 1
 
 
 async def test_submit_to_an_unknown_channel_is_an_error(make_session):
@@ -94,7 +94,7 @@ async def test_need_input_is_returned_and_shown_as_a_question(make_session):
 
 async def test_waiting_keeps_prompt_open_until_a_later_turn_ends(make_session):
     session, _ = make_session(wait_on("jobs"), done("job finished"), start=False)
-    jobs = session.agent.queue_manager.queue("jobs")
+    jobs = session._agent.queue_manager.queue("jobs")
     session.start()
     ended = []
     session.subscribe(lambda e: ended.append(e) if isinstance(e, TurnEndedUpdate) else None)
@@ -137,13 +137,8 @@ async def test_subscribers_see_admission_then_turn_start_then_turn_end(make_sess
     unsubscribe = session.subscribe(seen.append)
     session.start()
     await asyncio.wait_for(session.prompt("go"), TIMEOUT)
-    kinds = [e.kind for e in seen if e.kind != "agent_event"]
-    assert kinds == ["item_admitted", "turn_started", "turn_ended"]
-    agent_events = [e for e in seen if e.kind == "agent_event"]
-    assert "AgentMessage" in {e.event_type for e in agent_events}
-    [message_event] = [e for e in agent_events if e.event_type == "AgentMessage"]
-    assert session.agent.event_manager.values()
-    assert any(str(e.id) == message_event.event_id for e in session.agent.event_manager.values())
+    kinds = [e.kind for e in seen if e.kind not in ("usage_changed", "agent_event")]
+    assert kinds == ["item_admitted", "item_consumed", "turn_started", "turn_ended"]
 
     unsubscribe()
     count = len(seen)
@@ -180,14 +175,14 @@ async def test_a_failing_turn_raises_from_prompt_and_the_loop_goes_on(make_sessi
 async def test_close_is_idempotent_and_closes_the_agent(make_session):
     session, _ = make_session(reply("ok"))
     await asyncio.wait_for(session.prompt("go"), TIMEOUT)
-    job = session.agent.queue_manager.spawn(asyncio.Event().wait(), channel="user_messages")
+    job = session._agent.queue_manager.spawn(asyncio.Event().wait(), channel="user_messages")
     calls = []
 
     async def on_agent_close():
         # The agent's background jobs are shut down before the agent closes.
         calls.append(("agent closed", job.state))
 
-    session.agent.event_manager.on_close(on_agent_close)
+    session._agent.event_manager.on_close(on_agent_close)
     closed = []
     session.subscribe(lambda e: closed.append(e.kind) if e.kind == "closed" else None)
 
@@ -222,7 +217,7 @@ async def test_cancel_during_a_cell_records_the_interrupted_output(make_session,
 
     assert await asyncio.wait_for(session.cancel(), TIMEOUT) is True
     # cancel() returns only after the cell's cancelled output is recorded.
-    events = session.agent.event_manager.values()
+    events = session._agent.event_manager.values()
     [output] = [
         e
         for e in events
@@ -262,7 +257,7 @@ async def test_cancel_during_a_model_call_has_no_interrupted_cell(make_session):
     await asyncio.wait_for(llm.entered.wait(), TIMEOUT)
     assert await asyncio.wait_for(session.cancel(by="parent:root"), TIMEOUT) is True
     assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="parent:root")
-    [cancelled] = [e for e in session.agent.event_manager.values() if isinstance(e, TurnCancelled)]
+    [cancelled] = [e for e in session._agent.event_manager.values() if isinstance(e, TurnCancelled)]
     assert (cancelled.by, cancelled.interrupted) == ("parent:root", None)
 
 
@@ -274,7 +269,7 @@ async def test_idle_cancel_while_waiting_closes_the_prompt_without_an_event(make
     await until(lambda: ended)
     assert await session.cancel() is False
     assert await asyncio.wait_for(pending, TIMEOUT) == TurnCancelledOutcome(by="user")
-    assert not [e for e in session.agent.event_manager.values() if isinstance(e, TurnCancelled)]
+    assert not [e for e in session._agent.event_manager.values() if isinstance(e, TurnCancelled)]
     assert await session.cancel() is False
 
 
@@ -292,30 +287,50 @@ async def test_steer_during_a_turn_reaches_the_next_model_call(make_session):
     assert len(llm.calls) == 2
     assert "STEER-focus-on-tests" not in str(llm.calls[0].messages)
     assert "STEER-focus-on-tests" in str(llm.calls[1].messages)
-    notes = [e for e in session.agent.event_manager.values() if isinstance(e, Notification)]
-    assert [(n.source, n.description) for n in notes] == [
-        (
-            "New message from the user while you were working.",
-            "STEER-focus-on-tests",
-        )
-    ]
+    [note] = [e for e in session._agent.event_manager.values() if isinstance(e, Notification)]
+    assert note.value == {"user_messages": ["STEER-focus-on-tests"]}
+    assert session._agent.events[note.tag].value == note.value
     user_lines = [e.content for e in session.transcript() if e.role == "user"]
     assert user_lines == ["write the parser", "STEER-focus-on-tests"]
 
 
+STEER_EVENT = (
+    '<sys tag="{tag}">\n'
+    "Notification(source='New message on user_messages from the user while you were working.', "
+    "description='Sent during this turn. The value has the form of the notification argument "
+    'of handle(); reach it as self.events["N"].value, where N is the tag of this event.\', '
+    "value={{'user_messages': ['STEER-focus-on-tests']}})\n"
+    "</sys>"
+)
+
+
+async def test_a_steer_is_shown_to_the_model_like_a_turn_input(make_session):
+    started, block = agents.fresh_events()
+    session, llm = make_session(cell(agents.BLOCKING_CELL), done("steered"))
+    pending = asyncio.ensure_future(session.prompt("write the parser"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    await session.steer("STEER-focus-on-tests")
+    block.set()
+    await asyncio.wait_for(pending, TIMEOUT)
+
+    [note] = [e for e in session._agent.event_manager.values() if isinstance(e, Notification)]
+    rendered = [m["content"] for m in llm.calls[1].messages if "STEER-focus-on-tests" in str(m)]
+    assert rendered == [STEER_EVENT.format(tag=note.tag)]
+
+
 @pytest.mark.parametrize(
-    ("source", "sentence"),
+    ("source", "sender"),
     [
-        ("user", "New message from the user while you were working."),
-        (
-            "parent:reviewer",
-            "New message from your parent agent reviewer while you were working.",
-        ),
-        ("host", "New message from host while you were working."),
+        ("user", "the user"),
+        ("acp", "the user"),
+        ("parent:reviewer", "your parent agent reviewer"),
+        ("host", "host"),
     ],
 )
-def test_a_steer_notification_names_its_sender(source, sentence):
-    assert session_module._steer_source(source) == sentence
+def test_a_steer_notification_names_its_channel_and_sender(source, sender):
+    assert session_module._steer_source(source) == (
+        f"New message on user_messages from {sender} while you were working."
+    )
 
 
 async def test_steer_after_the_last_model_call_becomes_the_next_message(make_session):
@@ -338,7 +353,7 @@ async def test_steer_after_the_last_model_call_becomes_the_next_message(make_ses
     assert len(llm.calls) == 2
     assert "STEER-late" not in str(llm.calls[0].messages)
     assert str(llm.calls[1].messages).count("STEER-late") == 1
-    assert not [e for e in session.agent.event_manager.values() if isinstance(e, Notification)]
+    assert not [e for e in session._agent.event_manager.values() if isinstance(e, Notification)]
     admitted = [
         raw for _, raw in _rows(session, "ItemAdmitted") if raw["item_id"] == receipt.item_id
     ]
@@ -350,7 +365,7 @@ async def test_steer_while_idle_is_a_submit(make_session):
     session, _ = make_session(start=False)
     receipt = await session.steer("hello")
     assert (receipt.channel, receipt.delivered) == ("user_messages", "queued")
-    assert session.agent.queue_manager.get_channel("user_messages").qsize() == 1
+    assert session._agent.queue_manager.get_channel("user_messages").qsize() == 1
 
 
 async def test_a_steer_left_by_a_cancel_is_admitted_after_the_cancel(make_session):
@@ -398,7 +413,7 @@ async def test_withdraw_removes_a_queued_item(make_session):
     assert session.withdraw(third) is True
     with pytest.raises(ItemWithdrawnError):
         await asyncio.wait_for(third_prompt, TIMEOUT)
-    assert session.agent.queue_manager.get_channel("user_messages").snapshot() == ["KEEP-ME"]
+    assert session._agent.queue_manager.get_channel("user_messages").snapshot() == ["KEEP-ME"]
     withdrawn = [raw["item_id"] for _, raw in _rows(session, "ItemWithdrawn")]
     assert withdrawn == [second.item_id, third.item_id]
 
@@ -429,7 +444,7 @@ async def test_a_flushed_item_fails_its_outcome_and_is_not_requeued(make_session
     receipt = await session.submit("FLUSHED")
     pending = asyncio.ensure_future(session.outcome(receipt.item_id))
     await asyncio.sleep(0)
-    assert session.agent.queue_manager.get_channel("user_messages").flush() == 1
+    assert session._agent.queue_manager.get_channel("user_messages").flush() == 1
     with pytest.raises(ItemDiscardedError):
         await asyncio.wait_for(pending, TIMEOUT)
     assert [raw["item_id"] for _, raw in _rows(session, "ItemDiscarded")] == [receipt.item_id]
@@ -449,11 +464,11 @@ async def test_a_flushed_item_fails_its_outcome_and_is_not_requeued(make_session
 
 async def test_an_item_on_a_removed_channel_fails_its_outcome(make_session):
     session, _ = make_session(start=False)
-    session.agent.queue_manager.queue("jobs")
+    session._agent.queue_manager.queue("jobs")
     receipt = await session.submit({"job": 1}, channel="jobs")
     pending = asyncio.ensure_future(session.outcome(receipt.item_id))
     await asyncio.sleep(0)
-    session.agent.queue_manager.remove_channel("jobs")
+    session._agent.queue_manager.remove_channel("jobs")
     with pytest.raises(ItemDiscardedError):
         await asyncio.wait_for(pending, TIMEOUT)
 
@@ -461,7 +476,7 @@ async def test_an_item_on_a_removed_channel_fails_its_outcome(make_session):
 async def test_the_loop_survives_a_flush_while_it_waits(make_session):
     session, _ = make_session(done("still here"))
     await asyncio.sleep(0.05)  # the loop is racing the channels
-    session.agent.queue_manager.get_channel("user_messages").flush()
+    session._agent.queue_manager.get_channel("user_messages").flush()
     await asyncio.sleep(0.05)
     assert await asyncio.wait_for(session.prompt("go"), TIMEOUT) == Done(explanation="still here")
 
@@ -471,7 +486,7 @@ async def test_a_loop_with_no_channels_left_closes_the_session(make_session):
     closed = []
     session.subscribe(lambda e: closed.append(e) if e.kind == "closed" else None)
     await asyncio.sleep(0.05)
-    queues = session.agent.queue_manager
+    queues = session._agent.queue_manager
     for name in list(queues.channels()):
         queues.remove_channel(name)
     await until(lambda: closed)
@@ -482,7 +497,7 @@ async def test_a_loop_with_no_channels_left_closes_the_session(make_session):
 
 async def test_withdraw_a_steer_that_became_a_message(make_session):
     session, _ = make_session(start=False)
-    turns = session.agent.turns
+    turns = session._agent.turns
     turns._turn = asyncio.ensure_future(asyncio.sleep(10))  # a turn is running
     turns._settled.clear()
     session.info.status = "running"
@@ -496,7 +511,7 @@ async def test_withdraw_a_steer_that_became_a_message(make_session):
         session.info.status = "idle"
     pending = asyncio.ensure_future(session.outcome(receipt.item_id))
     session._admit_leftover_steers()  # the turn settled before any model call saw it
-    channel = session.agent.queue_manager.get_channel("user_messages")
+    channel = session._agent.queue_manager.get_channel("user_messages")
     assert channel.snapshot() == ["TOO-LATE"]
     assert session.withdraw(receipt) is True
     assert channel.snapshot() == []
@@ -521,9 +536,9 @@ async def test_checkpoint_is_written_only_when_the_state_changed(
         cell("self.v.answer = 42\nreturn_result(Done(explanation='three'))"),
     )
     await asyncio.wait_for(session.prompt("one"), TIMEOUT)
-    after_one = json.dumps(snapshot_to_json(session.agent), sort_keys=True)
+    after_one = json.dumps(snapshot_to_json(session._agent), sort_keys=True)
     await asyncio.wait_for(session.prompt("two"), TIMEOUT)
-    after_two = json.dumps(snapshot_to_json(session.agent), sort_keys=True)
+    after_two = json.dumps(snapshot_to_json(session._agent), sort_keys=True)
     # Precondition: a no-op turn leaves the serialised state unchanged.
     assert after_one == after_two
     await session.wait_for_checkpoint()
@@ -537,22 +552,47 @@ async def test_checkpoint_is_written_only_when_the_state_changed(
     await session.close()
     with SessionStore(sessions_dir).open(session_id) as handle:
         options = SessionOptions(workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent")
-        restored = default_agent_factory(options, handle.storage)
+        restored = plain_agent_factory(options, handle.storage)
         assert handle.storage.restore_latest_snapshot(restored)
         assert restored.v.answer == 42
 
 
 async def test_checkpoint_failure_does_not_fail_the_turn(make_session, monkeypatch, caplog):
-    def broken(blob):
+    def broken(data, **kwargs):
         raise sqlite3.OperationalError("disk full")
 
-    session, _ = make_session(done("fine"))
+    session, _ = make_session(done("fine"), start=False)
     monkeypatch.setattr(session.handle.storage, "save_snapshot_json", broken)
+    session.start()
     with caplog.at_level(logging.WARNING, logger=session_module.__name__):
         assert await asyncio.wait_for(session.prompt("go"), TIMEOUT) == Done(explanation="fine")
         await session.wait_for_checkpoint()
     assert "checkpoint" in caplog.text.lower()
     assert _snapshot_count(session.handle.path) == 0
+
+
+async def test_the_checkpoint_is_written_through_the_storage_off_the_event_loop(
+    make_session, monkeypatch
+):
+    """The write goes through the storage manager's public method, in a worker thread."""
+    session, _ = make_session(
+        cell("self.v.answer = 1\nreturn_result(Done(explanation='x'))"), start=False
+    )
+    storage = session.handle.storage
+    write = storage.save_snapshot_json
+    threads = []
+
+    def recording(data, **kwargs):
+        threads.append(threading.current_thread())
+        return write(data, **kwargs)
+
+    monkeypatch.setattr(storage, "save_snapshot_json", recording)
+    session.start()
+    await asyncio.wait_for(session.prompt("go"), TIMEOUT)
+    await asyncio.wait_for(session.wait_for_checkpoint(), TIMEOUT)
+    assert len(threads) == 1
+    assert threads[0] is not threading.main_thread()
+    assert _snapshot_count(session.handle.path) == 1
 
 
 async def test_the_checkpoint_writer_waits_for_the_storage_lock(make_session):
@@ -641,7 +681,7 @@ async def test_commands_delegate_to_the_agents_registry(make_session):
     assert result == CommandResult(
         text="model is fast", output_to_agent=False, data={"alias": "fast"}
     )
-    assert session.agent.slash_commands.invoked == [("model", "fast")]
+    assert session._agent.slash_commands.invoked == [("model", "fast")]
     with pytest.raises(KeyError):
         await session.invoke_command("nope", "")
 
@@ -712,23 +752,6 @@ async def test_idle_cancel_leaves_items_no_turn_has_taken(make_session):
     assert not outcome.done()
 
 
-async def test_listeners_can_read_an_agent_event_by_its_id(make_session):
-    session, _ = make_session(reply("hi"), start=False)
-    found = []
-
-    def listener(update):
-        if update.kind == "agent_event":
-            event = session.agent.event_manager.get(update.event_id)
-            found.append((update.event_type, event is not None and event.tag is not None))
-
-    session.subscribe(listener)
-    session.start()
-    await asyncio.wait_for(session.prompt("hello"), TIMEOUT)
-    await asyncio.sleep(0)
-    assert found and all(ok for _, ok in found), found
-    assert "AgentMessage" in {event_type for event_type, _ in found}
-
-
 async def test_item_admitted_updates_carry_the_full_text(make_session):
     session, _ = make_session(start=False)
     seen = []
@@ -752,7 +775,7 @@ def test_unused_store_api_is_gone():
 
 
 async def test_old_user_message_records_still_show_in_the_transcript(make_session):
-    from nooa_coder.session.events import SessionUserMessage
+    from coder_test_agents import SessionUserMessage
 
     session, _ = make_session(start=False)
     session.handle.events.add(SessionUserMessage(content="from an older host"))
@@ -766,6 +789,56 @@ async def test_commands_need_the_coding_registry_shape(make_session):
         def list(self):
             return []
 
-    session.agent.slash_commands = ListOnly()
+    session._agent.slash_commands = ListOnly()
     with pytest.raises(AttributeError):
         session.commands()
+
+
+def _order(session):
+    """The agent's messages and the session's turn ends, in order.
+
+    As ``("agent_event", "AgentMessage")`` and ``("turn_ended", None)`` pairs.
+    """
+    seen = []
+    session._agent.event_manager.on(
+        "AgentMessage", lambda _event: seen.append(("agent_event", "AgentMessage"))
+    )
+    session.subscribe(lambda e: seen.append((e.kind, None)) if e.kind == "turn_ended" else None)
+    return seen
+
+
+def _agent_lines(session):
+    return [e.content for e in session.transcript() if e.role == "agent"]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "return_result(Done(explanation='x', message='All set.'))",
+        # Already sent with self.message() in this turn: not sent again.
+        "self.message('All set.')\nreturn_result(Done(explanation='x', message='All set.'))",
+    ],
+    ids=["message_only", "sent_earlier_too"],
+)
+async def test_a_done_message_is_sent_once_before_the_turn_ends(make_session, code):
+    session, _ = make_session(cell(code))
+    seen = _order(session)
+    await asyncio.wait_for(session.prompt("go"), TIMEOUT)
+    assert _agent_lines(session) == ["All set."]
+    messages = [i for i, (_, t) in enumerate(seen) if t == "AgentMessage"]
+    assert len(messages) == 1
+    assert messages[0] < seen.index(("turn_ended", None))
+
+
+async def test_a_waiting_message_is_sent_before_the_turn_ends(make_session):
+    session, _ = make_session(
+        cell(
+            "return_result(Waiting(explanation='w', message='Tests are still running.', "
+            "on=['jobs']))"
+        )
+    )
+    seen = _order(session)
+    await session.submit("go")
+    await until(lambda: ("turn_ended", None) in seen)
+    assert _agent_lines(session) == ["Tests are still running."]
+    assert seen.index(("agent_event", "AgentMessage")) < seen.index(("turn_ended", None))

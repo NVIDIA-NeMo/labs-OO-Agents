@@ -38,12 +38,12 @@ async def test_preparation_cancel_keeps_admission_and_resolves_prompt(make_sessi
         entered.set()
         await asyncio.Event().wait()
 
-    session.agent.turns.start(prepare=prepare, commit=session._commit_turn)
+    session._agent.turns.start(prepare=prepare, commit=session._commit_turn)
     pending = asyncio.ensure_future(session.prompt("queued"))
     await asyncio.wait_for(entered.wait(), TIMEOUT)
     await asyncio.wait_for(getattr(session, action)(), TIMEOUT)
     assert isinstance(await asyncio.wait_for(pending, TIMEOUT), TurnCancelledOutcome)
-    assert session.agent.queue_manager.get_channel("user_messages").snapshot() == ["queued"]
+    assert session._agent.queue_manager.get_channel("user_messages").snapshot() == ["queued"]
     assert not llm.calls
     assert rows(session, "ItemConsumed", "TurnStarted") == []
 
@@ -62,7 +62,7 @@ async def test_idle_close_pauses_before_children_and_no_input_consumed(make_sess
     await asyncio.wait_for(entered.wait(), TIMEOUT)
     await asyncio.sleep(0.02)
     assert not llm.calls
-    assert session.agent.queue_manager.get_channel("user_messages").snapshot() == ["queued"]
+    assert session._agent.queue_manager.get_channel("user_messages").snapshot() == ["queued"]
     assert rows(session, "ItemConsumed", "TurnStarted") == []
     release.set()
     await asyncio.wait_for(closing, TIMEOUT)
@@ -81,12 +81,12 @@ async def test_sqlite_commit_failure_is_atomic_blocks_and_fails_outcome(make_ses
     pending = asyncio.ensure_future(session.outcome(receipt.item_id))
     with pytest.raises(TurnFailedError, match="start failed"):
         await asyncio.wait_for(pending, TIMEOUT)
-    assert session.agent.turns.paused and isinstance(
-        session.agent.turns.dispatch_error, sqlite3.IntegrityError
+    assert session._agent.turns.paused and isinstance(
+        session._agent.turns.dispatch_error, sqlite3.IntegrityError
     )
     assert not llm.calls
     assert rows(session, "ItemConsumed", "TurnStarted") == []
-    assert session.agent.queue_manager.get_channel("user_messages").snapshot() == ["first"]
+    assert session._agent.queue_manager.get_channel("user_messages").snapshot() == ["first"]
     await asyncio.sleep(0.02)
     assert not llm.calls
     with pytest.raises(TurnFailedError, match="dispatch is blocked"):
@@ -110,7 +110,7 @@ async def test_observer_cancelled_error_cannot_skip_prompt_or_close_cleanup(make
         raise asyncio.CancelledError()
 
     if where == "settled":
-        handlers = session.agent.event_manager._handlers["TurnSettled"]
+        handlers = session._agent.event_manager._handlers["TurnSettled"]
         handlers.insert(0, broken)  # explicitly before mandatory Session subscriber
     else:
         session.subscribe(broken)
@@ -147,7 +147,7 @@ async def test_midturn_get_record_failure_orphan_does_not_steal_same_object_retr
     channel, orphan, error = session._orphans[receipt.item_id]
     assert channel == "user_messages" and orphan is same_object
     assert isinstance(error, OSError)
-    assert session.agent.turns.paused
+    assert session._agent.turns.paused
     assert not any(raw["item_id"] == receipt.item_id for _, raw in rows(session, "ItemConsumed"))
     session.handle.events.add = add
     session.resume_dispatch()
@@ -157,7 +157,7 @@ async def test_midturn_get_record_failure_orphan_does_not_steal_same_object_retr
     )
     consumed_ids = {raw["item_id"] for _, raw in rows(session, "ItemConsumed")}
     assert retry.item_id in consumed_ids and receipt.item_id not in consumed_ids
-    assert session.agent.queue_manager.get_channel("user_messages").snapshot() == []
+    assert session._agent.queue_manager.get_channel("user_messages").snapshot() == []
     with pytest.raises(TurnFailedError):
         await session.outcome(receipt.item_id)
 
@@ -168,7 +168,7 @@ async def test_recursive_session_close_from_cleanup_child_does_not_deadlock(make
     async def cleanup():
         await asyncio.create_task(session.close())
 
-    session.agent.event_manager.on_close(cleanup)
+    session._agent.event_manager.on_close(cleanup)
     await asyncio.wait_for(session.close(), TIMEOUT)
     assert session.handle.closed
 
@@ -181,7 +181,7 @@ async def test_preparation_steer_is_queued_not_stranded(make_session):
         entered.set()
         await release.wait()
 
-    session.agent.turns.start(prepare=prepare, commit=session._commit_turn)
+    session._agent.turns.start(prepare=prepare, commit=session._commit_turn)
     first = asyncio.ensure_future(session.prompt("first"))
     await entered.wait()
     receipt = await session.steer("during prepare")
@@ -203,16 +203,16 @@ async def test_model_swap_attempt_once_retains_old_cleanup_on_cancel(make_sessio
 
     old = Old()
     session._owned_llm = old
-    new = session.agent.llm
+    new = session._agent.llm
     session._pending_model = ("new", new)
     session.start()
     pending = asyncio.ensure_future(session.prompt("queued"))
     await asyncio.wait_for(entered.wait(), TIMEOUT)
-    assert session.agent.llm is new and session.info.model == "new"
+    assert session._agent.llm is new and session.info.model == "new"
     assert session._pending_model is None and old in session._retired_llms
     assert await asyncio.wait_for(session.cancel(), TIMEOUT)
     assert isinstance(await asyncio.wait_for(pending, TIMEOUT), TurnCancelledOutcome)
-    assert session.agent.queue_manager.get_channel("user_messages").snapshot() == ["queued"]
+    assert session._agent.queue_manager.get_channel("user_messages").snapshot() == ["queued"]
     assert old in session._retired_llms
     # Release the test double for final cleanup (production ownership remains retained).
     session._retired_llms.remove(old)
@@ -220,7 +220,7 @@ async def test_model_swap_attempt_once_retains_old_cleanup_on_cancel(make_sessio
 
 async def test_model_activation_failure_is_not_retried_implicitly(make_session, monkeypatch):
     session, _ = make_session(done("after failure"), start=False)
-    old = session.agent.llm
+    old = session._agent.llm
     from nooa_coder.session import session as session_module
 
     from nooa.unifiedllm import FakeLLMClient
@@ -237,7 +237,7 @@ async def test_model_activation_failure_is_not_retried_implicitly(make_session, 
     session.start()
     with pytest.raises(TurnFailedError, match="bad swap"):
         await asyncio.wait_for(session.prompt("first"), TIMEOUT)
-    assert session.agent.llm is old and session._pending_model is None
+    assert session._agent.llm is old and session._pending_model is None
     assert new in session._retired_llms and attempts == [new]
     session.resume_dispatch()
     assert await asyncio.wait_for(session.prompt("second"), TIMEOUT) == Done(
@@ -307,9 +307,94 @@ async def test_steer_record_failure_retains_buffer_and_fails_relevant_prompt(mak
     for outcome in [first, *pending]:
         with pytest.raises(TurnFailedError):
             await asyncio.wait_for(outcome, TIMEOUT)
-    assert session.agent.turns.paused
+    assert session._agent.turns.paused
     assert [item_id for item_id, _, _ in session._pending_steers] == [r.item_id for r in receipts]
     assert not any(
         raw["item_id"] in {r.item_id for r in receipts} for _, raw in rows(session, "ItemConsumed")
     )
     session.handle.events.add = add
+
+
+async def test_failed_steer_notification_retains_unconsumed_recovery(make_session, monkeypatch):
+    from nooa.events import Notification
+
+    started, block = agents.fresh_events()
+    session, _ = make_session(cell(agents.BLOCKING_CELL), done("finished"))
+    first = asyncio.ensure_future(session.prompt("first"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    receipts = [await session.steer("steer-a"), await session.steer("steer-b")]
+    updates = []
+    session.subscribe(updates.append)
+    add = session._agent.event_manager.add
+
+    def fail(event, **kwargs):
+        if isinstance(event, Notification):
+            raise OSError("notification unavailable")
+        return add(event, **kwargs)
+
+    monkeypatch.setattr(session._agent.event_manager, "add", fail)
+    block.set()
+    with pytest.raises(TurnFailedError):
+        await asyncio.wait_for(first, TIMEOUT)
+    assert session._agent.turns.paused
+    ids = [r.item_id for r in receipts]
+    assert [item_id for item_id, _, _ in session._pending_steers] == ids
+    assert not any(raw["item_id"] in ids for _, raw in rows(session, "ItemConsumed"))
+    assert not any(e.kind == "item_consumed" and e.item_id in ids for e in updates)
+    for receipt in receipts:
+        with pytest.raises(TurnFailedError):
+            await session.outcome(receipt.item_id)
+    monkeypatch.setattr(session._agent.event_manager, "add", add)
+    session.resume_dispatch()
+    await agents.until(
+        lambda: all(
+            any(raw["item_id"] == item_id for _, raw in rows(session, "ItemConsumed"))
+            for item_id in ids
+        ),
+        TIMEOUT,
+    )
+    assert session._pending_steers == []
+
+
+@pytest.mark.parametrize("failure", ["before_delivery", "after_delivery"])
+async def test_failed_steer_notification_replays_on_load(
+    registry, root_options, models, sessions_dir, monkeypatch, failure
+):
+    from nooa_coder.session.registry import SessionRegistry
+    from nooa_coder.session.store import SessionStore
+
+    from nooa.events import Notification
+
+    started, block = agents.fresh_events()
+    models.scripts[None] = [cell(agents.BLOCKING_CELL), done("finished")]
+    root = await registry.create(root_options)
+    first = asyncio.ensure_future(root.prompt("first"))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    receipt = await root.steer("recover-this-steer")
+    add = root._agent.event_manager.add
+    delivered = []
+    root._agent.event_manager.on("Notification", delivered.append)
+
+    def fail(event, **kwargs):
+        if isinstance(event, Notification):
+            if failure == "after_delivery":
+                add(event, **kwargs)
+            raise OSError("notification delivery ambiguous")
+        return add(event, **kwargs)
+
+    monkeypatch.setattr(root._agent.event_manager, "add", fail)
+    block.set()
+    with pytest.raises(TurnFailedError):
+        await asyncio.wait_for(first, TIMEOUT)
+    assert not any(raw["item_id"] == receipt.item_id for _, raw in rows(root, "ItemConsumed"))
+    assert bool(delivered) == (failure == "after_delivery")
+    await registry.close_all()
+    later = agents.ScriptedModels({None: [done("replayed")]})
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=later)
+    try:
+        loaded = await fresh.load(root.id)
+        await asyncio.wait_for(loaded.outcome(receipt.item_id), TIMEOUT)
+        assert "recover-this-steer" in str(later.llms[None].calls[0].messages)
+        assert any(raw["item_id"] == receipt.item_id for _, raw in rows(loaded, "ItemRequeued"))
+    finally:
+        await fresh.close_all()

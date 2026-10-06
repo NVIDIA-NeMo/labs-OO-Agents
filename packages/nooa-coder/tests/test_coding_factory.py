@@ -5,7 +5,7 @@
 import asyncio
 
 import pytest
-from coder_test_agents import CODER_SPEC, ModelFactory, cell
+from coder_test_agents import CODER_SPEC, CellLLM, ModelFactory, cell
 from nooa_coder.coding.agent import CodingAgent
 from nooa_coder.coding.factory import create_session_agent, default_llm_factory
 from nooa_coder.session.options import SessionOptions
@@ -73,10 +73,10 @@ async def _close(agent):
 
 async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace, sessions_dir):
     llm = FakeLLMClient()
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=llm))
-        agent = root.agent
+        agent = root._agent
         assert isinstance(agent, CodingAgent)
         assert agent.cwd == workspace.resolve()
         assert agent.llm is llm
@@ -90,49 +90,48 @@ async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace
 
 async def test_the_mcp_and_skills_controls_are_installed_without_a_host(workspace, sessions_dir):
     """/mcp approve is what MCPApprovalRequired tells the user to run: it must exist."""
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         names = {command.name for command in root.commands()}
         assert {"mcp", "skills"} <= names
-        result = await root.agent.slash_commands.invoke("mcp", "status")
+        result = await root._agent.slash_commands.invoke("mcp", "status")
         assert "MCP servers" in str(result.value)
     finally:
         await registry.close_all()
 
 
-async def test_installing_the_controls_again_does_not_announce_a_change(workspace):
-    from nooa_coder.workspace.controls import behavior_commands
-    from nooa_coder.workspace.options import CoderOptions
-
+async def test_the_factory_installs_the_skills_and_mcp_controls(workspace):
     options = SessionOptions(workspace=workspace, agent_spec=CODER_SPEC, llm=FakeLLMClient())
     agent = create_session_agent(options, InMemoryStorageManager())
     try:
-        changes = []
-        agent.slash_commands.set_on_change(changes.append)
-        # What the ACP adapter does in its prepare step.
-        coder_options = CoderOptions.load(workspace)
-        agent.slash_commands.set_controls(
-            behavior_commands(
-                agent, coder_options, workspace=workspace, command_registry=agent.slash_commands
-            )
-        )
-        assert changes == []
         assert {"mcp", "skills"} <= {c.name for c in agent.slash_commands.commands()}
     finally:
         await _close(agent)
+
+
+async def test_a_settings_file_from_before_legacy_agent_was_removed_still_loads(workspace):
+    from nooa_coder.workspace.options import CoderOptions
+
+    (workspace / ".nooa").mkdir()
+    (workspace / ".nooa" / "settings.yaml").write_text(
+        "tui:\n  legacy_agent: true\ncoding:\n  legacy_agent: true\n  default_model: m\n"
+    )
+    options = CoderOptions.load(workspace)
+    assert options.default_model == "m"
+    assert not hasattr(options, "legacy_agent")
 
 
 async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, sessions_dir, caplog):
     settings = workspace / ".nooa" / "settings.yaml"
     settings.parent.mkdir()
     settings.write_text('coding:\n  active_skills: "just-one"\n')
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         with caplog.at_level("WARNING"):
             root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
-        assert isinstance(root.agent, CodingAgent)
-        assert root.agent.cwd == workspace.resolve()
+        assert isinstance(root._agent, CodingAgent)
+        assert root._agent.cwd == workspace.resolve()
         [warning] = [r.getMessage() for r in caplog.records if str(settings) in r.getMessage()]
         assert "active_skills" in warning
     finally:
@@ -254,15 +253,16 @@ def test_legacy_coding_agent_specs_load_the_moved_class(spec):
 
 async def test_a_child_with_another_model_gets_its_own_client(workspace, sessions_dir):
     models = ModelFactory({"other": [[cell(CHILD_RESULT)]]})
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=models)
-    parent_llm = FakeLLMClient(
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=models
+    )
+    parent_llm = CellLLM(
         [
             cell(
                 "done = await self.delegate('Other', 'use the other model', model='other')\n"
                 "return_result(Done(explanation=done.result.report))"
             )
-        ],
-        strict_exhaustion=True,
+        ]
     )
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=parent_llm))
@@ -285,18 +285,18 @@ async def test_a_child_with_another_model_gets_its_own_client(workspace, session
 
 async def test_stale_memory_context_is_dropped_after_a_reload(workspace, sessions_dir):
     """Keys an older snapshot carries are gone after load (restore is additive)."""
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         session_id = root.id
-        root.agent.context["memory_system"] = "stale memory prompt"
-        root.agent.context["recalled_memories"] = "stale recall"
+        root._agent.context["memory_system"] = "stale memory prompt"
+        root._agent.context["recalled_memories"] = "stale recall"
         root._checkpoint()
         await root.wait_for_checkpoint()
         await registry.close(session_id)
         loaded = await registry.load(session_id, llm=FakeLLMClient())
-        assert "memory_system" not in loaded.agent.context
-        assert "recalled_memories" not in loaded.agent.context
+        assert "memory_system" not in loaded._agent.context
+        assert "recalled_memories" not in loaded._agent.context
     finally:
         await registry.close_all()
 
@@ -328,7 +328,7 @@ async def test_skills_are_configured_before_and_stale_context_dropped_after_a_re
         order.append("cleanup")
         return cleanup(agent)
 
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
         session_id = root.id
@@ -350,7 +350,9 @@ def test_the_default_llm_factory_uses_the_workspace_default_model(workspace, mon
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")
     built: list[str] = []
-    monkeypatch.setattr(factory, "get_llm_client", lambda alias: built.append(alias) or alias)
+    monkeypatch.setattr(
+        factory, "workspace_llm_client", lambda alias, workspace: built.append(alias) or alias
+    )
     make = default_llm_factory()
     assert make(None, workspace) == "ws-model"
     assert make("named", workspace) == "named"
@@ -369,11 +371,11 @@ async def test_a_host_registry_builds_the_workspace_default_model(
     (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")
     built: list[TrackedLLM] = []
 
-    def fake_client(alias):
+    def fake_client(alias, workspace):
         built.append(TrackedLLM(alias, []))
         return built[-1]
 
-    monkeypatch.setattr(factory, "get_llm_client", fake_client)
+    monkeypatch.setattr(factory, "workspace_llm_client", fake_client)
     make = default_llm_factory()
     aliases: list[str | None] = []
 
@@ -381,13 +383,15 @@ async def test_a_host_registry_builds_the_workspace_default_model(
         aliases.append(alias)
         return make(alias, path)
 
-    registry = SessionRegistry(SessionStore(sessions_dir), llm_factory=spy)
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=spy
+    )
     try:
         root = await registry.create(_options(workspace, sessions_dir))
         assert aliases == [None]
         [client] = built
         assert client.alias == "ws-model"
-        assert root.agent.llm is client
+        assert root._agent.llm is client
         assert root.info.model == "ws-model"
         await registry.close(root.id)
         assert client.closed is True

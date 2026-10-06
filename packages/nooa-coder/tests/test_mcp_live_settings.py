@@ -103,3 +103,25 @@ async def test_pending_connection_cannot_attach_after_config_or_approval_changes
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+def test_the_mcp_block_names_configured_servers_without_their_endpoints(registry):
+    for i in range(12):
+        registry.register(f"server-{i:02d}", url=f"https://mcp.example.com/{i}/mcp")
+    status = registry.status()
+    assert "Configured MCP servers (12; connect with self.mcp.connect(['name'])):" in status
+    assert "server-00, server-01" in status
+    assert "https://" not in status and "streamable-http" not in status
+    assert max(len(line) for line in status.splitlines()) <= 100
+    # The full detail is still available on request.
+    verbose = registry.status(verbose=True)
+    assert "https://mcp.example.com/3/mcp" in verbose
+    assert "[approval required]" in verbose
+
+
+async def test_the_status_control_shows_server_endpoints(registry, tmp_path):
+    registry.register("remote", url="https://mcp.example.com/mcp")
+    control = MCPControl(SimpleNamespace(mcp=registry), CoderOptions(), workspace=tmp_path)
+    status = await control.run(["status"])
+    assert status.success
+    assert "https://mcp.example.com/mcp" in str(status)

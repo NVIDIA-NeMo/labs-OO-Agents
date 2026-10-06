@@ -97,7 +97,7 @@ async def test_closing_the_session_closes_skills_and_shell_but_not_a_shared_llm(
     shared = TrackedLLM("shared", [])
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=CoderModels())
     root = await registry.create(coder_options.model_copy(update={"llm": shared}))
-    agent = root.agent
+    agent = root._agent
     calls: list[str] = []
     real_skills_aclose = agent.skills.aclose
     real_shell_close = agent.shell.close
@@ -132,7 +132,7 @@ async def test_the_model_sees_the_turn_types_but_not_the_port(
     root = await coder_registry.create(coder_options)
     outcome = await asyncio.wait_for(root.prompt("check"), TIMEOUT)
     assert outcome == Done(explanation="ChildResult,ChildQuestion,ChildFailed:b")
-    for rendered in (doc(type(root.agent)), doc(root.agent)):
+    for rendered in (doc(type(root._agent)), doc(root._agent)):
         fields = {
             line.split(":", 1)[0].strip()
             for line in rendered.splitlines()
@@ -158,17 +158,17 @@ async def test_a_coding_session_round_trips_its_todos_without_skip_warnings(
     root = await coder_registry.create(coder_options)
     await asyncio.wait_for(root.prompt("plan"), TIMEOUT)
     with caplog.at_level(logging.WARNING):
-        snapshot_to_json(root.agent)
+        snapshot_to_json(root._agent)
     assert "skip" not in caplog.text.lower()
     await root.wait_for_checkpoint()
     session_id = root.id
     await coder_registry.close(session_id)
 
     loaded = await coder_registry.load(session_id)
-    [todo] = loaded.agent.todo.list_todos()
+    [todo] = loaded._agent.todo.list_todos()
     assert todo.title == "Fix the parser"
     assert [comment.body for comment in todo.comments] == ["found the off-by-one"]
-    assert loaded.agent.v.note == "kept"
+    assert loaded._agent.v.note == "kept"
 
 
 async def test_the_session_lists_and_runs_the_coders_slash_commands(
@@ -182,7 +182,7 @@ async def test_the_session_lists_and_runs_the_coders_slash_commands(
         "Say hello to $ARGUMENTS.\n"
     )
     root = await coder_registry.create(coder_options)
-    root.agent.slash_commands.add_skills_dir(workspace / ".nooa" / "skills")
+    root._agent.slash_commands.add_skills_dir(workspace / ".nooa" / "skills")
     [command] = [c for c in root.commands() if c.name == "greet"]
     assert command.description == "Say hello"
     result = await root.invoke_command("greet", "Ada")

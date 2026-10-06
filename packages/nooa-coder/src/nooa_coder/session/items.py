@@ -9,8 +9,9 @@ live agents never cross.
 
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, SerializeAsAny, ValidationError, field_validator
 
+from nooa.context_blocks import EventBase
 from nooa.interactive import Done, NeedInput
 from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
 
@@ -186,21 +187,69 @@ class TurnCancelledOutcome(BaseModel):
 class TranscriptEntry(BaseModel):
     """One line of a session's transcript as a host shows it."""
 
-    role: Literal["user", "agent", "question", "cancelled"]
+    role: Literal["user", "agent", "question", "cancelled", "note"]
     content: str
     item_id: str | None = None
     timestamp: float
 
 
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+    "cost_usd",
+)
+"""A session's own usage fields; each has an ``attributed_`` twin for its children.
+
+The names match ``nooa.llm_types.LLMUsage``, which a model response carries.
+"""
+
+
 class Usage(BaseModel):
-    """Token and cost totals: the session's own and those attributed from its children."""
+    """Token and cost totals: the session's own and those attributed from its children.
+
+    ``cached_input_tokens`` are input tokens read from the provider's prompt
+    cache, ``cache_write_input_tokens`` those written to it, and
+    ``reasoning_tokens`` output tokens spent on reasoning.
+    ``last_input_tokens`` is the input of this session's latest model call
+    (the context in use); it is not a total, so ``own()`` and
+    ``with_attributed()`` leave it out.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
     cost_usd: float = 0.0
     attributed_input_tokens: int = 0
     attributed_output_tokens: int = 0
+    attributed_cached_input_tokens: int = 0
+    attributed_cache_write_input_tokens: int = 0
+    attributed_reasoning_tokens: int = 0
+    attributed_total_tokens: int = 0
     attributed_cost_usd: float = 0.0
+    last_input_tokens: int = 0
+
+    def own(self) -> "Usage":
+        """Only this session's own totals."""
+        return Usage(**{name: getattr(self, name) for name in USAGE_FIELDS})
+
+    def with_attributed(self) -> "Usage":
+        """Own plus attributed totals, as own totals."""
+        return Usage(
+            **{
+                name: getattr(self, name) + getattr(self, f"attributed_{name}")
+                for name in USAGE_FIELDS
+            }
+        )
+
+    def has_attributed(self) -> bool:
+        return any(getattr(self, f"attributed_{name}") for name in USAGE_FIELDS)
 
 
 class SessionInfo(BaseModel):
@@ -220,6 +269,8 @@ class SessionInfo(BaseModel):
     host: str = ""
     agent: str = ""
     model: str = ""
+    reasoning: str | None = None
+    """The reasoning level chosen with ``set_reasoning``; ``None`` for the model's default."""
     mode: str = "auto"
     status: SessionStatus = "on_disk"
     retained: bool = False
@@ -227,7 +278,27 @@ class SessionInfo(BaseModel):
     created_at: float = 0.0
     last_active: float = 0.0
     turn_count: int = 0
+    reply_count: int = 0
     usage: Usage = Field(default_factory=Usage)
+    forked_from: str | None = None
+    """The session this one was copied from by ``SessionStore.fork``, if any."""
+
+
+class InUseSession(BaseModel):
+    """A stored session some process holds, as ``SessionStore.in_use()`` reports it.
+
+    ``owner`` describes the holder: ``pid N on HOST`` (another machine),
+    ``local process (pid N)``, or ``old TUI (pid N)``. ``title``,
+    ``parent_id`` and ``workspace`` are empty when the file could not be
+    read. ``last_write`` is the file's modification time.
+    """
+
+    id: str
+    title: str | None = None
+    parent_id: str | None = None
+    workspace: str = ""
+    owner: str
+    last_write: float
 
 
 class CommandInfo(BaseModel):
@@ -236,6 +307,37 @@ class CommandInfo(BaseModel):
     name: str
     description: str = ""
     input_hint: str | None = None
+
+
+class ModelInfo(BaseModel):
+    """The model a session's next call uses, as data (``Session.model_info()``).
+
+    ``reasoning_levels`` is empty when the client declares none;
+    ``reasoning_level`` is ``None`` when none was chosen, so the model
+    uses ``reasoning_default`` (or its own default when that is ``None``).
+    """
+
+    alias: str = ""
+    context_window: int | None = None
+    reasoning_level: str | None = None
+    reasoning_levels: list[str] = Field(default_factory=list)
+    reasoning_default: str | None = None
+
+
+PlanStatus = Literal["pending", "in_progress", "completed"]
+PlanPriority = Literal["high", "medium", "low"]
+
+
+class PlanEntry(BaseModel):
+    """One step of the agent's plan, as a host shows it (``Session.plan()``).
+
+    The fields are ACP's plan entry: ``content`` (the step), ``status`` and
+    ``priority``. The coding agent derives them from its todos.
+    """
+
+    content: str
+    status: PlanStatus = "pending"
+    priority: PlanPriority = "medium"
 
 
 class CommandResult(BaseModel):
@@ -289,6 +391,14 @@ class ItemAdmittedUpdate(_Update):
     text: str = ""  # the whole item: the string itself, else its JSON
 
 
+class ItemConsumedUpdate(_Update):
+    """An admitted item was taken: by the turn loop, by agent code, or as a steer a model call saw."""
+
+    kind: Literal["item_consumed"] = "item_consumed"
+    channel: str
+    item_id: str
+
+
 class CancelledUpdate(_Update):
     """A running turn was cancelled."""
 
@@ -312,6 +422,30 @@ class ModeChangedUpdate(_Update):
     mode: str
 
 
+class ModelChangedUpdate(_Update):
+    """The session's model alias changed; the new client applies from the next turn."""
+
+    kind: Literal["model_changed"] = "model_changed"
+    model: str
+
+
+class ReasoningChangedUpdate(_Update):
+    """The reasoning level changed (``set_reasoning``); it applies from the next model call."""
+
+    kind: Literal["reasoning_changed"] = "reasoning_changed"
+    level: str | None = None
+
+
+class CommandsChangedUpdate(_Update):
+    """The slash commands the session offers changed (a skill loaded, a control added).
+
+    ``commands`` is the new list, as ``Session.commands()`` returns it.
+    """
+
+    kind: Literal["commands_changed"] = "commands_changed"
+    commands: list[CommandInfo]
+
+
 class ChildCreatedUpdate(_Update):
     """A child session was created under this one."""
 
@@ -323,10 +457,28 @@ class ChildCreatedUpdate(_Update):
 
 
 class UsageChangedUpdate(_Update):
-    """Usage attributed from children changed; ``usage`` is the new total."""
+    """The session's usage changed (a model call, or a child's attributed usage).
+
+    ``usage`` is the new total.
+    """
 
     kind: Literal["usage_changed"] = "usage_changed"
     usage: Usage
+
+
+class AgentEventUpdate(_Update):
+    """One event from the session's agent: tool calls, cell output, messages, model responses.
+
+    Every event the agent's event manager handles is forwarded, runtime
+    events (terminal output, file edits) included, in the order they
+    happen and ordered with the other updates: a model response arrives
+    before the ``UsageChangedUpdate`` it causes. ``event`` is the event
+    itself (a pydantic value; listeners must not change it) and
+    serialises as its own type.
+    """
+
+    kind: Literal["agent_event"] = "agent_event"
+    event: SerializeAsAny[EventBase]
 
 
 class ClosedUpdate(_Update):
@@ -335,25 +487,21 @@ class ClosedUpdate(_Update):
     kind: Literal["closed"] = "closed"
 
 
-class AgentEventUpdate(_Update):
-    """The agent added an event; read it from the agent's events by id."""
-
-    kind: Literal["agent_event"] = "agent_event"
-    event_id: str
-    event_type: str
-
-
 SessionEvent = Annotated[
     TurnStartedUpdate
     | TurnEndedUpdate
     | ItemAdmittedUpdate
+    | ItemConsumedUpdate
     | CancelledUpdate
     | TitleChangedUpdate
     | ModeChangedUpdate
+    | ModelChangedUpdate
+    | ReasoningChangedUpdate
+    | CommandsChangedUpdate
     | ChildCreatedUpdate
     | UsageChangedUpdate
-    | ClosedUpdate
-    | AgentEventUpdate,
+    | AgentEventUpdate
+    | ClosedUpdate,
     Field(discriminator="kind"),
 ]
 """What ``Session.subscribe()`` listeners receive: data only."""

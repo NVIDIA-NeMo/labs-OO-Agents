@@ -17,7 +17,7 @@ prompt must raise a limit here on purpose.
 import asyncio
 
 import pytest
-from coder_test_agents import cell
+from nooa_coder.coding.factory import create_session_agent
 from nooa_coder.session.options import SessionOptions
 from nooa_coder.session.registry import SessionRegistry
 from nooa_coder.session.store import SessionStore
@@ -33,14 +33,20 @@ RESULT = (
 )
 
 # (spec, turn method): (system prompt chars, all message chars)
+# Measured after PR 0, then raised on tree/4-router: the state block names the
+# repository root, the class says ``cd`` moves shell and repo tools, the turn
+# methods say locals last one method call, and the repo tools take ``cwd``.
+# Lowered when CodingAgent moved to CodeActV2 (2026-09-25; was 19,827 / 23,935
+# for handle): measured values plus about 2% headroom.
+# Raised when python_cell_tools added the TodoManager API (2026-10-02, about
+# 2,570 characters): measured values plus about 2% headroom.
+# Raised after main's #415 rendered import lines from the declared module
+# (about 430 characters): measured values plus about 2% headroom.
 LIMITS = {
-    # After main's #415 rendered import lines from the declared module (about
-    # 430 characters): measured values plus headroom; the coding agent's
-    # system limit stops at the bench cap.
-    (CODER, "handle"): (20_000, 24_250),  # measured 19,959 / 23,756
-    (CODER, "handle_batch"): (20_000, 23_900),  # measured 19,959 / 23,400
-    (EXPERIMENTAL, "handle"): (11_800, 14_000),  # measured 11,543 / 13,716
-    (EXPERIMENTAL, "handle_batch"): (11_800, 14_350),  # measured 11,543 / 14,069
+    (CODER, "handle"): (14_550, 18_250),  # measured 14,281 / 17,881
+    (CODER, "handle_batch"): (14_550, 17_900),  # measured 14,281 / 17,525
+    (EXPERIMENTAL, "handle"): (14_400, 16_950),  # measured 14,119 / 16,584
+    (EXPERIMENTAL, "handle_batch"): (14_400, 17_300),  # measured 14,119 / 16,937
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -59,11 +65,11 @@ def _no_installed_skills(monkeypatch, tmp_path):
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
 async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
     code = RESULT if method == "handle_batch" else "return_result(Done(explanation='x'))"
-    response = cell(code) if spec == CODER else python_cell(code, "call_1")
+    response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    registry = SessionRegistry(SessionStore(sessions_dir))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(
             SessionOptions(
