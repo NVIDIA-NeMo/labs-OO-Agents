@@ -1020,51 +1020,6 @@ class ActorRuntime:
                 )
             )
 
-    def record_decision_fallback(
-        self,
-        request: "DecisionRequest",
-        *,
-        answers: dict[str, Any] | None,
-        success: bool,
-        exception_type: str | None,
-    ) -> None:
-        """Persist a chat-LLM emulation of a decision request.
-
-        The nested Predict call records its own LLM usage. This record adds the
-        logical decision provenance: the normalized questions, their digest,
-        the fallback adapter version, and the chat model that was requested.
-        """
-        if self._current_method is None:
-            raise RuntimeError("record_decision_fallback() called with no current method context")
-        from nooa.decisions.provenance import LLM_FALLBACK_SCHEMA_VERSION, question_digest
-
-        generation_id = self._generation_id_stack[-1] if self._generation_id_stack else ""
-        requested_model = getattr(_current_llm_var.get(), "model", "") or ""
-        digest = question_digest(request.questions)
-        self._set_decision_trace_attributes(
-            generation_id,
-            source="llm_fallback",
-            digest=digest,
-            requested_model=requested_model,
-            fallback_schema_version=LLM_FALLBACK_SCHEMA_VERSION,
-        )
-        self.event_manager.add(
-            DecisionRecord(
-                decision_call_id=str(uuid4()),
-                method_name=self._current_method.__name__,
-                generation_id=generation_id,
-                state=copy.deepcopy(request.state),
-                questions={name: asdict(question) for name, question in request.questions.items()},
-                answers=answers,
-                decision_source="llm_fallback",
-                question_digest=digest,
-                fallback_schema_version=LLM_FALLBACK_SCHEMA_VERSION,
-                requested_model=requested_model,
-                success=success,
-                exception_type=exception_type,
-            )
-        )
-
     def _set_decision_trace_attributes(
         self,
         generation_id: str,
@@ -1073,7 +1028,6 @@ class ActorRuntime:
         digest: str,
         requested_model: str,
         resolved_model: str | None = None,
-        fallback_schema_version: str | None = None,
     ) -> None:
         """Stage compact decision provenance for the generation span."""
         if not generation_id:
@@ -1085,14 +1039,7 @@ class ActorRuntime:
         }
         if resolved_model is not None:
             attributes["decision.resolved_model"] = resolved_model
-        if fallback_schema_version is not None:
-            attributes["decision.fallback_schema_version"] = fallback_schema_version
         self._decision_trace_attributes[generation_id] = attributes
-
-    @property
-    def has_decision_model(self) -> bool:
-        """Return whether the current generation call has a decision model."""
-        return _current_decision_model_var.get() is not None
 
     async def generate(
         self,
@@ -2715,19 +2662,8 @@ class ActorRuntime:
                 decorator_strategy = getattr(base_method, "_plan_strategy", None)
                 strategy = call_strategy or decorator_strategy or get_default_strategy()
 
-                # Only acquire lock if strategy requires it. A decision strategy
-                # without a decision model falls back to chat generation, which
-                # shares event history and so needs the lock like Predict.
-                needs_lock = isinstance(strategy, GenerationStrategyABC) and (
-                    strategy.requires_lock
-                    or (
-                        strategy.uses_decision_model
-                        and kwargs.get("decision_model") is None
-                        and getattr(base_method, "_plan_decision_model", None) is None
-                        and getattr(self.agent, "_decision_model", None) is None
-                    )
-                )
-                if needs_lock:
+                # Only acquire lock if strategy requires it
+                if isinstance(strategy, GenerationStrategyABC) and strategy.requires_lock:
                     self._ensure_generation_lock_on_current_loop()
                     async with self._generation_lock:
                         return await self._execute_with_generation(
@@ -2843,6 +2779,14 @@ class ActorRuntime:
                 decision_model = getattr(self.agent, "_decision_model", None)
                 if decision_model is not None:
                     decision_model_selection_source = "agent_decision_model"
+            if decision_model is None:
+                from nooa.decisions.types import DecisionModelRequiredError
+
+                raise DecisionModelRequiredError(
+                    f"'{method_name}' uses DecideStrategy but no decision model is "
+                    "configured. Pass decision_model= on the agent, the @strategy "
+                    "decorator, or the call."
+                )
         if decision_model is not None:
             if not callable(getattr(decision_model, "adecide", None)):
                 raise TypeError(
@@ -2868,19 +2812,19 @@ class ActorRuntime:
                 origin="call argument llm=",
             )
             llm_selection_source = "call_site"
-            decision_mode = "llm_fallback" if uses_decision_model else None
+            decision_mode = None
             active_model_name = getattr(llm_client, "model", "") or ""
         elif plan_llm is not None:
             from nooa.method_llm import resolve_method_llm
 
             llm_client = resolve_method_llm(plan_llm, self.agent, method_name)
             llm_selection_source = "decorator"
-            decision_mode = "llm_fallback" if uses_decision_model else None
+            decision_mode = None
             active_model_name = getattr(llm_client, "model", "") or ""
         else:
             llm_client = getattr(self.agent, "_llm", None)
             llm_selection_source = "agent_default"
-            decision_mode = "llm_fallback" if uses_decision_model else None
+            decision_mode = None
             active_model_name = getattr(llm_client, "model", "") or ""
         if llm_client is None and decision_model is None:
             raise RuntimeError(

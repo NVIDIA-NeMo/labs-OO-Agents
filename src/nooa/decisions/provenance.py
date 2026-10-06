@@ -14,9 +14,6 @@ if TYPE_CHECKING:
     from nooa.decisions.client import DecisionQuestion
 
 
-LLM_FALLBACK_SCHEMA_VERSION = "decide-predict-v2"
-
-
 def question_digest(questions: Mapping[str, DecisionQuestion]) -> str:
     """Hash normalized question names, instructions, criteria, and candidate IDs."""
     canonical = json.dumps(
@@ -28,4 +25,4 @@ def question_digest(questions: Mapping[str, DecisionQuestion]) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-__all__ = ["LLM_FALLBACK_SCHEMA_VERSION", "question_digest"]
+__all__ = ["question_digest"]

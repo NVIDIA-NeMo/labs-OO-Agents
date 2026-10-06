@@ -10,7 +10,7 @@ NOOA's primary strategies cover most applications.
 |---|---|---|
 | `PredictStrategy` | A non-tool attempt can classify, extract, or produce the typed answer | Structured LLM attempt followed by validation; invalid output may be retried |
 | `CodeActStrategy` | The task needs tools, live Python objects, code execution, or iteration | Repeated LLM turns in a per-call Python REPL; locals persist across cells |
-| `DecideStrategy` | A decision model should produce probabilities, choices, or rubric scores | One typed request through the configured decision model; primitive results fall back to Predict when it is absent |
+| `DecideStrategy` | A decision model should produce probabilities, choices, or rubric scores | One typed request through the configured decision model; raises `DecisionModelRequiredError` when none is configured |
 
 CodeAct is the default. Select Predict explicitly when the task does not need
 the extra loop. See [Decision models](decisions.md) when calibrated decision
@@ -149,8 +149,8 @@ Predict and CodeAct lock an agent instance while a generation call is active.
 Calling several agentic methods concurrently on the same instance therefore
 serializes by default. Create one agent instance per independent concurrent
 task. Custom strategies can opt out of locking when they do not share mutable
-runtime state. `DecideStrategy` calls to a decision model do not lock and can
-run concurrently; its Predict fallback locks like Predict.
+runtime state. `DecideStrategy` does not lock, so decision calls on one
+instance can run concurrently.
 
 ## Common mistakes
 

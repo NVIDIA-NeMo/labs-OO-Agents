@@ -526,9 +526,8 @@ class DecisionRecord(EventBase):  # type: ignore[misc]
     state: Any
     questions: dict[str, Any]
     answers: dict[str, Any] | None = None
-    decision_source: Literal["native", "llm_fallback"] = "native"
+    decision_source: Literal["native"] = "native"
     question_digest: str | None = None
-    fallback_schema_version: str | None = None
     requested_model: str
     resolved_model: str | None = None
     response_id: str | None = None

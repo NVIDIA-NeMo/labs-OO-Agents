@@ -189,11 +189,6 @@ class RuntimeServices(Protocol):
 class DecisionRuntimeServices(RuntimeServices, Protocol):
     """Additional runtime operation required only by decision strategies."""
 
-    @property
-    def has_decision_model(self) -> bool:
-        """Return whether the current call has a native decision model."""
-        ...
-
     async def decision_state_inputs(
         self,
     ) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
@@ -213,17 +208,6 @@ class DecisionRuntimeServices(RuntimeServices, Protocol):
         With ``include_raw_response``, the durable record also stores the
         client's raw response body, when it has one.
         """
-        ...
-
-    def record_decision_fallback(
-        self,
-        request: "DecisionRequest",
-        *,
-        answers: dict[str, Any] | None,
-        success: bool,
-        exception_type: str | None,
-    ) -> None:
-        """Persist one chat-LLM fallback outcome and its decision provenance."""
         ...
 
 

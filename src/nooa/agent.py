@@ -156,7 +156,7 @@ class Agent(metaclass=AgentMeta):
             decision_model: Optional decision model for ``DecideStrategy`` methods.
                 Pass a client or configured registry alias. Omit to inherit
                 from the class or parent agent. Pass ``None`` to disable an
-                inherited decision model and use the LLM fallback.
+                inherited decision model.
             truncation: Optional truncation configuration for stdout/stderr/pprint limits.
             execution: ExecutionConfig for framework-level execution guards.
             context: Class-level context block overrides.
@@ -203,7 +203,7 @@ class Agent(metaclass=AgentMeta):
             decision_model: Optional decision model for ``DecideStrategy`` methods.
                 Pass a client or configured registry alias. Omit to inherit
                 from the class or parent agent. Pass ``None`` to disable an
-                inherited decision model and use the LLM fallback.
+                inherited decision model.
             truncation: Optional truncation configuration.
             render_config: RenderConfig for block/provider formatter selection.
             context: Instance-level context block overrides.
@@ -387,7 +387,8 @@ class Agent(metaclass=AgentMeta):
         """Resolve the optional decision model from instance, class, or parent.
 
         An explicit ``None`` disables inheritance so callers can deliberately
-        select the LLM fallback for ``DecideStrategy`` methods.
+        run without one; its ``DecideStrategy`` methods then raise
+        ``DecisionModelRequiredError``.
         """
         selected: Any
         if instance_model is not INHERIT:

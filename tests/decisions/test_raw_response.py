@@ -21,7 +21,6 @@ from nooa import (
 from nooa.decisions.client import ChoiceAnswer, DecisionResponse
 from nooa.events import DecisionRecord
 from nooa.runtime.middleware import DecisionCallContext
-from nooa.unifiedllm import AssistantText, FakeLLMClient, LLMResponse
 
 ENDPOINT = "https://decision.example/v1/decisions"
 METADATA = {"probabilities": "one-hot", "calibration": "none"}
@@ -174,22 +173,4 @@ async def test_short_circuit_response_without_raw_body() -> None:
 
     assert decision.selected is Team.BILLING
     assert decision.raw_response is None
-    assert _record(agent).raw_response is None
-
-
-@pytest.mark.asyncio
-async def test_llm_fallback_ignores_raw_response_option() -> None:
-    llm = FakeLLMClient(
-        [LLMResponse(parts=(AssistantText(text='{"value": true}'),), finish_reason="stop")]
-    )
-
-    class Router(Agent, llm=llm):
-        @strategy(DecideStrategy(include_raw_response=True))
-        async def urgent(self, message: str) -> bool:
-            """Is it urgent?"""
-            ...
-
-    agent = Router()
-
-    assert await agent.urgent("Production is down") is True
     assert _record(agent).raw_response is None

@@ -72,7 +72,7 @@ class Threshold:
 
 
 class DecisionModelRequiredError(RuntimeError):
-    """The declared result requires evidence unavailable from an LLM fallback."""
+    """A ``DecideStrategy`` call has no decision model to run on."""
 
 
 class Decision[T](BaseModel):

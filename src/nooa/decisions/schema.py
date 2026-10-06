@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-import json
 import math
 import re
 import types
@@ -15,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin
 
-from pydantic import BaseModel, Field, JsonValue, TypeAdapter, create_model
+from pydantic import BaseModel, JsonValue
 
 from nooa.decisions.client import (
     BooleanAnswer,
@@ -34,7 +33,6 @@ from nooa.decisions.types import (
     Criteria,
     Criterion,
     Decision,
-    DecisionModelRequiredError,
     Instructions,
     ScoreDecision,
     Threshold,
@@ -60,7 +58,8 @@ class DecisionOutputSchema:
     criteria: Any
     threshold: float | None
     detailed: bool
-    requires_decision_model: bool
+    # Detailed results and thresholds need real probability evidence.
+    requires_probabilities: bool
     choices: tuple[ChoiceValue, ...] = ()
 
     def question(self) -> DecisionQuestion:
@@ -73,36 +72,6 @@ class DecisionOutputSchema:
                 criteria={choice.wire_id: choice.criterion for choice in self.choices},
             )
         return ScoreQuestion(instructions=self.instructions, criteria=list(self.criteria))
-
-    def fallback_question(self) -> dict[str, Any]:
-        """Describe this output for a chat model in terms of Python result values."""
-        question: dict[str, Any] = {"type": self.kind, "instructions": self.instructions}
-        if self.kind == "boolean":
-            if self.criteria is not None:
-                question["criteria"] = self.criteria
-        elif self.kind == "choice":
-            question["options"] = [
-                {
-                    "value": TypeAdapter(Any).dump_python(choice.value, mode="json"),
-                    "criterion": choice.criterion,
-                }
-                for choice in self.choices
-            ]
-        else:
-            question["levels"] = [
-                {"level": level, "criterion": criterion}
-                for level, criterion in enumerate(self.criteria)
-            ]
-            question["answer"] = (
-                f"The expected level: a number from 0 to {self.max_score}, "
-                "weighted by how likely each level is."
-            )
-        return question
-
-    @property
-    def max_score(self) -> int:
-        """Return the highest score level index."""
-        return len(self.criteria) - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,42 +102,6 @@ class DecisionSchema:
             questions={output.name: output.question() for output in self.outputs},
         )
 
-    def fallback_guidance(self) -> str:
-        """Render the compiled questions for the Predict fallback prompt."""
-        questions = {output.name: output.fallback_question() for output in self.outputs}
-        target = (
-            "Answer each question in the result field with the same name."
-            if self.composite
-            else "Answer this question as the result."
-        )
-        return (
-            "## Decision questions\n"
-            f"{target} Use only the listed options or levels.\n\n"
-            f"{json.dumps(questions, indent=2, ensure_ascii=False)}"
-        )
-
-    def fallback_result_type(self) -> Any:
-        """Return the result type with score outputs bounded to their levels."""
-        scores = {
-            output.name: output.max_score for output in self.outputs if output.kind == "score"
-        }
-        if not scores:
-            return self.result_type
-        if not self.composite:
-            return Annotated[self.result_type, Field(ge=0, le=scores["result"])]
-        fields: dict[str, Any] = {}
-        for name, upper in scores.items():
-            field = self.result_type.model_fields[name]
-            default = ... if field.is_required() else field.default
-            fields[name] = (Annotated[float, Field(ge=0, le=upper)], default)
-        return create_model(self.result_type.__name__, __base__=self.result_type, **fields)
-
-    def restore_fallback_result(self, result: Any) -> Any:
-        """Convert a bounded fallback result back to the declared result type."""
-        if self.composite and type(result) is not self.result_type:
-            return self.result_type.model_validate(result.model_dump())
-        return result
-
     def reconstruct(self, response: DecisionResponse, *, include_raw_response: bool = False) -> Any:
         """Validate a normalized response and create the declared return value.
 
@@ -195,27 +128,6 @@ class DecisionSchema:
                 if isinstance(decision, Decision):
                     decision._raw_response = response.raw
         return result
-
-    def require_llm_fallback_support(self) -> None:
-        """Reject result shapes whose evidence cannot be produced by chat generation."""
-        required = [output.name for output in self.outputs if output.requires_decision_model]
-        if not required:
-            return
-        names = ", ".join(repr(name) for name in required)
-        raise DecisionModelRequiredError(
-            "DecideStrategy requires a configured decision_model for "
-            f"output(s) {names}: detailed Decision results and Threshold metadata "
-            "require probability evidence that the LLM fallback does not provide."
-        )
-
-    def fallback_answers(self, result: Any) -> dict[str, Any]:
-        """Serialize an LLM fallback result without inventing probability evidence."""
-        serialized = TypeAdapter(self.result_type).dump_python(result, mode="json")
-        if self.composite:
-            if not isinstance(serialized, dict):
-                raise TypeError("Composite decision fallback did not serialize to an object")
-            return {name: {"value": serialized[name]} for name in serialized}
-        return {self.outputs[0].name: {"value": serialized}}
 
 
 def compile_decision_schema(return_type: Any, docstring: str | None) -> DecisionSchema:

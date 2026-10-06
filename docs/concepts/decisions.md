@@ -272,38 +272,27 @@ await agent.detect_fraud(transaction, decision_model=review_decision_model)
 ```
 
 Resolution is call argument, then method decorator, then agent, then the calling
-parent agent, then chat-LLM fallback. Each level accepts a client or a configured
-alias; the call argument and method decorator also accept a callable that
-receives the agent. A method parameter named `decision_model` is passed to the
-method instead of selecting a model. Standalone functions accept a client or
-alias as a call argument, but not a callable.
+parent agent. Each level accepts a client or a configured alias; the call
+argument and method decorator also accept a callable that receives the agent. A
+method parameter named `decision_model` is passed to the method instead of
+selecting a model.
 
-The fallback supports primitive `bool`, enum, `Literal`, and scored
-`float` results. The fallback prompt includes the same compiled instructions,
-criteria, options, and score levels that a decision model would receive, and a
-score outside its levels fails validation and is retried like any Predict
-output. Detailed decision objects and thresholded outputs require a native
-decision model because a chat completion does not provide calibrated
-probability evidence.
+A `DecideStrategy` method always uses a decision model. If none resolves, the
+call raises `DecisionModelRequiredError` before making any request; it never
+switches to the chat LLM.
 
-Every decision call, native or fallback, stores a `DecisionRecord` with the
-request state, normalized questions, answers, and provenance:
+Every decision call stores a `DecisionRecord` with the request state,
+normalized questions, answers, and provenance:
 
-- `decision_source`: `native` or `llm_fallback`.
+- `decision_source`: currently always `native`.
 - `question_digest`: a SHA-256 digest of the normalized question names,
-  instructions, criteria, and candidate IDs. Native and fallback calls that ask
-  the same question share a digest. For native calls it is computed after
+  instructions, criteria, and candidate IDs. It is computed after
   `decision_call` middleware, so it reflects the request actually sent.
-- `requested_model` and `resolved_model`: the configured model and, for native
-  calls, the model the endpoint reports it served.
-- `fallback_schema_version`: the version of the Predict adapter used by an LLM
-  fallback. Fallback answers contain only `value`; they never contain
-  probabilities.
+- `requested_model` and `resolved_model`: the configured model and the model
+  the endpoint reports it served.
 
 The generation trace span carries the same identifiers as
 `generation.decision.*` attributes, but not the request state or answers.
-Compare native and fallback results only on selected values; calibration and
-threshold metrics apply only to `native` records.
 
 The supported primitive outputs are:
 
@@ -337,16 +326,9 @@ decision.raw_response  # read-only mapping of the decision API's response body
 a composite, every detailed field shares the same response object. The same
 body is stored in the call's `DecisionRecord.raw_response`, and never in trace
 attributes. NOOA does not interpret it. It is excluded from equality, `repr`,
-and `model_dump()`, and it is `None` for LLM fallbacks, for responses created
-by `decision_call` middleware, and for decision clients that do not provide a
+and `model_dump()`, and it is `None` for responses created by `decision_call`
+middleware and for decision clients that do not provide a
 raw body.
-
-If `decision_model` is omitted, primitive `bool`, enum, `Literal`, and `float`
-results fall back to a Predict-style call through `llm`. Composites containing
-only those primitive results can also fall back. Detailed decision objects and
-any output annotated with `Threshold` require probability evidence, so calling
-such a method without a decision model raises `DecisionModelRequiredError`
-before making an LLM request.
 
 Standalone strategy functions can configure the same capability directly:
 
@@ -359,7 +341,9 @@ async def is_urgent(message: str) -> bool:
 
 When a standalone function is called from an agent and does not set
 `decision_model`, it inherits the calling agent's decision model. Without one,
-primitive outputs retain the same chat-LLM fallback behavior described above.
+it raises `DecisionModelRequiredError`. A call argument `decision_model=`
+overrides the decorator, as for agent methods; standalone functions accept a
+client or alias there, but not a callable.
 
 Group several outputs in a Pydantic model. Every field then needs its own
 `Instructions`; the method docstring becomes shared guidance. The strategy

@@ -178,10 +178,9 @@ class SupportAgent(Agent, llm=llm, decision_model=decision_model):
 ```
 
 The `route()` method uses the configured decision model; `draft_reply()` uses
-the chat LLM. If `decision_model` is omitted, primitive decisions such as this
-enum can use a Predict-style LLM fallback. Detailed results that retain
-probability distributions, and thresholds that consume probabilities, require
-a decision model rather than inventing evidence in the fallback.
+the chat LLM. A `DecideStrategy` method always needs a decision model: without
+one it raises `DecisionModelRequiredError` instead of quietly asking the chat
+LLM.
 
 See [Decision models](concepts/decisions.md) for boolean, choice, score,
 threshold, composite-result, and lifecycle details.

@@ -302,7 +302,6 @@ async def test_native_decision_model_selection_is_observable(
     assert completed["decision.requested_model"] == "decision-model"
     assert completed["decision.resolved_model"] == "decision-model"
     assert completed["decision.question_digest"].startswith("sha256:")
-    assert "decision.fallback_schema_version" not in completed
 
 
 @pytest.mark.asyncio
@@ -353,56 +352,6 @@ async def test_call_site_decision_model_selection_is_observable(
     generation = routing_hooks.generations[-1]
     assert generation["decision.model_name"] == "call-decision-model"
     assert generation["decision.selection_source"] == "call_site"
-
-
-@pytest.mark.asyncio
-async def test_decision_llm_fallback_selection_is_observable(
-    routing_hooks: RoutingHooks,
-) -> None:
-    llm = FakeLLMClient(
-        scripted_responses=[
-            LLMResponse(
-                raw_response=None,
-                content='{"value": true}',
-                tool_calls=[],
-                finish_reason="stop",
-            )
-        ]
-    )
-    llm.model = "fallback-model"
-
-    class RoutingAgent(Agent, llm=llm):
-        @strategy(DecideStrategy())
-        async def urgent(self, text: str) -> bool:
-            """Determine whether the text is urgent."""
-            ...
-
-    set_hooks(cast(Any, routing_hooks))
-
-    assert await RoutingAgent().urgent("production is down") is True
-
-    assert llm.call_count == 1
-    decision_generation = routing_hooks.generations[0]
-    assert decision_generation["decision.mode"] == "llm_fallback"
-    assert decision_generation["llm.model_name"] == "fallback-model"
-    assert decision_generation["llm.selection_source"] == "agent_default"
-    assert "decision.model_name" not in decision_generation
-    completed = next(
-        item
-        for item in routing_hooks.completed
-        if item["generation_id"] == decision_generation["generation_id"]
-    )
-    assert completed["decision.source"] == "llm_fallback"
-    assert completed["decision.requested_model"] == "fallback-model"
-    assert completed["decision.fallback_schema_version"] == "decide-predict-v2"
-    assert completed["decision.question_digest"].startswith("sha256:")
-    assert "decision.resolved_model" not in completed
-    nested = [
-        item
-        for item in routing_hooks.completed
-        if item["generation_id"] != decision_generation["generation_id"]
-    ]
-    assert all("decision.source" not in item for item in nested)
 
 
 @pytest.mark.asyncio

@@ -234,45 +234,52 @@ def create_standalone_wrapper(
                     f"{type(call_decision_model).__name__}"
                 )
 
-        # Same precedence as agent methods: call site, decorator, then parent.
-        if call_decision_model is not None:
-            resolved_decision_model = call_decision_model
-            origin = "call argument decision_model="
-        else:
-            resolved_decision_model = decision_model if _uses_decision_model else None
-            origin = "standalone decision_model="
-
         parent = _parent_agent_var.get()
-        if isinstance(resolved_decision_model, str):
-            resolved_decision_model = resolve_decision_alias(
-                resolved_decision_model,
-                _decision_alias_cache,
-                func.__name__,
-                origin=origin,
-            )
-        if _uses_decision_model and resolved_decision_model is None and parent is not None:
-            resolved_decision_model = getattr(parent, "_decision_model", None)
+        resolved_decision_model = None
+        resolved_llm = None
+        if _uses_decision_model:
+            # Same precedence as agent methods: call site, decorator, then parent.
+            if call_decision_model is not None:
+                resolved_decision_model = call_decision_model
+                origin = "call argument decision_model="
+            else:
+                resolved_decision_model = decision_model
+                origin = "standalone decision_model="
+            if isinstance(resolved_decision_model, str):
+                resolved_decision_model = resolve_decision_alias(
+                    resolved_decision_model,
+                    _decision_alias_cache,
+                    func.__name__,
+                    origin=origin,
+                )
+            if resolved_decision_model is None and parent is not None:
+                resolved_decision_model = getattr(parent, "_decision_model", None)
+            if resolved_decision_model is None:
+                from nooa.decisions.types import DecisionModelRequiredError
 
-        # A native decision model wins before chat-model resolution, matching
-        # agent methods and avoiding construction of an unused alias client.
-        resolved_llm = None if resolved_decision_model is not None else llm
-        if isinstance(resolved_llm, str):
-            from nooa.method_llm import resolve_alias
+                raise DecisionModelRequiredError(
+                    f"Standalone function '{func.__name__}' uses DecideStrategy but no "
+                    "decision model is configured. Pass decision_model= to @strategy, "
+                    "to the call, or set one on the calling agent."
+                )
+        else:
+            resolved_llm = llm
+            if isinstance(resolved_llm, str):
+                from nooa.method_llm import resolve_alias
 
-            resolved_llm = resolve_alias(
-                resolved_llm,
-                _alias_cache,
-                func.__name__,
-                origin="standalone @strategy(llm=...)",
-            )
-        if resolved_llm is None and resolved_decision_model is None and parent is not None:
-            resolved_llm = getattr(parent, "_llm", None)
-        if resolved_llm is None and resolved_decision_model is None:
-            raise RuntimeError(
-                f"No LLM client or decision model for standalone function '{func.__name__}'. "
-                "Pass decision_model=<client> for a native DecideStrategy call, "
-                "or llm=<client> for chat generation or fallback."
-            )
+                resolved_llm = resolve_alias(
+                    resolved_llm,
+                    _alias_cache,
+                    func.__name__,
+                    origin="standalone @strategy(llm=...)",
+                )
+            if resolved_llm is None and parent is not None:
+                resolved_llm = getattr(parent, "_llm", None)
+            if resolved_llm is None:
+                raise RuntimeError(
+                    f"No LLM client for standalone function '{func.__name__}'. "
+                    "Pass llm=<client> to @strategy or call it from an agent with an LLM."
+                )
 
         # Fresh agent per call — no shared state, history resets automatically
         agent_cls = _get_agent_cls(func.__module__)

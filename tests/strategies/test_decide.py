@@ -2,11 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from enum import Enum
 from typing import Annotated
 
 import pytest
-from pydantic import BaseModel
 
 from nooa import (
     Agent,
@@ -16,7 +14,6 @@ from nooa import (
     DecideStrategy,
     DecisionModelRequiredError,
     EventQuery,
-    Instructions,
     PredictStrategy,
     Threshold,
     strategy,
@@ -28,7 +25,7 @@ from nooa.decisions.client import (
     DecisionRequest,
     DecisionResponse,
 )
-from nooa.decisions.provenance import LLM_FALLBACK_SCHEMA_VERSION, question_digest
+from nooa.decisions.provenance import question_digest
 from nooa.events import DebugTrace, DecisionRecord, Error, EventBase, Message
 from nooa.runtime.middleware import DecisionCallContext
 from nooa.unifiedllm import AssistantText, FakeLLMClient, LLMResponse
@@ -184,9 +181,9 @@ async def test_decide_strategy_expands_method_docstring_from_agent_state() -> No
 
 @pytest.mark.asyncio
 async def test_decide_strategy_standalone_function() -> None:
-    llm = FakeLLMClient([_chat_response('{"value": false}')])
+    client = FakeDecisionClient(probability=0.1)
 
-    @strategy(DecideStrategy(), llm=llm)
+    @strategy(DecideStrategy(), decision_model=client)
     async def urgent(
         message: str,
     ) -> Annotated[
@@ -197,7 +194,10 @@ async def test_decide_strategy_standalone_function() -> None:
         ...
 
     assert await urgent("Routine request") is False
-    assert llm.call_count == 1
+    assert client.requests[0].questions["result"].criteria == {
+        "true": "urgent",
+        "false": "not urgent",
+    }
 
 
 @pytest.mark.asyncio
@@ -408,7 +408,6 @@ async def test_decision_middleware_mutation_and_durable_record() -> None:
     assert record.success is True
     assert record.decision_source == "native"
     assert record.question_digest == question_digest(client.requests[0].questions)
-    assert record.fallback_schema_version is None
 
 
 @pytest.mark.asyncio
@@ -555,166 +554,12 @@ async def test_decision_lifecycle_is_balanced_on_cancellation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decide_strategy_falls_back_to_llm_for_primitive_result() -> None:
-    llm = FakeLLMClient([_chat_response('{"value": true}')])
-
-    class TriageAgent(Agent, llm=llm):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> bool:
-            """Does the message require immediate action?"""
-            ...
-
-    assert await TriageAgent().urgent("Production is down") is True
-    assert llm.call_count == 1
-
-
 @pytest.mark.asyncio
-async def test_llm_fallback_persists_decision_provenance() -> None:
-    llm = FakeLLMClient([_chat_response('{"value": true}')])
-    llm.model = "fallback-chat"
-
-    class TriageAgent(Agent, llm=llm):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> bool:
-            """Does the message require immediate action?"""
-            ...
-
-    agent = TriageAgent()
-    assert await agent.urgent("Production is down") is True
-
-    records = agent.event_manager.filter(type="DecisionRecord")
-    assert len(records) == 1
-    record = records[0]
-    assert isinstance(record, DecisionRecord)
-    assert record.method_name == "urgent"
-    assert record.decision_source == "llm_fallback"
-    assert record.fallback_schema_version == LLM_FALLBACK_SCHEMA_VERSION
-    assert record.requested_model == "fallback-chat"
-    assert record.resolved_model is None
-    assert record.usage is None
-    assert record.questions["result"]["type"] == "noul"
-    assert record.answers == {"result": {"value": True}}
-    assert record.success is True
-    assert record.exception_type is None
-
-
 @pytest.mark.asyncio
-async def test_llm_fallback_and_native_share_question_digest() -> None:
-    client = FakeDecisionClient()
-
-    class NativeAgent(Agent, llm=FakeLLMClient(), decision_model=client):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> bool:
-            """Does the message require immediate action?"""
-            ...
-
-    class FallbackAgent(Agent, llm=FakeLLMClient([_chat_response('{"value": false}')])):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> bool:
-            """Does the message require immediate action?"""
-            ...
-
-    native = NativeAgent()
-    fallback = FallbackAgent()
-    await native.urgent("Production is down")
-    await fallback.urgent("A routine question")
-
-    native_record = native.event_manager.filter(type="DecisionRecord")[0]
-    fallback_record = fallback.event_manager.filter(type="DecisionRecord")[0]
-    assert isinstance(native_record, DecisionRecord)
-    assert isinstance(fallback_record, DecisionRecord)
-    assert native_record.question_digest == fallback_record.question_digest
-    assert native_record.decision_source != fallback_record.decision_source
-
-
 @pytest.mark.asyncio
-async def test_llm_fallback_serializes_composite_values_without_probabilities() -> None:
-    class Priority(Enum):
-        LOW = "low"
-        HIGH = "high"
-
-    class Triage(BaseModel):
-        urgent: Annotated[bool, Instructions("Does it need immediate action?")]
-        priority: Annotated[
-            Priority, Instructions("How important is it?"), Criteria("Minor", "Major")
-        ]
-
-    llm = FakeLLMClient([_chat_response('{"urgent": true, "priority": "high"}')])
-
-    class TriageAgent(Agent, llm=llm):
-        @strategy(DecideStrategy())
-        async def triage(self, message: str) -> Triage:
-            """Triage the message."""
-            ...
-
-    agent = TriageAgent()
-    assert await agent.triage("Production is down") == Triage(urgent=True, priority=Priority.HIGH)
-    record = agent.event_manager.filter(type="DecisionRecord")[0]
-    assert isinstance(record, DecisionRecord)
-    assert record.answers == {"urgent": {"value": True}, "priority": {"value": "high"}}
-    assert set(record.questions) == {"urgent", "priority"}
-
-
 @pytest.mark.asyncio
-async def test_failed_llm_fallback_is_recorded() -> None:
-    class UnavailableLLM(FakeLLMClient):
-        async def acall(self, *args, **kwargs):  # type: ignore[override]
-            raise ConnectionError("chat backend unavailable")
-
-    class TriageAgent(Agent, llm=UnavailableLLM()):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> bool:
-            """Does the message require immediate action?"""
-            ...
-
-    agent = TriageAgent()
-    with pytest.raises(ConnectionError):
-        await agent.urgent("Production is down")
-    record = agent.event_manager.filter(type="DecisionRecord")[0]
-    assert isinstance(record, DecisionRecord)
-    assert record.decision_source == "llm_fallback"
-    assert record.success is False
-    assert record.answers is None
-    assert record.exception_type == "ConnectionError"
-
-
 @pytest.mark.asyncio
-async def test_llm_fallback_rejects_evidence_dependent_results() -> None:
-    llm = FakeLLMClient([_chat_response('{"value": true}')])
-
-    class DetailedAgent(Agent, llm=llm):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> BooleanDecision:
-            """Does the message require immediate action?"""
-            ...
-
-    class ThresholdAgent(Agent, llm=llm):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> Annotated[bool, Threshold(0.8)]:
-            """Does the message require immediate action?"""
-            ...
-
-    for agent in (DetailedAgent(), ThresholdAgent()):
-        with pytest.raises(DecisionModelRequiredError, match="configured decision_model"):
-            await agent.urgent("Production is down")
-    assert llm.call_count == 0
-
-
 @pytest.mark.asyncio
-async def test_instance_can_disable_inherited_decision_model() -> None:
-    decision_model = FakeDecisionClient()
-    llm = FakeLLMClient([_chat_response('{"value": false}')])
-
-    class TriageAgent(Agent, llm=llm, decision_model=decision_model):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> bool:
-            """Does the message require immediate action?"""
-            ...
-
-    assert await TriageAgent(decision_model=None).urgent("Routine request") is False
-    assert decision_model.requests == []
-
-
 @pytest.mark.asyncio
 async def test_decision_only_agent_needs_no_chat_llm() -> None:
     client = FakeDecisionClient()
@@ -813,29 +658,6 @@ async def test_standalone_chat_function_keeps_llm_inside_decision_agent() -> Non
 
 
 @pytest.mark.asyncio
-async def test_llm_fallback_holds_the_generation_lock() -> None:
-    lock_states: list[bool] = []
-
-    class RecordingLLM(FakeLLMClient):
-        async def acall(self, *args, **kwargs):
-            lock_states.append(agent.runtime._generation_lock.locked())
-            return await super().acall(*args, **kwargs)
-
-    class TriageAgent(
-        Agent,
-        llm=RecordingLLM([_chat_response('{"value": true}'), _chat_response('{"value": false}')]),
-    ):
-        @strategy(DecideStrategy())
-        async def urgent(self, message: str) -> bool:
-            """Does the message require immediate action?"""
-            ...
-
-    agent = TriageAgent()
-    await asyncio.gather(agent.urgent("a"), agent.urgent("b"))
-
-    assert lock_states == [True, True]
-
-
 @pytest.mark.asyncio
 async def test_native_decisions_do_not_take_the_generation_lock() -> None:
     lock_states: list[bool] = []
@@ -857,94 +679,56 @@ async def test_native_decisions_do_not_take_the_generation_lock() -> None:
     assert lock_states == [False]
 
 
-def _prompt_text(call) -> str:
-    return "\n".join(str(message.get("content", "")) for message in call.messages)
-
-
 @pytest.mark.asyncio
-async def test_llm_fallback_prompt_contains_compiled_questions() -> None:
-    class Priority(Enum):
-        LOW = "low"
-        HIGH = "high"
-
-    class Triage(BaseModel):
-        urgent: Annotated[
-            bool,
-            Instructions("Does it need immediate action?"),
-            Criteria(by_value={True: "Customers are blocked.", False: "It can wait."}),
-        ]
-        priority: Annotated[
-            Priority, Instructions("How important is it?"), Criteria("Minor", "Major")
-        ]
-
-    llm = FakeLLMClient([_chat_response('{"urgent": true, "priority": "high"}')])
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_decide_without_decision_model_raises_before_any_llm_call() -> None:
+    llm = FakeLLMClient([_chat_response('{"value": true}')])
 
     class TriageAgent(Agent, llm=llm):
         @strategy(DecideStrategy())
-        async def triage(self, message: str) -> Triage:
-            """Triage the message."""
+        async def urgent(self, message: str) -> bool:
+            """Does the message require immediate action?"""
             ...
 
-    await TriageAgent().triage("Production is down")
-
-    prompt = _prompt_text(llm.calls[0])
-    for text in (
-        "Decision questions",
-        "Does it need immediate action?",
-        "Customers are blocked.",
-        "How important is it?",
-        '"value": "high"',
-        "Major",
-    ):
-        assert text in prompt
-
-
-@pytest.mark.asyncio
-async def test_llm_fallback_score_is_bounded_to_its_levels() -> None:
-    Severity = Annotated[float, Criteria("Cosmetic", "Degraded", "Outage")]
-    llm = FakeLLMClient([_chat_response('{"value": 7}'), _chat_response('{"value": 1.5}')])
-
-    class TriageAgent(Agent, llm=llm):
         @strategy(DecideStrategy())
-        async def severity(self, message: str) -> Severity:
-            """Rate the severity of the report."""
+        async def detailed(self, message: str) -> BooleanDecision:
+            """Does the message require immediate action?"""
             ...
 
     agent = TriageAgent()
-
-    assert await agent.severity("Checkout is slow") == 1.5
-    assert len(llm.calls) == 2
-    assert "Outage" in _prompt_text(llm.calls[0])
+    for method in (agent.urgent, agent.detailed):
+        with pytest.raises(DecisionModelRequiredError, match="no decision model"):
+            await method("Production is down")
+    assert llm.call_count == 0
+    assert agent.event_manager.filter(type="DecisionRecord") == []
 
 
 @pytest.mark.asyncio
-async def test_llm_fallback_composite_score_is_bounded_and_restored() -> None:
-    class Assessment(BaseModel):
-        urgent: Annotated[bool, Instructions("Does it need immediate action?")]
-        severity: Annotated[
-            float,
-            Instructions("How severe is it?"),
-            Criteria("Cosmetic", "Degraded", "Outage"),
-        ]
+async def test_instance_can_disable_inherited_decision_model() -> None:
+    decision_model = FakeDecisionClient()
 
-    llm = FakeLLMClient(
-        [
-            _chat_response('{"urgent": true, "severity": 3}'),
-            _chat_response('{"urgent": true, "severity": 2}'),
-        ]
-    )
-
-    class TriageAgent(Agent, llm=llm):
+    class TriageAgent(Agent, llm=FakeLLMClient(), decision_model=decision_model):
         @strategy(DecideStrategy())
-        async def assess(self, message: str) -> Assessment:
-            """Assess the report."""
+        async def urgent(self, message: str) -> bool:
+            """Does the message require immediate action?"""
             ...
 
-    result = await TriageAgent().assess("Production is down")
+    with pytest.raises(DecisionModelRequiredError):
+        await TriageAgent(decision_model=None).urgent("Routine request")
+    assert decision_model.requests == []
 
-    assert type(result) is Assessment
-    assert result == Assessment(urgent=True, severity=2)
-    assert len(llm.calls) == 2
+
+@pytest.mark.asyncio
+async def test_standalone_decide_without_decision_model_raises() -> None:
+    @strategy(DecideStrategy(), llm=FakeLLMClient())
+    async def urgent(message: str) -> bool:
+        """Is this urgent?"""
+        ...
+
+    with pytest.raises(DecisionModelRequiredError, match="no decision model"):
+        await urgent("Production is down")
 
 
 @pytest.mark.asyncio
