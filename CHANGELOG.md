@@ -73,6 +73,36 @@ to follow semantic versioning.
     `default_llm_factory()` as the registry's `llm_factory`. Agent specs
     may name a file (`./agent.py:Class`, relative to the workspace), and
     the older `nooa_cli.*` coding-agent specs still load.
+  - `nooa coder` serves the coding agent over ACP on
+    stdio, one process for every session, on the Session layer; the older
+    `nooa-acp` is unchanged. Sessions: new, load (attaching to a live
+    session and replaying its transcript), list (root sessions from every
+    workspace, with `_meta["dev.nooa/status"]`), close, and delete through
+    the `_nooa/session/delete` extension method. Turns: a prompt sent
+    during a turn steers it and both return together; `Waiting` keeps the
+    prompt open; cancel closes open tool cards as "Cancelled" before the
+    prompt answers `cancelled`; generation limits map to `max_tokens` and
+    `max_turn_requests`. A `NeedInput` question is the turn's final
+    message and, when the client supports forms, an `elicitation/create`
+    form (a yes/no permission request otherwise); the answer continues
+    the same prompt. The first prompt asks the agent for a session title.
+    Also: slash commands through `Session.invoke_command()`, the `auto`
+    mode, a `model` select option over the model registry's aliases,
+    thinking chunks, todos as plan updates, usage with children's cost and
+    context status, messages from other senders echoed as user chunks, and
+    child sessions announced in `_meta["dev.nooa/children"]` with their
+    tool cards mirrored into the parent. `/connect` points to the CLI.
+  - `nooa coder --tee PATH` and `python -m nooa_coder.acp.tee --log PATH -- COMMAND...`
+    record every ACP frame in both directions to a JSON Lines file (mode
+    0600); `docs/acp-tee.md` has the Pool settings entry and what the log
+    shows about Pool's behaviour.
+  - The `nooa-coder` package depends on `nooa-cli`, which provides the `nooa`
+    command; there is no separate `nooa-coder` script.
+  - `nooa-coder` and `nooa-acp` need `agent-client-protocol` 0.12.1 or
+    later (below 0.13). That release adds the library's HTTP and WebSocket
+    transports and renames two schema fields: the multi-select item type is
+    `StringMultiSelectItems`, and an ACP-transport MCP server's `id` is
+    `server_id`.
 
 - Groundwork for the session tree design, in shared code:
   - A cancelled CodeAct cell is now recorded for the model: an appended

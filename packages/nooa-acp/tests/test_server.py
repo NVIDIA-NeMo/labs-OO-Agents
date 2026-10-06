@@ -823,7 +823,7 @@ async def test_adapter_skips_forwarded_acp_transport_mcp_server(tmp_path):
     client = _RegistrationAwareClient()
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
-    server = AcpMcpServer(name="proxied", id="server-1", type="acp")
+    server = AcpMcpServer(name="proxied", server_id="server-1", type="acp")
 
     with (
         patch(
