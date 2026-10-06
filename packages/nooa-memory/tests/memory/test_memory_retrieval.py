@@ -85,6 +85,27 @@ def test_spread_decays_per_hop(store, emb):
     assert b.id in spread1 and c.id not in spread1
 
 
+def test_spread_decay_is_one_factor_per_hop(store, emb):
+    # The docstring and ``per_hop_decay``'s own comment both say the decay is
+    # per hop, so at hop h the activation is delta**h along unit-weight causal
+    # edges -- not a compounded power that dies under ``activation_floor``.
+    a = _add(store, emb, "seed node alpha")
+    b = _add(store, emb, "node beta")
+    c = _add(store, emb, "node gamma")
+    d = _add(store, emb, "node delta")
+    for src, dst in ((a, b), (b, c), (c, d)):
+        store.add_edge(src.id, dst.id, EdgeType.CAUSES, 1.0)
+    eng = RetrievalEngine(
+        store,
+        emb,
+        RetrievalConfig(per_hop_decay=0.6, per_hop_fanout=5, activation_floor=0.05),
+    )
+    spread = eng._spread({a.id: 1.0}, hops=3)
+    assert spread[b.id] == pytest.approx(0.6)
+    assert spread[c.id] == pytest.approx(0.6**2)
+    assert spread[d.id] == pytest.approx(0.6**3)
+
+
 def test_multi_hop_surfaces_linked_dissimilar_memory(store, emb):
     # A is relevant to the query; B is dissimilar but linked from A. Several
     # unlinked, equally-dissimilar distractors compete for the second slot.
