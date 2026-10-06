@@ -6,9 +6,18 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: `_nooa/session/inject` inputs now echo once on admission with a
+  distinct `acp:inject` source, including a buffered steer's same-ID queued
+  fallback. Ordinary prompts/Pool inputs remain un-echoed; replay is unchanged.
+  Pool input acknowledgements now fail on failed/skipped transport sends or a
+  stopped bridge, and a consumed item's outcome cannot falsely report it shown.
+  Failed acknowledgement associations remain bridge-local for explicit same-ID
+  notification-only retry after a flush resets the send error. This is not a wire
+  retry API or an exactly-once delivery/rendering guarantee across reconnection.
+
 - `nooa-atom`: accepted Pool and standard ACP `NeedInput` form answers now echo
   once as user messages before the agent continues, through the existing admission
-  bridge. Typed answers display their serialized JSON. Ordinary prompts/injections,
+  bridge. Typed answers display their serialized JSON. Ordinary prompts,
   yes/no permissions and live decline/cancel behavior are unchanged. Invalid standard
   form answers stay as text questions rather than being admitted as raw data.
 - `nooa-coder` is now `nooa-atom` (NOOA Atom), with no aliases for the old names:

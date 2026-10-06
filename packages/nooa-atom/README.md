@@ -84,8 +84,10 @@ connection.
 
 Accepted Pool and standard ACP form answers are echoed once as user messages before
 any subsequent agent reply. Typed answers display their validated JSON; text answers
-keep their text. Ordinary prompts/injections and yes/no permission answers are not
-re-echoed. Invalid standard form answers are not admitted and leave the question as
+keep their text. Ordinary prompts, Pool inputs and yes/no permission answers are not
+re-echoed. `_nooa/session/inject` inputs echo once on admission, including a buffered
+steer's same-ID queued fallback. Invalid standard form answers are not admitted and
+leave the question as
 text (Pool retries once). Declined/dismissed forms still submit the silent
 `(declined to answer)` marker; stopping an open form submits nothing. Loading a
 session replays every admitted user item once, including the stored decline marker,

@@ -307,7 +307,7 @@ async def test_form_answer_replay_preserves_admitted_sources_once(
     make_adapter, workspace, client, pool, accepted
 ):
     from acp.schema import Implementation
-    from nooa_coder.session.events import ItemAdmitted
+    from nooa_atom.session.events import ItemAdmitted
 
     models = ScriptedModels({None: [_ask("Name?"), reply("Okay.")]})
     if pool:
@@ -376,10 +376,10 @@ async def test_form_answer_replay_preserves_admitted_sources_once(
 
 
 async def test_mcp_sign_in_callback_is_not_admitted_or_echoed(
-    coder_adapter, workspace, client, monkeypatch
+    atom_adapter, workspace, client, monkeypatch
 ):
-    from nooa_coder.session.events import ItemAdmitted
-    from nooa_coder.skills.mcp_servers import MCPServers
+    from nooa_atom.session.events import ItemAdmitted
+    from nooa_atom.skills.mcp_servers import MCPServers
 
     completed = []
 
@@ -388,7 +388,7 @@ async def test_mcp_sign_in_callback_is_not_admitted_or_echoed(
         return "Signed in to remote."
 
     monkeypatch.setattr(MCPServers, "complete_sign_in", complete_sign_in)
-    adapter = await coder_adapter([reply("Hi.")])
+    adapter = await atom_adapter([reply("Hi.")])
     session_id, _ = await _run(adapter, workspace, text="hello")
     session = adapter.session(session_id)
     before = len(session.handle.events.filter(type="ItemAdmitted"))

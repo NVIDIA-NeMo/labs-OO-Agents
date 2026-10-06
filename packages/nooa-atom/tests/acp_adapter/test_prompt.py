@@ -13,6 +13,7 @@ from acp.schema import (
     Implementation,
     ToolCallProgress,
     ToolCallStart,
+    UserMessageChunk,
 )
 from atom_test_agents import (
     BLOCKING_CELL,
@@ -492,9 +493,12 @@ async def test_inject_queue_starts_a_turn_when_idle(make_adapter, workspace, cli
     answer = await _inject(adapter, session_id, "queue", "note this")
     assert answer["delivered"] == "queued" and answer["messageId"]
     await client.wait_for(lambda: "Got it.\n\n" in client.texts(AgentMessageChunk, session_id))
+    assert client.texts(UserMessageChunk, session_id) == ["note this"]
 
 
-async def test_inject_steer_reaches_the_running_turns_next_model_call(make_adapter, workspace):
+async def test_inject_steer_reaches_the_running_turns_next_model_call(
+    make_adapter, workspace, client
+):
     started, block = fresh_events()
     models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Adjusted.")]})
     adapter = await make_adapter(models)
@@ -509,6 +513,7 @@ async def test_inject_steer_reaches_the_running_turns_next_model_call(make_adapt
     assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
     assert "use tabs" in str(models.llms[None].calls[1].messages)
     assert len(models.llms[None].calls) == 2
+    assert client.texts(UserMessageChunk, session_id) == ["use tabs"]
 
 
 async def test_revoke_takes_back_a_queued_inject(make_adapter, workspace):
@@ -745,6 +750,12 @@ async def test_pool_steers_taken_by_one_turn_end_the_prompt_with_it(
     assert response.stop_reason == "end_turn"
     assert _order(client, session_id)[-3:] == ["First.\n\n", "Both.\n\n", "response"]
     assert len(models.llms[None].calls) == 3
+    acks = [
+        meta for _, meta in _input_events(client, session_id) if "poolside/clientInputId" in meta
+    ]
+    assert [meta["poolside/clientInputId"] for meta in acks] == ["steer-a", "steer-b"]
+    ids = _user_item_ids(adapter, session_id)
+    assert [meta["poolside/inputEventId"] for meta in acks] == [ids["message a"], ids["message b"]]
 
 
 async def test_a_pool_steer_the_running_turn_takes_is_done_with_it(make_adapter, workspace, client):
@@ -1056,3 +1067,174 @@ async def test_other_clients_get_no_pool_input_events(make_adapter, workspace, c
     await asyncio.wait_for(adapter.prompt(session_id, [text_block("hello")]), TIMEOUT)
     await adapter.load_session(str(workspace), session_id)
     assert _input_events(client, session_id) == []
+
+
+@pytest.mark.parametrize("mode", ["queue", "steer"])
+async def test_injected_long_multiline_input_echoes_once_and_replays_in_full(
+    make_adapter, workspace, client, mode
+):
+    from nooa_atom.acp.event_bridge import MAX_CHUNK_CHARS
+
+    text = "paste line\n" * (MAX_CHUNK_CHARS // 5)
+    adapter = await make_adapter(ScriptedModels({None: [reply("Read it.")]}))
+    session_id = await _new(adapter, workspace)
+    answer = await _inject(adapter, session_id, mode, text)
+    await asyncio.wait_for(adapter.session(session_id).outcome(answer["messageId"]), TIMEOUT)
+    await adapter._bridges[session_id].flush()
+    chunks = client.texts(UserMessageChunk, session_id)
+    assert len(chunks) > 1
+    assert "".join(chunks) == text
+    assert all(len(chunk) <= MAX_CHUNK_CHARS for chunk in chunks)
+    assert _user_item_ids(adapter, session_id) == {text: answer["messageId"]}
+    assert _input_events(client, session_id) == []
+    client.log.clear()
+    await adapter.load_session(str(workspace), session_id)
+    assert "".join(client.texts(UserMessageChunk, session_id)) == text
+
+
+async def test_injected_buffered_steer_fallback_echoes_once_with_same_id(
+    make_adapter, workspace, client
+):
+    started, block = fresh_events()
+    models = ScriptedModels(
+        {
+            None: [
+                cell(BLOCKING_CELL + "\nreturn_result(Done(explanation='first finished'))"),
+                reply("Handled fallback."),
+            ]
+        }
+    )
+    adapter = await make_adapter(models)
+    session_id = await _new(adapter, workspace)
+    updates = []
+    adapter.session(session_id).subscribe(updates.append)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("ordinary prompt")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    answer = await _inject(adapter, session_id, "steer", "fallback\nmessage")
+    assert answer["delivered"] == "steered"
+    block.set()
+    await asyncio.wait_for(prompt, TIMEOUT)
+    await asyncio.wait_for(adapter.session(session_id).outcome(answer["messageId"]), TIMEOUT)
+    await adapter._bridges[session_id].flush()
+    admissions = [
+        u for u in updates if u.kind == "item_admitted" and u.item_id == answer["messageId"]
+    ]
+    assert [u.channel for u in admissions] == ["steer", "user_messages"]
+    assert [u.source for u in admissions] == ["acp:inject", "acp:inject"]
+    assert client.texts(UserMessageChunk, session_id) == ["fallback\nmessage"]
+    assert (
+        len([u for u in updates if u.kind == "item_consumed" and u.item_id == answer["messageId"]])
+        == 1
+    )
+    assert _user_item_ids(adapter, session_id)["fallback\nmessage"] == answer["messageId"]
+
+
+@pytest.mark.parametrize("send_failure", [False, True])
+async def test_pool_steer_consumed_outcome_cannot_overtake_ack(
+    make_adapter, workspace, client, send_failure
+):
+    from acp.schema import SessionInfoUpdate
+
+    started, block = fresh_events()
+    models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    BLOCKING_CELL
+                    + "\nextra = await self.user_messages.get()\nreturn_result(Done(explanation='read'))"
+                ),
+            ]
+        }
+    )
+    gate, ack_started = asyncio.Event(), asyncio.Event()
+    original = client.session_update
+
+    async def send(session_id, update, **kwargs):
+        if isinstance(update, SessionInfoUpdate) and (update.field_meta or {}).get(
+            "poolside/clientInputId"
+        ):
+            ack_started.set()
+            await gate.wait()
+            if send_failure:
+                raise ConnectionResetError("synthetic ack failure")
+        await original(session_id, update, **kwargs)
+
+    client.session_update = send
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    steer = await _pool_steer(adapter, session_id, "read during cell", "gated")
+    block.set()
+    await asyncio.wait_for(ack_started.wait(), TIMEOUT)
+    item_id = _user_item_ids(adapter, session_id)["read during cell"]
+    await asyncio.wait_for(adapter.session(session_id).outcome(item_id), TIMEOUT)
+    await asyncio.sleep(0)
+    assert not steer.done()
+    assert not _input_events(client, session_id)[-1][1].get("poolside/clientInputId")
+    gate.set()
+    if send_failure:
+        with pytest.raises(ConnectionResetError, match="synthetic ack failure"):
+            await asyncio.wait_for(steer, TIMEOUT)
+        with pytest.raises(ConnectionResetError, match="synthetic ack failure"):
+            await asyncio.wait_for(prompt, TIMEOUT)
+    else:
+        assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "gated"}
+        assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
+    bridge = adapter._bridges[session_id]
+    if send_failure:
+        assert bridge.client_input_was_taken(item_id)
+        # The prompt flush reported/reset the send error. Retry only the ack,
+        # using the original IDs; no new admission, execution or transcript.
+        before = adapter.session(session_id).transcript()
+        calls = len(models.llms[None].calls)
+        client.session_update = original
+        await asyncio.wait_for(bridge.retry_client_input(item_id), TIMEOUT)
+        await bridge.flush()
+        assert _input_events(client, session_id)[-1][1] == {
+            "poolside/clientInputId": "gated",
+            "poolside/inputEventId": item_id,
+        }
+        assert adapter.session(session_id).transcript() == before
+        assert len(models.llms[None].calls) == calls
+        bridge.forget_client_input(item_id)
+    assert bridge._client_inputs == {}
+
+
+@pytest.mark.parametrize("taken", [False, True])
+async def test_taken_or_settled_propagates_both_ready_ack_error(taken):
+    from nooa_atom.acp.server import _taken_or_settled
+
+    class SettledSession:
+        async def outcome(self, item_id):
+            return None
+
+    shown = asyncio.get_running_loop().create_future()
+    shown.set_exception(ConnectionResetError("synthetic both ready"))
+    with pytest.raises(ConnectionResetError, match="synthetic both ready"):
+        await _taken_or_settled(SettledSession(), "item", shown, was_taken=lambda: taken)
+
+
+async def test_consumed_cancelled_outcome_still_waits_for_ack():
+    from nooa_atom.acp.server import _taken_or_settled
+    from nooa_atom.session.items import TurnCancelledOutcome
+
+    class CancelledSession:
+        async def outcome(self, item_id):
+            return TurnCancelledOutcome(by="user")
+
+    shown = asyncio.get_running_loop().create_future()
+    waiter = asyncio.create_task(
+        _taken_or_settled(
+            CancelledSession(),
+            "item",
+            shown,
+            was_taken=lambda: True,
+        )
+    )
+    for _ in range(4):
+        await asyncio.sleep(0)
+    assert not waiter.done()
+    shown.set_exception(ConnectionResetError("synthetic consumed cancellation"))
+    with pytest.raises(ConnectionResetError, match="synthetic consumed cancellation"):
+        await waiter
