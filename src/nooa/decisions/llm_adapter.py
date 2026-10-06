@@ -88,7 +88,13 @@ class LLMDecisionModel(DecisionModel):
         ]
         error: Exception | None = None
         for _ in range(self.max_attempts):
-            response = await self.llm.acall(messages, output_model=output_model)
+            try:
+                response = await self.llm.acall(messages, output_model=output_model)
+            except ValidationError as exc:
+                # Chat clients may validate structured output themselves; count
+                # that as an invalid reply. Other client errors propagate.
+                error = exc
+                continue
             try:
                 parsed = _parse_reply(response, output_model)
             except (ValidationError, ValueError) as exc:

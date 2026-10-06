@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Annotated, Literal
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from nooa import (
     Agent,
@@ -219,3 +219,70 @@ async def test_chat_backed_model_as_call_site_override() -> None:
         ...
 
     assert await urgent("The API is down", decision_model=DecisionModel.from_llm(llm)) is True
+
+
+def _validation_error() -> ValidationError:
+    class Answer(BaseModel):
+        result: bool
+
+    try:
+        Answer.model_validate({})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a validation error")
+
+
+class _ScriptedErrorsLLM(FakeLLMClient):
+    """Raise the given errors from acall() before returning scripted replies."""
+
+    def __init__(self, errors: list[Exception], *contents: str) -> None:
+        super().__init__([_reply(content) for content in contents])
+        self.model = "chat-model"
+        self.errors = errors
+        self.attempts = 0
+
+    async def acall(self, *args, **kwargs):
+        self.attempts += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return await super().acall(*args, **kwargs)
+
+
+class _UrgentRouter(Agent):
+    @strategy(DecideStrategy())
+    async def urgent(self, message: str) -> bool:
+        """Is the message urgent?"""
+        ...
+
+
+@pytest.mark.asyncio
+async def test_validation_error_from_acall_is_retried() -> None:
+    llm = _ScriptedErrorsLLM([_validation_error()], '{"result": true}')
+
+    agent = _UrgentRouter(decision_model=DecisionModel.from_llm(llm))
+
+    assert await agent.urgent("The API is down") is True
+    assert llm.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_validation_errors_from_acall_exhaust_attempts() -> None:
+    llm = _ScriptedErrorsLLM([_validation_error(), _validation_error()])
+
+    agent = _UrgentRouter(decision_model=DecisionModel.from_llm(llm))
+
+    with pytest.raises(InvalidDecisionResponseError, match="after 2 attempts"):
+        await agent.urgent("The API is down")
+    assert llm.attempts == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("gateway down"), ValueError("bad request")])
+async def test_unrelated_acall_errors_propagate_without_retry(error: Exception) -> None:
+    llm = _ScriptedErrorsLLM([error], '{"result": true}')
+
+    agent = _UrgentRouter(decision_model=DecisionModel.from_llm(llm))
+
+    with pytest.raises(type(error), match=str(error)):
+        await agent.urgent("The API is down")
+    assert llm.attempts == 1

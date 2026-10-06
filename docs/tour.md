@@ -145,7 +145,7 @@ import os
 from enum import StrEnum
 from typing import Annotated
 
-from nooa import Agent, Criteria, DecisionClient, DecideStrategy, strategy
+from nooa import Agent, Criteria, DecisionClient, DecisionModel, DecideStrategy, strategy
 
 
 class Department(StrEnum):
