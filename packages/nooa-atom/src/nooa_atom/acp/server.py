@@ -817,9 +817,10 @@ class AtomACPAgent:
     async def _ask_pool(self, session: Session, need: NeedInput, schema: dict[str, Any]) -> Any:
         """Ask with Pool's ``_poolside/elicitation`` form; the result is as ``_ask``'s.
 
-        An answer that does not convert, or is not one of the choices, is
-        asked once more with the error, then left as text. A failed request turns Pool forms off for this
-        connection.
+        A malformed or blank options answer, or a typed answer that does not
+        validate, is asked once more with the error, then left as text. Options
+        are suggestions; typed Literal fields still restrict their values.
+        A failed request turns Pool forms off for this connection.
         """
         conn = self._require_conn()
         question = f"{need.question}\n\n{need.reason}" if need.reason else need.question

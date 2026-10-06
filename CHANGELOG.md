@@ -42,6 +42,11 @@ to follow semantic versioning.
   lists them in one agent message. A question the agent asks while such a message is
   still waiting is not opened as a form: the queued message's turn comes first and can
   answer it.
+- `nooa-atom`: Pool `NeedInput(options=[...])` forms offer the picker plus a
+  text alternative in the same field, without Escape. Listed answers normalize
+  case and surrounding spaces; other nonblank strings are preserved. Malformed
+  or blank answers retry once. Typed `Literal` fields remain strict, and yes/no
+  permissions and standard ACP enum forms are unchanged.
 - `nooa-atom`: Pool forms show choices as a picker: a choice question and a string
   `Literal` field are a `oneOf` of `{const, title}` entries, and a `Literal[...] | str`
   field is the picker plus free text. A form with more than one field sends

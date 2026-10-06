@@ -4,6 +4,7 @@
 
 import asyncio
 
+import pytest
 from acp import RequestError, text_block
 from acp.schema import (
     AgentMessageChunk,
@@ -233,9 +234,11 @@ BRANCH_SCHEMA = {
     "type": "object",
     "properties": {
         "answer": {
-            "type": "string",
             "description": "Which branch?",
-            "oneOf": [{"const": "main", "title": "main"}, {"const": "dev", "title": "dev"}],
+            "anyOf": [
+                {"oneOf": [{"const": "main", "title": "main"}, {"const": "dev", "title": "dev"}]},
+                {"type": "string"},
+            ],
         }
     },
     "required": ["answer"],
@@ -273,10 +276,25 @@ async def test_a_choice_answer_matches_ignoring_case_and_spaces(make_adapter, wo
     assert client.texts(AgentMessageChunk, session_id)[-1] == "'main'\n\n"
 
 
-async def test_a_choice_answer_that_is_not_a_choice_is_asked_again(make_adapter, workspace, client):
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        {},
+        {"answer": ""},
+        {"answer": " \t "},
+        {"answer": None},
+        {"answer": 2},
+        {"answer": ["release"]},
+        "release",
+        [],
+        1,
+    ],
+)
+async def test_an_invalid_choice_answer_is_asked_again(make_adapter, workspace, client, content):
     models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
     client.ext_answers = [
-        {"action": "accept", "content": {"answer": "release"}},
+        {"action": "accept", "content": content},
         {"action": "accept", "content": {"answer": "Dev"}},
     ]
     adapter = await make_adapter(models, client_info=POOL)
@@ -285,16 +303,19 @@ async def test_a_choice_answer_that_is_not_a_choice_is_asked_again(make_adapter,
     assert response.stop_reason == "end_turn"
     [(_, first), (_, second)] = _requests(client)
     assert first["message"] == "Which branch?"
-    assert second["message"] == "Which branch?\n\nThat answer was not one of: main, dev"
+    error = (
+        "Enter a choice or a nonblank text answer."
+        if content is None or isinstance(content, dict)
+        else "That answer must be an object of form fields."
+    )
+    assert second["message"] == "Which branch?\n\n" + error
     assert second["requestedSchema"] == BRANCH_SCHEMA
     assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'\n\n"
 
 
-async def test_a_second_answer_that_is_not_a_choice_falls_back_to_text(
-    make_adapter, workspace, client
-):
+async def test_a_second_blank_choice_answer_falls_back_to_text(make_adapter, workspace, client):
     models = ScriptedModels({None: [_ask_branch()]})
-    bad = {"action": "accept", "content": {"answer": "release"}}
+    bad = {"action": "accept", "content": {"answer": " "}}
     client.ext_answers = [bad, bad]
     adapter = await make_adapter(models, client_info=POOL)
     session_id, response = await _run(adapter, workspace)
@@ -312,3 +333,79 @@ async def test_other_clients_keep_choice_questions_as_text(make_adapter, workspa
     assert response.stop_reason == "end_turn"
     assert _ext(client) == []
     assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev\n\n"
+
+
+@pytest.mark.parametrize("text", ["release", "  Release Candidate  ", "Ship\nwith tests"])
+async def test_an_alternative_is_submitted_without_retry(make_adapter, workspace, client, text):
+    models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
+    client.ext_answers = [{"action": "accept", "content": {"answer": text}}]
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id, response = await _run(adapter, workspace)
+
+    assert response.stop_reason == "end_turn"
+    assert len(_requests(client)) == 1
+    assert _requests(client)[0][1]["requestedSchema"] == BRANCH_SCHEMA
+    assert client.texts(AgentMessageChunk, session_id)[-1] == repr(text) + "\n\n"
+
+
+async def test_cancel_while_a_pool_choice_form_is_open(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_ask_branch()]})
+    client.ext_gate = asyncio.Event()
+    client.ext_answers = [{"action": "accept", "content": {"answer": "release"}}]
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("push it")]))
+    await client.wait_for(lambda: bool(_requests(client)))
+    await adapter.cancel(session_id)
+    response = await asyncio.wait_for(prompt, TIMEOUT)
+
+    assert response.stop_reason == "cancelled"
+    assert len(_requests(client)) == 1
+    assert len(models.llms[None].calls) == 1  # no alternative was submitted
+    assert len(client.ext_answers) == 1  # pending form response was not consumed
+
+
+def _ask_typed_choice(*, free_text=False):
+    annotation = 'Literal["main", "dev"]' + (" | str" if free_text else "")
+    return cell(
+        "from typing import Literal\n"
+        "from pydantic import BaseModel\n"
+        "class BranchAnswer(BaseModel):\n"
+        f"    branch: {annotation}\n"
+        "return_result(NeedInput(question='Which branch?', answer_type=BranchAnswer))"
+    )
+
+
+async def test_a_typed_literal_or_string_accepts_an_alternative(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_ask_typed_choice(free_text=True), _show_answer()]})
+    client.ext_answers = [{"action": "accept", "content": {"branch": "release"}}]
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id, response = await _run(adapter, workspace)
+
+    assert response.stop_reason == "end_turn"
+    assert len(_requests(client)) == 1
+    assert _requests(client)[0][1]["requestedSchema"]["properties"]["branch"] == {
+        "title": "Branch",
+        "anyOf": [
+            {"oneOf": [{"const": "main", "title": "main"}, {"const": "dev", "title": "dev"}]},
+            {"type": "string"},
+        ],
+    }
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "BranchAnswer(branch='release')\n\n"
+
+
+async def test_a_typed_literal_retries_an_unlisted_answer(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_ask_typed_choice(), _show_answer()]})
+    client.ext_answers = [
+        {"action": "accept", "content": {"branch": "release"}},
+        {"action": "accept", "content": {"branch": " DEV "}},
+    ]
+    adapter = await make_adapter(models, client_info=POOL)
+    session_id, response = await _run(adapter, workspace)
+
+    assert response.stop_reason == "end_turn"
+    [(_, first), (_, second)] = _requests(client)
+    assert "anyOf" not in first["requestedSchema"]["properties"]["branch"]
+    assert second["message"].startswith("Which branch?\n\nThat answer was not accepted: branch:")
+    assert second["requestedSchema"] == first["requestedSchema"]
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "BranchAnswer(branch='dev')\n\n"

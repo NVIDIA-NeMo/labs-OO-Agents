@@ -9,11 +9,11 @@ builds the form directly and returns ``None`` for anything it cannot
 flatten; the host then asks in free text.
 
 Pool's own form request (``_poolside/elicitation``) shows string fields
-only, so ``pool_form_schema`` declares every field as a string, says the
-expected type in its description, and ``pool_answer`` converts the strings
-back with the ``answer_type``. A choice is a picker: a ``oneOf`` of
-``{"const", "title"}`` entries, and ``anyOf`` that picker or a string for a
-choice that also takes free text (as measured in Pool 1.0.16).
+only, so ``pool_form_schema`` uses string inputs, says the expected type in
+its description, and ``pool_answer`` converts them back with ``answer_type``.
+``options`` are suggestions: ``anyOf`` a picker (``oneOf`` of ``{"const", "title"}``
+entries) or a string, as measured in Pool 1.0.16. A typed string ``Literal``
+is a strict picker; ``Literal[...] | str`` deliberately also takes free text.
 """
 
 import types
@@ -99,9 +99,10 @@ def answer_from_content(need: NeedInput, content: dict[str, Any] | None) -> Any:
 def pool_form_schema(need: NeedInput) -> dict[str, Any] | None:
     """The Pool form for a question; ``None`` for yes/no or a type it cannot flatten.
 
-    Every property is a string: Pool declines a form with any other type.
-    A choice question is one ``answer`` field, a ``oneOf`` picker described
-    by the question. A yes/no question gives ``None``: the host asks it
+    Every input is a string: Pool declines a form with any other input type.
+    An ``options`` question is one ``answer`` field: suggestions in a picker
+    plus free text (``anyOf``), so an alternative needs no form dismissal.
+    A yes/no question gives ``None``: the host asks it
     with a permission request. A string ``Literal`` field is a picker, and
     ``Literal[...] | str`` the picker or free text (``anyOf``). ``int``,
     ``float``, ``bool`` and lists of strings (plain or ``Literal``) say what
@@ -111,7 +112,10 @@ def pool_form_schema(need: NeedInput) -> dict[str, Any] | None:
     if need.options is not None:
         if sorted(option.lower() for option in need.options) == ["no", "yes"]:
             return None
-        choice = {"type": "string", "description": need.question, **_picker(need.options)}
+        choice = {
+            "description": need.question,
+            "anyOf": [_picker(need.options), {"type": "string"}],
+        }
         return {"type": "object", "properties": {_ANSWER: choice}, "required": [_ANSWER]}
     if need.answer_type is None:
         properties: dict[str, Any] = {_ANSWER: {"type": "string", "title": need.question}}
@@ -145,19 +149,25 @@ def pool_form_schema(need: NeedInput) -> dict[str, Any] | None:
 def pool_answer(need: NeedInput, content: dict[str, Any] | None) -> Any:
     """The item to submit for an accepted Pool form; raises ``ValueError``.
 
-    The choice for a choice question: the text matches one ignoring case
-    and surrounding spaces, else ``ValueError`` says the choices. The text
-    for a free-text question. Else an ``answer_type`` instance, from
+    For ``options``, normalize a listed choice ignoring case and surrounding
+    spaces; preserve any other nonblank string exactly as entered. Missing,
+    blank or non-string answers raise ``ValueError`` rather than becoming text.
+    The text for a free-text question. Else an ``answer_type`` instance, from
     strings: an empty field is left out (its default applies) and a list
     field is split on commas; ``ValidationError`` when it does not convert.
     """
+    if content is not None and not isinstance(content, dict):
+        raise ValueError("That answer must be an object of form fields.")
     content = dict(content or {})
     if need.options is not None:
-        text = str(content.get(_ANSWER, "")).strip().lower()
+        answer = content.get(_ANSWER)
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError("Enter a choice or a nonblank text answer.")
+        text = answer.strip().lower()
         for option in need.options:
             if option.strip().lower() == text:
                 return option
-        raise ValueError("That answer was not one of: " + ", ".join(need.options))
+        return answer
     if need.answer_type is None:
         return str(content.get(_ANSWER, ""))
     values: dict[str, Any] = {}
