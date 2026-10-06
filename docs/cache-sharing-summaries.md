@@ -1,7 +1,7 @@
-# Cache-sharing background summaries
+# Cache-sharing summaries
 
-`TokenBudgetSummarizer` replaces older conversation messages with a summary while
-the agent keeps working. It asks the same model to summarize the conversation
+`TokenBudgetSummarizer` pauses the agent to summarize older conversation messages,
+then replaces them at the next turn boundary. It asks the same model to summarize the conversation
 using the request the agent just sent, plus a summary instruction. That lets
 the provider reuse its cached input. It does not copy the running agent or
 execute tools.
@@ -19,7 +19,9 @@ TokenBudgetSummarizer.install(
 await agent.aclose()
 ```
 
-The threshold starts a summary; `preserve_recent` keeps the newest events intact.
+The threshold starts a summary after a completed model call; the agent awaits it
+before continuing. This is a soft trigger, not a strict context cap.
+`preserve_recent` keeps the newest events intact.
 There is no separate summarizer model, mode setting or fallback request.
 `agent.aclose()` waits for registered background components to stop, including
 an unfinished summary. The coding agent calls it automatically on shutdown.
@@ -27,9 +29,10 @@ an unfinished summary. The coding agent calls it automatically on shutdown.
 ## What happens to the conversation
 
 The collapse range is chosen before the parent request. Recent events and the
-response just produced remain active. The parent continues while the summary
-runs. At most one summary waits or runs at a time. A completed summary is applied
-before the next turn only if the original event IDs still match.
+response just produced remain active. The parent waits while the summary runs;
+other agents and asynchronous work can continue. At most one summary waits or
+runs at a time. A completed summary is applied before the next turn only if the
+original event IDs still match.
 
 ## If a summary fails
 
@@ -69,7 +72,7 @@ rendered input; it is not used as a token-budget fallback.
 - `src/nooa/runtime/event_manager.py`: awaits registered close callbacks, so
   the agent does not need to know which background components are installed.
 - `tests/agents/test_forked_summarizer*.py`: check parent-request parity, HTTP
-  prefix equality, background execution, ownership, safe output handling and
+  prefix equality, blocking execution, ownership, safe output handling and
   collapse timing. These are permanent offline tests, not an experiment.
 
 Offline tests verify that the fork preserves the parent request's prefix.
@@ -80,7 +83,7 @@ Keep deployment-specific measurements with the configuration used to run them.
 ## Live release smoke test
 
 `tests/integration/test_summarizer_live.py` installs the summarizer on a real
-CodeAct agent. It requires a background summary, application on the next agent
+CodeAct agent. It requires a summary, application on the next agent
 turn, preservation of three handoff identifiers, access to the raw archived
 events, and a cache read on the summary request. It also checks the outgoing
 request prefix and that the fork adds no parent events or tool executions.

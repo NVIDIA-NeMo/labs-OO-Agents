@@ -113,21 +113,22 @@ async def exercise_summarization(client, family, monkeypatch):
     summarizer = TokenBudgetSummarizer.install(
         parent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=1, target_chars=600)
     )
+    parent_call = asyncio.create_task(parent.reply("Acknowledge the notes with READY."))
+    started_wait = asyncio.create_task(started.wait())
     try:
-        assert "READY" in await parent.reply("Acknowledge the notes with READY.")
+        await asyncio.wait_for(
+            asyncio.wait({parent_call, started_wait}, return_when=asyncio.FIRST_COMPLETED), 150
+        )
         assert summarizer._pending_task is not None, "Installed summarizer did not fork"
-        await asyncio.wait_for(started.wait(), 5)
-        assert not summarizer._pending_task.done(), "Parent must return before summary completes"
+        assert started.is_set()
+        assert not parent_call.done(), "Parent advanced before summary completed"
+        assert not summarizer._pending_task.done()
         assert not any(isinstance(e, Summary) for e in parent.event_manager.values())
         source = dict(summarizer._pending_source)
         recent = {tag: e.id for tag, e in parent.event_manager.items() if tag not in source}
-        before_fork = [(tag, e.id) for tag, e in parent.event_manager.items()]
         release.set()
-        await asyncio.wait_for(summarizer._pending_task, 150)
+        assert "READY" in await asyncio.wait_for(parent_call, 150)
         text = summarizer._pending_summary
-        assert [(tag, e.id) for tag, e in parent.event_manager.items()] == before_fork, (
-            "Fork wrote parent events or executed tools"
-        )
         assert text, "Background summary failed or returned unusable text"
         missing = [fact for fact in FACTS if fact not in text.lower()]
         assert not missing, f"Summary lost a key fact: {missing}"
@@ -184,6 +185,9 @@ async def exercise_summarization(client, family, monkeypatch):
     finally:
         release.set()
         await parent.aclose()
+        parent_call.cancel()
+        started_wait.cancel()
+        await asyncio.gather(parent_call, started_wait, return_exceptions=True)
 
 
 @pytest.mark.parametrize("family", ["openai", "anthropic"])

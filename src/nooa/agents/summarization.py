@@ -614,7 +614,7 @@ def context_budget(
 # Example Summarizers (Good Defaults)
 # =============================================================================
 class TokenBudgetSummarizer(SummarizationAgent):
-    """Summarize old events asynchronously when provider input exceeds the budget.
+    """Summarize old events before the agent continues when input exceeds the budget.
 
     Fork the completed parent request with a trailing summary
     instruction. Tools, model settings and cache key stay unchanged so the
@@ -628,6 +628,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
     parents drop their output schema on the fork so it can return summary text;
     that schema change may reduce cache reuse.
 
+    The parent awaits the summary before returning its response to the agent.
     Completed summaries apply at BeforeTurn, provided the selected event IDs
     still match. Owners should await aclose() before closing the shared client.
 
@@ -753,6 +754,9 @@ class TokenBudgetSummarizer(SummarizationAgent):
         self._pending_source = source
         self._pending_range = (start, end)
         self._pending_task = asyncio.create_task(self._run_fork(fork))
+        # Pause this agent until compaction finishes. Keep the completed task
+        # pending so history is still replaced at the next BeforeTurn boundary.
+        await self._pending_task
         return ctx
 
     @hidden
