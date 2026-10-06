@@ -27,22 +27,24 @@ from nooa.unifiedllm import AssistantText, FakeLLMClient, LLMResponse
 
 
 class Team(Enum):
-    """Team that owns a message.
-
-    Attributes:
-        BILLING: Payments and refunds.
-        TECHNICAL: Bugs and outages.
-    """
-
     BILLING = "billing"
     TECHNICAL = "technical"
+
+
+TEAM_CRITERIA = Criteria(
+    by_value={
+        Team.BILLING: "Payments and refunds.",
+        Team.TECHNICAL: "Bugs and outages.",
+    }
+)
+TeamChoice = Annotated[Team, TEAM_CRITERIA]
 
 
 Severity = Annotated[float, Criteria("Cosmetic", "Degraded", "Outage")]
 
 
 class Triage(BaseModel):
-    team: Annotated[Team, Instructions("Which team owns it?")]
+    team: Annotated[TeamChoice, Instructions("Which team owns it?")]
     urgent: Annotated[bool, Instructions("Is it urgent?")]
     severity: Annotated[Severity, Instructions("How severe is it?")]
 
@@ -99,7 +101,7 @@ async def test_chat_backed_agent_answers_primitive_results() -> None:
 
     class Router(Agent, decision_model=DecisionModel.from_llm(llm)):
         @strategy(DecideStrategy())
-        async def team(self, message: str) -> Team:
+        async def team(self, message: str) -> TeamChoice:
             """Which team owns the message?"""
             ...
 
@@ -185,7 +187,7 @@ async def test_chat_backed_model_retries_an_invalid_reply() -> None:
 
     class Router(Agent, decision_model=DecisionModel.from_llm(llm)):
         @strategy(DecideStrategy())
-        async def team(self, message: str) -> Team:
+        async def team(self, message: str) -> TeamChoice:
             """Which team owns the message?"""
             ...
 

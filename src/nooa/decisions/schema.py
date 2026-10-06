@@ -7,7 +7,6 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import math
-import re
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -299,13 +298,11 @@ def _choice_values(
         raise TypeError(f"Choice output {name!r} must use an Enum or Literal type")
     members = list(choice_type)
     if criteria is None:
-        inferred = _enum_docstring_criteria(choice_type)
-        if inferred is None:
-            raise TypeError(
-                f"Enum output {name!r} requires Criteria(...) or complete Attributes documentation"
-            )
-        descriptions = [inferred[member.name] for member in members]
-    elif isinstance(criteria.value, dict):
+        raise TypeError(
+            f"Enum output {name!r} requires Criteria(by_value={{{choice_type.__name__}.MEMBER: "
+            "...}) describing every member"
+        )
+    if isinstance(criteria.value, dict):
         if set(criteria.value) != set(members):
             raise ValueError(f"Enum output {name!r} criteria must cover every non-alias member")
         descriptions = [criteria.value[member] for member in members]
@@ -317,21 +314,6 @@ def _choice_values(
         ChoiceValue(member.name, member, descriptions[index])
         for index, member in enumerate(members)
     )
-
-
-def _enum_docstring_criteria(enum_type: type[Enum]) -> dict[str, str] | None:
-    """Read complete enum-member descriptions from an ``Attributes`` docstring."""
-    doc = inspect.cleandoc(enum_type.__doc__ or "")
-    match = re.search(r"(?ms)^Attributes:\s*\n(?P<body>.*?)(?:\n\S|\Z)", doc)
-    if not match:
-        return None
-    result: dict[str, str] = {}
-    for line in match.group("body").splitlines():
-        item = re.match(r"\s*([A-Za-z_]\w*):\s*(.+)", line)
-        if item:
-            result[item.group(1)] = item.group(2).strip()
-    names = {member.name for member in enum_type}
-    return result if set(result) >= names else None
 
 
 def _unwrap_annotated(annotation: Any) -> tuple[Any, list[Any]]:

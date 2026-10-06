@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from enum import Enum
 from typing import Annotated
 
 import pytest
@@ -861,3 +862,29 @@ async def test_standalone_call_site_decision_model(monkeypatch) -> None:
     assert [r.state["inputs"]["message"] for r in decorated.requests] == ["c"]
     with pytest.raises(TypeError, match="must be a decision model or alias"):
         await urgent("d", decision_model=lambda agent: decorated)
+
+
+@pytest.mark.asyncio
+async def test_enum_docstring_does_not_supply_criteria_before_any_request() -> None:
+    class Department(Enum):
+        """Support team.
+
+        Attributes:
+            BILLING: Payments and refunds.
+            TECHNICAL: Bugs and outages.
+        """
+
+        BILLING = "billing"
+        TECHNICAL = "technical"
+
+    client = FakeDecisionClient()
+
+    class Router(Agent, decision_model=client):
+        @strategy(DecideStrategy())
+        async def department(self, message: str) -> Department:
+            """Choose the team that should handle the message."""
+            ...
+
+    with pytest.raises(TypeError, match=r"requires Criteria\(by_value="):
+        await Router().department("Refund please")
+    assert client.requests == []

@@ -143,20 +143,26 @@ probabilities and choices while its chat LLM handles ordinary generation:
 ```python
 import os
 from enum import StrEnum
+from typing import Annotated
 
-from nooa import Agent, DecisionClient, DecideStrategy, strategy
+from nooa import Agent, Criteria, DecisionClient, DecideStrategy, strategy
 
 
 class Department(StrEnum):
-    """Support team responsible for a message.
-
-    Attributes:
-        BILLING: Payments, invoicing, and refunds.
-        TECHNICAL: Bugs, outages, and integrations.
-    """
-
     BILLING = "billing"
     TECHNICAL = "technical"
+
+
+# Criteria tell the decision model what each option means.
+DepartmentChoice = Annotated[
+    Department,
+    Criteria(
+        by_value={
+            Department.BILLING: "Payments, invoices, and refunds.",
+            Department.TECHNICAL: "Bugs, outages, and integrations.",
+        }
+    ),
+]
 
 
 decision_model = DecisionClient(
@@ -168,7 +174,7 @@ decision_model = DecisionClient(
 
 class SupportAgent(Agent, llm=llm, decision_model=decision_model):
     @strategy(DecideStrategy())
-    async def route(self, message: str) -> Department:
+    async def route(self, message: str) -> DepartmentChoice:
         """Choose the team that should handle the request."""
         ...
 

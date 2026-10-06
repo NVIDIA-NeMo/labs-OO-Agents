@@ -13,6 +13,7 @@ from nooa import (
     Agent,
     BooleanDecision,
     ChoiceDecision,
+    Criteria,
     DecideStrategy,
     DecisionClient,
     Instructions,
@@ -27,15 +28,17 @@ METADATA = {"probabilities": "one-hot", "calibration": "none"}
 
 
 class Team(Enum):
-    """Team that owns a message.
-
-    Attributes:
-        BILLING: Payments and refunds.
-        TECHNICAL: Bugs and outages.
-    """
-
     BILLING = "billing"
     TECHNICAL = "technical"
+
+
+TEAM_CRITERIA = Criteria(
+    by_value={
+        Team.BILLING: "Payments and refunds.",
+        Team.TECHNICAL: "Bugs and outages.",
+    }
+)
+TeamDecision = Annotated[ChoiceDecision[Team], TEAM_CRITERIA]
 
 
 def _client(answers: dict) -> DecisionClient:
@@ -54,7 +57,7 @@ TEAM_ANSWER = {
 
 
 class Triage(BaseModel):
-    team: Annotated[ChoiceDecision[Team], Instructions("Which team owns it?")]
+    team: Annotated[TeamDecision, Instructions("Which team owns it?")]
     urgent: Annotated[BooleanDecision, Instructions("Is it urgent?")]
     escalate: Annotated[bool, Instructions("Should it be escalated?")]
 
@@ -73,7 +76,7 @@ def _record(agent: Agent) -> DecisionRecord:
 async def test_raw_response_is_off_by_default() -> None:
     class Router(Agent, decision_model=_client({"result": TEAM_ANSWER})):
         @strategy(DecideStrategy())
-        async def team(self, message: str) -> ChoiceDecision[Team]:
+        async def team(self, message: str) -> TeamDecision:
             """Which team owns the message?"""
             ...
 
@@ -88,7 +91,7 @@ async def test_raw_response_is_off_by_default() -> None:
 async def test_opt_in_attaches_read_only_raw_response_and_records_it() -> None:
     class Router(Agent, decision_model=_client({"result": TEAM_ANSWER})):
         @strategy(DecideStrategy(include_raw_response=True))
-        async def team(self, message: str) -> ChoiceDecision[Team]:
+        async def team(self, message: str) -> TeamDecision:
             """Which team owns the message?"""
             ...
 
@@ -148,7 +151,7 @@ async def test_raw_response_is_excluded_from_equality_repr_and_dumps() -> None:
 async def test_short_circuit_response_without_raw_body() -> None:
     class Router(Agent, decision_model=_client({"result": TEAM_ANSWER})):
         @strategy(DecideStrategy(include_raw_response=True))
-        async def team(self, message: str) -> ChoiceDecision[Team]:
+        async def team(self, message: str) -> TeamDecision:
             """Which team owns the message?"""
             ...
 

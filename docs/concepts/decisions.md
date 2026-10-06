@@ -8,21 +8,26 @@ agent's chat LLM remains available for its other generation methods.
 ```python
 import os
 from enum import StrEnum
+from typing import Annotated
 
-from nooa import Agent, DecisionClient, DecideStrategy, strategy
+from nooa import Agent, Criteria, DecisionClient, DecideStrategy, strategy
 from nooa.unifiedllm.registry import get_llm_client
 
 
 class Department(StrEnum):
-    """Support team responsible for a message.
-
-    Attributes:
-        BILLING: Payments, invoicing, and refunds.
-        TECHNICAL: Bugs, outages, and integrations.
-    """
-
     BILLING = "billing"
     TECHNICAL = "technical"
+
+
+DepartmentChoice = Annotated[
+    Department,
+    Criteria(
+        by_value={
+            Department.BILLING: "Payments, invoices, and refunds.",
+            Department.TECHNICAL: "Bugs, outages, and integrations.",
+        }
+    ),
+]
 
 
 llm = get_llm_client("gpt-5-mini")
@@ -35,7 +40,7 @@ decision_model = DecisionClient(
 
 class Router(Agent, llm=llm, decision_model=decision_model):
     @strategy(DecideStrategy())
-    async def department(self, message: str) -> Department:
+    async def department(self, message: str) -> DepartmentChoice:
         """Choose the team that should handle the message."""
         ...
 
@@ -45,9 +50,9 @@ class Router(Agent, llm=llm, decision_model=decision_model):
 ```
 
 The decision model chooses among the enum's members and reads a description,
-or criterion, for each one. Here the criteria come from the enum's
-`Attributes:` docstring. [Describe enum options](#describe-enum-options) shows
-how to declare them explicitly instead, and the exact docstring format.
+or criterion, for each one. `DepartmentChoice` declares those criteria once,
+next to the enum, so any method can return it.
+[Describe enum options](#describe-enum-options) explains the rules.
 
 ## Describe enum options
 
@@ -59,48 +64,22 @@ Two annotations shape a choice:
 - `Criteria(...)` describes the possible answers: what each option means.
 
 The model is sent each member's name as the option ID, with its criterion as
-the description. Every non-alias member needs a criterion. There are three
-ways to supply them, in order of preference.
+the description.
 
 ### Map criteria to members
 
-Pass a mapping keyed by the enum members themselves:
+Describe an enum with `Criteria(by_value=...)`, keyed by the enum members
+themselves, as `DepartmentChoice` does above:
 
-```python
-from enum import Enum
-from typing import Annotated
+- The keys must be the members (`Department.BILLING`), not their names or
+  values.
+- The mapping must cover every non-alias member exactly. Adding a member to the
+  enum without adding its criterion raises a `ValueError` when the method is
+  called, before any request is sent.
+- Each description stays attached to its member, so reordering the enum is
+  safe.
 
-from nooa import Criteria
-
-
-class Department(Enum):
-    BILLING = "billing"
-    TECHNICAL = "technical"
-
-
-DepartmentChoice = Annotated[
-    Department,
-    Criteria(
-        by_value={
-            Department.BILLING: "Payments, invoices, and refunds.",
-            Department.TECHNICAL: "Bugs, outages, and integrations.",
-        }
-    ),
-]
-
-
-class Router(Agent, decision_model=decision_model):
-    @strategy(DecideStrategy())
-    async def department(self, message: str) -> DepartmentChoice:
-        """Choose the team that should handle the message."""
-        ...
-```
-
-The keys must be the members (`Department.BILLING`), not their names or
-values, and the mapping must cover every non-alias member exactly. The enum
-needs no docstring. Because each description is attached to its member, the
-mapping stays correct if members are reordered. A criterion can also be a
-JSON object or array when plain text is not enough:
+A criterion can also be a JSON object or array when plain text is not enough:
 
 ```python
 Department.BILLING: {
@@ -109,46 +88,25 @@ Department.BILLING: {
 },
 ```
 
-### List criteria in member order
-
-Positional criteria are matched to the members in declaration order, which is
-the order of `list(Department)`:
-
-```python
-DepartmentChoice = Annotated[
-    Department,
-    Criteria(
-        "Payments, invoices, and refunds.",  # Department.BILLING
-        "Bugs, outages, and integrations.",  # Department.TECHNICAL
-    ),
-]
-```
-
-The number of criteria must equal the number of non-alias members. Reordering
-members without reordering their criteria silently changes which description
-belongs to each member. Adding a member requires a corresponding criterion in
-the same position. Prefer the mapping for enums that may change.
-
 ### Reuse the annotation
 
 A named annotation such as `DepartmentChoice` can be reused wherever the
 choice appears.
 
-To keep the evidence, wrap `ChoiceDecision` instead. Its criteria are declared
-the same way:
+To keep the evidence, wrap `ChoiceDecision` in the same criteria:
 
 ```python
 from nooa import ChoiceDecision
 
-DepartmentDecision = Annotated[
-    ChoiceDecision[Department],
-    Criteria(
-        by_value={
-            Department.BILLING: "Payments, invoices, and refunds.",
-            Department.TECHNICAL: "Bugs, outages, and integrations.",
-        }
-    ),
-]
+DEPARTMENT_CRITERIA = Criteria(
+    by_value={
+        Department.BILLING: "Payments, invoices, and refunds.",
+        Department.TECHNICAL: "Bugs, outages, and integrations.",
+    }
+)
+
+DepartmentChoice = Annotated[Department, DEPARTMENT_CRITERIA]
+DepartmentDecision = Annotated[ChoiceDecision[Department], DEPARTMENT_CRITERIA]
 ```
 
 To abstain below a threshold, make the reused annotation nullable:
@@ -176,56 +134,21 @@ class Triage(BaseModel):
 The field's `Instructions` say what to decide for that field, and
 `DepartmentChoice` says what each department means.
 
-### Use the enum's docstring
+### Enum docstrings and other sources are not read
 
-If you don't pass `Criteria`, NOOA reads the criteria from the enum's own
-docstring, as in the first example on this page:
+An enum used as a decision result needs explicit `Criteria`. Without it,
+calling the method raises a `TypeError` that asks for
+`Criteria(by_value=...)`, before any request is sent. NOOA does not read
+criteria from the enum's docstring (including an `Attributes:` section),
+annotations on individual members, comments, custom attributes, or member
+values. Keeping criteria in the annotation means that editing an enum's
+documentation can't change a decision's meaning, and the same enum can have
+different criteria in different decisions.
 
-```python
-class Department(Enum):
-    """Support team responsible for a message.
-
-    Attributes:
-        BILLING: Payments, invoices, and refunds.
-        TECHNICAL: Bugs, outages, and integrations.
-    """
-
-    BILLING = "billing"
-    TECHNICAL = "technical"
-```
-
-Method docstrings are used as written, but this section is parsed: its
-contents become the criteria sent with each call. The format is therefore
-strict:
-
-- The section starts with a line that is exactly `Attributes:`, in the enum's
-  docstring. The section ends at the next line that is not indented. Other
-  heading styles, such as NumPy's `Attributes` with an underline, are not
-  recognized.
-- Each entry is `MEMBER_NAME: description`. Use the member's name (`BILLING`),
-  not its value (`"billing"`).
-- Every non-alias member must have an entry. Entries for other names, such as
-  aliases, are ignored.
-- Each description must fit on one line. Continuation lines are not read: a
-  wrapped description is cut off at the end of its first line.
-
-If the section is missing or doesn't list every member, calling the method
-raises a `TypeError` that asks for `Criteria(...)` or complete `Attributes`
-documentation. This happens before any request is sent.
-
-Explicit `Criteria` replaces the docstring entirely. The two are never
-merged, so an explicit mapping must still cover every member, even those the
-docstring describes.
-
-Other places that look like descriptions are not read. These include
-annotations on individual members, comments next to members, custom attributes
-or methods on the enum, and the members' values. Use `Criteria` to describe an
-enum you can't or don't want to document this way.
-
-`Literal[...]` choices work similarly, without a docstring option. With no
-`Criteria`, each literal value is its own description. Use
+`Literal[...]` choices are different: with no `Criteria`, each literal value is
+its own description. To describe them, use
 `Criteria(by_value={"low": ..., "high": ...})`, keyed by the literal values, or
-positional criteria in the order of the literal.
+positional criteria in the literal's order.
 
 ## Decision-only agents
 
@@ -235,7 +158,7 @@ LLM. Configure only the decision model:
 ```python
 class SupportRouter(Agent, decision_model=decision_model):
     @strategy(DecideStrategy())
-    async def department(self, message: str) -> Department:
+    async def department(self, message: str) -> DepartmentChoice:
         """Choose the team that should handle the message."""
         ...
 
@@ -271,7 +194,7 @@ class SupportRouter(Agent, decision_model=decision_model):
     @strategy(DecideStrategy())
     async def confident_department(
         self, message: str
-    ) -> Annotated[ChoiceDecision[Department], Threshold(0.8)]:
+    ) -> Annotated[DepartmentDecision, Threshold(0.8)]:
         """Choose the team that should handle the message."""
         ...
 
@@ -295,7 +218,7 @@ So a result can have `probabilities[selected] == 0.54` and `value is None` for
 exposes `probability_true`, and `value` is `probability_true >= threshold`
 (default `0.5`). A primitive enum or `Literal` result with a `Threshold` must
 include `None` in its annotation, for example
-`Annotated[Department | None, Threshold(0.8)]`.
+`Annotated[DepartmentChoice | None, Threshold(0.8)]`.
 
 ## Advanced usage
 
@@ -419,7 +342,7 @@ class Triage(BaseModel):
         ),
     ]
     department: Annotated[
-        Department,
+        DepartmentChoice,
         Instructions("Select the team that should own the request."),
     ]
 
@@ -478,7 +401,7 @@ chat_decisions = DecisionModel.from_llm(llm)
 
 class Router(Agent, decision_model=chat_decisions):
     @strategy(DecideStrategy())
-    async def department(self, message: str) -> Department:
+    async def department(self, message: str) -> DepartmentChoice:
         """Choose the team that should handle the message."""
         ...
 
@@ -518,9 +441,8 @@ The generation trace span carries the same identifiers as
 The supported primitive outputs are:
 
 - `bool`, optionally with criteria for both outcomes and a `Threshold`.
-- An enum or `Literal[...]`, with mapped or positional criteria. For enums,
-  criteria can also come from the enum's docstring; see
-  [Describe enum options](#describe-enum-options).
+- An enum with mapped criteria (see [Describe enum options](#describe-enum-options)),
+  or a `Literal[...]`.
 - `float`, with 2–10 ordered score criteria. A bare `float` is invalid.
 
 Use `BooleanDecision`, `ChoiceDecision[E]`, or `ScoreDecision` instead of a
@@ -535,7 +457,7 @@ standard answers, opt in when you create the strategy:
 ```python
 class SupportAgent(Agent, decision_model=decision_model):
     @strategy(DecideStrategy(include_raw_response=True))
-    async def department(self, message: str) -> ChoiceDecision[Department]:
+    async def department(self, message: str) -> DepartmentDecision:
         """Choose the team that should handle the message."""
         ...
 

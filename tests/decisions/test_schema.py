@@ -23,7 +23,7 @@ class Department(Enum):
 
 
 class DocumentedDepartment(Enum):
-    """A department with descriptions embedded in its type.
+    """A department documented only through its docstring.
 
     Attributes:
         BILLING: Payments and refunds.
@@ -119,8 +119,35 @@ def test_literal_uses_collision_safe_wire_ids() -> None:
     assert result == "1"
 
 
-def test_enum_attributes_supply_choice_criteria() -> None:
-    schema = compile_decision_schema(DocumentedDepartment, "Choose the owner.")
+def test_enum_docstring_alone_does_not_supply_criteria() -> None:
+    with pytest.raises(
+        TypeError, match=r"requires Criteria\(by_value=\{DocumentedDepartment\.MEMBER"
+    ):
+        compile_decision_schema(DocumentedDepartment, "Choose the owner.")
+
+
+def test_detailed_and_composite_enum_outputs_require_criteria() -> None:
+    class Triage(BaseModel):
+        department: Annotated[DocumentedDepartment, Instructions("Which team owns it?")]
+
+    for result_type in (ChoiceDecision[DocumentedDepartment], Triage):
+        with pytest.raises(TypeError, match="requires Criteria"):
+            compile_decision_schema(result_type, "Choose the owner.")
+
+
+def test_mapped_criteria_describe_enum_members() -> None:
+    schema = compile_decision_schema(
+        Annotated[
+            DocumentedDepartment,
+            Criteria(
+                by_value={
+                    DocumentedDepartment.BILLING: "Payments and refunds.",
+                    DocumentedDepartment.TECHNICAL: "Bugs and outages.",
+                }
+            ),
+        ],
+        "Choose the owner.",
+    )
 
     assert schema.outputs[0].question().criteria == {
         "BILLING": "Payments and refunds.",

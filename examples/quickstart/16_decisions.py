@@ -28,21 +28,26 @@ from nooa import (
 
 
 class Department(StrEnum):
-    """Support team responsible for a message.
-
-    Attributes:
-        BILLING: Payments, invoices, and refunds.
-        TECHNICAL: Bugs, outages, and integrations.
-        ACCOUNT: Sign-in, profile, and access changes.
-    """
-
     BILLING = "billing"
     TECHNICAL = "technical"
     ACCOUNT = "account"
 
 
+# Criteria tell the decision model what each department means. Declare them
+# once and reuse them for plain and detailed results.
+DEPARTMENT_CRITERIA = Criteria(
+    by_value={
+        Department.BILLING: "Payments, invoices, and refunds.",
+        Department.TECHNICAL: "Bugs, outages, and integrations.",
+        Department.ACCOUNT: "Sign-in, profile, and access changes.",
+    }
+)
+DepartmentChoice = Annotated[Department, DEPARTMENT_CRITERIA]
+DepartmentDecision = Annotated[ChoiceDecision[Department], DEPARTMENT_CRITERIA]
+
+
 class Triage(BaseModel):
-    department: Annotated[Department, Instructions("Select the team that owns the request.")]
+    department: Annotated[DepartmentChoice, Instructions("Select the team that owns the request.")]
     urgent: Annotated[
         bool,
         Instructions("Decide whether the request needs immediate action."),
@@ -59,7 +64,7 @@ class Triage(BaseModel):
 # LLM is configured. Pass llm=... as well to mix in chat generation methods.
 class SupportRouter(Agent):
     @strategy(DecideStrategy())
-    async def department(self, message: str) -> Department:
+    async def department(self, message: str) -> DepartmentChoice:
         """Choose the team that should handle the message."""
         ...
 
@@ -68,7 +73,7 @@ class SupportRouter(Agent):
     @strategy(DecideStrategy())
     async def confident_department(
         self, message: str
-    ) -> Annotated[ChoiceDecision[Department], Threshold(0.8)]:
+    ) -> Annotated[DepartmentDecision, Threshold(0.8)]:
         """Choose the team that should handle the message."""
         ...
 
@@ -132,5 +137,5 @@ if __name__ == "__main__":
 #
 # Since the update I'm being billed for seats I removed and my teammates lost access.
 #   department: billing
-#   selected: billing (p=0.54, confidence=0.32) -> manual review
+#   selected: billing (p=0.45, confidence=0.18) -> manual review
 #   triage: billing, urgent=True
