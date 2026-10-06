@@ -12,7 +12,47 @@ nemo-harbor --help
 See the [main repository](https://github.com/NVIDIA-NeMo/labs-OO-Agents) for
 documentation.
 
-Two agent variants are available through `nemo-harbor --agent-type`:
+## Running the coding agent headless
+
+`nooa-bench run` runs one task with nooa-coder's coding agent, without
+Harbor. The agent works unattended in the workspace directory, and its
+session is stored in `.nooa/sessions` there (or in `NOOA_SESSIONS_DIR`), so
+it can be opened afterwards like any other session:
+
+```bash
+NEMO_OO_LLM_CONFIG=llm_config.yaml nooa-bench run --workspace /tmp/task --model glm-5.3 \
+    "Create a file hello.py that prints hello, then run it."
+```
+
+Standard output carries only the result, one JSON object with `status`
+(`done` or `stopped`), `stopped` (why the run stopped without finishing),
+`message`, `explanation`, `result` (the `TaskResult`), `session_id`,
+`turns` and `usage`. Logs go to standard error. The exit code is 0 when the
+agent finished and 1 otherwise. A turn that ends waiting on a job is
+followed by the turn the job's delivery starts; `--max-turns` (default 10)
+stops a run whose last allowed turn is still waiting, and `--timeout`
+(seconds, no default) stops it after that time.
+
+To run a Harbor benchmark with the same agent, set `agent_type: coder` (and a
+`git_ref` that has it) in the agent's `kwargs` in
+`examples/benchmarks/harbor_minimal.yaml`, then run from the repository root:
+
+```bash
+PYTHONPATH=examples/benchmarks harbor run --config examples/benchmarks/harbor_minimal.yaml
+```
+
+Harbor then runs `nemo-harbor --agent-type coder` in each task container.
+The agent works in the task's working directory (`--working-dir`, else
+`/testbed` or `/app`). The example adapter sets
+`NOOA_SESSIONS_DIR=/logs/agent/sessions`, so the session is kept with the
+task's logs; `NOOA_SESSIONS_DIR` pointed at that directory lists it. Token
+counts come from the session's usage, children included, and
+`trajectory.json` holds the root agent's events.
+
+## Agent types
+
+Three agent types are available through `nemo-harbor --agent-type`: `coder`
+(above) and two variants on the older agent loop:
 
 - `bench` — `BenchAgent` in `nooa_bench.bench_agent`: compact CodeAct baseline
   with automatic summarization and optional delegation.

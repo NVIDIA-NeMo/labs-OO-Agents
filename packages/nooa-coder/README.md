@@ -20,6 +20,14 @@ state when it can be restored. `NOOA_SESSIONS_DIR`, or an explicit
 for all workspaces instead. A `SessionRegistry` serves one such directory;
 a subagent's session goes in its root's.
 
+`run_task(options, task)` runs one task unattended in a new tree: the root
+runs `handle_batch` turns until the agent returns `Done`, follows a turn
+that ends `Waiting` to the next one, and stops at `max_turns` or `timeout`.
+It returns a `TaskRun` with the final `Done` and its `TaskResult`, the
+reason it stopped otherwise, the turn count, the usage and the root agent's
+events. `nooa-bench run` and the benchmark runner's `coder` agent type use
+it.
+
 A host never holds a session's agent (`Session._agent` is private). It
 submits items (`submit`, `prompt`, `steer`, `withdraw`, `cancel`) and reads
 and changes the session through data: `info`, `transcript()`, `channels()`,
