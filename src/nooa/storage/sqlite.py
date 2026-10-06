@@ -351,6 +351,59 @@ class SQLiteEventBackend:
                 self._raise_for_db_error(tag, e)
             self._next_tag_num = max(self._next_tag_num, _tag_max_num(tag) + 1)
 
+    def append_batch(self, events: list[EventBase]) -> list[str]:
+        """Allocate tags and append atomically, without event observers.
+
+        Unlike single-event store's reconnect/retry policy, a failed batch
+        propagates. Counters advance only after the transaction succeeds.
+        """
+        from nooa.runtime.event_backend import _validate_fresh_batch
+
+        with self._lock:
+            _validate_fresh_batch(
+                events,
+                self,
+                contains_id=lambda identity: (
+                    self._conn.execute(
+                        "SELECT 1 FROM events WHERE event_id = ? LIMIT 1", (identity,)
+                    ).fetchone()
+                    is not None
+                ),
+            )
+            if not events:
+                return []
+            tags = [str(self._next_tag_num + i) for i in range(len(events))]
+            rows = []
+            for i, (tag, event) in enumerate(zip(tags, events, strict=True)):
+                # Serialize a tagged copy; publish caller tags only after commit.
+                stored = event.model_copy(update={"tag": tag})
+                rows.append(
+                    (
+                        tag,
+                        event.id,
+                        event.event_type,
+                        event.status.value,
+                        self._serialize(stored),
+                        self._insertion_counter + i,
+                    )
+                )
+            position = self._max_position() + 1
+            with self._conn:
+                self._conn.executemany(
+                    "INSERT INTO events (tag, event_id, event_type, status, data, insertion_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+                self._conn.executemany(
+                    "INSERT INTO active_tags (position, tag) VALUES (?, ?)",
+                    [(position + i, tag) for i, tag in enumerate(tags)],
+                )
+            for tag, event in zip(tags, events, strict=True):
+                event.tag = tag
+            self._next_tag_num += len(events)
+            self._insertion_counter += len(events)
+            return tags
+
     def _raise_for_db_error(self, tag: str, exc: sqlite3.DatabaseError) -> typing.NoReturn:
         """Re-raise a write-path DatabaseError, typed if it indicates corruption.
 

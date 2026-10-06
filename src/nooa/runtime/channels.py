@@ -19,8 +19,10 @@ registration + aggregation.
 import asyncio
 import inspect
 import logging
+import threading
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Coroutine
+from functools import wraps
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import Field
@@ -65,6 +67,7 @@ class ChannelItemConsumed(EventBase):
 
     channel: str
     item: Annotated[Any, Field(repr=False)] = None
+    batch: bool = False
 
 
 class ChannelItemsDiscarded(EventBase):
@@ -209,6 +212,17 @@ def _default_event_preview(value: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _channel_locked(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._lock:
+            if self._claiming and method.__name__ != "snapshot":
+                raise RuntimeError("channel mutation during batch recording")
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
 class Channel[T]:
     """A named channel for agent input.
 
@@ -248,6 +262,8 @@ class Channel[T]:
                 "Use QueueManager.queue() / QueueManager.event() factories "
                 "rather than constructing Channel directly."
             )
+        self._lock = threading.RLock()
+        self._claiming = False
         self.name = name
         self.mode: ChannelMode = mode
         self._event_manager = event_manager
@@ -265,6 +281,7 @@ class Channel[T]:
 
     # ---- producer side ---------------------------------------------------
 
+    @_channel_locked
     def put(self, item: T) -> None:
         """Push *item* through the channel.
 
@@ -329,6 +346,7 @@ class Channel[T]:
                     continue
             return
 
+    @_channel_locked
     def _restore_front(self, item: T) -> None:
         """Restore *item* at the head and wake a waiter to claim it."""
         self._items.appendleft(item)
@@ -356,11 +374,14 @@ class Channel[T]:
                 f"_drain_one is queue-mode only; channel {self.name!r} is {self.mode}"
             )
         while True:
-            if self._items:
-                return self._items.popleft()
-            loop = asyncio.get_running_loop()
-            waiter: asyncio.Future[Any] = loop.create_future()
-            self._waiters.append(waiter)
+            with self._lock:
+                if self._claiming:
+                    raise RuntimeError("channel consumption during batch recording")
+                if self._items:
+                    return self._items.popleft()
+                loop = asyncio.get_running_loop()
+                waiter: asyncio.Future[Any] = loop.create_future()
+                self._waiters.append(waiter)
             try:
                 await waiter
             except asyncio.CancelledError:
@@ -391,7 +412,7 @@ class Channel[T]:
         self._fire_on_get(item)
         return item
 
-    def _fire_on_get(self, item: T) -> None:
+    def _fire_on_get(self, item: T, *, batch: bool = False) -> None:
         """Fire ``on_get`` for *item*, swallowing any exception.
 
         Catches ``BaseException`` deliberately. ``get()`` has already
@@ -405,7 +426,7 @@ class Channel[T]:
                 self._on_get(item)
             except BaseException:
                 logger.exception("Channel(%s).on_get raised", self.name)
-        self._publish(ChannelItemConsumed(channel=self.name, item=item))
+        self._publish(ChannelItemConsumed(channel=self.name, item=item, batch=batch))
 
     def _publish(self, event: EventBase) -> None:
         """Deliver a runtime event to the ``event_manager``'s subscribers, if any.
@@ -420,6 +441,7 @@ class Channel[T]:
         except BaseException:
             logger.exception("Channel(%s) could not publish %s", self.name, event.event_type)
 
+    @_channel_locked
     def drain(self) -> list[T]:
         """Pop every buffered item now, firing ``on_get`` for each.
 
@@ -443,6 +465,7 @@ class Channel[T]:
             drained.append(item)
         return drained
 
+    @_channel_locked
     def set_on_get(self, callback: Callable[[T], None] | None) -> None:
         """Late-bind the ``on_get`` hook (queue-mode only).
 
@@ -470,10 +493,12 @@ class Channel[T]:
         """True if a consumer is currently blocked on ``get()`` (queue mode)."""
         return any(not w.done() for w in self._waiters)
 
+    @_channel_locked
     def snapshot(self) -> list[T]:
         """Return a copy of pending items (head to tail). Non-consuming."""
         return list(self._items)
 
+    @_channel_locked
     def pop_last(self) -> T | None:
         """Remove and return the most recently put item (queue-mode tail).
 
@@ -487,6 +512,7 @@ class Channel[T]:
             return None
         return self._items.pop()
 
+    @_channel_locked
     def remove(self, item: T) -> bool:
         """Withdraw one pending item, matched by identity (``is``), not equality.
 
@@ -507,11 +533,13 @@ class Channel[T]:
                 return True
         return False
 
+    @_channel_locked
     def clear(self) -> None:
         dropped = list(self._items)
         self._items.clear()
         self._fire_on_discard(dropped)
 
+    @_channel_locked
     def flush(self) -> int:
         """Discard all pending items and cancel waiting consumers.
 
@@ -663,6 +691,8 @@ class QueueManager:
 
     def __init__(self, *, event_manager: Any = None) -> None:
         self._event_manager = event_manager
+        self._batch_lock = threading.RLock()
+        self._event_wakes = 0
         # Insertion order matters — race() picks the winner by this
         # order, matching the FIFO-by-position contract the fast path
         # documents.
@@ -752,6 +782,8 @@ class QueueManager:
         one is created. Otherwise a duplicate name raises
         ``ValueError``.
         """
+        if any(ch._claiming for ch in self._channels.values()):
+            raise RuntimeError("registry mutation during batch recording")
         if name in self._channels:
             if not replace:
                 raise ValueError(f"channel {name!r} already registered")
@@ -763,7 +795,9 @@ class QueueManager:
             on_get=on_get,
             on_put=self._set_notify,
         )
+        ch._lock = self._batch_lock
         self._channels[name] = ch
+        self._signal_notify()
         return ch
 
     def event[T](
@@ -785,6 +819,8 @@ class QueueManager:
         """
         if self._event_manager is None:
             raise RuntimeError("QueueManager has no event_manager; event-mode channels require one")
+        if any(ch._claiming for ch in self._channels.values()):
+            raise RuntimeError("registry mutation during batch recording")
         if name in self._channels:
             if not replace:
                 raise ValueError(f"channel {name!r} already registered")
@@ -793,10 +829,12 @@ class QueueManager:
             name,
             "event",
             event_manager=self._event_manager,
-            on_put=self._set_notify,
+            on_put=self._event_notify,
             preview=preview,
         )
+        ch._lock = self._batch_lock
         self._channels[name] = ch
+        self._signal_notify()
         return ch
 
     # ---- registry --------------------------------------------------------
@@ -834,8 +872,11 @@ class QueueManager:
 
         Raises ``KeyError`` if *name* is not registered.
         """
+        if any(ch._claiming for ch in self._channels.values()):
+            raise RuntimeError("registry mutation during batch recording")
         ch = self._channels.pop(name)  # KeyError if not found
         ch.flush()
+        self._signal_notify()
         # Cancel handles targeting this channel. task.cancel() is sync
         # (it requests cancellation); the task will finish on its own.
         remaining: list[JobHandle] = []
@@ -892,6 +933,75 @@ class QueueManager:
             body = f"{body}\n{cheat}" if body else cheat
 
         return body
+
+    def _event_notify(self) -> None:
+        with self._batch_lock:
+            self._event_wakes += 1
+        self._set_notify()
+
+    def ready(self) -> bool:
+        """Non-consuming readiness, including unclaimed event-mode wakes."""
+        with self._batch_lock:
+            return bool(
+                self._channels
+                and (self._event_wakes or any(ch.qsize() for ch in self._channels.values()))
+            )
+
+    async def wait_ready(self) -> None:
+        """Wait without taking ownership. Registry changes also wake this wait."""
+        loop = asyncio.get_running_loop()
+        if self._notify_pair is None or self._notify_pair[1] is not loop:
+            self._notify_pair = (asyncio.Event(), loop)
+        event = self._notify_pair[0]
+        while True:
+            event.clear()
+            if not self._channels:
+                raise ValueError("QueueManager.wait_ready() requires at least one channel")
+            if self.ready():
+                return
+            await event.wait()
+
+    def claim_batch(
+        self, recorder: Callable[[dict[str, list[Any]]], None] | None = None
+    ) -> dict[str, list[Any]] | None:
+        """Select, record, then dequeue synchronously; no await or observers in recorder.
+
+        Failure leaves inputs untouched. All queue ownership transfers before
+        consumption observers run. Cross-thread puts serialize on the shared
+        lock and append for the next batch. All reentrant channel mutations
+        during recording are rejected. Registry mutation is loop-owned.
+        None means readiness disappeared; {} is a real event-only wake.
+        """
+        with self._batch_lock:
+            channels = list(self._channels.values())
+            if not channels:
+                return None  # A stale event wake cannot dispatch after final removal.
+            notification = {ch.name: list(ch._items) for ch in channels if ch._items}
+            wakes = self._event_wakes
+            if not notification and not wakes:
+                return None
+            for ch in channels:
+                if ch._claiming:
+                    raise RuntimeError("reentrant batch claim")
+                ch._claiming = True
+            try:
+                if recorder is not None:
+                    result = recorder({name: list(items) for name, items in notification.items()})
+                    if inspect.isawaitable(result):
+                        if inspect.iscoroutine(result):
+                            result.close()
+                        raise TypeError("batch recorder must be synchronous")
+                for ch in channels:
+                    for _ in notification.get(ch.name, []):
+                        ch._items.popleft()
+                self._event_wakes -= wakes
+            finally:
+                for ch in channels:
+                    ch._claiming = False
+        for ch in channels:
+            for item in notification.get(ch.name, []):
+                ch._fire_on_get(item, batch=True)
+        return notification
 
     # ---- race ------------------------------------------------------------
 
