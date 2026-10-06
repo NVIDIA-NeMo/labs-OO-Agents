@@ -9,7 +9,7 @@ live agents never cross.
 
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from nooa.interactive import Done, NeedInput
 from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
@@ -22,12 +22,33 @@ ChildStatus = SessionStatus  # a child reports the same statuses as any session
 
 
 class TaskResult(BaseModel):
-    """Structured result of a delegated objective or a benchmark task."""
+    """Structured result of a delegated objective or a benchmark task.
 
-    solution_description: str = Field(description="What was done")
-    evidence: str = Field(description="What shows that it works")
-    how_to_verify: str = Field(description="How someone else can check it")
-    report: str = Field(default="", description="Optional longer report")
+    The field descriptions are what the model reads when it builds one;
+    they come from the benchmark agent, which re-exports this class.
+    """
+
+    solution_description: str = Field(
+        description="What you did and why it solves the problem. Describe root cause and fix."
+    )
+    evidence: str = Field(
+        description=(
+            "Concrete evidence that the task is done: what tests passed, "
+            "what output was produced, what behavior changed. Not a guess -- "
+            "cite the actual results you observed."
+        )
+    )
+    how_to_verify: str = Field(
+        title="How to Verify",
+        description=(
+            "How a verifier can confirm correctness: concrete checks or steps and their "
+            "expected results. Include commands when appropriate; a shell command is not required."
+        ),
+    )
+    report: str = Field(
+        default="",
+        description="Concise human-readable report that a parent or runner shows inline.",
+    )
 
 
 class Receipt(BaseModel):
@@ -104,10 +125,26 @@ class ChildFailedError(RuntimeError):
 
 
 class ChildResult(BaseModel):
-    """A child finished a turn with ``Done``; delivered on the parent's ``delegates`` channel."""
+    """A child finished a turn with ``Done``; delivered on the parent's ``delegates`` channel.
+
+    A ``done.result`` that arrives as data (a child that returned a dict, or
+    a result reloaded from the record) is rebuilt as a ``TaskResult`` when it
+    is one. ``delegate()`` gets its ``Done`` through this class too.
+    """
 
     child: ChildRef
     done: Done
+
+    @field_validator("done", mode="after")
+    @classmethod
+    def _task_result(cls, done: Done) -> Done:
+        if isinstance(done.result, dict):
+            try:
+                result = TaskResult.model_validate(done.result)
+            except ValidationError:
+                return done
+            done = done.model_copy(update={"result": result})
+        return done
 
 
 class ChildQuestion(BaseModel):

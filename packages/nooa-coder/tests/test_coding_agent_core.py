@@ -1,0 +1,387 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Shared coding-agent construction and repository instructions."""
+
+from types import SimpleNamespace
+
+import pytest
+from nooa_coder.coding import (
+    CodingAgent,
+    CodingSlashCommandRegistry,
+    discover_agent_instruction_files,
+)
+
+from nooa.skill import Skill, get_slash_commands, slash_command
+from nooa.unifiedllm import FakeLLMClient
+
+
+async def test_aclose_awaits_background_components_and_leaves_the_client_open(tmp_path):
+    """The agent does not own its model client: the session closes one it created."""
+    from unittest.mock import AsyncMock
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    calls = []
+    agent.event_manager.on_close(AsyncMock(side_effect=lambda: calls.append("component")))
+    agent.llm.aclose = AsyncMock(side_effect=lambda: calls.append("client"))
+    await agent.aclose()
+    assert calls == ["component"]
+
+
+def test_agent_instructions_follow_repository_hierarchy(tmp_path):
+    (tmp_path / ".git").mkdir()
+    nested = tmp_path / "packages" / "example"
+    nested.mkdir(parents=True)
+    root_instructions = tmp_path / "AGENTS.md"
+    package_instructions = tmp_path / "packages" / "AGENTS.md"
+    root_instructions.write_text("root rule")
+    package_instructions.write_text("package rule")
+
+    assert discover_agent_instruction_files(nested) == (
+        root_instructions,
+        package_instructions,
+    )
+
+
+async def test_coding_agent_uses_observed_shell_and_instruction_context(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("run the focused tests")
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        assert agent.shell.session is agent._base_shell.session
+        assert "run the focused tests" in str(agent.context["repository_instructions"])
+        assert "nemo.shell" in agent.skills.activated()
+        assert "nemo.repo" in agent.skills.activated()
+    finally:
+        await agent.aclose()
+
+
+async def test_directory_workflow_skills_are_loaded_but_opt_in(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "root-cause"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: root-cause\ndescription: Diagnose a defect\n---\nFind the cause.\n"
+    )
+
+    agent = CodingAgent(
+        llm=FakeLLMClient(),
+        cwd=tmp_path,
+        skills_dirs=[skills_dir],
+    )
+    try:
+        assert "cmd.root-cause" in agent.skills.loaded()
+        assert "cmd.root-cause" not in agent.skills.activated()
+    finally:
+        await agent.aclose()
+
+
+async def test_installed_skill_commands_load_without_automatic_activation(tmp_path, monkeypatch):
+    class WorkflowSkill(Skill):
+        @slash_command("root-cause")
+        def root_cause(self) -> str:
+            return "diagnose"
+
+    entry_point = SimpleNamespace(
+        name="nemo.workflow",
+        load=lambda: WorkflowSkill,
+    )
+    monkeypatch.setattr(
+        "nooa.skill_registry.entry_points",
+        lambda *, group: [entry_point],
+    )
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        assert "nemo.workflow" in agent.skills.loaded()
+        assert "nemo.workflow" not in agent.skills.activated()
+        assert [meta.name for meta, _ in get_slash_commands(agent.workflow)] == ["root-cause"]
+    finally:
+        await agent.aclose()
+
+
+async def test_installed_memory_skill_is_not_automatically_attached(tmp_path, monkeypatch):
+    class InstalledMemory(Skill):
+        pass
+
+    entry_point = SimpleNamespace(name="nemo.memory", load=lambda: InstalledMemory)
+    monkeypatch.setattr(
+        "nooa.skill_registry.entry_points",
+        lambda *, group: [entry_point],
+    )
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        assert not hasattr(agent, "memory")
+        assert "nemo.memory" not in agent.skills.loaded()
+    finally:
+        await agent.aclose()
+
+
+async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
+    """Hosts that run several workspaces in one process must be able to
+    separate the libs directory.
+
+    SkillWriting puts it on sys.path and imports from it, so a shared one
+    leaks agent-authored code between concurrent sessions. The default is
+    unchanged for single-workspace hosts like the TUI.
+    """
+    libs_dir = tmp_path / "scoped" / "libs"
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=libs_dir)
+    try:
+        assert agent.libs._path == libs_dir
+    finally:
+        await agent.aclose()
+
+
+async def test_coding_agent_declares_the_host_input_channels(tmp_path):
+    """slash_commands and system_messages belong to the coding host.
+
+    InteractiveAgent only declares user_messages: being dispatcher-driven does
+    not imply slash commands (a UI affordance whose registry is in this
+    package) or host continuations such as keep-going.
+    """
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        channels = agent.queue_manager.channels()
+        assert {"user_messages", "slash_commands", "system_messages"} <= channels.keys()
+        # The public name is the command registry a Session lists and runs.
+        assert isinstance(agent.slash_commands, CodingSlashCommandRegistry)
+        assert agent.system_messages is agent._system_messages_in.reader
+    finally:
+        await agent.aclose()
+
+
+async def test_coding_agent_owns_session_naming(tmp_path):
+    """name_session sits with the session model it feeds.
+
+    Sessions live in nooa_coder.session, so the generator belongs at this
+    layer rather than in core, which has no notion of a session at all.
+    """
+    from nooa.interactive import InteractiveAgent
+
+    assert hasattr(CodingAgent, "name_session")
+    assert not hasattr(InteractiveAgent, "name_session")
+
+
+def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
+    """The cap must bound the read, not just what is kept.
+
+    Truncating after read_text() still pulls a workspace-controlled file into
+    memory in full. The budget also has to cover the rendered text — headers,
+    separators, truncation markers — or the declared total is not the real one.
+    """
+    from nooa_coder.coding import instructions
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("x" * 1000)
+    reads: list[int] = []
+    real_fdopen = instructions.os.fdopen
+
+    class BoundedStream:
+        def __init__(self, *args, **kwargs):
+            self.stream = real_fdopen(*args, **kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def read(self, size=-1):
+            reads.append(size)
+            assert 0 <= size <= 101
+            return self.stream.read(size)
+
+    monkeypatch.setattr(instructions, "_MAX_INSTRUCTION_FILE_CHARS", 100)
+    monkeypatch.setattr(instructions.os, "fdopen", BoundedStream)
+
+    rendered = instructions.render_agent_instructions(tmp_path)
+
+    assert reads == [101]
+    assert "[... truncated ...]" in rendered
+    assert len(rendered) <= instructions._MAX_INSTRUCTION_TOTAL_CHARS
+
+
+def test_repository_instructions_allow_a_symlinked_workspace(tmp_path):
+    from nooa_coder.coding.instructions import render_agent_instructions
+
+    root = tmp_path / "real"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("reachable repository instructions")
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    assert "reachable repository instructions" in render_agent_instructions(alias)
+    (root / "AGENTS.md").unlink()
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside instructions")
+    (root / "AGENTS.md").symlink_to(outside)
+    assert not render_agent_instructions(alias)
+
+
+def test_repository_instructions_allow_a_symlink_within_the_boundary(tmp_path):
+    """A symlinked AGENTS.md whose target stays inside the repo (the common
+    AGENTS.md -> CLAUDE.md pattern) must not be rejected outright -- only a
+    symlink that actually escapes the boundary should be. _is_safe_path
+    already rejects any symlinked ANCESTOR DIRECTORY on the path to the
+    file; the file itself being a symlink to ordinary text content in the
+    same tree carries no additional risk.
+    """
+    from nooa_coder.coding.instructions import render_agent_instructions
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "CLAUDE.md").write_text("claude-specific instructions")
+    (root / "AGENTS.md").symlink_to(root / "CLAUDE.md")
+
+    rendered = render_agent_instructions(root)
+    assert "claude-specific instructions" in rendered
+
+
+async def test_coding_agent_owns_bounded_application_state_context(tmp_path):
+    agent = CodingAgent(cwd=tmp_path, llm=FakeLLMClient())
+    try:
+        agent.vars["token"] = "private-value"
+        agent.shell.cwd = "</coding_state>\n" + "x" * 500
+        rendered = agent._coding_state_context()
+        assert "1 persistent vars" in rendered
+        assert "print(self.v.items())" in rendered
+        assert "private-value" not in rendered
+        assert "</coding_state>" not in rendered
+        assert len(rendered) < 600
+    finally:
+        await agent.aclose()
+
+
+async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_path):
+    """Protection must not depend on the attribute being skill-owned.
+
+    _protected_owner only found attributes some skill had registered, so a
+    protected attribute the agent assigns directly — `self.skills` — had no
+    entry and was left unguarded. Registering `mcp.skills` replaced the
+    registry itself.
+    """
+    from nooa.skill import Skill
+
+    class _Evil(Skill):
+        pass
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        registry = agent.skills
+        with pytest.raises(ValueError, match="skills"):
+            agent.skills.register("mcp.skills", _Evil())
+        assert agent.skills is registry
+
+        # A skill-owned protected attr stays protected too.
+        shell = agent.shell
+        with pytest.raises(ValueError, match="shell"):
+            agent.skills.register("mcp.shell", _Evil())
+        assert agent.shell is shell
+
+        # Re-binding the same object under its owning name is still allowed.
+        agent.skills.register("nemo.shell", shell)
+    finally:
+        await agent.aclose()
+
+
+async def test_summarization_status_reports_installed_token_budget(tmp_path):
+    from nooa.interactive import SummarizationConfig
+
+    agent = CodingAgent(
+        llm=FakeLLMClient(),
+        cwd=tmp_path,
+        summarization=SummarizationConfig(threshold_fraction=0.60),
+    )
+    try:
+        summarizer = agent._summarizers[0]
+        status = agent.get_summarization_status()
+
+        assert status["has_summarizer"] is True
+        assert status["policy"] == "token_budget"
+        assert status["max_tokens"] == summarizer.config.max_tokens
+        assert status["threshold_fraction"] == 0.60
+        assert status["preserve_recent"] == summarizer.config.preserve_recent
+        assert status["compaction_pending"] is False
+        assert status["compaction_ready"] is False
+    finally:
+        await agent.aclose()
+
+
+async def test_summarization_status_reports_disabled_policy(tmp_path):
+    from nooa.interactive import SummarizationConfig
+
+    agent = CodingAgent(
+        llm=FakeLLMClient(),
+        cwd=tmp_path,
+        summarization=SummarizationConfig(policy="none"),
+    )
+    try:
+        assert agent.get_summarization_status() == {
+            "active_events": 0,
+            "summary_count": 0,
+            "summary_tags": [],
+            "has_summarizer": False,
+            "policy": "none",
+            "current_tokens": 0,
+            "max_tokens": 0,
+            "threshold_fraction": None,
+            "preserve_recent": 0,
+            "compaction_pending": False,
+            "compaction_ready": False,
+        }
+    finally:
+        await agent.aclose()
+
+
+def test_the_session_title_request_asks_for_an_awaited_rename():
+    """The title request is text a host submits; it names the awaited rename."""
+    from nooa_coder.coding.agent import session_title_request
+
+    prompt = session_title_request("  fix the flaky parser test  ")
+    assert prompt.startswith("[session-title]")
+    assert 'await self.rename_session("your title")' in prompt
+    assert "<opening_user_message>\nfix the flaky parser test\n</opening_user_message>" in prompt
+    assert not hasattr(CodingAgent, "request_session_title")
+
+
+async def test_rename_session_needs_a_session(tmp_path):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        with pytest.raises(RuntimeError, match="not running in a session"):
+            await agent.rename_session("Parser test fix")
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("module", ["agent", "experimental_agent"])
+def test_cells_see_the_turn_types_but_not_the_helpers(module):
+    from importlib import import_module
+
+    from nooa.agentdoc._visibility import filter_mro_module_globals
+
+    cls = getattr(
+        import_module(f"nooa_coder.coding.{module}"),
+        "CodingAgent" if module == "agent" else "ExperimentalCodingAgent",
+    )
+    names = set(filter_mro_module_globals(cls))
+    assert {"Done", "NeedInput", "Waiting", "TaskResult", "ChildResult"} <= names
+    assert {"ChildFailedError", "DepthLimitError"} <= names
+    hidden = {
+        "_todo_prompt",
+        "_report_text",
+        "_V2_CONTEXT",
+        "require_result",
+        "session_title_request",
+        "SessionPort",
+    }
+    assert names & hidden == set()
+
+
+def test_the_handle_prompt_names_every_input_channel():
+    from nooa_coder.coding.experimental_agent import ExperimentalCodingAgent
+
+    for cls in (CodingAgent, ExperimentalCodingAgent):
+        text = cls.handle.__doc__ or ""
+        for channel in ("user_messages", "system_messages", "slash_commands", "delegates"):
+            assert f'"{channel}"' in text, (cls.__name__, channel)
+    assert "SessionInfo" not in (CodingAgent.get_summarization_status.__doc__ or "")

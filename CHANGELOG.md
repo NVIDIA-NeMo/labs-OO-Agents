@@ -47,6 +47,32 @@ to follow semantic versioning.
     options taken from the session's record.
   - Sessions live in the user directory (`~/.config/nooa/sessions`), not
     per project; the store is adapted from `nooa_cli.sessions`.
+  - Session-layer fixes from its review: the turn loop survives a failed
+    turn and `close()` never raises; a cancelled `wait()` or a cancelled
+    child turn reaches the parent as a result or `ChildFailed`;
+    half-built sessions are closed when `create()`/`load()` fails; the
+    session owns the `llm_factory`'s client (built for every session
+    without one, including the default model) and records its alias;
+    `load()` takes keyword overrides only; `prepare` runs before any item
+    is admitted; a steer buffered at shutdown is re-queued; a closing
+    parent gets no new children; `TurnFailedError` chains the original
+    exception; updates carry full item text and usage changes;
+    `install_port` can hide the port from the model docs.
+  - The coding agent runs on it: `nooa_coder.coding.agent:CodingAgent`
+    (the agent spec hosts name) ends turns with `Done`/`NeedInput`/
+    `Waiting`; its `handle_batch` must return a `TaskResult`. The model
+    delegates with `delegate()` (a throwaway child, awaited, returning the
+    child's `Done`), `spawn()` and `children()`; `rename_session()` is
+    async, and a host asks for a title by submitting
+    `session_title_request(text)` on `system_messages`. `ExperimentalCodingAgent` (CodeActV2) follows the same rules.
+    The workspace settings, MCP registry and skill controls moved in as
+    `nooa_coder.workspace` (`CoderOptions`), and the repository tools as
+    `nooa_coder.tools`.
+  - The registry builds agents with `create_session_agent` by default
+    (workspace settings and skills for coding agents); hosts pass
+    `default_llm_factory()` as the registry's `llm_factory`. Agent specs
+    may name a file (`./agent.py:Class`, relative to the workspace), and
+    the older `nooa_cli.*` coding-agent specs still load.
 
 - Groundwork for the session tree design, in shared code:
   - A cancelled CodeAct cell is now recorded for the model: an appended

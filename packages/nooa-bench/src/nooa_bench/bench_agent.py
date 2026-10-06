@@ -19,6 +19,10 @@ from __future__ import annotations
 
 from nooa_cli.tools.repo_tools import RepoTools
 
+# The Session layer's TaskResult, re-exported: bench results and the coding
+# agent's child results are one class. Visible to generated cells.
+from nooa_coder.session.items import TaskResult
+
 from nooa import hidden as _hidden
 from nooa.tools.method_writing_lib import MethodWriting
 from nooa.tools.shell_tools import ShellTools
@@ -30,8 +34,6 @@ with _hidden:
     import logging
     import os
     from typing import TYPE_CHECKING, Any
-
-    from pydantic import BaseModel, Field
 
     from nooa import Agent, Context, no_trace, strategy
     from nooa.agentdoc import doc
@@ -66,32 +68,6 @@ _SOLVE_CONTEXT = {
         prefix=True,
     ),
 }
-
-
-class TaskResult(BaseModel):
-    """Structured result the agent must return when finishing a task."""
-
-    solution_description: str = Field(
-        description="What you did and why it solves the problem. Describe root cause and fix."
-    )
-    evidence: str = Field(
-        description=(
-            "Concrete evidence that the task is done: what tests passed, "
-            "what output was produced, what behavior changed. Not a guess -- "
-            "cite the actual results you observed."
-        )
-    )
-    how_to_verify: str = Field(
-        title="How to Verify",
-        description=(
-            "How a verifier can confirm correctness: concrete checks or steps and their "
-            "expected results. Include commands when appropriate; a shell command is not required."
-        ),
-    )
-    report: str = Field(
-        default="",
-        description="Concise human-readable report that a parent or runner shows inline.",
-    )
 
 
 @_hidden

@@ -533,3 +533,31 @@ async def test_a_failed_delivery_keeps_a_finished_throwaway_child_available(
     assert registry.get(child.id) is child and not child.closing
     [ended] = registry.store.load_rows(child.id, frozenset({"TurnEnded"}))
     assert ended[1]["explanation"] == "kid done"
+
+
+async def test_a_wait_cut_short_leaves_the_result_for_the_delegates_channel(
+    registry, root_options, models
+):
+    """A cell that stops waiting (timeout, cancel) must not swallow the child's result."""
+    started, block = fresh_events()
+    models.scripts[None] = [
+        cell(
+            "child = await self.session.delegate('Slow', 'take your time')\n"
+            "try:\n"
+            "    await asyncio.wait_for(child.wait(), 0.05)\n"
+            "except TimeoutError:\n"
+            "    pass\n"
+            "return_result(Waiting(explanation='still running', on=['delegates']))"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "return_result(Done(explanation='late: ' + item.done.explanation))"
+        ),
+    ]
+    models.scripts["Slow"] = [cell(BLOCKING_CELL), done("slow result")]
+    root = await registry.create(root_options)
+    outcome = root.outcome((await root.submit("go")).item_id)
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    await until(lambda: len(_turns(registry, root.id)) == 1 and root.info.status == "idle")
+    block.set()
+    assert await asyncio.wait_for(outcome, TIMEOUT) == Done(explanation="late: slow result")
