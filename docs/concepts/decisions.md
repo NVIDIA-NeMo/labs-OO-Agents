@@ -279,12 +279,50 @@ selecting a model.
 
 A `DecideStrategy` method always uses a decision model. If none resolves, the
 call raises `DecisionModelRequiredError` before making any request; it never
-switches to the chat LLM.
+switches to the chat LLM on its own. To use a chat model, configure one
+explicitly as described below.
+
+### Use a chat model as a decision model
+
+`DecisionModel.from_llm` wraps a chat client, or a configured chat alias, as a
+decision model:
+
+```python
+from nooa import DecisionModel
+
+chat_decisions = DecisionModel.from_llm(llm)
+
+
+class Router(Agent, decision_model=chat_decisions):
+    @strategy(DecideStrategy())
+    async def department(self, message: str) -> Department:
+        """Choose the team that should handle the message."""
+        ...
+
+
+# Use a native decision model for one call instead.
+await router.department(message, decision_model=decision_model)
+```
+
+The chat model receives the same state and questions a decision model would,
+and answers with structured output: one option, a true/false value, or a score
+level per question. It provides no probabilities, so it supports only primitive
+results (`bool`, enums, `Literal`, scored `float`) and composites of them. A
+method that returns `BooleanDecision`, `ChoiceDecision`, or `ScoreDecision`, or
+uses `Threshold`, raises `DecisionModelRequiredError` before any request.
+Scores are whole levels. A reply that does not match the schema is retried
+once, then fails with `InvalidDecisionResponseError`.
+
+Custom decision models can subclass `DecisionModel` and set
+`provides_probabilities = False` to get the same checks. Clients that implement
+only `UnifiedDecisionModel` are treated as providing probabilities.
 
 Every decision call stores a `DecisionRecord` with the request state,
 normalized questions, answers, and provenance:
 
-- `decision_source`: currently always `native`.
+- `decision_source`: `native` for decision models, or `llm` for a model
+  created with `DecisionModel.from_llm`. Compare `llm` records with native
+  ones only on selected values; their recorded distributions are one-hot.
 - `question_digest`: a SHA-256 digest of the normalized question names,
   instructions, criteria, and candidate IDs. It is computed after
   `decision_call` middleware, so it reflects the request actually sent.

@@ -180,7 +180,8 @@ class SupportAgent(Agent, llm=llm, decision_model=decision_model):
 The `route()` method uses the configured decision model; `draft_reply()` uses
 the chat LLM. A `DecideStrategy` method always needs a decision model: without
 one it raises `DecisionModelRequiredError` instead of quietly asking the chat
-LLM.
+LLM. To answer simple decisions with a chat model, pass
+`decision_model=DecisionModel.from_llm(llm)` explicitly.
 
 See [Decision models](concepts/decisions.md) for boolean, choice, score,
 threshold, composite-result, and lifecycle details.

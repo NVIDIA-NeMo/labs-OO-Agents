@@ -43,6 +43,19 @@ class DecideStrategy(GenerationStrategy):
         """
         schema = compile_decision_schema(call.return_type, call.docstring)
         decision_runtime = cast(DecisionRuntimeServices, runtime)
+        model = decision_runtime.decision_model
+        if not getattr(model, "provides_probabilities", True):
+            required = [output.name for output in schema.outputs if output.requires_probabilities]
+            if required:
+                from nooa.decisions.types import DecisionModelRequiredError
+
+                names = ", ".join(repr(name) for name in required)
+                raise DecisionModelRequiredError(
+                    f"'{call.method_name}' needs probabilities for output(s) {names}: "
+                    "detailed decision results and Threshold require a decision model "
+                    f"that provides them, but {type(model).__name__} "
+                    f"({getattr(model, 'model', '')!r}) does not."
+                )
         context, events = await decision_runtime.decision_state_inputs()
         request = schema.request(
             call.bound_parameters(),

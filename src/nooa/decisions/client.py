@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+from abc import abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, cast, runtime_checkable
 
 import httpx
 from pydantic import JsonValue
@@ -17,6 +18,7 @@ from nooa.decisions.types import Criterion
 if TYPE_CHECKING:
     # Importing nooa.unifiedllm loads LiteLLM; keep `import nooa` lightweight.
     from nooa.unifiedllm.retry_config import RetryConfig
+    from nooa.unifiedllm.unifiedllm import UnifiedLLM
 
 type DecisionState = str | dict[str, JsonValue] | list[JsonValue]
 
@@ -106,6 +108,53 @@ class UnifiedDecisionModel(Protocol):
         ...
 
 
+class DecisionModel(UnifiedDecisionModel):
+    """Base class for NOOA decision models.
+
+    Subclasses declare what their answers can support. A model with
+    ``provides_probabilities = False`` returns a selected value without
+    probability evidence, so ``DecideStrategy`` rejects detailed results and
+    thresholds for it before making a request. Clients that implement only
+    ``UnifiedDecisionModel`` are treated as providing probabilities.
+    """
+
+    #: Whether answers carry real probability evidence.
+    provides_probabilities: ClassVar[bool] = True
+    #: Recorded as ``DecisionRecord.decision_source`` for this model's calls.
+    decision_source: ClassVar[Literal["native", "llm"]] = "native"
+
+    @abstractmethod
+    async def adecide(self, request: DecisionRequest) -> DecisionResponse:
+        """Evaluate a normalized decision request."""
+
+    async def aclose(self) -> None:
+        """Release resources owned by this model."""
+
+    @classmethod
+    def from_llm(cls, llm: UnifiedLLM | str) -> DecisionModel:
+        """Answer decision questions with a chat model.
+
+        The chat model selects one option, boolean, or score level per
+        question; it provides no probabilities. Methods returning detailed
+        decision objects or using ``Threshold`` therefore raise
+        ``DecisionModelRequiredError`` with this model.
+
+        Args:
+            llm: A chat client, or a configured model alias.
+
+        Returns:
+            A decision model whose calls are recorded with
+            ``decision_source="llm"``.
+        """
+        from nooa.decisions.llm_adapter import LLMDecisionModel
+
+        if isinstance(llm, str):
+            from nooa.unifiedllm.registry import get_llm_client
+
+            llm = get_llm_client(llm)
+        return LLMDecisionModel(llm)
+
+
 class DecisionClientError(RuntimeError):
     """Base error raised by decision clients."""
 
@@ -122,7 +171,7 @@ class InvalidDecisionResponseError(DecisionClientError):
     """The service returned a malformed or incomplete response."""
 
 
-class DecisionClient(UnifiedDecisionModel):
+class DecisionClient(DecisionModel):
     """Async client for HTTP decision-model endpoints.
 
     The client owns an internally created ``httpx.AsyncClient`` and closes it
@@ -279,6 +328,7 @@ __all__ = [
     "DecisionAuthenticationError",
     "DecisionClient",
     "DecisionClientError",
+    "DecisionModel",
     "DecisionRequest",
     "DecisionResponse",
     "DecisionTransportError",

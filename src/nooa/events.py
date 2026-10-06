@@ -526,7 +526,7 @@ class DecisionRecord(EventBase):  # type: ignore[misc]
     state: Any
     questions: dict[str, Any]
     answers: dict[str, Any] | None = None
-    decision_source: Literal["native"] = "native"
+    decision_source: Literal["native", "llm"] = "native"
     question_digest: str | None = None
     requested_model: str
     resolved_model: str | None = None

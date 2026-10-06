@@ -19,7 +19,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 from uuid import uuid4
 
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
@@ -937,6 +937,10 @@ class ActorRuntime:
 
         generation_id = self._generation_id_stack[-1] if self._generation_id_stack else ""
         requested_model = getattr(client, "model", "") or ""
+        # DecisionModel subclasses declare their source; other clients are native.
+        decision_source: Literal["native", "llm"] = (
+            "llm" if getattr(client, "decision_source", "native") == "llm" else "native"
+        )
         decision_call_id = str(uuid4())
         event_meta = {
             "method_name": self._current_method.__name__,
@@ -989,7 +993,7 @@ class ActorRuntime:
             resolved_model = response.model if response is not None else None
             self._set_decision_trace_attributes(
                 generation_id,
-                source="native",
+                source=decision_source,
                 digest=digest,
                 requested_model=requested_model,
                 resolved_model=resolved_model,
@@ -1006,7 +1010,7 @@ class ActorRuntime:
                     answers={name: asdict(answer) for name, answer in response.answers.items()}
                     if response is not None
                     else None,
-                    decision_source="native",
+                    decision_source=decision_source,
                     question_digest=digest,
                     requested_model=requested_model,
                     resolved_model=resolved_model,
@@ -1019,6 +1023,14 @@ class ActorRuntime:
                     exception_type=exception_type,
                 )
             )
+
+    @property
+    def decision_model(self) -> "UnifiedDecisionModel":
+        """Return the decision model resolved for the current call."""
+        client = _current_decision_model_var.get()
+        if client is None:
+            raise RuntimeError("decision_model accessed with no decision model in context")
+        return cast("UnifiedDecisionModel", client)
 
     def _set_decision_trace_attributes(
         self,

@@ -15,7 +15,7 @@ from nooa.metaclass import AgentMeta
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks import DynamicContext
-    from nooa.decisions import DecisionRequest, DecisionResponse
+    from nooa.decisions import DecisionRequest, DecisionResponse, UnifiedDecisionModel
     from nooa.runtime.restrictions import RestrictionsConfig
     from nooa.strategies.current_call import CurrentCall
 
@@ -188,6 +188,11 @@ class RuntimeServices(Protocol):
 
 class DecisionRuntimeServices(RuntimeServices, Protocol):
     """Additional runtime operation required only by decision strategies."""
+
+    @property
+    def decision_model(self) -> "UnifiedDecisionModel":
+        """Return the decision model resolved for the current call."""
+        ...
 
     async def decision_state_inputs(
         self,
