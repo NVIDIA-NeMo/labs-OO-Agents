@@ -12,17 +12,17 @@ from acp.schema import (
     ToolCallStart,
     UserMessageChunk,
 )
-from coder_test_agents import (
+from atom_test_agents import (
+    ATOM_SPEC,
     BLOCKING_CELL,
-    CODER_SPEC,
-    CoderModels,
+    AtomModels,
     ScriptedModels,
     cell,
     fresh_events,
     reply,
 )
-from nooa_coder.acp.server import initialize_response
-from nooa_coder.session.store import SessionStore, sessions_root
+from nooa_atom.acp.server import initialize_response
+from nooa_atom.session.store import SessionStore, sessions_root
 
 TIMEOUT = 30
 _RESOURCE_NOT_FOUND = -32002
@@ -44,7 +44,7 @@ def test_initialize_advertises_sessions_mcp_and_the_agent():
     # Not routed by the 0.12 library: advertising them would promise a failure.
     assert sessions.delete is None and sessions.resume is None and sessions.fork is None
     assert response.auth_methods == []
-    assert response.agent_info is not None and response.agent_info.name == "nooa-coder"
+    assert response.agent_info is not None and response.agent_info.name == "nooa-atom"
 
 
 async def test_initialize_keeps_the_client_capabilities(make_adapter):
@@ -66,7 +66,7 @@ async def test_new_session_returns_the_id_and_auto_mode(make_adapter, workspace,
     info = SessionStore(sessions_dir).get(response.session_id)
     assert info.host == "acp"
     assert info.workspace == str(workspace)
-    assert info.agent == "coder_test_agents:EchoAgent"
+    assert info.agent == "atom_test_agents:EchoAgent"
     assert response.modes is not None
     assert response.modes.current_mode_id == "auto"
     assert [mode.id for mode in response.modes.available_modes] == ["auto"]
@@ -89,7 +89,7 @@ async def test_new_session_rejects_additional_directories(make_adapter, workspac
 async def test_commands_are_advertised_after_the_new_session_response(
     make_adapter, workspace, client
 ):
-    adapter = await make_adapter(CoderModels(), agent_spec=CODER_SPEC)
+    adapter = await make_adapter(AtomModels(), agent_spec=ATOM_SPEC)
     response = await adapter.new_session(str(workspace))
     # Deferred: nothing may reach the client before it knows the session id.
     assert client.log == []
@@ -102,7 +102,7 @@ async def test_commands_are_advertised_after_the_new_session_response(
 async def test_a_change_to_the_commands_is_advertised_again(
     make_adapter, workspace, client, tmp_path
 ):
-    adapter = await make_adapter(CoderModels(), agent_spec=CODER_SPEC)
+    adapter = await make_adapter(AtomModels(), agent_spec=ATOM_SPEC)
     response = await adapter.new_session(str(workspace))
     await client.wait_for(lambda: client.updates(response.session_id, AvailableCommandsUpdate))
     skill = tmp_path / "extra-skills" / "shipit"
@@ -120,7 +120,7 @@ async def test_a_change_to_the_commands_is_advertised_again(
 async def test_startup_warnings_are_sent_as_an_agent_message(make_adapter, workspace, client):
     from acp.schema import AcpMcpServer
 
-    adapter = await make_adapter(CoderModels(), agent_spec=CODER_SPEC)
+    adapter = await make_adapter(AtomModels(), agent_spec=ATOM_SPEC)
     response = await adapter.new_session(
         str(workspace), mcp_servers=[AcpMcpServer(name="remote", server_id="x", type="acp")]
     )
@@ -310,8 +310,8 @@ async def test_list_without_cwd_covers_only_workspaces_this_process_serves(
     """There is no index of every workspace, so a session no request led here is not listed."""
     unseen = tmp_path / "unseen"
     with SessionStore(sessions_root(unseen)).create(workspace=str(unseen)) as handle:
-        from coder_test_agents import SessionUserMessage
-        from nooa_coder.session.events import TurnEnded
+        from atom_test_agents import SessionUserMessage
+        from nooa_atom.session.events import TurnEnded
 
         handle.events.add(SessionUserMessage(content="hello"))
         handle.events.add(TurnEnded(outcome_kind="done"))
@@ -345,7 +345,7 @@ async def test_nooa_sessions_dir_holds_the_sessions_of_every_workspace(
 
 
 async def test_list_pages_with_a_cursor(make_adapter, workspace, monkeypatch):
-    from nooa_coder.acp import listing
+    from nooa_atom.acp import listing
 
     monkeypatch.setattr(listing, "SESSION_PAGE_SIZE", 2)
     models = ScriptedModels()
@@ -397,7 +397,7 @@ async def test_unknown_extension_methods_are_not_found(make_adapter):
 
 
 async def test_closing_in_order_runs_every_closer_and_raises_the_last_failure():
-    from nooa_coder.acp.server import _close_in_order
+    from nooa_atom.acp.server import _close_in_order
 
     ran: list[str] = []
 
@@ -415,7 +415,7 @@ async def test_closing_in_order_runs_every_closer_and_raises_the_last_failure():
 
 async def test_closing_in_order_lets_a_cancellation_through_at_once():
     """Cancelled part-way, the rest are started but not waited for."""
-    from nooa_coder.acp.server import _close_in_order
+    from nooa_atom.acp.server import _close_in_order
 
     first_started, second_started, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 

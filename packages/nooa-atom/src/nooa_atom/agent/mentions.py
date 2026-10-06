@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Workspace file references shared by coding host input adapters."""
+"""Workspace file references shared by host input adapters."""
 
 import os
 import re

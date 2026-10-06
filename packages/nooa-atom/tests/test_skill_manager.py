@@ -9,11 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 from fake_oauth_mcp import FakeOAuthServer
-from nooa_coder.coding.agent import CodingAgent
-from nooa_coder.skills.manager import SkillManager
-from nooa_coder.skills.mcp_servers import MCPServers
-from nooa_coder.workspace.controls import MCPControl, SkillsControl
-from nooa_coder.workspace.options import CoderOptions
+from nooa_atom.agent.agent import AtomAgent
+from nooa_atom.skills.manager import SkillManager
+from nooa_atom.skills.mcp_servers import MCPServers
+from nooa_atom.workspace.controls import MCPControl, SkillsControl
+from nooa_atom.workspace.options import AtomOptions
 
 from nooa.events import Notification
 from nooa.interactive import AgentMessage
@@ -79,7 +79,7 @@ async def agent(installed, tmp_path):
         "---\nname: review\ndescription: Review a change for defects\n---\n"
         "Read the diff, then list defects by severity.\n"
     )
-    made = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, skills_dirs=[skills_dir])
+    made = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, skills_dirs=[skills_dir])
     servers = MCPServers(
         mcp_file=tmp_path / ".mcp.json",
         approval_path=tmp_path / "approvals.json",
@@ -225,7 +225,7 @@ async def test_a_server_that_needs_sign_in_sends_the_link_and_reports_back(
     assert "remote (mcp, needs-auth)" in agent.skills.search("remote")
 
     pasted = await asyncio.to_thread(oauth_server.consent, url)
-    control = MCPControl(agent, CoderOptions(), workspace=tmp_path)
+    control = MCPControl(agent, AtomOptions(), workspace=tmp_path)
     finished = await control.run(["auth", "remote", pasted])
     assert finished.success, str(finished)
     assert "echo" in str(finished)
@@ -252,7 +252,7 @@ async def test_a_client_supplied_mcp_server_is_an_mcp_skill(agent):
 
 
 async def test_the_skills_control_lists_every_kind(agent, tmp_path):
-    control = SkillsControl(agent, CoderOptions(), workspace=tmp_path)
+    control = SkillsControl(agent, AtomOptions(), workspace=tmp_path)
     listed = await control.run(["list"])
     assert listed.success
     table = listed.outputs[0]
@@ -265,7 +265,7 @@ async def test_the_skills_control_lists_every_kind(agent, tmp_path):
 
 async def test_the_skills_control_activates_by_name(agent, tmp_path, monkeypatch):
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / ".nooa"))
-    control = SkillsControl(agent, CoderOptions(), workspace=tmp_path)
+    control = SkillsControl(agent, AtomOptions(), workspace=tmp_path)
     result = await control.run(["activate", "greeter"])
     assert result.success, str(result)
     assert "tools.greeter" in agent.skills.activated()
@@ -283,10 +283,10 @@ async def test_an_old_snapshot_with_mcp_state_loads_and_the_agent_is_told(
     """A snapshot from before SkillManager holds the ``<mcp>`` block, ``self.mcp.status()``."""
     import json
 
-    from nooa_coder.coding.factory import create_session_agent
-    from nooa_coder.session.options import SessionOptions
-    from nooa_coder.session.registry import SessionRegistry
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.agent.factory import create_session_agent
+    from nooa_atom.session.options import SessionOptions
+    from nooa_atom.session.registry import SessionRegistry
+    from nooa_atom.session.store import SessionStore
     from test_experimental_agent import python_cell
 
     from nooa.storage.json_snapshot import snapshot_to_json
@@ -295,7 +295,7 @@ async def test_an_old_snapshot_with_mcp_state_loads_and_the_agent_is_told(
     workspace.mkdir()
     options = SessionOptions(
         workspace=workspace,
-        agent_spec="nooa_coder.coding.agent:CodingAgent",
+        agent_spec="nooa_atom.agent:AtomAgent",
         llm=FakeLLMClient(),
         sessions_dir=sessions_dir,
     )

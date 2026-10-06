@@ -5,12 +5,12 @@
 import asyncio
 import sqlite3
 
-import coder_test_agents as agents
+import atom_test_agents as agents
 import pytest
-from coder_test_agents import cell, done
-from nooa_coder.session.events import TurnStarted
-from nooa_coder.session.session import TurnFailedError
-from nooa_coder.session.store import SessionStore
+from atom_test_agents import cell, done
+from nooa_atom.session.events import TurnStarted
+from nooa_atom.session.session import TurnFailedError
+from nooa_atom.session.store import SessionStore
 
 from nooa.interactive import Done
 from nooa.runtime.turn_loop import TurnCancelled

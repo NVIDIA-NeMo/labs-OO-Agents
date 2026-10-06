@@ -1,28 +1,28 @@
 [project]
-name = "nooa-coder"
+name = "nooa-atom"
 dynamic = ["version"]
-description = "NOOA coding agent, session layer, session tree and in-process host"
+description = "NOOAn Atom agent, session layer, session tree and in-process host"
 license = {text = "Apache-2.0"}
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "nooa[mcp]",
-    # The `nooa` command; the server is its `coder` subcommand.
+    # The `nooa` command; the server is its `atom` subcommand.
     "nooa-cli",
     "agent-client-protocol>=0.12.1,<0.13",
     "click>=8.1.0",
     "pydantic>=2.5.0",
     "pyyaml>=6.0",
-    # nooa coder --http (ACP over WebSocket).
+    # nooa atom --http (ACP over WebSocket).
     "websockets>=14",
 ]
 
 [project.entry-points."nooa_cli.commands"]
-coder = "nooa_coder.acp.cli:command"
+atom = "nooa_atom.acp.cli:command"
 
 [project.optional-dependencies]
 # AST-aware code analysis for RepoTools (tree-sitter grammars).
-# The coding agent works without these; RepoTools falls back to regex.
+# The Atom agent works without these; RepoTools falls back to regex.
 ast = [
     "tree-sitter>=0.23.0",
     "tree-sitter-python>=0.23.0",
@@ -55,4 +55,4 @@ metadata = false
 fallback-version = "0.0.6"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/nooa_coder"]
+packages = ["src/nooa_atom"]

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SkillManager: the coding agent's code skills, text skills and MCP servers."""
+"""SkillManager: the Atom agent's code skills, text skills and MCP servers."""
 
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ from nooa.agentdoc import hidden
 from nooa.events import Notification
 from nooa.skill import Skill, TextSkill, slash_command
 from nooa.skill_registry import SkillRegistry
-from nooa_coder.skills.mcp_servers import (
+from nooa_atom.skills.mcp_servers import (
     MCPServers,
     MCPSignInRequired,
     attr_name,
     tool_names,
 )
-from nooa_coder.workspace.mcp_approval import MCPApprovalRequired
+from nooa_atom.workspace.mcp_approval import MCPApprovalRequired
 
 Kind = Literal["code", "text", "mcp"]
 _KIND_LABELS = {"code": "code", "text": "text", "mcp": "MCP"}

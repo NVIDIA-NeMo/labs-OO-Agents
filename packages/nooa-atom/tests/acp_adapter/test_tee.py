@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The JSON-RPC tee: the external relay (``python -m nooa_coder.acp.tee``) and the in-process observer."""
+"""The JSON-RPC tee: the external relay (``python -m nooa_atom.acp.tee``) and the in-process observer."""
 
 import json
 import signal
@@ -20,7 +20,7 @@ def _relay(log: Path, *server_args: str) -> subprocess.Popen[bytes]:
         [
             sys.executable,
             "-m",
-            "nooa_coder.acp.tee",
+            "nooa_atom.acp.tee",
             "--log",
             str(log),
             "--",
@@ -108,7 +108,7 @@ def test_relay_forwards_sigterm_to_the_server(tmp_path):
 
 def test_relay_runs_as_a_module():
     result = subprocess.run(
-        [sys.executable, "-m", "nooa_coder.acp.tee", "--help"],
+        [sys.executable, "-m", "nooa_atom.acp.tee", "--help"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -119,7 +119,7 @@ def test_relay_runs_as_a_module():
 
 def test_relay_without_a_command_is_a_usage_error(tmp_path):
     result = subprocess.run(
-        [sys.executable, "-m", "nooa_coder.acp.tee", "--log", str(tmp_path / "x.jsonl")],
+        [sys.executable, "-m", "nooa_atom.acp.tee", "--log", str(tmp_path / "x.jsonl")],
         capture_output=True,
         text=True,
         timeout=60,
@@ -134,7 +134,7 @@ def test_relay_records_a_frame_that_is_not_json_as_text(tmp_path, line):
         [
             sys.executable,
             "-m",
-            "nooa_coder.acp.tee",
+            "nooa_atom.acp.tee",
             "--log",
             str(log),
             "--",
@@ -154,12 +154,12 @@ def test_relay_records_a_frame_that_is_not_json_as_text(tmp_path, line):
     ]
 
 
-# ---- the in-process observer (nooa coder --tee) -------------------------------
+# ---- the in-process observer (nooa atom --tee) -------------------------------
 
 
 def test_observer_records_frames_in_both_directions(tmp_path):
     from acp.connection import StreamDirection, StreamEvent
-    from nooa_coder.acp.tee import FrameLog
+    from nooa_atom.acp.tee import FrameLog
 
     log = tmp_path / "tee.jsonl"
     tee = FrameLog(log)
@@ -178,7 +178,7 @@ def test_observer_records_frames_in_both_directions(tmp_path):
 
 
 def test_observer_narrows_an_existing_log_to_the_owner(tmp_path):
-    from nooa_coder.acp.tee import FrameLog
+    from nooa_atom.acp.tee import FrameLog
 
     log = tmp_path / "tee.jsonl"
     log.write_text("")
@@ -192,7 +192,7 @@ def test_observer_drops_frames_instead_of_blocking_when_its_queue_is_full(tmp_pa
     import threading
 
     from acp.connection import StreamDirection, StreamEvent
-    from nooa_coder.acp import tee as tee_module
+    from nooa_atom.acp import tee as tee_module
 
     release = threading.Event()
     original = tee_module.FrameLog._write_loop
@@ -213,7 +213,7 @@ def test_observer_drops_frames_instead_of_blocking_when_its_queue_is_full(tmp_pa
 
 
 def test_observer_close_is_idempotent(tmp_path):
-    from nooa_coder.acp.tee import FrameLog
+    from nooa_atom.acp.tee import FrameLog
 
     tee = FrameLog(tmp_path / "tee.jsonl")
     tee.close()
@@ -225,7 +225,7 @@ def test_observer_close_returns_when_the_writer_died_with_a_full_queue(tmp_path,
     import threading
 
     from acp.connection import StreamDirection, StreamEvent
-    from nooa_coder.acp.tee import FrameLog
+    from nooa_atom.acp.tee import FrameLog
 
     tee = FrameLog(tmp_path / "tee.jsonl", max_pending=2)
     tee._file.close()  # every write now fails: the writer thread stops

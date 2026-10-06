@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 
 from acp import PROTOCOL_VERSION
-from nooa_coder.acp.framing import encode, read_frame
-from nooa_coder.acp.router import process_spawn
+from nooa_atom.acp.framing import encode, read_frame
+from nooa_atom.acp.router import process_spawn
 
 FAKE_AGENT = Path(__file__).parent / "fixtures" / "fake_agent.py"
 TIMEOUT = 60
@@ -45,7 +45,7 @@ async def test_a_spawned_worker_answers_leads_its_group_and_exits_zero_on_end_of
         await worker.writer.drain()
         frame = await asyncio.wait_for(read_frame(worker.reader), TIMEOUT)
         assert frame is not None and frame.id == "init"
-        assert frame.message["result"]["agentInfo"]["name"] == "nooa-coder"
+        assert frame.message["result"]["agentInfo"]["name"] == "nooa-atom"
         worker.writer.write_eof()
         assert await asyncio.wait_for(worker.wait(), TIMEOUT) == 0
     finally:
@@ -65,7 +65,7 @@ async def test_kill_tolerates_a_group_that_is_gone(tmp_path):
 async def test_a_worker_whose_socket_cannot_be_opened_is_killed(monkeypatch):
     import signal
 
-    from nooa_coder.acp import router
+    from nooa_atom.acp import router
 
     started = []
     real_exec = asyncio.create_subprocess_exec

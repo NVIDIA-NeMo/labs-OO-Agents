@@ -11,7 +11,7 @@ from acp.schema import (
     Implementation,
     RequestPermissionResponse,
 )
-from coder_test_agents import ScriptedModels, cell, reply
+from atom_test_agents import ScriptedModels, cell, reply
 
 TIMEOUT = 30
 POOL = Implementation(name="pool", version="1.0.16")

@@ -7,10 +7,10 @@ never holds the agent.
 """
 
 import pytest
-from coder_test_agents import LeveledModelFactory, plain_agent_factory
-from nooa_coder.session.items import CommandsChangedUpdate, ModelInfo, ReasoningChangedUpdate
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
+from atom_test_agents import LeveledModelFactory, plain_agent_factory
+from nooa_atom.session.items import CommandsChangedUpdate, ModelInfo, ReasoningChangedUpdate
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore
 
 from nooa.unifiedllm.reasoning import ReasoningConfig
 
@@ -118,7 +118,7 @@ async def test_a_model_switch_is_recorded_as_resetting_the_level(root_options, s
 
 
 async def test_commands_changed_is_emitted_when_the_registry_changes(make_session):
-    session, _ = make_session(agent_spec="coder_test_agents:CommandAgent", start=False)
+    session, _ = make_session(agent_spec="atom_test_agents:CommandAgent", start=False)
     seen = []
     session.subscribe(seen.append)
     session._agent.slash_commands.add("review", "Review the diff")
@@ -132,8 +132,8 @@ async def test_commands_changed_is_emitted_when_the_registry_changes(make_sessio
 
 
 async def test_agent_events_reach_subscribers_as_agent_event_updates(make_session):
-    from nooa_coder.coding.activity import TerminalCommandStarted
-    from nooa_coder.session.items import AgentEventUpdate
+    from nooa_atom.agent.activity import TerminalCommandStarted
+    from nooa_atom.session.items import AgentEventUpdate
 
     from nooa.interactive import AgentMessage
 
@@ -153,7 +153,7 @@ async def test_agent_events_reach_subscribers_as_agent_event_updates(make_sessio
 
 
 async def test_a_model_response_arrives_before_the_usage_it_changes(make_session):
-    from nooa_coder.session.items import AgentEventUpdate, UsageChangedUpdate
+    from nooa_atom.session.items import AgentEventUpdate, UsageChangedUpdate
 
     from nooa.events import LLMResponse
     from nooa.llm_types import LLMUsage
@@ -175,9 +175,9 @@ async def test_the_plan_is_empty_for_an_agent_without_one(make_session):
 
 
 async def test_the_plan_is_the_agents_as_entries(make_session):
-    from nooa_coder.session.items import PlanEntry
+    from nooa_atom.session.items import PlanEntry
 
-    session, _ = make_session(agent_spec="coder_test_agents:PlanAgent", start=False)
+    session, _ = make_session(agent_spec="atom_test_agents:PlanAgent", start=False)
     assert session.plan() == [
         PlanEntry(content="write the test", status="in_progress"),
         PlanEntry(content="run it"),
@@ -185,18 +185,18 @@ async def test_the_plan_is_the_agents_as_entries(make_session):
 
 
 async def test_a_failing_plan_is_empty(make_session, caplog):
-    session, _ = make_session(agent_spec="coder_test_agents:BrokenPlanAgent", start=False)
+    session, _ = make_session(agent_spec="atom_test_agents:BrokenPlanAgent", start=False)
     assert session.plan() == []
     assert "plan" in caplog.text
 
 
-async def test_the_coding_agent_plans_from_its_todos(tmp_path):
-    from nooa_coder.coding.agent import CodingAgent
-    from nooa_coder.session.items import PlanEntry
+async def test_the_atom_agent_plans_from_its_todos(tmp_path):
+    from nooa_atom.agent.agent import AtomAgent
+    from nooa_atom.session.items import PlanEntry
 
     from nooa.unifiedllm import FakeLLMClient
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         first = agent.todo.add("Write the test")
         second = agent.todo.add("Make it pass")
@@ -211,7 +211,7 @@ async def test_the_coding_agent_plans_from_its_todos(tmp_path):
 
 
 async def test_prepare_tools_runs_the_agents_hook_and_returns_its_warnings(make_session):
-    session, _ = make_session(agent_spec="coder_test_agents:ToolPrepAgent", start=False)
+    session, _ = make_session(agent_spec="atom_test_agents:ToolPrepAgent", start=False)
     assert await session.prepare_tools() == ["server 'x' was not connected"]
     assert session._agent.prepared == 1
 
@@ -229,7 +229,7 @@ class _Tool:
 
 
 async def test_register_tools_registers_and_activates_each_tool(make_session):
-    session, _ = make_session(agent_spec="nooa_coder.coding.agent:CodingAgent", start=False)
+    session, _ = make_session(agent_spec="nooa_atom.agent:AtomAgent", start=False)
     tool = _Tool()
     assert await session.register_tools({"mcp.remote": tool, "repo": _Tool()}) == {
         "repo": "Cannot register skill 'repo' as agent attr 'repo': already provided by 'nemo.repo'"
@@ -245,11 +245,11 @@ async def test_register_tools_on_an_agent_without_skills(make_session):
     }
 
 
-async def test_the_coding_agent_connects_the_servers_its_workspace_remembers(
+async def test_the_atom_agent_connects_the_servers_its_workspace_remembers(
     root_options, sessions_dir, tmp_path_factory, monkeypatch
 ):
     import yaml
-    from nooa_coder.coding.factory import create_session_agent
+    from nooa_atom.agent.factory import create_session_agent
 
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path_factory.mktemp("user-config")))
     workspace = root_options.workspace
@@ -260,7 +260,7 @@ async def test_the_coding_agent_connects_the_servers_its_workspace_remembers(
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         options = root_options.model_copy(
-            update={"agent_spec": "nooa_coder.coding.agent:CodingAgent", "llm": _fake_llm()}
+            update={"agent_spec": "nooa_atom.agent:AtomAgent", "llm": _fake_llm()}
         )
         session = await registry.create(options)
         asked = []

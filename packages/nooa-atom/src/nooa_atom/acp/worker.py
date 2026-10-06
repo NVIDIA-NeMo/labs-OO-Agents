@@ -4,7 +4,7 @@
 
 The router starts one worker process per root session and talks to it
 over one end of a Unix socket pair (``--worker-fd N``). The worker is a
-plain ACP server: P3's ``CoderACPAgent`` served by ``serve_connection``,
+plain ACP server: P3's ``AtomACPAgent`` served by ``serve_connection``,
 answering ``initialize`` itself (the router replays the client's
 ``initialize`` as the worker's first request). Its requests to the client
 use ids from ``--id-base B`` on, so the router routes replies by id alone.
@@ -28,8 +28,8 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
-from nooa_coder.acp.framing import FRAME_LIMIT
-from nooa_coder.acp.server import serve_connection
+from nooa_atom.acp.framing import FRAME_LIMIT
+from nooa_atom.acp.server import serve_connection
 
 logger = logging.getLogger(__name__)
 

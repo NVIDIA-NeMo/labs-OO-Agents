@@ -4,11 +4,11 @@
 
 import asyncio
 
-import nooa_coder
+import nooa_atom
 import pytest
-from coder_test_agents import cell
-from nooa_coder import SessionOptions, SessionStore, TaskResult, open_tree
-from nooa_coder.session.store import sessions_root
+from atom_test_agents import cell
+from nooa_atom import SessionOptions, SessionStore, TaskResult, open_tree
+from nooa_atom.session.store import sessions_root
 
 from nooa.interactive import Done
 from nooa.unifiedllm import FakeLLMClient
@@ -22,7 +22,7 @@ _RESULT = (
 async def test_open_tree_runs_a_batch_prompt_to_a_task_result(tmp_path):
     options = SessionOptions(
         workspace=tmp_path,
-        agent_spec="coder_test_agents:BatchAgent",
+        agent_spec="atom_test_agents:BatchAgent",
         turn_method="handle_batch",
         llm=FakeLLMClient([cell(_RESULT)], strict_exhaustion=True),
     )
@@ -41,7 +41,7 @@ async def test_open_tree_runs_a_batch_prompt_to_a_task_result(tmp_path):
 async def test_an_exception_in_the_block_leaves_no_live_claim(tmp_path, sessions_dir):
     options = SessionOptions(
         workspace=tmp_path,
-        agent_spec="coder_test_agents:EchoAgent",
+        agent_spec="atom_test_agents:EchoAgent",
         llm=FakeLLMClient([], strict_exhaustion=True),
     )
     with pytest.raises(RuntimeError, match="benchmark crashed"):
@@ -57,7 +57,7 @@ def _echo_options(workspace, **values):
     workspace.mkdir(parents=True, exist_ok=True)
     return SessionOptions(
         workspace=workspace,
-        agent_spec="coder_test_agents:EchoAgent",
+        agent_spec="atom_test_agents:EchoAgent",
         llm=FakeLLMClient([], strict_exhaustion=True),
         **values,
     )
@@ -108,4 +108,4 @@ def test_public_names_are_exported():
         "open_tree",
         "Tree",
     ):
-        assert hasattr(nooa_coder, name), name
+        assert hasattr(nooa_atom, name), name

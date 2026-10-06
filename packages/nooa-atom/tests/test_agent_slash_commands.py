@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for shared coding-agent skill command discovery and dispatch."""
+"""Tests for shared agent skill command discovery and dispatch."""
 
 import asyncio
 from typing import Literal
 
 import pytest
-from nooa_coder.coding import CodingAgent, CodingSlashCommandRegistry
+from nooa_atom.agent import AtomAgent, SlashCommandRegistry
 
 from nooa.skill import Skill, slash_command
 from nooa.slash_dispatch import CoercionError
@@ -37,9 +37,9 @@ class _BackgroundWorkflowSkill(Skill):
 
 
 async def test_registry_discovers_metadata_and_dispatches_typed_arguments(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.workflow", _WorkflowSkill())
-    registry = CodingSlashCommandRegistry(agent)
+    registry = SlashCommandRegistry(agent)
     try:
         assert registry.commands()[0].name == "diagnose"
         assert registry.commands()[0].description == "Diagnose the current failure."
@@ -57,9 +57,9 @@ async def test_registry_discovers_metadata_and_dispatches_typed_arguments(tmp_pa
 
 
 async def test_registry_reports_typed_argument_errors(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.workflow", _WorkflowSkill())
-    registry = CodingSlashCommandRegistry(agent)
+    registry = SlashCommandRegistry(agent)
     try:
         with pytest.raises(CoercionError, match="cannot convert"):
             await registry.invoke("diagnose", "invalid")
@@ -69,8 +69,8 @@ async def test_registry_reports_typed_argument_errors(tmp_path):
 
 
 async def test_registry_refresh_callback_observes_new_skill_commands(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
-    registry = CodingSlashCommandRegistry(agent)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    registry = SlashCommandRegistry(agent)
     updates: list[tuple[str, ...]] = []
     registry.set_on_change(
         lambda commands: updates.append(tuple(command.name for command in commands)),
@@ -88,9 +88,9 @@ async def test_registry_refresh_callback_observes_new_skill_commands(tmp_path):
 
 
 async def test_sync_command_runs_on_agent_loop_and_can_spawn_background_job(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.background", _BackgroundWorkflowSkill())
-    registry = CodingSlashCommandRegistry(agent)
+    registry = SlashCommandRegistry(agent)
     try:
         result = await registry.invoke("background", "started")
         handle = agent.queue_manager.job("background-test")
@@ -119,9 +119,9 @@ async def test_async_command_is_cooperatively_cancellable_on_agent_loop(tmp_path
             return "never"
 
     host_loop = asyncio.get_running_loop()
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.async", AsyncWorkflowSkill())
-    registry = CodingSlashCommandRegistry(agent)
+    registry = SlashCommandRegistry(agent)
     try:
         invocation = asyncio.create_task(registry.invoke("wait", ""))
         # Bounded: a regression that stops the coroutine reaching the host loop
@@ -162,14 +162,14 @@ async def test_commands_are_sorted_deduplicated_and_case_insensitive(tmp_path):
             """Duplicate."""
             return "duplicate"
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     # Registered out of order, and with a colliding name.
     # Registry names sort opposite to the command names they provide, so
     # _commands is built in [beta, alpha] order and sorting is observable.
     agent.skills.register("test.aaa", _Beta())
     agent.skills.register("test.zzz", _Alpha())
     agent.skills.register("test.zzzz", _AlphaAgain())
-    registry = CodingSlashCommandRegistry(agent)
+    registry = SlashCommandRegistry(agent)
     try:
         names = [command.name for command in registry.commands()]
         assert names == sorted(names), names
@@ -205,9 +205,9 @@ async def test_string_args_annotation_preserves_raw_input(
     )
     namespace = {"__name__": __name__, "Skill": Skill, "slash_command": slash_command}
     exec(compile(source, "<raw-args-skill>", "exec", dont_inherit=True), namespace)
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
     agent.skills.register("test.raw", namespace["StringArgsSkill"]())
-    registry = CodingSlashCommandRegistry(agent)
+    registry = SlashCommandRegistry(agent)
     try:
         result = await registry.invoke("raw-input", raw_args)
         assert result.text == raw_args
@@ -225,15 +225,15 @@ async def test_string_args_annotation_preserves_raw_input(
 )
 def test_markdown_skill_arguments_placeholder_never_reaches_the_agent(args, expected):
     """A skill body using $ARGUMENTS invoked without arguments expands it to ''."""
-    from nooa_coder.coding.slash_commands import CodingSlashCommand
+    from nooa_atom.agent.slash_commands import SlashCommand
 
-    command = CodingSlashCommand(name="review", description="", body="Review $ARGUMENTS now.")
+    command = SlashCommand(name="review", description="", body="Review $ARGUMENTS now.")
     assert command.make_agent_message(args) == expected
 
 
 def test_markdown_skill_without_placeholder_appends_arguments():
-    from nooa_coder.coding.slash_commands import CodingSlashCommand
+    from nooa_atom.agent.slash_commands import SlashCommand
 
-    command = CodingSlashCommand(name="review", description="", body="Review.")
+    command = SlashCommand(name="review", description="", body="Review.")
     assert command.make_agent_message([]) == "Review."
     assert command.make_agent_message(["a", "b"]) == "Review.\n\nArguments: a b"

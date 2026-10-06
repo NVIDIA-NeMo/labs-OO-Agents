@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""run_task: one unattended task through the coding agent's session tree."""
+"""run_task: one unattended task through the Atom agent's session tree."""
 
 import asyncio
 
-from coder_test_agents import CODER_SPEC, CellLLM, cell
-from nooa_coder import SessionOptions, SessionStore, TaskResult, run_task
-from nooa_coder.session.store import sessions_root
+from atom_test_agents import ATOM_SPEC, CellLLM, cell
+from nooa_atom import SessionOptions, SessionStore, TaskResult, run_task
+from nooa_atom.session.store import sessions_root
 
 from nooa.unifiedllm import LLMResponse, LLMUsage
 
@@ -34,7 +34,7 @@ return_result(Waiting(explanation="job running", on=["test_jobs"]))
 def _options(tmp_path, *responses: LLMResponse) -> SessionOptions:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
-    return SessionOptions(workspace=workspace, agent_spec=CODER_SPEC, llm=CellLLM(list(responses)))
+    return SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, llm=CellLLM(list(responses)))
 
 
 async def test_a_task_solved_in_one_turn_returns_its_task_result(tmp_path):

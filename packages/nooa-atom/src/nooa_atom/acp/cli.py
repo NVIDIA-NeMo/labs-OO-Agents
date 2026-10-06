@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The ``nooa coder`` command, a plugin of the ``nooa`` command (``nooa_cli.commands``).
+"""The ``nooa atom`` command, a plugin of the ``nooa`` command (``nooa_cli.commands``).
 
 The server runs in one of four roles:
 
 - Router (the default): the client speaks ACP to this process on standard
   input and output; each root session runs in its own worker process.
 - ``--http``: clients connect over WebSocket at ``ws://HOST:PORT/acp``
-  (``nooa_coder.acp.websocket``); each connection gets its own router and
+  (``nooa_atom.acp.websocket``); each connection gets its own router and
   workers, as on standard input and output.
 - ``--single-process``: every session runs in this process.
 - ``--worker-fd N --id-base B`` (hidden): a worker, started by the router on
@@ -30,7 +30,7 @@ from typing import Any
 
 import click
 
-TOKEN_ENV = "NOOA_CODER_TOKEN"
+TOKEN_ENV = "NOOA_ATOM_TOKEN"
 """The environment variable ``--http`` reads its token from (and removes, so workers and cells never see it)."""
 
 DEFAULT_PORT = 8765
@@ -71,7 +71,7 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     """
     if not value:
         return value
-    from nooa_coder.session.loader import _is_file_spec
+    from nooa_atom.session.loader import _is_file_spec
 
     module, _, class_path = value.rpartition(":")
     if not module or not _is_file_spec(module):
@@ -101,7 +101,7 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     callback=_resolve_agent_spec,
     help=(
         "Agent class for new sessions (module:Class or file.py:Class). Default: the "
-        "workspace's coding.agent_spec setting, else the coding agent."
+        "workspace's coding.agent_spec setting, else the Atom agent."
     ),
 )
 @click.option(
@@ -170,7 +170,7 @@ def command(
     worker_fd: int | None,
     id_base: int | None,
 ) -> None:
-    """Serve the NOOA coding agent over ACP on standard input/output, or over WebSocket.
+    """Serve NOOA Atom over ACP on standard input/output, or over WebSocket.
 
     \b
     Roles:
@@ -199,7 +199,7 @@ def command(
             raise click.UsageError(
                 "--tee records standard input/output; it does not work with --http."
             )
-        from nooa_coder.acp.websocket import is_loopback_host
+        from nooa_atom.acp.websocket import is_loopback_host
 
         if no_auth and not is_loopback_host(host):
             raise click.UsageError(
@@ -216,7 +216,7 @@ def command(
     def llm_factory(alias: str | None, workspace: Path) -> Any:
         # Called per session with the alias it asks for; None is the default.
         # The alias resolves against the session workspace's configuration.
-        from nooa_coder.workspace import models
+        from nooa_atom.workspace import models
 
         name = alias or model
         overrides = (
@@ -331,7 +331,7 @@ def llm_config_summary(workspace: Path) -> str:
     ``.nooa/llm_config.yaml``, then the ``NEMO_OO_LLM_CONFIG`` paths,
     highest priority last) and whether the environment variable is set.
     """
-    from nooa_coder.workspace.models import llm_config_files
+    from nooa_atom.workspace.models import llm_config_files
 
     paths = [str(path) for path in llm_config_files(workspace)]
     listed = ", ".join(paths) if paths else "none found"
@@ -345,11 +345,11 @@ def _run_router(
 ) -> None:
     import logging
 
-    from nooa_coder.acp._mcp_trace import MCPHandoffTrace
-    from nooa_coder.acp.router import Router, process_spawn
-    from nooa_coder.acp.tee import FrameLog
+    from nooa_atom.acp._mcp_trace import MCPHandoffTrace
+    from nooa_atom.acp.router import Router, process_spawn
+    from nooa_atom.acp.tee import FrameLog
 
-    _configure_logging("nooa-coder router")
+    _configure_logging("nooa-atom router")
     # Both observe the client's side, which only the router sees whole.
     observers: list[Any] = []
     if (trace := MCPHandoffTrace.from_env()) is not None:
@@ -374,10 +374,10 @@ def _run_http(options: HttpOptions, *, sessions_dir: Path | None) -> None:
     import logging
     import signal
 
-    from nooa_coder.acp.router import process_spawn
-    from nooa_coder.acp.websocket import Gate, serve_websocket
+    from nooa_atom.acp.router import process_spawn
+    from nooa_atom.acp.websocket import Gate, serve_websocket
 
-    _configure_logging("nooa-coder http")
+    _configure_logging("nooa-atom http")
     if options.token is None:
         logging.getLogger(__name__).warning(
             "--no-auth: any program on this machine can connect to %s:%d",
@@ -418,21 +418,21 @@ def _run_worker(
     # --tee and NOOA_ACP_MCP_TRACE are ignored here: the router records the
     # client's side. The server logs each workspace's model configuration
     # files when its first session starts: the workspace is not known yet.
-    from nooa_coder.acp.server import CoderACPAgent
-    from nooa_coder.acp.worker import run_worker
-    from nooa_coder.coding.factory import create_session_agent
-    from nooa_coder.session.registry import SessionRegistry
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.acp.server import AtomACPAgent
+    from nooa_atom.acp.worker import run_worker
+    from nooa_atom.agent.factory import create_session_agent
+    from nooa_atom.session.registry import SessionRegistry
+    from nooa_atom.session.store import SessionStore
 
-    _configure_logging(f"nooa-coder worker {id_base >> 32}")
+    _configure_logging(f"nooa-atom worker {id_base >> 32}")
 
     def new_registry(store: SessionStore) -> SessionRegistry:
         return SessionRegistry(
             store, agent_factory=agent_factory or create_session_agent, llm_factory=llm_factory
         )
 
-    def make_agent() -> CoderACPAgent:
-        return CoderACPAgent(
+    def make_agent() -> AtomACPAgent:
+        return AtomACPAgent(
             new_registry, sessions_dir=sessions_dir, agent_spec=agent_spec, model=model
         )
 
@@ -453,8 +453,8 @@ def _configure_logging(name: str) -> None:
     root.addHandler(handler)
     if root.level == logging.NOTSET or root.level > logging.WARNING:
         root.setLevel(logging.WARNING)
-    level = os.environ.get("NOOA_CODER_LOG_LEVEL", "INFO").upper()
-    logging.getLogger("nooa_coder.acp").setLevel(level)
+    level = os.environ.get("NOOA_ATOM_LOG_LEVEL", "INFO").upper()
+    logging.getLogger("nooa_atom.acp").setLevel(level)
 
 
 async def _serve(
@@ -468,12 +468,12 @@ async def _serve(
     acp_stdin: int,
     acp_stdout: int,
 ) -> None:
-    from nooa_coder.acp._mcp_trace import MCPHandoffTrace
-    from nooa_coder.acp.server import serve
-    from nooa_coder.acp.tee import FrameLog
-    from nooa_coder.coding.factory import create_session_agent
-    from nooa_coder.session.registry import SessionRegistry
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.acp._mcp_trace import MCPHandoffTrace
+    from nooa_atom.acp.server import serve
+    from nooa_atom.acp.tee import FrameLog
+    from nooa_atom.agent.factory import create_session_agent
+    from nooa_atom.session.registry import SessionRegistry
+    from nooa_atom.session.store import SessionStore
 
     def new_registry(store: SessionStore) -> SessionRegistry:
         return SessionRegistry(

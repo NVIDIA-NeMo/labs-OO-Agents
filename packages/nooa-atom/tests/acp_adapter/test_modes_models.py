@@ -7,14 +7,14 @@ import asyncio
 import pytest
 from acp import RequestError, text_block
 from acp.schema import AgentMessageChunk, CurrentModeUpdate
-from coder_test_agents import ModelFactory, ScriptedModels, reply
+from atom_test_agents import ModelFactory, ScriptedModels, reply
 
 TIMEOUT = 30
 
 
 @pytest.fixture(autouse=True)
 def aliases(monkeypatch):
-    from nooa_coder.acp import server
+    from nooa_atom.acp import server
 
     monkeypatch.setattr(server, "model_aliases", lambda workspace: ["fast", "smart"])
 

@@ -3,9 +3,9 @@
 """A JSON-RPC tee: record every ACP frame in both directions to a JSON Lines log.
 
 Two forms. ``FrameLog`` is an observer on the server's own ACP connection
-(``nooa coder --tee PATH``). The relay below wraps any server command.
+(``nooa atom --tee PATH``). The relay below wraps any server command.
 
-``python -m nooa_coder.acp.tee --log PATH -- COMMAND...`` runs any agent server command
+``python -m nooa_atom.acp.tee --log PATH -- COMMAND...`` runs any agent server command
 as a child process and relays its standard input and output unchanged,
 appending one record per frame: ``{"ts": <unix time>, "dir": "in"|"out",
 "frame": <the JSON message, or the raw line when it is not JSON>}``. ``in``
@@ -136,11 +136,11 @@ def relay(command: list[str], log_path: Path) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="python -m nooa_coder.acp.tee",
+        prog="python -m nooa_atom.acp.tee",
         description=(
             "Run an ACP agent server and record every JSON-RPC frame in both directions "
-            "to a JSON Lines log. Example: python -m nooa_coder.acp.tee --log acp.jsonl -- "
-            "nooa coder --model my-alias"
+            "to a JSON Lines log. Example: python -m nooa_atom.acp.tee --log acp.jsonl -- "
+            "nooa atom --model my-alias"
         ),
     )
     parser.add_argument(
@@ -165,7 +165,7 @@ if __name__ == "__main__":
 
 
 class FrameLog:
-    """The in-process tee (``nooa coder --tee PATH``): an ACP connection observer.
+    """The in-process tee (``nooa atom --tee PATH``): an ACP connection observer.
 
     Pass it to ``run_agent(..., observers=[...])``; the connection calls it
     with every parsed frame it reads (``in``) or writes (``out``). The call
@@ -179,7 +179,7 @@ class FrameLog:
         self._queue: queue.Queue[str | None] = queue.Queue(maxsize=max_pending)
         self._closed = False
         self.dropped = 0
-        self._thread = threading.Thread(target=self._write_loop, name="nooa-coder-tee", daemon=True)
+        self._thread = threading.Thread(target=self._write_loop, name="nooa-atom-tee", daemon=True)
         self._thread.start()
 
     def __call__(self, event: Any) -> None:

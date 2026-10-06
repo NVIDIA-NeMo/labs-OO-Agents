@@ -36,12 +36,12 @@ _USER_SKILL_DIRS = (
 )
 
 
-def load_coding_skills_dirs(
+def load_skills_dirs(
     workspace: str | Path,
     *,
     explicit: Iterable[str | Path] = (),
 ) -> list[Path]:
-    """Return existing skill roots for one coding-agent workspace.
+    """Return existing skill roots for one Atom workspace.
 
     The shared ``coding.additional_skills_dirs`` setting is preferred for new
     configuration. ``tui.additional_skills_dirs`` remains supported while the
@@ -161,14 +161,14 @@ def _warn_ignored_agent_spec() -> None:
     logger.warning(
         "Ignoring coding.agent_spec and tui.agent_spec in all settings layers "
         "(including user and project settings); select custom agents explicitly "
-        "through the host CLI or CoderOptions overrides"
+        "through the host CLI or AtomOptions overrides"
     )
 
 
 def behavior_fields() -> frozenset[str]:
-    from .options import CoderOptions
+    from .options import AtomOptions
 
-    return frozenset(CoderOptions.model_fields) - {
+    return frozenset(AtomOptions.model_fields) - {
         "working_dir",
         "skills_dirs",
         "agent_spec",
@@ -226,7 +226,7 @@ def _invalid_settings_files(workspace: str | Path) -> list[str]:
 
 def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
     """Resolve legacy aliases and partial nested overrides identically for both hosts."""
-    from .options import CoderOptions
+    from .options import AtomOptions
 
     values: dict[str, Any] = {}
     agent = data.get("agent", {})
@@ -254,7 +254,7 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
         # forget_mcp() writes ``name: null`` to mask an inherited definition;
         # a masked server is simply absent from the resolved options.
         values["mcp_servers"] = {k: v for k, v in servers.items() if v is not None}
-    return CoderOptions(**values).model_dump(exclude_unset=True)
+    return AtomOptions(**values).model_dump(exclude_unset=True)
 
 
 def canonical_setting_path(path: tuple[str, ...]) -> tuple[str, ...]:

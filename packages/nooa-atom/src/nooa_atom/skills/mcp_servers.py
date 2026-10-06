@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""MCPServers: the MCP servers a coding agent can connect to.
+"""MCPServers: the MCP servers an Atom agent can connect to.
 
 Held by the ``SkillManager``; the model reaches MCP servers through
 ``self.skills``. A server is *configured* (``.mcp.json``, the shared
@@ -41,14 +41,14 @@ from typing import Any, Literal
 
 from nooa.agentdoc import spec
 from nooa.mcp import MCPManager
-from nooa_coder.skills.mcp_auth import (
+from nooa_atom.skills.mcp_auth import (
     DEFAULT_REDIRECT_URI,
     AuthorizedHTTPClient,
     FileTokenStorage,
     PastedSignIn,
     oauth_provider,
 )
-from nooa_coder.workspace.mcp_approval import (
+from nooa_atom.workspace.mcp_approval import (
     MCPApprovalRequest,
     MCPApprovalRequired,
     MCPApprovalStore,
@@ -155,7 +155,7 @@ class MCPServers:
     def config_path(self) -> Path:
         """The workspace settings.yaml where servers are saved."""
         from nooa.paths import get_project_dir
-        from nooa_coder.workspace.settings import SETTINGS_FILENAME
+        from nooa_atom.workspace.settings import SETTINGS_FILENAME
 
         if self.project_dir:
             return self.project_dir / SETTINGS_FILENAME
@@ -176,7 +176,7 @@ class MCPServers:
             return []
 
         from nooa.layered_config import load_layered_yaml
-        from nooa_coder.workspace.settings import SETTINGS_ENV_VAR, SETTINGS_FILENAME
+        from nooa_atom.workspace.settings import SETTINGS_ENV_VAR, SETTINGS_FILENAME
 
         data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=self.project_dir)
         legacy = data.get("tui", {})

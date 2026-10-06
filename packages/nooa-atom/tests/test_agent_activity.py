@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Semantic activity emitted by the shared interactive coding tools."""
+"""Semantic activity emitted by the shared interactive agent tools."""
 
 import asyncio
 from pathlib import Path
 
-import nooa_coder.coding.activity as activity
+import nooa_atom.agent.activity as activity
 import pytest
-from nooa_coder.coding.activity import (
+from nooa_atom.agent.activity import (
     ActivityShellTools,
     FileEdit,
     TerminalCommandFinished,

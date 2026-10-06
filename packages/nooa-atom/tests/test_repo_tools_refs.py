@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import nooa_coder.tools._tree_sitter_backend as ts_backend
+import nooa_atom.tools._tree_sitter_backend as ts_backend
 import pytest
-from nooa_coder.tools.repo_tools import RepoTools
+from nooa_atom.tools.repo_tools import RepoTools
 
 from nooa.tools.shell_tools import ShellTools
 
@@ -80,7 +80,7 @@ async def test_refs_scoped_to_one_file_through_a_session(tmp_path, monkeypatch, 
 
 def test_the_tool_docs_promise_editable_only_when_match_has_it():
     """The model is told to filter on Match.editable only if core Match has it (#382)."""
-    from nooa_coder.tools import repo_tools
+    from nooa_atom.tools import repo_tools
 
     from nooa.agentdoc import doc
 

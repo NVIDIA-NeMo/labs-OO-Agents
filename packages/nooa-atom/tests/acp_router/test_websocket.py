@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``nooa coder --http``: ACP over WebSocket, one router per connection.
+"""``nooa atom --http``: ACP over WebSocket, one router per connection.
 
 The end-to-end cases run ``fixtures/fake_agent.py --http`` as a real
 process and talk to it with the ``acp`` library's own WebSocket client,
@@ -20,7 +20,7 @@ import pytest
 from acp import PROTOCOL_VERSION, connect_to_agent, text_block
 from acp.schema import AgentMessageChunk, AllowedOutcome, RequestPermissionResponse
 from acp.ws import create_websocket_stream
-from nooa_coder.acp.websocket import Gate, is_loopback_host
+from nooa_atom.acp.websocket import Gate, is_loopback_host
 from websockets.asyncio.client import connect
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
@@ -121,7 +121,7 @@ class HttpServer:
             sys.executable,
             str(FAKE_AGENT),
             "--agent",
-            "coder_test_agents:EchoAgent",
+            "atom_test_agents:EchoAgent",
             "--model",
             "fake",
             "--sessions-dir",
@@ -134,7 +134,7 @@ class HttpServer:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=tmp_path,
-            env={**os.environ, "HOME": str(home), "NOOA_CODER_TOKEN": TOKEN},
+            env={**os.environ, "HOME": str(home), "NOOA_ATOM_TOKEN": TOKEN},
         )
         assert process.stderr is not None
         seen: list[str] = []

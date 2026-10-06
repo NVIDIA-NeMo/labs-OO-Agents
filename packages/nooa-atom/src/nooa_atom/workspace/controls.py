@@ -250,7 +250,7 @@ class SkillsControl(BehaviorControl):
                 ControlMessage(f"Searched: {self.skills_dirs}", "status"),
             )
 
-        from nooa_coder.skills.manager import SkillManager
+        from nooa_atom.skills.manager import SkillManager
 
         manager = getattr(self.agent, "skills", None)
         if not isinstance(manager, SkillManager):
@@ -347,7 +347,7 @@ class MCPControl(BehaviorControl):
         return False, f"Usage: /mcp {self.usage}"
 
     async def execute(self, args: list[str]) -> ControlResult:
-        from nooa_coder.skills.mcp_servers import MCPSignInRequired
+        from nooa_atom.skills.mcp_servers import MCPSignInRequired
 
         from .mcp_approval import _safe_display
 
@@ -505,8 +505,8 @@ CONTROL_TYPES = {
 class ControlCommand:
     """One control as a slash command: its name, help text and what runs it.
 
-    The coding agent's command registry wraps each in its own command type
-    (``CodingSlashCommand.for_control``).
+    The Atom agent's command registry wraps each in its own command type
+    (``SlashCommand.for_control``).
     """
 
     name: str

@@ -14,8 +14,8 @@ from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 
-from nooa_coder.session.items import CommandInfo, InUseSession
-from nooa_coder.session.store import SessionStore
+from nooa_atom.session.items import CommandInfo, InUseSession
+from nooa_atom.session.store import SessionStore
 
 COMMAND = CommandInfo(
     name="recover",

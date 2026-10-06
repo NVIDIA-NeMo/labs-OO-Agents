@@ -18,7 +18,7 @@ from acp import RequestError
 from acp.schema import ListSessionsResponse
 from acp.schema import SessionInfo as ACPSessionInfo
 
-from nooa_coder.session.store import SessionStore
+from nooa_atom.session.store import SessionStore
 
 SESSION_PAGE_SIZE = 50
 

@@ -9,8 +9,8 @@ from enum import Enum
 from pathlib import Path
 
 import pytest
-from nooa_coder.session import items
-from nooa_coder.session.items import (
+from nooa_atom.session import items
+from nooa_atom.session.items import (
     ChildFailed,
     ChildQuestion,
     ChildRef,
@@ -22,7 +22,7 @@ from nooa_coder.session.items import (
     TurnCancelledOutcome,
     Usage,
 )
-from nooa_coder.session.options import SessionOptions
+from nooa_atom.session.options import SessionOptions
 from pydantic import BaseModel, ValidationError
 
 from nooa.interactive import Done, NeedInput

@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The ``coder`` agent type: the nooa-coder coding agent on a benchmark task."""
+"""The ``atom`` agent type: the Atom agent on a benchmark task."""
 
 import json
 
 import pytest
-from coder_test_agents import CellLLM, cell
+from atom_test_agents import CellLLM, cell
+from nooa_atom import SessionStore
+from nooa_atom.session.store import sessions_root
 from nooa_bench import AGENT_CLASSES, runner
-from nooa_bench.coder_agent import CoderBenchAgent
-from nooa_coder import SessionStore
-from nooa_coder.session.store import sessions_root
+from nooa_bench.atom_agent import AtomBenchAgent
 
 from nooa.unifiedllm import LLMUsage
 
@@ -34,14 +34,14 @@ def workspace(tmp_path):
     return path
 
 
-def test_coder_is_an_agent_type():
-    assert AGENT_CLASSES["coder"] == "nooa_bench.coder_agent:CoderBenchAgent"
-    assert runner._import_agent_class("coder") is CoderBenchAgent
+def test_atom_is_an_agent_type():
+    assert AGENT_CLASSES["atom"] == "nooa_bench.atom_agent:AtomBenchAgent"
+    assert runner._import_agent_class("atom") is AtomBenchAgent
 
 
 async def test_a_solved_task_gives_the_runners_result_shape(workspace):
     llm = CellLLM([cell(RESULT, usage=LLMUsage(input_tokens=120, output_tokens=30))])
-    agent = CoderBenchAgent(llm=llm)
+    agent = AtomBenchAgent(llm=llm)
 
     result = await agent._run_evaluation(
         {"user_message": "Create hello.py", "working_dir": str(workspace)}
@@ -62,7 +62,7 @@ async def test_a_solved_task_gives_the_runners_result_shape(workspace):
 
 
 async def test_a_run_without_a_result_is_a_failure(workspace):
-    agent = CoderBenchAgent(llm=CellLLM([]))  # no response: the turn fails
+    agent = AtomBenchAgent(llm=CellLLM([]))  # no response: the turn fails
 
     result = await agent._run_evaluation(
         {"user_message": "Create hello.py", "working_dir": str(workspace)}
@@ -80,13 +80,13 @@ async def test_the_runner_writes_result_trajectory_and_answer(monkeypatch, tmp_p
     monkeypatch.setattr(runner, "ANSWER_FILE", tmp_path / "answer.txt")
 
     code = await runner._run(
-        "Create hello.py", "fixture-model", "coder", api_base=None, working_dir=str(workspace)
+        "Create hello.py", "fixture-model", "atom", api_base=None, working_dir=str(workspace)
     )
 
     assert code == 0
     written = json.loads((tmp_path / "logs" / "result.json").read_text())
     assert written["success"] is True
-    assert written["agent_type"] == "coder"
+    assert written["agent_type"] == "atom"
     # The agent's own counts: the runner's token counter cannot see the session's turns.
     assert (written["n_input_tokens"], written["n_output_tokens"]) == (120, 30)
     trajectory = json.loads((tmp_path / "logs" / "trajectory.json").read_text())
@@ -101,7 +101,7 @@ async def test_the_runner_reports_a_failed_run(monkeypatch, tmp_path, workspace)
     monkeypatch.setattr(runner, "ANSWER_FILE", tmp_path / "answer.txt")
 
     code = await runner._run(
-        "Create hello.py", "fixture-model", "coder", api_base=None, working_dir=str(workspace)
+        "Create hello.py", "fixture-model", "atom", api_base=None, working_dir=str(workspace)
     )
 
     assert code == 1

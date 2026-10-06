@@ -8,7 +8,7 @@ import os
 import time
 from pathlib import Path
 
-from nooa_coder.acp import server
+from nooa_atom.acp import server
 
 
 def _write(path: Path, *aliases: str) -> None:
@@ -34,7 +34,7 @@ def test_an_alias_connected_after_start_up_appears(tmp_path, workspace, monkeypa
 
 
 def test_an_unchanged_registry_is_not_reloaded(tmp_path, workspace, monkeypatch):
-    from nooa_coder.workspace import models
+    from nooa_atom.workspace import models
 
     registry = tmp_path / "llm_config.yaml"
     _write(registry, "first")

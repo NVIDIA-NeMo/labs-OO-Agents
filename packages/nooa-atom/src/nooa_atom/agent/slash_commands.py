@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Host-neutral discovery and dispatch for coding-agent skill commands."""
+"""Host-neutral discovery and dispatch for agent skill commands."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class CodingSlashCommand:
+class SlashCommand:
     """Metadata for a user-invocable skill slash command."""
 
     name: str
@@ -33,7 +33,7 @@ class CodingSlashCommand:
     _method: Any = field(default=None, repr=False, compare=False)
 
     @classmethod
-    def for_control(cls, control: Any) -> CodingSlashCommand:
+    def for_control(cls, control: Any) -> SlashCommand:
         """A host control (``workspace.controls.ControlCommand``) as a slash command."""
         return cls(
             name=control.name,
@@ -68,7 +68,7 @@ RESERVED_COMMAND_NAMES = frozenset(
 
 
 def discover_markdown_commands(skills_dirs, reserved=RESERVED_COMMAND_NAMES):
-    skills: dict[str, CodingSlashCommand] = {}
+    skills: dict[str, SlashCommand] = {}
     if not skills_dirs:
         return skills
     try:
@@ -137,7 +137,7 @@ def discover_markdown_commands(skills_dirs, reserved=RESERVED_COMMAND_NAMES):
                     hint = "[" + ", ".join(str(x) for x in hint) + "]"
                 elif hint is not None:
                     hint = str(hint)
-                skills[cmd_name] = CodingSlashCommand(
+                skills[cmd_name] = SlashCommand(
                     name=cmd_name,
                     body=body,
                     description=description,
@@ -149,7 +149,7 @@ def discover_markdown_commands(skills_dirs, reserved=RESERVED_COMMAND_NAMES):
 
 
 def discover_python_commands(agent, reserved=RESERVED_COMMAND_NAMES):
-    skills: dict[str, CodingSlashCommand] = {}
+    skills: dict[str, SlashCommand] = {}
     try:
         from nooa.skill import get_slash_commands
     except ImportError:
@@ -169,7 +169,7 @@ def discover_python_commands(agent, reserved=RESERVED_COMMAND_NAMES):
             if cmd_name in reserved or cmd_name in skills:
                 continue
             description = (method.__doc__ or "").strip().split("\n")[0]
-            skills[cmd_name] = CodingSlashCommand(
+            skills[cmd_name] = SlashCommand(
                 name=cmd_name,
                 body="",
                 description=description,
@@ -181,7 +181,7 @@ def discover_python_commands(agent, reserved=RESERVED_COMMAND_NAMES):
     return skills
 
 
-class CodingSlashCommandRegistry:
+class SlashCommandRegistry:
     """Discover and invoke Markdown and Python skill commands without UI coupling."""
 
     def __init__(
@@ -191,14 +191,14 @@ class CodingSlashCommandRegistry:
         self.skills_dirs = tuple(skills_dirs)
         self.controls = {command.name: command for command in controls}
         self.reserved = RESERVED_COMMAND_NAMES | frozenset(reserved)
-        self._commands: dict[str, CodingSlashCommand] = {}
-        self._on_change: Callable[[tuple[CodingSlashCommand, ...]], None] | None = None
+        self._commands: dict[str, SlashCommand] = {}
+        self._on_change: Callable[[tuple[SlashCommand, ...]], None] | None = None
         self._previous_registry = getattr(agent, "_command_registry", None)
         if bind_registry:
             agent._command_registry = self
         self.refresh_skill_commands()
 
-    def commands(self) -> tuple[CodingSlashCommand, ...]:
+    def commands(self) -> tuple[SlashCommand, ...]:
         return tuple(self._commands[name] for name in sorted(self._commands))
 
     def skill_commands(self):
@@ -218,12 +218,12 @@ class CodingSlashCommandRegistry:
         self.controls = {command.name: command for command in controls}
         self.refresh_skill_commands()
 
-    def get(self, name: str) -> CodingSlashCommand | None:
+    def get(self, name: str) -> SlashCommand | None:
         return self._commands.get(name.lower())
 
     def set_on_change(
         self,
-        callback: Callable[[tuple[CodingSlashCommand, ...]], None] | None,
+        callback: Callable[[tuple[SlashCommand, ...]], None] | None,
         *,
         emit: bool = False,
     ) -> None:
@@ -257,7 +257,7 @@ class CodingSlashCommandRegistry:
 
 
 async def invoke_skill_command(
-    command: CodingSlashCommand, raw_args: str, *, agent: Any
+    command: SlashCommand, raw_args: str, *, agent: Any
 ) -> SlashCommandResult:
     """Prepare a skill result on the agent loop with identical argument semantics."""
     from .mentions import expand_mentions
@@ -285,4 +285,4 @@ async def invoke_skill_command(
     )
 
 
-__all__ = ["CodingSlashCommand", "CodingSlashCommandRegistry"]
+__all__ = ["SlashCommand", "SlashCommandRegistry"]

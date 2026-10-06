@@ -21,8 +21,8 @@ from typing import Any
 from nooa.events import TuiSessionResumed
 from nooa.interactive import Done
 from nooa.storage.sqlite import SessionAlreadyActiveError
-from nooa_coder.session.events import ChildDeleted, SnapshotRestoreFailed
-from nooa_coder.session.items import (
+from nooa_atom.session.events import ChildDeleted, SnapshotRestoreFailed
+from nooa_atom.session.items import (
     ChildCreatedUpdate,
     ChildFailed,
     ChildFailedError,
@@ -35,11 +35,11 @@ from nooa_coder.session.items import (
     SessionStatus,
     TurnEndedUpdate,
 )
-from nooa_coder.session.loader import AgentFactory, load_typed
-from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.port import install_port
-from nooa_coder.session.session import Session, SessionClosedError
-from nooa_coder.session.store import (
+from nooa_atom.session.loader import AgentFactory, load_typed
+from nooa_atom.session.options import SessionOptions
+from nooa_atom.session.port import install_port
+from nooa_atom.session.session import Session, SessionClosedError
+from nooa_atom.session.store import (
     InvalidSessionIdError,
     SessionHandle,
     SessionNotFoundError,
@@ -89,8 +89,8 @@ class SessionRegistry:
         llm_factory: LLMFactory | None = None,
     ) -> None:
         """``agent_factory(options, storage)`` builds each agent; the host
-        chooses it (usually the coding layer's ``create_session_agent``,
-        which loads ``options.agent_spec`` and gives a coding agent its
+        chooses it (usually the agent layer's ``create_session_agent``,
+        which loads ``options.agent_spec`` and gives an Atom agent its
         workspace settings). ``llm_factory(model_alias, workspace)`` builds the model
         client for every session whose options carry no ``llm``;
         ``model_alias`` is ``options.model``, or ``None`` for the factory's

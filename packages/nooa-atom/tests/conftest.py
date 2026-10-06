@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared fixtures for the nooa-coder tests."""
+"""Shared fixtures for the nooa-atom tests."""
 
 import pytest
 
@@ -31,10 +31,10 @@ async def make_session(sessions_dir, tmp_path):
     Returns ``(session, llm)``. The fake model is strict: a model call with
     no scripted response left fails the turn, so tests see extra calls.
     """
-    from coder_test_agents import plain_agent_factory
-    from nooa_coder.session.options import SessionOptions
-    from nooa_coder.session.session import Session
-    from nooa_coder.session.store import SessionStore
+    from atom_test_agents import plain_agent_factory
+    from nooa_atom.session.options import SessionOptions
+    from nooa_atom.session.session import Session
+    from nooa_atom.session.store import SessionStore
 
     from nooa.unifiedllm import FakeLLMClient
 
@@ -42,7 +42,7 @@ async def make_session(sessions_dir, tmp_path):
 
     def factory(
         *responses,
-        agent_spec: str = "coder_test_agents:EchoAgent",
+        agent_spec: str = "atom_test_agents:EchoAgent",
         turn_method: str = "handle",
         start: bool = True,
         llm=None,
@@ -70,15 +70,15 @@ async def make_session(sessions_dir, tmp_path):
 
 @pytest.fixture
 def models():
-    from coder_test_agents import ScriptedModels
+    from atom_test_agents import ScriptedModels
 
     return ScriptedModels()
 
 
 @pytest.fixture
 async def registry(sessions_dir, models):
-    from nooa_coder.session.registry import SessionRegistry
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.registry import SessionRegistry
+    from nooa_atom.session.store import SessionStore
 
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
     yield registry
@@ -87,6 +87,6 @@ async def registry(sessions_dir, models):
 
 @pytest.fixture
 def root_options(tmp_path):
-    from nooa_coder.session.options import SessionOptions
+    from nooa_atom.session.options import SessionOptions
 
-    return SessionOptions(workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent")
+    return SessionOptions(workspace=tmp_path, agent_spec="atom_test_agents:EchoAgent")

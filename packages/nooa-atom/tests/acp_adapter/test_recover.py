@@ -6,8 +6,8 @@ import asyncio
 
 from acp import text_block
 from acp.schema import AgentMessageChunk, AvailableCommandsUpdate
-from coder_test_agents import ScriptedModels
-from nooa_coder.session.store import SessionStore
+from atom_test_agents import ScriptedModels
+from nooa_atom.session.store import SessionStore
 
 TIMEOUT = 30
 

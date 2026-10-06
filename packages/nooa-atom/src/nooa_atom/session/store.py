@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SQLite-backed coding-agent sessions discoverable by interactive hosts."""
+"""SQLite-backed agent sessions discoverable by interactive hosts."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from nooa.storage.sqlite import (
     SQLiteStorageManager,
     delete_sqlite_database,
 )
-from nooa_coder.session.events import (
+from nooa_atom.session.events import (
     SESSION_EVENT_TYPES,
     ItemDiscarded,
     SessionModeChanged,
@@ -34,7 +34,7 @@ from nooa_coder.session.events import (
     SessionStarted,
     SessionTitleUpdated,
 )
-from nooa_coder.session.items import (
+from nooa_atom.session.items import (
     USAGE_FIELDS,
     InUseSession,
     SessionInfo,

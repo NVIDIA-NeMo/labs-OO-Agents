@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Durable metadata for interactive coding-agent sessions."""
+"""Durable metadata for interactive agent sessions."""
 
 from typing import ClassVar
 
@@ -8,7 +8,7 @@ from pydantic import Field
 
 from nooa.context_blocks import EventBase, Metadata
 from nooa.context_blocks.roles import Role
-from nooa_coder.session.items import TurnCancelled, Usage
+from nooa_atom.session.items import TurnCancelled, Usage
 
 
 class SessionStarted(Metadata):

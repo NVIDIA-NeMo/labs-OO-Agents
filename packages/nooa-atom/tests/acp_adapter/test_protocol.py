@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa-coder over real stdio: a subprocess driven by the ACP library's client."""
+"""nooa-atom over real stdio: a subprocess driven by the ACP library's client."""
 
 import asyncio
 import json
@@ -43,7 +43,7 @@ def _user_dir_for_subprocesses(tmp_path, monkeypatch):
 
 
 def _store(workspace):
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     return SessionStore(workspace / ".nooa" / "sessions")
 
@@ -100,7 +100,7 @@ def test_protocol_subprocess_imports_this_checkout(tmp_path):
         [
             sys.executable,
             "-c",
-            "import json, nooa, nooa_coder; print(json.dumps([nooa.__file__, nooa_coder.__file__]))",
+            "import json, nooa, nooa_atom; print(json.dumps([nooa.__file__, nooa_atom.__file__]))",
         ],
         cwd=tmp_path,
         env=default_environment(),
@@ -110,7 +110,7 @@ def test_protocol_subprocess_imports_this_checkout(tmp_path):
     )
     assert [Path(path).resolve() for path in json.loads(result.stdout)] == [
         root / "src/nooa/__init__.py",
-        root / "packages/nooa-coder/src/nooa_coder/__init__.py",
+        root / "packages/nooa-atom/src/nooa_atom/__init__.py",
     ]
 
 
@@ -133,7 +133,7 @@ async def test_a_session_runs_a_turn_over_stdio(tmp_path):
             timeout=_HANG_TIMEOUT,
         )
 
-    assert initialized.agent_info is not None and initialized.agent_info.name == "nooa-coder"
+    assert initialized.agent_info is not None and initialized.agent_info.name == "nooa-atom"
     assert response.stop_reason == "end_turn"
     assert {session_id for session_id, _ in client.updates} == {session.session_id}
     new_session_response = next(

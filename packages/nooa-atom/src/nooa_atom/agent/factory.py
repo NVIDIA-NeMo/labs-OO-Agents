@@ -16,20 +16,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nooa.interactive import InteractiveAgent
-from nooa_coder.coding.slash_commands import CodingSlashCommand
-from nooa_coder.session.loader import load_agent_class
-from nooa_coder.workspace.controls import behavior_commands
-from nooa_coder.workspace.models import workspace_llm_client
-from nooa_coder.workspace.options import CoderOptions, configure_session_skills
+from nooa_atom.agent.slash_commands import SlashCommand
+from nooa_atom.session.loader import load_agent_class
+from nooa_atom.workspace.controls import behavior_commands
+from nooa_atom.workspace.models import workspace_llm_client
+from nooa_atom.workspace.options import AtomOptions, configure_session_skills
 
 if TYPE_CHECKING:
     from nooa.storage.manager import StorageManager
-    from nooa_coder.session.options import SessionOptions
-    from nooa_coder.session.registry import LLMFactory
+    from nooa_atom.session.options import SessionOptions
+    from nooa_atom.session.registry import LLMFactory
 
 logger = logging.getLogger(__name__)
 
-# CodingAgent subclasses already warned about parameters they do not accept.
+# AtomAgent subclasses already warned about parameters they do not accept.
 _warned_classes: set[type] = set()
 
 
@@ -44,8 +44,8 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     default model) and passes the result here. Without an ``llm_factory``
     and without ``options.llm``, the class's own default client applies.
 
-    A coding agent (a ``CodingAgent`` subclass) also gets the workspace's
-    settings (``CoderOptions``): ``cwd``, ``skills_dirs``, ``summarization``
+    An Atom agent (an ``AtomAgent`` subclass) also gets the workspace's
+    settings (``AtomOptions``): ``cwd``, ``skills_dirs``, ``summarization``
     and a ``libs_dir`` inside the workspace, each one its ``__init__``
     accepts (a warning names the ones it does not), and then its MCP
     registry and configured skills (``configure_session_skills``) and its
@@ -53,26 +53,26 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     snapshot. Connecting remembered MCP servers is async and is left to the
     host's ``prepare`` hook. Any other agent gets only ``storage`` and ``llm``.
     """
-    from nooa_coder.coding.agent import CodingAgent
+    from nooa_atom.agent.agent import AtomAgent
 
     agent_class = load_agent_class(options.agent_spec, base=options.workspace)
-    # Only a coding agent gets the workspace: an unrelated agent's own
+    # Only an Atom agent gets the workspace: an unrelated agent's own
     # cwd/summarization/... parameters mean something else and are left alone.
-    is_coder = isinstance(agent_class, type) and issubclass(agent_class, CodingAgent)
-    coder_options = CoderOptions.load(options.workspace) if is_coder else None
+    is_atom = isinstance(agent_class, type) and issubclass(agent_class, AtomAgent)
+    atom_options = AtomOptions.load(options.workspace) if is_atom else None
 
     kwargs: dict[str, Any] = {"storage": storage}
     if options.llm is not None:
         kwargs["llm"] = options.llm
-    if coder_options is not None:
+    if atom_options is not None:
         parameters = inspect.signature(agent_class).parameters
         accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
-        workspace = Path(coder_options.working_dir)
+        workspace = Path(atom_options.working_dir)
         missing = []
         for name, value in {
             "cwd": workspace,
-            "skills_dirs": coder_options.skills_dirs,
-            "summarization": coder_options.summarization,
+            "skills_dirs": atom_options.skills_dirs,
+            "summarization": atom_options.summarization,
             "libs_dir": workspace / ".nooa" / "libs",
         }.items():
             if name in parameters or accepts_any:
@@ -90,20 +90,20 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
             )
     agent = agent_class(**kwargs)
 
-    if coder_options is not None and isinstance(agent, CodingAgent):
-        for warning in configure_session_skills(agent, coder_options):
+    if atom_options is not None and isinstance(agent, AtomAgent):
+        for warning in configure_session_skills(agent, atom_options):
             logger.warning("Session in %s: %s", options.workspace, warning)
         # The /skills and /mcp controls belong to the agent, not to one host:
         # MCPApprovalRequired tells the user to run /mcp approve. set_controls()
         # also refreshes the skill commands.
         controls = behavior_commands(
             agent,
-            coder_options,
-            workspace=Path(coder_options.working_dir),
+            atom_options,
+            workspace=Path(atom_options.working_dir),
             command_registry=agent.slash_commands,
         )
         agent.slash_commands.set_controls(
-            [CodingSlashCommand.for_control(control) for control in controls]
+            [SlashCommand.for_control(control) for control in controls]
         )
     return agent
 
@@ -114,12 +114,12 @@ def default_llm_factory(*, workspace_default: str | None = None) -> LLMFactory:
     The registry calls it as ``factory(alias, workspace)`` for a session
     without a client. A named alias is built with ``workspace_llm_client``,
     against the model configuration of that workspace. No alias means the
-    default model: ``workspace_default`` when given, else the workspace's ``CoderOptions.default_model`` (its settings files, then
+    default model: ``workspace_default`` when given, else the workspace's ``AtomOptions.default_model`` (its settings files, then
     ``nooa.interactive.DEFAULT_MODEL``).
     """
 
     def make(alias: str | None, workspace: Path) -> Any:
-        name = alias or workspace_default or CoderOptions.load(workspace).default_model
+        name = alias or workspace_default or AtomOptions.load(workspace).default_model
         return workspace_llm_client(name, workspace)
 
     return make

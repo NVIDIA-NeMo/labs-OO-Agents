@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prompt-size guards for the coding agents' first model call.
+"""Prompt-size guards for the Atom agents' first model call.
 
 Installed ``nooa.skills`` entry points are loaded into the agent, and the
 user's skill directories under the home directory are discovered, so both
@@ -17,16 +17,16 @@ prompt must raise a limit here on purpose.
 import asyncio
 
 import pytest
-from nooa_coder.coding.factory import create_session_agent
-from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
+from nooa_atom.agent.factory import create_session_agent
+from nooa_atom.session.options import SessionOptions
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore
 from test_experimental_agent import python_cell
 
 from nooa.unifiedllm import FakeLLMClient
 
-CODER = "nooa_coder.coding.agent:CodingAgent"
-EXPERIMENTAL = "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent"
+ATOM = "nooa_atom.agent:AtomAgent"
+EXPERIMENTAL = "nooa_atom.agent:ExperimentalAtomAgent"
 RESULT = (
     "return_result(Done(explanation='x', result=TaskResult("
     "solution_description='a', evidence='b', how_to_verify='c')))"
@@ -36,7 +36,7 @@ RESULT = (
 # Measured after PR 0, then raised on tree/4-router: the state block names the
 # repository root, the class says ``cd`` moves shell and repo tools, the turn
 # methods say locals last one method call, and the repo tools take ``cwd``.
-# Lowered when CodingAgent moved to CodeActV2 (2026-09-25; was 19,827 / 23,935
+# Lowered when AtomAgent moved to CodeActV2 (2026-09-25; was 19,827 / 23,935
 # for handle): measured values plus about 2% headroom.
 # Lowered when one <skills> block replaced the <skills> and <mcp> blocks
 # (2026-09-28): measured values plus about 2% headroom.
@@ -45,8 +45,8 @@ RESULT = (
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
 LIMITS = {
-    (CODER, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
-    (CODER, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
+    (ATOM, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
+    (ATOM, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
     (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
     (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
 }
@@ -136,9 +136,7 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(
-            SessionOptions(
-                workspace=workspace, agent_spec=CODER, llm=llm, sessions_dir=sessions_dir
-            )
+            SessionOptions(workspace=workspace, agent_spec=ATOM, llm=llm, sessions_dir=sessions_dir)
         )
         await asyncio.wait_for(root.prompt("hello"), 30)
     finally:

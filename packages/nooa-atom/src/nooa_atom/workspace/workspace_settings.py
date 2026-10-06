@@ -81,9 +81,9 @@ class WorkspaceSettings(Skill):
         self._agent_spec = options.agent_spec
 
     def _options(self):
-        from .options import CoderOptions
+        from .options import AtomOptions
 
-        options = CoderOptions.load(self._workspace)
+        options = AtomOptions.load(self._workspace)
         options.agent_spec = self._agent_spec
         return options
 

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared coding-agent components used by terminal and protocol hosts."""
+"""The Atom agent and the components terminal and protocol hosts share with it."""
 
 from importlib import import_module
 
@@ -10,12 +10,13 @@ _EXPORT_MODULES = {
     "TerminalCommandFinished": "activity",
     "TerminalCommandOutput": "activity",
     "TerminalCommandStarted": "activity",
-    "CodingAgent": "agent",
+    "AtomAgent": "agent",
+    "ExperimentalAtomAgent": "experimental_agent",
     "discover_agent_instruction_files": "instructions",
     "render_agent_instructions": "instructions",
-    "load_coding_skills_dirs": "nooa_coder.workspace.settings",
-    "CodingSlashCommand": "slash_commands",
-    "CodingSlashCommandRegistry": "slash_commands",
+    "load_skills_dirs": "nooa_atom.workspace.settings",
+    "SlashCommand": "slash_commands",
+    "SlashCommandRegistry": "slash_commands",
 }
 
 
@@ -32,14 +33,15 @@ def __getattr__(name: str):
 
 __all__ = [
     "ActivityShellTools",
-    "CodingAgent",
-    "CodingSlashCommand",
-    "CodingSlashCommandRegistry",
+    "AtomAgent",
+    "ExperimentalAtomAgent",
+    "SlashCommand",
+    "SlashCommandRegistry",
     "FileEdit",
     "TerminalCommandFinished",
     "TerminalCommandOutput",
     "TerminalCommandStarted",
     "discover_agent_instruction_files",
-    "load_coding_skills_dirs",
+    "load_skills_dirs",
     "render_agent_instructions",
 ]

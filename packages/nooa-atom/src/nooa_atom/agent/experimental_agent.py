@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Single-tool coding agent using the single-tool CodeAct strategy."""
+"""Single-tool Atom agent using the single-tool CodeAct strategy."""
 
 from __future__ import annotations
 
@@ -14,17 +14,17 @@ from nooa.agentdoc import doc  # noqa: F401 — used by dynamic context expressi
 from nooa.config import CodeActConfig
 from nooa.interactive import Done, NeedInput, Waiting
 from nooa.strategies import CodeActV2
-from nooa_coder.coding.agent import CodingAgent
+from nooa_atom.agent.agent import AtomAgent
 
 with hidden:
-    from nooa_coder.coding.agent import _V2_CONTEXT
-    from nooa_coder.coding.conditions import require_result
+    from nooa_atom.agent.agent import _V2_CONTEXT
+    from nooa_atom.agent.conditions import require_result
 
 # The stable agent's context overrides, without the context-usage block.
 _EXPERIMENTAL_CONTEXT: Annotated[dict[str, Any], hidden] = {**_V2_CONTEXT, "context_usage": None}
 
 
-class ExperimentalCodingAgent(CodingAgent):
+class ExperimentalAtomAgent(AtomAgent):
     """You are a careful software-development agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
@@ -111,4 +111,4 @@ class ExperimentalCodingAgent(CodingAgent):
         ...
 
 
-__all__ = ["ExperimentalCodingAgent"]
+__all__ = ["ExperimentalAtomAgent"]

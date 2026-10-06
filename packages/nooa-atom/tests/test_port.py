@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 import pytest
-from coder_test_agents import (
+from atom_test_agents import (
     BLOCKING_CELL,
     ScriptedModels,
     cell,
@@ -15,10 +15,10 @@ from coder_test_agents import (
     until,
     wait_on,
 )
-from nooa_coder.session.items import ChildFailedError, ChildRef, ChildResult, TaskResult
-from nooa_coder.session.port import SessionPort, current_port, install_port
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
+from nooa_atom.session.items import ChildFailedError, ChildRef, ChildResult, TaskResult
+from nooa_atom.session.port import SessionPort, current_port, install_port
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore
 
 from nooa.agentdoc import doc
 from nooa.interactive import Done
@@ -399,7 +399,7 @@ async def test_a_background_child_closed_mid_turn_wakes_the_parent(registry, roo
 
 async def test_the_port_can_be_hidden_from_the_model(registry, root_options, make_session):
     hidden = await registry.create(
-        root_options.model_copy(update={"agent_spec": "coder_test_agents:HiddenPortAgent"})
+        root_options.model_copy(update={"agent_spec": "atom_test_agents:HiddenPortAgent"})
     )
     assert isinstance(hidden._agent.session, SessionPort)
     assert "Create a child session" not in doc(hidden._agent)

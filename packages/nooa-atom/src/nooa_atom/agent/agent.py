@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Host-neutral interactive coding agent, run by a Session."""
+"""Host-neutral interactive Atom agent, run by a Session."""
 
 from __future__ import annotations
 
@@ -23,14 +23,14 @@ from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
-from nooa_coder.coding.activity import ActivityShellTools
-from nooa_coder.coding.instructions import render_agent_instructions
-from nooa_coder.coding.slash_commands import CodingSlashCommandRegistry
+from nooa_atom.agent.activity import ActivityShellTools
+from nooa_atom.agent.instructions import render_agent_instructions
+from nooa_atom.agent.slash_commands import SlashCommandRegistry
 
 # Visible to generated cells (cells see this module's globals): the model
 # builds TaskResult for unattended turns, matches what arrives on the
 # ``delegates`` channel and catches the delegation errors.
-from nooa_coder.session.items import (
+from nooa_atom.session.items import (
     ChildFailed,
     ChildFailedError,
     ChildQuestion,
@@ -39,15 +39,15 @@ from nooa_coder.session.items import (
     PlanEntry,
     TaskResult,
 )
-from nooa_coder.session.registry import DepthLimitError
-from nooa_coder.skills.manager import SkillManager
-from nooa_coder.tools.repo_tools import RepoTools
+from nooa_atom.session.registry import DepthLimitError
+from nooa_atom.skills.manager import SkillManager
+from nooa_atom.tools.repo_tools import RepoTools
 
 with hidden:
     from nooa.agents import TokenBudgetSummarizer
     from nooa.runtime.channels import Channel, ChannelReader
-    from nooa_coder.coding.conditions import require_result
-    from nooa_coder.session.port import SessionPort
+    from nooa_atom.agent.conditions import require_result
+    from nooa_atom.session.port import SessionPort
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
@@ -58,7 +58,7 @@ __all__ = [
     "ChildQuestion",
     "ChildRef",
     "ChildResult",
-    "CodingAgent",
+    "AtomAgent",
     "DepthLimitError",
     "Done",
     "NeedInput",
@@ -77,7 +77,7 @@ _V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
 }
 
 
-class CodingAgent(InteractiveAgent):
+class AtomAgent(InteractiveAgent):
     """You are a careful software-development agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
@@ -128,7 +128,7 @@ class CodingAgent(InteractiveAgent):
 
     cwd: Annotated[Path, nosnapshot]
     # Host-driven input channels. These live here rather than on
-    # InteractiveAgent because they are coding-host concepts: slash commands
+    # InteractiveAgent because they are host concepts: slash commands
     # are a UI affordance whose registry is in this package, and
     # system_messages carries host-provided system input. A host that sends
     # a command's output to the agent puts it on the slash_commands channel.
@@ -136,7 +136,7 @@ class CodingAgent(InteractiveAgent):
     # The command registry the Session lists and runs (Session.commands(),
     # Session.invoke_command()). create_session_agent() installs the /skills and
     # /mcp controls with set_controls().
-    slash_commands: Annotated[CodingSlashCommandRegistry, hidden, nosnapshot]
+    slash_commands: Annotated[SlashCommandRegistry, hidden, nosnapshot]
     # Set by the registry that binds itself to this agent (skills use it).
     _command_registry: Annotated[Any, hidden, nosnapshot]
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]
@@ -214,14 +214,14 @@ class CodingAgent(InteractiveAgent):
             self.skills.load(installed)
         if skills_dirs:
             self.skills.discover_skills_dirs(skills_dirs)
-        self.slash_commands = CodingSlashCommandRegistry(self, skills_dirs=skills_dirs or ())
+        self.slash_commands = SlashCommandRegistry(self, skills_dirs=skills_dirs or ())
 
         self.context["python_cell_tools"] = Context(
             doc(RepoTools, ActivityShellTools, TodoManager, concise=True),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
-        self.context["coding_state"] = Context(expr="self._coding_state_context()")
+        self.context["workspace_state"] = Context(expr="self._workspace_state_context()")
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"
         )
@@ -235,8 +235,8 @@ class CodingAgent(InteractiveAgent):
         install_summarizer(self._summarization, self)
 
     @no_trace
-    def _coding_state_context(self) -> str:
-        """Describe coding-specific state without exposing stored values."""
+    def _workspace_state_context(self) -> str:
+        """Describe the workspace state without exposing stored values."""
         from html import escape
 
         def shown(path: object) -> str:
@@ -349,7 +349,7 @@ class CodingAgent(InteractiveAgent):
     @hidden
     def after_restore(self) -> None:
         """Called by the session registry after it restores a snapshot into this agent."""
-        from nooa_coder.workspace.options import drop_stale_memory_context
+        from nooa_atom.workspace.options import drop_stale_memory_context
 
         drop_stale_memory_context(self)
         self.skills.after_restore()
@@ -368,9 +368,9 @@ class CodingAgent(InteractiveAgent):
         first turn. The ``/skills`` and ``/mcp`` controls come from the
         agent factory.
         """
-        from nooa_coder.workspace.options import CoderOptions, connect_session_mcp
+        from nooa_atom.workspace.options import AtomOptions, connect_session_mcp
 
-        return await connect_session_mcp(self, CoderOptions.load(self.cwd))
+        return await connect_session_mcp(self, AtomOptions.load(self.cwd))
 
     @hidden
     @no_trace
@@ -542,7 +542,7 @@ class CodingAgent(InteractiveAgent):
 
 
 # A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.
-spec(CodingAgent, "session_port_visible", hidden=True)
+spec(AtomAgent, "session_port_visible", hidden=True)
 
 
 @hidden

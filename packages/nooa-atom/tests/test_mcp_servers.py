@@ -10,10 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 from fake_oauth_mcp import FakeOAuthServer
-from nooa_coder.skills.mcp_servers import MCPServers, MCPSignInRequired
-from nooa_coder.workspace.controls import MCPControl
-from nooa_coder.workspace.mcp_approval import MCPApprovalRequired
-from nooa_coder.workspace.options import CoderOptions
+from nooa_atom.skills.mcp_servers import MCPServers, MCPSignInRequired
+from nooa_atom.workspace.controls import MCPControl
+from nooa_atom.workspace.mcp_approval import MCPApprovalRequired
+from nooa_atom.workspace.options import AtomOptions
 
 from nooa.mcp import MCPManager
 
@@ -65,7 +65,7 @@ def approve(servers, name):
 
 def _control(servers, tmp_path):
     agent = SimpleNamespace(skills=SimpleNamespace(mcp=servers))
-    return MCPControl(agent, CoderOptions(), workspace=tmp_path)
+    return MCPControl(agent, AtomOptions(), workspace=tmp_path)
 
 
 async def test_controls_see_saved_servers_and_keep_registered_ones(servers, tmp_path):

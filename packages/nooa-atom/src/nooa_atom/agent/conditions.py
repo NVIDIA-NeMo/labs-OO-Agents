@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Strategy postconditions for the coding agent's turn methods."""
+"""Strategy postconditions for the Atom agent's turn methods."""
 
 from typing import Any
 

@@ -5,7 +5,7 @@
 The client (an editor such as Pool) speaks ACP to the router on standard
 input and output. The router answers ``initialize`` and ``session/list``
 itself and forwards everything else, unchanged, to the worker that runs
-the session (``nooa_coder.acp.worker``). Each worker is a plain ACP server
+the session (``nooa_atom.acp.worker``). Each worker is a plain ACP server
 on one end of a Unix socket pair.
 
 The router is a JSON-lines proxy. It parses only the envelope of each
@@ -68,10 +68,10 @@ from acp.connection import StreamDirection, StreamEvent
 from acp.schema import InitializeRequest, ListSessionsRequest
 from pydantic import ValidationError
 
-from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
-from nooa_coder.acp.listing import list_sessions
-from nooa_coder.acp.protocol import initialize_response
-from nooa_coder.session.store import (
+from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
+from nooa_atom.acp.listing import list_sessions
+from nooa_atom.acp.protocol import initialize_response
+from nooa_atom.session.store import (
     InvalidSessionIdError,
     SessionNotFoundError,
     SessionStore,
@@ -269,7 +269,7 @@ class Router:
         starts the same shutdown as end of input; a second one gets the
         default action, so a hung shutdown can still be killed.
         """
-        from nooa_coder.acp.protocol import open_stdio
+        from nooa_atom.acp.protocol import open_stdio
 
         loop = asyncio.get_running_loop()
         previous = signal.getsignal(signal.SIGTERM)

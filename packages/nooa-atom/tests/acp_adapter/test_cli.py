@@ -1,22 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The nooa-coder command line: model, agent, sessions directory, tee."""
+"""The nooa-atom command line: model, agent, sessions directory, tee."""
 
 import shutil
 import subprocess
 
 import click.testing
 import pytest
-from nooa_coder.acp.cli import command
+from nooa_atom.acp.cli import command
 
 
 @pytest.fixture
 def served(monkeypatch):
     """Capture what the command would serve with, instead of serving."""
     captured: dict = {}
-    monkeypatch.setattr("nooa_coder.acp.cli.run", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr("nooa_atom.acp.cli.run", lambda **kwargs: captured.update(kwargs))
     # The real one repoints this process's stdin and stdout.
-    monkeypatch.setattr("nooa_coder.acp.cli.reserve_stdio_for_acp", lambda: (0, 1))
+    monkeypatch.setattr("nooa_atom.acp.cli.reserve_stdio_for_acp", lambda: (0, 1))
     monkeypatch.setattr("nooa.secrets.load_secrets_into_env", lambda *a, **k: None)
     return captured
 
@@ -29,7 +29,7 @@ def requested(monkeypatch):
         calls.append((name, kwargs))
         return name
 
-    monkeypatch.setattr("nooa_coder.workspace.models.workspace_llm_client", fake_client)
+    monkeypatch.setattr("nooa_atom.workspace.models.workspace_llm_client", fake_client)
     return calls
 
 
@@ -88,7 +88,7 @@ def test_a_relative_agent_file_is_resolved_where_the_command_runs(served, tmp_pa
 
 def test_without_agent_the_workspace_setting_decides(served):
     assert _invoke(["--model", "m"]).exit_code == 0
-    assert served["agent_spec"] is None  # the workspace setting, else the coding agent
+    assert served["agent_spec"] is None  # the workspace setting, else the Atom agent
 
 
 def test_sessions_dir_and_tee_are_passed_on(served, tmp_path):
@@ -100,25 +100,25 @@ def test_sessions_dir_and_tee_are_passed_on(served, tmp_path):
     assert served["tee"] == tmp_path / "t.jsonl"
 
 
-def test_the_command_is_the_nooa_coder_plugin():
+def test_the_command_is_the_nooa_atom_plugin():
     from nooa_cli.commands import discover_commands
 
-    assert dict(discover_commands())["coder"] is command
+    assert dict(discover_commands())["atom"] is command
 
 
-def test_nooa_coder_runs():
+def test_nooa_atom_runs():
     path = shutil.which("nooa")
-    assert path is not None, "nooa is not installed; nooa-coder depends on nooa-cli"
-    result = subprocess.run([path, "coder", "--help"], capture_output=True, text=True, timeout=120)
+    assert path is not None, "nooa is not installed; nooa-atom depends on nooa-cli"
+    result = subprocess.run([path, "atom", "--help"], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
-    assert "Serve the NOOA coding agent over ACP" in result.stdout
+    assert "Serve NOOA Atom over ACP" in result.stdout
 
 
-def test_nooa_coder_requires_a_model(monkeypatch):
+def test_nooa_atom_requires_a_model(monkeypatch):
     monkeypatch.delenv("NOOA_MODEL", raising=False)
     path = shutil.which("nooa")
     assert path is not None
-    result = subprocess.run([path, "coder"], capture_output=True, text=True, timeout=120)
+    result = subprocess.run([path, "atom"], capture_output=True, text=True, timeout=120)
     assert result.returncode == 2
     assert "--model" in result.stderr
 
@@ -127,7 +127,7 @@ def test_help_mentions_the_tee():
     assert "--tee" in _invoke(["--help"]).output
 
 
-@pytest.mark.parametrize("module", ["nooa_coder.acp.cli", "nooa_coder.acp.tee"])
+@pytest.mark.parametrize("module", ["nooa_atom.acp.cli", "nooa_atom.acp.tee"])
 def test_the_entry_points_import_without_the_framework(module):
     """`nooa` loads every plugin command at startup; this one must stay light."""
     import sys

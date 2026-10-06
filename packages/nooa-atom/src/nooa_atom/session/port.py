@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, Any
 from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.interactive import Done, InteractiveAgent
-from nooa_coder.session.items import ChildFailedError, ChildRef, Receipt, SessionInfo, Usage
-from nooa_coder.session.session import Session, as_data
+from nooa_atom.session.items import ChildFailedError, ChildRef, Receipt, SessionInfo, Usage
+from nooa_atom.session.session import Session, as_data
 
 if TYPE_CHECKING:
-    from nooa_coder.session.registry import SessionRegistry
+    from nooa_atom.session.registry import SessionRegistry
 
 current_port: contextvars.ContextVar["SessionPort | None"] = contextvars.ContextVar(
-    "nooa_coder_current_port", default=None
+    "nooa_atom_current_port", default=None
 )
 """The port of the session whose turn is running; set once at the top of each session loop."""
 

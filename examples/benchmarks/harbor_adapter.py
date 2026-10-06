@@ -84,7 +84,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         return "nooa-bench"
 
     async def install(self, environment: BaseEnvironment) -> None:
-        """Clone the repo and install core, cli, coder and bench into a fresh venv."""
+        """Clone the repo and install core, cli, atom and bench into a fresh venv."""
         url = shlex.quote(self._git_url)
         if self._git_ref:
             # `git clone --branch` rejects commit SHAs; fetching the ref and
@@ -110,7 +110,7 @@ class NooaBenchAgent(BaseInstalledAgent):
                 'export PATH="$HOME/.local/bin:$PATH" && '
                 f"uv venv {VENV} && "
                 f"uv pip install --python {VENV}/bin/python3 "
-                f"{REPO_DIR} {REPO_DIR}/packages/nooa-cli {REPO_DIR}/packages/nooa-coder "
+                f"{REPO_DIR} {REPO_DIR}/packages/nooa-cli {REPO_DIR}/packages/nooa-atom "
                 f"{REPO_DIR}/packages/nooa-bench && "
                 f"{VENV}/bin/python3 -c \"from nooa_bench.runner import main; print('nooa-bench installed OK')\""
             ),
@@ -142,7 +142,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         nvidia_key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_API_KEY")
         if nvidia_key:
             env.setdefault("OPENAI_API_KEY", nvidia_key)
-        # The coder agent type stores its session; only /logs/agent outlives the container.
+        # The atom agent type stores its session; only /logs/agent outlives the container.
         env["NOOA_SESSIONS_DIR"] = "/logs/agent/sessions"
         await self.exec_as_agent(environment, command=command, env=env, cwd=REPO_DIR)
 

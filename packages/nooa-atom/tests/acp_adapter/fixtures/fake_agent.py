@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Deterministic nooa-coder ACP subprocess for the protocol tests.
+"""Deterministic nooa-atom ACP subprocess for the protocol tests.
 
-Runs the real server (``nooa_coder.acp.cli.run``) and the real coding
+Runs the real server (``nooa_atom.acp.cli.run``) and the real Atom
 agent with a fake model. Flags pick the model's script: ``--blocking``
 (a cell that never ends), ``--shell`` (a cell blocked in a shell command),
 ``--question`` (asks which branch, then finishes), ``--noisy`` (prints to
@@ -18,9 +18,9 @@ from pathlib import Path
 # The ACP subprocess launcher drops PYTHONPATH. Pin this checkout's sources
 # so the wire tests cannot run an editable install from another worktree.
 _ROOT = Path(__file__).resolve().parents[5]
-sys.path[:0] = [str(_ROOT / "src"), str(_ROOT / "packages" / "nooa-coder" / "src")]
+sys.path[:0] = [str(_ROOT / "src"), str(_ROOT / "packages" / "nooa-atom" / "src")]
 
-from nooa_coder.acp.cli import run  # noqa: E402
+from nooa_atom.acp.cli import run  # noqa: E402
 
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall  # noqa: E402
 

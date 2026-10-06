@@ -1,24 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The single-tool (CodeActV2) coding agent on the Session layer."""
+"""The single-tool (CodeActV2) Atom agent on the Session layer."""
 
 import asyncio
 import json
 
 import pytest
-from nooa_coder.coding.factory import create_session_agent
-from nooa_coder.session.items import TaskResult
-from nooa_coder.session.loader import load_agent_class
-from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
+from nooa_atom.agent.factory import create_session_agent
+from nooa_atom.session.items import TaskResult
+from nooa_atom.session.loader import load_agent_class
+from nooa_atom.session.options import SessionOptions
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore
 
 from nooa.interactive import Done
 from nooa.llm_types import LLMResponse
 from nooa.unifiedllm import FakeLLMClient, ToolCall
 
 TIMEOUT = 30
-SPEC = "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent"
+SPEC = "nooa_atom.agent:ExperimentalAtomAgent"
 
 
 def python_cell(code: str, call_id: str) -> LLMResponse:
@@ -40,7 +40,7 @@ def python_cell(code: str, call_id: str) -> LLMResponse:
     ],
 )
 def test_legacy_experimental_specs_load_the_rewritten_class(spec):
-    assert load_agent_class(spec).__name__ == "ExperimentalCodingAgent"
+    assert load_agent_class(spec).__name__ == "ExperimentalAtomAgent"
     assert load_agent_class(spec) is load_agent_class(SPEC)
 
 

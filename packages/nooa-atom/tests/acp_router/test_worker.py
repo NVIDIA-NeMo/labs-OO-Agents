@@ -17,18 +17,18 @@ from acp import PROTOCOL_VERSION
 from acp.client.connection import ClientSideConnection
 from acp.connection import StreamDirection
 from acp.schema import AllowedOutcome, PermissionOption, RequestPermissionResponse, ToolCallUpdate
-from coder_test_agents import ScriptedModels
-from nooa_coder.acp.framing import FRAME_LIMIT
-from nooa_coder.acp.server import CoderACPAgent
-from nooa_coder.acp.worker import run_worker, serve_worker, start_parent_watchdog
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore, sessions_root
+from atom_test_agents import ScriptedModels
+from nooa_atom.acp.framing import FRAME_LIMIT
+from nooa_atom.acp.server import AtomACPAgent
+from nooa_atom.acp.worker import run_worker, serve_worker, start_parent_watchdog
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore, sessions_root
 
 TIMEOUT = 20
 ID_BASE = 1 << 32
 
 
-class AskingAgent(CoderACPAgent):
+class AskingAgent(AtomACPAgent):
     """The adapter plus a test extension method that asks the client for permission."""
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -64,7 +64,7 @@ async def worker(workspace):
     models = ScriptedModels()
     agent = AskingAgent(
         lambda root_store: SessionRegistry(root_store, agent_factory=models),
-        agent_spec="coder_test_agents:EchoAgent",
+        agent_spec="atom_test_agents:EchoAgent",
     )
     ours, theirs = socket.socketpair()
     task = asyncio.create_task(serve_worker(theirs, id_base=ID_BASE, agent=agent))
@@ -131,9 +131,7 @@ def test_run_worker_returns_zero_on_end_of_stream():
     code = run_worker(
         theirs.detach(),
         id_base=ID_BASE,
-        make_agent=lambda: CoderACPAgent(
-            lambda store: SessionRegistry(store, agent_factory=models)
-        ),
+        make_agent=lambda: AtomACPAgent(lambda store: SessionRegistry(store, agent_factory=models)),
         watchdog=False,
     )
     assert code == 0

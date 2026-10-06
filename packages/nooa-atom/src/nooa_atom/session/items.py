@@ -16,7 +16,7 @@ from nooa.interactive import Done, NeedInput
 from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:
-    from nooa_coder.session.port import SessionPort
+    from nooa_atom.session.port import SessionPort
 
 SessionStatus = Literal["running", "idle", "retained", "closed", "on_disk"]
 ChildStatus = SessionStatus  # a child reports the same statuses as any session
@@ -111,7 +111,7 @@ class ChildRef(BaseModel):
 
 def _port(ref: ChildRef) -> "SessionPort":
     """The running turn's port, if its session is ``ref``'s parent."""
-    from nooa_coder.session.port import require_port
+    from nooa_atom.session.port import require_port
 
     port = require_port()
     if ref.parent_id is not None and ref.parent_id != port.id:
@@ -332,7 +332,7 @@ class PlanEntry(BaseModel):
     """One step of the agent's plan, as a host shows it (``Session.plan()``).
 
     The fields are ACP's plan entry: ``content`` (the step), ``status`` and
-    ``priority``. The coding agent derives them from its todos.
+    ``priority``. The Atom agent derives them from its todos.
     """
 
     content: str

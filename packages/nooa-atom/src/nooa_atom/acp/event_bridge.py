@@ -54,13 +54,13 @@ from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
-from nooa_coder.coding.activity import (
+from nooa_atom.agent.activity import (
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
     TerminalCommandStarted,
 )
-from nooa_coder.session.items import (
+from nooa_atom.session.items import (
     USAGE_FIELDS,
     AgentEventUpdate,
     CancelledUpdate,

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Agents and fake-model scripts for the nooa-coder tests.
+"""Agents and fake-model scripts for the nooa-atom tests.
 
 The module has a unique name and sits on the pytest ``pythonpath`` so that
-``"coder_test_agents:EchoAgent"`` loads as an agent spec. Generated cells
+``"atom_test_agents:EchoAgent"`` loads as an agent spec. Generated cells
 run with this module's globals, so the names imported here (``Done``,
 ``TaskResult``, the ``STARTED``/``BLOCK`` events...) are what a scripted
 cell can use.
@@ -14,14 +14,14 @@ import contextvars
 import json
 from typing import Any, ClassVar
 
-from nooa_coder.session.items import (  # noqa: F401
+from nooa_atom.session.items import (  # noqa: F401
     ChildFailed,
     ChildFailedError,
     ChildQuestion,
     ChildResult,
     TaskResult,
 )
-from nooa_coder.session.loader import load_agent_class
+from nooa_atom.session.loader import load_agent_class
 from pydantic import BaseModel, Field
 
 from nooa.context_blocks import Metadata
@@ -74,7 +74,7 @@ class CellLLM(FakeLLMClient):
     """A strict fake model whose scripted cells run in the Python tool the agent offers.
 
     ``cell()`` scripts an ``execute_python`` call. Agents on CodeActV2 (the
-    coding agents) offer ``python_cell`` instead, so a scripted call is renamed
+    Atom agents) offer ``python_cell`` instead, so a scripted call is renamed
     to it when that is the Python tool in the request.
     """
 
@@ -226,7 +226,7 @@ class _CommandOutput:
 
 
 class FakeSlashCommands:
-    """A slash command registry shaped like the coding agent's (duck-typed)."""
+    """A slash command registry shaped like the Atom agent's (duck-typed)."""
 
     def __init__(self) -> None:
         self.invoked: list[tuple[str, str]] = []
@@ -342,11 +342,11 @@ async def until(predicate: Any, timeout: float = 5) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
-CODER_SPEC = "nooa_coder.coding.agent:CodingAgent"
+ATOM_SPEC = "nooa_atom.agent:AtomAgent"
 
 
-class CoderModels(ScriptedModels):
-    """An agent factory for coding-agent sessions, one strict fake model each.
+class AtomModels(ScriptedModels):
+    """An agent factory for Atom agent sessions, one strict fake model each.
 
     Like ``ScriptedModels``, scripts are keyed by session name. The agent is
     built by ``create_session_agent`` for the session's workspace (its
@@ -355,7 +355,7 @@ class CoderModels(ScriptedModels):
     """
 
     def __call__(self, options: Any, storage: Any) -> InteractiveAgent:
-        from nooa_coder.coding.factory import create_session_agent
+        from nooa_atom.agent.factory import create_session_agent
 
         llm = options.llm or CellLLM(list(self.scripts.get(options.name, [])))
         self.llms[options.name] = llm
@@ -367,7 +367,7 @@ class PlanAgent(InteractiveAgent, llm=FakeLLMClient()):
     """An agent that offers a plan (``plan``), one entry as a dict."""
 
     def plan(self) -> list[Any]:
-        from nooa_coder.session.items import PlanEntry
+        from nooa_atom.session.items import PlanEntry
 
         return [PlanEntry(content="write the test", status="in_progress"), {"content": "run it"}]
 

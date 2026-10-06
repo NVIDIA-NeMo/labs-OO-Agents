@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from nooa.interactive import InteractiveAgent
 from nooa.storage.manager import StorageManager
-from nooa_coder.session.options import SessionOptions
+from nooa_atom.session.options import SessionOptions
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +25,20 @@ AgentFactory = Callable[[SessionOptions, StorageManager], InteractiveAgent]
 """Builds the agent for a session from its options and its storage."""
 
 
-CODING_AGENT = "nooa_coder.coding.agent:CodingAgent"
-EXPERIMENTAL_CODING_AGENT = "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent"
+ATOM_AGENT = "nooa_atom.agent:AtomAgent"
+EXPERIMENTAL_ATOM_AGENT = "nooa_atom.agent:ExperimentalAtomAgent"
 LEGACY_AGENT_SPECS = {
-    "nooa_cli.tui.agent:TUIAgent": CODING_AGENT,
-    "nooa_cli.coding.legacy_agent:TUIAgent": CODING_AGENT,
-    "nooa_cli.tui.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
-    "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
-    # Spellings from before the coding agent moved to nooa-coder.
-    "nooa_cli.coding.agent:CodingAgent": CODING_AGENT,
-    "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_CODING_AGENT,
+    "nooa_cli.tui.agent:TUIAgent": ATOM_AGENT,
+    "nooa_cli.coding.legacy_agent:TUIAgent": ATOM_AGENT,
+    "nooa_cli.tui.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
+    "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
+    # Spellings from before the agent moved out of nooa-cli.
+    "nooa_cli.coding.agent:CodingAgent": ATOM_AGENT,
+    "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_ATOM_AGENT,
     # What the nooa-acp server and the old TUI record as a session's agent.
-    "CodingAgent": CODING_AGENT,
-    "TUIAgent": CODING_AGENT,
-    "ExperimentalTUIAgent": EXPERIMENTAL_CODING_AGENT,
+    "CodingAgent": ATOM_AGENT,
+    "TUIAgent": ATOM_AGENT,
+    "ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
 }
 """Agent specs older hosts saved, and the spec that loads the class that replaced each."""
 

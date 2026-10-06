@@ -5,7 +5,7 @@
 import sys
 
 import pytest
-from nooa_coder.workspace.controls import TraceUrlControl
+from nooa_atom.workspace.controls import TraceUrlControl
 
 import nooa.tracing
 

@@ -20,10 +20,10 @@ from typing import Any
 
 import pytest
 from acp import PROTOCOL_VERSION
-from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
-from nooa_coder.acp.router import INIT_REQUEST_ID, Router, WorkerProcess
-from nooa_coder.acp.server import initialize_response
-from nooa_coder.session.store import SessionStore, sessions_root
+from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
+from nooa_atom.acp.router import INIT_REQUEST_ID, Router, WorkerProcess
+from nooa_atom.acp.server import initialize_response
+from nooa_atom.session.store import SessionStore, sessions_root
 
 TIMEOUT = 10
 BASE = 1 << 32
@@ -239,8 +239,8 @@ def _stored(
     handle = harness.store.create(
         agent="a:B", workspace=workspace or harness.cwd, host="acp", parent_id=parent_id
     )
-    from coder_test_agents import SessionUserMessage
-    from nooa_coder.session.events import TurnEnded
+    from atom_test_agents import SessionUserMessage
+    from nooa_atom.session.events import TurnEnded
 
     for _ in range(turns):
         handle.events.add(SessionUserMessage(content="hello"))
@@ -409,7 +409,7 @@ async def test_worker_requests_reach_the_client_and_replies_route_back_by_id(har
 
 
 async def test_replies_with_stale_string_or_bool_ids_are_dropped(harness, caplog):
-    caplog.set_level(logging.INFO, logger="nooa_coder.acp.router")
+    caplog.set_level(logging.INFO, logger="nooa_atom.acp.router")
     await harness.initialize()
     await harness.new_session()
     worker = harness.workers[1]
@@ -733,7 +733,7 @@ async def test_a_store_error_during_load_routing_is_an_internal_error(harness, m
 
 
 async def test_a_failure_in_the_input_loop_is_logged_and_ends_the_router(harness, caplog):
-    caplog.set_level(logging.ERROR, logger="nooa_coder.acp.router")
+    caplog.set_level(logging.ERROR, logger="nooa_atom.acp.router")
 
     def explode(frame: Frame) -> None:
         raise RuntimeError("handler exploded")
@@ -751,7 +751,7 @@ async def test_session_list_gives_a_relative_recorded_workspace_the_store_direct
     harness, monkeypatch
 ):
     """The old TUI recorded "../"; the entry's cwd is the directory the store belongs to."""
-    import nooa_coder.session.store as store_module
+    import nooa_atom.session.store as store_module
 
     # create() resolves the workspace now; write the record as the old TUI did.
     monkeypatch.setattr(store_module, "_normalise_workspace", lambda workspace: str(workspace))

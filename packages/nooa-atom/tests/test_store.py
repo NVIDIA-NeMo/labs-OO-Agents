@@ -7,8 +7,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from nooa_coder.session.items import SessionInfo, TurnCancelled, Usage
-from nooa_coder.session.store import SessionNotFoundError, SessionStore, sessions_root
+from nooa_atom.session.items import SessionInfo, TurnCancelled, Usage
+from nooa_atom.session.store import SessionNotFoundError, SessionStore, sessions_root
 
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
@@ -186,7 +186,7 @@ def test_listing_shows_roots_by_default(sessions_dir):
 def test_turn_markers_and_turn_cancelled_reload_with_their_types(sessions_dir, monkeypatch):
     # Another class with the same name in the global registry (as nooa_cli's
     # copies are in a full test run) must not change what this store loads.
-    from nooa_coder.session import events
+    from nooa_atom.session import events
 
     from nooa.context_blocks.events import _EVENT_REGISTRY
 
@@ -226,7 +226,7 @@ def test_turn_markers_and_turn_cancelled_reload_with_their_types(sessions_dir, m
 
 
 def test_turn_count_counts_admitted_user_messages(sessions_dir):
-    from nooa_coder.session import events
+    from nooa_atom.session import events
 
     store = SessionStore(sessions_dir)
     with store.create() as handle:
@@ -255,7 +255,7 @@ def local_tz(monkeypatch):
 def test_timestamps_do_not_depend_on_the_readers_time_zone(sessions_dir, local_tz):
     import time
 
-    from nooa_coder.session import events
+    from nooa_atom.session import events
 
     local_tz("America/Los_Angeles")
     store = SessionStore(sessions_dir)
@@ -280,7 +280,7 @@ def test_timestamps_do_not_depend_on_the_readers_time_zone(sessions_dir, local_t
 
 
 def test_create_records_the_workspace_as_a_resolved_absolute_path(tmp_path, monkeypatch):
-    from nooa_coder.session.store import SessionStore, sessions_root
+    from nooa_atom.session.store import SessionStore, sessions_root
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -310,7 +310,7 @@ def test_a_tui_claim_with_a_live_process_marks_the_session_active(tmp_path):
     """The TUI claims a session through <id>.active/owner-*.json, not the file lock."""
     import os
 
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     from nooa.storage.sqlite import SessionAlreadyActiveError
 
@@ -327,7 +327,7 @@ def test_a_tui_claim_with_a_live_process_marks_the_session_active(tmp_path):
 
 
 def test_a_tui_claim_whose_process_is_gone_does_not_block(tmp_path):
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     with store.create(workspace=str(tmp_path)) as handle:
@@ -343,7 +343,7 @@ def test_the_lock_file_names_the_owner_and_is_blank_after_a_clean_close(tmp_path
     import os
     import socket
 
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     handle = store.create(workspace=str(tmp_path))
@@ -355,7 +355,7 @@ def test_the_lock_file_names_the_owner_and_is_blank_after_a_clean_close(tmp_path
 
 
 def test_a_session_held_on_another_machine_is_active_and_cannot_be_opened(tmp_path):
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     from nooa.storage.sqlite import SessionAlreadyActiveError
 
@@ -381,7 +381,7 @@ def test_a_stale_record_from_this_machine_is_left_to_the_kernel_lock(tmp_path):
     """A crash here leaves our own hostname behind; nothing holds the lock, so it is free."""
     import socket
 
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     with store.create(workspace=str(tmp_path)) as handle:
@@ -397,7 +397,7 @@ def test_a_stale_record_from_this_machine_is_left_to_the_kernel_lock(tmp_path):
 def test_session_files_use_the_rollback_journal_and_readers_leave_no_side_files(tmp_path):
     import sqlite3
 
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     with store.create(workspace=str(tmp_path)) as handle:
@@ -421,7 +421,7 @@ def test_session_files_use_the_rollback_journal_and_readers_leave_no_side_files(
 
 def test_the_liveness_probe_does_not_rewrite_the_lock_record(tmp_path):
     """Checking whether a session is active must not make the checker look like the owner."""
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     handle = store.create(workspace=str(tmp_path))
@@ -437,7 +437,7 @@ def test_the_liveness_probe_does_not_rewrite_the_lock_record(tmp_path):
 
 def test_a_file_in_use_on_another_machine_is_not_read_when_listing(tmp_path, monkeypatch):
     """Locks do not cross a shared mount, so such a file may be mid-write: skip it unread."""
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     with store.create(workspace=str(tmp_path)) as handle:

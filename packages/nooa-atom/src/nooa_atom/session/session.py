@@ -35,7 +35,7 @@ from nooa.interactive import (
 from nooa.llm_types import LLMResponse
 from nooa.runtime.turn_loop import TurnLoopEnded, TurnSettled
 from nooa.storage.json_snapshot import snapshot_to_json
-from nooa_coder.session.events import (
+from nooa_atom.session.events import (
     ItemAdmitted,
     ItemConsumed,
     ItemDiscarded,
@@ -45,7 +45,7 @@ from nooa_coder.session.events import (
     TurnStarted,
     UsageAttributed,
 )
-from nooa_coder.session.items import (
+from nooa_atom.session.items import (
     USAGE_FIELDS,
     AgentEventUpdate,
     CancelledUpdate,
@@ -71,8 +71,8 @@ from nooa_coder.session.items import (
     Usage,
     UsageChangedUpdate,
 )
-from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.store import SessionHandle
+from nooa_atom.session.options import SessionOptions
+from nooa_atom.session.store import SessionHandle
 
 logger = logging.getLogger(__name__)
 
@@ -913,7 +913,7 @@ class Session:
         """Run the agent's own tool set-up; return warnings for the user.
 
         Awaits the agent's ``prepare_tools()`` hook if it has one (the
-        coding agent connects the MCP servers its workspace remembers).
+        Atom agent connects the MCP servers its workspace remembers).
         A host calls this once, in the registry's ``prepare`` step, before
         the first turn.
         """
@@ -938,7 +938,7 @@ class Session:
                 continue
             try:
                 skills.register(name, tool)
-                # A coding agent's SkillManager activates asynchronously.
+                # An Atom agent's SkillManager activates asynchronously.
                 activated = skills.activate([name])
                 if inspect.isawaitable(activated):
                     await activated
@@ -954,7 +954,7 @@ class Session:
     def commands(self) -> list[CommandInfo]:
         """Slash commands of the agent's ``slash_commands`` registry, if it has one.
 
-        The registry has the coding agent's shape (``CodingSlashCommandRegistry``):
+        The registry has the Atom agent's shape (``SlashCommandRegistry``):
         ``commands()`` returns objects with ``name``, ``description`` and
         ``argument_hint``, and ``invoke(name, raw_args)`` runs one.
         """
@@ -1198,7 +1198,7 @@ class Session:
         """The agent's plan for a host to show, as ACP plan entries; empty if it has none.
 
         An agent offers it with a ``plan()`` method returning ``PlanEntry``
-        values or dicts with their fields (the coding agent derives them
+        values or dicts with their fields (the Atom agent derives them
         from its todos). A failure is logged and reads as no plan.
         """
         hook = getattr(self._agent, "plan", None)

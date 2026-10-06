@@ -5,12 +5,12 @@
 import asyncio
 
 import pytest
-from coder_test_agents import CODER_SPEC, CellLLM, ModelFactory, cell
-from nooa_coder.coding.agent import CodingAgent
-from nooa_coder.coding.factory import create_session_agent, default_llm_factory
-from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
+from atom_test_agents import ATOM_SPEC, CellLLM, ModelFactory, cell
+from nooa_atom.agent.agent import AtomAgent
+from nooa_atom.agent.factory import create_session_agent, default_llm_factory
+from nooa_atom.session.options import SessionOptions
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore
 
 from nooa.interactive import Done
 from nooa.storage import InMemoryStorageManager
@@ -24,10 +24,10 @@ CHILD_RESULT = (
 )
 
 _FORWARDING_AGENT = """\
-from nooa_coder.coding.agent import CodingAgent
+from nooa_atom.agent.agent import AtomAgent
 
 
-class ForwardingCoder(CodingAgent):
+class ForwardingAgent(AtomAgent):
     '''The normal subclass-extension pattern: forwards **kwargs to super().'''
 
     def __init__(self, llm=None, storage=None, **kwargs):
@@ -39,7 +39,7 @@ from nooa.interactive import InteractiveAgent
 
 
 class Unrelated(InteractiveAgent):
-    '''Declares **kwargs but understands none of the coding keywords.'''
+    '''Declares **kwargs but understands none of the Atom keywords.'''
 
     def __init__(self, llm=None, storage=None, **kwargs):
         if kwargs:
@@ -62,7 +62,7 @@ def workspace(tmp_path):
 
 def _options(workspace, sessions_dir, **values):
     return SessionOptions(
-        workspace=workspace, agent_spec=CODER_SPEC, sessions_dir=sessions_dir, **values
+        workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir, **values
     )
 
 
@@ -71,13 +71,13 @@ async def _close(agent):
     await agent.aclose()
 
 
-async def test_the_registry_builds_a_workspace_coding_agent_by_default(workspace, sessions_dir):
+async def test_the_registry_builds_a_workspace_atom_agent_by_default(workspace, sessions_dir):
     llm = FakeLLMClient()
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         root = await registry.create(_options(workspace, sessions_dir, llm=llm))
         agent = root._agent
-        assert isinstance(agent, CodingAgent)
+        assert isinstance(agent, AtomAgent)
         assert agent.cwd == workspace.resolve()
         assert agent.llm is llm
         assert agent.libs._path == workspace / ".nooa" / "libs"
@@ -102,7 +102,7 @@ async def test_the_mcp_and_skills_controls_are_installed_without_a_host(workspac
 
 
 async def test_the_factory_installs_the_skills_and_mcp_controls(workspace):
-    options = SessionOptions(workspace=workspace, agent_spec=CODER_SPEC, llm=FakeLLMClient())
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, llm=FakeLLMClient())
     agent = create_session_agent(options, InMemoryStorageManager())
     try:
         assert {"mcp", "skills"} <= {c.name for c in agent.slash_commands.commands()}
@@ -111,13 +111,13 @@ async def test_the_factory_installs_the_skills_and_mcp_controls(workspace):
 
 
 async def test_a_settings_file_from_before_legacy_agent_was_removed_still_loads(workspace):
-    from nooa_coder.workspace.options import CoderOptions
+    from nooa_atom.workspace.options import AtomOptions
 
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text(
         "tui:\n  legacy_agent: true\ncoding:\n  legacy_agent: true\n  default_model: m\n"
     )
-    options = CoderOptions.load(workspace)
+    options = AtomOptions.load(workspace)
     assert options.default_model == "m"
     assert not hasattr(options, "legacy_agent")
 
@@ -130,7 +130,7 @@ async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, ses
     try:
         with caplog.at_level("WARNING"):
             root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
-        assert isinstance(root._agent, CodingAgent)
+        assert isinstance(root._agent, AtomAgent)
         assert root._agent.cwd == workspace.resolve()
         [warning] = [r.getMessage() for r in caplog.records if str(settings) in r.getMessage()]
         assert "active_skills" in warning
@@ -143,7 +143,7 @@ async def test_workspace_settings_reach_the_agent(workspace):
     (workspace / ".nooa" / "settings.yaml").write_text(
         "coding:\n  summarization:\n    policy: none\n"
     )
-    options = SessionOptions(workspace=workspace, agent_spec=CODER_SPEC, llm=FakeLLMClient())
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, llm=FakeLLMClient())
     agent = create_session_agent(options, InMemoryStorageManager())
     try:
         assert agent.get_summarization_status()["policy"] == "none"
@@ -152,18 +152,18 @@ async def test_workspace_settings_reach_the_agent(workspace):
 
 
 async def test_a_kwargs_forwarding_subclass_gets_the_real_workspace(workspace):
-    """A CodingAgent subclass using **kwargs still gets cwd and libs_dir.
+    """An AtomAgent subclass using **kwargs still gets cwd and libs_dir.
 
     A literal-name-only check would drop them and fall back to cwd='.',
-    the process's own directory. (From coder/3-engine's test_coding_factory.)
+    the process's own directory. (From atom/3-engine's test_coding_factory.)
     """
     (workspace / "forwarding.py").write_text(_FORWARDING_AGENT)
     options = SessionOptions(
-        workspace=workspace, agent_spec="./forwarding.py:ForwardingCoder", llm=FakeLLMClient()
+        workspace=workspace, agent_spec="./forwarding.py:ForwardingAgent", llm=FakeLLMClient()
     )
     agent = create_session_agent(options, InMemoryStorageManager())
     try:
-        assert type(agent).__name__ == "ForwardingCoder"
+        assert type(agent).__name__ == "ForwardingAgent"
         assert agent.cwd == workspace.resolve()
         assert agent.libs._path == workspace / ".nooa" / "libs"
     finally:
@@ -171,10 +171,10 @@ async def test_a_kwargs_forwarding_subclass_gets_the_real_workspace(workspace):
 
 
 _NARROW_AGENT = """\
-from nooa_coder.coding.agent import CodingAgent
+from nooa_atom.agent.agent import AtomAgent
 
 
-class NarrowCoder(CodingAgent):
+class NarrowAgent(AtomAgent):
     '''Overrides __init__ with explicit keywords and no **kwargs.'''
 
     def __init__(self, llm=None, *, storage=None):
@@ -198,25 +198,25 @@ class OwnCwd(InteractiveAgent):
 async def test_a_narrow_subclass_keeps_the_workspace_wiring_and_is_warned(workspace, caplog):
     (workspace / "narrow.py").write_text(_NARROW_AGENT)
     options = SessionOptions(
-        workspace=workspace, agent_spec="./narrow.py:NarrowCoder", llm=FakeLLMClient()
+        workspace=workspace, agent_spec="./narrow.py:NarrowAgent", llm=FakeLLMClient()
     )
-    with caplog.at_level("WARNING", logger="nooa_coder.coding.factory"):
+    with caplog.at_level("WARNING", logger="nooa_atom.agent.factory"):
         agent = create_session_agent(options, InMemoryStorageManager())
     try:
         assert "nooa.workspace_settings" in agent.skills.activated()
         assert agent.skills.mcp is not None
         assert "mcp" in {c.name for c in agent.slash_commands.commands()}
-        warnings = [r.getMessage() for r in caplog.records if "NarrowCoder" in r.getMessage()]
+        warnings = [r.getMessage() for r in caplog.records if "NarrowAgent" in r.getMessage()]
         assert len(warnings) == 1
         assert "cwd" in warnings[0] and "libs_dir" in warnings[0]
     finally:
         await _close(agent)
     # Once per class: a second session does not repeat it.
     caplog.clear()
-    with caplog.at_level("WARNING", logger="nooa_coder.coding.factory"):
+    with caplog.at_level("WARNING", logger="nooa_atom.agent.factory"):
         agent = create_session_agent(options, InMemoryStorageManager())
     try:
-        assert not [r for r in caplog.records if "NarrowCoder" in r.getMessage()]
+        assert not [r for r in caplog.records if "NarrowAgent" in r.getMessage()]
     finally:
         await _close(agent)
 
@@ -245,11 +245,11 @@ def test_kwargs_are_not_forced_on_an_unrelated_agent(workspace):
         "nooa_cli.coding.agent:CodingAgent",
     ],
 )
-def test_legacy_coding_agent_specs_load_the_moved_class(spec):
-    """Saved specs from nooa_cli keep loading after the move to nooa_coder."""
-    from nooa_coder.session.loader import load_agent_class
+def test_legacy_agent_specs_load_the_moved_class(spec):
+    """Saved specs from nooa_cli keep loading after the move to nooa_atom."""
+    from nooa_atom.session.loader import load_agent_class
 
-    assert load_agent_class(spec) is CodingAgent
+    assert load_agent_class(spec) is AtomAgent
 
 
 async def test_a_child_with_another_model_gets_its_own_client(workspace, sessions_dir):
@@ -307,15 +307,15 @@ async def test_skills_are_configured_before_and_stale_context_dropped_after_a_re
 ):
     """Skills are configured before the snapshot is restored; the stale-context
     cleanup runs after it, since restoring is additive and would re-add the keys."""
-    import nooa_coder.coding.factory as factory
-    import nooa_coder.workspace.options as coder_options
+    import nooa_atom.agent.factory as factory
+    import nooa_atom.workspace.options as atom_options
 
     from nooa.storage.sqlite import SQLiteStorageManager
 
     order: list[str] = []
     configure = factory.configure_session_skills
     restore = SQLiteStorageManager.restore_latest_snapshot
-    cleanup = coder_options.drop_stale_memory_context
+    cleanup = atom_options.drop_stale_memory_context
 
     def spy_configure(agent, options):
         order.append("configure")
@@ -338,7 +338,7 @@ async def test_skills_are_configured_before_and_stale_context_dropped_after_a_re
         await registry.close(session_id)
         monkeypatch.setattr(factory, "configure_session_skills", spy_configure)
         monkeypatch.setattr(SQLiteStorageManager, "restore_latest_snapshot", spy_restore)
-        monkeypatch.setattr(coder_options, "drop_stale_memory_context", spy_cleanup)
+        monkeypatch.setattr(atom_options, "drop_stale_memory_context", spy_cleanup)
         await registry.load(session_id, llm=FakeLLMClient())
         assert order == ["configure", "restore", "cleanup"]
     finally:
@@ -346,7 +346,7 @@ async def test_skills_are_configured_before_and_stale_context_dropped_after_a_re
 
 
 def test_the_default_llm_factory_uses_the_workspace_default_model(workspace, monkeypatch):
-    import nooa_coder.coding.factory as factory
+    import nooa_atom.agent.factory as factory
 
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")
@@ -365,8 +365,8 @@ async def test_a_host_registry_builds_the_workspace_default_model(
     workspace, sessions_dir, monkeypatch
 ):
     """default_llm_factory() as the registry's llm_factory, for a session without a model."""
-    import nooa_coder.coding.factory as factory
-    from coder_test_agents import TrackedLLM
+    import nooa_atom.agent.factory as factory
+    from atom_test_agents import TrackedLLM
 
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")

@@ -100,22 +100,22 @@ def client():
 
 @pytest.fixture
 async def make_adapter(client):
-    """Build a ``CoderACPAgent`` over a registry of scripted-model agents.
+    """Build an ``AtomACPAgent`` over a registry of scripted-model agents.
 
     ``make_adapter(models, agent_spec=..., capabilities=..., client_info=...)`` returns the
     adapter, connected to ``client`` and initialized. Everything it built
     is closed after the test.
     """
     from acp import PROTOCOL_VERSION
-    from nooa_coder.acp.server import CoderACPAgent
-    from nooa_coder.session.registry import SessionRegistry
+    from nooa_atom.acp.server import AtomACPAgent
+    from nooa_atom.session.registry import SessionRegistry
 
     built: list[Any] = []
 
     async def make(
         models: Any,
         *,
-        agent_spec: str = "coder_test_agents:EchoAgent",
+        agent_spec: str = "atom_test_agents:EchoAgent",
         capabilities: Any = None,
         llm_factory: Any = None,
         model: str | None = None,
@@ -125,7 +125,7 @@ async def make_adapter(client):
         def new_registry(store: Any) -> SessionRegistry:
             return SessionRegistry(store, agent_factory=models, llm_factory=llm_factory)
 
-        adapter = CoderACPAgent(new_registry, agent_spec=agent_spec, model=model)
+        adapter = AtomACPAgent(new_registry, agent_spec=agent_spec, model=model)
         adapter.on_connect(client_ or client)
         await adapter.initialize(
             PROTOCOL_VERSION, client_capabilities=capabilities, client_info=client_info
@@ -162,21 +162,21 @@ def file_spec():
 
 
 @pytest.fixture
-async def coder_adapter(make_adapter):
-    """``coder_adapter(*responses)``: an adapter building real coding agents.
+async def atom_adapter(make_adapter):
+    """``atom_adapter(*responses)``: an adapter building real Atom agents.
 
     Sessions are built by ``create_session_agent``, so workspace settings, skills and slash
     commands apply; each session's model is a strict fake scripted with
     ``responses`` (one list per session, in creation order).
     """
-    from coder_test_agents import CODER_SPEC, ModelFactory
-    from nooa_coder.coding.factory import create_session_agent
+    from atom_test_agents import ATOM_SPEC, ModelFactory
+    from nooa_atom.agent.factory import create_session_agent
 
     async def make(*scripts: list[Any], capabilities: Any = None) -> Any:
         factory = ModelFactory({"fake": [list(script) for script in scripts]})
         adapter = await make_adapter(
             create_session_agent,
-            agent_spec=CODER_SPEC,
+            agent_spec=ATOM_SPEC,
             llm_factory=factory,
             model="fake",
             capabilities=capabilities,
@@ -200,7 +200,7 @@ def _protocol_subprocess_environment(monkeypatch):
 
     original = acp.transports.default_environment
     root = Path(__file__).resolve().parents[4]
-    sources = [root / "src", root / "packages" / "nooa-coder" / "src"]
+    sources = [root / "src", root / "packages" / "nooa-atom" / "src"]
 
     def environment():
         values = original()

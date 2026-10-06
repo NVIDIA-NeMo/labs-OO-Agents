@@ -7,7 +7,7 @@ import json
 
 import pytest
 from acp.connection import StreamDirection, StreamEvent
-from nooa_coder.acp._mcp_trace import MCPHandoffTrace
+from nooa_atom.acp._mcp_trace import MCPHandoffTrace
 
 
 @pytest.fixture

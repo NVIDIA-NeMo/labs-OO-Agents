@@ -5,12 +5,12 @@
 import asyncio
 import sqlite3
 
-import coder_test_agents as agents
+import atom_test_agents as agents
 import pytest
-from coder_test_agents import cell, done
-from nooa_coder.session.events import ItemConsumed
-from nooa_coder.session.items import TurnCancelledOutcome
-from nooa_coder.session.session import TurnFailedError
+from atom_test_agents import cell, done
+from nooa_atom.session.events import ItemConsumed
+from nooa_atom.session.items import TurnCancelledOutcome
+from nooa_atom.session.session import TurnFailedError
 
 from nooa.interactive import Done
 
@@ -221,7 +221,7 @@ async def test_model_swap_attempt_once_retains_old_cleanup_on_cancel(make_sessio
 async def test_model_activation_failure_is_not_retried_implicitly(make_session, monkeypatch):
     session, _ = make_session(done("after failure"), start=False)
     old = session._agent.llm
-    from nooa_coder.session import session as session_module
+    from nooa_atom.session import session as session_module
 
     from nooa.unifiedllm import FakeLLMClient
 
@@ -281,7 +281,7 @@ async def test_steer_record_failure_retains_buffer_and_fails_relevant_prompt(mak
     receipts = [await session.steer("steer-a"), await session.steer("steer-b")]
     pending = [asyncio.ensure_future(session.outcome(r.item_id)) for r in receipts]
     add = session.handle.events.add
-    from nooa_coder.session.events import ItemAdmitted
+    from nooa_atom.session.events import ItemAdmitted
 
     def fail(event, **kwargs):
         if (
@@ -360,8 +360,8 @@ async def test_failed_steer_notification_retains_unconsumed_recovery(make_sessio
 async def test_failed_steer_notification_replays_on_load(
     registry, root_options, models, sessions_dir, monkeypatch, failure
 ):
-    from nooa_coder.session.registry import SessionRegistry
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.registry import SessionRegistry
+    from nooa_atom.session.store import SessionStore
 
     from nooa.events import Notification
 

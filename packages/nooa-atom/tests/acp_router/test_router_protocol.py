@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa-coder over real standard input and output, in both server modes.
+"""nooa-atom over real standard input and output, in both server modes.
 
 The same protocol cases run against ``--single-process`` and the router
 (the default), with real worker processes started from the test fixture
@@ -21,8 +21,8 @@ from typing import Any
 
 import pytest
 from acp import PROTOCOL_VERSION
-from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode
-from nooa_coder.session.store import SessionStore
+from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode
+from nooa_atom.session.store import SessionStore
 
 FAKE_AGENT = Path(__file__).parent / "fixtures" / "fake_agent.py"
 TIMEOUT = 60
@@ -30,7 +30,7 @@ MODES = {"single": ["--single-process"], "router": []}
 
 
 class Server:
-    """A nooa-coder process driven by a raw JSON-lines client."""
+    """A nooa-atom process driven by a raw JSON-lines client."""
 
     def __init__(self, process: asyncio.subprocess.Process) -> None:
         self.process = process
@@ -48,7 +48,7 @@ class Server:
             sys.executable,
             str(FAKE_AGENT),
             "--agent",
-            "coder_test_agents:EchoAgent",
+            "atom_test_agents:EchoAgent",
             "--model",
             "fake",
             "--sessions-dir",
@@ -349,7 +349,7 @@ async def test_a_child_session_loads_in_its_roots_worker(servers, workspace, tmp
     store = SessionStore(tmp_path / "sessions")
     # A child record, as the registry writes one; the root's worker is its owner.
     handle = store.create(
-        agent="coder_test_agents:EchoAgent",
+        agent="atom_test_agents:EchoAgent",
         workspace=str(workspace),
         host="acp",
         parent_id=root,

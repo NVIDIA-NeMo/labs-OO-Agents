@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The ACP agent over the Session layer: protocol translation, no session policy.
 
-``CoderACPAgent`` implements the ``acp`` library's ``Agent`` interface on a
+``AtomACPAgent`` implements the ``acp`` library's ``Agent`` interface on a
 ``SessionRegistry``. Sessions, turns, steering, cancellation and
 checkpoints are the Session's; this module maps requests onto it and keeps
 one ``ACPEventBridge`` per session id that sends the session's activity
@@ -68,34 +68,34 @@ from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
-from nooa_coder.acp.event_bridge import ACPEventBridge, cancel_text, pool_input_event
-from nooa_coder.acp.listing import list_sessions, validate_workspace
-from nooa_coder.acp.need_input import (
+from nooa_atom.acp.event_bridge import ACPEventBridge, cancel_text, pool_input_event
+from nooa_atom.acp.listing import list_sessions, validate_workspace
+from nooa_atom.acp.need_input import (
     answer_from_content,
     need_input_schema,
     pool_answer,
     pool_form_schema,
 )
-from nooa_coder.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
-from nooa_coder.acp.recover import COMMAND as RECOVER
-from nooa_coder.acp.recover import recover
-from nooa_coder.coding.slash_commands import RESERVED_COMMAND_NAMES
-from nooa_coder.session.items import (
+from nooa_atom.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
+from nooa_atom.acp.recover import COMMAND as RECOVER
+from nooa_atom.acp.recover import recover
+from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
+from nooa_atom.session.items import (
     CommandInfo,
     CommandsChangedUpdate,
     Receipt,
     TurnCancelledOutcome,
 )
-from nooa_coder.session.loader import CODING_AGENT, canonical_agent_spec
-from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.registry import ChildActiveElsewhereError, SessionRegistry
-from nooa_coder.session.session import (
+from nooa_atom.session.loader import ATOM_AGENT, canonical_agent_spec
+from nooa_atom.session.options import SessionOptions
+from nooa_atom.session.registry import ChildActiveElsewhereError, SessionRegistry
+from nooa_atom.session.session import (
     ItemWithdrawnError,
     Session,
     SessionClosedError,
     TurnFailedError,
 )
-from nooa_coder.session.store import (
+from nooa_atom.session.store import (
     InvalidSessionIdError,
     SessionNotFoundError,
     SessionStore,
@@ -209,7 +209,7 @@ def model_aliases(workspace: Path) -> list[str]:
     model connected with ``nooa connect`` in a terminal shows up in the
     picker without restarting the server.
     """
-    from nooa_coder.workspace.models import workspace_models
+    from nooa_atom.workspace.models import workspace_models
 
     try:
         return sorted(workspace_models(workspace))
@@ -218,7 +218,7 @@ def model_aliases(workspace: Path) -> list[str]:
         return []
 
 
-class CoderACPAgent:
+class AtomACPAgent:
     """One ACP connection's view of the sessions this process runs.
 
     Sessions are stored per workspace (``sessions_root``): a request's
@@ -229,7 +229,7 @@ class CoderACPAgent:
     workspace's ``.nooa/sessions``).
 
     ``agent_spec`` names the agent class for new sessions (``None``: the
-    workspace's ``coding.agent_spec`` setting, else the coding agent).
+    workspace's ``coding.agent_spec`` setting, else the Atom agent).
     ``model`` is the model alias new sessions start with; the registry's
     ``llm_factory`` builds the client.
     """
@@ -283,7 +283,7 @@ class CoderACPAgent:
     def _log_llm_config(self, workspace: Path) -> None:
         """Log the model configuration files of a workspace, the first time it is used."""
         if workspace not in self._logged_config:
-            from nooa_coder.acp.cli import llm_config_summary
+            from nooa_atom.acp.cli import llm_config_summary
 
             self._logged_config.add(workspace)
             logger.info(llm_config_summary(workspace))
@@ -681,7 +681,7 @@ class CoderACPAgent:
             return
         if any(entry.role == "user" for entry in session.transcript()):
             return
-        from nooa_coder.coding.agent import session_title_request
+        from nooa_atom.agent.agent import session_title_request
 
         await session.submit(session_title_request(text), channel="system_messages", source="host")
 
@@ -1198,10 +1198,10 @@ class CoderACPAgent:
     def _agent_spec_for(self, root: Path) -> str:
         if self._agent_spec:
             return canonical_agent_spec(self._agent_spec)
-        from nooa_coder.workspace.options import CoderOptions
+        from nooa_atom.workspace.options import AtomOptions
 
-        configured = CoderOptions.load(root).agent_spec
-        return canonical_agent_spec(configured) if configured else CODING_AGENT
+        configured = AtomOptions.load(root).agent_spec
+        return canonical_agent_spec(configured) if configured else ATOM_AGENT
 
     def _modes(self, session: Session) -> SessionModeState:
         return SessionModeState(current_mode_id=session.info.mode or "auto", available_modes=_MODES)
@@ -1210,7 +1210,7 @@ class CoderACPAgent:
         """Give a new or loaded session its tools; return warnings.
 
         Runs in the registry's ``prepare`` step, before any turn. The
-        agent's own set-up runs first (a coding agent connects the MCP
+        agent's own set-up runs first (an Atom agent connects the MCP
         servers its workspace remembers), then the MCP servers the client
         sent are registered as ``mcp.<name>``. A name that collides with
         one the agent provides (``shell``, ``repo``) is skipped with a
@@ -1527,9 +1527,9 @@ async def serve(
     ``input_fd`` and ``output_fd`` are the descriptors frames are read from
     and written to when stdio was reserved for ACP
     (``cli.reserve_stdio_for_acp``); ``None`` uses the process's stdio.
-    ``new_registry`` and ``sessions_dir`` are as for ``CoderACPAgent``.
+    ``new_registry`` and ``sessions_dir`` are as for ``AtomACPAgent``.
     """
-    adapter = CoderACPAgent(
+    adapter = AtomACPAgent(
         new_registry, sessions_dir=sessions_dir, agent_spec=agent_spec, model=model
     )
     # ACP clients may terminate their subprocess instead of closing stdin.
@@ -1574,7 +1574,7 @@ async def serve(
 
 __all__ = [
     "INJECT_CAPABILITY",
-    "CoderACPAgent",
+    "AtomACPAgent",
     "initialize_response",
     "list_sessions",
     "open_stdio",

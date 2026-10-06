@@ -14,7 +14,7 @@ from acp.schema import (
     ToolCallProgress,
     ToolCallStart,
 )
-from coder_test_agents import (
+from atom_test_agents import (
     BLOCKING_CELL,
     CommandAgent,
     ScriptedModels,
@@ -256,7 +256,7 @@ async def test_another_generation_error_is_an_internal_error(
 
 
 async def test_a_command_with_text_output_answers_without_a_turn(make_adapter, workspace, client):
-    adapter = await make_adapter(ScriptedModels(), agent_spec="coder_test_agents:CommandAgent")
+    adapter = await make_adapter(ScriptedModels(), agent_spec="atom_test_agents:CommandAgent")
     session_id = await _new(adapter, workspace)
     response = await _prompt(adapter, session_id, "/model fast")
     assert response.stop_reason == "end_turn"
@@ -266,7 +266,7 @@ async def test_a_command_with_text_output_answers_without_a_turn(make_adapter, w
     assert agent.slash_commands.invoked == [("model", "fast")]
 
 
-async def test_a_command_meant_for_the_agent_runs_a_turn(coder_adapter, workspace, client):
+async def test_a_command_meant_for_the_agent_runs_a_turn(atom_adapter, workspace, client):
     skills = workspace / "skills" / "review"
     skills.mkdir(parents=True)
     (skills / "SKILL.md").write_text(
@@ -277,7 +277,7 @@ async def test_a_command_meant_for_the_agent_runs_a_turn(coder_adapter, workspac
     (workspace / ".nooa" / "settings.yaml").write_text(
         f"coding:\n  additional_skills_dirs:\n    - {workspace / 'skills'}\n"
     )
-    adapter = await coder_adapter([reply("Reviewed.\n")])
+    adapter = await atom_adapter([reply("Reviewed.\n")])
     session_id = await _new(adapter, workspace)
     response = await _prompt(adapter, session_id, '/review-this "two words"')
     assert response.stop_reason == "end_turn"
@@ -286,8 +286,8 @@ async def test_a_command_meant_for_the_agent_runs_a_turn(coder_adapter, workspac
     assert client.texts(AgentMessageChunk, session_id)[-1] == "Reviewed.\n\n"
 
 
-async def test_host_controls_answer_as_text(coder_adapter, workspace, client):
-    adapter = await coder_adapter([])
+async def test_host_controls_answer_as_text(atom_adapter, workspace, client):
+    adapter = await atom_adapter([])
     session_id = await _new(adapter, workspace)
     assert (await _prompt(adapter, session_id, "/skills list")).stop_reason == "end_turn"
     assert "Skills" in client.texts(AgentMessageChunk, session_id)[-1]
@@ -300,12 +300,12 @@ _TRACE_CELL = (
 )
 
 
-async def test_each_session_is_its_own_trace_session(coder_adapter, workspace, client, monkeypatch):
+async def test_each_session_is_its_own_trace_session(atom_adapter, workspace, client, monkeypatch):
     """The adapter names the trace session after the ACP session: turns and /trace-url."""
     import nooa.tracing
 
     monkeypatch.setenv("OTLP_ENDPOINT", "http://viewer:5001/v1/traces")
-    adapter = await coder_adapter([cell(_TRACE_CELL)], [cell(_TRACE_CELL)])
+    adapter = await atom_adapter([cell(_TRACE_CELL)], [cell(_TRACE_CELL)])
     first = await _new(adapter, workspace)
     assert nooa.tracing.get_session() == first
     second = await _new(adapter, workspace)
@@ -326,7 +326,7 @@ _HOOKS_CELL = (
 
 
 async def test_turns_run_with_the_tracing_hooks_registered(
-    coder_adapter, workspace, client, monkeypatch
+    atom_adapter, workspace, client, monkeypatch
 ):
     """The loop runs in a fresh context; the hooks tracing registered must reach it."""
     import nooa.tracing
@@ -337,16 +337,16 @@ async def test_turns_run_with_the_tracing_hooks_registered(
 
     monkeypatch.setattr(nooa.tracing, "_hooks", Hooks())
     set_hooks(None)
-    adapter = await coder_adapter([cell(_HOOKS_CELL)])
+    adapter = await atom_adapter([cell(_HOOKS_CELL)])
     session_id = await _new(adapter, workspace)
     await _prompt(adapter, session_id, "hooked?")
     assert client.texts(AgentMessageChunk, session_id)[-1] == "Hooks\n\n"
 
 
-async def test_usage_answers_with_the_token_totals(coder_adapter, workspace, client):
+async def test_usage_answers_with_the_token_totals(atom_adapter, workspace, client):
     from nooa.unifiedllm import LLMUsage
 
-    adapter = await coder_adapter(
+    adapter = await atom_adapter(
         [reply("Hi.", usage=LLMUsage(input_tokens=11, output_tokens=2, cached_input_tokens=7))]
     )
     session_id = await _new(adapter, workspace)
@@ -357,12 +357,12 @@ async def test_usage_answers_with_the_token_totals(coder_adapter, workspace, cli
     assert "Cached input tokens (cache reads)" in text and "Turns: 1" in text
 
 
-async def test_trace_url_answers_with_the_viewer_url(coder_adapter, workspace, client, monkeypatch):
+async def test_trace_url_answers_with_the_viewer_url(atom_adapter, workspace, client, monkeypatch):
     import nooa.tracing
 
     monkeypatch.setattr(nooa.tracing, "get_session", lambda: "trace-1")
     monkeypatch.setenv("OTLP_ENDPOINT", "http://viewer:5001/v1/traces")
-    adapter = await coder_adapter([])
+    adapter = await atom_adapter([])
     session_id = await _new(adapter, workspace)
     assert (await _prompt(adapter, session_id, "/trace-url")).stop_reason == "end_turn"
     assert client.texts(AgentMessageChunk, session_id)[-1] == (
@@ -378,9 +378,9 @@ async def test_trace_url_answers_with_the_viewer_url(coder_adapter, workspace, c
     ],
 )
 async def test_reserved_commands_without_an_acp_form_explain_themselves(
-    coder_adapter, workspace, client, text, expected
+    atom_adapter, workspace, client, text, expected
 ):
-    adapter = await coder_adapter([])
+    adapter = await atom_adapter([])
     session_id = await _new(adapter, workspace)
     assert (await _prompt(adapter, session_id, text)).stop_reason == "end_turn"
     assert expected in client.texts(AgentMessageChunk, session_id)[-1]
@@ -397,7 +397,7 @@ async def test_an_unknown_slash_command_is_an_ordinary_prompt(make_adapter, work
 
 
 async def test_a_failing_command_reports_the_failure(make_adapter, workspace, client):
-    adapter = await make_adapter(ScriptedModels(), agent_spec="coder_test_agents:CommandAgent")
+    adapter = await make_adapter(ScriptedModels(), agent_spec="atom_test_agents:CommandAgent")
     session_id = await _new(adapter, workspace)
     agent = adapter.session(session_id)._agent
 
@@ -411,9 +411,9 @@ async def test_a_failing_command_reports_the_failure(make_adapter, workspace, cl
 
 async def test_a_command_for_the_agent_with_no_output_says_so(make_adapter, workspace, client):
     """Nothing to send the agent: the client is told, not left with a silent end_turn."""
-    from coder_test_agents import _CommandOutput
+    from atom_test_agents import _CommandOutput
 
-    adapter = await make_adapter(ScriptedModels(), agent_spec="coder_test_agents:CommandAgent")
+    adapter = await make_adapter(ScriptedModels(), agent_spec="atom_test_agents:CommandAgent")
     session_id = await _new(adapter, workspace)
     agent = adapter.session(session_id)._agent
 
@@ -430,10 +430,10 @@ async def test_a_command_for_the_agent_with_no_output_says_so(make_adapter, work
 # ---- titles ------------------------------------------------------------------
 
 
-async def test_the_first_prompt_asks_the_agent_for_a_title(coder_adapter, workspace, client):
+async def test_the_first_prompt_asks_the_agent_for_a_title(atom_adapter, workspace, client):
     from acp.schema import SessionInfoUpdate
 
-    adapter = await coder_adapter(
+    adapter = await atom_adapter(
         [
             cell(
                 "await self.rename_session('Parser fix')\n"
@@ -458,7 +458,7 @@ async def test_the_first_prompt_asks_the_agent_for_a_title(coder_adapter, worksp
 
 async def test_a_session_that_has_a_title_is_not_asked_again(make_adapter, workspace):
     models = ScriptedModels({None: [reply("Hi.")]})
-    adapter = await make_adapter(models, agent_spec="coder_test_agents:EchoAgent")
+    adapter = await make_adapter(models, agent_spec="atom_test_agents:EchoAgent")
     session_id = await _new(adapter, workspace)
     await adapter.session(session_id).set_title("Chosen", user_set=True)
     await _prompt(adapter, session_id, "hello")
@@ -477,7 +477,7 @@ async def _inject(adapter, session_id, mode, text):
 
 async def test_inject_is_advertised_for_the_router_too():
     from acp import PROTOCOL_VERSION
-    from nooa_coder.acp.server import initialize_response
+    from nooa_atom.acp.server import initialize_response
 
     meta = initialize_response(PROTOCOL_VERSION).agent_capabilities.field_meta
     assert meta == {

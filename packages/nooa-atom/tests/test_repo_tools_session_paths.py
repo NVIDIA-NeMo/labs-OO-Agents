@@ -17,7 +17,7 @@ import shlex
 from pathlib import Path
 
 import pytest
-from nooa_coder.tools.repo_tools import RepoTools
+from nooa_atom.tools.repo_tools import RepoTools
 
 from nooa.tools.shell_tools import Match, ShellTools
 

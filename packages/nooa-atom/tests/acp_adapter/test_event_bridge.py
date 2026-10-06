@@ -21,15 +21,15 @@ from acp.schema import (
     UsageUpdate,
     UserMessageChunk,
 )
-from nooa_coder.acp.event_bridge import ACPEventBridge
-from nooa_coder.coding import (
-    CodingAgent,
+from nooa_atom.acp.event_bridge import ACPEventBridge
+from nooa_atom.agent import (
+    AtomAgent,
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
     TerminalCommandStarted,
 )
-from nooa_coder.session.items import (
+from nooa_atom.session.items import (
     AgentEventUpdate,
     CancelledUpdate,
     ChildCreatedUpdate,
@@ -40,7 +40,7 @@ from nooa_coder.session.items import (
     TitleChangedUpdate,
     TurnEndedUpdate,
 )
-from nooa_coder.session.session import Session
+from nooa_atom.session.session import Session
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
@@ -110,7 +110,7 @@ def _content_text(content: ContentToolCallContent) -> str:
 
 @pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
 async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -193,10 +193,10 @@ async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name
 
 
 async def test_the_usage_update_carries_the_token_totals(tmp_path):
-    from nooa_coder.session.items import Usage
+    from nooa_atom.session.items import Usage
 
     llm = FakeLLMClient()
-    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    agent = AtomAgent(llm=llm, cwd=tmp_path)
     client = _RecordingClient()
     session = _FakeSession(agent, "session-1")
     session.info.usage = Usage(attributed_cached_input_tokens=5)
@@ -213,7 +213,7 @@ async def test_the_usage_update_carries_the_token_totals(tmp_path):
 
 
 async def test_the_python_card_names_its_code_like_the_shell_card(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
     long_line = "total = " + " + ".join(str(n) for n in range(40))
@@ -247,7 +247,7 @@ async def test_the_python_card_names_its_code_like_the_shell_card(tmp_path):
 
 
 async def test_bridge_marks_failed_python_output(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -286,7 +286,7 @@ async def test_bridge_marks_failed_python_output(tmp_path):
 
 
 async def test_bridge_retains_python_source_when_interrupted(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -320,7 +320,7 @@ async def test_bridge_retains_python_source_when_interrupted(tmp_path):
 async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     llm = FakeLLMClient()
     cast(Any, llm)._context_window = None
-    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    agent = AtomAgent(llm=llm, cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -344,7 +344,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     # UsageUpdate. Without this, `return` at the top of _on_llm_response passes
     # both halves — an AgentMessageChunk control comes from a different handler
     # and cannot tell "the guard works" from "usage never fires".
-    sized = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    sized = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     sized_client = _RecordingClient()
     sized_bridge = ACPEventBridge(_FakeSession(sized, "session-2"), sized_client)  # type: ignore[arg-type]
     sized.event_manager.add(
@@ -357,7 +357,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
 
 
 async def test_bridge_emits_structured_file_edit(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
     path = str(tmp_path / "example.py")
@@ -395,7 +395,7 @@ async def test_bridge_emits_structured_file_edit(tmp_path):
 
 
 async def test_bridge_emits_terminal_lifecycle(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -505,7 +505,7 @@ class _BlockingClient(_RecordingClient):
 
 
 async def test_cancelled_flush_does_not_stop_update_pump(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _BlockingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
     agent.event_manager.add(AgentMessage(content="First"))
@@ -535,7 +535,7 @@ async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
     on every future flush — the agent kept running turns, at full cost, that
     the client never saw.
     """
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
 
     class _FlakyClient:
         def __init__(self) -> None:
@@ -569,7 +569,7 @@ async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
 
 async def test_a_cancelled_command_reads_as_cancellation_not_a_crash(tmp_path):
     """The client must see the user's action, not a Python exception name."""
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -601,7 +601,7 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
     means the client is told there was no output while the agent reasons from
     one.
     """
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -636,7 +636,7 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
 )
 async def test_a_turn_result_is_not_shown_as_out(tmp_path, value):
     """``return_result(...)`` ends the turn; its value is not output for the card."""
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -666,7 +666,7 @@ async def test_synthetic_text_replies_are_not_rendered_as_python_runs(tmp_path):
     Nothing was executed, so surfacing it as a Python tool call shows the user
     a run that never happened, with their model's prose commented out inside.
     """
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -686,7 +686,7 @@ async def test_synthetic_text_replies_are_not_rendered_as_python_runs(tmp_path):
 
 async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
     """Closing the bridge must not leave a card spinning or state retained."""
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -716,7 +716,7 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
     a technical-sounding failure and had to expand the card to learn it was
     their own action.
     """
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -734,7 +734,7 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
 
 async def test_a_force_closed_terminal_card_keeps_what_it_streamed(tmp_path):
     """Cancelling a running command closes its card with its output so far, then the reason."""
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
@@ -761,7 +761,7 @@ async def test_a_dead_pump_fails_flush_instead_of_hanging(tmp_path):
     marker and never observed the task, so it blocked forever, and close()
     flushes before awaiting the pump, hanging session teardown too.
     """
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
 
     class _DyingClient:
         async def session_update(self, session_id: str, update: object, **kwargs) -> None:
@@ -803,8 +803,8 @@ def _messages(client: _RecordingClient) -> list[str]:
 
 @pytest.fixture
 async def bridged(tmp_path):
-    """A coding agent behind a fake session, bridged to a recording client."""
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    """An Atom agent behind a fake session, bridged to a recording client."""
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     session = _FakeSession(agent)
     client = _RecordingClient()
     bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
@@ -968,8 +968,8 @@ async def test_messages_from_other_senders_are_echoed_as_user_chunks(bridged):
 
 
 async def test_tool_cards_of_a_child_are_mirrored_under_the_childs_id(tmp_path):
-    parent_agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
-    child_agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    parent_agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    child_agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     parent = _FakeSession(parent_agent, "parent")
     child = _FakeSession(child_agent, "child-1")
     client = _RecordingClient()
@@ -1025,8 +1025,8 @@ async def test_tool_cards_of_a_child_are_mirrored_under_the_childs_id(tmp_path):
     ids=["cancelled", "failed-turn"],
 )
 async def test_ending_the_parents_turn_leaves_a_mirrored_childs_cards_open(tmp_path, update):
-    parent_agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
-    child_agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    parent_agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    child_agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     parent = _FakeSession(parent_agent, "parent")
     child = _FakeSession(child_agent, "child-1")
     client = _RecordingClient()
@@ -1094,7 +1094,7 @@ async def test_usage_includes_cost_attributed_from_children(bridged):
 
 
 async def test_a_resumed_sessions_cost_continues_from_what_it_already_spent(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     session = _FakeSession(agent)
     session.info.usage.cost_usd = 2.0  # spent before this bridge was attached
     client = _RecordingClient()
@@ -1110,7 +1110,7 @@ async def test_a_resumed_sessions_cost_continues_from_what_it_already_spent(tmp_
 
 
 async def test_a_grandchild_is_announced_before_its_mirrored_cards(tmp_path):
-    agents = {name: CodingAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c", "g")}
+    agents = {name: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c", "g")}
     parent = _FakeSession(agents["p"], "parent")
     sessions = {
         "child-1": _FakeSession(agents["c"], "child-1"),
@@ -1169,9 +1169,9 @@ async def test_a_long_message_goes_out_as_chunks_under_the_websocket_limit(tmp_p
     import json
 
     from acp import text_block, update_user_message
-    from nooa_coder.acp.event_bridge import MAX_CHUNK_CHARS
+    from nooa_atom.acp.event_bridge import MAX_CHUNK_CHARS
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
     # Worst case for the wire size: every character needs a six-byte escape.
@@ -1202,7 +1202,7 @@ def test_every_agent_message_ends_its_line():
     message therefore ends with a blank line.
     """
     from acp import text_block, update_agent_message, update_agent_thought_text
-    from nooa_coder.acp.event_bridge import end_line
+    from nooa_atom.acp.event_bridge import end_line
 
     ended = end_line(update_agent_message(text_block("ending in billing.")))
     assert ended.content.text == "ending in billing.\n\n"

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in shell tools and events shared by interactive coding hosts."""
+"""Opt-in shell tools and events shared by interactive hosts."""
 
 from __future__ import annotations
 
@@ -149,7 +149,7 @@ def _edit_diff(
 
 
 class FileEdit(EventBase):  # type: ignore[misc]
-    """A successful structured filesystem edit made by the coding agent."""
+    """A successful structured filesystem edit made by the Atom agent."""
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
@@ -183,7 +183,7 @@ class FileEdit(EventBase):  # type: ignore[misc]
 
 
 class TerminalCommandStarted(EventBase):  # type: ignore[misc]
-    """A command began in a persistent coding-agent terminal."""
+    """A command began in a persistent agent terminal."""
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
@@ -205,7 +205,7 @@ class TerminalCommandStarted(EventBase):  # type: ignore[misc]
 
 
 class TerminalCommandOutput(EventBase):  # type: ignore[misc]
-    """The output of one coding-agent terminal command.
+    """The output of one agent terminal command.
 
     Emitted once, when the command finishes: output is buffered and bounded
     rather than streamed, so hosts receive a single event per command.
@@ -223,7 +223,7 @@ class TerminalCommandOutput(EventBase):  # type: ignore[misc]
 
 
 class TerminalCommandFinished(EventBase):  # type: ignore[misc]
-    """A coding-agent terminal command completed or failed to launch."""
+    """An agent terminal command completed or failed to launch."""
 
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 

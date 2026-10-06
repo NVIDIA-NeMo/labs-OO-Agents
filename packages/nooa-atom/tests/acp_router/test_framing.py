@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 
-from nooa_coder.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
+from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 
 
 def _reader(data: bytes, *, limit: int = FRAME_LIMIT) -> asyncio.StreamReader:
@@ -58,7 +58,7 @@ async def test_blank_lines_are_skipped():
 
 
 async def test_bad_json_and_batches_are_dropped_with_a_log_line(caplog):
-    caplog.set_level(logging.WARNING, logger="nooa_coder.acp.framing")
+    caplog.set_level(logging.WARNING, logger="nooa_atom.acp.framing")
     frames = await _all(
         _reader(b'not json\n[{"jsonrpc":"2.0","method":"a"}]\n42\n{"jsonrpc":"2.0","method":"b"}\n')
     )
@@ -88,7 +88,7 @@ async def test_a_five_mib_frame_passes_whole():
 
 
 async def test_a_frame_over_the_limit_is_dropped_and_reading_continues(caplog):
-    caplog.set_level(logging.WARNING, logger="nooa_coder.acp.framing")
+    caplog.set_level(logging.WARNING, logger="nooa_atom.acp.framing")
     big = encode({"jsonrpc": "2.0", "method": "big", "params": {"text": "y" * 5000}})
     frames = await _all(_reader(big + b'{"jsonrpc":"2.0","method":"after"}\n', limit=1024))
     assert [frame.method for frame in frames] == ["after"]

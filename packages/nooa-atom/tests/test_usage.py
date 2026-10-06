@@ -5,11 +5,11 @@
 import asyncio
 
 import pytest
-from coder_test_agents import ScriptedModels, cell, done
-from nooa_coder.session.items import Usage
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
-from nooa_coder.workspace.controls import UsageControl
+from atom_test_agents import ScriptedModels, cell, done
+from nooa_atom.session.items import Usage
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore
+from nooa_atom.workspace.controls import UsageControl
 
 from nooa.unifiedllm import LLMUsage
 

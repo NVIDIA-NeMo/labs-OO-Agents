@@ -7,8 +7,8 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from nooa_coder.hosts.headless import TaskRun, Tree, open_tree, run_task
-    from nooa_coder.session.items import (
+    from nooa_atom.hosts.headless import TaskRun, Tree, open_tree, run_task
+    from nooa_atom.session.items import (
         ChildFailed,
         ChildFailedError,
         ChildQuestion,
@@ -25,25 +25,25 @@ if TYPE_CHECKING:
         TurnCancelledOutcome,
         Usage,
     )
-    from nooa_coder.session.loader import AgentFactory, AgentSpecError, load_agent_class
-    from nooa_coder.session.options import SessionOptions
-    from nooa_coder.session.port import SessionPort
-    from nooa_coder.session.registry import (
+    from nooa_atom.session.loader import AgentFactory, AgentSpecError, load_agent_class
+    from nooa_atom.session.options import SessionOptions
+    from nooa_atom.session.port import SessionPort
+    from nooa_atom.session.registry import (
         ChildActiveElsewhereError,
         DepthLimitError,
         SessionRegistry,
     )
-    from nooa_coder.session.session import (
+    from nooa_atom.session.session import (
         ItemWithdrawnError,
         Outcome,
         Session,
         SessionClosedError,
         TurnFailedError,
     )
-    from nooa_coder.session.store import SessionNotFoundError, SessionStore
+    from nooa_atom.session.store import SessionNotFoundError, SessionStore
 
 # The public names load on first use: importing a light submodule (the
-# `nooa coder` command, which `nooa` loads at startup with every plugin)
+# `nooa atom` command, which `nooa` loads at startup with every plugin)
 # must not import the framework.
 _EXPORT_MODULES = {
     **dict.fromkeys(("TaskRun", "Tree", "open_tree", "run_task"), "hosts.headless"),
@@ -79,7 +79,7 @@ def __getattr__(name: str) -> Any:
 
 
 try:
-    __version__ = version("nooa-coder")
+    __version__ = version("nooa-atom")
 except PackageNotFoundError:  # pragma: no cover - running from a source tree without install
     __version__ = "0.0.0"
 

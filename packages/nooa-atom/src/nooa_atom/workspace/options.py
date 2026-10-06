@@ -10,15 +10,15 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from nooa.interactive import DEFAULT_MODEL, SummarizationConfig
-from nooa_coder.workspace.settings import load_coding_skills_dirs
+from nooa_atom.workspace.settings import load_skills_dirs
 
 
-class CoderOptions(BaseModel):
+class AtomOptions(BaseModel):
     """Behavioral options; terminal presentation settings stay with the TUI.
 
-    These are the coding agent's own settings, read from the workspace and
+    These are the Atom agent's own settings, read from the workspace and
     user settings files. They are not the Session layer's
-    ``nooa_coder.session.options.SessionOptions``, which say how a session
+    ``nooa_atom.session.options.SessionOptions``, which say how a session
     is built and run.
     """
 
@@ -35,7 +35,7 @@ class CoderOptions(BaseModel):
     mcp_auto_connect: list[str] = Field(default_factory=list)
 
     @classmethod
-    def load(cls, workspace: str | Path, **overrides: Any) -> CoderOptions:
+    def load(cls, workspace: str | Path, **overrides: Any) -> AtomOptions:
         """Load legacy ``tui`` and shared ``coding`` settings for this workspace.
 
         Invalid settings are reported and replaced by the defaults.
@@ -46,11 +46,11 @@ class CoderOptions(BaseModel):
         values = load_behavior_settings(root)
         values.update({key: value for key, value in overrides.items() if value is not None})
         values["working_dir"] = str(root)
-        values["skills_dirs"] = load_coding_skills_dirs(root)
+        values["skills_dirs"] = load_skills_dirs(root)
         return cls(**values)
 
 
-async def connect_session_mcp(agent: Any, options: CoderOptions) -> list[str]:
+async def connect_session_mcp(agent: Any, options: AtomOptions) -> list[str]:
     """Connect remembered servers, preserving exact-configuration approvals."""
     warnings = []
     for name in dict.fromkeys(options.mcp_auto_connect):
@@ -66,7 +66,7 @@ def drop_stale_memory_context(agent: Any) -> None:
 
     The memory skill itself is excluded from snapshots, but its context
     blocks were not. Restoring is additive, so this runs after the restore
-    (``CodingAgent.after_restore``). An agent that attached its own
+    (``AtomAgent.after_restore``). An agent that attached its own
     ``memory`` keeps them.
     """
     if not hasattr(agent, "memory"):
@@ -75,14 +75,14 @@ def drop_stale_memory_context(agent: Any) -> None:
                 del agent.context[key]
 
 
-def configure_session_skills(agent: Any, options: CoderOptions) -> list[str]:
+def configure_session_skills(agent: Any, options: AtomOptions) -> list[str]:
     """Attach the workspace's MCP servers and explicit skills before resume events.
 
     Return actionable warnings for either host to display. Discovering a skill
     does not activate it; negative activation preferences override positives.
     """
-    from nooa_coder.skills.mcp_servers import MCPServers
-    from nooa_coder.workspace.workspace_settings import WorkspaceSettings
+    from nooa_atom.skills.mcp_servers import MCPServers
+    from nooa_atom.workspace.workspace_settings import WorkspaceSettings
 
     skills = getattr(agent, "skills", None)
     if skills is None:

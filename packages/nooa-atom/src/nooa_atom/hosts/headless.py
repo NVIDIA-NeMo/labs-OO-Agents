@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from nooa.interactive import Done
-from nooa_coder.session.items import (
+from nooa_atom.session.items import (
     AgentEventUpdate,
     SessionEvent,
     TaskResult,
@@ -27,11 +27,11 @@ from nooa_coder.session.items import (
     TurnEndedUpdate,
     Usage,
 )
-from nooa_coder.session.loader import AgentFactory
-from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.registry import LLMFactory, SessionRegistry
-from nooa_coder.session.session import Session, TurnFailedError
-from nooa_coder.session.store import SessionStore, sessions_root
+from nooa_atom.session.loader import AgentFactory
+from nooa_atom.session.options import SessionOptions
+from nooa_atom.session.registry import LLMFactory, SessionRegistry
+from nooa_atom.session.session import Session, TurnFailedError
+from nooa_atom.session.store import SessionStore, sessions_root
 
 DEFAULT_MAX_TURNS = 10
 
@@ -62,7 +62,7 @@ async def open_tree(
     turn loop is traced when ``nooa.tracing`` is enabled.
     """
     if agent_factory is None:
-        from nooa_coder.coding.factory import create_session_agent
+        from nooa_atom.agent.factory import create_session_agent
 
         agent_factory = create_session_agent
     store = SessionStore(sessions_root(options.workspace, options.sessions_dir))
@@ -143,7 +143,7 @@ async def run_task(
     ``options.llm``, or a child on another model) gets one for its model.
     """
     if llm_factory is None:
-        from nooa_coder.coding.factory import default_llm_factory
+        from nooa_atom.agent.factory import default_llm_factory
 
         llm_factory = default_llm_factory()
     options = options.model_copy(update={"turn_method": "handle_batch"})

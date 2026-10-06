@@ -6,7 +6,7 @@ import asyncio
 
 from acp import text_block
 from acp.schema import SessionInfoUpdate, ToolCallProgress, ToolCallStart, UserMessageChunk
-from coder_test_agents import ScriptedModels, cell, done
+from atom_test_agents import ScriptedModels, cell, done
 
 TIMEOUT = 30
 

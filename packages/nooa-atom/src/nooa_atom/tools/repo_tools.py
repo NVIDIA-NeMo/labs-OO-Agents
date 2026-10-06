@@ -324,7 +324,7 @@ def _detect_lang(path: Path) -> str:
 
 def _tree_sitter_available() -> bool:
     try:
-        from nooa_coder.tools._tree_sitter_backend import TREE_SITTER_AVAILABLE
+        from nooa_atom.tools._tree_sitter_backend import TREE_SITTER_AVAILABLE
     except ImportError:
         return False
     return TREE_SITTER_AVAILABLE
@@ -349,7 +349,7 @@ def _anchor(
     ``Match(editable=...)`` comes with the core change that makes
     ``ShellTools.replace()`` refuse read-only anchors (#382). Until that is
     on this branch, anchors are built without the flag: they are then
-    editable host anchors, which is what they are for the coding agent,
+    editable host anchors, which is what they are for the Atom agent,
     whose ``RepoTools`` always shares the host filesystem (a real
     ``BashSession``). Only a scripted session over its own filesystem asks
     for read-only anchors.
@@ -459,7 +459,7 @@ def _extract_symbols(
     """
     # Try tree-sitter first (AST-aware, more accurate)
     try:
-        from nooa_coder.tools._tree_sitter_backend import (
+        from nooa_atom.tools._tree_sitter_backend import (
             TREE_SITTER_AVAILABLE,
             ts_extract_symbols,
         )
@@ -1118,7 +1118,7 @@ class RepoTools(Skill):
         # The AST branch walks the host filesystem, so it only applies when no
         # session is wired; session results come from rg/grep below instead.
         try:
-            from nooa_coder.tools._tree_sitter_backend import (
+            from nooa_atom.tools._tree_sitter_backend import (
                 TREE_SITTER_AVAILABLE,
                 ts_find_references,
             )

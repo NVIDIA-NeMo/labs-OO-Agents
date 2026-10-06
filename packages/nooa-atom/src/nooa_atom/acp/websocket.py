@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""ACP over WebSocket: ``nooa coder --http``.
+"""ACP over WebSocket: ``nooa atom --http``.
 
 Follows the WebSocket profile of the ACP remote transport proposal
 ("Streamable HTTP & WebSocket Transport"): one endpoint, ``/acp``; a
@@ -9,7 +9,7 @@ message is one text frame; the client sends ``initialize`` first. The
 proposal lets a server offer WebSocket only, which this does; the
 Streamable HTTP profile (``POST`` and server-sent events) is not served.
 
-Each connection gets its own :class:`~nooa_coder.acp.router.Router`, so a
+Each connection gets its own :class:`~nooa_atom.acp.router.Router`, so a
 remote client gets exactly what a client on standard input and output
 gets: one worker process per root session, started and stopped by that
 connection. The router is a line proxy, and a text frame is one line.
@@ -51,8 +51,8 @@ from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 
-from nooa_coder.acp.framing import FRAME_LIMIT
-from nooa_coder.acp.router import Router, Spawn
+from nooa_atom.acp.framing import FRAME_LIMIT
+from nooa_atom.acp.router import Router, Spawn
 
 logger = logging.getLogger(__name__)
 

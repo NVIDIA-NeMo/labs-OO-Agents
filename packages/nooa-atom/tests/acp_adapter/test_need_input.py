@@ -5,7 +5,7 @@
 from typing import Annotated, Literal
 
 import pytest
-from nooa_coder.acp.need_input import (
+from nooa_atom.acp.need_input import (
     answer_from_content,
     need_input_schema,
     pool_answer,

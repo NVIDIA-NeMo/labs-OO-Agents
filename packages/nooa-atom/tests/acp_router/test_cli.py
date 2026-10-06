@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa-coder's roles: router by default, --http, --single-process, and the hidden worker options."""
+"""nooa-atom's roles: router by default, --http, --single-process, and the hidden worker options."""
 
 import sys
 from pathlib import Path
@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from click.testing import CliRunner
-from nooa_coder.acp import cli
+from nooa_atom.acp import cli
 
 
 @pytest.fixture
@@ -184,13 +184,13 @@ def test_the_cli_module_imports_nothing_heavy_at_load_time():
             loaded.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             loaded.append(node.module)
-    heavy = [name for name in loaded if name.split(".")[0] in ("nooa", "nooa_coder", "acp")]
+    heavy = [name for name in loaded if name.split(".")[0] in ("nooa", "nooa_atom", "acp")]
     assert heavy == []
 
 
 def test_llm_config_summary_names_the_files_and_the_env_var(tmp_path, monkeypatch):
     """The server logs where a workspace's model configuration comes from."""
-    from nooa_coder.acp.cli import llm_config_summary
+    from nooa_atom.acp.cli import llm_config_summary
 
     workspace = tmp_path / "workspace"
     (workspace / ".nooa").mkdir(parents=True)

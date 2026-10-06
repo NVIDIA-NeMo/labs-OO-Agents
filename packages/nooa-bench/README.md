@@ -12,9 +12,9 @@ nemo-harbor --help
 See the [main repository](https://github.com/NVIDIA-NeMo/labs-OO-Agents) for
 documentation.
 
-## Running the coding agent headless
+## Running the Atom agent headless
 
-`nooa-bench run` runs one task with nooa-coder's coding agent, without
+`nooa-bench run` runs one task with the Atom agent, without
 Harbor. The agent works unattended in the workspace directory, and its
 session is stored in `.nooa/sessions` there (or in `NOOA_SESSIONS_DIR`), so
 it can be opened afterwards like any other session:
@@ -33,7 +33,7 @@ followed by the turn the job's delivery starts; `--max-turns` (default 10)
 stops a run whose last allowed turn is still waiting, and `--timeout`
 (seconds, no default) stops it after that time.
 
-To run a Harbor benchmark with the same agent, set `agent_type: coder` (and a
+To run a Harbor benchmark with the same agent, set `agent_type: atom` (and a
 `git_ref` that has it) in the agent's `kwargs` in
 `examples/benchmarks/harbor_minimal.yaml`, then run from the repository root:
 
@@ -41,7 +41,7 @@ To run a Harbor benchmark with the same agent, set `agent_type: coder` (and a
 PYTHONPATH=examples/benchmarks harbor run --config examples/benchmarks/harbor_minimal.yaml
 ```
 
-Harbor then runs `nemo-harbor --agent-type coder` in each task container.
+Harbor then runs `nemo-harbor --agent-type atom` in each task container.
 The agent works in the task's working directory (`--working-dir`, else
 `/testbed` or `/app`). The example adapter sets
 `NOOA_SESSIONS_DIR=/logs/agent/sessions`, so the session is kept with the
@@ -51,7 +51,7 @@ counts come from the session's usage, children included, and
 
 ## Agent types
 
-Three agent types are available through `nemo-harbor --agent-type`: `coder`
+Three agent types are available through `nemo-harbor --agent-type`: `atom`
 (above) and two variants on the older agent loop:
 
 - `bench` — `BenchAgent` in `nooa_bench.bench_agent`: compact CodeAct baseline
@@ -63,7 +63,7 @@ Both use `CodeActV2` with the single `python_cell` tool and return a structured 
 Its `how_to_verify` field describes concrete checks and expected results; commands
 are optional. The `evidence` field records results the agent actually observed.
 Both delegate through an awaited call returning a `TaskResult`; neither exposes
-the interactive coding agent's background `spawn()` / job-handle API.
+the Atom agent's background `spawn()` / job-handle API.
 The strategy allows ten retries, uses a 1,800-second cell timeout, and has no
 fixed iteration cap; configure the enclosing benchmark's time/token budget.
 Awaited delegation runs inside that same parent cell deadline. A timeout cancels

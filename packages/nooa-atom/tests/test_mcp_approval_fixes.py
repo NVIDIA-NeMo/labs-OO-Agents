@@ -5,7 +5,7 @@ and the approval store's atomic-write descriptor handling.
 """
 
 import pytest
-from nooa_coder.workspace.mcp_approval import MCPApprovalStore, build_approval_request
+from nooa_atom.workspace.mcp_approval import MCPApprovalStore, build_approval_request
 
 
 def test_fingerprint_binds_the_workspace_scope():
@@ -57,9 +57,9 @@ def test_approval_store_write_failure_does_not_double_close_fd(tmp_path, monkeyp
         closed.append(fd)
         return original_close(fd, *a, **kw)
 
-    monkeypatch.setattr("nooa_coder.workspace.mcp_approval.os.close", tracking_close)
+    monkeypatch.setattr("nooa_atom.workspace.mcp_approval.os.close", tracking_close)
     monkeypatch.setattr(
-        "nooa_coder.workspace.mcp_approval.os.replace",
+        "nooa_atom.workspace.mcp_approval.os.replace",
         lambda *a, **kw: (_ for _ in ()).throw(OSError("replace failed")),
     )
 
@@ -72,7 +72,7 @@ def test_approval_store_write_failure_does_not_double_close_fd(tmp_path, monkeyp
 
 
 def _registry(tmp_path, workspace, servers):
-    from nooa_coder.skills.mcp_servers import MCPServers
+    from nooa_atom.skills.mcp_servers import MCPServers
 
     root = tmp_path / workspace
     (root / ".nooa").mkdir(parents=True)

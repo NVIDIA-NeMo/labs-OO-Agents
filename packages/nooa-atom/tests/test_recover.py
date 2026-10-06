@@ -10,9 +10,9 @@ import sys
 import textwrap
 
 import pytest
-from coder_test_agents import BLOCKING_CELL, ScriptedModels, cell, done, fresh_events
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
+from atom_test_agents import BLOCKING_CELL, ScriptedModels, cell, done, fresh_events
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore
 
 TIMEOUT = 20
 
@@ -112,7 +112,7 @@ async def test_the_fork_loads_with_the_saved_agent_state(root_options, sessions_
 _HOLDER = textwrap.dedent(
     """
     import sys
-    from nooa_coder.session.store import SessionStore
+    from nooa_atom.session.store import SessionStore
 
     handle = SessionStore(sys.argv[1]).open(sys.argv[2])
     print("held", flush=True)

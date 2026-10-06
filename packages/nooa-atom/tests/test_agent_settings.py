@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for workspace-aware coding host settings."""
+"""Tests for workspace-aware Atom settings."""
 
 import pytest
-from nooa_coder.coding import load_coding_skills_dirs
+from nooa_atom.agent import load_skills_dirs
 
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     """Point ``Path.home()`` at an empty directory.
 
-    ``load_coding_skills_dirs`` reads conventional user roots such as
+    ``load_skills_dirs`` reads conventional user roots such as
     ``~/.agents/skills`` straight from the real home — correct in production,
     since those are third-party conventions rather than NOOA config, and so
     unaffected by NEMO_OO_USER_DIR. Without this, every assertion here depends
@@ -37,11 +37,11 @@ def test_project_tui_skill_dirs_remain_compatible(tmp_path, monkeypatch, caplog)
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_text(f"tui:\n  additional_skills_dirs:\n    - {skills}\n")
 
-    assert load_coding_skills_dirs(workspace) == [skills.resolve()]
+    assert load_skills_dirs(workspace) == [skills.resolve()]
     assert "use coding.additional_skills_dirs" in caplog.text
 
 
-def test_shared_coding_skill_dirs_and_workspace_conventions_are_loaded(tmp_path, monkeypatch):
+def test_shared_atom_skill_dirs_and_workspace_conventions_are_loaded(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     configured = workspace / "shared-skills"
     conventional = workspace / ".agents" / "skills"
@@ -57,7 +57,7 @@ def test_shared_coding_skill_dirs_and_workspace_conventions_are_loaded(tmp_path,
         "coding:\n  additional_skills_dirs:\n    - shared-skills\n"
     )
 
-    assert load_coding_skills_dirs(workspace) == [
+    assert load_skills_dirs(workspace) == [
         configured.resolve(),
         conventional.resolve(),
     ]
@@ -74,7 +74,7 @@ def test_missing_configured_skill_dirs_are_ignored(tmp_path, monkeypatch):
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_text("coding:\n  additional_skills_dirs:\n    - absent\n")
 
-    assert load_coding_skills_dirs(workspace) == []
+    assert load_skills_dirs(workspace) == []
 
 
 def test_legacy_project_config_toml_libs_dirs_remain_supported(tmp_path, monkeypatch):
@@ -89,7 +89,7 @@ def test_legacy_project_config_toml_libs_dirs_remain_supported(tmp_path, monkeyp
     config_dir.mkdir()
     (config_dir / "config.toml").write_text('[tui]\nlibs_dirs = ["nemo-oo-skills"]\n')
 
-    assert load_coding_skills_dirs(workspace) == [skills.resolve()]
+    assert load_skills_dirs(workspace) == [skills.resolve()]
 
 
 def test_user_yaml_does_not_suppress_workspace_legacy_skill_dirs(tmp_path, monkeypatch):
@@ -109,7 +109,7 @@ def test_user_yaml_does_not_suppress_workspace_legacy_skill_dirs(tmp_path, monke
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
 
-    assert load_coding_skills_dirs(workspace) == [
+    assert load_skills_dirs(workspace) == [
         user_skills.resolve(),
         workspace_skills.resolve(),
     ]
@@ -142,7 +142,7 @@ def test_environment_settings_override_user_and_workspace_layers(tmp_path, monke
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.setenv("NEMO_OO_SETTINGS", str(override))
 
-    assert load_coding_skills_dirs(workspace) == [override_skills.resolve()]
+    assert load_skills_dirs(workspace) == [override_skills.resolve()]
 
 
 def test_an_explicit_empty_modern_list_disables_the_legacy_config(tmp_path, monkeypatch):
@@ -167,7 +167,7 @@ def test_an_explicit_empty_modern_list_disables_the_legacy_config(tmp_path, monk
     (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
     (config_dir / "settings.yaml").write_text("coding:\n  additional_skills_dirs: []\n")
 
-    assert load_coding_skills_dirs(workspace) == []
+    assert load_skills_dirs(workspace) == []
 
 
 def test_a_non_utf8_settings_file_does_not_abort_discovery(tmp_path, monkeypatch):
@@ -188,7 +188,7 @@ def test_a_non_utf8_settings_file_does_not_abort_discovery(tmp_path, monkeypatch
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_bytes(b"\xff\xfe coding:\n")
 
-    assert load_coding_skills_dirs(workspace) == [conventional.resolve()]
+    assert load_skills_dirs(workspace) == [conventional.resolve()]
 
 
 def test_a_non_utf8_legacy_config_does_not_abort_discovery(tmp_path, monkeypatch):
@@ -206,7 +206,7 @@ def test_a_non_utf8_legacy_config_does_not_abort_discovery(tmp_path, monkeypatch
     config_dir.mkdir()
     (config_dir / "config.toml").write_bytes(b"\xff\xfe [tui]\n")
 
-    assert load_coding_skills_dirs(workspace) == [conventional.resolve()]
+    assert load_skills_dirs(workspace) == [conventional.resolve()]
 
 
 def test_an_env_override_suppresses_a_legacy_only_workspace(tmp_path, monkeypatch):
@@ -227,4 +227,4 @@ def test_an_env_override_suppresses_a_legacy_only_workspace(tmp_path, monkeypatc
     config_dir.mkdir()
     (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
 
-    assert load_coding_skills_dirs(workspace) == []
+    assert load_skills_dirs(workspace) == []

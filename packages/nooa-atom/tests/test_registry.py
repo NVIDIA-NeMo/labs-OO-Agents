@@ -7,7 +7,7 @@ import contextlib
 import sqlite3
 
 import pytest
-from coder_test_agents import (
+from atom_test_agents import (
     BLOCKING_CELL,
     ModelFactory,
     ScriptedModels,
@@ -17,15 +17,15 @@ from coder_test_agents import (
     fresh_events,
     until,
 )
-from nooa_coder.coding.factory import create_session_agent
-from nooa_coder.session.events import TurnEnded
-from nooa_coder.session.registry import (
+from nooa_atom.agent.factory import create_session_agent
+from nooa_atom.session.events import TurnEnded
+from nooa_atom.session.registry import (
     ChildActiveElsewhereError,
     DepthLimitError,
     SessionRegistry,
 )
-from nooa_coder.session.session import SessionClosedError, TurnFailedError
-from nooa_coder.session.store import SessionStore
+from nooa_atom.session.session import SessionClosedError, TurnFailedError
+from nooa_atom.session.store import SessionStore
 
 from nooa.interactive import Done
 
@@ -48,7 +48,7 @@ async def test_create_publishes_a_started_session(registry, root_options, models
 async def test_a_failing_build_leaves_no_file_and_no_reservation(
     registry, root_options, sessions_dir
 ):
-    failing = root_options.model_copy(update={"agent_spec": "coder_test_agents:FailingAgent"})
+    failing = root_options.model_copy(update={"agent_spec": "atom_test_agents:FailingAgent"})
     real = SessionRegistry(registry.store, agent_factory=create_session_agent)  # imports the spec
     with pytest.raises(RuntimeError, match="construction failed"):
         await real.create(failing)
@@ -665,7 +665,7 @@ async def test_a_throwaway_childs_turn_method_is_recorded(registry, root_options
 
 async def test_a_turn_cancelled_from_inside_fails_and_the_loop_goes_on(root_options, sessions_dir):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
-    options = root_options.model_copy(update={"agent_spec": "coder_test_agents:SelfCancelAgent"})
+    options = root_options.model_copy(update={"agent_spec": "atom_test_agents:SelfCancelAgent"})
     root = await registry.create(options)
     with pytest.raises(TurnFailedError, match="cancelled from inside"):
         await asyncio.wait_for(root.prompt("one"), 5)
@@ -741,7 +741,7 @@ async def test_a_failed_agent_build_closes_the_owned_client(root_options, sessio
         SessionStore(sessions_dir), agent_factory=create_session_agent, llm_factory=factory
     )
     failing = root_options.model_copy(
-        update={"model": "alias-a", "agent_spec": "coder_test_agents:FailingAgent"}
+        update={"model": "alias-a", "agent_spec": "atom_test_agents:FailingAgent"}
     )
     with pytest.raises(RuntimeError, match="construction failed"):
         await registry.create(failing)
@@ -855,7 +855,7 @@ async def test_paused_parent_durably_receives_child_finish_and_consumes_on_resum
 async def test_failed_parent_delivery_does_not_auto_close_child(
     registry, root_options, models, monkeypatch
 ):
-    from nooa_coder.session.events import ItemAdmitted
+    from nooa_atom.session.events import ItemAdmitted
 
     models.scripts["child"] = [done("durable child result")]
     parent = await registry.create(root_options)

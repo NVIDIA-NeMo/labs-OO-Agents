@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Sessions written by the ``nooa-acp`` server are found and loaded by nooa-coder.
+"""Sessions written by the ``nooa-acp`` server are found and loaded by nooa-atom.
 
 The old server keeps each workspace's sessions in ``<workspace>/.nooa/sessions``
-and records the agent as the bare name ``CodingAgent`` (the old TUI wrote
+and records the agent as the bare name ``AtomAgent`` (the old TUI wrote
 ``TUIAgent``). Only this test
 imports ``nooa_cli``; the package source must not.
 """
@@ -13,12 +13,12 @@ import sqlite3
 from contextlib import closing
 
 import pytest
+from nooa_atom.agent.agent import AtomAgent
+from nooa_atom.agent.factory import create_session_agent
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore, sessions_root
 from nooa_cli.coding import CodingAgent as OldCodingAgent
 from nooa_cli.sessions.store import SessionStore as OldSessionStore
-from nooa_coder.coding.agent import CodingAgent
-from nooa_coder.coding.factory import create_session_agent
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore, sessions_root
 
 from nooa.unifiedllm import FakeLLMClient
 
@@ -65,7 +65,7 @@ async def test_an_old_session_is_listed_and_loads_with_its_state(tmp_path, agent
     registry = SessionRegistry(store, agent_factory=create_session_agent)
     try:
         session = await registry.load(session_id, llm=FakeLLMClient([]))
-        assert isinstance(session._agent, CodingAgent)
+        assert isinstance(session._agent, AtomAgent)
         assert session._agent.cwd == workspace.resolve()
         assert [(e.role, e.content) for e in session.transcript()] == [
             ("user", "please remember the plan")
@@ -86,7 +86,7 @@ async def test_a_snapshot_that_cannot_be_restored_still_loads(tmp_path, caplog):
         SessionStore(sessions_root(workspace)), agent_factory=create_session_agent
     )
     try:
-        with caplog.at_level(logging.WARNING, logger="nooa_coder.session.registry"):
+        with caplog.at_level(logging.WARNING, logger="nooa_atom.session.registry"):
             session = await registry.load(session_id, llm=FakeLLMClient([]))
         assert f"Session {session_id}: could not restore its latest saved state" in caplog.text
         [user, note] = session.transcript()
@@ -127,7 +127,7 @@ async def test_an_unreadable_latest_snapshot_falls_back_to_the_one_before(tmp_pa
         SessionStore(sessions_root(workspace)), agent_factory=create_session_agent
     )
     try:
-        with caplog.at_level(logging.WARNING, logger="nooa_coder.session.registry"):
+        with caplog.at_level(logging.WARNING, logger="nooa_atom.session.registry"):
             session = await registry.load(session_id, llm=FakeLLMClient([]))
         assert "restored an older snapshot" in caplog.text
         [user, note] = session.transcript()

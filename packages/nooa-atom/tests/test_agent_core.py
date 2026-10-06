@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared coding-agent construction and repository instructions."""
+"""Atom agent construction and repository instructions."""
 
 from types import SimpleNamespace
 
 import pytest
-from nooa_coder.coding import (
-    CodingAgent,
-    CodingSlashCommandRegistry,
+from nooa_atom.agent import (
+    AtomAgent,
+    SlashCommandRegistry,
     discover_agent_instruction_files,
 )
 
@@ -19,7 +19,7 @@ async def test_aclose_awaits_background_components_and_leaves_the_client_open(tm
     """The agent does not own its model client: the session closes one it created."""
     from unittest.mock import AsyncMock
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     calls = []
     agent.event_manager.on_close(AsyncMock(side_effect=lambda: calls.append("component")))
     agent.llm.aclose = AsyncMock(side_effect=lambda: calls.append("client"))
@@ -42,10 +42,10 @@ def test_agent_instructions_follow_repository_hierarchy(tmp_path):
     )
 
 
-async def test_coding_agent_uses_observed_shell_and_instruction_context(tmp_path):
+async def test_atom_agent_uses_observed_shell_and_instruction_context(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text("run the focused tests")
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert agent.shell.session is agent._base_shell.session
         assert "run the focused tests" in str(agent.context["repository_instructions"])
@@ -63,7 +63,7 @@ async def test_directory_workflow_skills_are_loaded_but_opt_in(tmp_path):
         "---\nname: root-cause\ndescription: Diagnose a defect\n---\nFind the cause.\n"
     )
 
-    agent = CodingAgent(
+    agent = AtomAgent(
         llm=FakeLLMClient(),
         cwd=tmp_path,
         skills_dirs=[skills_dir],
@@ -90,7 +90,7 @@ async def test_installed_skill_commands_load_without_automatic_activation(tmp_pa
         lambda *, group: [entry_point],
     )
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert "nemo.workflow" in agent.skills.loaded()
         assert "nemo.workflow" not in agent.skills.activated()
@@ -109,7 +109,7 @@ async def test_installed_memory_skill_is_not_automatically_attached(tmp_path, mo
         lambda *, group: [entry_point],
     )
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert not hasattr(agent, "memory")
         assert "nemo.memory" not in agent.skills.loaded()
@@ -126,40 +126,40 @@ async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
     unchanged for single-workspace hosts like the TUI.
     """
     libs_dir = tmp_path / "scoped" / "libs"
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=libs_dir)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=libs_dir)
     try:
         assert agent.libs._path == libs_dir
     finally:
         await agent.aclose()
 
 
-async def test_coding_agent_declares_the_host_input_channels(tmp_path):
-    """slash_commands and system_messages belong to the coding host.
+async def test_atom_agent_declares_the_host_input_channels(tmp_path):
+    """slash_commands and system_messages belong to the agent host.
 
     InteractiveAgent only declares user_messages: being dispatcher-driven does
     not imply slash commands (a UI affordance whose registry is in this
     package) or host continuations such as keep-going.
     """
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         channels = agent.queue_manager.channels()
         assert {"user_messages", "slash_commands", "system_messages"} <= channels.keys()
         # The public name is the command registry a Session lists and runs.
-        assert isinstance(agent.slash_commands, CodingSlashCommandRegistry)
+        assert isinstance(agent.slash_commands, SlashCommandRegistry)
         assert agent.system_messages is agent._system_messages_in.reader
     finally:
         await agent.aclose()
 
 
-async def test_coding_agent_owns_session_naming(tmp_path):
+async def test_atom_agent_owns_session_naming(tmp_path):
     """name_session sits with the session model it feeds.
 
-    Sessions live in nooa_coder.session, so the generator belongs at this
+    Sessions live in nooa_atom.session, so the generator belongs at this
     layer rather than in core, which has no notion of a session at all.
     """
     from nooa.interactive import InteractiveAgent
 
-    assert hasattr(CodingAgent, "name_session")
+    assert hasattr(AtomAgent, "name_session")
     assert not hasattr(InteractiveAgent, "name_session")
 
 
@@ -170,7 +170,7 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
     memory in full. The budget also has to cover the rendered text — headers,
     separators, truncation markers — or the declared total is not the real one.
     """
-    from nooa_coder.coding import instructions
+    from nooa_atom.agent import instructions
 
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text("x" * 1000)
@@ -203,7 +203,7 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
 
 
 def test_repository_instructions_allow_a_symlinked_workspace(tmp_path):
-    from nooa_coder.coding.instructions import render_agent_instructions
+    from nooa_atom.agent.instructions import render_agent_instructions
 
     root = tmp_path / "real"
     root.mkdir()
@@ -226,7 +226,7 @@ def test_repository_instructions_allow_a_symlink_within_the_boundary(tmp_path):
     file; the file itself being a symlink to ordinary text content in the
     same tree carries no additional risk.
     """
-    from nooa_coder.coding.instructions import render_agent_instructions
+    from nooa_atom.agent.instructions import render_agent_instructions
 
     root = tmp_path / "repo"
     root.mkdir()
@@ -237,16 +237,16 @@ def test_repository_instructions_allow_a_symlink_within_the_boundary(tmp_path):
     assert "claude-specific instructions" in rendered
 
 
-async def test_coding_agent_owns_bounded_application_state_context(tmp_path):
-    agent = CodingAgent(cwd=tmp_path, llm=FakeLLMClient())
+async def test_atom_agent_owns_bounded_application_state_context(tmp_path):
+    agent = AtomAgent(cwd=tmp_path, llm=FakeLLMClient())
     try:
         agent.vars["token"] = "private-value"
-        agent.shell.cwd = "</coding_state>\n" + "x" * 500
-        rendered = agent._coding_state_context()
+        agent.shell.cwd = "</workspace_state>\n" + "x" * 500
+        rendered = agent._workspace_state_context()
         assert "1 persistent vars" in rendered
         assert "print(self.v.items())" in rendered
         assert "private-value" not in rendered
-        assert "</coding_state>" not in rendered
+        assert "</workspace_state>" not in rendered
         assert len(rendered) < 600
     finally:
         await agent.aclose()
@@ -265,7 +265,7 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
     class _Evil(Skill):
         pass
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         registry = agent.skills
         with pytest.raises(ValueError, match="skills"):
@@ -287,7 +287,7 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
 async def test_summarization_status_reports_installed_token_budget(tmp_path):
     from nooa.interactive import SummarizationConfig
 
-    agent = CodingAgent(
+    agent = AtomAgent(
         llm=FakeLLMClient(),
         cwd=tmp_path,
         summarization=SummarizationConfig(threshold_fraction=0.60),
@@ -310,7 +310,7 @@ async def test_summarization_status_reports_installed_token_budget(tmp_path):
 async def test_summarization_status_reports_disabled_policy(tmp_path):
     from nooa.interactive import SummarizationConfig
 
-    agent = CodingAgent(
+    agent = AtomAgent(
         llm=FakeLLMClient(),
         cwd=tmp_path,
         summarization=SummarizationConfig(policy="none"),
@@ -335,17 +335,17 @@ async def test_summarization_status_reports_disabled_policy(tmp_path):
 
 def test_the_session_title_request_asks_for_an_awaited_rename():
     """The title request is text a host submits; it names the awaited rename."""
-    from nooa_coder.coding.agent import session_title_request
+    from nooa_atom.agent.agent import session_title_request
 
     prompt = session_title_request("  fix the flaky parser test  ")
     assert prompt.startswith("[session-title]")
     assert 'await self.rename_session("your title")' in prompt
     assert "<opening_user_message>\nfix the flaky parser test\n</opening_user_message>" in prompt
-    assert not hasattr(CodingAgent, "request_session_title")
+    assert not hasattr(AtomAgent, "request_session_title")
 
 
 async def test_rename_session_needs_a_session(tmp_path):
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         with pytest.raises(RuntimeError, match="not running in a session"):
             await agent.rename_session("Parser test fix")
@@ -360,8 +360,8 @@ def test_cells_see_the_turn_types_but_not_the_helpers(module):
     from nooa.agentdoc._visibility import filter_mro_module_globals
 
     cls = getattr(
-        import_module(f"nooa_coder.coding.{module}"),
-        "CodingAgent" if module == "agent" else "ExperimentalCodingAgent",
+        import_module(f"nooa_atom.agent.{module}"),
+        "AtomAgent" if module == "agent" else "ExperimentalAtomAgent",
     )
     names = set(filter_mro_module_globals(cls))
     assert {"Done", "NeedInput", "Waiting", "TaskResult", "ChildResult"} <= names
@@ -378,20 +378,20 @@ def test_cells_see_the_turn_types_but_not_the_helpers(module):
 
 
 def test_the_handle_prompt_names_every_input_channel():
-    from nooa_coder.coding.experimental_agent import ExperimentalCodingAgent
+    from nooa_atom.agent.experimental_agent import ExperimentalAtomAgent
 
-    for cls in (CodingAgent, ExperimentalCodingAgent):
+    for cls in (AtomAgent, ExperimentalAtomAgent):
         text = cls.handle.__doc__ or ""
         for channel in ("user_messages", "system_messages", "slash_commands", "delegates"):
             assert f'"{channel}"' in text, (cls.__name__, channel)
-    assert "SessionInfo" not in (CodingAgent.get_summarization_status.__doc__ or "")
+    assert "SessionInfo" not in (AtomAgent.get_summarization_status.__doc__ or "")
 
 
 async def test_cd_moves_the_repo_tools_with_the_shell(tmp_path):
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         await agent.shell.run("cd sub")
         assert agent.shell.cwd == sub.resolve()
@@ -412,10 +412,10 @@ async def test_the_state_block_shows_the_shell_directory_and_the_repo_root(tmp_p
     repo = tmp_path / "repo"
     (repo / "pkg").mkdir(parents=True)
     monkeypatch.chdir(elsewhere)
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=repo)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=repo)
     try:
         await agent.shell.run("cd pkg")
-        rendered = agent._coding_state_context()
+        rendered = agent._workspace_state_context()
         assert str((repo / "pkg").resolve()) in rendered
         assert f"Repository root (the boundary for repo searches): {repo.resolve()}" in rendered
         assert str(elsewhere) not in rendered
@@ -428,7 +428,7 @@ async def test_the_turn_prompt_says_locals_last_one_call(tmp_path, method):
     from nooa import build_prompt_data
     from nooa.prompts import render_prompt_data
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         data = await build_prompt_data(getattr(agent, method), {"user_messages": ["hi"]})
         rendered = " ".join(render_prompt_data(data).split())
@@ -446,7 +446,7 @@ async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):
     sub.mkdir()
     (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
     (tmp_path / "caller.py").write_text("from sub.x import only_in_sub\nonly_in_sub()\n")
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         relative = await agent.repo.symbols("x.py", cwd="sub")
         assert relative.diagnostic is None and "only_in_sub" in str(relative)
@@ -466,7 +466,7 @@ async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):
 
 
 def test_the_repo_tool_docs_offer_cwd():
-    from nooa_coder.tools.repo_tools import RepoTools
+    from nooa_atom.tools.repo_tools import RepoTools
 
     from nooa.agentdoc import doc
 
@@ -477,15 +477,15 @@ def test_the_repo_tool_docs_offer_cwd():
 
 def test_context_block_helpers_are_not_traced():
     """Evaluating a dynamic context block is prompt rendering, not agent work: no span."""
-    assert getattr(CodingAgent._coding_state_context, "_no_trace", False) is True
+    assert getattr(AtomAgent._workspace_state_context, "_no_trace", False) is True
 
 
 @pytest.mark.parametrize("method", ["handle", "handle_batch"])
 def test_the_turn_methods_run_on_the_single_tool_strategy(method):
     from nooa.strategies import CodeActV2
 
-    assert isinstance(getattr(CodingAgent, method)._plan_strategy, CodeActV2)
-    assert not isinstance(CodingAgent.name_session._plan_strategy, CodeActV2)
+    assert isinstance(getattr(AtomAgent, method)._plan_strategy, CodeActV2)
+    assert not isinstance(AtomAgent.name_session._plan_strategy, CodeActV2)
 
 
 async def _first_call_messages(tmp_path, method: str) -> list[dict]:
@@ -497,7 +497,7 @@ async def _first_call_messages(tmp_path, method: str) -> list[dict]:
         "solution_description='a', evidence='b', how_to_verify='c')))"
     )
     llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
-    agent = CodingAgent(llm=llm, cwd=tmp_path)
+    agent = AtomAgent(llm=llm, cwd=tmp_path)
     try:
         await getattr(agent, method)({"user_messages": ["hi"]})
     finally:
@@ -543,7 +543,7 @@ def test_host_reads_record_no_span(tmp_path):
     """``plan()`` and ``get_summarization_status()`` are host reads, not agent work."""
     from nooa.runtime.hooks import get_hooks, set_hooks
 
-    class ProbedAgent(CodingAgent):
+    class ProbedAgent(AtomAgent):
         def probe(self) -> int:
             return 1
 

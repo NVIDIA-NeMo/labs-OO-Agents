@@ -1,11 +1,11 @@
-# nooa-coder
+# nooa-atom
 
-`nooa-coder` holds the Session layer for NOOA interactive agents: a `Session`
+`nooa-atom` holds the Session layer for NOOA interactive agents: a `Session`
 that owns one agent and its turn loop, a `SessionRegistry` that keeps the tree
 of sessions (a root and the children it delegates to), the agent-side port
 (`self.session`) through which an agent creates and talks to children, and a
-headless in-process host (`open_tree`). It also holds the coding agent that
-runs on that layer: `nooa_coder.coding.agent:CodingAgent` is the agent spec a
+headless in-process host (`open_tree`). It also holds the Atom agent that
+runs on that layer: `nooa_atom.agent:AtomAgent` is the agent spec a
 host passes in `SessionOptions.agent_spec`.
 
 Status: pre-release. The package is part of the workspace but is not published
@@ -25,7 +25,7 @@ runs `handle_batch` turns until the agent returns `Done`, follows a turn
 that ends `Waiting` to the next one, and stops at `max_turns` or `timeout`.
 It returns a `TaskRun` with the final `Done` and its `TaskResult`, the
 reason it stopped otherwise, the turn count, the usage and the root agent's
-events. `nooa-bench run` and the benchmark runner's `coder` agent type use
+events. `nooa-bench run` and the benchmark runner's `atom` agent type use
 it.
 
 A host never holds a session's agent (`Session._agent` is private). It
@@ -33,12 +33,12 @@ submits items (`submit`, `prompt`, `steer`, `withdraw`, `cancel`) and reads
 and changes the session through data: `info`, `transcript()`, `channels()`,
 `model_info()`, `set_model()`, `set_reasoning()`, `set_mode()`,
 `commands()` and `invoke_command()`, `plan()` (the agent's plan entries,
-such as the coding agent's todos), and, before the first turn,
+such as the Atom agent's todos), and, before the first turn,
 `prepare_tools()` and `register_tools()`. `subscribe()` delivers every
 change as a pydantic update, in order: turns, items, title, mode, model,
 reasoning level, commands, usage, children, close, and each of the agent's
 own events (`AgentEventUpdate`). The ACP adapter uses only these; a test
-checks that the `nooa_coder.acp` package reads no `agent` attribute.
+checks that the `nooa_atom.acp` package reads no `agent` attribute.
 
 Over ACP, a `session/prompt` sent during a turn is queued, not steered.
 `_nooa/session/inject` queues or steers a message without a prompt request,
@@ -70,7 +70,7 @@ the rest of the connection.
 
 ## Skills and MCP servers
 
-The coding agent reaches all its capabilities through one `SkillManager`,
+The Atom agent reaches all its capabilities through one `SkillManager`,
 `self.skills`: code skills (`Skill` classes from `nooa.skills` entry points,
 workspace libraries and `.py` files in skill directories), text skills
 (`SKILL.md` directories) and MCP servers (`.mcp.json`, `coding.mcp_servers`

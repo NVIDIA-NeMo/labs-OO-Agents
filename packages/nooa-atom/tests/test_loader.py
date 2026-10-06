@@ -3,28 +3,28 @@
 """Loading agent classes from a module:Class spec, and building one for a session."""
 
 import pytest
-from coder_test_agents import EchoAgent
-from nooa_coder.coding.factory import create_session_agent
-from nooa_coder.session.loader import AgentSpecError, load_agent_class
-from nooa_coder.session.options import SessionOptions
+from atom_test_agents import EchoAgent
+from nooa_atom.agent.factory import create_session_agent
+from nooa_atom.session.loader import AgentSpecError, load_agent_class
+from nooa_atom.session.options import SessionOptions
 
 from nooa.storage import InMemoryStorageManager
 from nooa.unifiedllm import FakeLLMClient
 
 
 def test_loads_an_interactive_agent_class():
-    assert load_agent_class("coder_test_agents:EchoAgent") is EchoAgent
+    assert load_agent_class("atom_test_agents:EchoAgent") is EchoAgent
 
 
 @pytest.mark.parametrize(
     "spec",
     [
-        "coder_test_agents",  # no class
-        "coder_test_agents:",  # empty class
+        "atom_test_agents",  # no class
+        "atom_test_agents:",  # empty class
         ":EchoAgent",  # empty module
-        "no_such_module_for_nooa_coder:Agent",
-        "coder_test_agents:NoSuchAgent",
-        "coder_test_agents:NotAnAgent",  # not an InteractiveAgent
+        "no_such_module_for_nooa_atom:Agent",
+        "atom_test_agents:NoSuchAgent",
+        "atom_test_agents:NotAnAgent",  # not an InteractiveAgent
     ],
 )
 def test_bad_specs_are_rejected(spec):
@@ -35,7 +35,7 @@ def test_bad_specs_are_rejected(spec):
 def test_the_session_factory_passes_storage_and_llm(tmp_path):
     storage = InMemoryStorageManager()
     llm = FakeLLMClient()
-    options = SessionOptions(workspace=tmp_path, agent_spec="coder_test_agents:EchoAgent", llm=llm)
+    options = SessionOptions(workspace=tmp_path, agent_spec="atom_test_agents:EchoAgent", llm=llm)
     agent = create_session_agent(options, storage)
     assert isinstance(agent, EchoAgent)
     assert agent.llm is llm
@@ -73,7 +73,7 @@ def test_file_agents_get_distinct_modules_and_keep_resolving_annotations(tmp_pat
 
     Postponed annotations resolve through ``sys.modules[cls.__module__]``; with
     one shared module name the first class's annotations pointed at the second
-    file's namespace and ``get_type_hints`` failed. (From coder/3-engine's
+    file's namespace and ``get_type_hints`` failed. (From atom/3-engine's
     test_coding_factory.py, now against the one loader.)
     """
     import sys

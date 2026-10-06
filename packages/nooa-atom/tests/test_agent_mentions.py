@@ -3,7 +3,7 @@
 """Only actual file mentions become workspace links."""
 
 import pytest
-from nooa_coder.coding.mentions import expand_mentions
+from nooa_atom.agent.mentions import expand_mentions
 
 
 @pytest.mark.parametrize("token", ["@", "@?", "@.", "@..", "@/", "@./", "@!"])

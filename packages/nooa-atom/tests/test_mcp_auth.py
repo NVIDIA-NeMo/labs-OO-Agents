@@ -8,7 +8,7 @@ import stat
 
 import pytest
 from fake_oauth_mcp import FakeOAuthServer
-from nooa_coder.skills.mcp_auth import (
+from nooa_atom.skills.mcp_auth import (
     AuthorizedHTTPClient,
     FileTokenStorage,
     PastedSignIn,

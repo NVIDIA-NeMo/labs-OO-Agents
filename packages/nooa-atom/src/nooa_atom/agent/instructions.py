@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Repository instruction discovery for interactive coding agents."""
+"""Repository instruction discovery for interactive agents."""
 
 from __future__ import annotations
 

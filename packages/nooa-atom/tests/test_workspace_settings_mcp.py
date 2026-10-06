@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from nooa_coder.skills.mcp_servers import MCPServers
-from nooa_coder.workspace.options import CoderOptions
-from nooa_coder.workspace.workspace_settings import WorkspaceSettings
+from nooa_atom.skills.mcp_servers import MCPServers
+from nooa_atom.workspace.options import AtomOptions
+from nooa_atom.workspace.workspace_settings import WorkspaceSettings
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def workspace_settings(tmp_path, monkeypatch):
         watch_settings=True,
         project_dir=project,
     )
-    options = CoderOptions(working_dir=str(workspace))
+    options = AtomOptions(working_dir=str(workspace))
     ws = WorkspaceSettings(options)
     ws._agent = SimpleNamespace(skills=SimpleNamespace(mcp=registry))
     return ws, registry, workspace

@@ -5,10 +5,10 @@ settings.yaml entries into the shared, committed project settings file.
 """
 
 import yaml
-from nooa_coder.coding.agent import CodingAgent
-from nooa_coder.coding.slash_commands import CodingSlashCommandRegistry
-from nooa_coder.workspace.controls import SkillsControl
-from nooa_coder.workspace.options import CoderOptions
+from nooa_atom.agent.agent import AtomAgent
+from nooa_atom.agent.slash_commands import SlashCommandRegistry
+from nooa_atom.workspace.controls import SkillsControl
+from nooa_atom.workspace.options import AtomOptions
 
 from nooa.unifiedllm import FakeLLMClient
 
@@ -26,9 +26,9 @@ async def test_deactivate_does_not_leak_a_users_personal_active_skill(tmp_path, 
     )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=workspace)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=workspace)
     try:
-        config = CoderOptions(working_dir=str(workspace))
+        config = AtomOptions(working_dir=str(workspace))
         control = SkillsControl(agent, config, workspace=workspace)
 
         result = await control.invoke("deactivate nemo.methodwriting")
@@ -57,10 +57,10 @@ async def test_add_skills_dir_does_not_leak_a_users_personal_directory(tmp_path,
     )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=workspace)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=workspace)
     try:
-        config = CoderOptions(working_dir=str(workspace))
-        command_registry = CodingSlashCommandRegistry(agent)
+        config = AtomOptions(working_dir=str(workspace))
+        command_registry = SlashCommandRegistry(agent)
         control = SkillsControl(
             agent, config, workspace=workspace, command_registry=command_registry
         )
@@ -85,10 +85,10 @@ async def test_activate_works_when_project_settings_mask_an_mcp_server(tmp_path,
     )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
 
-    options = CoderOptions.load(workspace)
+    options = AtomOptions.load(workspace)
     assert "forgotten" not in options.mcp_servers
 
-    agent = CodingAgent(llm=FakeLLMClient(), cwd=workspace)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=workspace)
     try:
         control = SkillsControl(agent, options, workspace=workspace)
         result = await control.invoke("activate nemo.methodwriting")

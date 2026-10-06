@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 
 import pytest
-from coder_test_agents import ScriptedModels
-from nooa_coder.coding.factory import default_llm_factory
+from atom_test_agents import ScriptedModels
+from nooa_atom.agent.factory import default_llm_factory
 
 
 def write_models(workspace: Path, **aliases: str) -> Path:
@@ -69,7 +69,7 @@ async def test_the_first_session_in_a_workspace_logs_its_configuration(
 ):
     own = write_models(workspace, mine="openai/mine-model")
     adapter = await make_adapter(ScriptedModels(), llm_factory=default_llm_factory(), model="m")
-    with caplog.at_level(logging.INFO, logger="nooa_coder.acp"):
+    with caplog.at_level(logging.INFO, logger="nooa_atom.acp"):
         await adapter.new_session(str(workspace))
         await adapter.new_session(str(workspace))
     lines = [r.getMessage() for r in caplog.records if "LLM configuration" in r.getMessage()]

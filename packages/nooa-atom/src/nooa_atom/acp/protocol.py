@@ -45,7 +45,7 @@ def initialize_response(protocol_version: int) -> InitializeResponse:
     found". Deleting is the ``_nooa/session/delete`` extension method.
     """
     try:
-        package_version = version("nooa-coder")
+        package_version = version("nooa-atom")
     except PackageNotFoundError:
         package_version = "0.0.0"
     return InitializeResponse(
@@ -66,7 +66,7 @@ def initialize_response(protocol_version: int) -> InitializeResponse:
         ),
         auth_methods=[],
         agent_info=Implementation(
-            name="nooa-coder",
+            name="nooa-atom",
             title="NVIDIA Labs Object Oriented Agents (NOOA)",
             version=package_version,
         ),

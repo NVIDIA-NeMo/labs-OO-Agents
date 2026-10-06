@@ -21,7 +21,7 @@ from acp.schema import (
     ToolCallStart,
     UserMessageChunk,
 )
-from coder_test_agents import ScriptedModels, cell, reply
+from atom_test_agents import ScriptedModels, cell, reply
 
 TIMEOUT = 30
 FORMS = ClientCapabilities(elicitation=ElicitationCapabilities(form=ElicitationFormCapabilities()))

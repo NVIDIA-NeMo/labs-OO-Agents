@@ -7,12 +7,12 @@ import time
 from pathlib import Path
 
 import pytest
-from coder_test_agents import EchoAgent
-from nooa_coder.coding.factory import default_llm_factory
-from nooa_coder.session.options import SessionOptions
-from nooa_coder.session.registry import SessionRegistry
-from nooa_coder.session.store import SessionStore
-from nooa_coder.workspace.models import llm_config_files, workspace_llm_client, workspace_models
+from atom_test_agents import EchoAgent
+from nooa_atom.agent.factory import default_llm_factory
+from nooa_atom.session.options import SessionOptions
+from nooa_atom.session.registry import SessionRegistry
+from nooa_atom.session.store import SessionStore
+from nooa_atom.workspace.models import llm_config_files, workspace_llm_client, workspace_models
 
 
 def write_models(path: Path, **aliases: str) -> Path:
@@ -66,7 +66,7 @@ def test_a_workspace_file_created_later_is_seen(workspace):
 
 
 def test_unchanged_files_are_not_read_again(workspace, monkeypatch):
-    import nooa_coder.workspace.models as models
+    import nooa_atom.workspace.models as models
 
     write_models(workspace_file(workspace), mine="openai/mine-model")
     workspace_models(workspace)

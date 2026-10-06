@@ -15,9 +15,9 @@ members = [
     "eval-pipeline",
     "nooa",
     "nooa-acp",
+    "nooa-atom",
     "nooa-bench",
     "nooa-cli",
-    "nooa-coder",
     "nooa-memory",
 ]
 
@@ -1410,14 +1410,14 @@ arc = [
     { name = "pillow" },
     { name = "rich" },
 ]
+atom = [
+    { name = "nooa-atom" },
+]
 bench = [
     { name = "nooa-bench" },
 ]
 cli = [
     { name = "nooa-cli" },
-]
-coder = [
-    { name = "nooa-coder" },
 ]
 mcp = [
     { name = "mcp" },
@@ -1492,9 +1492,9 @@ requires-dist = [
     { name = "msgpack", specifier = ">=1.2.1" },
     { name = "nemo-relay", marker = "extra == 'nemo-relay'", specifier = ">=0.6,<0.7" },
     { name = "nooa-acp", marker = "extra == 'acp'", editable = "packages/nooa-acp" },
+    { name = "nooa-atom", marker = "extra == 'atom'", editable = "packages/nooa-atom" },
     { name = "nooa-bench", marker = "extra == 'bench'", editable = "packages/nooa-bench" },
     { name = "nooa-cli", marker = "extra == 'cli'", editable = "packages/nooa-cli" },
-    { name = "nooa-coder", marker = "extra == 'coder'", editable = "packages/nooa-coder" },
     { name = "nooa-memory", marker = "extra == 'memory'", editable = "packages/nooa-memory" },
     { name = "openinference-instrumentation", marker = "extra == 'tracing'", specifier = ">=0.1.42" },
     { name = "openinference-instrumentation-litellm", specifier = ">=0.1.30" },
@@ -1510,7 +1510,7 @@ requires-dist = [
     { name = "rich", marker = "extra == 'arc'", specifier = ">=13.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'viewer'", specifier = ">=0.20.0" },
 ]
-provides-extras = ["acp", "arc", "bench", "cli", "coder", "mcp", "memory", "nemo-relay", "sandbox", "tracing", "viewer"]
+provides-extras = ["acp", "arc", "atom", "bench", "cli", "mcp", "memory", "nemo-relay", "sandbox", "tracing", "viewer"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1569,21 +1569,62 @@ requires-dist = [
 ]
 
 [[package]]
+name = "nooa-atom"
+source = { editable = "packages/nooa-atom" }
+dependencies = [
+    { name = "agent-client-protocol" },
+    { name = "click" },
+    { name = "nooa", extra = ["mcp"] },
+    { name = "nooa-cli" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "websockets" },
+]
+
+[package.optional-dependencies]
+ast = [
+    { name = "tree-sitter" },
+    { name = "tree-sitter-go" },
+    { name = "tree-sitter-javascript" },
+    { name = "tree-sitter-python" },
+    { name = "tree-sitter-rust" },
+    { name = "tree-sitter-typescript" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "agent-client-protocol", specifier = ">=0.12.1,<0.13" },
+    { name = "click", specifier = ">=8.1.0" },
+    { name = "nooa", extras = ["mcp"], editable = "." },
+    { name = "nooa-cli", editable = "packages/nooa-cli" },
+    { name = "pydantic", specifier = ">=2.5.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "tree-sitter", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-go", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-javascript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-python", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-rust", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "tree-sitter-typescript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
+    { name = "websockets", specifier = ">=14" },
+]
+provides-extras = ["ast"]
+
+[[package]]
 name = "nooa-bench"
 source = { editable = "packages/nooa-bench" }
 dependencies = [
     { name = "click" },
     { name = "nooa" },
+    { name = "nooa-atom" },
     { name = "nooa-cli" },
-    { name = "nooa-coder" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "nooa", editable = "." },
+    { name = "nooa-atom", editable = "packages/nooa-atom" },
     { name = "nooa-cli", editable = "packages/nooa-cli" },
-    { name = "nooa-coder", editable = "packages/nooa-coder" },
 ]
 
 [[package]]
@@ -1632,47 +1673,6 @@ requires-dist = [
     { name = "tree-sitter-typescript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
 ]
 provides-extras = ["ast", "datascience"]
-
-[[package]]
-name = "nooa-coder"
-source = { editable = "packages/nooa-coder" }
-dependencies = [
-    { name = "agent-client-protocol" },
-    { name = "click" },
-    { name = "nooa", extra = ["mcp"] },
-    { name = "nooa-cli" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "websockets" },
-]
-
-[package.optional-dependencies]
-ast = [
-    { name = "tree-sitter" },
-    { name = "tree-sitter-go" },
-    { name = "tree-sitter-javascript" },
-    { name = "tree-sitter-python" },
-    { name = "tree-sitter-rust" },
-    { name = "tree-sitter-typescript" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agent-client-protocol", specifier = ">=0.12.1,<0.13" },
-    { name = "click", specifier = ">=8.1.0" },
-    { name = "nooa", extras = ["mcp"], editable = "." },
-    { name = "nooa-cli", editable = "packages/nooa-cli" },
-    { name = "pydantic", specifier = ">=2.5.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "tree-sitter", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-go", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-javascript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-python", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-rust", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-typescript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "websockets", specifier = ">=14" },
-]
-provides-extras = ["ast"]
 
 [[package]]
 name = "nooa-memory"

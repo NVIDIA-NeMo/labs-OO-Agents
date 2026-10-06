@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa_coder stays independent of the older host packages."""
+"""nooa_atom stays independent of the older host packages."""
 
 import ast
 import re
 from pathlib import Path
 
-import nooa_coder
+import nooa_atom
 
 _FORBIDDEN = ("nooa_cli", "nooa_acp")
 
@@ -23,7 +23,7 @@ def _imported_modules(path: Path) -> set[str]:
 
 
 def test_no_module_imports_the_cli_or_acp_packages():
-    root = Path(nooa_coder.__file__).parent
+    root = Path(nooa_atom.__file__).parent
     sources = sorted(root.rglob("*.py"))
     assert sources
     offenders = {
@@ -35,13 +35,13 @@ def test_no_module_imports_the_cli_or_acp_packages():
     assert {path: names for path, names in offenders.items() if names} == {}
 
 
-def test_the_coding_modules_use_no_retired_turn_or_worker_types():
-    """The coding agent is on the Session layer: no RespondResult, no CodingWorker."""
-    root = Path(nooa_coder.__file__).parent
+def test_the_agent_modules_use_no_retired_turn_or_worker_types():
+    """The Atom agent is on the Session layer: no RespondResult, no CodingWorker."""
+    root = Path(nooa_atom.__file__).parent
     retired = ("RespondResult", "RespondReason", "CodingWorker")
     hits = [
         f"{path.relative_to(root)}: {name}"
-        for package in ("coding", "tools", "workspace")
+        for package in ("agent", "tools", "workspace")
         for path in sorted((root / package).rglob("*.py"))
         for name in retired
         if name in path.read_text()
@@ -66,7 +66,7 @@ _PRIVATE_CORE_NAMES = {
 
 
 def test_no_module_uses_private_core_names_that_have_public_replacements():
-    root = Path(nooa_coder.__file__).parent
+    root = Path(nooa_atom.__file__).parent
     hits = [
         f"{path.relative_to(root)}:{number}: {line.strip()} (use {replacement})"
         for path in sorted(root.rglob("*.py"))
@@ -104,7 +104,7 @@ def test_the_acp_package_never_reaches_the_agent():
     Module imports such as ``acp.agent.connection`` are not attribute reads
     and do not count.
     """
-    root = Path(nooa_coder.__file__).parent / "acp"
+    root = Path(nooa_atom.__file__).parent / "acp"
     sources = sorted(root.rglob("*.py"))
     assert sources
     assert [hit for path in sources for hit in _agent_reaches(path)] == []
