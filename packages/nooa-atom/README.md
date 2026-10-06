@@ -1,12 +1,20 @@
 # nooa-atom
 
-`nooa-atom` holds the Session layer for NOOA interactive agents: a `Session`
+`nooa-atom` is NOOA Atom: an interactive agent, served over ACP with
+`nooa atom`, and the Session layer it runs on.
+
+The Session layer serves any NOOA interactive agent: a `Session`
 that owns one agent and its turn loop, a `SessionRegistry` that keeps the tree
 of sessions (a root and the children it delegates to), the agent-side port
 (`self.session`) through which an agent creates and talks to children, and a
-headless in-process host (`open_tree`). It also holds the Atom agent that
-runs on that layer: `nooa_atom.agent:AtomAgent` is the agent spec a
-host passes in `SessionOptions.agent_spec`.
+headless in-process host (`open_tree`). The Atom agent runs on that layer:
+`nooa_atom.agent:AtomAgent` is the agent spec a host passes in
+`SessionOptions.agent_spec`.
+
+Atom reads its settings from the `atom` section of `settings.yaml` (user and
+workspace `.nooa/`). The TUI and `nooa-acp` read `coding`; the first time
+Atom reads a settings file that has `coding` and no `atom`, it adds an `atom`
+copy, and the two sections change independently from then on.
 
 Status: pre-release. The package is part of the workspace but is not published
 yet, and its API may change until the hosts switch over to it. The ACP
@@ -73,7 +81,7 @@ the rest of the connection.
 The Atom agent reaches all its capabilities through one `SkillManager`,
 `self.skills`: code skills (`Skill` classes from `nooa.skills` entry points,
 workspace libraries and `.py` files in skill directories), text skills
-(`SKILL.md` directories) and MCP servers (`.mcp.json`, `coding.mcp_servers`
+(`SKILL.md` directories) and MCP servers (`.mcp.json`, `atom.mcp_servers`
 in the settings files, and the servers an ACP client sends). The model uses:
 
 - `search(query, limit=10)`: one line per match with name, kind, state and

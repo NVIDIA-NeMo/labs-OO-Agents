@@ -25,7 +25,7 @@ _EXPERIMENTAL_CONTEXT: Annotated[dict[str, Any], hidden] = {**_V2_CONTEXT, "cont
 
 
 class ExperimentalAtomAgent(AtomAgent):
-    """You are a careful software-development agent working in one local repository.
+    """You are a careful agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
     unrelated worktree changes. Use an RLM-style controller policy: complete requests

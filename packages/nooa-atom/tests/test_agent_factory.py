@@ -115,7 +115,7 @@ async def test_a_settings_file_from_before_legacy_agent_was_removed_still_loads(
 
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text(
-        "tui:\n  legacy_agent: true\ncoding:\n  legacy_agent: true\n  default_model: m\n"
+        "tui:\n  legacy_agent: true\natom:\n  legacy_agent: true\n  default_model: m\n"
     )
     options = AtomOptions.load(workspace)
     assert options.default_model == "m"
@@ -125,7 +125,7 @@ async def test_a_settings_file_from_before_legacy_agent_was_removed_still_loads(
 async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, sessions_dir, caplog):
     settings = workspace / ".nooa" / "settings.yaml"
     settings.parent.mkdir()
-    settings.write_text('coding:\n  active_skills: "just-one"\n')
+    settings.write_text('atom:\n  active_skills: "just-one"\n')
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         with caplog.at_level("WARNING"):
@@ -141,7 +141,7 @@ async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, ses
 async def test_workspace_settings_reach_the_agent(workspace):
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text(
-        "coding:\n  summarization:\n    policy: none\n"
+        "atom:\n  summarization:\n    policy: none\n"
     )
     options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, llm=FakeLLMClient())
     agent = create_session_agent(options, InMemoryStorageManager())
@@ -349,7 +349,7 @@ def test_the_default_llm_factory_uses_the_workspace_default_model(workspace, mon
     import nooa_atom.agent.factory as factory
 
     (workspace / ".nooa").mkdir()
-    (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")
+    (workspace / ".nooa" / "settings.yaml").write_text("atom:\n  default_model: ws-model\n")
     built: list[str] = []
     monkeypatch.setattr(
         factory, "workspace_llm_client", lambda alias, workspace: built.append(alias) or alias
@@ -369,7 +369,7 @@ async def test_a_host_registry_builds_the_workspace_default_model(
     from atom_test_agents import TrackedLLM
 
     (workspace / ".nooa").mkdir()
-    (workspace / ".nooa" / "settings.yaml").write_text("coding:\n  default_model: ws-model\n")
+    (workspace / ".nooa" / "settings.yaml").write_text("atom:\n  default_model: ws-model\n")
     built: list[TrackedLLM] = []
 
     def fake_client(alias, workspace):

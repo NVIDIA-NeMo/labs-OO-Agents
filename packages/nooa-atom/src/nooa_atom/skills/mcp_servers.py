@@ -4,7 +4,7 @@
 
 Held by the ``SkillManager``; the model reaches MCP servers through
 ``self.skills``. A server is *configured* (``.mcp.json``, the shared
-``coding.mcp_servers`` block in settings.yaml, or registered in memory),
+``atom.mcp_servers`` block in settings.yaml, or registered in memory),
 *connected* (its tools are known and ``self.<server>`` is set on the agent)
 and *active* (listed as active in the ``<skills>`` block).
 
@@ -122,7 +122,7 @@ class MCPServers:
 
         Args:
             mcp_file: Path to a VS Code / Claude-style ``.mcp.json``.
-            servers: Inline definitions (``coding.mcp_servers`` in settings.yaml).
+            servers: Inline definitions (``atom.mcp_servers`` in settings.yaml).
             approval_path: The user approval store (tests override it).
             watch_settings: Reload the layered settings before lifecycle
                 commands, so servers added to settings.yaml while the host
@@ -176,26 +176,32 @@ class MCPServers:
             return []
 
         from nooa.layered_config import load_layered_yaml
-        from nooa_atom.workspace.settings import SETTINGS_ENV_VAR, SETTINGS_FILENAME
+        from nooa_atom.workspace.settings import (
+            SETTINGS_ENV_VAR,
+            SETTINGS_FILENAME,
+            SETTINGS_SECTION,
+            copy_coding_settings,
+        )
 
+        copy_coding_settings(self.project_dir)
         data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=self.project_dir)
         legacy = data.get("tui", {})
         tui = dict(legacy) if isinstance(legacy, dict) else {}
-        coding = data.get("coding", {})
-        if "mcp_servers" in tui and not (isinstance(coding, dict) and "mcp_servers" in coding):
-            logger.warning("Reading legacy tui.mcp_servers; use coding.mcp_servers")
-        if isinstance(coding, dict):
-            tui.update(coding)
+        atom = data.get(SETTINGS_SECTION, {})
+        if "mcp_servers" in tui and not (isinstance(atom, dict) and "mcp_servers" in atom):
+            logger.warning("Reading legacy tui.mcp_servers; use atom.mcp_servers")
+        if isinstance(atom, dict):
+            tui.update(atom)
         raw_servers = tui.get("mcp_servers", {}) if isinstance(tui, dict) else {}
         if raw_servers is None:
             raw_servers = {}
         if not isinstance(raw_servers, dict):
-            raise ValueError("coding.mcp_servers must be a mapping")
+            raise ValueError("atom.mcp_servers must be a mapping")
 
         fresh: dict[str, dict[str, Any]] = {}
         for name, definition in raw_servers.items():
             if not isinstance(name, str) or not isinstance(definition, dict):
-                raise ValueError("each coding.mcp_servers entry must map a name to a mapping")
+                raise ValueError("each atom.mcp_servers entry must map a name to a mapping")
             fresh[name] = copy.deepcopy(definition)
 
         removed = self._settings_server_names - set(fresh)

@@ -82,14 +82,14 @@ class BehaviorControl:
         from .settings import write_settings_updates
 
         path, _ = write_settings_updates(
-            {("coding", key): value for key, value in updates.items()}, workspace=self.workspace
+            {("atom", key): value for key, value in updates.items()}, workspace=self.workspace
         )
         return path
 
     def _persist_setting(self, field: str, value: object) -> Path:
         from .settings import write_settings_updates
 
-        path, _ = write_settings_updates({("coding", field): value}, workspace=self.workspace)
+        path, _ = write_settings_updates({("atom", field): value}, workspace=self.workspace)
         return path
 
     def _project_scope_settings(self) -> dict[str, Any]:

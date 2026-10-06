@@ -22,7 +22,7 @@ async def test_deactivate_does_not_leak_a_users_personal_active_skill(tmp_path, 
     user_dir = tmp_path / "user-config"
     user_dir.mkdir()
     (user_dir / "settings.yaml").write_text(
-        yaml.safe_dump({"coding": {"active_skills": ["personal.secret-skill"]}})
+        yaml.safe_dump({"atom": {"active_skills": ["personal.secret-skill"]}})
     )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
 
@@ -35,7 +35,7 @@ async def test_deactivate_does_not_leak_a_users_personal_active_skill(tmp_path, 
         assert result.success, str(result)
 
         project_settings = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-        persisted_active = project_settings["coding"]["active_skills"]
+        persisted_active = project_settings["atom"]["active_skills"]
         assert "personal.secret-skill" not in persisted_active
         assert "nemo.methodwriting" not in persisted_active
     finally:
@@ -51,9 +51,7 @@ async def test_add_skills_dir_does_not_leak_a_users_personal_directory(tmp_path,
     user_dir = tmp_path / "user-config"
     user_dir.mkdir()
     (user_dir / "settings.yaml").write_text(
-        yaml.safe_dump(
-            {"coding": {"additional_skills_dirs": [str(tmp_path / "personal-only-dir")]}}
-        )
+        yaml.safe_dump({"atom": {"additional_skills_dirs": [str(tmp_path / "personal-only-dir")]}})
     )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
 
@@ -69,7 +67,7 @@ async def test_add_skills_dir_does_not_leak_a_users_personal_directory(tmp_path,
         assert result.success, str(result)
 
         project_settings = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-        persisted_dirs = project_settings["coding"]["additional_skills_dirs"]
+        persisted_dirs = project_settings["atom"]["additional_skills_dirs"]
         assert not any("personal-only-dir" in entry for entry in persisted_dirs)
         assert any(str(extra_dir) in entry for entry in persisted_dirs)
     finally:
@@ -81,7 +79,7 @@ async def test_activate_works_when_project_settings_mask_an_mcp_server(tmp_path,
     workspace = tmp_path / "project"
     (workspace / ".nooa").mkdir(parents=True)
     (workspace / ".nooa" / "settings.yaml").write_text(
-        yaml.safe_dump({"coding": {"mcp_servers": {"forgotten": None}}})
+        yaml.safe_dump({"atom": {"mcp_servers": {"forgotten": None}}})
     )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
 
@@ -94,7 +92,7 @@ async def test_activate_works_when_project_settings_mask_an_mcp_server(tmp_path,
         result = await control.invoke("activate nemo.methodwriting")
         assert result.success, str(result)
         project_settings = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-        assert "nemo.methodwriting" in project_settings["coding"]["active_skills"]
-        assert project_settings["coding"]["mcp_servers"] == {"forgotten": None}
+        assert "nemo.methodwriting" in project_settings["atom"]["active_skills"]
+        assert project_settings["atom"]["mcp_servers"] == {"forgotten": None}
     finally:
         await agent.aclose()

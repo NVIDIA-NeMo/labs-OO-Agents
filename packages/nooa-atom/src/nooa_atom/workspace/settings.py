@@ -3,7 +3,12 @@
 """The workspace's settings: behaviour settings, skill directories, and persistence.
 
 One layered ``settings.yaml`` (user, then project ``.nooa/``, or the file
-``NEMO_OO_SETTINGS`` names) holds them for every interactive host.
+``NEMO_OO_SETTINGS`` names) holds them for every interactive host. Atom reads
+and writes its ``atom`` section. The TUI and ``nooa-acp`` keep using
+``coding``, the section Atom used to share with them: the first time Atom
+reads a settings file that has ``coding`` and no ``atom``, it copies one to
+the other (``copy_coding_settings``), and from then on each section changes
+on its own.
 """
 
 from __future__ import annotations
@@ -20,6 +25,10 @@ from nooa.layered_config import load_layered_yaml
 
 SETTINGS_FILENAME = "settings.yaml"
 SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
+SETTINGS_SECTION = "atom"
+"""The ``settings.yaml`` section that holds Atom's settings."""
+CODING_SECTION = "coding"
+"""The section the TUI and ``nooa-acp`` read, which Atom copies from once."""
 logger = logging.getLogger(__name__)
 
 _LEGACY_CONFIG_FILENAME = "config.toml"
@@ -43,12 +52,13 @@ def load_skills_dirs(
 ) -> list[Path]:
     """Return existing skill roots for one Atom workspace.
 
-    The shared ``coding.additional_skills_dirs`` setting is preferred for new
-    configuration. ``tui.additional_skills_dirs`` remains supported while the
-    TUI migrates to the shared section. Relative configured paths are resolved
-    against the active workspace, not the ACP server process's checkout.
+    ``atom.additional_skills_dirs`` is preferred; the legacy
+    ``tui.additional_skills_dirs`` is read when it is absent. Relative
+    configured paths are resolved against the active workspace, not the ACP
+    server process's checkout.
     """
     root = Path(workspace).expanduser().resolve()
+    copy_coding_settings(root / ".nooa")
     settings = load_layered_yaml(
         SETTINGS_FILENAME,
         SETTINGS_ENV_VAR,
@@ -56,14 +66,16 @@ def load_skills_dirs(
     )
 
     configured: list[str | Path] = []
-    coding = settings.get("coding")
+    atom = settings.get(SETTINGS_SECTION)
     section = (
-        "coding" if isinstance(coding, Mapping) and "additional_skills_dirs" in coding else "tui"
+        SETTINGS_SECTION
+        if isinstance(atom, Mapping) and "additional_skills_dirs" in atom
+        else "tui"
     )
     if section == "tui" and isinstance(settings.get("tui"), Mapping):
         if "additional_skills_dirs" in settings["tui"]:
             logger.warning(
-                "Reading legacy tui.additional_skills_dirs; use coding.additional_skills_dirs"
+                "Reading legacy tui.additional_skills_dirs; use atom.additional_skills_dirs"
             )
     configured.extend(_setting_paths(settings, section))
     # A workspace's old config.toml is still a workspace layer. Do not let an
@@ -77,7 +89,7 @@ def load_skills_dirs(
     modern_key_set = any(
         isinstance(project_settings.get(section), Mapping)
         and "additional_skills_dirs" in project_settings[section]
-        for section in ("coding", "tui")
+        for section in (SETTINGS_SECTION, "tui")
     )
     if not os.environ.get(SETTINGS_ENV_VAR) and not modern_key_set:
         configured.extend(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
@@ -124,7 +136,7 @@ def _read_project_settings(path: Path) -> Mapping[str, Any]:
     try:
         value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        logger.warning("Failed to read coding settings %s: %s", path, exc)
+        logger.warning("Failed to read Atom settings %s: %s", path, exc)
         return {}
     return value if isinstance(value, Mapping) else {}
 
@@ -138,7 +150,7 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
-        logger.warning("Failed to read legacy coding settings %s: %s", path, exc)
+        logger.warning("Failed to read legacy Atom settings %s: %s", path, exc)
         return []
     tui = data.get("tui")
     if not isinstance(tui, Mapping):
@@ -146,7 +158,7 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
     value = tui.get("libs_dirs")
     if isinstance(value, (str, list)):
         logger.warning(
-            "Reading legacy config.toml tui.libs_dirs; use settings.yaml coding.additional_skills_dirs"
+            "Reading legacy config.toml tui.libs_dirs; use settings.yaml atom.additional_skills_dirs"
         )
     if isinstance(value, str):
         return [value]
@@ -159,7 +171,7 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
 def _warn_ignored_agent_spec() -> None:
     """Report the process-wide agent-selection policy once despite repeated loads."""
     logger.warning(
-        "Ignoring coding.agent_spec and tui.agent_spec in all settings layers "
+        "Ignoring atom.agent_spec and tui.agent_spec in all settings layers "
         "(including user and project settings); select custom agents explicitly "
         "through the host CLI or AtomOptions overrides"
     )
@@ -177,6 +189,7 @@ def behavior_fields() -> frozenset[str]:
 
 def load_settings_data(workspace: str | Path | None = None) -> dict[str, Any]:
     project = Path(workspace).expanduser().resolve() / ".nooa" if workspace is not None else None
+    copy_coding_settings(project)
     return load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project)
 
 
@@ -197,7 +210,7 @@ def load_behavior_settings(workspace: str | Path) -> dict[str, Any]:
             for error in exc.errors()
         )
         files = ", ".join(_invalid_settings_files(workspace)) or "the merged settings"
-        logger.warning("Invalid coding settings in %s (%s); using the defaults", files, errors)
+        logger.warning("Invalid Atom settings in %s (%s); using the defaults", files, errors)
         return {}
 
 
@@ -232,18 +245,18 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
     agent = data.get("agent", {})
     if isinstance(agent, dict) and isinstance(agent.get("summarization"), dict):
         values["summarization"] = deepcopy(agent["summarization"])
-    for name in ("tui", "coding"):
+    for name in ("tui", SETTINGS_SECTION):
         section = data.get(name)
         if not isinstance(section, dict):
             continue
         if name == "tui" and section:
-            logger.warning("Reading legacy tui settings; move shared behavior settings to coding")
+            logger.warning("Reading legacy tui settings; move shared behavior settings to atom")
         for key, value in section.items():
             if key == "agent_spec":
                 _warn_ignored_agent_spec()
             if key not in behavior_fields():
-                if name == "coding" and key != "agent_spec":
-                    logger.warning("Ignoring unsupported coding setting %r", key)
+                if name == SETTINGS_SECTION and key != "agent_spec":
+                    logger.warning("Ignoring unsupported Atom setting %r", key)
                 continue
             if key == "summarization" and isinstance(value, dict):
                 values.setdefault(key, {}).update(value)
@@ -262,7 +275,7 @@ def canonical_setting_path(path: tuple[str, ...]) -> tuple[str, ...]:
         (path[0] == "tui" and path[1] in behavior_fields())
         or (path[0] == "agent" and path[1] == "summarization")
     ):
-        return ("coding", *path[1:])
+        return (SETTINGS_SECTION, *path[1:])
     return path
 
 
@@ -292,13 +305,15 @@ def write_settings_updates(
 ) -> tuple[Path, dict[str, Any]]:
     """Apply nested setting updates to one writable settings file.
 
-    ``updates`` maps dotted-path tuples like ``("coding", "default_model")``
+    ``updates`` maps dotted-path tuples like ``("atom", "default_model")``
     to YAML-friendly values. Existing sibling keys are preserved. When
     ``dry_run`` is true, the returned data is what would be written.
     """
     import yaml
 
     path = settings_path(scope, workspace=workspace)
+    if not dry_run:
+        _copy_coding_section(path)
     data: dict[str, Any] = {}
     if path.exists():
         loaded = yaml.safe_load(path.read_text())
@@ -307,11 +322,11 @@ def write_settings_updates(
 
     for setting_path, value in updates.items():
         canonical = canonical_setting_path(setting_path)
-        if len(canonical) > 2 and canonical[0] == "coding":
+        if len(canonical) > 2 and canonical[0] == SETTINGS_SECTION:
             # A first nested canonical write must retain siblings that only
             # exist under the legacy alias (e.g. another MCP server definition).
-            coding = data.get("coding")
-            if not isinstance(coding, dict) or canonical[1] not in coding:
+            atom = data.get(SETTINGS_SECTION)
+            if not isinstance(atom, dict) or canonical[1] not in atom:
                 inherited = resolve_behavior_settings(data).get(canonical[1])
                 if isinstance(inherited, dict):
                     _set_mapping_path(data, list(canonical[:2]), deepcopy(inherited))
@@ -333,3 +348,59 @@ def _set_mapping_path(data: dict[str, Any], path: list[str], value: Any) -> None
             current[part] = child
         current = child
     current[path[-1]] = value
+
+
+def copy_coding_settings(project_dir: Path | None = None) -> None:
+    """Copy ``coding`` to ``atom`` in each settings layer that has no ``atom`` yet.
+
+    Atom used to read the ``coding`` section, which the TUI and ``nooa-acp``
+    still use. Each settings file Atom reads (user, project ``project_dir``
+    or the files ``NEMO_OO_SETTINGS`` names) that has a ``coding`` mapping
+    and no ``atom`` key gets an ``atom`` section with the same settings. The
+    copy happens once per file: afterwards the ``atom`` key exists, and a
+    later change to either section does not reach the other.
+    """
+    from nooa.layered_config import layered_paths
+
+    for path in layered_paths(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project_dir):
+        _copy_coding_section(path)
+
+
+def _copy_coding_section(path: Path) -> None:
+    """Add an ``atom`` copy of ``path``'s ``coding`` section, keeping the rest of the file.
+
+    The copy is appended, so the file's comments and layout stay as they
+    were. If appending would not give the intended data (a file in YAML
+    flow style, for instance), the file is rewritten from its parsed data.
+    A file that cannot be read is left to the settings loaders, which
+    report it; one that cannot be written is reported here and left as is.
+    """
+    import yaml
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = yaml.safe_load(text)
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return
+    if (
+        not isinstance(data, dict)
+        or SETTINGS_SECTION in data
+        or not isinstance(data.get(CODING_SECTION), dict)
+    ):
+        return
+    expected = {**data, SETTINGS_SECTION: deepcopy(data[CODING_SECTION])}
+    block = yaml.safe_dump({SETTINGS_SECTION: data[CODING_SECTION]}, sort_keys=False)
+    separator = "\n" if text and not text.endswith("\n") else ""
+    updated = f"{text}{separator}# Copied from the coding section by NOOA Atom.\n{block}"
+    try:
+        appended_ok = yaml.safe_load(updated) == expected
+    except yaml.YAMLError:
+        appended_ok = False
+    if not appended_ok:
+        updated = yaml.safe_dump(expected, sort_keys=False)
+    try:
+        path.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not copy the coding settings in %s to atom: %s", path, exc)
+        return
+    logger.info("Copied the coding settings in %s to a new atom section", path)

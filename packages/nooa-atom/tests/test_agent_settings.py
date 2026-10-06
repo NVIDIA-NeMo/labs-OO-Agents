@@ -38,7 +38,7 @@ def test_project_tui_skill_dirs_remain_compatible(tmp_path, monkeypatch, caplog)
     (config_dir / "settings.yaml").write_text(f"tui:\n  additional_skills_dirs:\n    - {skills}\n")
 
     assert load_skills_dirs(workspace) == [skills.resolve()]
-    assert "use coding.additional_skills_dirs" in caplog.text
+    assert "use atom.additional_skills_dirs" in caplog.text
 
 
 def test_shared_atom_skill_dirs_and_workspace_conventions_are_loaded(tmp_path, monkeypatch):
@@ -54,7 +54,7 @@ def test_shared_atom_skill_dirs_and_workspace_conventions_are_loaded(tmp_path, m
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_text(
-        "coding:\n  additional_skills_dirs:\n    - shared-skills\n"
+        "atom:\n  additional_skills_dirs:\n    - shared-skills\n"
     )
 
     assert load_skills_dirs(workspace) == [
@@ -72,7 +72,7 @@ def test_missing_configured_skill_dirs_are_ignored(tmp_path, monkeypatch):
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
-    (config_dir / "settings.yaml").write_text("coding:\n  additional_skills_dirs:\n    - absent\n")
+    (config_dir / "settings.yaml").write_text("atom:\n  additional_skills_dirs:\n    - absent\n")
 
     assert load_skills_dirs(workspace) == []
 
@@ -101,7 +101,7 @@ def test_user_yaml_does_not_suppress_workspace_legacy_skill_dirs(tmp_path, monke
     user_skills.mkdir()
     workspace_skills.mkdir(parents=True)
     (user_config / "settings.yaml").write_text(
-        f"coding:\n  additional_skills_dirs:\n    - {user_skills}\n"
+        f"atom:\n  additional_skills_dirs:\n    - {user_skills}\n"
     )
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
@@ -132,12 +132,12 @@ def test_environment_settings_override_user_and_workspace_layers(tmp_path, monke
     workspace_config.mkdir()
     override = tmp_path / "override.yaml"
     (user_config / "settings.yaml").write_text(
-        f"coding:\n  additional_skills_dirs:\n    - {user_skills}\n"
+        f"atom:\n  additional_skills_dirs:\n    - {user_skills}\n"
     )
     (workspace_config / "settings.yaml").write_text(
-        f"coding:\n  additional_skills_dirs:\n    - {workspace_skills}\n"
+        f"atom:\n  additional_skills_dirs:\n    - {workspace_skills}\n"
     )
-    override.write_text(f"coding:\n  additional_skills_dirs:\n    - {override_skills}\n")
+    override.write_text(f"atom:\n  additional_skills_dirs:\n    - {override_skills}\n")
     (workspace_config / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy_skills}"]\n')
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.setenv("NEMO_OO_SETTINGS", str(override))
@@ -165,7 +165,7 @@ def test_an_explicit_empty_modern_list_disables_the_legacy_config(tmp_path, monk
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
     (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
-    (config_dir / "settings.yaml").write_text("coding:\n  additional_skills_dirs: []\n")
+    (config_dir / "settings.yaml").write_text("atom:\n  additional_skills_dirs: []\n")
 
     assert load_skills_dirs(workspace) == []
 
@@ -186,7 +186,7 @@ def test_a_non_utf8_settings_file_does_not_abort_discovery(tmp_path, monkeypatch
 
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
-    (config_dir / "settings.yaml").write_bytes(b"\xff\xfe coding:\n")
+    (config_dir / "settings.yaml").write_bytes(b"\xff\xfe atom:\n")
 
     assert load_skills_dirs(workspace) == [conventional.resolve()]
 
@@ -220,7 +220,7 @@ def test_an_env_override_suppresses_a_legacy_only_workspace(tmp_path, monkeypatc
     override = tmp_path / "override.yaml"
     workspace.mkdir()
     legacy.mkdir()
-    override.write_text("coding:\n  additional_skills_dirs: []\n")
+    override.write_text("atom:\n  additional_skills_dirs: []\n")
     monkeypatch.setenv("NEMO_OO_SETTINGS", str(override))
 
     config_dir = workspace / ".nooa"

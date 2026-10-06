@@ -61,6 +61,10 @@ _TUPLE = "tuple"
 _ENVELOPE_TYPES = frozenset({_PYDANTIC, _DATACLASS, _DICT_CLASS, _TUPLE})
 _LEGACY_CLASS_PREFIXES = {
     "nemo_oo_agents.": "nooa.",
+    # Sessions saved by nooa-coder, which became nooa-atom (its coding/
+    # module became agent/).
+    "nooa_coder.coding.": "nooa_atom.agent.",
+    "nooa_coder.": "nooa_atom.",
 }
 
 

@@ -51,7 +51,7 @@ async def test_remember_mcp_accepts_a_placeholder_only_header(workspace_settings
     result = ws.remember_mcp("clean")
     assert "Saved" in result
     saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-    assert saved["coding"]["mcp_servers"]["clean"]["headers"]["Authorization"] == "${MY_TOKEN}"
+    assert saved["atom"]["mcp_servers"]["clean"]["headers"]["Authorization"] == "${MY_TOKEN}"
 
 
 async def test_remember_mcp_does_not_leak_a_users_personal_auto_connect(
@@ -61,7 +61,7 @@ async def test_remember_mcp_does_not_leak_a_users_personal_auto_connect(
     user_dir = workspace.parent / "user-config"
     user_dir.mkdir()
     (user_dir / "settings.yaml").write_text(
-        yaml.safe_dump({"coding": {"mcp_auto_connect": ["personal-server"]}})
+        yaml.safe_dump({"atom": {"mcp_auto_connect": ["personal-server"]}})
     )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
 
@@ -69,7 +69,7 @@ async def test_remember_mcp_does_not_leak_a_users_personal_auto_connect(
     ws.remember_mcp("shared")
 
     saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-    persisted = saved["coding"]["mcp_auto_connect"]
+    persisted = saved["atom"]["mcp_auto_connect"]
     assert "personal-server" not in persisted
     assert "shared" in persisted
 
@@ -84,14 +84,14 @@ async def test_forget_mcp_does_not_leak_a_users_personal_auto_connect(
     user_dir = workspace.parent / "user-config"
     user_dir.mkdir()
     (user_dir / "settings.yaml").write_text(
-        yaml.safe_dump({"coding": {"mcp_auto_connect": ["personal-server"]}})
+        yaml.safe_dump({"atom": {"mcp_auto_connect": ["personal-server"]}})
     )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
 
     ws.forget_mcp("shared")
 
     saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-    persisted = saved["coding"]["mcp_auto_connect"]
+    persisted = saved["atom"]["mcp_auto_connect"]
     assert "personal-server" not in persisted
     assert "shared" not in persisted
 
@@ -103,14 +103,14 @@ async def test_remember_mcp_after_forget_mcp_saves_the_definition_again(workspac
     ws.remember_mcp("again")
     ws.forget_mcp("again")
     saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-    assert saved["coding"]["mcp_servers"]["again"] is None
+    assert saved["atom"]["mcp_servers"]["again"] is None
 
     registry.register("again", command="again-command")
     ws.remember_mcp("again")
 
     saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-    assert saved["coding"]["mcp_servers"]["again"]["command"] == "again-command"
-    assert saved["coding"]["mcp_auto_connect"] == ["again"]
+    assert saved["atom"]["mcp_servers"]["again"]["command"] == "again-command"
+    assert saved["atom"]["mcp_auto_connect"] == ["again"]
 
 
 async def test_remember_mcp_keeps_a_connected_server_connected(workspace_settings, monkeypatch):
@@ -128,7 +128,7 @@ async def test_remember_mcp_keeps_a_connected_server_connected(workspace_setting
     ws.remember_mcp("live")
 
     saved = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
-    assert saved["coding"]["mcp_servers"]["live"]["transport"] == "streamable-http"
+    assert saved["atom"]["mcp_servers"]["live"]["transport"] == "streamable-http"
     assert detached == []
     assert registry.connected() == ["live"]
 

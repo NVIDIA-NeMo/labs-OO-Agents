@@ -36,7 +36,7 @@ class AtomOptions(BaseModel):
 
     @classmethod
     def load(cls, workspace: str | Path, **overrides: Any) -> AtomOptions:
-        """Load legacy ``tui`` and shared ``coding`` settings for this workspace.
+        """Load the workspace's ``atom`` settings (and the legacy ``tui`` ones).
 
         Invalid settings are reported and replaced by the defaults.
         """

@@ -315,7 +315,7 @@ class SkillManager(Skill):
         The person pastes what they have about a server (a name and URL, a
         ``claude mcp add ...`` line, a docs snippet, an OAuth client id). This
         edits nothing; it returns a task for the agent, which writes the
-        ``coding.mcp_servers.<name>`` block and guides the person through
+        ``atom.mcp_servers.<name>`` block and guides the person through
         approval and sign-in.
         """
         details = args.strip()
@@ -336,7 +336,7 @@ class SkillManager(Skill):
             "Do the following:\n"
             "1. Parse the server name, URL, transport (default `streamable-http` for HTTP "
             "URLs), and any auth info (OAuth client_id, static API key/headers).\n"
-            f"2. Add a `coding.mcp_servers.<name>` YAML block to `{config_path}` (create the "
+            f"2. Add an `atom.mcp_servers.<name>` YAML block to `{config_path}` (create the "
             "file or section if missing; do not remove existing servers). Use an environment "
             "placeholder in `headers` for a static API key, or `oauth_client_id` for a "
             "pre-registered OAuth client. Never write a secret value into project config.\n"

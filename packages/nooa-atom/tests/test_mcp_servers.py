@@ -55,7 +55,7 @@ def servers(tmp_path, monkeypatch):
 def save(servers, command):
     definitions = {"probe": {"command": command}} if command is not None else {}
     (servers.project_dir / "settings.yaml").write_text(
-        json.dumps({"coding": {"mcp_servers": definitions}})
+        json.dumps({"atom": {"mcp_servers": definitions}})
     )
 
 

@@ -122,7 +122,7 @@ class WorkspaceSettings(Skill):
         """
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be a nonempty alias or provider/model ID")
-        path = self._save({("coding", "default_model"): model.strip()})
+        path = self._save({("atom", "default_model"): model.strip()})
         return f"Saved default model in {path}; the running model is unchanged."
 
     def remember_mcp(self, name: str, auto_connect: bool = True) -> str:
@@ -157,8 +157,8 @@ class WorkspaceSettings(Skill):
             names.append(name)
         path = self._save(
             {
-                ("coding", "mcp_servers", name): definition,
-                ("coding", "mcp_auto_connect"): names,
+                ("atom", "mcp_servers", name): definition,
+                ("atom", "mcp_auto_connect"): names,
             }
         )
         # The saved form is normalized (e.g. a bare url gains its transport).
@@ -180,8 +180,8 @@ class WorkspaceSettings(Skill):
             raise ValueError("name must be a nonempty MCP server name")
         path = self._save(
             {
-                ("coding", "mcp_servers", name): None,
-                ("coding", "mcp_auto_connect"): [
+                ("atom", "mcp_servers", name): None,
+                ("atom", "mcp_auto_connect"): [
                     n for n in self._project_auto_connect() if n != name
                 ],
             }

@@ -275,7 +275,7 @@ async def test_a_command_meant_for_the_agent_runs_a_turn(atom_adapter, workspace
     )
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text(
-        f"coding:\n  additional_skills_dirs:\n    - {workspace / 'skills'}\n"
+        f"atom:\n  additional_skills_dirs:\n    - {workspace / 'skills'}\n"
     )
     adapter = await atom_adapter([reply("Reviewed.\n")])
     session_id = await _new(adapter, workspace)

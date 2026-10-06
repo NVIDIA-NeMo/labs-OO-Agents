@@ -255,7 +255,7 @@ async def test_the_atom_agent_connects_the_servers_its_workspace_remembers(
     workspace = root_options.workspace
     (workspace / ".nooa").mkdir(exist_ok=True)
     (workspace / ".nooa" / "settings.yaml").write_text(
-        yaml.safe_dump({"coding": {"mcp_auto_connect": ["docs", "nowhere"]}})
+        yaml.safe_dump({"atom": {"mcp_auto_connect": ["docs", "nowhere"]}})
     )
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:

@@ -101,7 +101,7 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     callback=_resolve_agent_spec,
     help=(
         "Agent class for new sessions (module:Class or file.py:Class). Default: the "
-        "workspace's coding.agent_spec setting, else the Atom agent."
+        "workspace's atom.agent_spec setting, else the Atom agent."
     ),
 )
 @click.option(

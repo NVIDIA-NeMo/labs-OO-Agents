@@ -6,6 +6,17 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-coder` is now `nooa-atom` (NOOA Atom), with no aliases for the old names:
+  the package `nooa_atom` (extra `nooa[atom]`), the command `nooa atom`, the
+  environment variables `NOOA_ATOM_TOKEN` and `NOOA_ATOM_LOG_LEVEL`, the ACP agent
+  name `nooa-atom` and the benchmark agent type `atom` (`AtomBenchAgent`). The agent
+  is `nooa_atom.agent:AtomAgent` (was `CodingAgent` in `nooa_coder.coding`), its
+  options `AtomOptions` and its slash commands `SlashCommand`; its prompt no longer
+  calls it a software-development agent, and its state block is `workspace_state`.
+  Sessions nooa-coder saved still load: their agent specs, snapshot classes and
+  recorded item types map to the new names. Atom keeps its settings in a new `atom`
+  section of `settings.yaml`, copied once from `coding`, which the TUI and `nooa-acp`
+  keep using.
 - `nooa-atom`: `AtomAgent.plan()` and `AtomAgent.get_summarization_status()`, which
   hosts read (the ACP bridge reads the plan after each Python cell), no longer record a
   trace span per call.

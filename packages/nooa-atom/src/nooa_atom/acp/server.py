@@ -229,7 +229,7 @@ class AtomACPAgent:
     workspace's ``.nooa/sessions``).
 
     ``agent_spec`` names the agent class for new sessions (``None``: the
-    workspace's ``coding.agent_spec`` setting, else the Atom agent).
+    workspace's ``atom.agent_spec`` setting, else the Atom agent).
     ``model`` is the model alias new sessions start with; the registry's
     ``llm_factory`` builds the client.
     """

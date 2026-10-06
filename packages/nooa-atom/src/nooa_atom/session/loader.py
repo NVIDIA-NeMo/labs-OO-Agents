@@ -32,6 +32,9 @@ LEGACY_AGENT_SPECS = {
     "nooa_cli.coding.legacy_agent:TUIAgent": ATOM_AGENT,
     "nooa_cli.tui.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
     "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
+    # What nooa-coder, the package before nooa-atom, recorded.
+    "nooa_coder.coding.agent:CodingAgent": ATOM_AGENT,
+    "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_ATOM_AGENT,
     # Spellings from before the agent moved out of nooa-cli.
     "nooa_cli.coding.agent:CodingAgent": ATOM_AGENT,
     "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_ATOM_AGENT,
@@ -41,6 +44,23 @@ LEGACY_AGENT_SPECS = {
     "ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
 }
 """Agent specs older hosts saved, and the spec that loads the class that replaced each."""
+
+LEGACY_MODULE_PREFIXES = {
+    "nooa_coder.coding.": "nooa_atom.agent.",
+    "nooa_coder.": "nooa_atom.",
+}
+"""Module prefixes nooa-coder recorded, and the nooa-atom modules that replaced them.
+
+The first matching prefix applies, so the more specific one comes first.
+"""
+
+
+def canonical_module(module_name: str) -> str:
+    """The module to import for ``module_name``: its nooa-atom name if nooa-coder recorded it."""
+    for old, new in LEGACY_MODULE_PREFIXES.items():
+        if f"{module_name}.".startswith(old):
+            return (new + f"{module_name}.".removeprefix(old)).rstrip(".")
+    return module_name
 
 
 def canonical_agent_spec(spec: str) -> str:
@@ -172,6 +192,7 @@ def load_typed(type_name: str | None, data: Any) -> Any:
     module_name, _, qualname = type_name.partition(":")
     if module_name == "builtins" or not qualname:
         return value
+    module_name = canonical_module(module_name)
     try:
         target: Any = importlib.import_module(module_name)
         for part in qualname.split("."):
