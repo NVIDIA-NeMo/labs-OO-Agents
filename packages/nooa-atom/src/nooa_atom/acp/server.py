@@ -117,7 +117,13 @@ _POOL_STEER_METHOD = "poolside/session_steer"
 """``_poolside/session_steer`` as ``ext_method`` receives it (without the underscore)."""
 
 SOURCE = "acp"
-"""The source of items this adapter admits (the bridge does not echo them back)."""
+"""Already-visible client prompts/Pool inputs and permission answers; do not echo."""
+
+INJECT_SOURCE = "acp:inject"
+"""Injected inputs are not ordinary prompts: echo their admission once."""
+
+FORM_ANSWER_SOURCE = "acp:form-answer"
+"""Accepted NeedInput form answers, echoed once by the admission bridge."""
 
 DECLINED = "(declined to answer)"
 """What the agent receives when the person declines or dismisses a question."""
@@ -536,9 +542,9 @@ class AtomACPAgent:
         session, _bridge = self._followed(session_id)
         try:
             if mode == "steer":
-                receipt = await session.steer(text, source=SOURCE)
+                receipt = await session.steer(text, source=INJECT_SOURCE)
             else:
-                receipt = await session.submit(text, source=SOURCE)
+                receipt = await session.submit(text, source=INJECT_SOURCE)
         except SessionClosedError:
             raise RequestError.resource_not_found(session_id) from None
         self._injects.setdefault(session_id, {})[receipt.item_id] = receipt
@@ -587,8 +593,21 @@ class AtomACPAgent:
         shown = bridge.client_input_taken(receipt.item_id, input_id)
         if self._open.get(session_id):
             self._followers.setdefault(session_id, []).append((receipt, text))
-        await _taken_or_settled(session, receipt.item_id, shown)
-        bridge.forget_client_input(receipt.item_id)
+        request_cancelled = False
+        try:
+            await _taken_or_settled(
+                session,
+                receipt.item_id,
+                shown,
+                was_taken=lambda: bridge.client_input_was_taken(receipt.item_id),
+            )
+        except asyncio.CancelledError:
+            request_cancelled = True
+            raise
+        finally:
+            # Request cancellation does not withdraw its admitted input; it may
+            # be consumed later and still needs its original client-ID event.
+            bridge.release_client_input_waiter(receipt.item_id, keep_pending=request_cancelled)
         return {"inputId": input_id}
 
     def _revoke_inject(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -807,7 +826,11 @@ class AtomACPAgent:
             if response is None or response is _CANCELLED:
                 return response
             if response.action == "accept":
-                return answer_from_content(need, response.content), SOURCE
+                try:
+                    return answer_from_content(need, response.content), FORM_ANSWER_SOURCE
+                except (ValidationError, ValueError):
+                    # Invalid client data is not an answer; leave the question as text.
+                    return None
             return DECLINED, DECLINED_SOURCE
         options = need.options or []
         if sorted(option.lower() for option in options) == ["no", "yes"]:
@@ -817,9 +840,10 @@ class AtomACPAgent:
     async def _ask_pool(self, session: Session, need: NeedInput, schema: dict[str, Any]) -> Any:
         """Ask with Pool's ``_poolside/elicitation`` form; the result is as ``_ask``'s.
 
-        An answer that does not convert, or is not one of the choices, is
-        asked once more with the error, then left as text. A failed request turns Pool forms off for this
-        connection.
+        A malformed or blank options answer, or a typed answer that does not
+        validate, is asked once more with the error, then left as text. Options
+        are suggestions; typed Literal fields still restrict their values.
+        A failed request turns Pool forms off for this connection.
         """
         conn = self._require_conn()
         question = f"{need.question}\n\n{need.reason}" if need.reason else need.question
@@ -845,7 +869,7 @@ class AtomACPAgent:
             if not isinstance(response, dict) or response.get("action") != "accept":
                 return DECLINED, DECLINED_SOURCE
             try:
-                return pool_answer(need, response.get("content")), SOURCE
+                return pool_answer(need, response.get("content")), FORM_ANSWER_SOURCE
             except ValidationError as exc:
                 problems = "; ".join(
                     f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
@@ -1451,11 +1475,17 @@ def _available_commands_update(commands: list[CommandInfo]) -> Any:
     return update_available_commands(available)
 
 
-async def _taken_or_settled(session: Session, item_id: str, shown: asyncio.Future[None]) -> None:
+async def _taken_or_settled(
+    session: Session,
+    item_id: str,
+    shown: asyncio.Future[None],
+    *,
+    was_taken: Callable[[], bool],
+) -> None:
     """Wait until Pool was told ``item_id`` was taken, or the item's outcome settles first.
 
-    The outcome settles without the item being taken when it is withdrawn
-    (Stop), discarded, or the session closes; any of those ends the wait.
+    Only a never-taken item's withdrawal/discard/close ends the wait without
+    a send. A consumed item's outcome cannot overtake its acknowledgement.
     """
 
     async def settled() -> None:
@@ -1465,11 +1495,15 @@ async def _taken_or_settled(session: Session, item_id: str, shown: asyncio.Futur
     outcome = asyncio.ensure_future(settled())
     try:
         await asyncio.wait({shown, outcome}, return_when=asyncio.FIRST_COMPLETED)
+        # A consumed item may settle before the queued send completes. Its
+        # outcome (even cancellation/error) is not evidence of client delivery.
+        if shown.done():
+            shown.result()
+        elif was_taken():
+            await asyncio.shield(shown)
     finally:
         outcome.cancel()
         await asyncio.gather(outcome, return_exceptions=True)
-        if shown.done() and not shown.cancelled():
-            shown.exception()  # retrieved: a stopped bridge is not this request's error
 
 
 async def serve_connection(

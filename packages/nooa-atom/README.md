@@ -66,15 +66,39 @@ When the client is Pool (`clientInfo.name` is `pool`), free-text, choice and
 typed questions use Pool's `_poolside/elicitation` form instead. Pool shows
 string fields only, so every field is sent as a string with the expected type
 in its description ("a whole number", "yes or no", "a comma-separated list")
-and the answer is converted back. A choice question, and a string `Literal`
-field, is a picker (a `oneOf` of `{const, title}` entries); a
-`Literal[...] | str` field is the picker plus free text (`anyOf`). A form with
-more than one field sends `_meta["poolside/field_order"]` with the fields in
-model order. A choice answer typed as text matches a choice ignoring case. An
-answer that does not convert or
-match is asked once more, then left as text. Yes/no questions keep the
-permission request. If Pool fails the request, questions fall back to text for
-the rest of the connection.
+and the answer is converted back. `NeedInput(options=[...])` offers suggestions
+in a picker plus free text (`anyOf` of a `oneOf` of `{const, title}` entries
+and a string). The person can type an alternative in the form without Escape.
+A listed choice matches ignoring case and surrounding spaces; any other
+nonblank string is passed through exactly as entered. Missing, blank or
+non-string option answers are asked once more, then left as text.
+
+Typed `answer_type` fields still validate against the Pydantic model. A string
+`Literal` is a strict picker; `Literal[...] | str` deliberately adds free text.
+A typed answer that does not validate is asked once more, then left as text.
+A form with more than one field sends `_meta["poolside/field_order"]` with the
+fields in model order. Yes/no questions keep the permission request. Other ACP
+clients still receive an enum for `options` when they support standard forms.
+If Pool fails the request, questions fall back to text for the rest of the
+connection.
+
+Accepted Pool and standard ACP form answers are echoed once as user messages before
+any subsequent agent reply. Typed answers display their validated JSON; text answers
+keep their text. Ordinary prompts, Pool inputs and yes/no permission answers are not
+re-echoed. `_nooa/session/inject` inputs echo once on admission, including a buffered
+steer's same-ID queued fallback. Invalid standard form answers are not admitted and
+leave the question as
+text (Pool retries once). Declined/dismissed forms still submit the silent
+`(declined to answer)` marker; stopping an open form submits nothing. Loading a
+session replays every admitted user item once, including the stored decline marker,
+as before.
+
+These picker/text shapes were measured in Pool 1.0.16. Its built-in agent's
+wire capture accepts unlisted text for both single-field and multi-field
+`anyOf[oneOf, string]` forms. This is a Pool extension, not general JSON Schema
+support: native number, boolean and array widgets are not supported. The
+capture establishes accepted values, not the exact on-screen label or key
+sequence; rendering in other versions must be checked separately.
 
 ## Skills and MCP servers
 

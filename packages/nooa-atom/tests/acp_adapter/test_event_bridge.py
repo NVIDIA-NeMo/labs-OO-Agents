@@ -35,6 +35,7 @@ from nooa_atom.session.items import (
     ChildCreatedUpdate,
     ClosedUpdate,
     ItemAdmittedUpdate,
+    ItemConsumedUpdate,
     ModeChangedUpdate,
     SessionInfo,
     TitleChangedUpdate,
@@ -946,6 +947,7 @@ async def test_messages_from_other_senders_are_echoed_as_user_chunks(bridged):
         ("user_messages", "acp"),  # this adapter's own prompt: the client shows it already
         ("user_messages", "user:declined"),
         ("delegates", "child:helper"),
+        ("user_messages", "acp:form-answer"),
         ("user_messages", "parent:root"),
         ("steer", "tui"),
     ):
@@ -964,7 +966,7 @@ async def test_messages_from_other_senders_are_echoed_as_user_chunks(bridged):
         for _, u in client.updates
         if isinstance(u, UserMessageChunk)
     ]
-    assert echoed == ["from parent:root", "from tui"]
+    assert echoed == ["from acp:form-answer", "from parent:root", "from tui"]
 
 
 async def test_tool_cards_of_a_child_are_mirrored_under_the_childs_id(tmp_path):
@@ -1212,3 +1214,345 @@ def test_every_agent_message_ends_its_line():
     assert end_line(already) is already
     thought = update_agent_thought_text("thinking")
     assert end_line(thought) is thought
+
+
+@pytest.mark.parametrize("prior_failure", [False, True], ids=["ack-failed", "ack-skipped"])
+async def test_input_ack_failure_is_not_shown_and_explicit_retry_preserves_ids(
+    tmp_path, prior_failure
+):
+    from acp import text_block, update_agent_message
+    from nooa_atom.acp.event_bridge import pool_input_event
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+
+    class FlakyClient(_RecordingClient):
+        fail = True
+
+        async def session_update(self, session_id, update, **kwargs):
+            if self.fail:
+                self.fail = False
+                raise ConnectionResetError("synthetic send failure")
+            await super().session_update(session_id, update, **kwargs)
+
+    client = FlakyClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    try:
+        if prior_failure:
+            bridge.publish(update_agent_message(text_block("before ack")))
+        shown = bridge.client_input_taken("stable-item", "stable-client")
+        assert bridge.client_input_taken("stable-item", "stable-client") is shown
+        with pytest.raises(ValueError, match="Conflicting"):
+            bridge.client_input_taken("stable-item", "different-client")
+        session.emit(
+            ItemConsumedUpdate(
+                session_id=session.id, channel="user_messages", item_id="stable-item"
+            )
+        )
+        with pytest.raises(ConnectionResetError, match="synthetic"):
+            await asyncio.wait_for(asyncio.shield(shown), 5)
+        assert client.updates == []
+        with pytest.raises(RuntimeError, match="Flush"):
+            bridge.retry_client_input("stable-item")
+        # The associated ack error does not steal flush's stream error.
+        with pytest.raises(ConnectionResetError, match="synthetic"):
+            await bridge.flush()
+        client.fail = True
+        retry = bridge.retry_client_input("stable-item")
+        with pytest.raises(ValueError, match="not a failed"):
+            bridge.retry_client_input("stable-item")
+        with pytest.raises(ConnectionResetError, match="synthetic"):
+            await asyncio.wait_for(retry, 5)
+        with pytest.raises(ConnectionResetError, match="synthetic"):
+            await bridge.flush()
+        await asyncio.wait_for(bridge.retry_client_input("stable-item"), 5)
+        await bridge.flush()
+        assert client.updates == [(session.id, pool_input_event("stable-item", "stable-client"))]
+        with pytest.raises(ValueError, match="not a failed"):
+            bridge.retry_client_input("stable-item")
+        bridge.forget_client_input("stable-item")
+        with pytest.raises(KeyError):
+            bridge.retry_client_input("stable-item")
+    finally:
+        await bridge.close()
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("ack_in_flight", [False, True], ids=["queued", "in-flight"])
+async def test_pump_death_fails_input_ack_and_late_registration(tmp_path, ack_in_flight):
+    from acp import text_block, update_agent_message
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+
+    class DyingClient:
+        async def session_update(self, session_id, update, **kwargs):
+            raise asyncio.CancelledError()
+
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, DyingClient())  # type: ignore[arg-type]
+    try:
+        if not ack_in_flight:
+            bridge.publish(update_agent_message(text_block("before ack")))
+        shown = bridge.client_input_taken("item", "client")
+        session.emit(
+            ItemConsumedUpdate(session_id=session.id, channel="user_messages", item_id="item")
+        )
+        with pytest.raises(RuntimeError, match="bridge stopped"):
+            await asyncio.wait_for(shown, 5)
+        with pytest.raises(RuntimeError, match="bridge stopped"):
+            await asyncio.wait_for(bridge.flush(), 5)
+        with pytest.raises(RuntimeError, match="bridge stopped"):
+            await bridge.client_input_taken("late", "client-late")
+        await asyncio.wait_for(bridge.close(), 5)
+        with pytest.raises(RuntimeError, match="bridge stopped"):
+            await bridge.client_input_taken("closed", "client-closed")
+    finally:
+        await bridge.close()
+        await agent.aclose()
+
+
+async def test_abandoned_input_and_flush_failures_do_not_leak_future_exceptions(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+
+    class FailingClient(_BlockingClient):
+        async def session_update(self, session_id, update, **kwargs):
+            self.started.set()
+            await self.release.wait()
+            raise ConnectionResetError("synthetic abandoned send")
+
+    client = FailingClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    loop = asyncio.get_running_loop()
+    errors = []
+    old_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
+    try:
+        # Abandon the ack future, as a request can when its outcome wins/cancels.
+        bridge.client_input_taken("abandoned", "client")
+        session.emit(
+            ItemConsumedUpdate(session_id=session.id, channel="user_messages", item_id="abandoned")
+        )
+        flush = asyncio.create_task(bridge.flush())
+        await client.started.wait()
+        flush.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flush
+        client.release.set()
+        await bridge.flush()
+        bridge.forget_client_input("abandoned")
+        await bridge.close()
+        await asyncio.sleep(0)  # completion callbacks, not a transport wait
+        assert errors == []
+    finally:
+        loop.set_exception_handler(old_handler)
+        await bridge.close()
+        await agent.aclose()
+
+
+async def test_late_registration_and_registered_consumption_survive_recent_id_eviction(bridged):
+    _agent, session, client, bridge = bridged
+    session.emit(ItemConsumedUpdate(session_id=session.id, channel="user_messages", item_id="late"))
+    late = bridge.client_input_taken("late", "client-late")
+    tracked = bridge.client_input_taken("tracked", "client-tracked")
+    session.emit(ItemConsumedUpdate(session_id=session.id, channel="steer", item_id="tracked"))
+    for i in range(300):
+        session.emit(
+            ItemConsumedUpdate(session_id=session.id, channel="user_messages", item_id=str(i))
+        )
+    assert "tracked" not in bridge._taken
+    assert bridge.client_input_was_taken("tracked")
+    await asyncio.wait_for(asyncio.gather(late, tracked), 5)
+    session.emit(
+        ItemConsumedUpdate(session_id=session.id, channel="user_messages", item_id="tracked")
+    )
+    await bridge.flush()
+    acks = [u.field_meta for _, u in client.updates if isinstance(u, SessionInfoUpdate)]
+    assert len(acks) == 2
+    assert [meta["poolside/clientInputId"] for meta in acks] == ["client-late", "client-tracked"]
+
+
+@pytest.mark.parametrize("consume", ["get", "drain"])
+async def test_real_channel_consumption_sends_one_ack(make_session, consume):
+    session, _llm = make_session(start=False)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    try:
+        receipt = await session.submit("multiline\ninput", source="acp")
+        shown = bridge.client_input_taken(receipt.item_id, "client")
+        channel = session._agent.queue_manager.get_channel("user_messages")
+        if consume == "get":
+            assert await session._agent.user_messages.get() == "multiline\ninput"
+        else:
+            assert channel.drain() == ["multiline\ninput"]
+        await asyncio.wait_for(shown, 5)
+        await bridge.flush()
+        assert [u.field_meta for _, u in client.updates] == [
+            {"poolside/clientInputId": "client", "poolside/inputEventId": receipt.item_id}
+        ]
+        from nooa_atom.session.store import SessionStore
+
+        assert (
+            len(
+                SessionStore._read_rows(
+                    session.handle.path, event_types=frozenset({"ItemConsumed"})
+                )
+            )
+            == 1
+        )
+    finally:
+        await bridge.close()
+
+
+async def test_live_echo_dedup_is_source_aware_and_not_bounded_by_recent_consumption(bridged):
+    _agent, session, client, bridge = bridged
+
+    def admit(item_id, source, channel="user_messages"):
+        session.emit(
+            ItemAdmittedUpdate(
+                session_id=session.id,
+                item_id=item_id,
+                source=source,
+                channel=channel,
+                preview="same text",
+                text="full\ntext",
+            )
+        )
+
+    admit("injected", "acp:inject", "steer")
+    for i in range(300):
+        admit(str(i), "acp")  # no prompt echo and no dedup poisoning
+    admit("injected", "acp:inject")
+    admit("other", "acp:inject")  # distinct ID, identical text
+    admit("form", "acp")
+    admit("form", "acp:form-answer")
+    admit("channel", "acp:inject", "delegates")
+    admit("channel", "acp:inject")
+    await bridge.flush()
+    assert [u.content.text for _, u in client.updates if isinstance(u, UserMessageChunk)] == [
+        "full\ntext",
+        "full\ntext",
+        "full\ntext",
+        "full\ntext",
+    ]
+
+
+@pytest.mark.parametrize("phase", ["never-taken", "queued", "in-flight"])
+@pytest.mark.parametrize("send_failure", [False, True])
+async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, phase, send_failure):
+    from acp import text_block, update_agent_message
+    from nooa_atom.acp.event_bridge import pool_input_event
+    from nooa_atom.acp.server import AtomACPAgent
+    from nooa_atom.session.items import Receipt
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    submitted = asyncio.Event()
+    outcome = asyncio.get_running_loop().create_future()
+
+    class SessionWithInput(_FakeSession):
+        async def submit(self, text, source):
+            submitted.set()
+            return Receipt(
+                session_id=self.id, channel="user_messages", item_id="owed", delivered="queued"
+            )
+
+        async def outcome(self, item_id):
+            return await asyncio.shield(outcome)
+
+    class GatedClient(_RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def session_update(self, session_id, update, **kwargs):
+            is_ack = isinstance(update, SessionInfoUpdate)
+            if (phase == "queued" and not is_ack) or (phase == "in-flight" and is_ack):
+                self.started.set()
+                await self.release.wait()
+            if is_ack and send_failure:
+                raise ConnectionResetError("synthetic cancelled waiter ack")
+            await super().session_update(session_id, update, **kwargs)
+
+    session = SessionWithInput(agent)
+    client = GatedClient()
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    adapter = SimpleNamespace(
+        _followed=lambda _id: (session, bridge),
+        _open={},
+        _followers={},
+        _prompt_text=AtomACPAgent._prompt_text,
+    )
+    try:
+        if phase == "queued":
+            bridge.publish(update_agent_message(text_block("gated preceding update")))
+            await asyncio.wait_for(client.started.wait(), 5)
+        request = asyncio.create_task(
+            AtomACPAgent._pool_steer(
+                adapter,
+                {
+                    "sessionId": session.id,
+                    "inputId": "client-owed",
+                    "prompt": [{"type": "text", "text": "message"}],
+                },
+            )
+        )
+        await asyncio.wait_for(submitted.wait(), 5)
+        if phase != "never-taken":
+            session.emit(
+                ItemConsumedUpdate(session_id=session.id, channel="user_messages", item_id="owed")
+            )
+        if phase == "in-flight":
+            await asyncio.wait_for(client.started.wait(), 5)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert not outcome.cancelled()
+        outcome.set_result(None)
+        client.release.set()
+        if phase != "never-taken" and send_failure:
+            with pytest.raises(ConnectionResetError, match="synthetic cancelled waiter"):
+                await asyncio.wait_for(bridge.flush(), 5)
+            assert bridge.client_input_was_taken("owed")
+            client.session_update = _RecordingClient.session_update.__get__(client)
+            await bridge.retry_client_input("owed")
+            bridge.forget_client_input("owed")
+        else:
+            await asyncio.wait_for(bridge.flush(), 5)
+        acks = [u for _, u in client.updates if isinstance(u, SessionInfoUpdate)]
+        assert acks == ([] if phase == "never-taken" else [pool_input_event("owed", "client-owed")])
+        if phase == "never-taken":
+            # Request cancellation did not withdraw the admission: later
+            # consumption must still acknowledge its original client ID.
+            client.session_update = _RecordingClient.session_update.__get__(client)
+            session.emit(
+                ItemConsumedUpdate(
+                    session_id=session.id,
+                    channel="user_messages",
+                    item_id="owed",
+                )
+            )
+            await bridge.flush()
+            acks = [u for _, u in client.updates if isinstance(u, SessionInfoUpdate)]
+            assert acks == [pool_input_event("owed", "client-owed")]
+        assert bridge._client_inputs == {}
+    finally:
+        await bridge.close()
+        await agent.aclose()
+
+
+async def test_evicted_unregistered_input_is_not_claimed_shown(bridged):
+    _agent, session, client, bridge = bridged
+    for i in range(257):
+        session.emit(
+            ItemConsumedUpdate(session_id=session.id, channel="user_messages", item_id=str(i))
+        )
+    # No authoritative history lookup: outside the documented recent-ID window
+    # the bridge cannot infer consumption. It must not resolve shown successfully.
+    shown = bridge.client_input_taken("0", "too-late")
+    await bridge.flush()
+    assert not shown.done()
+    assert not bridge.client_input_was_taken("0")
+    assert client.updates == []
+    bridge.forget_client_input("0")
+    assert shown.cancelled()

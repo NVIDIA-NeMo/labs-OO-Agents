@@ -6,6 +6,20 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: `_nooa/session/inject` inputs now echo once on admission with a
+  distinct `acp:inject` source, including a buffered steer's same-ID queued
+  fallback. Ordinary prompts/Pool inputs remain un-echoed; replay is unchanged.
+  Pool input acknowledgements now fail on failed/skipped transport sends or a
+  stopped bridge, and a consumed item's outcome cannot falsely report it shown.
+  Failed acknowledgement associations remain bridge-local for explicit same-ID
+  notification-only retry after a flush resets the send error. This is not a wire
+  retry API or an exactly-once delivery/rendering guarantee across reconnection.
+
+- `nooa-atom`: accepted Pool and standard ACP `NeedInput` form answers now echo
+  once as user messages before the agent continues, through the existing admission
+  bridge. Typed answers display their serialized JSON. Ordinary prompts,
+  yes/no permissions and live decline/cancel behavior are unchanged. Invalid standard
+  form answers stay as text questions rather than being admitted as raw data.
 - `nooa-coder` is now `nooa-atom` (NOOA Atom), with no aliases for the old names:
   the package `nooa_atom` (extra `nooa[atom]`), the command `nooa atom`, the
   environment variables `NOOA_ATOM_TOKEN` and `NOOA_ATOM_LOG_LEVEL`, the ACP agent
@@ -42,6 +56,11 @@ to follow semantic versioning.
   lists them in one agent message. A question the agent asks while such a message is
   still waiting is not opened as a form: the queued message's turn comes first and can
   answer it.
+- `nooa-atom`: Pool `NeedInput(options=[...])` forms offer the picker plus a
+  text alternative in the same field, without Escape. Listed answers normalize
+  case and surrounding spaces; other nonblank strings are preserved. Malformed
+  or blank answers retry once. Typed `Literal` fields remain strict, and yes/no
+  permissions and standard ACP enum forms are unchanged.
 - `nooa-atom`: Pool forms show choices as a picker: a choice question and a string
   `Literal` field are a `oneOf` of `{const, title}` entries, and a `Literal[...] | str`
   field is the picker plus free text. A form with more than one field sends

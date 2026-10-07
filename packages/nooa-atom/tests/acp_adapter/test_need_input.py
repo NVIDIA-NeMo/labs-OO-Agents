@@ -157,9 +157,21 @@ def test_anything_else_falls_back_to_free_text(answer_type):
     assert need_input_schema(NeedInput(question="?", answer_type=answer_type)) is None
 
 
-def test_an_invalid_answer_for_a_type_is_kept_as_its_data():
+def test_an_invalid_answer_for_a_type_is_rejected():
     need = NeedInput(question="Deploy how?", answer_type=Deployment)
-    assert answer_from_content(need, {"target": "x"}) == {"target": "x"}
+    with pytest.raises(ValidationError):
+        answer_from_content(need, {"target": "x"})
+
+
+@pytest.mark.parametrize("content", [None, {}, {"answer": ""}, {"answer": " "}, {"answer": 2}])
+def test_an_invalid_standard_text_answer_is_rejected(content):
+    with pytest.raises(ValueError):
+        answer_from_content(NeedInput(question="Name?"), content)
+
+
+def test_an_unlisted_standard_choice_is_rejected():
+    with pytest.raises(ValueError):
+        answer_from_content(NeedInput(question="Branch?", options=["main", "dev"]), {"answer": "x"})
 
 
 # ---- Pool forms: string properties only -------------------------------
@@ -240,15 +252,22 @@ def test_a_pool_form_needs_simple_fields(answer_type):
     assert pool_form_schema(NeedInput(question="?", answer_type=answer_type)) is None
 
 
-def test_a_pool_choice_question_is_a_one_of_picker():
+def test_a_pool_choice_question_is_a_picker_or_free_text():
     need = NeedInput(question="Which branch?", options=["main", "Dev"])
     assert pool_form_schema(need) == {
         "type": "object",
         "properties": {
             "answer": {
-                "type": "string",
                 "description": "Which branch?",
-                "oneOf": [{"const": "main", "title": "main"}, {"const": "Dev", "title": "Dev"}],
+                "anyOf": [
+                    {
+                        "oneOf": [
+                            {"const": "main", "title": "main"},
+                            {"const": "Dev", "title": "Dev"},
+                        ]
+                    },
+                    {"type": "string"},
+                ],
             }
         },
         "required": ["answer"],
@@ -257,10 +276,34 @@ def test_a_pool_choice_question_is_a_one_of_picker():
     assert pool_answer(need, {"answer": "MAIN"}) == "main"
 
 
-def test_a_pool_answer_that_is_not_a_choice_raises():
+@pytest.mark.parametrize("text", ["release", "  Release Candidate  ", "Ship\nwith tests", "0"])
+def test_a_pool_alternative_is_preserved(text):
     need = NeedInput(question="Which branch?", options=["main", "dev"])
-    with pytest.raises(ValueError, match="^That answer was not one of: main, dev$"):
-        pool_answer(need, {"answer": "release"})
+    assert pool_answer(need, {"answer": text}) == text
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        {},
+        {"answer": ""},
+        {"answer": " \t\n "},
+        {"answer": None},
+        {"answer": 1},
+        {"answer": False},
+        {"answer": []},
+        {"answer": {"text": "release"}},
+        "release",
+        1,
+        [],
+        [["answer", "release"]],
+    ],
+)
+def test_a_pool_options_answer_must_be_a_nonblank_string_in_an_object(content):
+    need = NeedInput(question="Which branch?", options=["main", "dev"])
+    with pytest.raises(ValueError):
+        pool_answer(need, content)
 
 
 def test_a_yes_no_question_has_no_pool_form():
@@ -310,3 +353,9 @@ def test_a_pool_literal_field_is_a_picker_and_literal_or_str_adds_free_text():
     answer = pool_answer(need, {"channel": "Beta", "name": "Vega", "note": ""})
     assert answer == Release(channel="beta", name="Vega")
     assert pool_answer(need, {"channel": "stable", "name": "Aurora"}).name == "Aurora"
+
+
+def test_a_pool_typed_literal_remains_strict():
+    need = NeedInput(question="Release how?", answer_type=Release)
+    with pytest.raises(ValidationError):
+        pool_answer(need, {"channel": "nightly", "name": "Vega"})

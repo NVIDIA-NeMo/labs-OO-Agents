@@ -90,7 +90,10 @@ _TURN_RESULTS = (Done, NeedInput, Waiting)
 _MAX_VALUE_CHARS = 10_000
 
 OWN_SOURCES = frozenset({"acp", "user:declined"})
-"""Item sources this adapter admits itself; the client already shows those."""
+"""Already-visible client input/permission answers and silent decline markers.
+
+Accepted form answers use ``acp:form-answer`` instead, so admission echoes them.
+"""
 
 _ECHOED_CHANNELS = frozenset({"user_messages", "steer"})
 
@@ -136,10 +139,25 @@ class _BestEffortUpdate:
 
 
 @dataclass(frozen=True, slots=True)
-class _Sent:
-    """Resolve ``future`` once the pump reaches it, without taking a flush's error."""
+class _InputEvent:
+    """An input acknowledgement and the future for this specific send attempt."""
 
+    value: SessionInfoUpdate
     future: asyncio.Future[None]
+
+
+@dataclass(slots=True)
+class _ClientInput:
+    client_id: str
+    future: asyncio.Future[None]
+    taken: bool = False
+
+
+def _observe_future(future: asyncio.Future[None]) -> None:
+    # Requests/flushes can be cancelled while the pump still owns their send.
+    # Retrieving an exception here does not stop an await from raising it.
+    if not future.cancelled():
+        future.exception()
 
 
 def _fenced_code(text: str, language: str) -> str:
@@ -297,9 +315,11 @@ class ACPEventBridge:
         self._plan: list[PlanEntry] = []
         self._children: list[dict[str, Any]] = []
         self._mirrors: dict[str, list[Callable[[], None]]] = {}
-        # Pool steers waiting for their item to be taken: item id ->
-        # (Pool's inputId, the future resolved once Pool has been told).
-        self._client_inputs: dict[str, tuple[str, asyncio.Future[None]]] = {}
+        # Keep the association through send failure until the request forgets it.
+        self._client_inputs: dict[str, _ClientInput] = {}
+        # Live admission dedup, including a steer's same-ID queued fallback.
+        # Replay deliberately goes through publish(), not this set.
+        self._echoed_items: set[str] = set()
         # Recently taken item ids, for a steer registered after its item was taken.
         self._taken: dict[str, None] = {}
         # By event type. Cards come from this session's agent and, mirrored,
@@ -393,33 +413,93 @@ class ACPEventBridge:
     # ---- session updates ---------------------------------------------
 
     def client_input_taken(self, item_id: str, client_input_id: str) -> asyncio.Future[None]:
-        """Tell Pool when the turn takes ``item_id``, the item of its steer ``client_input_id``.
+        """Acknowledge consumption, completing only after the transport send succeeds.
 
-        Returns a future that resolves once ``pool_input_event`` has gone
-        out, after everything queued before it, so the steer's answer can
-        follow it as Pool's own agent does. It never resolves when the item
-        is never taken (withdrawn, discarded, the session closed): the caller
-        also waits for the item's outcome, and calls ``forget_client_input``.
+        A repeated registration shares its attempt; conflicting client IDs are
+        rejected. Late registration is supported for the last 256 consumed IDs.
+        Failed sends can be explicitly retried with ``retry_client_input`` while
+        this registration is retained. This is not an execution retry or proof
+        of client rendering; transport failure can occur after peer receipt.
         """
+        previous = self._client_inputs.get(item_id)
+        if previous is not None:
+            if previous.client_id != client_input_id:
+                raise ValueError("Conflicting client input ID")
+            return previous.future
         done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        if item_id in self._taken:
-            self._send_client_input(item_id, client_input_id, done)
-        else:
-            self._client_inputs[item_id] = (client_input_id, done)
+        done.add_done_callback(_observe_future)
+        registration = _ClientInput(client_input_id, done, item_id in self._taken)
+        self._client_inputs[item_id] = registration
+        if self._closed or self._pump_failure is not None:
+            done.set_exception(self._stopped_error(self._pump_failure or RuntimeError("closed")))
+        elif registration.taken:
+            self._send_client_input(item_id, registration)
         return done
 
-    def forget_client_input(self, item_id: str) -> None:
-        self._client_inputs.pop(item_id, None)
+    def client_input_was_taken(self, item_id: str) -> bool:
+        registration = self._client_inputs.get(item_id)
+        return bool(registration and registration.taken)
 
-    def _send_client_input(
-        self, item_id: str, client_input_id: str, done: asyncio.Future[None]
-    ) -> None:
-        if self._closed:
-            if not done.done():
-                done.set_result(None)
+    def retry_client_input(self, item_id: str) -> asyncio.Future[None]:
+        """Explicitly retry only a failed acknowledgement, using the same wire IDs.
+
+        The caller must first flush to report/reset the ordinary stream error.
+        No admission, consumption, transcript replay or new turn is performed.
+        This bridge-local facility does not make a repeated Pool steer request
+        idempotent; reconnect/persistent client-ID reconciliation is not defined.
+        """
+        registration = self._client_inputs[item_id]
+        if self._closed or self._pump_failure is not None:
+            raise self._stopped_error(self._pump_failure or RuntimeError("closed"))
+        if self._error is not None:
+            raise RuntimeError("Flush the ACP send error before retrying an input event")
+        if not registration.taken or not registration.future.done():
+            raise ValueError("Input acknowledgement is not a failed completed attempt")
+        if registration.future.cancelled() or registration.future.exception() is None:
+            raise ValueError("Input acknowledgement is not a failed completed attempt")
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        done.add_done_callback(_observe_future)
+        registration.future = done
+        self._send_client_input(item_id, registration)
+        return done
+
+    def release_client_input_waiter(self, item_id: str, *, keep_pending: bool = False) -> None:
+        """Release a request, not a consumed input's pump-owned notification.
+
+        Successful sends are cleaned up; failed sends retain IDs for explicit
+        retry. A cancelled request's still-admitted input retains its association
+        until consumption/send or bridge close, even if not yet taken.
+        """
+        registration = self._client_inputs.get(item_id)
+        if registration is None:
             return
-        self._enqueue(pool_input_event(item_id, client_input_id))
-        self._queue.put_nowait(_Sent(done))  # resolved once the update is sent
+        if not keep_pending and not registration.taken and not registration.future.done():
+            self.forget_client_input(item_id)
+            return
+
+        def release_success(future: asyncio.Future[None]) -> None:
+            if (
+                not future.cancelled()
+                and future.exception() is None
+                and self._client_inputs.get(item_id) is registration
+                and registration.future is future
+            ):
+                self.forget_client_input(item_id)
+
+        if registration.future.done():
+            release_success(registration.future)
+        else:
+            registration.future.add_done_callback(release_success)
+
+    def forget_client_input(self, item_id: str) -> None:
+        registration = self._client_inputs.pop(item_id, None)
+        if registration is not None and not registration.future.done():
+            registration.future.cancel()
+
+    def _send_client_input(self, item_id: str, registration: _ClientInput) -> None:
+        self._queue.put_nowait(
+            _InputEvent(pool_input_event(item_id, registration.client_id), registration.future)
+        )
 
     def _on_session_update(self, update: Any) -> None:
         if isinstance(update, AgentEventUpdate):
@@ -428,11 +508,17 @@ class ACPEventBridge:
             self._taken[update.item_id] = None
             while len(self._taken) > 256:
                 del self._taken[next(iter(self._taken))]
-            waiting = self._client_inputs.pop(update.item_id, None)
-            if waiting is not None:
-                self._send_client_input(update.item_id, *waiting)
+            waiting = self._client_inputs.get(update.item_id)
+            if waiting is not None and not waiting.taken:
+                waiting.taken = True
+                self._send_client_input(update.item_id, waiting)
         elif isinstance(update, ItemAdmittedUpdate):
-            if update.channel in _ECHOED_CHANNELS and update.source not in self._own_sources:
+            if (
+                update.channel in _ECHOED_CHANNELS
+                and update.source not in self._own_sources
+                and update.item_id not in self._echoed_items
+            ):
+                self._echoed_items.add(update.item_id)
                 text = getattr(update, "text", "") or update.preview
                 self._enqueue(update_user_message_text(text))
         elif isinstance(update, TitleChangedUpdate):
@@ -757,9 +843,14 @@ class ACPEventBridge:
                 return
             if isinstance(item, asyncio.Future) and not item.done():
                 item.set_exception(self._stopped_error(cause))
-            elif isinstance(item, _Sent) and not item.future.done():
-                item.future.set_result(None)
+            elif isinstance(item, _InputEvent) and not item.future.done():
+                item.future.set_exception(self._stopped_error(cause))
             self._queue.task_done()
+
+    def _fail_client_inputs(self, cause: BaseException) -> None:
+        for registration in self._client_inputs.values():
+            if not registration.future.done():
+                registration.future.set_exception(self._stopped_error(cause))
 
     async def _pump(self) -> None:
         try:
@@ -771,6 +862,7 @@ class ACPEventBridge:
             # which flushes first — blocked forever.
             self._pump_failure = exc
             self._fail_pending_flushes(exc)
+            self._fail_client_inputs(exc)
             raise
 
     async def _pump_loop(self) -> None:
@@ -791,9 +883,26 @@ class ACPEventBridge:
                         else:
                             item.set_exception(error)
                     continue
-                if isinstance(item, _Sent):
-                    if not item.future.done():
-                        item.future.set_result(None)
+                if isinstance(item, _InputEvent):
+                    if self._error is not None:
+                        if not item.future.done():
+                            item.future.set_exception(self._error)
+                        continue
+                    try:
+                        await self.client.session_update(self.session_id, item.value)
+                    except BaseException as exc:
+                        if isinstance(exc, Exception):
+                            self._error = exc
+                            error = exc
+                        else:
+                            error = self._stopped_error(exc)
+                        if not item.future.done():
+                            item.future.set_exception(error)
+                        if not isinstance(exc, Exception):
+                            raise
+                    else:
+                        if not item.future.done():
+                            item.future.set_result(None)
                     continue
                 if isinstance(item, _BestEffortUpdate):
                     try:
@@ -825,6 +934,7 @@ class ACPEventBridge:
         if self._pump_failure is not None:
             raise self._stopped_error(self._pump_failure)
         future = asyncio.get_running_loop().create_future()
+        future.add_done_callback(_observe_future)
         self._queue.put_nowait(future)
         # Race the pump: if it dies without draining this marker, waiting on the
         # marker alone would never return.
@@ -918,6 +1028,7 @@ class ACPEventBridge:
         with suppress(Exception):
             await self.flush()
         self._closed = True
+        self._fail_client_inputs(RuntimeError("closed"))
         self._queue.put_nowait(_STOP)
         with suppress(BaseException):
             await self._pump_task
