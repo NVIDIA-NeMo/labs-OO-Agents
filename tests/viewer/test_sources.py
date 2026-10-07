@@ -286,3 +286,58 @@ def test_experiment_listing_reads_catalog_once(source_store, monkeypatch, endpoi
     assert len(reads) == 1
     data = response.json()
     assert (data["total"] if isinstance(data, dict) else len(data)) == 25
+
+
+@pytest.mark.parametrize(
+    ("metadata", "classified", "scored", "average", "passed", "failed"),
+    [
+        (
+            [{"passed": True, "score": 1}, {"passed": False, "score": 0}, {"passed": None}],
+            2,
+            2,
+            0.5,
+            1,
+            1,
+        ),
+        (
+            [
+                {"passed": None, "score": 0.5},
+                {"passed": None, "weighted_score": 0.75},
+                {"passed": None, "score": "invalid"},
+            ],
+            0,
+            2,
+            0.625,
+            0,
+            0,
+        ),
+        ([{"passed": None}, {"passed": None}], 0, 0, None, 0, 0),
+    ],
+)
+def test_summary_distinguishes_grades_scores_and_missing_results(
+    source_store, monkeypatch, metadata, classified, scored, average, passed, failed
+):
+    catalog = source_store.list_sessions()[0]
+    monkeypatch.setattr(
+        source_store,
+        "list_sessions",
+        lambda: [{**catalog, "id": f"example-{i}", "eval": ev} for i, ev in enumerate(metadata)],
+    )
+    client = TestClient(main.app)
+    response = client.get("/api/eval/experiments/all")
+    assert response.status_code == 200
+    experiment = response.json()[0]
+    assert experiment["classified_count"] == classified
+    assert experiment["scored_count"] == scored
+    assert experiment["avg_score"] == average
+    assert experiment["passed_count"] == passed
+    response = client.get("/api/eval/experiment/Example/summary")
+    assert response.status_code == 200
+    summary = response.json()["overall"]
+    assert summary["classified_count"] == classified
+    assert summary["scored_count"] == scored
+    assert summary["passed"] == passed
+    assert summary["failed"] == failed
+    assert summary["unclassified"] == len(metadata) - classified
+    if average is not None:
+        assert summary["avg_score"] == average

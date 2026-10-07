@@ -10,6 +10,7 @@ unpacks it and returns all keys as top-level fields in each test dict,
 plus a ``metadata_keys`` list so the frontend can dynamically build columns.
 """
 
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -42,6 +43,9 @@ class ExperimentSummaryItem(BaseModel):
     models: list[str]
     test_count: int
     passed_count: int
+    classified_count: int = 0
+    scored_count: int = 0
+    avg_score: float | None = None
     status: str
     suite_name: str | None = None
 
@@ -76,6 +80,17 @@ _DETAIL_ONLY_KEYS = {"input", "output", "expected", "scores", "trace_file", "dur
 _TRACE_METRIC_KEYS = {"duration_ms", "span_count"}
 
 
+def _numeric_score(metadata: dict[str, Any]) -> float | None:
+    value = metadata.get("score")
+    if value is None:
+        value = metadata.get("weighted_score")
+    try:
+        score = float(value)
+        return score if math.isfinite(score) else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _build_experiment_summary_item(
     experiment: str, sessions: list[dict[str, Any]]
 ) -> ExperimentSummaryItem | None:
@@ -87,6 +102,8 @@ def _build_experiment_summary_item(
         {s["eval"].get("model", "") for s in sessions if s.get("eval", {}).get("model")}
     )
     passed = sum(1 for s in sessions if s.get("eval", {}).get("passed"))
+    classified = sum(s.get("eval", {}).get("passed") is not None for s in sessions)
+    scores = [score for s in sessions if (score := _numeric_score(s.get("eval", {}))) is not None]
     modified = max((float(s["modified"]) for s in sessions), default=0.0)
 
     return ExperimentSummaryItem(
@@ -95,6 +112,9 @@ def _build_experiment_summary_item(
         models=models,
         test_count=len(sessions),
         passed_count=passed,
+        classified_count=classified,
+        scored_count=len(scores),
+        avg_score=sum(scores) / len(scores) if scores else None,
         status="completed",
     )
 
@@ -445,15 +465,11 @@ def get_experiment_summary_endpoint(
         by_test_type[test_name]["total"] += 1
         if t_passed:
             by_test_type[test_name]["passed"] += 1
-        score = t.get("score") if t.get("score") is not None else t.get("weighted_score")
+        score = _numeric_score(t)
         if score is not None:
-            try:
-                s = float(score)
-                total_score += s
-                scored += 1
-                by_test_type[test_name]["score_sum"] += s
-            except (ValueError, TypeError):
-                pass
+            total_score += score
+            scored += 1
+            by_test_type[test_name]["score_sum"] += score
 
         # matrix
         if test_name not in matrix:
@@ -484,6 +500,8 @@ def get_experiment_summary_endpoint(
             "passed": passed,
             "failed": sum(t.get("passed") is False for t in tests),
             "unclassified": sum(t.get("passed") is None for t in tests),
+            "classified_count": sum(t.get("passed") is not None for t in tests),
+            "scored_count": scored,
             "avg_score": avg_score,
             "success_rate": success_rate,
             "run_count": 1,
