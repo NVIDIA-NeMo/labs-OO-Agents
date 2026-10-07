@@ -29,12 +29,12 @@ _agentdoc_hidden_names = {"_hidden"}
 with _hidden:
     import logging
     import os
-    from typing import TYPE_CHECKING, Any
+    from typing import TYPE_CHECKING, Annotated, Any
 
     from pydantic import BaseModel, Field
 
     from nooa import Agent, Context, no_trace, strategy
-    from nooa.agentdoc import doc
+    from nooa.agentdoc import doc, spec
     from nooa.config import CodeActConfig
     from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.strategies import CodeActV2
@@ -60,7 +60,7 @@ _SOLVE_CONTEXT = {
     "python_cell_state": None,
     "self": Context(expr="doc(type(self), concise=True)", prefix=True),
     # Method inputs remain live even if their prefill events are summarized.
-    # Reuse the framework's bounded parameter rendering rather than a raw copy.
+    # Honor description's unbounded string spec while keeping other inputs bounded.
     "task": Context(
         expr="runtime.current_call.format_parameters_as_code(tc=runtime.truncation_config)",
         prefix=True,
@@ -308,7 +308,11 @@ class BenchAgent(
         _SOLVE_STRATEGY,
         context=_SOLVE_CONTEXT,
     )
-    async def _solve_task(self, description: str, supplied_context: Any = None) -> TaskResult:
+    async def _solve_task(
+        self,
+        description: Annotated[str, spec(max_string=None)],
+        supplied_context: Any = None,
+    ) -> TaskResult:
         """Solve the supplied task completely.
 
         Inspect before editing. Plan with ``self.todo`` only when useful. Make the
