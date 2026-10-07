@@ -863,10 +863,28 @@ async def test_original_task_remains_after_prefill_compaction(tmp_path):
     llm.compacted = False
     agent = BenchAgent(llm=llm, working_dir=str(tmp_path))
     try:
-        assert (await agent._solve_task("UNIQUE-ORIGINAL-TASK")).solution_description == "done"
+        description = (
+            "task start " + "a" * 3000 + " MIDDLE-TASK-INSTRUCTIONS " + "b" * 3000 + " task end"
+        )
+        supplied_context = "context start " + "c" * 3000 + " MIDDLE-SUPPLIED-CONTEXT " + "d" * 3000
+        assert (
+            await agent._solve_task(description, supplied_context=supplied_context)
+        ).solution_description == "done"
         assert llm.compacted
         rendered = str(llm.last_messages)
-        assert "UNIQUE-ORIGINAL-TASK" in rendered
+        assert len(llm.calls) == 2
+        # The first model request includes the input prefill; the second must
+        # retain the full task after that prefill has been summarized away.
+        for call in llm.calls:
+            messages = str(call.messages)
+            assert "MIDDLE-TASK-INSTRUCTIONS" in messages
+            assert "MIDDLE-SUPPLIED-CONTEXT" not in messages
+        initial_prefill = str([m for m in llm.calls[0].messages if m["role"] != "system"])
+        assert "MIDDLE-TASK-INSTRUCTIONS" in initial_prefill
+        persistent_context = str([m for m in llm.calls[1].messages if m["role"] == "system"])
+        assert "MIDDLE-TASK-INSTRUCTIONS" in persistent_context
+        assert "MIDDLE-SUPPLIED-CONTEXT" not in persistent_context
+        assert "MIDDLE-TASK-INSTRUCTIONS" in rendered
         assert "TaskResult" in rendered
     finally:
         await agent.close()
