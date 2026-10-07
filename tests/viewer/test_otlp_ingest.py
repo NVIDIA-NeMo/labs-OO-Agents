@@ -232,13 +232,13 @@ class TestEventLoopIsolation:
         get_started = asyncio.Event()
 
         # Simulate a heavy catalog read in the evaluations-tab endpoint.
-        def slow_list_experiments():
+        def slow_list_sessions(**kwargs):
             loop.call_soon_threadsafe(get_started.set)
             _time.sleep(2.0)
             return []
 
         with patch("nooa.viewer.main.otlp_store", mock_store):
-            with patch("nooa.viewer.sources.list_experiments", slow_list_experiments):
+            with patch("nooa.viewer.sources.list_sessions", slow_list_sessions):
                 async with AsyncClient(
                     transport=ASGITransport(app=app), base_url="http://test"
                 ) as client:

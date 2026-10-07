@@ -91,10 +91,12 @@ def add_run(name: str, run_id: str) -> dict[str, Any]:
             raise NotImplementedError("This source does not support selecting runs")
         options = prepare(run_id)
         replacement = factory(name=name, options=options)
-        catalog = replacement.list_sessions()
-        ids = [s["id"] for s in catalog]
-        if len(set(ids)) != len(ids) or any(not sid.startswith(name + "-") for sid in ids):
-            raise ValueError("Source returned an invalid session namespace or duplicate identities")
+        # Validate across sources too: names may have overlapping prefixes.
+        catalog = [
+            session
+            for owner, _, session in _catalog({**configured_sources(), name: replacement}).values()
+            if owner == name
+        ]
         changed = options != item.get("options", {})
         if changed:
             item["options"] = options
@@ -122,9 +124,9 @@ def add_run(name: str, run_id: str) -> dict[str, Any]:
         }
 
 
-def _catalog() -> dict[str, tuple[str, TraceSource, dict[str, Any]]]:
+def _catalog(plugins=None) -> dict[str, tuple[str, TraceSource, dict[str, Any]]]:
     rows = {}
-    for name, source in configured_sources().items():
+    for name, source in (configured_sources() if plugins is None else plugins).items():
         for session in source.list_sessions():
             sid = session["id"]
             if sid in rows:
@@ -139,14 +141,18 @@ def list_sessions(experiment=None, eval_only=False, batch_id=None):
     if not configured_sources():
         return otlp_store.list_sessions(experiment, eval_only, batch_id)
     rows = {row["id"]: row for row in otlp_store.list_sessions(experiment, eval_only, batch_id)}
+    cached_rows = {row["id"]: row for row in otlp_store.list_sessions()}
     for sid, (name, _source, session) in _catalog().items():
+        # Catalog membership is authoritative even when the portable payload
+        # omitted evaluation fields or used a different experiment name.
+        rows.pop(sid, None)
         if experiment is not None and session.get("experiment") != experiment:
             continue
         if batch_id is not None and session.get("batch_id") != batch_id:
             continue
         if eval_only and not session.get("eval"):
             continue
-        cached = rows.get(sid)
+        cached = cached_rows.get(sid)
         # The catalog owns grades; the local cache owns measured trace metrics.
         rows[sid] = {**session, "source": name}
         if cached:
@@ -219,8 +225,22 @@ def ensure_session(session_id: str):
                     raise ValueError("Unsupported source journal record")
                 if journal["type"] == "call" and journal["call"].get("session_id") != session_id:
                     raise ValueError("Source returned a mismatched call identity")
+                if journal["type"] == "call":
+                    # Call IDs in the native journal table are globally keyed.
+                    # Portable traces may reuse IDs, so scope them by session.
+                    journal = {
+                        **journal,
+                        "call": {
+                            **journal["call"],
+                            "call_id": json.dumps([session_id, journal["call"]["call_id"]]),
+                        },
+                    }
                 journals.append(journal)
-        if not body["resourceSpans"]:
+        if not any(
+            scope.get("spans")
+            for resource in body["resourceSpans"]
+            for scope in resource.get("scopeSpans", [])
+        ):
             raise ValueError("Source returned no OTLP trace")
 
         def write():
@@ -237,14 +257,7 @@ def ensure_session(session_id: str):
                         "Cached source version changed; clear its cache before reopening"
                     )
                 return
-            # Journals are idempotent. Publish spans last so failed journal loads
-            # can retry without appending duplicate spans.
-            for journal in journals:
-                if journal["type"] == "blocks":
-                    otlp_store.ingest_journal_blocks(session_id, journal["blocks"])
-                else:
-                    otlp_store.ingest_journal_call(journal["call"])
-            otlp_store.ingest(body)
+            otlp_store.ingest_session_with_journal(body, journals)
 
         # Serialize with native ingestion and annotation writes.
         from .main import _write_executor

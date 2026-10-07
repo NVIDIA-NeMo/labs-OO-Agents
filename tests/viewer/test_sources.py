@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Source isolation, lazy loading, and cache publication using synthetic data."""
 
+import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from starlette.testclient import TestClient
 
 from nooa.viewer import main, otlp_store, sources
 
@@ -171,7 +174,7 @@ def test_duplicate_source_identity_rejected(source_store, monkeypatch):
 def test_journal_failure_can_retry_without_duplicate_spans(source_store, monkeypatch):
     original = otlp_store.ingest_journal_call
 
-    def fail(call):
+    def fail(call, **kwargs):
         raise RuntimeError("interrupted")
 
     monkeypatch.setattr(otlp_store, "ingest_journal_call", fail)
@@ -181,3 +184,105 @@ def test_journal_failure_can_retry_without_duplicate_spans(source_store, monkeyp
     monkeypatch.setattr(otlp_store, "ingest_journal_call", original)
     sources.ensure_session("example-task")
     assert len(otlp_store.get_session_spans("example-task")) == 1
+
+
+def test_imported_call_ids_do_not_replace_other_sessions(source_store, monkeypatch):
+    main._write_executor.submit(
+        otlp_store.ingest_journal_call,
+        {"call_id": "call", "session_id": "native", "output_messages": [{"role": "assistant"}]},
+    ).result()
+    catalog = source_store.list_sessions()[0]
+    monkeypatch.setattr(
+        source_store,
+        "list_sessions",
+        lambda: [catalog, {**catalog, "id": "example-second"}],
+    )
+    sources.ensure_session("example-task")
+    sources.ensure_session("example-second")
+    assert otlp_store.get_session_calls("native")[0]["call_id"] == "call"
+    for sid in ["example-task", "example-second"]:
+        assert len(otlp_store.get_session_calls(sid)) == 1
+        assert otlp_store.get_session_calls(sid)[0]["call_id"] == json.dumps([sid, "call"])
+
+
+def test_filtered_catalog_uses_cached_metrics_and_catalog_membership(source_store, monkeypatch):
+    sources.ensure_session("example-task")
+    catalog = source_store.list_sessions()[0]
+    monkeypatch.setattr(
+        source_store, "list_sessions", lambda: [{**catalog, "experiment": "Catalog experiment"}]
+    )
+    sessions = sources.list_sessions(experiment="Catalog experiment", eval_only=True)
+    assert len(sessions) == 1
+    assert sessions[0]["span_count"] == 1
+    assert sessions[0]["eval"]["passed"] is False
+    assert sources.list_sessions(experiment="Example") == []
+
+
+def test_failed_span_publication_rolls_back_journals_and_can_retry(source_store):
+    db = otlp_store._get_db()
+    db.execute(
+        "CREATE TRIGGER reject_span BEFORE INSERT ON spans BEGIN SELECT RAISE(ABORT, 'test'); END"
+    )
+    db.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="test"):
+        sources.ensure_session("example-task")
+    assert not otlp_store.session_exists("example-task")
+    assert otlp_store.get_session_calls("example-task") == []
+    assert otlp_store.get_session_blocks("example-task") == {}
+    assert not main._write_executor.submit(
+        lambda: otlp_store._get_write_db().in_transaction
+    ).result()
+    db.execute("DROP TRIGGER reject_span")
+    db.commit()
+    sources.ensure_session("example-task")
+    assert len(otlp_store.get_session_spans("example-task")) == 1
+
+
+def test_namespaced_call_collision_preserves_native_journal(source_store):
+    call_id = json.dumps(["example-task", "call"])
+    main._write_executor.submit(
+        otlp_store.ingest_journal_call, {"call_id": call_id, "session_id": "native"}
+    ).result()
+    with pytest.raises(ValueError, match="another session"):
+        sources.ensure_session("example-task")
+    assert otlp_store.get_session_calls("native")[0]["call_id"] == call_id
+    assert not otlp_store.session_exists("example-task")
+    assert otlp_store.get_session_blocks("example-task") == {}
+
+
+def test_empty_trace_does_not_cache_and_can_retry(source_store, monkeypatch):
+    original = source_store.load_session
+
+    def empty(session_id):
+        records = original(session_id)
+        records[-1]["resourceSpans"][0]["scopeSpans"] = []
+        return records
+
+    monkeypatch.setattr(source_store, "load_session", empty)
+    with pytest.raises(ValueError, match="no OTLP trace"):
+        sources.ensure_session("example-task")
+    assert not otlp_store.session_exists("example-task")
+    assert otlp_store.get_session_calls("example-task") == []
+    monkeypatch.setattr(source_store, "load_session", original)
+    sources.ensure_session("example-task")
+    assert source_store.loads == 2
+    assert len(otlp_store.get_session_spans("example-task")) == 1
+
+
+@pytest.mark.parametrize("endpoint", ["/api/eval/experiments?limit=1", "/api/eval/experiments/all"])
+def test_experiment_listing_reads_catalog_once(source_store, monkeypatch, endpoint):
+    catalog = source_store.list_sessions()[0]
+    reads = []
+
+    def many_experiments():
+        reads.append(True)
+        return [
+            {**catalog, "id": f"example-{i}", "experiment": f"Experiment {i}"} for i in range(25)
+        ]
+
+    monkeypatch.setattr(source_store, "list_sessions", many_experiments)
+    response = TestClient(main.app).get(endpoint)
+    assert response.status_code == 200
+    assert len(reads) == 1
+    data = response.json()
+    assert (data["total"] if isinstance(data, dict) else len(data)) == 25

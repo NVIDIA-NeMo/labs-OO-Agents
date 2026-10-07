@@ -76,9 +76,10 @@ _DETAIL_ONLY_KEYS = {"input", "output", "expected", "scores", "trace_file", "dur
 _TRACE_METRIC_KEYS = {"duration_ms", "span_count"}
 
 
-def _build_experiment_summary_item(experiment: str) -> ExperimentSummaryItem | None:
+def _build_experiment_summary_item(
+    experiment: str, sessions: list[dict[str, Any]]
+) -> ExperimentSummaryItem | None:
     """Build summary for a single experiment from indexed sessions."""
-    sessions = sources.list_sessions(experiment=experiment, eval_only=True)
     if not sessions:
         return None
 
@@ -96,6 +97,21 @@ def _build_experiment_summary_item(experiment: str) -> ExperimentSummaryItem | N
         passed_count=passed,
         status="completed",
     )
+
+
+def _build_experiment_summaries() -> list[ExperimentSummaryItem]:
+    """Read each source catalog once for a consistent Experiment listing."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for session in sources.list_sessions(eval_only=True):
+        if session.get("experiment"):
+            grouped.setdefault(session["experiment"], []).append(session)
+    summaries = []
+    for name, sessions in grouped.items():
+        item = _build_experiment_summary_item(name, sessions)
+        if item:
+            summaries.append(item)
+    summaries.sort(key=lambda x: x.timestamp, reverse=True)
+    return summaries
 
 
 def _session_to_test_dict(
@@ -220,15 +236,7 @@ def list_experiments(
     limit = max(1, min(limit, 200))
     page = max(1, page)
 
-    all_experiments = sources.list_experiments()
-
-    summaries: list[ExperimentSummaryItem] = []
-    for name in all_experiments:
-        item = _build_experiment_summary_item(name)
-        if item:
-            summaries.append(item)
-
-    summaries.sort(key=lambda x: x.timestamp, reverse=True)
+    summaries = _build_experiment_summaries()
 
     if search:
         search_lower = search.lower()
@@ -250,13 +258,7 @@ def list_experiments(
 
 @router.get("/experiments/all")
 def list_all_experiments() -> list[ExperimentSummaryItem]:
-    summaries: list[ExperimentSummaryItem] = []
-    for name in sources.list_experiments():
-        item = _build_experiment_summary_item(name)
-        if item:
-            summaries.append(item)
-    summaries.sort(key=lambda x: x.timestamp, reverse=True)
-    return summaries
+    return _build_experiment_summaries()
 
 
 def _collect_column_info(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:

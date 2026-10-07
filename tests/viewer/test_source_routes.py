@@ -139,3 +139,19 @@ def test_remote_run_selection_requires_authorization(selection, monkeypatch):
         headers={"Authorization": "Bearer test-token"},
     )
     assert response.status_code == 200
+
+
+def test_selection_collision_with_another_source_preserves_config(selection):
+    path, registry = selection
+    config = json.loads(path.read_text())
+    config["sources"].append(
+        {"name": "example-b", "plugin": "example-source", "options": {"runs": ["task"]}}
+    )
+    path.write_text(json.dumps(config))
+    registry["example-b"] = RunSource(name="example-b", options={"runs": ["task"]})
+    before, active = path.read_text(), registry["example"]
+    response = TestClient(main.app).post("/api/sources/example/runs", json={"run_id": "b-task"})
+    assert response.status_code == 400
+    assert path.read_text() == before
+    assert registry["example"] is active
+    assert len(sources._catalog()) == 2
