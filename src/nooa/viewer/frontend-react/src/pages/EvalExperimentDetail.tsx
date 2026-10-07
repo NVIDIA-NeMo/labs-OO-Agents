@@ -56,7 +56,8 @@ export function EvalExperimentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const experimentId = decodeURIComponent(id || "");
+  // React Router already decodes path parameters, including literal percent signs.
+  const experimentId = id || "";
 
   const page = parseInt(searchParams.get("page") || "1", 10);
   const sortBy = searchParams.get("sort") || null;

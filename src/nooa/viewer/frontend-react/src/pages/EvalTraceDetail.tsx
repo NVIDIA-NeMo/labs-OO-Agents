@@ -14,8 +14,9 @@ export function EvalTraceDetail() {
   const { id, traceId } = useParams<{ id: string; traceId: string }>();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const experimentId = decodeURIComponent(id || "");
-  const sessionId = decodeURIComponent(traceId || "");
+  // React Router already decodes path parameters, including literal percent signs.
+  const experimentId = id || "";
+  const sessionId = traceId || "";
 
   const [allTests, setAllTests] = useState<TestResult[]>([]);
   const [loading, setLoading] = useState(true);
