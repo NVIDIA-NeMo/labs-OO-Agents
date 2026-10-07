@@ -341,3 +341,29 @@ def test_summary_distinguishes_grades_scores_and_missing_results(
     assert summary["unclassified"] == len(metadata) - classified
     if average is not None:
         assert summary["avg_score"] == average
+
+
+def test_measured_trace_availability_overrides_catalog_hint(source_store, monkeypatch):
+    original_load = source_store.load_session
+
+    def load(session_id):
+        records = original_load(session_id)
+        records[-1]["resourceSpans"][0]["resource"]["attributes"].append(
+            {"key": "eval.trace_available", "value": {"boolValue": False}}
+        )
+        return records
+
+    monkeypatch.setattr(source_store, "load_session", load)
+    sources.ensure_session("example-task")
+    catalog = source_store.list_sessions()[0]
+    monkeypatch.setattr(
+        source_store,
+        "list_sessions",
+        lambda: [
+            {
+                **catalog,
+                "eval": {**catalog["eval"], "trace_available": True},
+            }
+        ],
+    )
+    assert sources.list_sessions()[0]["eval"]["trace_available"] is False

@@ -158,8 +158,9 @@ def list_sessions(experiment=None, eval_only=False, batch_id=None):
         if cached:
             rows[sid]["span_count"] = cached["span_count"]
             rows[sid]["eval"] = {**cached.get("eval", {}), **session.get("eval", {})}
-            if session.get("eval", {}).get("trace_available") is None:
-                rows[sid]["eval"]["trace_available"] = cached.get("eval", {}).get("trace_available")
+            availability = cached.get("eval", {}).get("trace_available")
+            if availability is not None:
+                rows[sid]["eval"]["trace_available"] = availability
     return list(rows.values())
 
 
