@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from . import otlp_store
+from . import otlp_store, sources
 
 
 def _epoch_to_iso(epoch: str | float) -> str:
@@ -78,7 +78,7 @@ _TRACE_METRIC_KEYS = {"duration_ms", "span_count"}
 
 def _build_experiment_summary_item(experiment: str) -> ExperimentSummaryItem | None:
     """Build summary for a single experiment from indexed sessions."""
-    sessions = otlp_store.list_sessions(experiment=experiment, eval_only=True)
+    sessions = sources.list_sessions(experiment=experiment, eval_only=True)
     if not sessions:
         return None
 
@@ -146,7 +146,8 @@ def _sessions_to_test_dicts(
     durations = otlp_store.get_session_durations_ms([s["id"] for s in sessions])
     return [
         _session_to_test_dict(
-            {**s, "duration_ms": durations.get(s["id"])}, include_detail=include_detail
+            {**s, "duration_ms": durations.get(s["id"], s.get("duration_ms"))},
+            include_detail=include_detail,
         )
         for s in sessions
     ]
@@ -173,7 +174,7 @@ def _collect_metadata_keys(tests: list[dict[str, Any]]) -> list[str]:
 def health_check():
     return {
         "status": "healthy",
-        "experiment_count": len(otlp_store.list_experiments()),
+        "experiment_count": len(sources.list_experiments()),
     }
 
 
@@ -219,7 +220,7 @@ def list_experiments(
     limit = max(1, min(limit, 200))
     page = max(1, page)
 
-    all_experiments = otlp_store.list_experiments()
+    all_experiments = sources.list_experiments()
 
     summaries: list[ExperimentSummaryItem] = []
     for name in all_experiments:
@@ -250,7 +251,7 @@ def list_experiments(
 @router.get("/experiments/all")
 def list_all_experiments() -> list[ExperimentSummaryItem]:
     summaries: list[ExperimentSummaryItem] = []
-    for name in otlp_store.list_experiments():
+    for name in sources.list_experiments():
         item = _build_experiment_summary_item(name)
         if item:
             summaries.append(item)
@@ -283,7 +284,7 @@ def get_experiment(
     sort_dir: str = "desc",
     search: str | None = None,
 ):
-    sessions = otlp_store.list_sessions(experiment=experiment_id, eval_only=True)
+    sessions = sources.list_sessions(experiment=experiment_id, eval_only=True)
     if not sessions:
         raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found")
 
@@ -294,7 +295,7 @@ def get_experiment(
     models = sorted({t.get("model", "") for t in tests if t.get("model")})
     variants = sorted({t.get("variant", "") for t in tests if t.get("variant")})
 
-    summary = otlp_store.get_experiment_summary(experiment_id)
+    summary = {"modified": max((float(s["modified"]) for s in sessions), default=0)}
 
     # --- Filtering ---
     known_params = {"page", "limit", "sort_by", "sort_dir", "search"}
@@ -378,7 +379,7 @@ def get_experiment(
 def get_experiment_summary_endpoint(
     experiment_id: str, request: Request, search: str | None = None
 ):
-    sessions = otlp_store.list_sessions(experiment=experiment_id, eval_only=True)
+    sessions = sources.list_sessions(experiment=experiment_id, eval_only=True)
     if not sessions:
         raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found")
 
@@ -479,6 +480,8 @@ def get_experiment_summary_endpoint(
         "overall": {
             "total": total,
             "passed": passed,
+            "failed": sum(t.get("passed") is False for t in tests),
+            "unclassified": sum(t.get("passed") is None for t in tests),
             "avg_score": avg_score,
             "success_rate": success_rate,
             "run_count": 1,
@@ -497,7 +500,7 @@ def get_experiment_summary_endpoint(
 
 @router.get("/experiment/{experiment_id}/tests")
 def get_experiment_tests(experiment_id: str):
-    sessions = otlp_store.list_sessions(experiment=experiment_id, eval_only=True)
+    sessions = sources.list_sessions(experiment=experiment_id, eval_only=True)
     if not sessions:
         raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found")
 
@@ -508,7 +511,7 @@ def get_experiment_tests(experiment_id: str):
 
 @router.get("/experiment/{experiment_id}/status")
 def get_experiment_status_endpoint(experiment_id: str) -> ExperimentStatus:
-    sessions = otlp_store.list_sessions(experiment=experiment_id, eval_only=True)
+    sessions = sources.list_sessions(experiment=experiment_id, eval_only=True)
     if not sessions:
         raise HTTPException(status_code=404, detail=f"Experiment {experiment_id} not found")
 
@@ -528,7 +531,7 @@ def get_test_trace(experiment_id: str, test_id: str):
     in the OTLP format. The frontend can link directly to
     /traces/view?session_id={session_id} instead.
     """
-    sessions = otlp_store.list_sessions(experiment=experiment_id, eval_only=True)
+    sessions = sources.list_sessions(experiment=experiment_id, eval_only=True)
     session_id = None
     for s in sessions:
         ev = s.get("eval", {})
@@ -540,6 +543,7 @@ def get_test_trace(experiment_id: str, test_id: str):
         return {"events": [], "trace_file": None, "session_id": None}
 
     try:
+        sources.ensure_session(session_id)
         spans = otlp_store.get_session_spans(session_id)
     except FileNotFoundError:
         spans = []
@@ -555,7 +559,7 @@ def get_test_trace(experiment_id: str, test_id: str):
 @router.get("/experiments/metrics")
 def get_experiments_metrics(limit: int = -1):
     """Get aggregate metrics across experiments."""
-    experiments = otlp_store.list_experiments()
+    experiments = sources.list_experiments()
 
     history = []
     for name in experiments:
@@ -601,10 +605,10 @@ def get_experiments_metrics(limit: int = -1):
 @router.get("/debug/experiments")
 def debug_experiments():
     """Debug endpoint to show experiment indexing."""
-    experiments = otlp_store.list_experiments()
+    experiments = sources.list_experiments()
     result = []
     for name in experiments:
-        sessions = otlp_store.list_sessions(experiment=name, eval_only=True)
+        sessions = sources.list_sessions(experiment=name, eval_only=True)
         result.append(
             {
                 "experiment": name,

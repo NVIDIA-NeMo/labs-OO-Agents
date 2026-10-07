@@ -228,33 +228,35 @@ class TestEventLoopIsolation:
         """POST /v1/traces must return quickly while a slow GET is in-flight."""
         from nooa.viewer.main import app
 
-        # Simulate a heavy SQLite read (2 s) in the evaluations-tab endpoint.
-        def slow_list_sessions(*args, **kwargs):
+        loop = asyncio.get_running_loop()
+        get_started = asyncio.Event()
+
+        # Simulate a heavy catalog read in the evaluations-tab endpoint.
+        def slow_list_experiments():
+            loop.call_soon_threadsafe(get_started.set)
             _time.sleep(2.0)
             return []
 
-        mock_store.list_sessions.side_effect = slow_list_sessions
-
         with patch("nooa.viewer.main.otlp_store", mock_store):
-            with patch("nooa.viewer.eval_routes.otlp_store", mock_store):
+            with patch("nooa.viewer.sources.list_experiments", slow_list_experiments):
                 async with AsyncClient(
                     transport=ASGITransport(app=app), base_url="http://test"
                 ) as client:
-                    t0 = asyncio.get_event_loop().time()
-
-                    # Fire GET (slow) and POST (should be fast) concurrently.
+                    # Start timing POST only after GET has entered its blocking
+                    # read. Waiting for both responses would measure GET's
+                    # intentional delay rather than event-loop isolation.
                     get_task = asyncio.create_task(client.get("/api/eval/experiments"))
-                    post_task = asyncio.create_task(
-                        client.post(
-                            "/v1/traces",
-                            content=b'{"resourceSpans":[]}',
-                            headers={"Content-Type": "application/json"},
-                        )
+                    await asyncio.wait_for(get_started.wait(), timeout=5)
+                    t0 = loop.time()
+                    post_resp = await client.post(
+                        "/v1/traces",
+                        content=b'{"resourceSpans":[]}',
+                        headers={"Content-Type": "application/json"},
                     )
-                    get_resp, post_resp = await asyncio.gather(get_task, post_task)
+                    post_elapsed = loop.time() - t0
+                    get_resp = await get_task
 
-                    post_elapsed = asyncio.get_event_loop().time() - t0
-
+        assert get_resp.status_code == 200
         assert post_resp.status_code == 200, f"POST failed: {post_resp.text}"
         assert post_elapsed < 1.0, (
             f"POST /v1/traces took {post_elapsed:.2f}s while GET was in-flight — "
