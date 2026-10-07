@@ -200,8 +200,6 @@ uv run nooa start-dev        # trace viewer on http://localhost:5001
 
 If the viewer isn't running, tracing is silently disabled — no configuration needed either way.
 
-The viewer can also browse traces from installed [source plugins](docs/viewer-sources.md).
-
 ## Learn more
 
 - **[Documentation](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** — human-oriented reading paths, core concepts, architecture, and safety guidance.
