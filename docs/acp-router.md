@@ -1,29 +1,29 @@
-# The nooa-coder router and its workers
+# The nooa-atom router and its workers
 
-`nooa coder` serves the NOOA coding agent over the Agent Client Protocol (ACP)
+`nooa atom` serves NOOA Atom over the Agent Client Protocol (ACP)
 on its standard input and output, or over WebSocket with `--http`. It runs in
 one of four roles. A client such as Pool sees the same protocol in every role.
 
 ## Roles
 
-**Router (the default).** `nooa coder [options]`. The router answers
+**Router (the default).** `nooa atom [options]`. The router answers
 `initialize` and `session/list` itself. Each `session/new` starts a worker
 process, and the session runs there. `session/load` of a subagent's session
 goes to the worker that runs its root, so a root and its subagents always
 share one process. All other messages are forwarded, unchanged, to the
 session's worker.
 
-**Network (`--http`).** `nooa coder --http [--host H] [--port P] [options]`.
+**Network (`--http`).** `nooa atom --http [--host H] [--port P] [options]`.
 Clients connect over WebSocket at `ws://H:P/acp` (default
 `ws://127.0.0.1:8765/acp`). Each connection gets its own router, with its
 own workers, so a remote client gets what a client on standard input and
 output gets. See "Serving over the network" below.
 
-**Single process.** `nooa coder --single-process [options]`. All sessions run
+**Single process.** `nooa atom --single-process [options]`. All sessions run
 in the one process that the client started. This is the P3 behaviour. Use it
 to compare with the router or to debug.
 
-**Worker.** `nooa coder [options] --worker-fd N --id-base B`. The router
+**Worker.** `nooa atom [options] --worker-fd N --id-base B`. The router
 starts workers; do not run this role by hand. A worker is a plain ACP server
 on one end of a Unix socket pair (file descriptor `N`). Its requests to the
 client (permission, elicitation, file and terminal requests) use ids from `B`
@@ -120,7 +120,7 @@ message, "Stopped before these messages were handled"; the prompt answers
 - A worker runs in its own session and process group. Its standard input is
   `/dev/null`, and its standard output goes to standard error, so only the
   router writes to the client. Log lines from each process start with
-  `nooa-coder router` or `nooa-coder worker k`. The router logs `worker k pid
+  `nooa-atom router` or `nooa-atom worker k`. The router logs `worker k pid
   N started` for each worker. For each `session/new` and `session/load` it
   also logs `spawn_ms`, `handshake_ms` and `forward_ms`.
 - Only the router stops workers. It stops a worker when the worker has no
@@ -156,7 +156,7 @@ extra).
 
 Access:
 
-- The token is read from `NOOA_CODER_TOKEN` and removed from the environment,
+- The token is read from `NOOA_ATOM_TOKEN` and removed from the environment,
   so workers and the code they run do not see it. Clients send it as
   `Authorization: Bearer <token>`, or as `?token=<token>` where they cannot
   set headers (browsers). The server does not start without a token unless
@@ -183,8 +183,8 @@ thought text longer than 64,000 characters goes out as several chunks, which
 clients join as usual, and tool cards are already shortened for display.
 
 ```bash
-export NOOA_CODER_TOKEN=$(openssl rand -hex 32)
-uv run nooa coder --http --model MODEL_ALIAS
+export NOOA_ATOM_TOKEN=$(openssl rand -hex 32)
+uv run nooa atom --http --model MODEL_ALIAS
 ```
 
 ## Running it
@@ -192,10 +192,10 @@ uv run nooa coder --http --model MODEL_ALIAS
 From a checkout, with the environment created by `uv sync --all-extras`:
 
 ```bash
-uv run nooa coder --model MODEL_ALIAS                    # router
-uv run nooa coder --model MODEL_ALIAS --single-process   # one process
-uv run nooa coder --model MODEL_ALIAS --http             # WebSocket, see above
-uv run nooa coder --help                                 # lists the four roles
+uv run nooa atom --model MODEL_ALIAS                    # router
+uv run nooa atom --model MODEL_ALIAS --single-process   # one process
+uv run nooa atom --model MODEL_ALIAS --http             # WebSocket, see above
+uv run nooa atom --help                                 # lists the four roles
 ```
 
 ### Pool
@@ -207,7 +207,7 @@ The worktree's environment was created with
 
 ```yaml
 agent_servers:
-  nooa-coder:
+  nooa-atom:
     command: /usr/bin/env
     args:
       - UV_PROJECT_ENVIRONMENT=.venv-host
@@ -216,20 +216,20 @@ agent_servers:
       - --project
       - /localhome/local-pfurgale/dev/wt-p4
       - nooa
-      - coder
+      - atom
       - --model
       - MODEL_ALIAS
       - --tee
-      - /tmp/nooa-coder-acp.jsonl
+      - /tmp/nooa-atom-acp.jsonl
 ```
 
-Then run `pool --agent-server nooa-coder` in the repository you want to work
+Then run `pool --agent-server nooa-atom` in the repository you want to work
 on. To compare with one process, add `- --single-process` to `args`.
 
 To see the workers while Pool is connected:
 
 ```bash
-ps -eo pid,ppid,pgid,stat,args | grep -e PGID -e 'bin/[n]ooa-coder'
+ps -eo pid,ppid,pgid,stat,args | grep -e PGID -e 'bin/[n]ooa-atom'
 ```
 
 Each root session has one line that contains `--worker-fd`. Its `PPID` is the

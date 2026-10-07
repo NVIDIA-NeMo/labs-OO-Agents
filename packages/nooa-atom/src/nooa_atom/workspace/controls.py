@@ -1,0 +1,544 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Behavior controls shared by native and ACP presentation adapters."""
+
+from __future__ import annotations
+
+import shlex
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ControlMessage:
+    content: str
+    style: str = "info"
+
+
+@dataclass(frozen=True)
+class ControlTable:
+    columns: list[str]
+    rows: list[list[str]]
+    title: str
+
+    @property
+    def content(self) -> str:
+        lines = [self.title, " | ".join(self.columns)]
+        lines.extend(" | ".join(row) for row in self.rows)
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class ControlResult:
+    success: bool
+    outputs: tuple[ControlMessage | ControlTable, ...]
+
+    @classmethod
+    def ok(cls, *outputs: ControlMessage | ControlTable) -> ControlResult:
+        return cls(True, outputs)
+
+    @classmethod
+    def err(cls, message: str) -> ControlResult:
+        return cls(False, (ControlMessage(message, "error"),))
+
+    def __str__(self) -> str:
+        return "\n".join(output.content for output in self.outputs)
+
+
+class BehaviorControl:
+    def __init__(
+        self,
+        agent: Any,
+        config: Any,
+        *,
+        workspace: Path | None = None,
+        command_registry: Any = None,
+    ):
+        self.agent = agent
+        self.config = config
+        self.workspace = workspace
+        self._registry = command_registry
+
+    @property
+    def name(self) -> str:
+        """The command name, without the slash."""
+        raise NotImplementedError
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        """Check the parsed arguments; return ``(ok, error)``."""
+        raise NotImplementedError
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        """Run the command with validated arguments."""
+        raise NotImplementedError
+
+    @property
+    def skills_dirs(self):
+        return getattr(self._registry, "skills_dirs", self.config.skills_dirs)
+
+    def _persist_settings(self, updates: dict[str, object]) -> Path:
+        from .settings import write_settings_updates
+
+        path, _ = write_settings_updates(
+            {("atom", key): value for key, value in updates.items()}, workspace=self.workspace
+        )
+        return path
+
+    def _persist_setting(self, field: str, value: object) -> Path:
+        from .settings import write_settings_updates
+
+        path, _ = write_settings_updates({("atom", field): value}, workspace=self.workspace)
+        return path
+
+    def _project_scope_settings(self) -> dict[str, Any]:
+        """Read only the project-scope settings.yaml, never the user/env layers.
+
+        _persist_settings()/_persist_setting() always write project scope.
+        Basing a project-scope write on the fully layered user+project merge
+        (as read elsewhere for display) would copy a user's own personal
+        settings.yaml entries into the shared, committed project file.
+        """
+        import yaml
+
+        from .settings import settings_path
+
+        path = settings_path("project", workspace=self.workspace)
+        if not path.exists():
+            return {}
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, UnicodeError, yaml.YAMLError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def run(self, args: list[str]) -> ControlResult:
+        valid, error = self.validate_args(args)
+        if not valid:
+            return ControlResult.err(error or "Invalid command arguments")
+        try:
+            return await self.execute(args)
+        except Exception as exc:
+            return ControlResult.err(f"/{self.name} failed: {exc}")
+
+    async def invoke(self, args: str) -> ControlResult:
+        try:
+            parsed = shlex.split(args)
+        except ValueError as exc:
+            return ControlResult.err(f"/{self.name}: {exc}")
+        return await self.run(parsed)
+
+
+class SkillsControl(BehaviorControl):
+    """Discover skills and save workspace activation preferences."""
+
+    @property
+    def name(self) -> str:
+        return "skills"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {
+            "/skills <list|add DIR|commands|activate ID|deactivate ID>": (
+                "List and manage skills or show their slash commands"
+            ),
+        }
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if not args:
+            return False, "Usage: /skills <list|add|activate|deactivate|commands>"
+        if args[0].lower() not in ("list", "add", "activate", "deactivate", "commands"):
+            return False, f"Unknown subcommand `{args[0]}`"
+        if args[0].lower() == "add" and len(args) != 2:
+            return False, "Usage: /skills add <directory>"
+        if args[0].lower() in ("activate", "deactivate") and len(args) != 2:
+            return False, f"Usage: /skills {args[0]} <skill_id>"
+        return True, None
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        subcmd = args[0].lower()
+        subargs = args[1:]
+        if self.workspace is None:
+            cwd = getattr(self.agent, "cwd", None)
+            if isinstance(cwd, (str, Path)):
+                self.workspace = Path(cwd)
+        # Another session (or the agent's persistence skill) may have saved
+        # choices since this command's configuration was constructed.
+        # activate/deactivate/add always write project scope (see
+        # _persist_settings), so the basis for computing what to write must
+        # be project scope alone, not the fully layered user+project merge
+        # used for display elsewhere -- building the new list from the
+        # layered merge and writing it back to project scope would copy a
+        # user's own personal settings.yaml entries into the shared,
+        # committed project file.
+        from .settings import resolve_behavior_settings
+
+        project_saved = resolve_behavior_settings(self._project_scope_settings())
+
+        if subcmd == "add":
+            if self._registry is None:
+                return ControlResult.err("The command registry is unavailable.")
+            raw_path = Path(subargs[0]).expanduser()
+            base = Path(getattr(self.agent, "cwd", Path.cwd()))
+            path = (base / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+            if not path.is_dir():
+                return ControlResult.err(f"Skills directory not found: {path}")
+
+            before_skills = set(
+                getattr(getattr(self.agent, "skills", None), "discovered", lambda: [])()
+            )
+            before_commands = set(self._registry.skill_commands())
+            try:
+                added = self._registry.add_skills_dir(path)
+            except Exception as exc:
+                return ControlResult.err(f"Failed to add skills directory {path}: {exc}")
+
+            persisted = list(
+                dict.fromkeys(
+                    (base / Path(item).expanduser()).resolve()
+                    for item in project_saved.get("additional_skills_dirs", [])
+                )
+            )
+            if path not in persisted:
+                persisted.append(path)
+            self.config.additional_skills_dirs = list(
+                dict.fromkeys([*self.config.additional_skills_dirs, path])
+            )
+            try:
+                settings_path = self._persist_setting(
+                    "additional_skills_dirs", [str(item) for item in persisted]
+                )
+            except Exception as exc:
+                return ControlResult.ok(
+                    ControlMessage(f"Added skills directory: {path}", "success"),
+                    ControlMessage(f"Could not save the skills directory: {exc}", "warning"),
+                )
+
+            after_skills = set(
+                getattr(getattr(self.agent, "skills", None), "discovered", lambda: [])()
+            )
+            after_commands = set(self._registry.skill_commands())
+            detail = (
+                f"Discovered {len(after_skills - before_skills)} skill(s) and "
+                f"{len(after_commands - before_commands)} slash command(s)."
+            )
+            verb = "Added" if added else "Already using"
+            return ControlResult.ok(
+                ControlMessage(f"{verb} skills directory: {path}", "success"),
+                ControlMessage(detail, "info"),
+                ControlMessage(f"Saved in {settings_path}", "status"),
+            )
+
+        if subcmd == "commands":
+            user_skills = self._registry.skill_commands() if self._registry else {}
+            rows_cmd = [
+                [f"/{name}", skill.argument_hint or "", skill.description]
+                for name, skill in sorted(user_skills.items())
+            ]
+            if rows_cmd:
+                return ControlResult.ok(
+                    ControlTable(
+                        columns=["Command", "Args", "Description"],
+                        rows=rows_cmd,
+                        title="Skill slash commands",
+                    ),
+                    ControlMessage(f"Searched: {self.skills_dirs}", "status"),
+                )
+            return ControlResult.ok(
+                ControlMessage("No user-invocable skill commands found.", "info"),
+                ControlMessage(f"Searched: {self.skills_dirs}", "status"),
+            )
+
+        from nooa_atom.skills.manager import SkillManager
+
+        manager = getattr(self.agent, "skills", None)
+        if not isinstance(manager, SkillManager):
+            return ControlResult.err("This agent has no skill manager.")
+
+        if subcmd == "list":
+            entries = manager.entries()
+            if not entries:
+                return ControlResult.ok(ControlMessage("No skills found", "info"))
+            rows = [[e.name, e.kind, e.state, e.description] for e in entries]
+            return ControlResult.ok(
+                ControlTable(
+                    columns=["Name", "Kind", "State", "Description"], rows=rows, title="Skills"
+                ),
+            )
+
+        entry = manager.entry(subargs[0])
+        if entry is None:
+            return ControlResult.err(f"Skill `{subargs[0]}` not found. Use /skills list.")
+        # Settings keep the registered name, which older settings files use too.
+        skill_id = entry.key
+        if subcmd == "activate":
+            try:
+                result = await manager.activate([skill_id])
+            except Exception as e:
+                return ControlResult.err(f"Failed to activate `{entry.name}`: {e}")
+            if entry.kind != "code":
+                # Text skills are read once; MCP servers are saved through /mcp.
+                return ControlResult.ok(ControlMessage(result))
+            if manager.entry(skill_id).state != "active":
+                return ControlResult.err(result)
+            active = list(dict.fromkeys([*project_saved.get("active_skills", []), skill_id]))
+            inactive = [
+                name for name in project_saved.get("inactive_skills", []) if name != skill_id
+            ]
+            self.config.active_skills = list(dict.fromkeys([*self.config.active_skills, skill_id]))
+            self.config.inactive_skills = [
+                name for name in self.config.inactive_skills if name != skill_id
+            ]
+            try:
+                self._persist_settings({"active_skills": active, "inactive_skills": inactive})
+            except Exception as exc:
+                return ControlResult.ok(
+                    ControlMessage(result, "success"),
+                    ControlMessage(f"Could not save skill activation: {exc}", "warning"),
+                )
+            return ControlResult.ok(ControlMessage(result, "success"))
+
+        # deactivate
+        try:
+            result = await manager.deactivate([skill_id])
+        except Exception as e:
+            return ControlResult.err(f"Failed to deactivate `{entry.name}`: {e}")
+        if entry.kind != "code":
+            return ControlResult.ok(ControlMessage(result))
+        if manager.entry(skill_id).state == "active":
+            return ControlResult.err(f"Failed to deactivate `{entry.name}`")
+        active = [name for name in project_saved.get("active_skills", []) if name != skill_id]
+        inactive = list(dict.fromkeys([*project_saved.get("inactive_skills", []), skill_id]))
+        self.config.active_skills = [name for name in self.config.active_skills if name != skill_id]
+        self.config.inactive_skills = list(dict.fromkeys([*self.config.inactive_skills, skill_id]))
+        try:
+            self._persist_settings({"active_skills": active, "inactive_skills": inactive})
+        except Exception as exc:
+            return ControlResult.ok(
+                ControlMessage(result, "success"),
+                ControlMessage(f"Could not save skill deactivation: {exc}", "warning"),
+            )
+        return ControlResult.ok(ControlMessage(result, "success"))
+
+
+class MCPControl(BehaviorControl):
+    """Review, approve, sign in to, and revoke MCP server configurations."""
+
+    usage = "[status|approve NAME [CODE]|auth NAME ADDRESS|revoke NAME]"
+
+    @property
+    def name(self) -> str:
+        return "mcp"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {f"/mcp {cls.usage}": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if not args or (args[0] == "status" and len(args) == 1):
+            return True, None
+        if args[0] == "approve" and len(args) in (2, 3):
+            return True, None
+        if args[0] in ("revoke",) and len(args) == 2:
+            return True, None
+        if args[0] == "auth" and len(args) == 3:
+            return True, None
+        return False, f"Usage: /mcp {self.usage}"
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        from nooa_atom.skills.mcp_servers import MCPSignInRequired
+
+        from .mcp_approval import _safe_display
+
+        servers = getattr(getattr(self.agent, "skills", None), "mcp", None)
+        if servers is None:
+            return ControlResult.err("This agent has no MCP servers.")
+        servers.refresh_settings()
+        if not args or args[0] == "status":
+            rows = []
+            for name in servers.discovered():
+                try:
+                    approval = "approved" if servers.is_approved(name) else "approval required"
+                except ValueError:
+                    # One bad server config must not blank out the status of the others.
+                    approval = "invalid configuration"
+                rows.append([_safe_display(name), approval, servers.state(name)])
+            return ControlResult.ok(
+                ControlTable(
+                    columns=["Server", "Approval", "State"], rows=rows, title="MCP servers"
+                ),
+                # The person also sees each server's endpoint and transport.
+                ControlMessage(servers.details()),
+            )
+        name = args[1]
+        # Connection APIs accept globs; these commands name one exact definition.
+        pattern = "".join({"[": "[[]", "*": "[*]", "?": "[?]"}.get(c, c) for c in name)
+        if args[0] == "revoke":
+            # Revoke before disconnect so a transport failure cannot retain permission.
+            servers.revoke(name)
+            await servers.disconnect([pattern])
+            return ControlResult.ok(
+                ControlMessage(f"Revoked approvals for {_safe_display(name)}.", "success")
+            )
+        if args[0] == "auth":
+            message = await servers.complete_sign_in(name, args[2])
+            return ControlResult.ok(ControlMessage(message, "success"))
+        if len(args) == 2:
+            return ControlResult.ok(ControlMessage(servers.approval_request(name).review_text()))
+        servers.approve(name, args[2])
+        try:
+            await servers.connect([pattern])
+        except MCPSignInRequired as needed:
+            return ControlResult.ok(
+                ControlMessage(f"Approved {_safe_display(name)}.", "success"),
+                ControlMessage(str(needed)),
+            )
+        return ControlResult.ok(
+            ControlMessage(f"Approved and connected to {_safe_display(name)}.", "success")
+        )
+
+
+class TraceUrlControl(BehaviorControl):
+    """Show the viewer URL of the current trace session."""
+
+    @property
+    def name(self) -> str:
+        return "trace-url"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/trace-url": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if args:
+            return False, "Usage: /trace-url"
+        return True, None
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        """The URL from ``OTLP_ENDPOINT`` without its ``/v1/traces`` or ``/v1`` suffix.
+
+        The trace session is the one ``nooa.tracing`` holds in this context;
+        the ACP adapter sets it to the ACP session id for the session's
+        turns and for the commands it runs.
+        """
+        import os
+        import urllib.parse
+
+        try:
+            from nooa.tracing import get_session
+        except ImportError:
+            return ControlResult.err("Tracing package not installed.")
+        session_name = get_session()
+        if not session_name:
+            return ControlResult.err("No active trace session.")
+        base = os.environ.get("OTLP_ENDPOINT", "http://localhost:5001/v1/traces").rstrip("/")
+        for suffix in ("/v1/traces", "/v1"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        url = f"{base}/traces/view?session_id={urllib.parse.quote(session_name)}"
+        # A bare URL on its own is not rendered by every ACP client (Pool 1.0.16
+        # shows nothing); a text fence is, and keeps the URL copyable.
+        return ControlResult.ok(ControlMessage(f"Trace viewer:\n```text\n{url}\n```"))
+
+
+_USAGE_ROWS = (
+    ("Total tokens", "total_tokens"),
+    ("Input tokens", "input_tokens"),
+    ("Output tokens", "output_tokens"),
+    ("Cached input tokens (cache reads)", "cached_input_tokens"),
+    ("Cache-write input tokens", "cache_write_input_tokens"),
+    ("Reasoning tokens", "reasoning_tokens"),
+)
+
+
+class UsageControl(BehaviorControl):
+    """Token usage for this session so far."""
+
+    @property
+    def name(self) -> str:
+        return "usage"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/usage": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if args:
+            return False, "Usage: /usage"
+        return True, None
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        """This session's own totals; with subagents, a second block that adds theirs."""
+        port = getattr(self.agent, "session", None)
+        if port is None or not callable(getattr(port, "usage", None)):
+            return ControlResult.err("Token usage is not available: this agent has no session.")
+        usage = port.usage()
+        info = port.info() if callable(getattr(port, "info", None)) else None
+        lines = ["This session", *_usage_lines(usage.own())]
+        if usage.has_attributed():
+            lines += ["", "Including subagents", *_usage_lines(usage.with_attributed())]
+        if info is not None:
+            lines += ["", f"Turns: {info.turn_count}"]
+        body = "\n".join(lines)
+        return ControlResult.ok(ControlMessage(f"```text\n{body}\n```"))
+
+
+def _usage_lines(usage: Any) -> list[str]:
+    width = max(len(label) for label, _ in _USAGE_ROWS)
+    lines = [f"  {label:<{width}}  {getattr(usage, field):>12,}" for label, field in _USAGE_ROWS]
+    if usage.cost_usd:
+        lines.append(f"  {'Cost (USD)':<{width}}  {usage.cost_usd:>12.4f}")
+    return lines
+
+
+CONTROL_TYPES = {
+    "skills": SkillsControl,
+    "mcp": MCPControl,
+    "trace-url": TraceUrlControl,
+    "usage": UsageControl,
+}
+
+
+@dataclass(frozen=True)
+class ControlCommand:
+    """One control as a slash command: its name, help text and what runs it.
+
+    The Atom agent's command registry wraps each in its own command type
+    (``SlashCommand.for_control``).
+    """
+
+    name: str
+    description: str
+    argument_hint: str
+    # Not compared: the same control built again is not a change.
+    invoke: Callable[..., Awaitable[Any]] = field(repr=False, compare=False)
+
+
+def behavior_commands(
+    agent: Any, config: Any, *, workspace: Path, command_registry: Any
+) -> list[ControlCommand]:
+    """The ``/skills``, ``/mcp``, ``/trace-url`` and ``/usage`` controls, as plain commands."""
+    result = []
+    for control_type in CONTROL_TYPES.values():
+        control = control_type(
+            agent,
+            config,
+            workspace=workspace,
+            command_registry=command_registry,
+        )
+        result.append(
+            ControlCommand(
+                name=control.name,
+                description=control_type.__doc__ or "",
+                argument_hint={
+                    "skills": "<list|commands|add DIR|activate ID|deactivate ID>",
+                    "mcp": MCPControl.usage,
+                    "trace-url": "",
+                    "usage": "",
+                }[control.name],
+                invoke=control.invoke,
+            )
+        )
+    return result

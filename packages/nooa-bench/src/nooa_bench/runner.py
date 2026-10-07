@@ -316,7 +316,7 @@ async def _run(
         else:
             result = await agent._run_evaluation(task_input)
         # Counts an agent reports win: turns run in a session's own context
-        # (the coder agent) are invisible to this task's token counter.
+        # (the Atom agent) are invisible to this task's token counter.
         result = {**get_task_tokens(), **result}
         _write_result(result, model, agent_type)
         nooa_trajectory_filename = "trajectory.nooa.json" if enable_atif else "trajectory.json"

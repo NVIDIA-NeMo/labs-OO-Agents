@@ -6,57 +6,68 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- `nooa-coder`: `CodingAgent.plan()` and `CodingAgent.get_summarization_status()`, which
+- `nooa-coder` is now `nooa-atom` (NOOA Atom), with no aliases for the old names:
+  the package `nooa_atom` (extra `nooa[atom]`), the command `nooa atom`, the
+  environment variables `NOOA_ATOM_TOKEN` and `NOOA_ATOM_LOG_LEVEL`, the ACP agent
+  name `nooa-atom` and the benchmark agent type `atom` (`AtomBenchAgent`). The agent
+  is `nooa_atom.agent:AtomAgent` (was `CodingAgent` in `nooa_coder.coding`), its
+  options `AtomOptions` and its slash commands `SlashCommand`; its prompt no longer
+  calls it a software-development agent, and its state block is `workspace_state`.
+  Sessions nooa-coder saved still load: their agent specs, snapshot classes and
+  recorded item types map to the new names. Atom keeps its settings in a new `atom`
+  section of `settings.yaml`, copied once from `coding`, which the TUI and `nooa-acp`
+  keep using.
+- `nooa-atom`: `AtomAgent.plan()` and `AtomAgent.get_summarization_status()`, which
   hosts read (the ACP bridge reads the plan after each Python cell), no longer record a
   trace span per call.
-- `nooa-coder`: a message steered into a running turn reaches the model in the form of
+- `nooa-atom`: a message steered into a running turn reaches the model in the form of
   a turn's input: a `Notification` whose `value` is `{"user_messages": [text]}`, whose
   `source` names the channel and the sender, and whose `description` says it came during
   the turn and how to reach it (`self.events["N"].value`). A steer from an ACP client
   counts as the user.
-- `nooa-coder`: a message typed in Pool during a turn now appears in Pool's conversation.
+- `nooa-atom`: a message typed in Pool during a turn now appears in Pool's conversation.
   When a turn takes it, the server sends the input event Pool's own agent sends
   (`session_info_update` with `_meta` `poolside/clientInputId` and `poolside/inputEventId`),
   and answers `_poolside/session_steer` after it. Prompts and replayed user messages also
   carry `poolside/inputEventId` for Pool. The Session reports a taken item as
   `ItemConsumedUpdate`.
-- `nooa-coder`: the ACP server takes the messages typed in Pool during a running turn.
+- `nooa-atom`: the ACP server takes the messages typed in Pool during a running turn.
   It advertises `poolside/session_steer`, and each such message is queued for the next
   turn instead of waiting in Pool's own queue, where Esc drops it. It is not steered
   into the running turn until the Pool team says which of the two the request means.
-- `nooa-coder`: the open `session/prompt` stays open until the messages Pool handed over
+- `nooa-atom`: the open `session/prompt` stays open until the messages Pool handed over
   with `_poolside/session_steer` during it are handled, in order, questions included, as
   Pool expects; before, the prompt ended with its own turn and the next turn ran with no
   prompt open, and Pool did not show its reply. Stop withdraws the ones no turn took and
   lists them in one agent message. A question the agent asks while such a message is
   still waiting is not opened as a form: the queued message's turn comes first and can
   answer it.
-- `nooa-coder`: Pool forms show choices as a picker: a choice question and a string
+- `nooa-atom`: Pool forms show choices as a picker: a choice question and a string
   `Literal` field are a `oneOf` of `{const, title}` entries, and a `Literal[...] | str`
   field is the picker plus free text. A form with more than one field sends
   `_meta["poolside/field_order"]`. Before, a choice was a text box listing the choices.
-- `nooa-coder`: with Pool as the ACP client, free-text, choice and typed questions
+- `nooa-atom`: with Pool as the ACP client, free-text, choice and typed questions
   (`NeedInput`) open Pool's form (`_poolside/elicitation`) instead of ending the turn as
   text. Typed fields are asked as strings and converted; a choice question is one text
   field that lists the choices, and the answer matches a choice ignoring case. A bad
   value is asked once more. Yes/no questions still use the permission dialog.
-- `nooa-coder`: the ACP server accepts Pool's steering. It advertises
+- `nooa-atom`: the ACP server accepts Pool's steering. It advertises
   `poolside/session_steer`, and a message typed in Pool during a running turn reaches
   the turn's next model call (queued when no turn is running) instead of waiting in
   Pool's queue.
-- `nooa-coder`: with Pool as the ACP client, free-text and typed questions (`NeedInput`)
+- `nooa-atom`: with Pool as the ACP client, free-text and typed questions (`NeedInput`)
   open Pool's form (`_poolside/elicitation`) instead of ending the turn as text. Typed
   fields are asked as strings and converted; a bad value is asked once more.
-- Headless benchmarks with the nooa-coder coding agent: `nooa-bench run --workspace DIR
+- Headless benchmarks with the nooa-atom coding agent: `nooa-bench run --workspace DIR
   --model ALIAS "task"` runs one task unattended and prints the result as JSON (exit 0 when
-  the agent finished), and `nemo-harbor --agent-type coder` runs Harbor tasks the same way.
-  Each run is a stored session in the workspace. `nooa_coder.run_task` is the API.
-- `nooa-coder`: one `SkillManager` (`self.skills`) for code skills, text skills and MCP
+  the agent finished), and `nemo-harbor --agent-type atom` runs Harbor tasks the same way.
+  Each run is a stored session in the workspace. `nooa_atom.run_task` is the API.
+- `nooa-atom`: one `SkillManager` (`self.skills`) for code skills, text skills and MCP
   servers, with `search`, `activate`, `deactivate`, `read` and `doc`, and one small
   `<skills>` block in place of the `<skills>` and `<mcp>` blocks. MCP sign-in uses the
   MCP SDK's OAuth provider with a pasted redirect address (`/mcp auth NAME ADDRESS`);
   tokens are in `~/.config/nooa/mcp_oauth.json`, so servers signed in before sign in once more.
-- `nooa-coder`: `/recover` in ACP sessions continues a session that is marked in use,
+- `nooa-atom`: `/recover` in ACP sessions continues a session that is marked in use,
   for example after a crash on another machine sharing the directory, in a new copy.
   Without an argument it lists those sessions. The original file is never modified;
   queued messages it never read and its subagent sessions are not carried over, and the
@@ -71,8 +82,8 @@ to follow semantic versioning.
   `--provider` help and errors list every preset, including `hub`.
 - `nooa connect` offers the NVIDIA Inference Hub (`inference-api.nvidia.com`,
   key in `NVIDIA_INFERENCE_API_KEY`) as a preset provider, after build.nvidia.com.
-- `nooa-coder`: the ACP model picker re-reads the model registry when a registry file changes, so an alias added with `nooa connect` in a terminal appears without restarting the server.
-- `nooa-coder`: a session in workspace W also reads `W/.nooa/llm_config.yaml`, the
+- `nooa-atom`: the ACP model picker re-reads the model registry when a registry file changes, so an alias added with `nooa connect` in a terminal appears without restarting the server.
+- `nooa-atom`: a session in workspace W also reads `W/.nooa/llm_config.yaml`, the
   file `nooa connect` writes when run in W: for the model picker, for the model client
   of the session and of `set_model`, and for `default_llm_factory()`. It ranks above
   the user and package-project files and below `NEMO_OO_LLM_CONFIG`. Each workspace's
@@ -82,7 +93,7 @@ to follow semantic versioning.
   (about 3.3 s down to 0.3 s here). The strategy names, `LLMResponse` and
   `llm_config_chain` load on first use; `from nooa import CodeActStrategy`
   and `from nooa import *` work as before.
-- `nooa coder` (package `nooa-coder`): the ACP server now runs as a
+- `nooa atom` (package `nooa-atom`): the ACP server now runs as a
   router by default, with one worker process for each root session. Each
   worker runs in its own process group and talks to the router over a Unix
   socket pair. The router answers `initialize` and `session/list` itself and
@@ -90,16 +101,16 @@ to follow semantic versioning.
   the worker of its root. Workers exit when their root session closes, when
   the client disconnects, or when the router dies. `--single-process` keeps
   every session in one process. See `docs/acp-router.md`.
-- `nooa coder --http` serves ACP over WebSocket at
+- `nooa atom --http` serves ACP over WebSocket at
   `ws://HOST:PORT/acp` (default `127.0.0.1:8765`), the WebSocket profile of
   the ACP remote transport proposal. Each connection gets its own router and
-  workers. Clients authenticate with the token in `NOOA_CODER_TOKEN`
+  workers. Clients authenticate with the token in `NOOA_ATOM_TOKEN`
   (`Authorization: Bearer` or `?token=`); `--no-auth` is allowed on loopback
   only. Browser origins other than loopback need `--allowed-origin`. No TLS:
   use an SSH tunnel or a proxy. See `docs/acp-router.md`.
 
-- New workspace package `nooa-coder` (pre-release, not published yet; the
-  `coder` extra installs it). It holds the Session layer of the session
+- New workspace package `nooa-atom` (pre-release, not published yet; the
+  `atom` extra installs it). It holds the Session layer of the session
   tree design (#388):
   - `Session` owns one `InteractiveAgent` and its turn loop. Items are
     recorded before they are queued (`submit`), each with a receipt that
@@ -127,7 +138,7 @@ to follow semantic versioning.
     (where `nooa-acp` and the TUI keep them), unless `NOOA_SESSIONS_DIR`
     or `--sessions-dir` names one shared directory for all workspaces;
     `sessions_root()` gives the directory. Sessions written by `nooa-acp`
-    are listed and load (its `CodingAgent` record maps to the coding
+    are listed and load (its `AtomAgent` record maps to the coding
     agent); a saved agent state that cannot be restored is logged, noted
     in the transcript, and the session goes on from an empty state. The
     store is adapted from `nooa_cli.sessions`.
@@ -142,22 +153,22 @@ to follow semantic versioning.
     parent gets no new children; `TurnFailedError` chains the original
     exception; updates carry full item text and usage changes;
     `install_port` can hide the port from the model docs.
-  - The coding agent runs on it: `nooa_coder.coding.agent:CodingAgent`
+  - The coding agent runs on it: `nooa_atom.agent:AtomAgent`
     (the agent spec hosts name) ends turns with `Done`/`NeedInput`/
     `Waiting`; its `handle_batch` must return a `TaskResult`. The model
     delegates with `delegate()` (a throwaway child, awaited, returning the
     child's `Done`), `spawn()` and `children()`; `rename_session()` is
     async, and a host asks for a title by submitting
-    `session_title_request(text)` on `system_messages`. `ExperimentalCodingAgent` (CodeActV2) follows the same rules.
+    `session_title_request(text)` on `system_messages`. `ExperimentalAtomAgent` (CodeActV2) follows the same rules.
     The workspace settings, MCP registry and skill controls moved in as
-    `nooa_coder.workspace` (`CoderOptions`), and the repository tools as
-    `nooa_coder.tools`.
+    `nooa_atom.workspace` (`AtomOptions`), and the repository tools as
+    `nooa_atom.tools`.
   - The registry builds agents with `create_session_agent` by default
     (workspace settings and skills for coding agents); hosts pass
     `default_llm_factory()` as the registry's `llm_factory`. Agent specs
     may name a file (`./agent.py:Class`, relative to the workspace), and
     the older `nooa_cli.*` coding-agent specs still load.
-  - `nooa coder` serves the coding agent over ACP on
+  - `nooa atom` serves the coding agent over ACP on
     stdio, one process for every session, on the Session layer; the older
     `nooa-acp` is unchanged. Sessions: new, load (attaching to a live
     session and replaying its transcript), list (root sessions of the `cwd`'s
@@ -180,13 +191,13 @@ to follow semantic versioning.
     context status, messages from other senders echoed as user chunks, and
     child sessions announced in `_meta["dev.nooa/children"]` with their
     tool cards mirrored into the parent. `/connect` points to the CLI.
-  - `nooa coder --tee PATH` and `python -m nooa_coder.acp.tee --log PATH -- COMMAND...`
+  - `nooa atom --tee PATH` and `python -m nooa_atom.acp.tee --log PATH -- COMMAND...`
     record every ACP frame in both directions to a JSON Lines file (mode
     0600); `docs/acp-tee.md` has the Pool settings entry and what the log
     shows about Pool's behaviour.
-  - The `nooa-coder` package depends on `nooa-cli`, which provides the `nooa`
-    command; there is no separate `nooa-coder` script.
-  - `nooa-coder` and `nooa-acp` need `agent-client-protocol` 0.12.1 or
+  - The `nooa-atom` package depends on `nooa-cli`, which provides the `nooa`
+    command; there is no separate `nooa-atom` script.
+  - `nooa-atom` and `nooa-acp` need `agent-client-protocol` 0.12.1 or
     later (below 0.13). That release adds the library's HTTP and WebSocket
     transports and renames two schema fields: the multi-select item type is
     `StringMultiSelectItems`, and an ACP-transport MCP server's `id` is
@@ -208,7 +219,7 @@ to follow semantic versioning.
   - `nooa.interactive` adds the `Done`, `NeedInput` and `Waiting` turn
     results and a `handle_batch()` turn method (`Done | Waiting`) for
     unattended turns. `handle()` returns one of the three types.
-  - `RespondResult` and `RespondReason` are removed; `CodingAgent`, the ACP
+  - `RespondResult` and `RespondReason` are removed; `AtomAgent`, the ACP
     dispatcher and the ARC-AGI-3 example use the typed results. To migrate,
     return `Done` for `DONE`, `NeedInput` for `NEED_INPUT`, and `Waiting`
     for `WAIT` or `GET_USER_INPUT`.

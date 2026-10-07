@@ -5,8 +5,8 @@
 import json
 
 import pytest
+from atom_test_agents import CellLLM, cell
 from click.testing import CliRunner
-from coder_test_agents import CellLLM, cell
 from nooa_bench.cli import main
 
 RESULT = (
@@ -43,7 +43,7 @@ def _model(monkeypatch, *responses):
         asked.append(alias)
         return CellLLM(list(responses))
 
-    monkeypatch.setattr("nooa_coder.coding.factory.workspace_llm_client", workspace_llm_client)
+    monkeypatch.setattr("nooa_atom.agent.factory.workspace_llm_client", workspace_llm_client)
     return asked
 
 

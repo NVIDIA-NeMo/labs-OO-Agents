@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The ``nooa-bench`` command.
 
-``nooa-bench run`` runs one task with nooa-coder's coding agent, headless
+``nooa-bench run`` runs one task with the Atom agent, headless
 and without Harbor, for smoke tests and scripts::
 
     nooa-bench run --workspace DIR --model ALIAS "task text"
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 import click
-from nooa_coder.hosts.headless import DEFAULT_MAX_TURNS
+from nooa_atom.hosts.headless import DEFAULT_MAX_TURNS
 
 
 @click.group()
@@ -56,16 +56,16 @@ def main() -> None:
 def run(
     workspace: Path, model: str | None, max_turns: int, timeout: float | None, task: str
 ) -> None:
-    """Run TASK with the coding agent, unattended, and print the result as JSON."""
-    from nooa_coder import SessionOptions, run_task
-    from nooa_coder.session.loader import CODING_AGENT
+    """Run TASK with the Atom agent, unattended, and print the result as JSON."""
+    from nooa_atom import SessionOptions, run_task
+    from nooa_atom.session.loader import ATOM_AGENT
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         stream=sys.stderr,
     )
-    options = SessionOptions(workspace=workspace.resolve(), agent_spec=CODING_AGENT, model=model)
+    options = SessionOptions(workspace=workspace.resolve(), agent_spec=ATOM_AGENT, model=model)
     # Anything else that prints goes to standard error: standard output is the result.
     with contextlib.redirect_stdout(sys.stderr):
         outcome = asyncio.run(run_task(options, task, max_turns=max_turns, timeout=timeout))
