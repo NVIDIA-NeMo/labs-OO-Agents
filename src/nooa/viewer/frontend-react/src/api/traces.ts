@@ -1,4 +1,4 @@
-import { assertOk } from './http';
+import { assertOk, assertOkWithDetail } from './http';
 import type {
   PaginatedTraceResponse,
   TraceResponse,
@@ -34,7 +34,7 @@ export async function fetchTraces(params: {
 
 export async function fetchTrace(sessionId: string): Promise<TraceResponse> {
   const res = await fetch(`/api/trace?session_id=${encodeURIComponent(sessionId)}`);
-  assertOk(res, 'Failed to fetch trace');
+  await assertOkWithDetail(res, 'Failed to fetch trace');
   return res.json();
 }
 
@@ -45,7 +45,7 @@ export async function fetchTraceResource(
   const res = await fetch(`/api/trace/resource?session_id=${encodeURIComponent(sessionId)}`, {
     signal,
   });
-  assertOk(res, 'Failed to fetch trace resource');
+  await assertOkWithDetail(res, 'Failed to fetch trace resource');
   return res.json();
 }
 

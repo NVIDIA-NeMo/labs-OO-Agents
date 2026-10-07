@@ -77,16 +77,20 @@ export function EvalTraceDetail() {
   const statusLabel = currentTest
     ? currentTest.error
       ? "ERROR"
-      : currentTest.passed
-        ? "PASS"
-        : "FAIL"
+      : currentTest.passed == null
+        ? "UNCLASSIFIED"
+        : currentTest.passed
+          ? "PASS"
+          : "FAIL"
     : null;
 
   const statusCls = statusLabel === "PASS"
     ? "bg-green-900 text-green-200"
-    : statusLabel === "ERROR"
-      ? "bg-orange-900 text-orange-200"
-      : "bg-red-900 text-red-200";
+    : statusLabel === "UNCLASSIFIED"
+      ? "bg-gray-800 text-gray-300"
+      : statusLabel === "ERROR"
+        ? "bg-orange-900 text-orange-200"
+        : "bg-red-900 text-red-200";
 
   return (
     <div className="max-w-[100rem] mx-auto px-4 py-6">
