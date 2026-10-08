@@ -26,6 +26,10 @@ Both delegate through an awaited call returning a `TaskResult`; neither exposes
 the interactive coding agent's background `spawn()` / job-handle API.
 The strategy allows ten retries, uses a 1,800-second cell timeout, and has no
 fixed iteration cap; configure the enclosing benchmark's time/token budget.
+The CodeAct loop guard is enabled with its defaults: a call that failed identically
+twice in the last eight tool calls is not run a third time, and a call that
+produced identical output three times runs with a warning; repeating either
+after the warning stops the task with `LoopDetectedError`.
 Awaited delegation runs inside that same parent cell deadline. A timeout cancels
 the worker and merges no partial Todo state; the parent receives a cell timeout
 error and may try again. Cell timeouts do not consume the strategy's retry counter,

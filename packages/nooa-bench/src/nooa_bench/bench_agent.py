@@ -35,7 +35,7 @@ with _hidden:
 
     from nooa import Agent, Context, no_trace, strategy
     from nooa.agentdoc import doc, spec
-    from nooa.config import CodeActConfig
+    from nooa.config import CodeActConfig, LoopGuardConfig
     from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.strategies import CodeActV2
     from nooa.unifiedllm import FakeLLMClient
@@ -56,7 +56,9 @@ _OPTIONAL_TESTBED_ACTIVATE = (
     "fi"
 )
 
-_SOLVE_STRATEGY = CodeActV2(config=CodeActConfig(max_retries=10, cell_timeout=1800.0))
+_SOLVE_STRATEGY = CodeActV2(
+    config=CodeActConfig(max_retries=10, cell_timeout=1800.0, loop_guard=LoopGuardConfig())
+)
 _SOLVE_CONTEXT = {
     "state": None,
     "execution_context": None,

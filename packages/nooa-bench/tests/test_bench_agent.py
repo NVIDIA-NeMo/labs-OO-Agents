@@ -900,3 +900,12 @@ async def test_original_task_remains_after_prefill_compaction(agent_type, tmp_pa
         assert "TaskResult" in rendered
     finally:
         await agent.close()
+
+
+def test_bench_agents_enable_the_default_loop_guard():
+    """BenchAgent and RLMBenchAgent share this strategy for _solve_task."""
+    from nooa.config import LoopGuardConfig
+
+    config = bench_agent_module._SOLVE_STRATEGY.config
+    assert config.loop_guard == LoopGuardConfig()
+    assert config.max_retries == 10
