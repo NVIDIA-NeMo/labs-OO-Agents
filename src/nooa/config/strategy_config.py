@@ -49,9 +49,9 @@ class LoopGuardConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    repeat_threshold: int = Field(default=3, ge=2)
+    repeat_threshold: int = Field(default=7, ge=2)
     # Number of most recent tool calls, including the current one, that are compared.
-    window: int = Field(default=8, ge=2)
+    window: int = Field(default=15, ge=2)
     # Bound on the previous outcome quoted in the loop-guard message.
     max_outcome_chars: int = Field(default=500, ge=0)
 

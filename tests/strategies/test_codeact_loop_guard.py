@@ -28,10 +28,10 @@ def _cell(code: str, call_id: str, tool: str = "python_cell") -> LLMResponse:
     return _call(tool, json.dumps({"code": code}), call_id)
 
 
-_DEFAULT_GUARD = LoopGuardConfig()
+_SHORT_GUARD = LoopGuardConfig(repeat_threshold=3, window=8)
 
 
-def _agent(responses, *, guard=_DEFAULT_GUARD, strategy_type=CodeActV2):
+def _agent(responses, *, guard=_SHORT_GUARD, strategy_type=CodeActV2):
     llm = FakeLLMClient(scripted_responses=responses)
     config = CodeActConfig(prefill=None, max_retries=20, loop_guard=guard)
 
@@ -195,7 +195,7 @@ async def test_repeats_outside_the_window_are_forgotten():
     agent = _agent(
         [_cell("self.fail()", "a"), _cell("self.fail()", "b"), *other, _cell("self.fail()", "c")]
         + [_cell("return_result('ok')", "end")],
-        guard=LoopGuardConfig(window=4),
+        guard=LoopGuardConfig(repeat_threshold=3, window=4),
     )
     try:
         assert await agent.answer() == "ok"
@@ -252,3 +252,97 @@ def test_missing_outcome_never_matches_another_call():
     second = CodeActStrategy._tool_call_outcome(runtime, "b", 0)
     assert first[0] is False and second[0] is False
     assert first[1] != second[1]
+
+
+@pytest.mark.parametrize(
+    "strategy_type,tool", [(CodeActV2, "python_cell"), (CodeActStrategy, "execute_python")]
+)
+async def test_default_guard_warns_on_seventh_success_and_stops_on_eighth(strategy_type, tool):
+    guard = LoopGuardConfig()
+    assert (guard.repeat_threshold, guard.window) == (7, 15)
+    agent = _agent(
+        [_cell("print(self.probe())", str(i), tool) for i in range(10)],
+        guard=guard,
+        strategy_type=strategy_type,
+    )
+    try:
+        with pytest.raises(LoopDetectedError):
+            await agent.answer()
+        assert agent.runs == 8
+        assert [(e.action, e.repeats, e.window) for e in _guard_events(agent)] == [
+            ("nudged", 7, 15),
+            ("stopped", 8, 15),
+        ]
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize(
+    "strategy_type,tool", [(CodeActV2, "python_cell"), (CodeActStrategy, "execute_python")]
+)
+async def test_default_guard_blocks_seventh_failure_and_stops_on_eighth(strategy_type, tool):
+    agent = _agent(
+        [_cell("self.fail()", str(i), tool) for i in range(10)],
+        guard=LoopGuardConfig(),
+        strategy_type=strategy_type,
+    )
+    try:
+        with pytest.raises(LoopDetectedError):
+            await agent.answer()
+        assert agent.runs == 6
+        assert [(e.action, e.repeats, e.window) for e in _guard_events(agent)] == [
+            ("blocked", 7, 15),
+            ("stopped", 8, 15),
+        ]
+    finally:
+        await agent.aclose()
+
+
+async def test_default_guard_tolerates_cleanup_between_four_changing_trials():
+    calls = []
+    for i in range(4):
+        calls += [
+            _cell("print(self.probe())", f"cleanup-{i}"),
+            _cell("print(self.tick())", f"trial-{i}"),
+        ]
+    agent = _agent(calls + [_cell("return_result('done')", "end")], guard=LoopGuardConfig())
+    try:
+        assert await agent.answer() == "done"
+        assert agent.runs == agent.ticks == 4
+        assert _guard_events(agent) == []
+    finally:
+        await agent.aclose()
+
+
+async def test_default_guard_counts_interleaved_identical_successes_within_window():
+    calls = []
+    for i in range(8):
+        calls += [
+            _cell("print(self.probe())", f"probe-{i}"),
+            _cell("print(self.tick())", f"tick-{i}"),
+        ]
+    agent = _agent(calls, guard=LoopGuardConfig())
+    try:
+        with pytest.raises(LoopDetectedError):
+            await agent.answer()
+        assert agent.runs == 8
+        assert agent.ticks == 7
+        assert [(e.action, e.repeats, e.window) for e in _guard_events(agent)] == [
+            ("nudged", 7, 15),
+            ("stopped", 8, 15),
+        ]
+    finally:
+        await agent.aclose()
+
+
+async def test_default_guard_ignores_identical_successes_outside_fifteen_call_window():
+    calls = [_cell("print(self.probe())", f"old-{i}") for i in range(6)]
+    calls += [_cell("print(self.tick())", f"progress-{i}") for i in range(15)]
+    calls += [_cell("print(self.probe())", "new"), _cell("return_result('done')", "end")]
+    agent = _agent(calls, guard=LoopGuardConfig())
+    try:
+        assert await agent.answer() == "done"
+        assert agent.runs == 7
+        assert _guard_events(agent) == []
+    finally:
+        await agent.aclose()
