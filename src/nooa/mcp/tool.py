@@ -647,6 +647,19 @@ class MCPTool:
         async with self._client.connect_to_server() as session:
             result = await session.call_tool(tool_name, clean_args)
 
+        if getattr(result, "isError", False) is True:
+            details = None
+            if hasattr(result, "content") and result.content:
+                for content in result.content:
+                    if hasattr(content, "text"):
+                        details = content.text
+                        break
+
+            raise RuntimeError(
+                f"MCP tool {tool_name!r} on {self._server_name!r} returned an error"
+                + (f": {details}" if details else "")
+            )
+
         if hasattr(result, "content") and result.content:
             for content in result.content:
                 if hasattr(content, "text"):

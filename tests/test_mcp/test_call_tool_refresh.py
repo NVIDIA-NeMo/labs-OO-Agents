@@ -59,6 +59,40 @@ async def test_success_no_refresh():
 
 
 @pytest.mark.asyncio
+async def test_tool_level_error_is_not_returned_as_success():
+    class _ErrorSession:
+        async def call_tool(self, name, args):
+            class _R:
+                isError = True
+                content = [type("C", (), {"text": "permission denied"})()]
+
+            return _R()
+
+    class _ErrorClient:
+        def connect_to_server(self):
+            session = _ErrorSession()
+
+            class _CM:
+                async def __aenter__(self):
+                    return session
+
+                async def __aexit__(self, *a):
+                    return False
+
+            return _CM()
+
+    tool = _make_tool(_ErrorClient())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await tool._call_tool("read", {})
+
+    message = str(exc_info.value)
+    assert "read" in message
+    assert "test-server" in message
+    assert "permission denied" in message
+
+
+@pytest.mark.asyncio
 async def test_401_without_refresh_ctx_raises_actionable():
     tool = _make_tool(_FakeClient(fail_times=1), refresh_ctx=None)
     with pytest.raises(RuntimeError, match="401 Unauthorized"):
