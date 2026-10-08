@@ -74,6 +74,14 @@ def _bounded(text: str) -> str:
     return buffer.getvalue()
 
 
+def _process_start_time(pid: int) -> str | None:
+    """Linux process identity, so escalation cannot signal a reused PID."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
 class BashSession:
     """A persistent bash shell session with dedicated control channel.
 
@@ -625,10 +633,10 @@ class BashSession:
         sentinel: str,
         original_timeout: float,
     ) -> bool:
-        """Kill child processes and wait for sentinel on control fd.
+        """Kill the current command tree and wait for its control sentinel.
 
-        Graduated: SIGTERM children -> 5s -> SIGINT bash -> 2s. Background jobs
-        started by earlier commands are not this command's children to kill.
+        Capture descendants before TERM can orphan them. Earlier background
+        jobs and their entire subtrees are excluded from timeout cleanup.
         """
         ctrl = self._control_reader
         assert ctrl is not None
@@ -644,40 +652,68 @@ class BashSession:
                 if sentinel in raw.decode("utf-8", errors="replace"):
                     return True
 
-        async def kill_children(sig: int) -> None:
-            killed_any = False
+        async def snapshot_children() -> dict[int, str | None]:
             try:
-                pgrep = await asyncio.create_subprocess_exec(
-                    "pgrep",
-                    "-P",
-                    str(proc.pid),
+                process_list = await asyncio.create_subprocess_exec(
+                    "ps",
+                    "-eo",
+                    "pid=,ppid=",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-                stdout, _ = await asyncio.wait_for(pgrep.communicate(), timeout=2.0)
-                if stdout:
-                    for pid_str in stdout.decode().split():
-                        if pid_str.strip():
-                            if int(pid_str) in self._background_pids:
-                                continue  # an earlier command's job, not this one
-                            try:
-                                os.kill(int(pid_str), sig)
-                                killed_any = True
-                            except (ProcessLookupError, OSError):
-                                pass
-            except (TimeoutError, OSError, FileNotFoundError):
-                pass
-            if not killed_any:
-                # SIGINT to bash (like Ctrl-C) to break pending reads.
                 try:
-                    os.kill(proc.pid, signal.SIGINT)
+                    stdout, _ = await asyncio.wait_for(process_list.communicate(), timeout=2.0)
+                except TimeoutError:
+                    process_list.kill()
+                    await process_list.communicate()
+                    raise
+                children: dict[int, list[int]] = {}
+                for line in stdout.decode().splitlines():
+                    pid, parent = map(int, line.split())
+                    children.setdefault(parent, []).append(pid)
+                descendants: dict[int, str | None] = {}
+                pending = list(children.get(proc.pid, []))
+                while pending:
+                    pid = pending.pop()
+                    if pid in self._background_pids or pid in descendants:
+                        continue
+                    descendants[pid] = _process_start_time(pid)
+                    pending.extend(children.get(pid, []))
+                return descendants
+            except (TimeoutError, OSError, FileNotFoundError):
+                logger.warning("Could not snapshot command descendants for timeout cleanup")
+                return {}
+
+        def kill_children(targets: dict[int, str | None], sig: int) -> bool:
+            killed_any = False
+            # Signal descendants before their parents. Keep the captured PIDs
+            # through escalation even if the shell sentinel has already arrived.
+            for pid, identity in reversed(list(targets.items())):
+                if sys.platform == "linux" and (
+                    identity is None or _process_start_time(pid) != identity
+                ):
+                    continue
+                try:
+                    os.kill(pid, sig)
+                    killed_any = True
                 except (ProcessLookupError, OSError):
                     pass
+            return killed_any
 
-        await kill_children(signal.SIGTERM)
-        if await try_drain(_SIGTERM_GRACE):
+        targets = await snapshot_children()
+        if not kill_children(targets, signal.SIGTERM):
+            # A shell builtin may be waiting without any command children.
+            try:
+                os.kill(proc.pid, signal.SIGINT)
+            except (ProcessLookupError, OSError):
+                pass
+        recovered = await try_drain(_SIGTERM_GRACE)
+        # Refresh reachable descendants, but retain orphaned original targets.
+        for pid, identity in (await snapshot_children()).items():
+            targets.setdefault(pid, identity)
+        kill_children(targets, signal.SIGKILL)
+        if recovered:
             return True
-        await kill_children(signal.SIGKILL)
         if await try_drain(_SIGKILL_GRACE):
             return True
         return False

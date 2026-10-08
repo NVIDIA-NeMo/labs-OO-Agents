@@ -4,6 +4,7 @@
 
 import asyncio
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -73,6 +74,42 @@ async def test_timeout_spares_earlier_background_jobs(tmp_path, reap):
         assert _alive(pid)
         stdout, _, code = await session.run("echo still-usable")
         assert (stdout, code) == ("still-usable", 0)
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("pipeline", [False, True])
+async def test_timeout_kills_nested_command_but_spares_earlier_job(tmp_path, reap, pipeline):
+    """A TERM-resistant grandchild must not survive its parent's early exit."""
+    session = BashSession(cwd=tmp_path, keep_background_on_close=True)
+    pid_file = tmp_path / "child.pid"
+    child = (
+        "import os, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    )
+    parent = f"import subprocess, time; subprocess.Popen([{sys.executable!r}, '-c', {child!r}]); time.sleep(60)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(parent)}"
+    if pipeline:
+        command += " | cat"
+    try:
+        earlier = await _start_job(session, "sleep 60")
+        reap.append(earlier)
+        running = asyncio.create_task(session.run(command, timeout=1.0))
+        try:
+            for _ in range(100):
+                if pid_file.exists() and pid_file.read_text().strip():
+                    break
+                await asyncio.sleep(0.01)
+            nested = int(pid_file.read_text())
+            reap.append(nested)
+        finally:
+            _, _, code = await running
+        assert code == 124
+        assert await _wait_dead(nested)
+        assert _alive(earlier)
+        stdout, _, code = await session.run("echo recovered")
+        assert (stdout, code) == ("recovered", 0)
     finally:
         await session.close()
 
