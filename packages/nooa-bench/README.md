@@ -31,21 +31,16 @@ twice in the last eight tool calls is not run a third time, and a call that
 produced identical output three times runs with a warning; repeating either
 after the warning stops the task with `LoopDetectedError`.
 Awaited delegation runs inside that same parent cell deadline. A timeout cancels
-the worker and merges no partial Todo state; the parent receives a cell timeout
-error and may try again. Cell timeouts do not consume the strategy's retry counter,
-so the enclosing harness budget is the overall limit on repeated delegations.
+the worker; the parent receives a cell timeout error and may try again. Cell
+timeouts do not consume the strategy's retry counter, so the enclosing harness
+budget is the overall limit on repeated delegations.
 Workers use the same agent type, model client and working directory, with their
 own execution context and shell. Background jobs started through `self.shell`
 (`server &`) survive later command timeouts and shell close, so a verifier that
 runs after the agent exits can still reach servers the agent started; the
-benchmark container's teardown ends them. Delegation defaults to a maximum depth of four.
-Passing a Todo gives the worker an independent task copy; successful worker
-updates are merged after cleanup. Conflicts or worker-only dependencies raise
-`DelegationMergeError`, retaining the completed `result` and full `worker_state`
-for explicit reconciliation without rerunning the worker. Failed execution or
-cleanup does not merge partial state. Task-local state stays on Todos, and automatic
-summarization handles context maintenance. Method-writing tools are available in
-both variants.
+benchmark container's teardown ends them. Delegation defaults to a maximum depth
+of four. Neither variant attaches a todo tool; automatic summarization handles
+context maintenance. Method-writing tools are available in both variants.
 
 Context usage is the last provider-reported input count divided by the model
 window minus UnifiedLLM's effective reply cap (including reasoning-level and
@@ -67,7 +62,7 @@ framework events carry explicit attempt linkage. Schema version 2 removes
 unsupported error-code guesses from stdout. Code metrics count syntactic call
 sites, not actual runtime loop iterations; fan-out recognizes direct and starred
 `asyncio.gather` arguments, including comprehensions and same-cell list aliases.
-Simple same-cell aliases of Todo, shell and repo objects are recognized; this is
+Simple same-cell aliases of todo, shell and repo objects are recognized; this is
 not general cross-cell dataflow analysis. Reports with another schema, content
 policy or unknown metrics are rejected; regenerate them from `trajectory.json`.
 Supplied delegation context is an ordinary worker-method argument, displayed by
