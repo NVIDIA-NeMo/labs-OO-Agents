@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- LLM provider calls are bounded by an overall per-attempt deadline
+  (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
+  gap between received bytes, so a stalled stream that still trickled keepalive
+  bytes was never timed out and the attempt awaited forever. On expiry the
+  attempt is cancelled and a retryable `TimeoutError` is raised, so the retry
+  layer recovers. Set `request_timeout=None` to disable.
 - Shell commands (`ShellTools.run`, `BashSession.run`) that print more than
   30,000 characters on stdout or stderr keep the first and last 15,000, with the
   standard truncation notice (`TruncatingStringIO`). Before, only the first

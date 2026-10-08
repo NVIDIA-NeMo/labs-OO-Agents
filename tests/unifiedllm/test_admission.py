@@ -33,7 +33,6 @@ from nooa.unifiedllm.admission import (
     _reset_admission_groups_for_tests,
 )
 from nooa.unifiedllm.unifiedllm import (
-    _litellm_acompletion,
     _record_admission_observation,
     _run_async_provider_call,
 )
@@ -167,7 +166,7 @@ async def test_wrapper_is_per_use_and_delegates_runtime_attributes_with_fake_llm
                 events.append(f"provider:{value}")
                 return value
 
-            return await _run_async_provider_call(provider_attempt)
+            return await _run_async_provider_call(provider_attempt, request_timeout=None)
 
     base = FakeLLM()
     wrapped = AdmissionControl(base, AdmissionControlConfig(controller=Controller()))
@@ -388,13 +387,10 @@ async def test_cancellation_storm_removes_waiters_immediately():
 
 
 @pytest.mark.asyncio
-async def test_unbounded_call_preserves_existing_provider_handoff():
+async def test_unbounded_call_preserves_provider_handoff():
     provider_started = asyncio.Event()
     release_provider = asyncio.Event()
     provider_exited = asyncio.Event()
-
-    async def admitted_call() -> Any:
-        raise AssertionError("unbounded calls must use the compatibility path")
 
     async def provider(**_kwargs: Any) -> litellm.ModelResponse:
         provider_started.set()
@@ -404,16 +400,11 @@ async def test_unbounded_call_preserves_existing_provider_handoff():
         finally:
             provider_exited.set()
 
-    async def existing_handoff() -> Any:
-        return await _litellm_acompletion({})
+    async def call() -> Any:
+        return await litellm.acompletion()
 
     with patch("litellm.acompletion", AsyncMock(side_effect=provider)):
-        task = asyncio.create_task(
-            _run_async_provider_call(
-                admitted_call,
-                unadmitted_call=existing_handoff,
-            )
-        )
+        task = asyncio.create_task(_run_async_provider_call(call, request_timeout=None))
         await asyncio.wait_for(provider_started.wait(), timeout=1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -472,7 +463,7 @@ async def test_dispatched_cancellation_holds_slot_until_provider_exits():
 
     async def controlled(provider: Callable[[], Any]) -> Any:
         with _admission_controller_scope(policy):
-            return await _run_async_provider_call(provider)
+            return await _run_async_provider_call(provider, request_timeout=None)
 
     first_task = asyncio.create_task(controlled(first_provider))
     await asyncio.wait_for(first_started.wait(), timeout=1)
@@ -486,6 +477,32 @@ async def test_dispatched_cancellation_holds_slot_until_provider_exits():
 
     finish_first.set()
     assert await asyncio.wait_for(second_task, timeout=1) == "second"
+
+
+@pytest.mark.asyncio
+async def test_deadline_frees_permit_after_caller_cancel():
+    policy = _policy(1)
+    first_started = asyncio.Event()
+
+    async def stalled_provider() -> str:
+        first_started.set()
+        await asyncio.sleep(3600)
+        return "first"
+
+    async def second_provider() -> str:
+        return "second"
+
+    async def controlled(provider: Callable[[], Any]) -> Any:
+        with _admission_controller_scope(policy):
+            return await _run_async_provider_call(provider, request_timeout=0.05)
+
+    first_task = asyncio.create_task(controlled(stalled_provider))
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    first_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+
+    assert await asyncio.wait_for(controlled(second_provider), timeout=1) == "second"
 
 
 @pytest.mark.asyncio
