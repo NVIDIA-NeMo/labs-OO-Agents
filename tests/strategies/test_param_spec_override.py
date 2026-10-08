@@ -170,3 +170,47 @@ class TestInspectInputsPrefillHonorsParamSpecs:
         assert "pprint(full, max_length=20," in code
         # plain has no override → config default (10)
         assert "pprint(plain, max_length=10," in code
+
+
+async def test_top_level_agent_call_prefill_honors_param_specs():
+    """A direct agent call carries Annotated overrides into the model prefill.
+
+    Nested calls already built CurrentCall.from_method(); the top-level runtime
+    path must preserve the same specs, or every entry-point argument falls back
+    to the default 2,000-character bound.
+    """
+    import json
+
+    from nooa import Agent, strategy
+    from nooa.strategies import CodeActV2
+    from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+
+    code = "return_result('done')"
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(
+                    ToolCall(id="c1", name="python_cell", arguments=json.dumps({"code": code})),
+                ),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+
+    class SpecAgent(Agent, llm=llm):
+        @strategy(CodeActV2())
+        async def process(
+            self, content: Annotated[str, spec(max_string=None)], plain: str
+        ) -> str: ...
+
+    content = "start " + "a" * 3000 + " MIDDLE-OF-CONTENT " + "b" * 3000
+    plain = "start " + "c" * 3000 + " MIDDLE-OF-PLAIN " + "d" * 3000
+    agent = SpecAgent()
+    try:
+        assert await agent.process(content, plain) == "done"
+    finally:
+        await agent.aclose()
+
+    rendered = str(llm.calls[0].messages)
+    assert "MIDDLE-OF-CONTENT" in rendered
+    assert "MIDDLE-OF-PLAIN" not in rendered

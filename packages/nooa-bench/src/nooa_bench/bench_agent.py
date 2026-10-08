@@ -40,6 +40,9 @@ with _hidden:
     from nooa.strategies import CodeActV2
     from nooa.unifiedllm import FakeLLMClient
 
+    # The task text is rendered in full; other inputs keep the default bounds.
+    _TaskDescription = Annotated[str, spec(max_string=None)]
+
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
 
@@ -310,7 +313,7 @@ class BenchAgent(
     )
     async def _solve_task(
         self,
-        description: Annotated[str, spec(max_string=None)],
+        description: _TaskDescription,
         supplied_context: Any = None,
     ) -> TaskResult:
         """Solve the supplied task completely.

@@ -834,7 +834,8 @@ for name in ('agent', 'activity', 'slash_commands', 'settings'):
 
 
 @pytest.mark.asyncio
-async def test_original_task_remains_after_prefill_compaction(tmp_path):
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_original_task_remains_after_prefill_compaction(agent_type, tmp_path):
     class CompactingLLM(FakeLLMClient):
         async def acall(self, messages, **kwargs):
             if not self.compacted:
@@ -861,7 +862,7 @@ async def test_original_task_remains_after_prefill_compaction(tmp_path):
         ]
     )
     llm.compacted = False
-    agent = BenchAgent(llm=llm, working_dir=str(tmp_path))
+    agent = agent_type(llm=llm, working_dir=str(tmp_path))
     try:
         description = (
             "task start " + "a" * 3000 + " MIDDLE-TASK-INSTRUCTIONS " + "b" * 3000 + " task end"
