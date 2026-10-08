@@ -651,7 +651,7 @@ class MCPTool:
             details = None
             if hasattr(result, "content") and result.content:
                 for content in result.content:
-                    if hasattr(content, "text"):
+                    if hasattr(content, "text") and content.text:
                         details = content.text
                         break
 
