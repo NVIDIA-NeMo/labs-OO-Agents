@@ -1271,6 +1271,91 @@ Standard Python builtins and agent instance (`self`) are available."""
         code = f"result = {call_expr}\nprint(result)"
         return code
 
+    def _empty_code_error(self, args: dict[str, Any]) -> str:
+        """Explain an empty cell, naming misplaced argument keys when present."""
+        extra = sorted(str(k) for k in args if k != "code")
+        if "code" in args or not extra:
+            return "Execution error: empty code provided."
+        return (
+            f"Execution error: {self._python_tool_name()} takes a single `code` argument "
+            f"containing Python source, but received {', '.join(f'`{k}`' for k in extra)}. "
+            'Pass Python source as {"code": "..."}; inspect print(doc(self)) for the '
+            "agent's APIs."
+        )
+
+    def _unknown_tool_feedback(
+        self, tool_name: str, args: dict[str, Any], runtime: RuntimeServices
+    ) -> str:
+        """Explain how to express a rejected tool call as a Python cell.
+
+        Models sometimes call an agent attribute such as ``todo`` or
+        ``self.shell.run`` as if it were a provider tool. The feedback names the
+        one valid tool, separates the tool name from the code it receives, and
+        shows a concrete cell for the rejected name: the equivalent call when
+        it resolves to a public callable on ``self``, otherwise a ``doc()``
+        inspection. Resolution is static, so no agent attribute is evaluated.
+        """
+        python_tool = self._python_tool_name()
+        shown_name = tool_name if len(tool_name) <= 80 else tool_name[:77] + "..."
+        header = f"Unknown tool `{shown_name}`. Available tools: {self._available_tool_names()}."
+        if tool_name == "return_result" and not self._supports_return_result():
+            return (
+                f"{header} To finish, call {python_tool} with code `return_result(value)`; "
+                "return_result is a Python builtin, not a provider tool."
+            )
+
+        from nooa.agentdoc._visibility import is_hidden_field, is_hidden_method
+
+        path = tool_name.removeprefix("self.").split(".")
+        target: Any = runtime.agent
+        for part in path:
+            owner = target
+            try:
+                if not part.isidentifier() or part.startswith("_"):
+                    raise AttributeError(part)
+                target = inspect.getattr_static(owner, part)
+            except AttributeError:
+                target = None
+                break
+            if is_hidden_method(target) or (
+                owner is runtime.agent and is_hidden_field(owner, part)
+            ):
+                target = None
+                break
+        expr = "self." + ".".join(path)
+
+        if target is None:
+            code = "print(doc(self))"
+            shown_expr = expr if len(expr) <= 80 else expr[:77] + "..."
+            hint = (
+                f"`{shown_expr}` does not exist. Inspect the available APIs with the cell above, "
+                f"then call them inside {python_tool}."
+            )
+        elif callable(target):
+            func = getattr(target, "__func__", target)
+            call_expr = f"{expr}({', '.join(f'{k}={v!r}' for k, v in args.items())})"
+            if len(call_expr) > 300:
+                call_expr = f"{expr}(...)"
+            if inspect.iscoroutinefunction(func):
+                call_expr = f"await {call_expr}"
+            code = f"result = {call_expr}\nprint(result)"
+            hint = f"Check the arguments with print(doc({expr})) inside {python_tool} if unsure."
+        else:
+            code = f"print(doc({expr}))"
+            hint = (
+                f"`{expr}` is an object, not a function. After inspecting it, call its "
+                f"documented methods as {expr}.method_name(...) inside {python_tool}; "
+                "await async methods."
+            )
+        arguments = json.dumps({"code": code})
+        return (
+            f"{header}\n\n"
+            f"Call the {python_tool} tool and put Python code in its `code` argument:\n\n"
+            f"Tool name: {python_tool}\n"
+            f"Arguments: {arguments}\n\n"
+            f"{hint} Do not call `{shown_name}` as a tool again."
+        )
+
     async def _process_tool_calls(
         self,
         tool_calls: list[Any],
@@ -1316,7 +1401,11 @@ Standard Python builtins and agent instance (`self`) are available."""
             except ValueError as e:
                 session.record_error()
                 runtime.event_manager.add(
-                    Error(content=f"Invalid arguments for tool `{tool_call.name}`: {e}")
+                    Error(
+                        content=f"Invalid arguments for tool `{tool_call.name}`: {e}. "
+                        f"Tool arguments must be a JSON object; call {self._python_tool_name()} "
+                        f'with arguments like {{"code": "print(1)"}}.'
+                    )
                 )
                 # Stop processing remaining tool calls - let LLM fix this first
                 return _ToolCallsResult()
@@ -1450,18 +1539,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_call_event_id,
                         result=ToolResult(
                             tool_call_id=tool_call.id,
-                            content=(
-                                f"Unknown tool `{tool_call.name}`. "
-                                f"Available tools: {self._available_tool_names()}"
-                                + (
-                                    f". To finish, call {self._python_tool_name()} with code "
-                                    "`return_result(value)`; return_result is a Python builtin, "
-                                    "not a provider tool."
-                                    if tool_call.name == "return_result"
-                                    and not self._supports_return_result()
-                                    else ""
-                                )
-                            ),
+                            content=self._unknown_tool_feedback(tool_call.name, args, runtime),
                             result_status=ResultStatus.ERROR,
                         ),
                     )
@@ -1572,7 +1650,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     execution_count=execution_count,
                     stdout="",
                     stderr="",
-                    error="Execution error: empty code provided.",
+                    error=self._empty_code_error(args),
                     value=None,
                     explicit_return=False,
                     execution_status=ResultStatus.ERROR,
