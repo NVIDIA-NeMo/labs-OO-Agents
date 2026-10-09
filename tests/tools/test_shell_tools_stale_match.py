@@ -147,9 +147,15 @@ async def test_small_diff_is_complete(shell, tmp_path):
     with pytest.raises(StaleMatchError) as caught:
         await shell.replace(anchor, "replacement")
     error = caught.value
-    assert error.diff == "--- captured\n+++ current-at-old-range\n@@ -1 +1 @@\n-old\n+new\n"
+    assert error.diff == (
+        "--- stored Match.text (when read)\n"
+        "+++ current file (same saved line range)\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
     assert error.diff_complete
-    assert "diff (complete)" in str(error)
+    assert (
+        "stored Match.text (when read) versus current file (same saved line range) diff (complete):"
+    ) in str(error)
     assert error.args == (str(error),)  # no raw full regions in exception rendering
 
 

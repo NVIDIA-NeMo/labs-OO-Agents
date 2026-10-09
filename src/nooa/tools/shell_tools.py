@@ -163,7 +163,7 @@ class Match:
 
 
 class StaleMatchError(ValueError):
-    """Rejected Match edit, with a bounded diagnostic (no captured/current text fields).
+    """Rejected Match edit, with a bounded diagnostic (no stored/current text fields).
 
     Structured fields are available locally. Existing sandbox error transport
     carries the type name and rendered message, not custom exception attributes.
@@ -206,7 +206,10 @@ def _stale_match_diff(expected: str, current: str | None) -> tuple[str, bool, st
         return "", False, "Diff omitted (incomplete): input regions exceed 400 lines."
     # Both sides use the same universal-newline representation as Match producers.
     chunks = difflib.unified_diff(
-        expected_lines, current_lines, fromfile="captured", tofile="current-at-old-range"
+        expected_lines,
+        current_lines,
+        fromfile="stored Match.text (when read)",
+        tofile="current file (same saved line range)",
     )
     full = "".join(
         chunk if chunk.endswith("\n") else chunk + "\n\\ No newline at end of file\n"
@@ -216,7 +219,7 @@ def _stale_match_diff(expected: str, current: str | None) -> tuple[str, bool, st
     preview = preview.encode("utf-8")[:2048].decode("utf-8", errors="ignore")
     complete = preview == full
     detail = (
-        "Captured versus current-at-old-range diff (complete):"
+        "stored Match.text (when read) versus current file (same saved line range) diff (complete):"
         if complete
         else "Diff preview (incomplete; capped at 20 lines and 2 KiB):"
     )
