@@ -33,6 +33,7 @@ from .annotation_routes import router as annotation_router  # noqa: E402
 from .eval_routes import router as eval_router  # noqa: E402
 from .explorer_routes import router as explorer_router  # noqa: E402
 from .memory_routes import router as memory_router  # noqa: E402
+from .source_routes import router as source_router  # noqa: E402
 from .trace_routes import router as trace_router  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -158,6 +159,9 @@ async def lifespan(app: FastAPI):
         log.error("SQLite trace store is not writable:\n%s", exc)
         raise SystemExit(1) from exc
     log.info("Database ready: %d sessions in %s", count, otlp_store.DB_PATH)
+    from . import sources
+
+    sources.configured_sources()  # Validate explicitly configured plugins at startup.
     # Stated at startup so a rejected Host is diagnosable from the log alone.
     extra_hosts = allowed_hosts()
     if "*" in extra_hosts:
@@ -347,6 +351,7 @@ app.include_router(eval_router, dependencies=_protected)
 app.include_router(annotation_router, dependencies=_protected)
 app.include_router(explorer_router, dependencies=_protected)
 app.include_router(memory_router, dependencies=_protected)
+app.include_router(source_router, dependencies=_protected)
 
 
 # ============================================================================
@@ -553,6 +558,9 @@ async def journal_blocks_ingest(request: Request):
 @app.get("/api/traces/{session_id:path}/calls", dependencies=_protected)
 def get_session_calls(session_id: str):
     """Return all LLM calls for a session with fully reconstructed messages."""
+    from . import sources
+
+    sources.ensure_session(session_id)
     if not otlp_store.session_exists(session_id):
         return JSONResponse(status_code=404, content={"error": f"Session not found: {session_id}"})
     return JSONResponse(content=otlp_store.get_session_calls(session_id))
