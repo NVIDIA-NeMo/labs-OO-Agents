@@ -124,6 +124,10 @@ class BashSession:
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
+        from nooa.tools.shell_lifecycle import _current_scope
+
+        if scope := _current_scope.get():
+            scope.adopt(self)
 
     @property
     def cwd(self) -> Path:
@@ -137,8 +141,12 @@ class BashSession:
             try:
                 # During interpreter shutdown, module globals (os, signal) may
                 # be None, causing TypeError. Broad except handles all cases.
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
+                if self._keep_background_on_close:
+                    _spawn_output_drainer(proc)
+                    proc.kill()
+                else:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
             except Exception:
                 try:
                     proc.kill()
