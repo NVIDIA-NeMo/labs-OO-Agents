@@ -29,6 +29,7 @@ Attach to an agent::
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import shlex
@@ -159,6 +160,81 @@ class Match:
             )
 
         raise TypeError(f"indices must be int or slice, not {type(key).__name__}")
+
+
+class StaleMatchError(ValueError):
+    """Rejected Match edit, with a bounded diagnostic (no stored/current text fields).
+
+    Structured fields are available locally. Existing sandbox error transport
+    carries the type name and rendered message, not custom exception attributes.
+    """
+
+    code = "STALE_MATCH"
+
+    def __init__(self, target: Match, current: str | None, reason: str):
+        self.path = target.path
+        self.resolved_path = target.resolved_path
+        self.start = target.start
+        self.end = target.end
+        self.reason = reason
+        self.diff, self.diff_complete, detail = _stale_match_diff(target.text, current)
+        message = (
+            f"{self.code}: {self.path!r} (resolved path: {self.resolved_path!r}), "
+            f"captured lines {self.start}-{self.end}: {reason}. "
+            "No file was changed. Re-read or re-search the file and recompute the Match "
+            "before retrying; anchors are never relocated."
+        )
+        message += f"\n{detail}"
+        if self.diff:
+            message += f"\n{self.diff}"
+            if not self.diff_complete:
+                # Byte truncation can leave the preview mid-line. Keep the notice
+                # on its own line and outside the bounded structured diff field.
+                if not message.endswith("\n"):
+                    message += "\n"
+                message += (
+                    "Diff preview truncated (capped at 20 lines and 2 KiB); not a complete diff."
+                )
+        super().__init__(message)
+
+
+def _stale_match_diff(expected: str, current: str | None) -> tuple[str, bool, str]:
+    """Bound computation as well as output: <=16 KiB / 400 input lines total.
+
+    A preview is at most 20 lines AND 2 KiB (UTF-8), even for huge single
+    lines. No raw region is retained on the exception or in its args.
+    """
+    if current is None:
+        return "", False, "Diff omitted (incomplete): current region is unavailable."
+    input_limit = 16 * 1024
+    if len(expected) + len(current) > input_limit or (
+        len(expected.encode("utf-8")) + len(current.encode("utf-8")) > input_limit
+    ):
+        return "", False, "Diff omitted (incomplete): input regions exceed 16 KiB."
+    expected_lines = expected.splitlines(keepends=True)
+    current_lines = current.splitlines(keepends=True)
+    if len(expected_lines) + len(current_lines) > 400:
+        return "", False, "Diff omitted (incomplete): input regions exceed 400 lines."
+    # Both sides use the same universal-newline representation as Match producers.
+    chunks = difflib.unified_diff(
+        expected_lines,
+        current_lines,
+        fromfile="stored Match.text (when read)",
+        tofile="current file (same saved line range)",
+    )
+    full = "".join(
+        chunk if chunk.endswith("\n") else chunk + "\n\\ No newline at end of file\n"
+        for chunk in chunks
+    )
+    preview = "".join(full.splitlines(keepends=True)[:20])
+    preview = preview.encode("utf-8")[:2048].decode("utf-8", errors="ignore")
+    complete = preview == full
+    detail = (
+        "stored Match.text (when read) versus current file (same saved line range) diff (complete):"
+        if complete
+        else "Diff preview:"
+    )
+    return preview, complete, detail
 
 
 class ShellResult(str):
@@ -822,6 +898,9 @@ class ShellTools(Skill):
         2. replace(path, old, new)  — old must match exactly once. new="" deletes.
 
         A Match replaces its entire line region, not a substring within it.
+        Stale or invalid anchors raise StaleMatchError without writing; re-read or
+        re-search and recompute the Match. Anchors are never relocated. This is
+        a pre-write check, not a lock against concurrent external writers.
         Supplying new with a Match is an error; use the path form for old -> new.
 
         Args:
@@ -842,8 +921,30 @@ class ShellTools(Skill):
                 )
             new_text = old_or_new
             resolved = Path(target.resolved_path)
-            content = resolved.read_text()
+            try:
+                content = resolved.read_text()
+            except FileNotFoundError:
+                raise StaleMatchError(target, None, "file no longer exists") from None
             all_lines = content.splitlines(keepends=True)
+            # Compare at the captured range only; never find/relocate matching text.
+            # read(), search harvesting and Match slicing use this same normalized
+            # text representation, including line terminators and missing EOF newline.
+            integer_range = type(target.start) is int and type(target.end) is int
+            empty_file_anchor = (
+                integer_range
+                and target.start == 1
+                and target.end == 0
+                and target.text == ""
+                and content == ""
+            )
+            if not empty_file_anchor:
+                if not integer_range or target.start < 1 or target.end < target.start:
+                    raise StaleMatchError(target, None, "invalid captured line range")
+                current = "".join(all_lines[target.start - 1 : target.end])
+                if target.end > len(all_lines):
+                    raise StaleMatchError(target, current, "captured line range is out of bounds")
+                if current != target.text:
+                    raise StaleMatchError(target, current, "captured text no longer matches")
 
             before = all_lines[: target.start - 1]
             after = all_lines[target.end :]
