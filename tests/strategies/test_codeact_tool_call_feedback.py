@@ -207,3 +207,87 @@ async def test_invalid_json_arguments_show_expected_shape():
         )
     finally:
         await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"add": '[{"id": "1", "title": "Tune model"}]'},
+        {"title": "Install ffmpeg and tesseract-ocr", "deps": '["2b12c3ab"]'},
+    ],
+)
+async def test_rejected_todo_arguments_reach_model_as_tool_feedback(arguments):
+    """Valid JSON with an imagined todo schema must not disappear silently."""
+    from nooa.tools.todo import TodoManager
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _call("todo", json.dumps(arguments), "bad-todo"),
+            _cell("return_result('recovered')", "fixed"),
+        ]
+    )
+
+    class FeedbackAgent(Agent, llm=llm):
+        def __init__(self):
+            super().__init__()
+            self.todo = TodoManager()
+
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> str:
+            """Return recovered."""
+            ...
+
+    agent = FeedbackAgent()
+    try:
+        assert await agent.answer() == "recovered"
+        feedback = next(
+            message
+            for message in llm.last_messages
+            if message.get("role") == "tool" and message.get("tool_call_id") == "bad-todo"
+        )
+        assert "Unknown tool `todo`" in feedback["content"]
+        assert "print(doc(self.todo))" in feedback["content"]
+        assert "self.todo.method_name(...)" in feedback["content"]
+        assert "Do not call `todo` as a tool again." in feedback["content"]
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_retains_feedback_for_every_rejected_todo_call():
+    """The final rejection must have an error result even at the retry limit."""
+    from nooa.errors import GenerationError
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _call("todo", json.dumps({"add": "[]"}), f"bad-{index}") for index in range(10)
+        ]
+    )
+
+    class FeedbackAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None, max_retries=10)))
+        async def answer(self) -> str:
+            """Return a result."""
+            ...
+
+    agent = FeedbackAgent()
+    try:
+        with pytest.raises(GenerationError, match="after 10 errors"):
+            await agent.answer()
+        rejected = [
+            event for event in agent.event_manager.values() if isinstance(event, ToolCallEvent)
+        ]
+        assert len(rejected) == 10
+        assert all(
+            event.result is not None and "Unknown tool `todo`" in event.result.content
+            for event in rejected
+        )
+        visible = {
+            message["tool_call_id"]
+            for message in llm.last_messages
+            if message.get("role") == "tool"
+        }
+        assert visible == {f"bad-{index}" for index in range(9)}
+    finally:
+        await agent.aclose()
