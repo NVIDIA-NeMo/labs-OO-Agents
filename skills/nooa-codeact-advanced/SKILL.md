@@ -48,7 +48,7 @@ class Notifier(Agent, llm=llm):
 | `restrictions` | `RestrictionsConfig()` | See Restrictions below. |
 | `prefill` | `InspectInputsPrefill()` | See Prefill above. |
 | `max_tool_calls` | `None` | **Dead — declared but never read.** Setting it does nothing. |
-| `loop_guard` | `None` | Opt-in `LoopGuardConfig(repeat_threshold=3, window=8)`. A call (tool name + normalized arguments; comments and formatting ignored) that failed identically on its last two runs in the window is not run again; one that produced identical output three times runs with a warning. Repeating either within the window after the warning raises `LoopDetectedError`. Messages are fixed templates; a `LoopGuardTriggered` event records each warning or stop. |
+| `loop_guard` | `None` | Opt-in `LoopGuardConfig()` (defaults `repeat_threshold=7`, `window=15`, `max_outcome_chars=500`). A call (tool name + normalized arguments; comments and formatting ignored) whose last `repeat_threshold - 1` runs in the window failed identically is not run again; one that produced identical output `repeat_threshold` times runs with a warning. Repeating either within the window after the warning raises `LoopDetectedError`. Messages are fixed templates; a `LoopGuardTriggered` event records each warning or stop. |
 
 `tool_choice` is hardcoded `"auto"`.
 
