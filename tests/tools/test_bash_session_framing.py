@@ -154,3 +154,50 @@ class TestStreamingUsesTheSameFraming:
         ]
         assert "streamed" in "".join(chunks)
         assert session.cwd == sub
+
+
+class TestInitCommandUsesTheSameFraming:
+    """start() sends init_command through _build_script, so a malformed or
+    stdin-reading init cannot wedge the session for its whole 60s timeout."""
+
+    async def test_unbalanced_quote_in_init_does_not_wedge_start(self, tmp_path):
+        s = BashSession(cwd=tmp_path, init_command='echo "unclosed')
+        try:
+            await asyncio.wait_for(s.start(), timeout=10.0)
+            stdout, _stderr, code = await s.run("echo alive")
+            assert stdout == "alive"
+            assert code == 0
+        finally:
+            await s.close()
+
+    async def test_stdin_reading_init_does_not_consume_the_protocol(self, tmp_path):
+        s = BashSession(cwd=tmp_path, init_command="cat")
+        try:
+            await asyncio.wait_for(s.start(), timeout=10.0)
+            stdout, _stderr, code = await s.run("echo alive")
+            assert stdout == "alive"
+            assert code == 0
+        finally:
+            await s.close()
+
+    async def test_benign_init_still_applies_env_and_cwd(self, tmp_path):
+        sub = tmp_path / "initdir"
+        sub.mkdir()
+        s = BashSession(cwd=tmp_path, init_command=f"export NOOA_INIT_VAR=applied && cd {sub}")
+        try:
+            await asyncio.wait_for(s.start(), timeout=10.0)
+            assert s.cwd == sub
+            stdout, _stderr, _code = await s.run("echo $NOOA_INIT_VAR")
+            assert stdout == "applied"
+        finally:
+            await s.close()
+
+    async def test_failed_init_logs_a_warning(self, tmp_path, caplog):
+        s = BashSession(cwd=tmp_path, init_command="false")
+        try:
+            with caplog.at_level("WARNING", logger="nooa.tools._bash_session"):
+                await asyncio.wait_for(s.start(), timeout=10.0)
+            messages = [r.getMessage() for r in caplog.records]
+            assert any("init_command" in m and "exited 1" in m for m in messages)
+        finally:
+            await s.close()
