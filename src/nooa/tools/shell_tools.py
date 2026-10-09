@@ -184,7 +184,18 @@ class StaleMatchError(ValueError):
             "No file was changed. Re-read or re-search the file and recompute the Match "
             "before retrying; anchors are never relocated."
         )
-        super().__init__(f"{message}\n{detail}" + (f"\n{self.diff}" if self.diff else ""))
+        message += f"\n{detail}"
+        if self.diff:
+            message += f"\n{self.diff}"
+            if not self.diff_complete:
+                # Byte truncation can leave the preview mid-line. Keep the notice
+                # on its own line and outside the bounded structured diff field.
+                if not message.endswith("\n"):
+                    message += "\n"
+                message += (
+                    "Diff preview truncated (capped at 20 lines and 2 KiB); not a complete diff."
+                )
+        super().__init__(message)
 
 
 def _stale_match_diff(expected: str, current: str | None) -> tuple[str, bool, str]:
