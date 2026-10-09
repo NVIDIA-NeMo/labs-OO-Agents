@@ -15,6 +15,7 @@ are this file's own and are not passed to ``nooa-atom``:
 """
 
 import importlib.abc
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from atom_test_agents import CellLLM, cell, reply  # noqa: E402
 from nooa_atom.acp import cli  # noqa: E402
 
 from nooa.unifiedllm import FakeLLMClient  # noqa: E402
+
+os.environ.setdefault("NOOA_MODEL", "fake")  # the server command needs a default model
 
 HOT_CELL = """\
 import os, pathlib, time

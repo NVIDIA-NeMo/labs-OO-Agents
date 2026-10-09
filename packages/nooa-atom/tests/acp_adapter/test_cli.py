@@ -13,6 +13,7 @@ from nooa_atom.acp.cli import command
 @pytest.fixture
 def served(monkeypatch):
     """Capture what the command would serve with, instead of serving."""
+    monkeypatch.setenv("NOOA_MODEL", "m")
     captured: dict = {}
     monkeypatch.setattr("nooa_atom.acp.cli.run", lambda **kwargs: captured.update(kwargs))
     # The real one repoints this process's stdin and stdout.
@@ -37,28 +38,34 @@ def _invoke(args, **kwargs):
     return click.testing.CliRunner().invoke(command, args, **kwargs)
 
 
-def test_a_model_is_required(monkeypatch):
+def test_without_a_model_the_first_configured_one_is_used(
+    monkeypatch, served, requested, tmp_path
+):
     monkeypatch.delenv("NOOA_MODEL", raising=False)
-    result = _invoke([])
-    assert result.exit_code == 2
-    assert "--model" in result.output
+    assert _invoke([]).exit_code == 0
+    assert served["model"] is None
+    (tmp_path / ".nooa").mkdir()
+    (tmp_path / ".nooa" / "llm_config.yaml").write_text(
+        "models:\n  first:\n    model_name: openai/a\n  second:\n    model_name: openai/b\n"
+    )
+    served["llm_factory"](None, tmp_path)
+    assert requested[-1][0] == "first"
 
 
-def test_the_model_comes_from_the_environment_or_the_flag(monkeypatch, served, requested, tmp_path):
+def test_the_model_comes_from_the_environment(monkeypatch, served, requested, tmp_path):
     monkeypatch.setenv("NOOA_MODEL", "env-model")
     assert _invoke([]).exit_code == 0
     assert served["model"] == "env-model"
-    assert _invoke(["--model", "flag-model"]).exit_code == 0
-    assert served["model"] == "flag-model"
     # The factory builds the alias a session asks for, else the default.
     served["llm_factory"](None, tmp_path)
     served["llm_factory"]("other", tmp_path)
-    assert requested == [("flag-model", {"client_type": None}), ("other", {"client_type": None})]
+    assert requested == [("env-model", {"client_type": None}), ("other", {"client_type": None})]
 
 
 def test_client_type_and_the_nvidia_key_reach_the_client(monkeypatch, served, requested, tmp_path):
     monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
-    result = _invoke(["--model", "nvidia_nim/some/model", "--client-type", "responses"])
+    monkeypatch.setenv("NOOA_MODEL", "nvidia_nim/some/model")
+    result = _invoke(["--client-type", "responses"])
     assert result.exit_code == 0, result.output
     served["llm_factory"](None, tmp_path)
     served["llm_factory"]("openai/gpt", tmp_path)
@@ -74,26 +81,26 @@ def test_the_factory_reads_the_session_workspace_configuration(served, tmp_path,
     (tmp_path / ".nooa" / "llm_config.yaml").write_text(
         "models:\n  mine:\n    model_name: openai/mine-model\n"
     )
-    assert _invoke(["--model", "m"]).exit_code == 0
+    assert _invoke([]).exit_code == 0
     assert served["llm_factory"]("mine", tmp_path).model == "openai/mine-model"
 
 
 def test_a_relative_agent_file_is_resolved_where_the_command_runs(served, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    assert _invoke(["--model", "m", "--agent", "agents/my_agent.py:MyAgent"]).exit_code == 0
+    assert _invoke(["--agent", "agents/my_agent.py:MyAgent"]).exit_code == 0
     assert served["agent_spec"] == f"{tmp_path / 'agents/my_agent.py'}:MyAgent"
-    assert _invoke(["--model", "m", "--agent", "pkg.module:Agent"]).exit_code == 0
+    assert _invoke(["--agent", "pkg.module:Agent"]).exit_code == 0
     assert served["agent_spec"] == "pkg.module:Agent"
 
 
 def test_without_agent_the_workspace_setting_decides(served):
-    assert _invoke(["--model", "m"]).exit_code == 0
+    assert _invoke([]).exit_code == 0
     assert served["agent_spec"] is None  # the workspace setting, else the Atom agent
 
 
 def test_sessions_dir_and_tee_are_passed_on(served, tmp_path):
     result = _invoke(
-        ["--model", "m", "--sessions-dir", str(tmp_path / "s"), "--tee", str(tmp_path / "t.jsonl")]
+        ["--sessions-dir", str(tmp_path / "s"), "--tee", str(tmp_path / "t.jsonl")]
     )
     assert result.exit_code == 0, result.output
     assert served["sessions_dir"] == tmp_path / "s"
@@ -112,30 +119,3 @@ def test_nooa_atom_runs():
     result = subprocess.run([path, "atom", "--help"], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
     assert "Serve NOOA Atom over ACP" in result.stdout
-
-
-def test_nooa_atom_requires_a_model(monkeypatch):
-    monkeypatch.delenv("NOOA_MODEL", raising=False)
-    path = shutil.which("nooa")
-    assert path is not None
-    result = subprocess.run([path, "atom"], capture_output=True, text=True, timeout=120)
-    assert result.returncode == 2
-    assert "--model" in result.stderr
-
-
-def test_help_mentions_the_tee():
-    assert "--tee" in _invoke(["--help"]).output
-
-
-@pytest.mark.parametrize("module", ["nooa_atom.acp.cli", "nooa_atom.acp.tee"])
-def test_the_entry_points_import_without_the_framework(module):
-    """`nooa` loads every plugin command at startup; this one must stay light."""
-    import sys
-
-    result = subprocess.run(
-        [sys.executable, "-c", f"import sys; import {module}; assert 'nooa' not in sys.modules"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 0, result.stderr

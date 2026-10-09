@@ -22,8 +22,6 @@ async def test_a_spawned_worker_answers_leads_its_group_and_exits_zero_on_end_of
         [
             sys.executable,
             str(FAKE_AGENT),
-            "--model",
-            "fake",
             "--sessions-dir",
             str(tmp_path / "sessions"),
         ]

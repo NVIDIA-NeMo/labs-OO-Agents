@@ -111,6 +111,11 @@ def workspace_models(workspace: Path) -> dict[str, dict[str, Any]]:
     return merged
 
 
+def default_model(workspace: Path) -> str | None:
+    """The first model alias ``workspace`` configures, or ``None`` when it has none."""
+    return next(iter(workspace_models(workspace)), None)
+
+
 def workspace_llm_client(
     name: str, workspace: Path, *, client_type: str | None = None, **overrides: Any
 ) -> Any:

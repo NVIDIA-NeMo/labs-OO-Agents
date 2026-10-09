@@ -49,8 +49,6 @@ class Server:
             str(FAKE_AGENT),
             "--agent",
             "atom_test_agents:EchoAgent",
-            "--model",
-            "fake",
             "--sessions-dir",
             str(tmp_path / "sessions"),
             *args,

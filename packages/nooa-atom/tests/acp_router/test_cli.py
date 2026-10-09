@@ -14,6 +14,7 @@ from nooa_atom.acp import cli
 @pytest.fixture
 def served(monkeypatch):
     """What the command passes to run(), instead of serving."""
+    monkeypatch.setenv("NOOA_MODEL", "m")
     captured: dict[str, Any] = {}
     monkeypatch.setattr(cli, "run", lambda **kwargs: captured.update(kwargs))
     monkeypatch.setattr(cli, "reserve_stdio_for_acp", lambda: (0, 1))
@@ -59,12 +60,12 @@ def test_help_describes_the_four_roles():
 
 
 def test_the_command_passes_the_role_options_to_run(served):
-    assert CliRunner().invoke(cli.command, ["--model", "m"]).exit_code == 0
+    assert CliRunner().invoke(cli.command, []).exit_code == 0
     assert (served["single_process"], served["worker_fd"], served["id_base"]) == (False, None, None)
-    args = ["--model", "m", "--worker-fd", "7", "--id-base", str(3 << 32)]
+    args = ["--worker-fd", "7", "--id-base", str(3 << 32)]
     assert CliRunner().invoke(cli.command, args).exit_code == 0
     assert (served["worker_fd"], served["id_base"]) == (7, 3 << 32)
-    assert CliRunner().invoke(cli.command, ["--model", "m", "--single-process"]).exit_code == 0
+    assert CliRunner().invoke(cli.command, ["--single-process"]).exit_code == 0
     assert served["single_process"] is True
 
 
@@ -77,13 +78,13 @@ def test_the_command_passes_the_role_options_to_run(served):
     ],
 )
 def test_inconsistent_role_options_are_usage_errors(served, args):
-    result = CliRunner().invoke(cli.command, ["--model", "m", *args])
+    result = CliRunner().invoke(cli.command, [*args])
     assert result.exit_code == 2
 
 
 def test_http_needs_a_token_or_no_auth(served, monkeypatch):
     monkeypatch.delenv(cli.TOKEN_ENV, raising=False)
-    result = CliRunner().invoke(cli.command, ["--model", "m", "--http"])
+    result = CliRunner().invoke(cli.command, ["--http"])
     assert result.exit_code == 2
     assert cli.TOKEN_ENV in result.output
     assert not served
@@ -92,7 +93,7 @@ def test_http_needs_a_token_or_no_auth(served, monkeypatch):
 def test_http_takes_the_token_out_of_the_environment(served, monkeypatch):
     """Workers and the cells they run inherit the environment; the token stays in the server."""
     monkeypatch.setenv(cli.TOKEN_ENV, "s3cret")
-    args = ["--model", "m", "--http", "--port", "9001", "--allowed-origin", "https://a.example"]
+    args = ["--http", "--port", "9001", "--allowed-origin", "https://a.example"]
     result = CliRunner().invoke(cli.command, args)
     assert result.exit_code == 0, result.output
     assert served["http"] == cli.HttpOptions(
@@ -105,11 +106,11 @@ def test_http_takes_the_token_out_of_the_environment(served, monkeypatch):
 
 def test_no_auth_is_only_for_loopback(served, monkeypatch):
     monkeypatch.delenv(cli.TOKEN_ENV, raising=False)
-    result = CliRunner().invoke(cli.command, ["--model", "m", "--http", "--no-auth"])
+    result = CliRunner().invoke(cli.command, ["--http", "--no-auth"])
     assert result.exit_code == 0, result.output
     assert served["http"].token is None
     served.clear()
-    args = ["--model", "m", "--http", "--no-auth", "--host", "0.0.0.0"]
+    args = ["--http", "--no-auth", "--host", "0.0.0.0"]
     result = CliRunner().invoke(cli.command, args)
     assert result.exit_code == 2
     assert "loopback" in result.output
@@ -119,14 +120,14 @@ def test_no_auth_is_only_for_loopback(served, monkeypatch):
 @pytest.mark.parametrize("extra", [["--single-process"], ["--tee", "frames.jsonl"]])
 def test_http_rejects_the_stdio_only_options(served, monkeypatch, extra):
     monkeypatch.setenv(cli.TOKEN_ENV, "t")
-    result = CliRunner().invoke(cli.command, ["--model", "m", "--http", *extra])
+    result = CliRunner().invoke(cli.command, ["--http", *extra])
     assert result.exit_code == 2
 
 
 def test_a_worker_of_an_http_server_needs_no_token(served, monkeypatch):
     """Workers re-run the server's command line, --http included."""
     monkeypatch.delenv(cli.TOKEN_ENV, raising=False)
-    args = ["--model", "m", "--http", "--worker-fd", "7", "--id-base", "1"]
+    args = ["--http", "--worker-fd", "7", "--id-base", "1"]
     result = CliRunner().invoke(cli.command, args)
     assert result.exit_code == 0, result.output
     assert served["worker_fd"] == 7
@@ -139,7 +140,7 @@ def test_run_serves_http_when_asked(roles):
 
 
 def test_a_factory_in_the_context_object_replaces_the_default(served):
-    result = CliRunner().invoke(cli.command, ["--model", "m"], obj={"llm_factory": _factory})
+    result = CliRunner().invoke(cli.command, [], obj={"llm_factory": _factory})
     assert result.exit_code == 0, result.output
     assert served["llm_factory"] is _factory
 

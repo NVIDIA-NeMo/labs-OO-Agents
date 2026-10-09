@@ -84,12 +84,6 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
 
 @click.command()
 @click.option(
-    "--model",
-    envvar="NOOA_MODEL",
-    required=True,
-    help="Model alias or LiteLLM model name new sessions start with. Or set NOOA_MODEL.",
-)
-@click.option(
     "--client-type",
     type=click.Choice(("completion", "responses")),
     default=None,
@@ -156,7 +150,6 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
 @click.pass_context
 def command(
     ctx: click.Context,
-    model: str,
     client_type: str | None,
     agent_spec: str | None,
     sessions_dir: Path | None,
@@ -185,6 +178,8 @@ def command(
     reserve_stdio_for_acp()
     from nooa.secrets import load_secrets_into_env
 
+    # Only the starting model; the client changes it with session/set_config_option.
+    model = os.environ.get("NOOA_MODEL") or None
     if (worker_fd is None) != (id_base is None):
         raise click.UsageError("--worker-fd and --id-base go together.")
     if worker_fd is not None and single_process:
@@ -218,7 +213,11 @@ def command(
         # The alias resolves against the session workspace's configuration.
         from nooa_atom.workspace import models
 
-        name = alias or model
+        name = alias or model or models.default_model(workspace)
+        if name is None:
+            raise click.UsageError(
+                f"No model configured for {workspace}: set NOOA_MODEL or run 'nooa connect'."
+            )
         overrides = (
             {"api_key": nvidia_api_key} if nvidia_api_key and name.startswith("nvidia_nim/") else {}
         )

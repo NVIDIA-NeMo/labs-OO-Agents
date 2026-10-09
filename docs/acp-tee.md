@@ -52,8 +52,6 @@ agent_servers:
     command: CHECKOUT/.venv-host/bin/nooa
     args:
       - atom
-      - --model
-      - MODEL_ALIAS
       - --tee
       - /tmp/nooa-atom-acp.jsonl
     env:

@@ -30,7 +30,7 @@ client (permission, elicitation, file and terminal requests) use ids from `B`
 upwards, with `B = k << 32` for worker `k`. The router sends each reply to the
 worker whose id range contains the reply's id.
 
-The shared options are `--model` (or `NOOA_MODEL`, required), `--client-type`,
+The shared options are `NOOA_MODEL` (environment variable; default: the first model in the workspace's LLM configuration), `--client-type`,
 `--agent`, `--sessions-dir` (or `NOOA_SESSIONS_DIR`) and
 `--tee`. The router starts
 each worker by re-running its own command line (`sys.orig_argv`) with
@@ -184,7 +184,7 @@ clients join as usual, and tool cards are already shortened for display.
 
 ```bash
 export NOOA_ATOM_TOKEN=$(openssl rand -hex 32)
-uv run nooa atom --http --model MODEL_ALIAS
+uv run nooa atom --http
 ```
 
 ## Running it
@@ -192,10 +192,10 @@ uv run nooa atom --http --model MODEL_ALIAS
 From a checkout, with the environment created by `uv sync --all-extras`:
 
 ```bash
-uv run nooa atom --model MODEL_ALIAS                    # router
-uv run nooa atom --model MODEL_ALIAS --single-process   # one process
-uv run nooa atom --model MODEL_ALIAS --http             # WebSocket, see above
-uv run nooa atom --help                                 # lists the four roles
+uv run nooa atom                   # router
+uv run nooa atom --single-process  # one process
+uv run nooa atom --http            # WebSocket, see above
+uv run nooa atom --help            # lists the four roles
 ```
 
 ### Pool
@@ -217,8 +217,6 @@ agent_servers:
       - /localhome/local-pfurgale/dev/wt-p4
       - nooa
       - atom
-      - --model
-      - MODEL_ALIAS
       - --tee
       - /tmp/nooa-atom-acp.jsonl
 ```
