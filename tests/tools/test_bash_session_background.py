@@ -79,8 +79,18 @@ async def test_timeout_spares_earlier_background_jobs(tmp_path, reap):
 
 
 @pytest.mark.parametrize("pipeline", [False, True])
-async def test_timeout_kills_nested_command_but_spares_earlier_job(tmp_path, reap, pipeline):
+async def test_timeout_kills_nested_command_but_spares_earlier_job(
+    tmp_path, reap, pipeline, monkeypatch
+):
     """A TERM-resistant grandchild must not survive its parent's early exit."""
+    spawn = asyncio.create_subprocess_exec
+
+    async def without_ps(command, *args, **kwargs):
+        if command == "ps":
+            raise FileNotFoundError("ps is absent in the task image")
+        return await spawn(command, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", without_ps)
     session = BashSession(cwd=tmp_path, keep_background_on_close=True)
     pid_file = tmp_path / "child.pid"
     child = (

@@ -31,3 +31,14 @@ The destructor respects the preservation flag and terminates only Bash rather
 than its process group. Outside an opted-in scope, default cleanup and timeout
 recovery retain their existing behavior. Creating new shells from an inherited
 scope after it has closed raises an error instead of silently orphaning them.
+
+On Linux, timeout recovery discovers command descendants directly through
+`/proc`, so task images do not need `ps`. Each PID is paired with its process
+start time before signaling to protect against PID reuse. Earlier background
+jobs and their descendants remain excluded from command-timeout cleanup.
+Other platforms retain the `ps` fallback.
+
+Integrations that track terminal model errors can use
+`nooa.agents.summarization.summary_fork_active()` to identify best-effort
+summary calls. A caught summary failure must not mark the parent rollout fatal,
+and a successful summary must not clear an unresolved parent model failure.

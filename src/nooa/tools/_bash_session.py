@@ -662,34 +662,54 @@ class BashSession:
 
         async def snapshot_children() -> dict[int, str | None]:
             try:
-                process_list = await asyncio.create_subprocess_exec(
-                    "ps",
-                    "-eo",
-                    "pid=,ppid=",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                try:
-                    stdout, _ = await asyncio.wait_for(process_list.communicate(), timeout=2.0)
-                except TimeoutError:
-                    process_list.kill()
-                    await process_list.communicate()
-                    raise
-                children: dict[int, list[int]] = {}
-                for line in stdout.decode().splitlines():
-                    pid, parent = map(int, line.split())
-                    children.setdefault(parent, []).append(pid)
+                children: dict[int, list[tuple[int, str | None]]] = {}
+                if sys.platform == "linux":
+                    # Minimal benchmark images often have /proc but no procps.
+                    # Read PPID and start time from the same stat record.
+                    for entry in Path("/proc").iterdir():
+                        if not entry.name.isdecimal():
+                            continue
+                        try:
+                            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                            parent, identity = int(fields[1]), fields[19]
+                        except (OSError, IndexError, ValueError):
+                            # Processes may exit between enumeration and read.
+                            continue
+                        children.setdefault(parent, []).append((int(entry.name), identity))
+                else:
+                    process_list = await asyncio.create_subprocess_exec(
+                        "ps",
+                        "-eo",
+                        "pid=,ppid=",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    try:
+                        stdout, _ = await asyncio.wait_for(process_list.communicate(), timeout=2.0)
+                    except TimeoutError:
+                        process_list.kill()
+                        await process_list.communicate()
+                        raise
+                    if process_list.returncode:
+                        raise OSError(f"ps exited with status {process_list.returncode}")
+                    for line in stdout.decode().splitlines():
+                        pid, parent = map(int, line.split())
+                        children.setdefault(parent, []).append((pid, None))
                 descendants: dict[int, str | None] = {}
                 pending = list(children.get(proc.pid, []))
                 while pending:
-                    pid = pending.pop()
+                    pid, identity = pending.pop()
                     if pid in self._background_pids or pid in descendants:
                         continue
-                    descendants[pid] = _process_start_time(pid)
+                    descendants[pid] = identity
                     pending.extend(children.get(pid, []))
                 return descendants
-            except (TimeoutError, OSError, FileNotFoundError):
-                logger.warning("Could not snapshot command descendants for timeout cleanup")
+            except (TimeoutError, OSError, ValueError) as error:
+                logger.warning(
+                    "Could not snapshot command descendants for timeout cleanup (%s): %s",
+                    type(error).__name__,
+                    error,
+                )
                 return {}
 
         def kill_children(targets: dict[int, str | None], sig: int) -> bool:

@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 _in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
 
 
+@hidden
+def summary_fork_active() -> bool:
+    """Whether this model call is best-effort memory compaction, not parent execution.
+
+    Integrations can use this task-local marker to avoid treating a contained
+    summary transport failure as the parent's terminal failure.
+    """
+    return _in_summary_fork.get()
+
+
 def _copy_request_containers(value: Any) -> Any:
     """Detach mutable JSON containers; borrow tools, responses and other objects."""
     if isinstance(value, dict):
