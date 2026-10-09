@@ -85,8 +85,10 @@ def _get_agent_cls(module_name: str) -> type:
         event_query = None
         _execution_config = None
 
-        def __init__(self, llm: Any, agent_id: str) -> None:
+        def __init__(self, llm: Any, decision_model: Any, agent_id: str) -> None:
+            """Initialize the per-call runtime state for a standalone function."""
             self._llm = llm
+            self._decision_model = decision_model
             self._truncation = TruncationConfig()
             self.render_config = RenderConfig()
             self.event_manager = EventManager()
@@ -154,11 +156,14 @@ def create_standalone_wrapper(
     func: Callable[..., Any],
     strategy: Any,
     llm: Any,
+    decision_model: Any = None,
 ) -> Callable[..., Any]:
     """Wrap a standalone generation function so it can be called directly.
 
     Each invocation creates a fresh agent stub (no shared state, history resets).
-    LLM resolution order: ``@strategy(llm=…)`` → parent-agent cascade → RuntimeError.
+    Model resolution order is an explicit decorator value followed by the
+    corresponding parent-agent model. A native decision call does not require
+    an otherwise unused chat LLM.
 
     Args:
         func: Original async function with an ellipsis body.
@@ -170,6 +175,9 @@ def create_standalone_wrapper(
             instance to cache on). Never a resolver callable: standalone
             functions have no agent instance to bind one against, so
             ``@strategy`` rejects callables here at decoration time.
+        decision_model: Optional decision model supplied by
+            ``@strategy(..., decision_model=...)``. When omitted, a calling
+            parent agent's decision model is inherited.
 
     Returns:
         Async callable with the same signature as *func*.
@@ -195,35 +203,91 @@ def create_standalone_wrapper(
     # Shared resolution lives in nooa.method_llm.resolve_alias so this path
     # and the agent-method path report identical errors.
     _alias_cache: dict[str, Any] = {}
+    _decision_alias_cache: dict[str, Any] = {}
+
+    # Only decision strategies consume a decision model. Other strategies must
+    # keep their chat LLM even when called from an agent that has one.
+    _uses_decision_model = bool(getattr(strategy, "uses_decision_model", False))
+    # A function parameter named decision_model shadows the call-site override.
+    _has_user_decision_model_param = "decision_model" in inspect.signature(func).parameters
 
     @wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        resolved_llm = llm
-        if isinstance(resolved_llm, str):
-            from nooa.method_llm import resolve_alias
+        from nooa.decisions.resolution import is_decision_model, resolve_decision_alias
+        from nooa.runtime.context_vars import _parent_agent_var
 
-            resolved_llm = resolve_alias(
-                resolved_llm,
-                _alias_cache,
-                func.__name__,
-                origin="standalone @strategy(llm=...)",
-            )
-        if resolved_llm is None:
-            # Cascade: inherit LLM from a calling agent if we're inside one
-            from nooa.runtime.context_vars import _parent_agent_var
+        call_decision_model = None
+        if not _has_user_decision_model_param:
+            call_decision_model = kwargs.pop("decision_model", None)
+        if call_decision_model is not None:
+            if not _uses_decision_model:
+                raise TypeError(
+                    f"decision_model= applies only to DecideStrategy functions; "
+                    f"'{func.__name__}' uses {type(strategy).__name__}."
+                )
+            if not isinstance(call_decision_model, str) and not is_decision_model(
+                call_decision_model
+            ):
+                raise TypeError(
+                    f"call argument decision_model= for standalone function "
+                    f"{func.__name__!r} must be a decision model or alias; got "
+                    f"{type(call_decision_model).__name__}"
+                )
 
-            parent = _parent_agent_var.get()
-            if parent is not None:
+        parent = _parent_agent_var.get()
+        resolved_decision_model = None
+        resolved_llm = None
+        if _uses_decision_model:
+            # Same precedence as agent methods: call site, decorator, then parent.
+            if call_decision_model is not None:
+                resolved_decision_model = call_decision_model
+                origin = "call argument decision_model="
+            else:
+                resolved_decision_model = decision_model
+                origin = "standalone decision_model="
+            if isinstance(resolved_decision_model, str):
+                resolved_decision_model = resolve_decision_alias(
+                    resolved_decision_model,
+                    _decision_alias_cache,
+                    func.__name__,
+                    origin=origin,
+                )
+            if resolved_decision_model is None and parent is not None:
+                resolved_decision_model = getattr(parent, "_decision_model", None)
+            if resolved_decision_model is None:
+                from nooa.decisions.types import DecisionModelRequiredError
+
+                raise DecisionModelRequiredError(
+                    f"Standalone function '{func.__name__}' uses DecideStrategy but no "
+                    "decision model is configured. Pass decision_model= to @strategy, "
+                    "to the call, or set one on the calling agent."
+                )
+        else:
+            resolved_llm = llm
+            if isinstance(resolved_llm, str):
+                from nooa.method_llm import resolve_alias
+
+                resolved_llm = resolve_alias(
+                    resolved_llm,
+                    _alias_cache,
+                    func.__name__,
+                    origin="standalone @strategy(llm=...)",
+                )
+            if resolved_llm is None and parent is not None:
                 resolved_llm = getattr(parent, "_llm", None)
-        if resolved_llm is None:
-            raise RuntimeError(
-                f"No LLM client for standalone function '{func.__name__}'. "
-                f"Pass llm=<client> to @strategy(..., llm=<client>)."
-            )
+            if resolved_llm is None:
+                raise RuntimeError(
+                    f"No LLM client for standalone function '{func.__name__}'. "
+                    "Pass llm=<client> to @strategy or call it from an agent with an LLM."
+                )
 
         # Fresh agent per call — no shared state, history resets automatically
         agent_cls = _get_agent_cls(func.__module__)
-        agent = agent_cls(llm=resolved_llm, agent_id=_standalone_agent_id)
+        agent = agent_cls(
+            llm=resolved_llm,
+            decision_model=resolved_decision_model,
+            agent_id=_standalone_agent_id,
+        )
 
         # ATIF exporter cascade: if an exporter is active in the surrounding
         # context, attach it to this child agent's
@@ -253,4 +317,5 @@ def create_standalone_wrapper(
     wrapper._needs_generation = True  # type: ignore[attr-defined]
     wrapper._plan_strategy = strategy  # type: ignore[attr-defined]
     wrapper._plan_llm = llm  # type: ignore[attr-defined]
+    wrapper._plan_decision_model = decision_model  # type: ignore[attr-defined]
     return wrapper

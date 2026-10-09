@@ -5,6 +5,7 @@
 import ast
 import asyncio
 import contextvars
+import copy
 import inspect
 import io
 import linecache
@@ -16,8 +17,9 @@ import types
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 from uuid import uuid4
 
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
@@ -32,10 +34,18 @@ from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
+    from nooa.decisions import (
+        DecisionRequest,
+        DecisionResponse,
+        UnifiedDecisionModel,
+    )
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
 
 from nooa.events import (
+    DecisionCallEnd,
+    DecisionCallStart,
+    DecisionRecord,
     ExecutionResult,
     ExecutionSignal,
     LLMCallEnd,
@@ -389,6 +399,9 @@ _current_method_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "current_method", default=None
 )
 _current_llm_var: contextvars.ContextVar[Any] = contextvars.ContextVar("current_llm", default=None)
+_current_decision_model_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "current_decision_model", default=None
+)
 _current_llm_model_name_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_llm_model_name", default=None
 )
@@ -619,6 +632,9 @@ class ActorRuntime:
         # chars × this ratio, anchored to the real provider count. Defaults to
         # the ~4-chars-per-token heuristic before the first response.
         self._tokens_per_char: float = _DEFAULT_TOKENS_PER_CHAR
+        # Compact decision provenance keyed by generation_id, added to the
+        # generation span when that generation ends.
+        self._decision_trace_attributes: dict[str, dict[str, Any]] = {}
 
     def _event_format_for_event(self, event: Any) -> Any:
         """Return the FormatConfig to use when serializing an event.
@@ -848,6 +864,194 @@ class ActorRuntime:
         if override is not None:
             return override
         return self.agent._truncation
+
+    async def decision_state_inputs(
+        self,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+        """Resolve context and events explicitly selected for a decision call.
+
+        Decision models receive a compact state object rather than the complete
+        chat prompt. Context is included only when supplied through decorator or
+        active ``ScopedContext`` overrides. Events are included only when an
+        effective ``EventQuery`` exists. Metadata and runtime-only events remain
+        excluded, matching their normal model-visibility contract.
+        """
+        from nooa.decisions.state import resolve_decision_context, select_decision_events
+
+        call = self._current_call
+        extra_context = {
+            "method": self._current_method,
+            "call_args": call.args if call is not None else (),
+            "call_kwargs": call.kwargs if call is not None else {},
+            "strategy": _current_strategy_var.get(),
+            "datetime": datetime,
+            "runtime": self,
+        }
+
+        async def _resolve_dynamic(key: str, value: DynamicContext) -> Any:
+            """Evaluate one dynamic decision context block with call state."""
+            try:
+                return await self.evaluate_expression(
+                    value.expr,
+                    extra_context=extra_context,
+                    error_mode="raise",
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to resolve decision context block {key!r} "
+                    f"from expression {value.expr!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+        resolved_context = await resolve_decision_context(
+            decorator_context=_decorator_context_var.get(),
+            scoped_context=_scoped_blocks_var.get(),
+            disabled_keys=self.agent.context_manager.disabled(),
+            resolve_dynamic=_resolve_dynamic,
+        )
+        events = select_decision_events(
+            self.agent.event_manager.values(),
+            runtime_query=self.agent.event_manager.get_event_query(),
+            scoped_query=_scoped_events_var.get(),
+            decorator_query=_decorator_events_var.get(),
+            agent_query=getattr(self.agent, "event_query", None),
+            current_call_id=self._agent_call_id,
+        )
+        return resolved_context, events
+
+    async def decide(
+        self, request: "DecisionRequest", *, include_raw_response: bool = False
+    ) -> "DecisionResponse":
+        """Run a decision request through middleware and persist its outcome.
+
+        ``include_raw_response`` stores the response's raw body in the
+        ``DecisionRecord``. It is never added to trace attributes.
+        """
+        if self._current_method is None:
+            raise RuntimeError("decide() called with no current method context")
+        client = cast("UnifiedDecisionModel | None", _current_decision_model_var.get())
+        if client is None:
+            raise RuntimeError("decide() called with no decision model in context")
+
+        from nooa.decisions.provenance import question_digest
+        from nooa.runtime.middleware import DecisionCallContext
+
+        generation_id = self._generation_id_stack[-1] if self._generation_id_stack else ""
+        requested_model = getattr(client, "model", "") or ""
+        # DecisionModel subclasses declare their source; other clients are native.
+        decision_source: Literal["native", "llm"] = (
+            "llm" if getattr(client, "decision_source", "native") == "llm" else "native"
+        )
+        decision_call_id = str(uuid4())
+        event_meta = {
+            "method_name": self._current_method.__name__,
+            "generation_id": generation_id,
+            "question_count": len(request.questions),
+            "model": requested_model,
+        }
+        self.event_manager.add(DecisionCallStart(**event_meta), record=False)
+        ctx = DecisionCallContext(
+            request=request,
+            agent=self.agent,
+            runtime=self,
+            client=client,
+        )
+        success = False
+        exception_type: str | None = None
+        try:
+
+            async def _core_decision(core_ctx: DecisionCallContext) -> DecisionCallContext:
+                core_ctx.response = await client.adecide(core_ctx.request)
+                return core_ctx
+
+            ctx = cast(
+                "DecisionCallContext",
+                await self.event_manager.run_middleware("decision_call", ctx, _core_decision),
+            )
+            response = ctx.response
+            if response is None:
+                raise RuntimeError(
+                    "decision_call middleware returned without setting ctx.response. "
+                    "Short-circuiting middleware must set ctx.response before returning."
+                )
+            success = True
+            return response
+        except BaseException as exc:
+            exception_type = type(exc).__name__
+            raise
+        finally:
+            self.event_manager.add(
+                DecisionCallEnd(
+                    **event_meta,
+                    success=success,
+                    exception_type=exception_type,
+                ),
+                record=False,
+            )
+            response = ctx.response
+            # Digest the effective request so middleware rewrites are reflected.
+            digest = question_digest(ctx.request.questions)
+            resolved_model = response.model if response is not None else None
+            self._set_decision_trace_attributes(
+                generation_id,
+                source=decision_source,
+                digest=digest,
+                requested_model=requested_model,
+                resolved_model=resolved_model,
+            )
+            self.event_manager.add(
+                DecisionRecord(
+                    decision_call_id=decision_call_id,
+                    method_name=event_meta["method_name"],
+                    generation_id=generation_id,
+                    state=copy.deepcopy(ctx.request.state),
+                    questions={
+                        name: asdict(question) for name, question in ctx.request.questions.items()
+                    },
+                    answers={name: asdict(answer) for name, answer in response.answers.items()}
+                    if response is not None
+                    else None,
+                    decision_source=decision_source,
+                    question_digest=digest,
+                    requested_model=requested_model,
+                    resolved_model=resolved_model,
+                    response_id=response.id if response is not None else None,
+                    usage=LLMUsage.from_provider(response.usage) if response is not None else None,
+                    raw_response=response.raw
+                    if include_raw_response and response is not None
+                    else None,
+                    success=success,
+                    exception_type=exception_type,
+                )
+            )
+
+    @property
+    def decision_model(self) -> "UnifiedDecisionModel":
+        """Return the decision model resolved for the current call."""
+        client = _current_decision_model_var.get()
+        if client is None:
+            raise RuntimeError("decision_model accessed with no decision model in context")
+        return cast("UnifiedDecisionModel", client)
+
+    def _set_decision_trace_attributes(
+        self,
+        generation_id: str,
+        *,
+        source: str,
+        digest: str,
+        requested_model: str,
+        resolved_model: str | None = None,
+    ) -> None:
+        """Stage compact decision provenance for the generation span."""
+        if not generation_id:
+            return
+        attributes: dict[str, Any] = {
+            "decision.source": source,
+            "decision.question_digest": digest,
+            "decision.requested_model": requested_model,
+        }
+        if resolved_model is not None:
+            attributes["decision.resolved_model"] = resolved_model
+        self._decision_trace_attributes[generation_id] = attributes
 
     async def generate(
         self,
@@ -2508,13 +2712,20 @@ class ActorRuntime:
         """Execute a method that needs LLM generation."""
         base_method = getattr(method, "__func__", method)
         try:
-            has_user_llm_param = "llm" in inspect.signature(method).parameters
+            method_params = inspect.signature(method).parameters
         except (TypeError, ValueError):
-            has_user_llm_param = False
+            method_params = {}
+        has_user_llm_param = "llm" in method_params
+        has_user_decision_model_param = "decision_model" in method_params
 
         # Extract framework parameters (don't pass to generated method)
         call_strategy = kwargs.pop("_strategy", None)
         call_llm = kwargs.pop("llm", _MISSING) if not has_user_llm_param else _MISSING
+        call_decision_model = (
+            kwargs.pop("decision_model", _MISSING)
+            if not has_user_decision_model_param
+            else _MISSING
+        )
         call_session_locals = kwargs.pop("_session_locals", None)
 
         # Get strategy with priority: call-level > decorator > default
@@ -2537,13 +2748,68 @@ class ActorRuntime:
         from nooa.strategies import get_default_strategy
 
         strategy = call_strategy or decorator_strategy or get_default_strategy()
+        uses_decision_model = bool(
+            isinstance(strategy, GenerationStrategyABC) and strategy.uses_decision_model
+        )
 
         # Resolve LLM client with priority: call-level > @strategy decorator > agent's default.
         # A call-level or @strategy(llm=...) value may be a callable resolved against
         # the agent instance; only invoke it when it would actually be used, so a
         # call-level override doesn't trigger someone else's resolver side effects.
         plan_llm = getattr(base_method, "_plan_llm", None)
-        if call_llm is not _MISSING and call_llm is not None:
+        plan_decision_model = getattr(base_method, "_plan_decision_model", None)
+        decision_model = None
+        decision_model_selection_source: str | None = None
+        if call_decision_model is not _MISSING and call_decision_model is not None:
+            if not uses_decision_model:
+                raise TypeError(
+                    f"decision_model= applies only to DecideStrategy methods; "
+                    f"'{method_name}' uses {type(strategy).__name__}."
+                )
+        if uses_decision_model:
+            # Same precedence as llm=: call site, then decorator, then agent.
+            if call_decision_model is not _MISSING and call_decision_model is not None:
+                from nooa.decisions.resolution import resolve_method_decision_model
+
+                decision_model = resolve_method_decision_model(
+                    call_decision_model,
+                    self.agent,
+                    method_name,
+                    origin="call argument decision_model=",
+                )
+                decision_model_selection_source = "call_site"
+            elif plan_decision_model is not None:
+                from nooa.decisions.resolution import resolve_method_decision_model
+
+                decision_model = resolve_method_decision_model(
+                    plan_decision_model,
+                    self.agent,
+                    method_name,
+                )
+                decision_model_selection_source = "method_decision_model"
+            else:
+                decision_model = getattr(self.agent, "_decision_model", None)
+                if decision_model is not None:
+                    decision_model_selection_source = "agent_decision_model"
+            if decision_model is None:
+                from nooa.decisions.types import DecisionModelRequiredError
+
+                raise DecisionModelRequiredError(
+                    f"'{method_name}' uses DecideStrategy but no decision model is "
+                    "configured. Pass decision_model= on the agent, the @strategy "
+                    "decorator, or the call."
+                )
+        if decision_model is not None:
+            if not callable(getattr(decision_model, "adecide", None)):
+                raise TypeError(
+                    f"The decision_model for '{method_name}' must implement adecide(), got "
+                    f"{type(decision_model).__name__}."
+                )
+            llm_client = getattr(self.agent, "_llm", None)
+            llm_selection_source = "agent_default"
+            decision_mode = "native"
+            active_model_name = getattr(decision_model, "model", "") or ""
+        elif call_llm is not _MISSING and call_llm is not None:
             from nooa.method_llm import resolve_method_llm
 
             # Call-site overrides accept the same spellings as the decorator
@@ -2552,19 +2818,39 @@ class ActorRuntime:
             # names the call site so a typo'd alias or a raising resolver
             # points at the caller's line, not the decorator's.
             llm_client = resolve_method_llm(
-                call_llm, self.agent, method_name, origin="call-site llm="
+                call_llm,
+                self.agent,
+                method_name,
+                origin="call argument llm=",
             )
             llm_selection_source = "call_site"
+            decision_mode = None
+            active_model_name = getattr(llm_client, "model", "") or ""
         elif plan_llm is not None:
             from nooa.method_llm import resolve_method_llm
 
             llm_client = resolve_method_llm(plan_llm, self.agent, method_name)
             llm_selection_source = "decorator"
+            decision_mode = None
+            active_model_name = getattr(llm_client, "model", "") or ""
         else:
             llm_client = getattr(self.agent, "_llm", None)
             llm_selection_source = "agent_default"
-        if llm_client is None:
-            raise RuntimeError(f"No LLM client available for {method_name}")
+            decision_mode = None
+            active_model_name = getattr(llm_client, "model", "") or ""
+        if llm_client is None and decision_model is None:
+            raise RuntimeError(
+                f"No LLM client available for {method_name}. A decision-only agent "
+                "can run only DecideStrategy methods; pass llm=... for other strategies."
+                if getattr(self.agent, "_decision_model", None) is not None
+                else f"No LLM client available for {method_name}"
+            )
+        if llm_client is not None and not callable(getattr(llm_client, "acall", None)):
+            raise TypeError(
+                f"The effective LLM for '{method_name}' is incompatible with "
+                f"{type(strategy).__name__}: expected acall(), got "
+                f"{type(llm_client).__name__}."
+            )
         llm_model_name = getattr(llm_client, "model", "") or ""
 
         # Resolve truncation config: method-level @strategy(truncation=...) > agent-level
@@ -2600,6 +2886,27 @@ class ActorRuntime:
         # Call generation hooks (skip for non-traceable strategies like TemplateStrategy)
         should_trace = strategy.traceable if isinstance(strategy, GenerationStrategyABC) else True
         hook_context = None
+        if uses_decision_model:
+            model_attributes: dict[str, Any] = {"decision.mode": decision_mode}
+            if decision_model is not None:
+                model_attributes.update(
+                    {
+                        "decision.model_name": active_model_name,
+                        "decision.selection_source": decision_model_selection_source,
+                    }
+                )
+            else:
+                model_attributes.update(
+                    {
+                        "llm.model_name": active_model_name,
+                        "llm.selection_source": llm_selection_source,
+                    }
+                )
+        else:
+            model_attributes = {
+                "llm.model_name": active_model_name,
+                "llm.selection_source": llm_selection_source,
+            }
         if should_trace:
             hook_context = call_before_hook(
                 "before_generation",
@@ -2609,10 +2916,7 @@ class ActorRuntime:
                 generation_id=generation_id,
                 parent_generation_id=parent_generation_id,
                 agent_call_id=self._agent_call_id,
-                **{
-                    "llm.model_name": llm_model_name,
-                    "llm.selection_source": llm_selection_source,
-                },
+                **model_attributes,
                 **strategy_kwargs,  # Add strategy config parameters
             )
 
@@ -2708,6 +3012,7 @@ class ActorRuntime:
                 call_token = _current_call_var.set(call)
                 method_token = _current_method_var.set(method)
                 llm_token = _current_llm_var.set(llm_client)
+                decision_model_token = _current_decision_model_var.set(decision_model)
                 llm_model_name_token = _current_llm_model_name_var.set(llm_model_name)
                 llm_selection_source_token = _current_llm_selection_source_var.set(
                     llm_selection_source
@@ -2752,6 +3057,7 @@ class ActorRuntime:
                     _current_call_var.reset(call_token)
                     _current_method_var.reset(method_token)
                     _current_llm_var.reset(llm_token)
+                    _current_decision_model_var.reset(decision_model_token)
                     _current_llm_model_name_var.reset(llm_model_name_token)
                     _current_llm_selection_source_var.reset(llm_selection_source_token)
                     _current_truncation_config_var.reset(truncation_token)
@@ -2785,6 +3091,7 @@ class ActorRuntime:
                 _hm_ctx.__exit__(None, None, None)
 
             # Call after generation hook
+            decision_trace_attributes = self._decision_trace_attributes.pop(generation_id, {})
             if should_trace:
                 call_after_hook(
                     "after_generation",
@@ -2794,6 +3101,7 @@ class ActorRuntime:
                     result=result,
                     exception=exception_caught,
                     generation_id=generation_id,
+                    **decision_trace_attributes,
                 )
 
             # Restore previous context variable value
