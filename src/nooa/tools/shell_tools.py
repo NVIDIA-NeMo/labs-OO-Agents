@@ -232,7 +232,7 @@ def _stale_match_diff(expected: str, current: str | None) -> tuple[str, bool, st
     detail = (
         "stored Match.text (when read) versus current file (same saved line range) diff (complete):"
         if complete
-        else "Diff preview (incomplete; capped at 20 lines and 2 KiB):"
+        else "Diff preview:"
     )
     return preview, complete, detail
 

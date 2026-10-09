@@ -193,18 +193,18 @@ async def test_large_diff_bounded_or_omitted(
     assert len(error.diff.splitlines()) <= 20
     assert len(error.diff.encode("utf-8")) <= 2048
     assert detail in str(error)
-    assert "incomplete" in str(error)
     assert expected not in str(error)
     assert current not in str(error)
     assert path.read_bytes() == current.encode()
     footer = "Diff preview truncated (capped at 20 lines and 2 KiB); not a complete diff."
     if "exceed" in detail:
+        assert "incomplete" in str(error)
         assert error.diff == ""
         assert "Diff preview truncated" not in str(error)
         assert "--- stored Match.text" not in str(error)
     else:
         assert error.diff
-        assert "Diff preview (incomplete; capped at 20 lines and 2 KiB):\n" in str(error)
+        assert "\nDiff preview:\n" + error.diff in str(error)
         separator = "" if error.diff.endswith("\n") else "\n"
         assert str(error).endswith(error.diff + separator + footer)
         assert footer not in error.diff
