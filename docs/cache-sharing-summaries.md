@@ -49,9 +49,17 @@ events and retry with less context. Those raw events remain in session storage.
 Filtered-history requests are skipped: the fork cannot summarize events it did
 not see. A known filter produces a warning at installation; later scoped filters
 warn on first use, once per summarizer. The runtime's context overflow safety net
-still applies. Structured-output parents remove `output_model` from the fork so
-it can return text; changing that schema may reduce cache reuse. Tools stay the
+still applies. Structured-output parents retain their output schema to preserve
+the rendered prefix; summaries must satisfy that contract. Tools stay the
 same, including typed `return_result` schemas; an incompatible reply is rejected.
+The fork retains tool choice, tools, instructions, output schemas and all history.
+A stronger appended instruction requests a text summary; executable-tool replies
+are rejected without execution. Final dispatch restores the original snapshot if
+middleware rewrites it. Changing tool choice to `none` is deliberately avoided:
+the NVIDIA live probe reported a smaller prompt with that flag despite retained
+tool definitions, so request-message equality alone was insufficient.
+Provider cache hits depend on routing and the backend, but the prompt prefix
+is append-only.
 
 `reuse_parent_prefix` and a separate `llm=` are no longer supported. The separate
 `MethodSummarizer` feature still summarizes completed methods through its own

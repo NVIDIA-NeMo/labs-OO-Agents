@@ -44,13 +44,14 @@ from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCal
 from nooa.context_blocks.events import CODEACT_INLINE_RETURN
 from nooa.context_blocks.exceptions import BlockSyntaxError
 from nooa.decorators import strategy
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, LoopDetectedError
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
     DebugTrace,
     Error,
     ExecutionSignal,
+    LoopGuardTriggered,
     PythonOutput,
     Task,
     TextOnlyReply,
@@ -66,6 +67,7 @@ from nooa.strategies.generated_code import (
     GeneratedCodeValidator,
     HelperFunctionManager,
 )
+from nooa.strategies.loop_guard import LoopGuard, action_fingerprint, mentions_return_result
 from nooa.strategies.template import TemplateStrategy
 from nooa.strategy_validation import (
     InvariantError,
@@ -274,6 +276,7 @@ class CodeActSession:
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
     execution_count: int = 0
+    loop_guard: LoopGuard | None = None
 
     def __post_init__(self) -> None:
         """Initialize OutAccessor for Jupyter-style Out[n] access."""
@@ -906,6 +909,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             max_retries=self.config.max_retries,
             target_method_name=call.method_name,
             event_manager=runtime.event_manager,
+            loop_guard=(
+                LoopGuard(self.config.loop_guard) if self.config.loop_guard is not None else None
+            ),
         )
         # Publish to the caller so execute()'s finally can tear down the worker.
         session_holder["session"] = session
@@ -1271,6 +1277,91 @@ Standard Python builtins and agent instance (`self`) are available."""
         code = f"result = {call_expr}\nprint(result)"
         return code
 
+    def _empty_code_error(self, args: dict[str, Any]) -> str:
+        """Explain an empty cell, naming misplaced argument keys when present."""
+        extra = sorted(str(k) for k in args if k != "code")
+        if "code" in args or not extra:
+            return "Execution error: empty code provided."
+        return (
+            f"Execution error: {self._python_tool_name()} takes a single `code` argument "
+            f"containing Python source, but received {', '.join(f'`{k}`' for k in extra)}. "
+            'Pass Python source as {"code": "..."}; inspect print(doc(self)) for the '
+            "agent's APIs."
+        )
+
+    def _unknown_tool_feedback(
+        self, tool_name: str, args: dict[str, Any], runtime: RuntimeServices
+    ) -> str:
+        """Explain how to express a rejected tool call as a Python cell.
+
+        Models sometimes call an agent attribute such as ``todo`` or
+        ``self.shell.run`` as if it were a provider tool. The feedback names the
+        one valid tool, separates the tool name from the code it receives, and
+        shows a concrete cell for the rejected name: the equivalent call when
+        it resolves to a public callable on ``self``, otherwise a ``doc()``
+        inspection. Resolution is static, so no agent attribute is evaluated.
+        """
+        python_tool = self._python_tool_name()
+        shown_name = tool_name if len(tool_name) <= 80 else tool_name[:77] + "..."
+        header = f"Unknown tool `{shown_name}`. Available tools: {self._available_tool_names()}."
+        if tool_name == "return_result" and not self._supports_return_result():
+            return (
+                f"{header} To finish, call {python_tool} with code `return_result(value)`; "
+                "return_result is a Python builtin, not a provider tool."
+            )
+
+        from nooa.agentdoc._visibility import is_hidden_field, is_hidden_method
+
+        path = tool_name.removeprefix("self.").split(".")
+        target: Any = runtime.agent
+        for part in path:
+            owner = target
+            try:
+                if not part.isidentifier() or part.startswith("_"):
+                    raise AttributeError(part)
+                target = inspect.getattr_static(owner, part)
+            except AttributeError:
+                target = None
+                break
+            if is_hidden_method(target) or (
+                owner is runtime.agent and is_hidden_field(owner, part)
+            ):
+                target = None
+                break
+        expr = "self." + ".".join(path)
+
+        if target is None:
+            code = "print(doc(self))"
+            shown_expr = expr if len(expr) <= 80 else expr[:77] + "..."
+            hint = (
+                f"`{shown_expr}` does not exist. Inspect the available APIs with the cell above, "
+                f"then call them inside {python_tool}."
+            )
+        elif callable(target):
+            func = getattr(target, "__func__", target)
+            call_expr = f"{expr}({', '.join(f'{k}={v!r}' for k, v in args.items())})"
+            if len(call_expr) > 300:
+                call_expr = f"{expr}(...)"
+            if inspect.iscoroutinefunction(func):
+                call_expr = f"await {call_expr}"
+            code = f"result = {call_expr}\nprint(result)"
+            hint = f"Check the arguments with print(doc({expr})) inside {python_tool} if unsure."
+        else:
+            code = f"print(doc({expr}))"
+            hint = (
+                f"`{expr}` is an object, not a function. After inspecting it, call its "
+                f"documented methods as {expr}.method_name(...) inside {python_tool}; "
+                "await async methods."
+            )
+        arguments = json.dumps({"code": code})
+        return (
+            f"{header}\n\n"
+            f"Call the {python_tool} tool and put Python code in its `code` argument:\n\n"
+            f"Tool name: {python_tool}\n"
+            f"Arguments: {arguments}\n\n"
+            f"{hint} Do not call `{shown_name}` as a tool again."
+        )
+
     async def _process_tool_calls(
         self,
         tool_calls: list[Any],
@@ -1308,37 +1399,339 @@ Standard Python builtins and agent instance (`self`) are available."""
         # If one cell fails, subsequent cells likely depend on its output
         # and would cascade into confusing errors.
         for tool_call in tool_calls:
-            # Parse arguments
-            try:
-                args = json.loads(tool_call.arguments)
-                if not isinstance(args, dict):
-                    raise ValueError("tool arguments must be a JSON object")
-            except ValueError as e:
-                session.record_error()
-                runtime.event_manager.add(
-                    Error(content=f"Invalid arguments for tool `{tool_call.name}`: {e}")
+            guard = session.loop_guard
+            if guard is None:
+                result = await self._process_one_tool_call(
+                    tool_call, runtime, builtins, session, call, return_type, llm_response_id
                 )
-                # Stop processing remaining tool calls - let LLM fix this first
-                return _ToolCallsResult()
+                if result is not None:
+                    return result
+                continue
 
-            # Add ToolCallEvent to record the tool call (result will be nested later)
-            tool_call_event_id = runtime.event_manager.add(
-                ToolCallEvent(
+            action, parsed_args = self._loop_guard_action(tool_call)
+            blocked = self._loop_guard_before(
+                guard, action, parsed_args, tool_call, runtime, llm_response_id
+            )
+            if blocked is not None:
+                return blocked
+            first_new = len(runtime.event_manager.keys())
+            result = await self._process_one_tool_call(
+                tool_call, runtime, builtins, session, call, return_type, llm_response_id
+            )
+            if result is not None and result.completed:
+                return result
+            self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
+            if result is not None:
+                return result
+
+        # All tool calls processed without completion or error-break
+        return _ToolCallsResult()
+
+    def _loop_guard_action(self, tool_call: Any) -> tuple[str, Any]:
+        """Fingerprint a tool call from its raw arguments, valid JSON or not."""
+        try:
+            parsed: Any = json.loads(tool_call.arguments)
+        except ValueError:
+            parsed = tool_call.arguments
+        return action_fingerprint(tool_call.name, parsed, self._python_tool_name()), parsed
+
+    def _loop_guard_before(
+        self,
+        guard: LoopGuard,
+        action: str,
+        parsed_args: Any,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult | None:
+        """Skip a call that already failed identically; stop if it was warned about."""
+        verdict = guard.before(action)
+        if verdict is None:
+            return None
+        kind, repeats, outcome = verdict
+        message = guard.message(
+            kind,
+            tool_call.name,
+            repeats,
+            outcome,
+            completion=mentions_return_result(parsed_args),
+        )
+        runtime.event_manager.add(
+            ToolCallEvent(
+                tool_call_id=tool_call.id,
+                name=tool_call.name,
+                arguments=parsed_args if isinstance(parsed_args, dict) else {},
+                llm_response_id=llm_response_id,
+                result=ToolResult(
                     tool_call_id=tool_call.id,
-                    name=tool_call.name,
-                    arguments=args,
-                    llm_response_id=llm_response_id,
-                    result=None,  # Will be updated after execution
+                    content="Not executed: blocked by the loop guard.",
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+        )
+        self._record_loop_guard(
+            runtime,
+            message,
+            kind="blocked" if kind == "block" else "stopped",
+            tool_call=tool_call,
+            repeats=repeats,
+            action=action,
+            window=guard.config.window,
+        )
+        if kind == "stop":
+            raise LoopDetectedError(message)
+        return _ToolCallsResult()
+
+    def _loop_guard_after(
+        self,
+        guard: LoopGuard,
+        action: str,
+        parsed_args: Any,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        first_new: int,
+    ) -> None:
+        """Record the call's outcome; warn on or stop at identical successful repeats."""
+        failed, outcome = self._tool_call_outcome(runtime, tool_call.id, first_new)
+        verdict = guard.after(action, outcome, failed)
+        if verdict is None:
+            return
+        kind, repeats = verdict
+        message = guard.message(
+            kind,
+            tool_call.name,
+            repeats,
+            outcome,
+            completion=mentions_return_result(parsed_args),
+        )
+        self._record_loop_guard(
+            runtime,
+            message,
+            kind="nudged" if kind == "nudge" else "stopped",
+            tool_call=tool_call,
+            repeats=repeats,
+            action=action,
+            window=guard.config.window,
+        )
+        if kind == "stop":
+            raise LoopDetectedError(message)
+
+    @staticmethod
+    def _tool_call_outcome(
+        runtime: RuntimeServices, tool_call_id: str, first_new: int
+    ) -> tuple[bool, str]:
+        """Summarize what a tool call produced, from its own events.
+
+        Uses the call's tool result and cell output; a failed cell is
+        represented by the final line of its error, so cell numbers in a
+        traceback do not matter. A call rejected before it became a
+        ToolCallEvent (invalid JSON arguments) is represented by its Error
+        events. Only events added since ``first_new`` are read; an outcome
+        that cannot be found (for example, summarized away) is unique, so it
+        never matches another call.
+        """
+        manager = runtime.event_manager
+        # Only events added during this call: providers may reuse tool-call ids.
+        tags = manager.keys()[first_new:]
+        own: list[Any] = []
+        recorded = False
+        for tag in reversed(tags):
+            event = manager.get(tag)
+            if getattr(event, "tool_call_id", None) != tool_call_id:
+                continue
+            own.append(event)
+            if isinstance(event, ToolCallEvent):
+                recorded = True
+                break
+        parts: list[str] = []
+        failed = False
+        for event in reversed(own):
+            if isinstance(event, ToolCallEvent):
+                result = event.result
+                if result is not None and result.result_status == ResultStatus.ERROR:
+                    failed = True
+                    parts.append(str(result.content))
+            elif isinstance(event, PythonOutput):
+                if event.error:
+                    failed = True
+                    lines = [line for line in str(event.error).splitlines() if line.strip()]
+                    parts.append(lines[-1] if lines else "")
+                else:
+                    parts.extend([event.stdout or "", event.stderr or "", repr(event.value)])
+        if not recorded:
+            errors = [str(e.content) for tag in tags if isinstance(e := manager.get(tag), Error)]
+            failed = bool(errors)
+            parts.extend(errors)
+        text = "\n".join(part for part in parts if part)
+        return failed, text or f"<no outcome for {tool_call_id}>"
+
+    @staticmethod
+    def _record_loop_guard(
+        runtime: RuntimeServices,
+        message: str,
+        *,
+        kind: str,
+        tool_call: Any,
+        repeats: int,
+        action: str,
+        window: int,
+    ) -> None:
+        metrics = get_harness_metrics()
+        if kind == "stopped":
+            metrics.loop_guard_stop()
+        else:
+            metrics.loop_guard_nudge()
+        logger.warning(
+            "[CODEACT] Loop guard %s %s call (%d repeats)", kind, tool_call.name, repeats
+        )
+        runtime.event_manager.add(
+            LoopGuardTriggered(
+                content=message,
+                action=kind,
+                tool_name=tool_call.name,
+                tool_call_id=tool_call.id,
+                repeats=repeats,
+                window=window,
+                fingerprint=action,
+            )
+        )
+
+    async def _process_one_tool_call(
+        self,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        builtins: dict[str, Any],
+        session: CodeActSession,
+        call: "CurrentCall",
+        return_type: Any,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult | None:
+        """Handle one tool call; return a result to end the turn, or None to continue."""
+        # Parse arguments
+        try:
+            args = json.loads(tool_call.arguments)
+            if not isinstance(args, dict):
+                raise ValueError("tool arguments must be a JSON object")
+        except ValueError as e:
+            session.record_error()
+            runtime.event_manager.add(
+                Error(
+                    content=f"Invalid arguments for tool `{tool_call.name}`: {e}. "
+                    f"Tool arguments must be a JSON object; call {self._python_tool_name()} "
+                    f'with arguments like {{"code": "print(1)"}}.'
                 )
             )
+            # Stop processing remaining tool calls - let LLM fix this first
+            return _ToolCallsResult()
 
-            # Handle based on tool name
-            if tool_call.name == self._python_tool_name():
-                # Execute Python code
+        # Add ToolCallEvent to record the tool call (result will be nested later)
+        tool_call_event_id = runtime.event_manager.add(
+            ToolCallEvent(
+                tool_call_id=tool_call.id,
+                name=tool_call.name,
+                arguments=args,
+                llm_response_id=llm_response_id,
+                result=None,  # Will be updated after execution
+            )
+        )
+
+        # Handle based on tool name
+        if tool_call.name == self._python_tool_name():
+            # Execute Python code
+            result = await self._handle_execute_python(
+                runtime,
+                tool_call,
+                args,
+                builtins,
+                session,
+                call,
+                return_type,
+                tool_call_event_id=tool_call_event_id,
+            )
+            if result is None or getattr(result, "error", None) is not None:
+                # Error occurred (already handled) or code execution failed -
+                # stop processing remaining tool calls
+                return _ToolCallsResult()
+
+            # Check if return_result() was called inline
+            if isinstance(result, tuple) and result[0] == "TASK_COMPLETE":
+                # Task completed via inline return_result()
+                return _ToolCallsResult(completed=True, final_value=result[1])
+
+        elif tool_call.name == "return_result" and self._supports_return_result():
+            # Return the final result
+            try:
+                validated, error_msg = self._handle_return_result(
+                    runtime, args, return_type, session, call
+                )
+            except GenerationError:
+                # _handle_return_result raises GenerationError when validation
+                # fails AND session is exhausted. Ensure the ToolCallEvent has
+                # an error result before re-raising so the event is never left
+                # with result=None in the DB (which corrupts the next session's
+                # context render).
+                runtime.event_manager.update(
+                    tool_call_event_id,
+                    result=ToolResult(
+                        tool_call_id=tool_call.id,
+                        content="return_result validation failed (session exhausted).",
+                        result_status=ResultStatus.ERROR,
+                    ),
+                )
+                raise
+            if error_msg is None:
+                # Rewrite the tool_call arguments to show correct syntax
+                # when coercion changed the value (teaches model the right format).
+                corrected_args = self._corrected_return_args(validated, args)
+                runtime.event_manager.update(
+                    tool_call_event_id,
+                    arguments=corrected_args,
+                    result=ToolResult(
+                        tool_call_id=tool_call.id,
+                        content="Result accepted.",
+                        result_status=ResultStatus.COMPLETE,
+                    ),
+                )
+                logger.info("[CODEACT] Task completed successfully via return_result")
+                return _ToolCallsResult(completed=True, final_value=validated)
+            # Validation error - update with error result
+            runtime.event_manager.update(
+                tool_call_event_id,
+                result=ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=f"Invalid result: {error_msg}\n"
+                    f"Please call return_result again with valid arguments. "
+                    f"Tip: if you computed the result in {self._python_tool_name()}(), you can call "
+                    f"return_result(variable) from within the code instead.",
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+            # Stop processing remaining tool calls
+            return _ToolCallsResult()
+
+        else:
+            # Unknown tool — attempt to translate to execute_python.
+            # Weaker models sometimes call agent methods directly as tool
+            # calls instead of wrapping them in execute_python().
+            translated_code = (
+                self._translate_tool_call_to_code(tool_call.name, args, builtins, session, runtime)
+                if self.config.translate_tool_calls
+                else None
+            )
+            if translated_code is not None:
+                get_harness_metrics().tool_call_translated(tool_call.name)
+                logger.debug(f"[CODEACT] Translated tool call '{tool_call.name}' -> execute_python")
+                # Update ToolCallEvent to reflect the translation
+                runtime.event_manager.update(
+                    tool_call_event_id,
+                    name=self._python_tool_name(),
+                    arguments={"code": translated_code},
+                )
+                translated_args = {"code": translated_code}
                 result = await self._handle_execute_python(
                     runtime,
                     tool_call,
-                    args,
+                    translated_args,
                     builtins,
                     session,
                     call,
@@ -1346,130 +1739,24 @@ Standard Python builtins and agent instance (`self`) are available."""
                     tool_call_event_id=tool_call_event_id,
                 )
                 if result is None or getattr(result, "error", None) is not None:
-                    # Error occurred (already handled) or code execution failed -
-                    # stop processing remaining tool calls
                     return _ToolCallsResult()
-
-                # Check if return_result() was called inline
                 if isinstance(result, tuple) and result[0] == "TASK_COMPLETE":
-                    # Task completed via inline return_result()
                     return _ToolCallsResult(completed=True, final_value=result[1])
-
-            elif tool_call.name == "return_result" and self._supports_return_result():
-                # Return the final result
-                try:
-                    validated, error_msg = self._handle_return_result(
-                        runtime, args, return_type, session, call
-                    )
-                except GenerationError:
-                    # _handle_return_result raises GenerationError when validation
-                    # fails AND session is exhausted. Ensure the ToolCallEvent has
-                    # an error result before re-raising so the event is never left
-                    # with result=None in the DB (which corrupts the next session's
-                    # context render).
-                    runtime.event_manager.update(
-                        tool_call_event_id,
-                        result=ToolResult(
-                            tool_call_id=tool_call.id,
-                            content="return_result validation failed (session exhausted).",
-                            result_status=ResultStatus.ERROR,
-                        ),
-                    )
-                    raise
-                if error_msg is None:
-                    # Rewrite the tool_call arguments to show correct syntax
-                    # when coercion changed the value (teaches model the right format).
-                    corrected_args = self._corrected_return_args(validated, args)
-                    runtime.event_manager.update(
-                        tool_call_event_id,
-                        arguments=corrected_args,
-                        result=ToolResult(
-                            tool_call_id=tool_call.id,
-                            content="Result accepted.",
-                            result_status=ResultStatus.COMPLETE,
-                        ),
-                    )
-                    logger.info("[CODEACT] Task completed successfully via return_result")
-                    return _ToolCallsResult(completed=True, final_value=validated)
-                # Validation error - update with error result
+            else:
+                # Truly unknown tool — not translatable
+                session.record_error()
                 runtime.event_manager.update(
                     tool_call_event_id,
                     result=ToolResult(
                         tool_call_id=tool_call.id,
-                        content=f"Invalid result: {error_msg}\n"
-                        f"Please call return_result again with valid arguments. "
-                        f"Tip: if you computed the result in {self._python_tool_name()}(), you can call "
-                        f"return_result(variable) from within the code instead.",
+                        content=self._unknown_tool_feedback(tool_call.name, args, runtime),
                         result_status=ResultStatus.ERROR,
                     ),
                 )
                 # Stop processing remaining tool calls
                 return _ToolCallsResult()
 
-            else:
-                # Unknown tool — attempt to translate to execute_python.
-                # Weaker models sometimes call agent methods directly as tool
-                # calls instead of wrapping them in execute_python().
-                translated_code = (
-                    self._translate_tool_call_to_code(
-                        tool_call.name, args, builtins, session, runtime
-                    )
-                    if self.config.translate_tool_calls
-                    else None
-                )
-                if translated_code is not None:
-                    get_harness_metrics().tool_call_translated(tool_call.name)
-                    logger.debug(
-                        f"[CODEACT] Translated tool call '{tool_call.name}' -> execute_python"
-                    )
-                    # Update ToolCallEvent to reflect the translation
-                    runtime.event_manager.update(
-                        tool_call_event_id,
-                        name=self._python_tool_name(),
-                        arguments={"code": translated_code},
-                    )
-                    translated_args = {"code": translated_code}
-                    result = await self._handle_execute_python(
-                        runtime,
-                        tool_call,
-                        translated_args,
-                        builtins,
-                        session,
-                        call,
-                        return_type,
-                        tool_call_event_id=tool_call_event_id,
-                    )
-                    if result is None or getattr(result, "error", None) is not None:
-                        return _ToolCallsResult()
-                    if isinstance(result, tuple) and result[0] == "TASK_COMPLETE":
-                        return _ToolCallsResult(completed=True, final_value=result[1])
-                else:
-                    # Truly unknown tool — not translatable
-                    session.record_error()
-                    runtime.event_manager.update(
-                        tool_call_event_id,
-                        result=ToolResult(
-                            tool_call_id=tool_call.id,
-                            content=(
-                                f"Unknown tool `{tool_call.name}`. "
-                                f"Available tools: {self._available_tool_names()}"
-                                + (
-                                    f". To finish, call {self._python_tool_name()} with code "
-                                    "`return_result(value)`; return_result is a Python builtin, "
-                                    "not a provider tool."
-                                    if tool_call.name == "return_result"
-                                    and not self._supports_return_result()
-                                    else ""
-                                )
-                            ),
-                            result_status=ResultStatus.ERROR,
-                        ),
-                    )
-                    # Stop processing remaining tool calls
-                    return _ToolCallsResult()
-
-        # All tool calls processed without completion or error-break
-        return _ToolCallsResult()
+        return None
 
     @staticmethod
     def _handle_block_syntax_error(
@@ -1572,7 +1859,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     execution_count=execution_count,
                     stdout="",
                     stderr="",
-                    error="Execution error: empty code provided.",
+                    error=self._empty_code_error(args),
                     value=None,
                     explicit_return=False,
                     execution_status=ResultStatus.ERROR,
