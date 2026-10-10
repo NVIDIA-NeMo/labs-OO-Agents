@@ -475,6 +475,30 @@ def test_the_repo_tool_docs_offer_cwd():
     assert "defaults to the shell's current directory" in rendered
 
 
+async def test_replace_contract_survives_the_default_concise_tool_context(tmp_path):
+    from nooa_atom.agent.activity import ActivityShellTools
+    from nooa_atom.tools.repo_tools import RepoTools
+
+    from nooa.agentdoc import doc
+    from nooa.tools.todo import TodoManager
+
+    # Construct only: strict exhaustion forbids even an accidental fake model call.
+    agent = AtomAgent(llm=FakeLLMClient(strict_exhaustion=True), cwd=tmp_path)
+    try:
+        tools = doc(RepoTools, ActivityShellTools, TodoManager, concise=True)
+        assert str(agent.context["python_cell_tools"]) == tools
+        for rendered in (tools, doc(ActivityShellTools, concise=True)):
+            assert "replace(match: Match, new_text: str)" in rendered
+            assert "replace(file_path: str, old_text: str, new_text: str)" in rendered
+            assert "line numbers are not handles" in rendered
+            assert (
+                "A Match replaces its entire line region, not a substring within it."
+                not in rendered
+            )
+    finally:
+        await agent.aclose()
+
+
 def test_context_block_helpers_are_not_traced():
     """Evaluating a dynamic context block is prompt rendering, not agent work: no span."""
     assert getattr(AtomAgent._workspace_state_context, "_no_trace", False) is True
