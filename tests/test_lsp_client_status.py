@@ -995,10 +995,11 @@ class TestDegradedTransition:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         await client.start()
-
-        assert client.status == LSPClientStatus.DEGRADED
-        assert client._decode_errors == 1
-        await client.stop()
+        try:
+            assert client.status == LSPClientStatus.DEGRADED
+            assert client._decode_errors == 1
+        finally:
+            await client.stop()
 
     @pytest.mark.parametrize("invalid_message", [b"\xff", b"[]", b"42", b"null"])
     async def test_invalid_messages_degrade_and_reader_continues(
@@ -1017,18 +1018,19 @@ class TestDegradedTransition:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         await client.start()
+        try:
+            for _ in range(100):
+                if client.status == LSPClientStatus.DEGRADED:
+                    break
+                await asyncio.sleep(0.01)
 
-        for _ in range(100):
-            if client.status == LSPClientStatus.DEGRADED:
-                break
-            await asyncio.sleep(0.01)
-
-        assert client.status == LSPClientStatus.DEGRADED
-        assert client._decode_errors == 1
-        assert await client.definition(
-            "file:///tmp/x.py", {"line": 0, "character": 0}
-        ) == []
-        await client.stop()
+            assert client.status == LSPClientStatus.DEGRADED
+            assert client._decode_errors == 1
+            assert await client.definition(
+                "file:///tmp/x.py", {"line": 0, "character": 0}
+            ) == []
+        finally:
+            await client.stop()
 
     async def test_json_parse_error_marks_degraded(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
@@ -1040,18 +1042,19 @@ class TestDegradedTransition:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         await client.start()
-
-        # The read loop races the test: with a fully-buffered fake stream it may
-        # consume the bad frame before or shortly after start() returns. Poll
-        # until degradation is observed rather than asserting an intermediate
-        # COMPLETE that may never be visible.
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if client.status == LSPClientStatus.DEGRADED:
-                break
-        assert client.status == LSPClientStatus.DEGRADED
-        assert client._decode_errors == 1
-        await client.stop()
+        try:
+            # The read loop races the test: with a fully-buffered fake stream it may
+            # consume the bad frame before or shortly after start() returns. Poll
+            # until degradation is observed rather than asserting an intermediate
+            # COMPLETE that may never be visible.
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if client.status == LSPClientStatus.DEGRADED:
+                    break
+            assert client.status == LSPClientStatus.DEGRADED
+            assert client._decode_errors == 1
+        finally:
+            await client.stop()
 
     async def test_degraded_client_can_still_answer_queries(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
@@ -1066,16 +1069,20 @@ class TestDegradedTransition:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         await client.start()
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if client.status == LSPClientStatus.DEGRADED:
-                break
-        assert client.status == LSPClientStatus.DEGRADED
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if client.status == LSPClientStatus.DEGRADED:
+                    break
+            assert client.status == LSPClientStatus.DEGRADED
 
-        result = await client.definition("file:///tmp/x.py", {"line": 0, "character": 0})
-        assert result == []
-        assert client.status == LSPClientStatus.DEGRADED
-        await client.stop()
+            result = await client.definition(
+                "file:///tmp/x.py", {"line": 0, "character": 0}
+            )
+            assert result == []
+            assert client.status == LSPClientStatus.DEGRADED
+        finally:
+            await client.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -1140,14 +1147,17 @@ class TestFailedTransition:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         await client.start()
-        assert client.status == LSPClientStatus.COMPLETE
+        try:
+            assert client.status == LSPClientStatus.COMPLETE
 
-        process.kill()
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if client.status == LSPClientStatus.FAILED:
-                break
-        assert client.status == LSPClientStatus.FAILED
+            process.kill()
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if client.status == LSPClientStatus.FAILED:
+                    break
+            assert client.status == LSPClientStatus.FAILED
+        finally:
+            await client.stop()
 
     async def test_clean_stop_marks_failed(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
@@ -1173,14 +1183,19 @@ class TestFailedTransition:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         await client.start()
-        process.kill()
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if client.status == LSPClientStatus.FAILED:
-                break
+        try:
+            process.kill()
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if client.status == LSPClientStatus.FAILED:
+                    break
 
-        with pytest.raises(LSPClientError, match="FAILED"):
-            await client.definition("file:///tmp/x.py", {"line": 0, "character": 0})
+            with pytest.raises(LSPClientError, match="FAILED"):
+                await client.definition(
+                    "file:///tmp/x.py", {"line": 0, "character": 0}
+                )
+        finally:
+            await client.stop()
 
 
 # ---------------------------------------------------------------------------
