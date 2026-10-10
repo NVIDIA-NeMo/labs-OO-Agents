@@ -448,7 +448,12 @@ class AtomAgent(InteractiveAgent):
 
     @hidden
     @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
-    async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
+    async def handle(
+        self,
+        notification: Annotated[
+            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+        ],
+    ) -> Done | NeedInput | Waiting:
         """Handle one interactive turn: the newest request and anything else that arrived.
 
         ``notification`` maps a channel name to the items that arrived on it:
@@ -489,7 +494,12 @@ class AtomAgent(InteractiveAgent):
         CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
         context=_V2_CONTEXT,
     )
-    async def handle_batch(self, notification: dict[str, list[Any]]) -> Done | Waiting:
+    async def handle_batch(
+        self,
+        notification: Annotated[
+            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+        ],
+    ) -> Done | Waiting:
         """Work on one task unattended and return a structured result.
 
         The task is the text in ``notification["user_messages"]``; data sent

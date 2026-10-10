@@ -17,7 +17,7 @@ import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
@@ -2646,62 +2646,18 @@ class ActorRuntime:
                         raw_docstring, extra_context=arg_context, error_mode="silent"
                     )
 
-                # Build CurrentCall for the strategy
-                # Map positional args to parameter names for kwargs (like from_method does)
-                sig = inspect.signature(method)
-                param_names = [p for p in sig.parameters.keys() if p != "self"]
-                merged_kwargs = dict(kwargs)
-                for i, value in enumerate(args):
-                    if i < len(param_names):
-                        param_name = param_names[i]
-                        if param_name not in merged_kwargs:
-                            merged_kwargs[param_name] = value
-
-                # Extract return type annotation — use get_type_hints to
-                # resolve PEP 563 stringified annotations.
-                return_type = None
-                try:
-                    hints = get_type_hints(method, include_extras=True)
-                    return_annotation = hints.get("return", inspect.Signature.empty)
-                except (NameError, TypeError, AttributeError):
-                    return_annotation = sig.return_annotation
-                if return_annotation is not inspect.Signature.empty:
-                    return_type = return_annotation
-
-                # Extract pre-ellipsis code (setup code before ... marker)
-                # Use _original if method was wrapped by metaclass
-                from nooa.ellipsis_detection import get_pre_ellipsis_code
-
-                original_method = getattr(method, "_original", method)
-                pre_ellipsis_code = get_pre_ellipsis_code(original_method)
-
-                # Use the call_id already pushed by the wrapper so events added
-                # during this call have metadata["call_id"] matching the agent
-                # call stack and runtime.current_call.id. CodeAct stores its
-                # display-only Task event tag separately on call.task_tag.
-                call_id = self._agent_call_id or str(uuid4())
-                call = CurrentCall(
-                    id=call_id,
-                    method_name=method_name,
-                    decorator="plan",
-                    signature=str(sig),
-                    docstring=expanded_docstring,
-                    args=args,
-                    kwargs=merged_kwargs,
-                    parent_id=self._agent_call_stack[-2]
-                    if len(self._agent_call_stack) >= 2
-                    else None,
-                    is_async=inspect.iscoroutinefunction(method),
-                    return_type=return_type,
-                    pre_ellipsis_code=pre_ellipsis_code,
-                    session_locals=call_session_locals,
-                    # Authoritative ordered names from the live signature (excludes
-                    # 'self') so format_parameters_as_code never re-parses the string.
-                    param_names=[p for p in sig.parameters if p != "self"],
-                    # Preserve Annotated parameter overrides on top-level calls,
-                    # just as the nested method wrapper does.
-                    param_specs=CurrentCall.from_method(method).param_specs,
+                # Use the shared builder so Annotated parameter specs reach
+                # prefill rendering on agent calls as well as nested strategy calls.
+                call = CurrentCall.from_method(method, args=args, kwargs=kwargs)
+                # Preserve runtime identity, expanded instructions and caller state.
+                # Events must match the wrapper's call ID, not the builder's UUID.
+                call.id = self._agent_call_id or str(uuid4())
+                call.method_name = method_name
+                call.docstring = expanded_docstring
+                call.parent_id = (
+                    self._agent_call_stack[-2] if len(self._agent_call_stack) >= 2 else None
                 )
+                call.session_locals = call_session_locals
 
                 # Store current call context in context vars for RuntimeServices.generate()
                 # Using context vars (not instance attrs) allows parallel nested calls
