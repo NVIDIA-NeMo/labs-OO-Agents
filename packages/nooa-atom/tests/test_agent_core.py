@@ -364,7 +364,21 @@ def test_cells_see_the_turn_types_but_not_the_helpers(module):
         "AtomAgent" if module == "agent" else "ExperimentalAtomAgent",
     )
     names = set(filter_mro_module_globals(cls))
-    assert {"Done", "NeedInput", "Waiting", "TaskResult", "ChildResult"} <= names
+    assert {
+        "Done",
+        "NeedInput",
+        "NeedInputForm",
+        "InputRequest",
+        "FormResponse",
+        "TextQuestion",
+        "PickOneQuestion",
+        "PickOneOrTextQuestion",
+        "FormChoice",
+        "FormQuestion",
+        "Waiting",
+        "TaskResult",
+        "ChildResult",
+    } <= names
     assert {"ChildFailedError", "DepthLimitError"} <= names
     hidden = {
         "_todo_prompt",

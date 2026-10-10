@@ -146,7 +146,7 @@ class TurnStarted(Metadata):
 class TurnEnded(Metadata):
     """A turn ended.
 
-    ``outcome_kind`` is ``done``, ``need_input``, ``waiting``,
+    ``outcome_kind`` is ``done``, ``need_input``, ``need_input_form``, ``waiting``,
     ``cancelled`` or ``error``. ``result_json`` is the outcome as JSON
     data. ``usage`` is this turn's own token and cost delta.
     """

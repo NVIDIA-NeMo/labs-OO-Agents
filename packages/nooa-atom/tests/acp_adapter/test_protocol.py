@@ -67,7 +67,9 @@ class _RecordingClient:
 
     async def create_elicitation(self, message: str, mode: object, **kwargs):
         self.elicitations.append((message, mode))
-        return AcceptElicitationResponse(action="accept", content={"answer": "dev"})
+        return AcceptElicitationResponse(
+            action="accept", content={"answer": "dev"}, **{"_meta": {"trace": "wire"}}
+        )
 
     def texts(self) -> list[str]:
         return [
@@ -214,9 +216,9 @@ async def test_session_close_works_over_the_wire(tmp_path):
     assert capabilities.delete is None
 
 
-async def test_a_question_is_answered_through_a_form_over_the_wire(tmp_path):
+async def test_an_explicit_form_is_answered_over_the_wire(tmp_path):
     client = _RecordingClient()
-    async with _spawn(client, "--question", cwd=tmp_path) as (connection, _process):
+    async with _spawn(client, "--form", cwd=tmp_path) as (connection, _process):
         await connection.initialize(
             PROTOCOL_VERSION,
             client_capabilities=ClientCapabilities(

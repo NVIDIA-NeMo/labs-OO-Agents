@@ -307,3 +307,185 @@ def test_old_tui_claims_and_workspaces_in_the_in_use_listing(tmp_path):
     listed = {info.id: info.owner for info in store.in_use(workspace=tmp_path / "one")}
     assert listed == {claimed.id: f"old TUI (pid {os.getpid()})"}
     assert free.id not in {info.id for info in store.in_use()}
+
+
+async def test_recover_after_descriptor_form_preserves_questions_without_reopening(
+    root_options, sessions_dir
+):
+    import json
+
+    store = SessionStore(sessions_dir)
+    models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    "return_result(NeedInputForm(heading='Deploy?', questions=[TextQuestion(id='target', label='Target?'), TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')]))"
+                )
+            ]
+        }
+    )
+    registry = SessionRegistry(store, agent_factory=models)
+    try:
+        root = await registry.create(root_options)
+        outcome = await asyncio.wait_for(root.prompt("deploy"), TIMEOUT)
+        expected_questions = outcome.model_dump(mode="json")["questions"]
+        await root.wait_for_checkpoint()
+    finally:
+        await registry.close_all()
+    _mark_foreign(store, root.id)
+    before = _digest(store.path_for(root.id))
+    fork = store.fork(root.id)
+    assert _digest(store.path_for(root.id)) == before
+    assert store.load_transcript(fork.id) == store.load_transcript(root.id)
+    [(_, ended)] = store._read_rows(store.path_for(fork.id), event_types=frozenset({"TurnEnded"}))
+    data = json.loads(ended["result_json"])
+    assert data["kind"] == "form"
+    assert data["questions"] == expected_questions
+    loaded_models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    "[a] = notification['user_messages']\nself.v.answer = a\nreturn_result(Done(explanation='received'))"
+                )
+            ]
+        }
+    )
+    registry = SessionRegistry(store, agent_factory=loaded_models)
+    try:
+        loaded = await registry.load(fork.id)
+        assert not loaded._agent.llm.calls  # history does not reopen a form/turn
+        from nooa.interactive import FormResponse
+
+        with pytest.raises(ValueError):
+            await loaded.submit(FormResponse(action="accept", content={"replicas": "bad"}))
+        receipt = await loaded.submit(
+            FormResponse(
+                action="accept",
+                content={
+                    "target": "staging",
+                    "replicas": "2",
+                    "dry_run": "yes",
+                },
+            )
+        )
+        assert await asyncio.wait_for(loaded.outcome(receipt.item_id), TIMEOUT)
+        assert loaded._agent.v.answer.action == "accept"
+        assert loaded._agent.v.answer.content["replicas"] == "2"
+        assert len(loaded._agent.llm.calls) == 1
+    finally:
+        await registry.close_all()
+
+
+@pytest.mark.parametrize("later", ["start", "admission"])
+async def test_recovery_does_not_resurrect_superseded_form(root_options, sessions_dir, later):
+    import json
+
+    from nooa_atom.session.events import ItemAdmitted, ItemConsumed, TurnEnded, TurnStarted
+
+    from nooa.interactive import FormResponse
+
+    store = SessionStore(sessions_dir)
+    registry = SessionRegistry(store, agent_factory=ScriptedModels({None: []}))
+    try:
+        session = await registry.create(root_options)
+        session.handle.events.add(
+            TurnEnded(
+                outcome_kind="need_input_form",
+                result_json=json.dumps(
+                    {
+                        "kind": "form",
+                        "heading": "Old",
+                        "request_id": "old",
+                        "questions": [{"kind": "text", "id": "answer", "label": "Old?"}],
+                    }
+                ),
+            )
+        )
+        session.handle.events.add(
+            ItemAdmitted(
+                channel="user_messages", source="user", item_id="later", item_json='"new work"'
+            )
+        )
+        session.handle.events.add(ItemConsumed(channel="user_messages", item_id="later"))
+        if later == "start":
+            session.handle.events.add(TurnStarted(item_ids=["later"]))
+        registry._requeue(session)
+        assert session._pending_form is None
+        with pytest.raises(ValueError, match="No pending"):
+            await session.submit(FormResponse(action="accept", content={"answer": "old"}))
+    finally:
+        await registry.close_all()
+
+
+@pytest.mark.parametrize("kind", ["done", "waiting", "need_input", "need_input_form"])
+@pytest.mark.parametrize("payload", ["", "{broken", "null", "[]", '"scalar"', "{}"])
+async def test_load_ignores_irrelevant_json_and_keeps_corrupt_forms_unavailable(
+    root_options, sessions_dir, kind, payload
+):
+    from nooa_atom.session.events import TurnEnded
+
+    from nooa.interactive import FormResponse
+
+    store = SessionStore(sessions_dir)
+    models = ScriptedModels({None: []})
+    registry = SessionRegistry(store, agent_factory=models)
+    session = await registry.create(root_options)
+    session.handle.events.add(TurnEnded(outcome_kind=kind, result_json=payload))
+    await registry.close_all()
+    registry = SessionRegistry(store, agent_factory=models)
+    try:
+        loaded = await registry.load(session.id)
+        assert loaded._pending_form is None
+        assert loaded._unavailable_form == (
+            kind == "need_input_form" or (kind == "need_input" and payload != "{}")
+        )
+        assert not loaded._agent.llm.calls
+        loaded.transcript()  # corrupt input records must remain viewable too
+        with pytest.raises(ValueError):
+            await loaded.submit(FormResponse(action="accept", content={"answer": "stale"}))
+        if loaded._unavailable_form:
+            loaded._agent.turns.pause()
+            await loaded.submit(FormResponse(action="cancel"))
+    finally:
+        await registry.close_all()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"question": "Name?", "options": "ab"},
+        {"question": "Name?", "options": {}},
+        {"question": "Name?", "options": 1},
+        {"question": "Name?", "options": [None]},
+        {"question": " ", "options": []},
+        {"heading": "Name?", "questions": [None]},
+        {"heading": "Name?", "questions": [{"id": "answer", "kind": "pick_one", "choices": 2}]},
+        {"question": "Name?", "request_id": ["bad"]},
+    ],
+)
+async def test_load_malformed_nested_forms_never_fabricates_answer_owner(
+    root_options, sessions_dir, data
+):
+    import json
+
+    from nooa_atom.session.events import TurnEnded
+
+    from nooa.interactive import FormResponse
+
+    store = SessionStore(sessions_dir)
+    registry = SessionRegistry(store, agent_factory=ScriptedModels({None: []}))
+    session = await registry.create(root_options)
+    session.handle.events.add(
+        TurnEnded(outcome_kind="need_input_form", result_json=json.dumps(data))
+    )
+    await registry.close_all()
+    registry = SessionRegistry(store, agent_factory=ScriptedModels({None: []}))
+    try:
+        loaded = await registry.load(session.id)
+        assert loaded._pending_form is None and loaded._unavailable_form
+        loaded.transcript()
+        with pytest.raises(ValueError, match="cannot be restored"):
+            await loaded.submit(FormResponse(action="accept", content={"answer": "stale"}))
+        assert not loaded._agent.llm.calls
+    finally:
+        await registry.close_all()

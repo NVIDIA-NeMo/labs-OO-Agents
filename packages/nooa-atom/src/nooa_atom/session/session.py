@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -27,8 +28,10 @@ from nooa.events import Notification
 from nooa.interactive import (
     AgentMessage,
     Done,
+    FormResponse,
+    InputRequest,
     InteractiveAgent,
-    NeedInput,
+    NeedInputForm,
     Waiting,
     apply_model_limits,
 )
@@ -76,13 +79,13 @@ from nooa_atom.session.store import SessionHandle
 
 logger = logging.getLogger(__name__)
 
-Outcome = Done | NeedInput | Waiting | TurnCancelledOutcome
+Outcome = Done | InputRequest | Waiting | TurnCancelledOutcome
 """What ``prompt()`` returns."""
 
 _FINISHED_KEPT = 256
 """How many finished items' outcomes ``outcome()`` still answers."""
 
-OutcomeKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
+OutcomeKind = Literal["done", "need_input", "need_input_form", "waiting", "cancelled", "error"]
 _MODES = ("auto", "ask")
 
 
@@ -160,6 +163,25 @@ _closing_sessions: contextvars.ContextVar[tuple[str, ...]] = contextvars.Context
 )
 
 
+def _is_form_response(item: Any) -> bool:
+    """Reserve explicit response actions/envelope shapes, not domain action data.
+
+    Recognized actions stay reserved even with malformed extra fields. Action-only
+    dictionaries and response-key-only data without a string action fail closed.
+    An arbitrary string action plus content can be domain data; callers declare
+    ambiguous response intent with request_id rather than us guessing its meaning.
+    """
+    if isinstance(item, FormResponse):
+        return True
+    if not isinstance(item, dict):
+        return False
+    return item.get("action") in ("accept", "decline", "cancel") or (
+        bool(item)
+        and item.keys() <= {"action", "content"}
+        and ("content" not in item or not isinstance(item.get("action"), str))
+    )
+
+
 class Session:
     """One agent, its turn loop and its durable record.
 
@@ -214,6 +236,9 @@ class Session:
         self._consumed: list[str] = []  # consumed since the last turn settled
         self._waiting: list[str] = []  # items whose prompt stays open over a Waiting
         self._recording_error: BaseException | None = None
+        self._form_request_id: str | None = None
+        self._pending_form: NeedInputForm | None = None
+        self._unavailable_form = False
         self._started = False
         self._usage_before: Usage = self.info.usage.model_copy()
         self._turn_messages: set[str] = set()
@@ -249,6 +274,46 @@ class Session:
         set_on_change = getattr(getattr(agent, "slash_commands", None), "set_on_change", None)
         if callable(set_on_change):
             set_on_change(self._on_commands_changed)
+
+    def restore_input_request(self, kind: str, data: Any) -> None:
+        """Restore valid descriptors, leaving corrupt/obsolete form intent unavailable.
+
+        Old untyped text/choice requests can migrate honestly to string questions.
+        A saved class/schema is never imported or reconstructed as an answer model.
+        Corrupt input records cannot become fabricated forms or validate stale accepts.
+        """
+        from nooa_atom.session.loader import migrate_input_request
+
+        if kind not in ("need_input", "need_input_form"):
+            return
+        self._pending_form = None
+        self._form_request_id = None
+        self._unavailable_form = False
+        if not isinstance(data, dict):
+            self._unavailable_form = True
+            return
+        if kind != "need_input_form" and not (
+            data.get("kind") == "form"
+            or data.get("presentation") == "form"
+            or data.get("answer_schema") is not None
+            or data.get("answer_type") is not None
+        ):
+            return
+        self._unavailable_form = True
+        request_id = data.get("request_id")
+        if request_id is not None and (not isinstance(request_id, str) or not request_id.strip()):
+            return
+        self._form_request_id = request_id
+        # Migration is for real legacy questions, never an empty/corrupt record.
+        if "questions" not in data and not isinstance(data.get("question"), str):
+            return
+        try:
+            record = migrate_input_request(data, form=True)
+            if record is not None:
+                self._pending_form = NeedInputForm.model_validate(record)
+                self._unavailable_form = False
+        except (ValueError, TypeError):
+            pass  # Malformed nested legacy data must not prevent session recovery.
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -417,12 +482,71 @@ class Session:
         self._recording_error = None
         self._agent.turns.resume()
 
-    async def submit(
-        self, item: Any, *, channel: str = "user_messages", source: str = "user"
-    ) -> Receipt:
-        """Admit ``item`` on ``channel``: recorded first, then queued for a turn."""
+    def form_is_current(self, request: NeedInputForm) -> bool:
+        """Whether this exact live form still owns the answer intent."""
+        return self._pending_form is request and not self.closing and self.info.status != "running"
+
+    def admit_form_response(
+        self, request: NeedInputForm, response: FormResponse, *, source: str
+    ) -> Receipt | None:
+        """Admit an adapter-validated response only while its request is current.
+
+        No await separates identity checking and admission. The adapter validates
+        protocol shape once; later turns supersede old dialog ownership.
+        """
         self._ensure_external_admission()
-        return self.admit(item, channel=channel, source=source)
+        if not self.form_is_current(request):
+            return None
+        receipt = self.admit(response, source=source)
+        self._pending_form = None
+        self._form_request_id = None
+        return receipt
+
+    async def submit(
+        self,
+        item: Any,
+        *,
+        channel: str = "user_messages",
+        source: str = "user",
+        request_id: str | None = None,
+    ) -> Receipt:
+        """Record then queue input, validating explicit form responses against their owner.
+
+        Recognizable response envelopes are reserved on ``user_messages``; other
+        structured domain data remains ordinary input. ``request_id`` explicitly
+        declares response intent and must match the current durable request.
+        """
+        self._ensure_external_admission()
+        if request_id is not None and request_id != self._form_request_id:
+            raise ValueError(
+                "Form request was superseded or already answered; ask for the current request."
+            )
+        is_response = request_id is not None or _is_form_response(item)
+        if channel == "user_messages" and (
+            self._pending_form is not None or self._unavailable_form
+        ):
+            if is_response:
+                response = FormResponse.model_validate(item)
+                if self._unavailable_form and response.action == "accept":
+                    raise ValueError(
+                        "Stored corrupt or legacy typed form cannot be restored; ask for a new descriptor form."
+                    )
+                item = (
+                    self._pending_form.validate_response(response)
+                    if self._pending_form
+                    else response
+                )
+            # Raw text remains raw: the agent must not treat it as a validated form outcome.
+        elif channel == "user_messages" and is_response:
+            raise ValueError("No pending form request to validate this response.")
+        receipt = self.admit(item, channel=channel, source=source)
+        if channel == "user_messages":
+            # Successful admission claims/invalidates the decision before dispatch can yield.
+            # Withdrawal does not resurrect an obsolete dialog; request a fresh form.
+            self._pending_form = None
+            self._unavailable_form = False
+            self._form_request_id = None
+        return receipt
 
     async def steer(self, text: str, *, source: str = "user") -> Receipt:
         """Give the running turn extra text; while idle this is ``submit(text)``.
@@ -439,7 +563,7 @@ class Session:
         """
         self._ensure_external_admission()
         if not self._agent.turns.running or self.info.status != "running":
-            return self.admit(text, channel="user_messages", source=source)
+            return await self.submit(text, channel="user_messages", source=source)
         event = ItemAdmitted(
             channel="steer", item_json=item_to_json(text), item_type=type_name(text), source=source
         )
@@ -715,6 +839,11 @@ class Session:
         self.info.status = "running"
 
     def _on_turn_began(self, _event: Any) -> None:
+        # A new turn owns subsequent input decisions, even before it settles.
+        # An old dialog cannot inject accepted data into that running turn.
+        self._pending_form = None
+        self._unavailable_form = False
+        self._form_request_id = None
         self._turn_messages.clear()
         for channel, item_id in self._batch_consumed:
             self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
@@ -800,6 +929,9 @@ class Session:
             outcome = TurnFailedError(event.message, event.error)
         else:
             outcome = event.result
+        self._pending_form = outcome if isinstance(outcome, NeedInputForm) else None
+        self._form_request_id = uuid4().hex if self._pending_form else None
+        self._unavailable_form = False
         self._send_result_message(outcome)
         consumed = list(self._consumed)
         if self._recording_error is None:
@@ -807,6 +939,8 @@ class Session:
         # A failed steer delivery retains its buffer/ledger ownership for recovery.
         usage = _usage_delta(self._usage_before, self.info.usage)
         data, result_type = _outcome_data(outcome, kind)
+        if self._form_request_id is not None:
+            data["request_id"] = self._form_request_id
         explanation = _explanation(outcome, kind)
         self.handle.events.add(
             TurnEnded(
@@ -1246,16 +1380,8 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
             return outcome.model_dump(mode="json"), result_type
         except Exception:  # a result that is not data
             return {"explanation": outcome.explanation, "result": repr(result)}, None
-    if kind == "need_input":
-        schema = (
-            outcome.answer_type.model_json_schema() if outcome.answer_type is not None else None
-        )
-        return {
-            "question": outcome.question,
-            "options": outcome.options,
-            "reason": getattr(outcome, "reason", None),
-            "answer_schema": schema,
-        }, None
+    if kind in ("need_input", "need_input_form"):
+        return outcome.model_dump(mode="json"), None
     if kind == "waiting":
         return outcome.model_dump(mode="json"), None
     if kind == "cancelled":
@@ -1266,8 +1392,8 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
 def _explanation(outcome: Any, kind: OutcomeKind) -> str:
     if kind in ("done", "waiting"):
         return outcome.explanation
-    if kind == "need_input":
-        return outcome.question
+    if kind in ("need_input", "need_input_form"):
+        return outcome.heading if isinstance(outcome, NeedInputForm) else outcome.question
     if kind == "cancelled":
         return f"cancelled by {outcome.by}"
     return str(outcome)
