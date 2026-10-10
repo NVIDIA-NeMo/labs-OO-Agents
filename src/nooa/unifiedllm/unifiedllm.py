@@ -2320,12 +2320,6 @@ class ResponsesClient(UnifiedLLM):
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
 
-    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
-        params = super()._prepare_call_config(overrides)
-        caps = REPLY_CAP_KEYS & params.keys()
-        if caps:
-            params["max_output_tokens"] = params.pop(next(iter(caps)))
-        return params
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Responses API schema format."""

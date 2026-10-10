@@ -1732,13 +1732,35 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     entry.pop("provenance", None)
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Lock a stable sidecar inode, not the registry inode replaced atomically.
-    # Keep the lock file: unlinking it would let a third writer bypass waiters.
-    import fcntl
+    import sys
 
-    with path.with_name(f".{path.name}.lock").open("a") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        _write_entry(entry, path, alias=alias)
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+
+    lock_file = path.with_name(f".{path.name}.lock")
+    with lock_file.open("a+") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        elif sys.platform == "win32":
+            import msvcrt
+
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            _write_entry(entry, path, alias=alias)
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            elif sys.platform == "win32":
+                import msvcrt
+
+                try:
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
 
 
 def _write_entry(entry: dict, path: Path, *, alias: str) -> None:

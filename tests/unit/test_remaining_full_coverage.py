@@ -725,10 +725,9 @@ class TestSQLiteSessionLocking:
         three-digit pid produced a garbled ``999472`` that would later
         mislead diagnostics.
         """
-        import fcntl
         import socket
 
-        from nooa.storage.sqlite import _acquire_session_lock
+        from nooa.storage.sqlite import _acquire_session_lock, _release_session_lock
 
         lock_path = tmp_path / "truncation.lock"
         # Seed with a longer "old owner" PID.
@@ -740,8 +739,7 @@ class TestSQLiteSessionLocking:
             # sharing the directory tell the session is in use).
             assert lock_path.read_bytes() == f"{os.getpid()} {socket.gethostname()}".encode()
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            _release_session_lock(fd)
 
     def test_close_on_connect_failure(self, tmp_path):
         """Lines 365-367: close() is called when sqlite3.connect or schema setup fails."""
