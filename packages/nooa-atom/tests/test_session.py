@@ -999,3 +999,116 @@ async def test_no_owner_response_dictionaries_are_rejected(make_session, content
     session, _ = make_session(start=False)
     with pytest.raises(ValueError, match="No pending"):
         await session.submit({"action": "accept", "content": content})
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"action": "deploy", "target": "staging"},
+        {"action": "deploy", "content": {"target": "staging"}},
+        {"action": {"name": "deploy"}, "target": "staging"},
+        {},
+    ],
+)
+async def test_domain_action_data_remains_ordinary_input(make_session, pending, item):
+    session, _ = make_session(start=False)
+    if pending:
+        session.restore_input_request(
+            "need_input_form",
+            {
+                "kind": "form",
+                "heading": "Name",
+                "questions": [{"kind": "text", "id": "answer", "label": "Name?"}],
+            },
+        )
+    receipt = await session.submit(item)
+    [(_, row)] = _rows(session, "ItemAdmitted")
+    assert json.loads(row["item_json"]) == item
+    assert row["item_id"] == receipt.item_id
+    assert session._pending_form is None
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"action": "accept"},
+        {"action": "accept", "content": {"answer": 1}},
+        {"action": "cancel", "extra": "invalid"},
+        {"action": "decline", "content": {}},
+        {"action": "unknown"},
+        {"content": {"answer": "a"}},
+        {"action": ["accept"]},
+        FormResponse(action="cancel"),
+    ],
+)
+async def test_recognizable_responses_never_slip_through_as_domain_data(
+    make_session, pending, item
+):
+    session, _ = make_session(start=False)
+    if pending:
+        session.restore_input_request("need_input_form", {"question": "Name?"})
+    if pending and isinstance(item, FormResponse):
+        await session.submit(item)
+    else:
+        with pytest.raises(ValueError):
+            await session.submit(item)
+        assert _rows(session, "ItemAdmitted") == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        None,
+        [],
+        "bad",
+        {},
+        {"question": "Name?", "options": 42},
+        {"question": "Name?", "options": {"a": "A"}},
+        {"questions": [None]},
+        {"heading": "Name", "questions": {}},
+    ],
+)
+async def test_corrupt_form_restore_fails_closed_and_replaces_previous_owner(make_session, data):
+    session, _ = make_session(start=False)
+    session.restore_input_request("need_input_form", {"question": "Old?", "request_id": "old"})
+    old = session._pending_form
+    session.restore_input_request("need_input_form", data)
+    assert not session.form_is_current(old)
+    assert session._pending_form is None and session._unavailable_form
+    with pytest.raises(ValueError, match="cannot be restored"):
+        await session.submit(FormResponse(action="accept", content={"answer": "stale"}))
+    assert _rows(session, "ItemAdmitted") == []
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"action": "unknown", "content": {"answer": "a"}},
+        {"action": "deploy", "target": "staging"},
+        {},
+        "plain text",
+    ],
+)
+async def test_request_token_declares_response_intent_even_for_ambiguous_data(make_session, item):
+    session, _ = make_session(start=False)
+    session.restore_input_request("need_input_form", {"question": "Name?", "request_id": "current"})
+    owner = session._pending_form
+    with pytest.raises(ValueError):
+        await session.submit(item, request_id="current")
+    assert session._pending_form is owner and session._form_request_id == "current"
+    assert _rows(session, "ItemAdmitted") == []
+
+
+async def test_restoration_replaces_form_intent_with_new_conversational_request(make_session):
+    session, _ = make_session(start=False)
+    session.restore_input_request("need_input_form", {"question": "Old?", "request_id": "old"})
+    old = session._pending_form
+    session.restore_input_request("need_input", {"question": "Why?"})
+    assert not session.form_is_current(old)
+    assert session._pending_form is None and not session._unavailable_form
+    assert session._form_request_id is None
+    session.restore_input_request("need_input_form", {"question": "New?", "request_id": "new"})
+    assert session._pending_form.heading == "New?"
+    assert session._form_request_id == "new"

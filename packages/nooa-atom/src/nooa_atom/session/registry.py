@@ -668,11 +668,13 @@ class SessionRegistry:
                 event_type == "ItemAdmitted" and raw.get("channel") == "user_messages"
             ):
                 pending = None
-        if pending:
-            session.restore_input_request(
-                str(pending.get("outcome_kind", "")),
-                json.loads(str(pending.get("result_json", "{}"))),
-            )
+        if pending and pending.get("outcome_kind") in ("need_input", "need_input_form"):
+            # Other outcomes need no descriptor restoration (and may have no JSON).
+            try:
+                data = json.loads(pending.get("result_json", ""))
+            except (ValueError, TypeError):
+                data = None
+            session.restore_input_request(str(pending["outcome_kind"]), data)
         rows = self.store.load_rows(
             session.id,
             frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn", "ItemDiscarded")),

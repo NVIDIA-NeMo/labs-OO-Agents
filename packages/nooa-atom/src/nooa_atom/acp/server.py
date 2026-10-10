@@ -805,6 +805,9 @@ class AtomACPAgent:
                 await bridge.flush()
                 return PromptResponse(stop_reason="end_turn")
             asked.append(outcome)
+            # Revoke the previous dialog before replacing its session-keyed slots.
+            # Its waiters/cleanup may run later, but cannot own this new request.
+            self._stop_client_request(session.id)
             self._asking[session.id] = outcome
             form_stop = asyncio.get_running_loop().create_future()
             self._form_stops[session.id] = form_stop
@@ -852,7 +855,7 @@ class AtomACPAgent:
         conn = self._require_conn()
         pool_schema = pool_form_schema(need) if self._pool_forms else None
         if pool_schema is not None:
-            return await self._ask_pool(session, need, pool_schema)
+            return await self._ask_pool(session, bridge, need, pool_schema)
         capabilities = self.client_capabilities
         forms = (
             capabilities is not None
@@ -887,11 +890,13 @@ class AtomACPAgent:
                 )
                 return need.validate_response(outcome), FORM_ANSWER_SOURCE
             except (ValidationError, ValueError, AttributeError, TypeError) as exc:
-                await self._form_failure(session, exc)
+                await self._form_failure(bridge, exc)
                 return None
         return None
 
-    async def _ask_pool(self, session: Session, need: NeedInputForm, schema: dict[str, Any]) -> Any:
+    async def _ask_pool(
+        self, session: Session, bridge: ACPEventBridge, need: NeedInputForm, schema: dict[str, Any]
+    ) -> Any:
         """One Pool request. Malformed payload fails closed once, never a wizard retry."""
         conn = self._require_conn()
         if session.id in self._stopped_forms:
@@ -920,13 +925,12 @@ class AtomACPAgent:
             outcome = FormResponse(action=response.get("action"), content=response.get("content"))
             return need.validate_response(outcome), FORM_ANSWER_SOURCE
         except (ValidationError, ValueError, AttributeError, TypeError) as exc:
-            await self._form_failure(session, exc)
+            await self._form_failure(bridge, exc)
             return None
 
-    async def _form_failure(self, session: Session, exc: Exception) -> None:
-        """Actionable fallback without creating an answer or opening another dialog."""
-        await self._require_conn().session_update(
-            session.id,
+    async def _form_failure(self, bridge: ACPEventBridge, exc: Exception) -> None:
+        """Flush an ordered fallback notice; the owning form wait remains revocable."""
+        bridge.publish(
             update_agent_message(
                 text_block(
                     f"Form response was not accepted: {exc}\n\n"
@@ -935,6 +939,7 @@ class AtomACPAgent:
                 )
             ),
         )
+        await bridge.flush()
 
     async def _client_call(self, session_id: str, request: Any) -> Any:
         """Await a request to the client that session/cancel can stop.
@@ -991,6 +996,7 @@ class AtomACPAgent:
                 task.exception()
 
     def _client_request_done(self, task: asyncio.Future[Any]) -> None:
+        """Retire detached work and observe failures without changing current ownership."""
         self._detached_asks.discard(task)
         if not task.cancelled():
             task.exception()  # Retrieve failures from a detached client request.

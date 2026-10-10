@@ -163,6 +163,25 @@ _closing_sessions: contextvars.ContextVar[tuple[str, ...]] = contextvars.Context
 )
 
 
+def _is_form_response(item: Any) -> bool:
+    """Reserve explicit response actions/envelope shapes, not domain action data.
+
+    Recognized actions stay reserved even with malformed extra fields. Action-only
+    dictionaries and response-key-only data without a string action fail closed.
+    An arbitrary string action plus content can be domain data; callers declare
+    ambiguous response intent with request_id rather than us guessing its meaning.
+    """
+    if isinstance(item, FormResponse):
+        return True
+    if not isinstance(item, dict):
+        return False
+    return item.get("action") in ("accept", "decline", "cancel") or (
+        bool(item)
+        and item.keys() <= {"action", "content"}
+        and ("content" not in item or not isinstance(item.get("action"), str))
+    )
+
+
 class Session:
     """One agent, its turn loop and its durable record.
 
@@ -256,29 +275,45 @@ class Session:
         if callable(set_on_change):
             set_on_change(self._on_commands_changed)
 
-    def restore_input_request(self, kind: str, data: dict[str, Any]) -> None:
-        """Restore descriptors; old typed-model forms require a new agent request.
+    def restore_input_request(self, kind: str, data: Any) -> None:
+        """Restore valid descriptors, leaving corrupt/obsolete form intent unavailable.
 
         Old untyped text/choice requests can migrate honestly to string questions.
         A saved class/schema is never imported or reconstructed as an answer model.
+        Corrupt input records cannot become fabricated forms or validate stale accepts.
         """
         from nooa_atom.session.loader import migrate_input_request
 
+        if kind not in ("need_input", "need_input_form"):
+            return
+        self._pending_form = None
+        self._form_request_id = None
+        self._unavailable_form = False
+        if not isinstance(data, dict):
+            self._unavailable_form = True
+            return
         if kind != "need_input_form" and not (
-            data.get("presentation") == "form"
+            data.get("kind") == "form"
+            or data.get("presentation") == "form"
             or data.get("answer_schema") is not None
             or data.get("answer_type") is not None
         ):
             return
-        self._form_request_id = data.get("request_id")
-        record = migrate_input_request(data, form=True)
-        if record is None:
-            self._unavailable_form = True
+        self._unavailable_form = True
+        request_id = data.get("request_id")
+        if request_id is not None and (not isinstance(request_id, str) or not request_id.strip()):
+            return
+        self._form_request_id = request_id
+        # Migration is for real legacy questions, never an empty/corrupt record.
+        if "questions" not in data and not isinstance(data.get("question"), str):
             return
         try:
-            self._pending_form = NeedInputForm.model_validate(record)
-        except ValueError:
-            self._unavailable_form = True
+            record = migrate_input_request(data, form=True)
+            if record is not None:
+                self._pending_form = NeedInputForm.model_validate(record)
+                self._unavailable_form = False
+        except (ValueError, TypeError):
+            pass  # Malformed nested legacy data must not prevent session recovery.
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -475,20 +510,26 @@ class Session:
         source: str = "user",
         request_id: str | None = None,
     ) -> Receipt:
-        """Admit ``item`` on ``channel``: recorded first, then queued for a turn."""
+        """Record then queue input, validating explicit form responses against their owner.
+
+        Recognizable response envelopes are reserved on ``user_messages``; other
+        structured domain data remains ordinary input. ``request_id`` explicitly
+        declares response intent and must match the current durable request.
+        """
         self._ensure_external_admission()
         if request_id is not None and request_id != self._form_request_id:
             raise ValueError(
                 "Form request was superseded or already answered; ask for the current request."
             )
+        is_response = request_id is not None or _is_form_response(item)
         if channel == "user_messages" and (
             self._pending_form is not None or self._unavailable_form
         ):
-            if isinstance(item, FormResponse) or (isinstance(item, dict) and "action" in item):
+            if is_response:
                 response = FormResponse.model_validate(item)
                 if self._unavailable_form and response.action == "accept":
                     raise ValueError(
-                        "Stored legacy typed form cannot be restored; ask for a new descriptor form."
+                        "Stored corrupt or legacy typed form cannot be restored; ask for a new descriptor form."
                     )
                 item = (
                     self._pending_form.validate_response(response)
@@ -496,9 +537,7 @@ class Session:
                     else response
                 )
             # Raw text remains raw: the agent must not treat it as a validated form outcome.
-        elif channel == "user_messages" and (
-            isinstance(item, FormResponse) or (isinstance(item, dict) and "action" in item)
-        ):
+        elif channel == "user_messages" and is_response:
             raise ValueError("No pending form request to validate this response.")
         receipt = self.admit(item, channel=channel, source=source)
         if channel == "user_messages":

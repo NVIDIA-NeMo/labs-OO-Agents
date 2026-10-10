@@ -805,14 +805,18 @@ class SessionStore:
                         request = json.loads(str(raw.get("result_json", "{}")))
                     except (ValueError, TypeError):
                         request = {}
+                    if not isinstance(request, dict):
+                        request = {}
                     content += (
                         "\n\nExplicit form request: FormResponse with action accept and validated "
                         "content, decline, or cancel. Raw text remains unvalidated."
                     )
                     if request.get("reason"):
                         content += "\n\n" + str(request["reason"])
-                    if request.get("options"):
-                        content += "\n\nChoices: " + ", ".join(request["options"])
+                    options = request.get("options")
+                    if isinstance(options, list) and all(isinstance(o, str) for o in options):
+                        if options:
+                            content += "\n\nChoices: " + ", ".join(options)
                     if request.get("questions") or request.get("answer_schema"):
                         content += (
                             "\n\nQuestion descriptors (legacy schema if unavailable):\n```json\n"

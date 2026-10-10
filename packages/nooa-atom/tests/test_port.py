@@ -681,3 +681,38 @@ async def test_idle_child_steer_withdraw_and_reload_cannot_revive_form(
     )
     with pytest.raises(ValueError, match="superseded"):
         await root._agent.session.answer_child(child.id, response, request_id=request_id)
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_parent_send_child_preserves_domain_action_data(
+    registry, root_options, models, pending
+):
+    from nooa.interactive import NeedInputForm
+
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('Helper', 'ask', retain=True)\nreturn_result(Done(explanation='spawned'))"
+        )
+    ]
+    models.scripts["Helper"] = [
+        cell(
+            "return_result(NeedInputForm(heading='Name?', questions=[TextQuestion(id='answer', label='Name?')]))"
+        )
+    ]
+    root = await registry.create(root_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    [info] = registry.children(root.id)
+    child = registry.get(info.id)
+    await until(lambda: isinstance(child._pending_form, NeedInputForm))
+    child._agent.turns.pause()
+    if not pending:
+        await child.submit("never mind")
+    item = {"action": "deploy", "target": "staging"}
+    receipt = await root._agent.session.send_child(child.id, item, channel="user_messages")
+    assert receipt.delivered == "queued"
+    rows = registry.store.load_rows(child.id, frozenset({"ItemAdmitted"}))
+    [row] = [raw for _, raw in rows if raw["item_id"] == receipt.item_id]
+    import json
+
+    assert json.loads(row["item_json"]) == item
+    assert child._pending_form is None

@@ -231,7 +231,11 @@ def load_typed(type_name: str | None, data: Any) -> Any:
 
 
 def migrate_input_request(value: dict[str, Any], *, form: bool = False) -> dict[str, Any] | None:
-    """Migrate old untyped records; typed class/schema records stay unavailable data."""
+    """Migrate valid legacy string questions; corrupt/typed records stay unavailable.
+
+    Descriptor records pass through for strict model validation. Legacy choices
+    must be string lists: iterating arbitrary containers would invent new choices.
+    """
     record = dict(value)
     record.pop("request_id", None)
     presentation = record.pop("presentation", None)
@@ -245,8 +249,15 @@ def migrate_input_request(value: dict[str, Any], *, form: bool = False) -> dict[
         return record
     if "questions" in record:
         return record
-    question = record.pop("question", "Details")
+    question = record.pop("question", None)
     options = record.pop("options", None)
+    if not isinstance(question, str) or not question.strip():
+        return None
+    if options is not None and (
+        not isinstance(options, list)
+        or any(not isinstance(option, str) or not option.strip() for option in options)
+    ):
+        return None
     descriptor: dict[str, Any] = {"id": "answer", "label": question, "kind": "text"}
     if options:
         descriptor.update(kind="pick_one", choices=[{"value": c, "title": c} for c in options])

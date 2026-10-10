@@ -526,3 +526,154 @@ async def test_caller_cancel_settles_without_cancellation_swallowing_client(
         await asyncio.gather(pending, return_exceptions=True)
     assert len(models.llms[None].calls) == 1
     assert client.updates(sid, UserMessageChunk) == []
+
+
+@pytest.mark.parametrize("pool", [False, True])
+@pytest.mark.parametrize("admission", ["prompt", "steer"])
+@pytest.mark.parametrize("operation", ["stop", "detach", "close", "accept"])
+async def test_new_dialog_revokes_old_ownership_before_installing_slots(
+    make_adapter, workspace, client, pool, admission, operation
+):
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    old_cancelled = asyncio.Event()
+    calls = []
+
+    async def dialog(*args, **kwargs):
+        index = len(calls)
+        calls.append(index)
+        entered[index].set()
+        try:
+            await release[index].wait()
+        except asyncio.CancelledError:
+            if index == 0:
+                old_cancelled.set()
+                await release[index].wait()  # deliberately cancellation-resistant
+            else:
+                raise
+        return {"action": "accept", "content": {"answer": "old" if index == 0 else "new"}}
+
+    if pool:
+        client.ext_method = dialog
+    else:
+        client.create_elicitation = dialog
+    models = ScriptedModels({None: [_form(False), _form(False), _inspect_answer()]})
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid = (await adapter.new_session(str(workspace))).session_id
+    session = adapter.session(sid)
+    first = asyncio.create_task(adapter.prompt(sid, [text_block("first")]))
+    await asyncio.wait_for(entered[0].wait(), TIMEOUT)
+    old_need = adapter._asking[sid]
+    if admission == "prompt":
+        second = asyncio.create_task(adapter.prompt(sid, [text_block("second")]))
+    else:
+        receipt = await session.steer("second", source="acp")
+        second = asyncio.create_task(adapter._finish(session, adapter.bridge(sid), receipt.item_id))
+    try:
+        await asyncio.wait_for(entered[1].wait(), TIMEOUT)
+        await asyncio.wait_for(old_cancelled.wait(), TIMEOUT)
+        assert (await asyncio.wait_for(first, 1)).stop_reason == "cancelled"
+        new_need = adapter._asking[sid]
+        assert new_need is not old_need
+        new_task, new_stop = adapter._asks[sid], adapter._ask_stops[sid]
+        release[0].set()
+        # Await the detached old transport to check its cleanup cannot touch new slots.
+        await asyncio.gather(*list(adapter._detached_asks), return_exceptions=True)
+        assert adapter._asking[sid] is new_need
+        assert adapter._asks[sid] is new_task and adapter._ask_stops[sid] is new_stop
+        assert client.updates(sid, UserMessageChunk) == []
+        if operation == "stop":
+            await adapter.cancel(sid)
+        elif operation == "detach":
+            adapter._detach(adapter.bridge(sid))
+        elif operation == "close":
+            await adapter.close_session(sid)
+        else:
+            release[1].set()
+        result = await asyncio.wait_for(second, 1)
+        assert result.stop_reason == ("end_turn" if operation == "accept" else "cancelled")
+        if operation == "accept":
+            assert session._agent.v.answer.content == {"answer": "new"}
+        else:
+            assert client.updates(sid, UserMessageChunk) == []
+        assert sid not in adapter._asks and sid not in adapter._asking
+        assert sid not in adapter._ask_stops and sid not in adapter._form_stops
+    finally:
+        for gate in release:
+            gate.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.parametrize("pool", [False, True])
+@pytest.mark.parametrize("operation", ["deliver", "fail", "stop", "close"])
+async def test_form_failure_uses_ordered_bridge_and_revocable_flush(
+    make_adapter, workspace, client, pool, operation
+):
+    from acp import update_agent_message
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = client.session_update
+    adapter = await make_adapter(
+        ScriptedModels({None: [_form(False)]}),
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid = (await adapter.new_session(str(workspace))).session_id
+    bridge = adapter.bridge(sid)
+
+    async def ordered_send(session_id, update, **kwargs):
+        text = getattr(getattr(update, "content", None), "text", "")
+        if text.startswith("before failure"):
+            entered.set()
+            await release.wait()
+        if operation == "fail" and "No automatic retry" in text:
+            raise RuntimeError("notice transport failed")
+        await original(session_id, update, **kwargs)
+
+    async def malformed(*args, **kwargs):
+        bridge.publish(update_agent_message(text_block("before failure")))
+        return {"action": "accept", "content": {"answer": 42}}
+
+    client.session_update = ordered_send
+    if pool:
+        client.ext_method = malformed
+    else:
+        client.create_elicitation = malformed
+    pending = asyncio.create_task(adapter.prompt(sid, [text_block("go")]))
+    closing = None
+    try:
+        await asyncio.wait_for(entered.wait(), TIMEOUT)
+        if operation == "stop":
+            await adapter.cancel(sid)
+        elif operation == "close":
+            # Close drains the independent update pump; form ownership must settle
+            # before that transport is released, not wait for the close RPC.
+            closing = asyncio.create_task(adapter.close_session(sid))
+        else:
+            # A direct send would overtake the blocked predecessor.
+            assert not any("No automatic retry" in t for t in client.texts(AgentMessageChunk, sid))
+            release.set()
+        if operation == "fail":
+            with pytest.raises(RuntimeError, match="notice transport failed"):
+                await asyncio.wait_for(pending, 1)
+            await bridge.flush()  # error marker resets the pump for subsequent updates
+            bridge.publish(update_agent_message(text_block("after failure")))
+            await bridge.flush()
+            assert client.texts(AgentMessageChunk, sid)[-1] == "after failure\n\n"
+        else:
+            result = await asyncio.wait_for(pending, 1)
+            assert result.stop_reason == ("end_turn" if operation == "deliver" else "cancelled")
+        if operation == "deliver":
+            texts = client.texts(AgentMessageChunk, sid)
+            assert texts[-2] == "before failure\n\n"
+            assert "No automatic retry" in texts[-1]
+        assert client.updates(sid, UserMessageChunk) == []
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        if closing is not None:
+            await asyncio.wait_for(closing, TIMEOUT)

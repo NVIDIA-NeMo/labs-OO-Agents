@@ -415,3 +415,77 @@ async def test_recovery_does_not_resurrect_superseded_form(root_options, session
             await session.submit(FormResponse(action="accept", content={"answer": "old"}))
     finally:
         await registry.close_all()
+
+
+@pytest.mark.parametrize("kind", ["done", "waiting", "need_input", "need_input_form"])
+@pytest.mark.parametrize("payload", ["", "{broken", "null", "[]", '"scalar"', "{}"])
+async def test_load_ignores_irrelevant_json_and_keeps_corrupt_forms_unavailable(
+    root_options, sessions_dir, kind, payload
+):
+    from nooa_atom.session.events import TurnEnded
+
+    from nooa.interactive import FormResponse
+
+    store = SessionStore(sessions_dir)
+    models = ScriptedModels({None: []})
+    registry = SessionRegistry(store, agent_factory=models)
+    session = await registry.create(root_options)
+    session.handle.events.add(TurnEnded(outcome_kind=kind, result_json=payload))
+    await registry.close_all()
+    registry = SessionRegistry(store, agent_factory=models)
+    try:
+        loaded = await registry.load(session.id)
+        assert loaded._pending_form is None
+        assert loaded._unavailable_form == (
+            kind == "need_input_form" or (kind == "need_input" and payload != "{}")
+        )
+        assert not loaded._agent.llm.calls
+        loaded.transcript()  # corrupt input records must remain viewable too
+        with pytest.raises(ValueError):
+            await loaded.submit(FormResponse(action="accept", content={"answer": "stale"}))
+        if loaded._unavailable_form:
+            loaded._agent.turns.pause()
+            await loaded.submit(FormResponse(action="cancel"))
+    finally:
+        await registry.close_all()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"question": "Name?", "options": "ab"},
+        {"question": "Name?", "options": {}},
+        {"question": "Name?", "options": 1},
+        {"question": "Name?", "options": [None]},
+        {"question": " ", "options": []},
+        {"heading": "Name?", "questions": [None]},
+        {"heading": "Name?", "questions": [{"id": "answer", "kind": "pick_one", "choices": 2}]},
+        {"question": "Name?", "request_id": ["bad"]},
+    ],
+)
+async def test_load_malformed_nested_forms_never_fabricates_answer_owner(
+    root_options, sessions_dir, data
+):
+    import json
+
+    from nooa_atom.session.events import TurnEnded
+
+    from nooa.interactive import FormResponse
+
+    store = SessionStore(sessions_dir)
+    registry = SessionRegistry(store, agent_factory=ScriptedModels({None: []}))
+    session = await registry.create(root_options)
+    session.handle.events.add(
+        TurnEnded(outcome_kind="need_input_form", result_json=json.dumps(data))
+    )
+    await registry.close_all()
+    registry = SessionRegistry(store, agent_factory=ScriptedModels({None: []}))
+    try:
+        loaded = await registry.load(session.id)
+        assert loaded._pending_form is None and loaded._unavailable_form
+        loaded.transcript()
+        with pytest.raises(ValueError, match="cannot be restored"):
+            await loaded.submit(FormResponse(action="accept", content={"answer": "stale"}))
+        assert not loaded._agent.llm.calls
+    finally:
+        await registry.close_all()
