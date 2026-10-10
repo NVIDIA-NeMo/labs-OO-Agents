@@ -17,11 +17,11 @@ from .registry import LSPServerRegistry
 class LSPSkill(Skill):
     """Provides Language Server Protocol (LSP) capabilities for code intelligence.
 
-    ALL methods are async coroutines - always await them; calling without
-    `await` returns a coroutine object, not a facade/result. Symbol results are
-    typed models with fields such as `symbol.name`, `symbol.selectionRange`,
-    or `symbol.location`.
-    However, `LSPDocumentFacade.diagnostics()` is synchronous and must not be awaited.
+    Document requests are async coroutines and must be awaited; calling one
+    without `await` returns a coroutine object, not a facade or result. Symbol
+    results are typed models with fields such as `symbol.name`,
+    `symbol.selectionRange`, or `symbol.location`.
+    `LSPDocumentFacade.diagnostics()` is synchronous and must not be awaited.
 
     Use this skill to perform repository-aware semantic code navigation:
         lsp = await self.lsp.for_file("src/orders.py")
@@ -163,20 +163,31 @@ class LSPSkill(Skill):
                     if isinstance(item, DocumentSymbol):
                         return item.selectionRange.start
 
-                    start = item.location.range.start
+                    symbol_range = item.location.range
+                    start = symbol_range.start
                     sym_uri = item.location.uri
-                    if sym_uri in self._opened_documents:
-                        content = self._opened_documents[sym_uri][1]
-                        lines = content.splitlines()
-                        if 0 <= start.line < len(lines):
-                            offset = lines[start.line].find(
-                                target, start.character
-                            )
-                            if offset != -1:
-                                return Position(
-                                    line=start.line, character=offset
-                                )
-                    return start
+                    if sym_uri not in self._opened_documents:
+                        return None
+
+                    lines = self._opened_documents[sym_uri][1].splitlines()
+                    end = symbol_range.end
+                    if (
+                        start.line < 0
+                        or end.line >= len(lines)
+                        or start.line > end.line
+                        or start.character < 0
+                        or end.character < 0
+                    ):
+                        return None
+
+                    for line_number in range(start.line, end.line + 1):
+                        line = lines[line_number]
+                        line_start = start.character if line_number == start.line else 0
+                        line_end = end.character if line_number == end.line else len(line)
+                        offset = line.find(target, line_start, line_end)
+                        if offset != -1:
+                            return Position(line=line_number, character=offset)
+                    return None
 
                 if isinstance(item, DocumentSymbol) and item.children:
                     result = _find_symbol_pos(

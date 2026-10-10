@@ -79,6 +79,31 @@ async def test_for_file_updates_cached_state_only_after_notification(
     assert skill._opened_documents[uri] == (1, "value = 1\n")
 
 
+async def test_for_file_replaces_failed_cached_client(tmp_path, monkeypatch):
+    skill, failed_client = _skill_with_client(tmp_path)
+    failed_client.status = LSPClientStatus.FAILED
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    started = []
+
+    async def start(client):
+        client.status = LSPClientStatus.COMPLETE
+        started.append(client)
+
+    async def send_notification(client, method, params=None):
+        pass
+
+    monkeypatch.setattr(LSPClient, "start", start)
+    monkeypatch.setattr(LSPClient, "send_notification", send_notification)
+
+    await skill.for_file(str(source))
+
+    replacement = skill._clients[tuple(failed_client.command)]
+    assert replacement is not failed_client
+    assert replacement.status == LSPClientStatus.COMPLETE
+    assert started == [replacement]
+
+
 async def test_for_file_propagates_file_read_failures(tmp_path):
     skill, _ = _skill_with_client(tmp_path)
     missing_source = tmp_path / "missing.py"

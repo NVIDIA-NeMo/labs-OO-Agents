@@ -201,6 +201,16 @@ class TestInitialStatus:
         with pytest.raises(LSPClientError, match="UNKNOWN"):
             client._send({"jsonrpc": "2.0", "method": "initialized"})
 
+    async def test_send_request_after_failure_does_not_register_future(self):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        client.status = LSPClientStatus.FAILED
+
+        with pytest.raises(LSPClientError, match="FAILED"):
+            await client.send_request("textDocument/definition")
+
+        assert client._pending_requests == {}
+        assert client._next_id == 1
+
 
 # ---------------------------------------------------------------------------
 # Successful startup
@@ -484,6 +494,50 @@ class TestLSPPackageInterface:
 
         assert await skill.find_references("src/x.py", "Target") == []
         assert captured == [(2, 4)]
+
+    @pytest.mark.parametrize(
+        ("range_end", "expected_position"),
+        [(10, (0, 4)), (3, None)],
+    )
+    async def test_skill_finds_flat_symbol_name_within_location_range(
+        self, monkeypatch, range_end, expected_position
+    ):
+        skill = LSPSkill(root_uri="file:///tmp")
+        uri = "file:///tmp/x.py"
+        facade = LSPDocumentFacade(
+            LSPClient(command=["fake-server"], root_uri="file:///tmp"), uri
+        )
+        skill._opened_documents[uri] = (1, "def Target():\n")
+        flat_symbol = SymbolInformation(
+            name="Target",
+            kind=12,
+            location=Location(
+                uri=uri,
+                range=Range(
+                    start=Position(line=0, character=0),
+                    end=Position(line=0, character=range_end),
+                ),
+            ),
+        )
+        captured = []
+
+        async def fake_for_file(filepath):
+            return facade
+
+        async def fake_document_symbols():
+            return [flat_symbol]
+
+        async def fake_references(line, character, include_declaration=True):
+            captured.append((line, character))
+            return []
+
+        monkeypatch.setattr(skill, "for_file", fake_for_file)
+        monkeypatch.setattr(facade, "document_symbols", fake_document_symbols)
+        monkeypatch.setattr(facade, "references", fake_references)
+
+        assert await skill.find_references("src/x.py", "Target") == []
+        expected_calls = [expected_position] if expected_position else []
+        assert captured == expected_calls
 
     async def test_document_symbol_information_is_typed(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")

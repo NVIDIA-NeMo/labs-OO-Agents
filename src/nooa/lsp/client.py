@@ -289,6 +289,10 @@ class LSPClient:
 
     async def send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Send a JSON-RPC request and return its response result."""
+        if self.status == LSPClientStatus.FAILED:
+            raise LSPClientError(
+                f"LSP server not available (status={self.status})"
+            )
         msg_id = self._next_id
         self._next_id += 1
         msg = {
