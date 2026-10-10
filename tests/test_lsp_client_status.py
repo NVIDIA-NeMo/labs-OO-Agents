@@ -913,6 +913,53 @@ class TestDegradedTransition:
 
 
 class TestFailedTransition:
+    @pytest.mark.parametrize(
+        ("kill_reaps_process", "expected_wait_calls"),
+        [(True, 1), (False, 2)],
+    )
+    async def test_stop_bounds_shutdown_and_process_waits(
+        self, monkeypatch, kill_reaps_process, expected_wait_calls
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        process = _FakeProcess()
+        client.process = process
+        client.status = LSPClientStatus.COMPLETE
+        wait_calls = 0
+        kill_calls = 0
+        wait_timeouts = []
+        real_wait_for = asyncio.wait_for
+
+        async def never_complete(method, params=None):
+            await asyncio.Future()
+
+        async def never_wait():
+            nonlocal wait_calls
+            wait_calls += 1
+            await asyncio.Future()
+
+        async def fast_wait_for(awaitable, timeout):
+            wait_timeouts.append(timeout)
+            return await real_wait_for(awaitable, timeout=0.01)
+
+        def kill():
+            nonlocal kill_calls
+            kill_calls += 1
+            if kill_reaps_process:
+                process.returncode = -9
+
+        monkeypatch.setattr(client, "send_request", never_complete)
+        monkeypatch.setattr(process, "wait", never_wait)
+        monkeypatch.setattr(process, "kill", kill)
+        monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+
+        async with asyncio.timeout(0.5):
+            await client.stop()
+
+        assert wait_timeouts == [1.0] * (1 + expected_wait_calls)
+        assert wait_calls == expected_wait_calls
+        assert kill_calls == 1
+        assert client.status == LSPClientStatus.FAILED
+
     async def test_unexpected_process_death_marks_failed(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
         process = _FakeProcess(responses={1: [_initialize_response()]})

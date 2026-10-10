@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """LSP Skill module for NOOA agents."""
 
+import asyncio
 import pathlib
 from collections.abc import Sequence
 from typing import Dict
@@ -74,6 +75,7 @@ class LSPSkill(Skill):
 
         self.registry = LSPServerRegistry()
         self._clients: Dict[tuple[str, ...], LSPClient] = {}
+        self._client_locks: dict[tuple[str, ...], asyncio.Lock] = {}
         self._opened_documents: dict[str, tuple[int, str]] = {}
         self._opened_document_clients: dict[str, tuple[str, ...]] = {}
 
@@ -94,37 +96,18 @@ class LSPSkill(Skill):
             return None
 
         server_cmd_key = tuple(server_config.command)
-        client = self._clients.get(server_cmd_key)
-        if client is not None and client.status == "FAILED":
-            stale_uris = [
-                uri
-                for uri, owner in self._opened_document_clients.items()
-                if owner == server_cmd_key
-            ]
-            for stale_uri in stale_uris:
-                self._opened_documents.pop(stale_uri, None)
-                self._opened_document_clients.pop(stale_uri, None)
-            self._clients.pop(server_cmd_key)
-            client = None
+        lock = self._client_locks.setdefault(server_cmd_key, asyncio.Lock())
+        async with lock:
+            client = await self._get_or_start_client(
+                server_cmd_key, server_config.command
+            )
 
-        if client is None:
-            client = LSPClient(command=server_config.command, root_uri=self._root_uri)
-            try:
-                await client.start()
-            except BaseException:
-                await client.stop()
-                raise
-            self._clients[server_cmd_key] = client
-
-        client = self._clients[server_cmd_key]
         uri = path.as_uri()
-
-        # Ensure the document is "open" from the LSP's perspective.
         content = path.read_text(encoding="utf-8")
         state = self._opened_documents.get(uri)
         if state is None:
             lang_id = ext.lstrip(".")
-            
+
             # Standardize common language IDs
             if lang_id == "py":
                 lang_id = "python"
@@ -138,7 +121,7 @@ class LSPSkill(Skill):
                 lang_id = "typescriptreact"
             elif lang_id == "jsx":
                 lang_id = "javascriptreact"
-                
+
             await client.send_notification(
                 "textDocument/didOpen",
                 {
@@ -164,6 +147,32 @@ class LSPSkill(Skill):
 
         self._opened_document_clients[uri] = server_cmd_key
         return LSPDocumentFacade(client, uri)
+
+    async def _get_or_start_client(
+        self, server_cmd_key: tuple[str, ...], command: list[str]
+    ) -> LSPClient:
+        client = self._clients.get(server_cmd_key)
+        if client is not None and client.status == "FAILED":
+            stale_uris = [
+                uri
+                for uri, owner in self._opened_document_clients.items()
+                if owner == server_cmd_key
+            ]
+            for stale_uri in stale_uris:
+                self._opened_documents.pop(stale_uri, None)
+                self._opened_document_clients.pop(stale_uri, None)
+            self._clients.pop(server_cmd_key)
+            client = None
+
+        if client is None:
+            client = LSPClient(command=command, root_uri=self._root_uri)
+            try:
+                await client.start()
+            except BaseException:
+                await client.stop()
+                raise
+            self._clients[server_cmd_key] = client
+        return client
 
     async def find_references(
         self, filepath: str, symbol: str

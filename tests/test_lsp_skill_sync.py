@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for LSP document synchronization."""
 
+import asyncio
+
 import pytest
 
 from nooa.lsp.client import LSPClient, LSPClientStatus
@@ -119,6 +121,36 @@ async def test_for_file_replaces_failed_cached_client(tmp_path, monkeypatch):
     assert skill._opened_documents[uri] == (1, "value = 1\n")
     assert stale_uri not in skill._opened_documents
     assert skill._opened_documents[healthy_uri] == (4, "healthy content")
+
+
+async def test_concurrent_for_file_calls_start_one_client(tmp_path, monkeypatch):
+    skill = LSPSkill(root_uri=tmp_path.as_uri())
+    first_source = tmp_path / "first.py"
+    second_source = tmp_path / "second.py"
+    first_source.write_text("first = 1\n", encoding="utf-8")
+    second_source.write_text("second = 2\n", encoding="utf-8")
+    start_calls = 0
+
+    async def start(client):
+        nonlocal start_calls
+        start_calls += 1
+        await asyncio.sleep(0)
+        client.status = LSPClientStatus.COMPLETE
+
+    async def send_notification(client, method, params=None):
+        pass
+
+    monkeypatch.setattr(LSPClient, "start", start)
+    monkeypatch.setattr(LSPClient, "send_notification", send_notification)
+
+    first, second = await asyncio.gather(
+        skill.for_file(str(first_source)),
+        skill.for_file(str(second_source)),
+    )
+
+    assert first is not None and second is not None
+    assert start_calls == 1
+    assert first._client is second._client
 
 
 async def test_for_file_propagates_file_read_failures(tmp_path):

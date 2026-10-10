@@ -134,9 +134,11 @@ class LSPClient:
         if self.process:
             if self.process.returncode is None:
                 try:
-                    await self.send_request("shutdown", {})
+                    await asyncio.wait_for(
+                        self.send_request("shutdown", {}), timeout=1.0
+                    )
                     await self.send_notification("exit", {})
-                except (LSPClientError, OSError):
+                except (LSPClientError, OSError, asyncio.TimeoutError):
                     pass
 
                 # Give it a short moment to exit gracefully
@@ -148,7 +150,11 @@ class LSPClient:
                     except ProcessLookupError:
                         pass
 
-            await self.process.wait()
+            if self.process.returncode is None:
+                try:
+                    await asyncio.wait_for(self.process.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    logger.warning("LSP server did not exit after kill")
         # Server is gone either way; no query result can be trusted past here.
         self.status = LSPClientStatus.FAILED
 
