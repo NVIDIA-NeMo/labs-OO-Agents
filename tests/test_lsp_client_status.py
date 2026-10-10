@@ -211,6 +211,22 @@ class TestInitialStatus:
         assert client._pending_requests == {}
         assert client._next_id == 1
 
+    @pytest.mark.parametrize("failure", ["unknown", "broken_pipe"])
+    async def test_send_request_removes_future_when_send_fails(self, failure):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        if failure == "broken_pipe":
+            client.process = _FakeProcess()
+            client.status = LSPClientStatus.COMPLETE
+            client.process.stdin.broken = True
+            expected_error = ConnectionResetError
+        else:
+            expected_error = LSPClientError
+
+        with pytest.raises(expected_error):
+            await client.send_request("textDocument/definition")
+
+        assert client._pending_requests == {}
+
 
 # ---------------------------------------------------------------------------
 # Successful startup
@@ -243,6 +259,59 @@ class TestStartupTransition:
             "positionEncodings"
         ] == ["utf-8", "utf-16", "utf-32"]
         await client.stop()
+
+    @pytest.mark.parametrize(
+        ("failure_phase", "result", "expected_error"),
+        [
+            ("request", None, "initialize request failed"),
+            ("parse", {}, "Invalid initialize response"),
+            (
+                "encoding",
+                {"capabilities": {"positionEncoding": "utf-7"}},
+                "Unsupported LSP position encoding",
+            ),
+            ("initialized", {"capabilities": {}}, "initialized notification failed"),
+        ],
+    )
+    async def test_failed_handshake_stops_process_and_tasks(
+        self, monkeypatch, failure_phase, result, expected_error
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        response = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "result": result}
+        ).encode()
+        process = _FakeProcess(responses={1: [response]})
+
+        async def fake_exec(*args, **kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        send_request = client.send_request
+        send_notification = client.send_notification
+
+        async def fail_initialize_request(method, params=None):
+            if failure_phase == "request" and method == "initialize":
+                raise LSPClientError("initialize request failed")
+            return await send_request(method, params)
+
+        async def fail_initialized_notification(method, params=None):
+            if failure_phase == "initialized" and method == "initialized":
+                raise LSPClientError("initialized notification failed")
+            return await send_notification(method, params)
+
+        monkeypatch.setattr(client, "send_request", fail_initialize_request)
+        monkeypatch.setattr(
+            client, "send_notification", fail_initialized_notification
+        )
+
+        with pytest.raises(LSPClientError, match=expected_error):
+            await client.start()
+
+        assert process.returncode == 0
+        assert client.status == LSPClientStatus.FAILED
+        await asyncio.gather(client._run_task, client._watch_task)
+        assert client._run_task.done()
+        assert client._watch_task.done()
 
     async def test_status_complete_after_successful_initialize(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
@@ -903,6 +972,34 @@ class TestLSPPackageInterface:
 
 
 class TestDegradedTransition:
+    async def test_malformed_diagnostics_during_handshake_remain_degraded(
+        self, monkeypatch
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        invalid_diagnostics = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": {
+                    "uri": "file:///tmp/x.py",
+                    "diagnostics": ["invalid diagnostic"],
+                },
+            }
+        ).encode()
+        process = _FakeProcess(
+            responses={1: [invalid_diagnostics, _initialize_response()]}
+        )
+
+        async def fake_exec(*args, **kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await client.start()
+
+        assert client.status == LSPClientStatus.DEGRADED
+        assert client._decode_errors == 1
+        await client.stop()
+
     @pytest.mark.parametrize("invalid_message", [b"\xff", b"[]", b"42", b"null"])
     async def test_invalid_messages_degrade_and_reader_continues(
         self, monkeypatch, invalid_message

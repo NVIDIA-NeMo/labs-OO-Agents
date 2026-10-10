@@ -85,40 +85,44 @@ class LSPClient:
         self.status = LSPClientStatus.DEGRADED
 
         # Send initialize
-        init_res = await self.send_request(
-            "initialize",
-            {
-                "processId": None,
-                "rootUri": self.root_uri,
-                "capabilities": {
-                    "general": {
-                        "positionEncodings": list(
-                            _SUPPORTED_POSITION_ENCODINGS
-                        )
-                    },
-                    "workspace": {},
-                    "textDocument": {
-                        "publishDiagnostics": {},
-                        "rename": {"prepareSupport": True},
+        try:
+            init_res = await self.send_request(
+                "initialize",
+                {
+                    "processId": None,
+                    "rootUri": self.root_uri,
+                    "capabilities": {
+                        "general": {
+                            "positionEncodings": list(
+                                _SUPPORTED_POSITION_ENCODINGS
+                            )
+                        },
+                        "workspace": {},
+                        "textDocument": {
+                            "publishDiagnostics": {},
+                            "rename": {"prepareSupport": True},
+                        },
                     },
                 },
-            },
-        )
-        initialize_result = self._parse_response(
-            "initialize", init_res, InitializeResult
-        )
-        self.capabilities = initialize_result.capabilities
-        self.position_encoding = self.capabilities.get(
-            "positionEncoding", "utf-16"
-        )
-        if self.position_encoding not in _SUPPORTED_POSITION_ENCODINGS:
-            raise LSPClientError(
-                "Unsupported LSP position encoding: "
-                f"{self.position_encoding}"
             )
+            initialize_result = self._parse_response(
+                "initialize", init_res, InitializeResult
+            )
+            self.capabilities = initialize_result.capabilities
+            self.position_encoding = self.capabilities.get(
+                "positionEncoding", "utf-16"
+            )
+            if self.position_encoding not in _SUPPORTED_POSITION_ENCODINGS:
+                raise LSPClientError(
+                    "Unsupported LSP position encoding: "
+                    f"{self.position_encoding}"
+                )
 
-        # Send initialized
-        await self.send_notification("initialized", {})
+            await self.send_notification("initialized", {})
+        except BaseException:
+            await self.stop()
+            raise
+
         # Only promote to COMPLETE from the handshake state. The read loop runs
         # concurrently and may already have flagged DEGRADED (undecodable frame)
         # or FAILED (server died) while we awaited — don't clobber either.
@@ -276,6 +280,7 @@ class LSPClient:
                             Diagnostic,
                         )
                     except LSPClientError as error:
+                        self._decode_errors += 1
                         self.status = LSPClientStatus.DEGRADED
                         logger.error("Invalid LSP diagnostics: %s", error)
 
@@ -336,7 +341,11 @@ class LSPClient:
         future = asyncio.get_running_loop().create_future()
         self._pending_requests[msg_id] = future
 
-        self._send(msg)
+        try:
+            self._send(msg)
+        except BaseException:
+            self._pending_requests.pop(msg_id, None)
+            raise
         return await future
 
     async def send_notification(self, method: str, params: dict[str, Any] | None = None):
