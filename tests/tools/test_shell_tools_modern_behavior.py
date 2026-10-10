@@ -9,7 +9,19 @@ test_shell_tools_modern.py.
 
 import pytest
 
+from nooa.agentdoc import doc
 from nooa.tools.shell_tools import Match, ShellResult, ShellTools
+
+
+@pytest.mark.parametrize("tool", [ShellTools, ShellTools.replace])
+def test_replace_concise_docs_include_typed_forms_and_reject_line_handles(tool):
+    rendered = doc(tool, concise=True)
+
+    assert "replace(match: Match, new_text: str)" in rendered
+    assert "replace(file_path: str, old_text: str, new_text: str)" in rendered
+    assert "line numbers are not handles" in rendered
+    # Concise rendering must not expand the rest of the docstring.
+    assert "A Match replaces its entire line region, not a substring within it." not in rendered
 
 
 def test_shell_tools_directs_agents_to_its_file_and_command_methods():
