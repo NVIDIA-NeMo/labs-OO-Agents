@@ -14,6 +14,35 @@ from .protocol import DocumentSymbol, Location, Position, SymbolInformation
 from .registry import LSPServerRegistry
 
 
+def _character_units(character: str, encoding: str) -> int:
+    if encoding == "utf-8":
+        return len(character.encode("utf-8"))
+    if encoding == "utf-16":
+        return len(character.encode("utf-16-le")) // 2
+    if encoding == "utf-32":
+        return 1
+    raise ValueError(f"Unsupported LSP position encoding: {encoding}")
+
+
+def _lsp_character_to_index(
+    text: str, character: int, encoding: str
+) -> int | None:
+    if character < 0:
+        return None
+    units = 0
+    for index, value in enumerate(text):
+        if units == character:
+            return index
+        units += _character_units(value, encoding)
+        if units > character:
+            return None
+    return len(text) if units == character else None
+
+
+def _index_to_lsp_character(text: str, index: int, encoding: str) -> int:
+    return sum(_character_units(value, encoding) for value in text[:index])
+
+
 class LSPSkill(Skill):
     """Provides Language Server Protocol (LSP) capabilities for code intelligence.
 
@@ -46,6 +75,7 @@ class LSPSkill(Skill):
         self.registry = LSPServerRegistry()
         self._clients: Dict[tuple[str, ...], LSPClient] = {}
         self._opened_documents: dict[str, tuple[int, str]] = {}
+        self._opened_document_clients: dict[str, tuple[str, ...]] = {}
 
     async def for_file(self, filepath: str) -> LSPDocumentFacade | None:
         """Get an LSP facade for a given file. Must be awaited.
@@ -64,7 +94,20 @@ class LSPSkill(Skill):
             return None
 
         server_cmd_key = tuple(server_config.command)
-        if server_cmd_key not in self._clients or self._clients[server_cmd_key].status == "FAILED":
+        client = self._clients.get(server_cmd_key)
+        if client is not None and client.status == "FAILED":
+            stale_uris = [
+                uri
+                for uri, owner in self._opened_document_clients.items()
+                if owner == server_cmd_key
+            ]
+            for stale_uri in stale_uris:
+                self._opened_documents.pop(stale_uri, None)
+                self._opened_document_clients.pop(stale_uri, None)
+            self._clients.pop(server_cmd_key)
+            client = None
+
+        if client is None:
             client = LSPClient(command=server_config.command, root_uri=self._root_uri)
             try:
                 await client.start()
@@ -119,6 +162,7 @@ class LSPSkill(Skill):
             )
             self._opened_documents[uri] = (version, content)
 
+        self._opened_document_clients[uri] = server_cmd_key
         return LSPDocumentFacade(client, uri)
 
     async def find_references(
@@ -166,11 +210,16 @@ class LSPSkill(Skill):
                     symbol_range = item.location.range
                     start = symbol_range.start
                     sym_uri = item.location.uri
-                    if sym_uri not in self._opened_documents:
+                    client_key = self._opened_document_clients.get(sym_uri)
+                    if (
+                        sym_uri not in self._opened_documents
+                        or client_key not in self._clients
+                    ):
                         return None
 
                     lines = self._opened_documents[sym_uri][1].splitlines()
                     end = symbol_range.end
+                    encoding = self._clients[client_key].position_encoding
                     if (
                         start.line < 0
                         or end.line >= len(lines)
@@ -182,11 +231,28 @@ class LSPSkill(Skill):
 
                     for line_number in range(start.line, end.line + 1):
                         line = lines[line_number]
-                        line_start = start.character if line_number == start.line else 0
-                        line_end = end.character if line_number == end.line else len(line)
+                        line_start = 0
+                        if line_number == start.line:
+                            line_start = _lsp_character_to_index(
+                                line, start.character, encoding
+                            )
+                            if line_start is None:
+                                return None
+                        line_end = len(line)
+                        if line_number == end.line:
+                            line_end = _lsp_character_to_index(
+                                line, end.character, encoding
+                            )
+                            if line_end is None:
+                                return None
                         offset = line.find(target, line_start, line_end)
                         if offset != -1:
-                            return Position(line=line_number, character=offset)
+                            return Position(
+                                line=line_number,
+                                character=_index_to_lsp_character(
+                                    line, offset, encoding
+                                ),
+                            )
                     return None
 
                 if isinstance(item, DocumentSymbol) and item.children:
@@ -208,3 +274,4 @@ class LSPSkill(Skill):
             await client.stop()
         self._clients.clear()
         self._opened_documents.clear()
+        self._opened_document_clients.clear()

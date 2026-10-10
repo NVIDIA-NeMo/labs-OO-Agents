@@ -31,6 +31,7 @@ _CLIENT_REQUEST_METHODS = {
     "workspace/applyEdit",
     "workspace/workspaceFolders",
 }
+_SUPPORTED_POSITION_ENCODINGS = ("utf-8", "utf-16", "utf-32")
 
 
 class LSPClientError(Exception):
@@ -65,6 +66,7 @@ class LSPClient:
         self._run_task: asyncio.Task | None = None
         self._watch_task: asyncio.Task | None = None
         self.capabilities: dict[str, Any] = {}
+        self.position_encoding = "utf-16"
         self.status: str = LSPClientStatus.UNKNOWN
         self._decode_errors: int = 0
 
@@ -89,6 +91,11 @@ class LSPClient:
                 "processId": None,
                 "rootUri": self.root_uri,
                 "capabilities": {
+                    "general": {
+                        "positionEncodings": list(
+                            _SUPPORTED_POSITION_ENCODINGS
+                        )
+                    },
                     "workspace": {},
                     "textDocument": {
                         "publishDiagnostics": {},
@@ -101,6 +108,14 @@ class LSPClient:
             "initialize", init_res, InitializeResult
         )
         self.capabilities = initialize_result.capabilities
+        self.position_encoding = self.capabilities.get(
+            "positionEncoding", "utf-16"
+        )
+        if self.position_encoding not in _SUPPORTED_POSITION_ENCODINGS:
+            raise LSPClientError(
+                "Unsupported LSP position encoding: "
+                f"{self.position_encoding}"
+            )
 
         # Send initialized
         await self.send_notification("initialized", {})

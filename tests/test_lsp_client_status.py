@@ -218,6 +218,32 @@ class TestInitialStatus:
 
 
 class TestStartupTransition:
+    async def test_initialize_negotiates_position_encoding(self, monkeypatch):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        response = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"capabilities": {"positionEncoding": "utf-8"}},
+            }
+        ).encode()
+        process = _FakeProcess(responses={1: [response]})
+
+        async def fake_exec(*args, **kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await client.start()
+
+        initialize_request = json.loads(
+            process.stdin.writes[0].split(b"\r\n\r\n", 1)[1]
+        )
+        assert client.position_encoding == "utf-8"
+        assert initialize_request["params"]["capabilities"]["general"][
+            "positionEncodings"
+        ] == ["utf-8", "utf-16", "utf-32"]
+        await client.stop()
+
     async def test_status_complete_after_successful_initialize(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
         process = _FakeProcess(responses={1: [_initialize_response()]})
@@ -496,6 +522,53 @@ class TestLSPPackageInterface:
         assert captured == [(2, 4)]
 
     @pytest.mark.parametrize(
+        ("encoding", "target_start", "range_end"),
+        [("utf-8", 8, 14), ("utf-16", 6, 12), ("utf-32", 5, 11)],
+    )
+    async def test_skill_converts_flat_symbol_offsets_by_encoding(
+        self, monkeypatch, encoding, target_start, range_end
+    ):
+        skill = LSPSkill(root_uri="file:///tmp")
+        uri = "file:///tmp/x.py"
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        client.position_encoding = encoding
+        facade = LSPDocumentFacade(client, uri)
+        source = f"def \U00010400Target():\n"
+        skill._opened_documents[uri] = (1, source)
+        client_key = tuple(client.command)
+        skill._clients[client_key] = client
+        skill._opened_document_clients[uri] = client_key
+        flat_symbol = SymbolInformation(
+            name="Target",
+            kind=12,
+            location=Location(
+                uri=uri,
+                range=Range(
+                    start=Position(line=0, character=0),
+                    end=Position(line=0, character=range_end),
+                ),
+            ),
+        )
+        captured = []
+
+        async def fake_for_file(filepath):
+            return facade
+
+        async def fake_document_symbols():
+            return [flat_symbol]
+
+        async def fake_references(line, character, include_declaration=True):
+            captured.append((line, character))
+            return []
+
+        monkeypatch.setattr(skill, "for_file", fake_for_file)
+        monkeypatch.setattr(facade, "document_symbols", fake_document_symbols)
+        monkeypatch.setattr(facade, "references", fake_references)
+
+        assert await skill.find_references("src/x.py", "Target") == []
+        assert captured == [(0, target_start)]
+
+    @pytest.mark.parametrize(
         ("range_end", "expected_position"),
         [(10, (0, 4)), (3, None)],
     )
@@ -504,10 +577,12 @@ class TestLSPPackageInterface:
     ):
         skill = LSPSkill(root_uri="file:///tmp")
         uri = "file:///tmp/x.py"
-        facade = LSPDocumentFacade(
-            LSPClient(command=["fake-server"], root_uri="file:///tmp"), uri
-        )
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        facade = LSPDocumentFacade(client, uri)
         skill._opened_documents[uri] = (1, "def Target():\n")
+        client_key = tuple(client.command)
+        skill._clients[client_key] = client
+        skill._opened_document_clients[uri] = client_key
         flat_symbol = SymbolInformation(
             name="Target",
             kind=12,
