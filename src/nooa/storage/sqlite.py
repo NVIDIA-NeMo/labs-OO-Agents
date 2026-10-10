@@ -7,7 +7,12 @@ Provides persistent storage using stdlib sqlite3 — no new dependencies.
 
 from __future__ import annotations
 
-import fcntl
+import sys
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
 import json
 import logging
 import os
@@ -627,7 +632,7 @@ def read_lock_owner(lock_path: str) -> tuple[int | None, str | None]:
     parseable.
     """
     try:
-        with open(lock_path, "rb") as f:
+        with open(lock_path, "rb", buffering=0) as f:
             raw = f.read(512).decode("utf-8", "replace").strip()
     except OSError:
         return None, None
@@ -667,6 +672,9 @@ def _blank_lock_if_ours(lock_path: str) -> None:
         pass
 
 
+_WIN32_LOCK_OFFSET = 1024
+
+
 def _acquire_session_lock(lock_path: str) -> int:
     """Acquire an exclusive flock on *lock_path*, returning the held fd.
 
@@ -686,7 +694,13 @@ def _acquire_session_lock(lock_path: str) -> int:
     """
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(fd, _WIN32_LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
     except OSError:
         os.close(fd)
         owner_pid = _read_lock_pid(lock_path)
@@ -709,6 +723,23 @@ def _acquire_session_lock(lock_path: str) -> int:
     os.ftruncate(fd, 0)
     os.write(fd, _lock_owner_record())
     return fd
+
+
+def _release_session_lock(lock_fd: int) -> None:
+    """Release and close a lock fd acquired by _acquire_session_lock."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        elif sys.platform == "win32":
+            import msvcrt
+
+            try:
+                os.lseek(lock_fd, _WIN32_LOCK_OFFSET, os.SEEK_SET)
+                msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+    finally:
+        os.close(lock_fd)
 
 
 def delete_sqlite_database(db_path: str | Path) -> bool:
@@ -744,8 +775,7 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
         # Blank the record before releasing, as a clean close does, so the
         # retained lock file does not name this process as a live owner.
         _blank_lock_if_ours(lock_path)
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        _release_session_lock(lock_fd)
 
 
 class SQLiteStorageManager:
@@ -997,8 +1027,7 @@ class SQLiteStorageManager:
                 # the kernel lock reads "free" and not a stale owner.
                 if self._db_path != ":memory:":
                     _blank_lock_if_ours(str(Path(self._db_path).with_suffix(".lock")))
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
+                _release_session_lock(self._lock_fd)
                 self._lock_fd = None
 
     def __enter__(self) -> Self:
