@@ -22,6 +22,16 @@ from .protocol import (
 
 logger = logging.getLogger(__name__)
 
+_CLIENT_REQUEST_METHODS = {
+    "client/registerCapability",
+    "client/unregisterCapability",
+    "window/showDocument",
+    "window/showMessageRequest",
+    "window/workDoneProgress/create",
+    "workspace/applyEdit",
+    "workspace/workspaceFolders",
+}
+
 
 class LSPClientError(Exception):
     """Exception raised for LSP client errors."""
@@ -64,7 +74,7 @@ class LSPClient:
             *self.command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         self._run_task = asyncio.create_task(self._read_loop())
         self._watch_task = asyncio.create_task(self._watch_process())
@@ -140,7 +150,6 @@ class LSPClient:
                 while True:
                     line_bytes = await self.process.stdout.readline()
                     if not line_bytes:
-                        self._mark_connection_lost()
                         return
                     line_str = line_bytes.decode("utf-8").strip()
                     if not line_str:
@@ -154,7 +163,6 @@ class LSPClient:
                 try:
                     content = await self.process.stdout.readexactly(content_length)
                 except asyncio.IncompleteReadError:
-                    self._mark_connection_lost()
                     return
                 try:
                     message = json.loads(content)
@@ -172,8 +180,9 @@ class LSPClient:
         except asyncio.CancelledError:
             pass
         except (OSError, ValueError, TypeError, AttributeError) as e:
-            self._mark_connection_lost()
             logger.error("LSP Read Error: %s", e)
+        finally:
+            self._mark_connection_lost()
 
     def _mark_connection_lost(self):
         """Flag the client FAILED and fail any in-flight requests.
@@ -186,7 +195,7 @@ class LSPClient:
         self.status = LSPClientStatus.FAILED
         for future in self._pending_requests.values():
             if not future.done():
-                future.set_exception(LSPClientError("LSP connection lost"))
+                future.set_exception(LSPClientError("LSP connection closed"))
         self._pending_requests.clear()
 
     async def _watch_process(self):
@@ -212,7 +221,9 @@ class LSPClient:
 
     def _handle_message(self, message: dict[str, Any]):
         """Dispatch a server response or notification to its handler."""
-        if "id" in message and "method" not in message:
+        if "id" in message and "method" in message:
+            self._handle_server_request(message)
+        elif "id" in message:
             # Response
             msg_id = message["id"]
             if msg_id in self._pending_requests:
@@ -237,6 +248,25 @@ class LSPClient:
                     except LSPClientError as error:
                         self.status = LSPClientStatus.DEGRADED
                         logger.error("Invalid LSP diagnostics: %s", error)
+
+    def _handle_server_request(self, request: dict[str, Any]) -> None:
+        """Reply to requests initiated by the language server."""
+        method = request["method"]
+        request_id = request["id"]
+        if method == "workspace/configuration":
+            params = request.get("params", {})
+            items = params.get("items", []) if isinstance(params, dict) else []
+            result = [None] * len(items) if isinstance(items, list) else []
+            response = {"jsonrpc": "2.0", "id": request_id, "result": result}
+        elif method in _CLIENT_REQUEST_METHODS:
+            response = {"jsonrpc": "2.0", "id": request_id, "result": None}
+        else:
+            response = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32601, "message": "Method not found"},
+            }
+        self._send(response)
 
     @staticmethod
     def _parse_response(method: str, result: Any, result_type: Any) -> Any:

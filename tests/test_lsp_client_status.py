@@ -211,8 +211,10 @@ class TestStartupTransition:
     async def test_status_complete_after_successful_initialize(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
         process = _FakeProcess(responses={1: [_initialize_response()]})
+        exec_kwargs = {}
 
         async def fake_exec(*args, **kwargs):
+            exec_kwargs.update(kwargs)
             return process
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -220,6 +222,9 @@ class TestStartupTransition:
 
         assert client.status == LSPClientStatus.COMPLETE
         assert result.capabilities == {"renameProvider": True}
+        assert exec_kwargs["stdin"] == asyncio.subprocess.PIPE
+        assert exec_kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert exec_kwargs["stderr"] == asyncio.subprocess.DEVNULL
         await client.stop()
 
     async def test_queries_work_when_complete(self, monkeypatch):
@@ -609,6 +614,90 @@ class TestLSPPackageInterface:
         )
         assert client.status == LSPClientStatus.DEGRADED
         assert client.get_diagnostics("file:///tmp/x.py") == diagnostics
+
+    def test_server_requests_receive_method_specific_responses(self):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        process = _FakeProcess()
+        client.process = process
+        client.status = LSPClientStatus.COMPLETE
+
+        client._handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "workspace/configuration",
+                "params": {"items": [{}, {}, {}]},
+            }
+        )
+        configuration_response = json.loads(
+            process.stdin.writes[-1].split(b"\r\n\r\n", 1)[1]
+        )
+        assert configuration_response == {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": [None, None, None],
+        }
+
+        client._handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "client/registerCapability",
+                "params": {},
+            }
+        )
+        known_response = json.loads(
+            process.stdin.writes[-1].split(b"\r\n\r\n", 1)[1]
+        )
+        assert known_response == {"jsonrpc": "2.0", "id": 8, "result": None}
+
+        client._handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "server/unsupportedRequest",
+                "params": {},
+            }
+        )
+        unknown_response = json.loads(
+            process.stdin.writes[-1].split(b"\r\n\r\n", 1)[1]
+        )
+        assert unknown_response == {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "error": {"code": -32601, "message": "Method not found"},
+        }
+
+    @pytest.mark.parametrize("exit_path", ["eof", "read_error", "cancel"])
+    async def test_read_loop_exit_fails_pending_requests(
+        self, monkeypatch, exit_path
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        process = _FakeProcess()
+        client.process = process
+        client.status = LSPClientStatus.COMPLETE
+        pending = asyncio.get_running_loop().create_future()
+        client._pending_requests[99] = pending
+
+        if exit_path == "eof":
+            process.stdout.close()
+        elif exit_path == "read_error":
+            async def fail_readline():
+                raise OSError("read failed")
+
+            process.stdout.readline = fail_readline
+
+        client._run_task = asyncio.create_task(client._read_loop())
+        if exit_path == "cancel":
+            await asyncio.sleep(0)
+            client._run_task.cancel()
+        await client._run_task
+
+        assert client.status == LSPClientStatus.FAILED
+        assert client._pending_requests == {}
+        with pytest.raises(LSPClientError, match="connection closed"):
+            await pending
+
 
     async def test_json_rpc_error_is_raised_as_client_error(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
