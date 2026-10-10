@@ -804,7 +804,7 @@ class ShellTools(Skill):
         ] = None,
     ) -> FileWrite:
         """
-        Edit a file — two forms:
+        Edit via replace(match: Match, new_text: str) or replace(file_path: str, old_text: str, new_text: str); line numbers are not handles.
 
         1. replace(match, new_text) — replace the Match's line region.
         2. replace(path, old, new)  — old must match exactly once. new="" deletes.
