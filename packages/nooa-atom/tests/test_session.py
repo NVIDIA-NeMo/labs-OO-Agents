@@ -32,7 +32,7 @@ from nooa_atom.session.store import SessionStore
 
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification, PythonOutput, ResultStatus
-from nooa.interactive import Done, NeedInput
+from nooa.interactive import Done, FormResponse, NeedInput, NeedInputForm
 from nooa.llm_types import LLMUsage
 from nooa.storage.json_snapshot import snapshot_to_json
 
@@ -842,3 +842,160 @@ async def test_a_waiting_message_is_sent_before_the_turn_ends(make_session):
     await until(lambda: ("turn_ended", None) in seen)
     assert _agent_lines(session) == ["Tests are still running."]
     assert seen.index(("agent_event", "AgentMessage")) < seen.index(("turn_ended", None))
+
+
+@pytest.mark.parametrize("kind", ["question", "form"])
+async def test_need_input_intent_is_durable(make_session, kind):
+    code = (
+        "NeedInputForm(heading='Which?', reason='Safety.', questions=[TextQuestion(id='branch', label='Branch?')])"
+        if kind == "form"
+        else "NeedInput(question='Which?', reason='Safety.')"
+    )
+    session, _ = make_session(cell(f"return_result({code})"))
+    outcome = await asyncio.wait_for(session.prompt("go"), TIMEOUT)
+    [(_, ended)] = _rows(session, "TurnEnded")
+    assert ended["outcome_kind"] == ("need_input_form" if kind == "form" else "need_input")
+    data = json.loads(ended["result_json"])
+    assert data["kind"] == kind
+    assert data["reason"] == "Safety."
+    if kind == "form":
+        assert data.pop("request_id")
+    assert data == outcome.model_dump(mode="json")
+    assert "answer_type" not in data
+
+
+@pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
+async def test_explicit_form_external_submission_is_validated(make_session, action):
+    session, _ = make_session(
+        cell(
+            "return_result(NeedInputForm(heading='Deploy?', questions=[TextQuestion(id='target', label='Target?'), TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')]))"
+        ),
+        cell(
+            "[a] = notification['user_messages']\nself.v.answer = a\nreturn_result(Done(explanation='received'))"
+        ),
+    )
+    await asyncio.wait_for(session.prompt("go"), TIMEOUT)
+    if action == "accept":
+        with pytest.raises(ValueError):
+            await session.submit(FormResponse(action="accept", content={"replicas": "bad"}))
+    content = {"target": "prod", "replicas": "3", "dry_run": "no"} if action == "accept" else None
+    receipt = await session.submit(FormResponse(action=action, content=content))
+    await asyncio.wait_for(session.outcome(receipt.item_id), TIMEOUT)
+    answer = session._agent.v.answer
+    assert answer.action == action
+    if action == "accept":
+        assert answer.content["replicas"] == "3"
+    else:
+        assert answer.content is None
+    [row] = [r for _, r in _rows(session, "ItemAdmitted") if r["item_id"] == receipt.item_id]
+    assert json.loads(row["item_json"])["action"] == action
+
+
+async def test_unavailable_original_model_recovery_refuses_accept(make_session):
+    session, _ = make_session(start=False)
+    session.restore_input_request(
+        "need_input_form",
+        {
+            "question": "Details?",
+            "answer_schema": {"type": "object"},
+            "answer_type": "nonexistent.module:Answer",
+        },
+    )
+    with pytest.raises(ValueError, match="cannot be restored"):
+        await session.submit(FormResponse(action="accept", content={"count": "2"}))
+    receipt = await session.submit(FormResponse(action="cancel"))
+    assert receipt.delivered == "queued"
+
+
+def test_saved_legacy_input_migrates_only_at_loader_boundary():
+    from nooa_atom.session.loader import load_typed
+
+    for record in (
+        {"question": "Details?", "presentation": "form", "answer_type": "atom_test_agents:Answer"},
+        {"question": "Details?", "answer_type": "atom_test_agents:Answer"},
+    ):
+        loaded = load_typed("nooa.interactive:NeedInput", record)
+        assert loaded == record  # no restoration of old classes or validators
+    question = load_typed(
+        "nooa.interactive:NeedInput",
+        {"question": "Why?", "presentation": "auto", "options": ["yes", "no"]},
+    )
+    assert isinstance(question, NeedInput)
+    missing = {
+        "question": "Details?",
+        "answer_type": "not_available:Answer",
+        "presentation": "form",
+    }
+    assert load_typed("nooa.interactive:NeedInput", missing) == missing
+
+    for type_name, record in (
+        ("nooa.interactive:NeedInput", {"question": "Name?", "presentation": "form"}),
+        (
+            "nooa.interactive:NeedInputForm",
+            {"kind": "form", "question": "Branch?", "options": ["main", "dev"]},
+        ),
+    ):
+        loaded = load_typed(type_name, record)
+        assert isinstance(loaded, NeedInputForm)
+        assert loaded.questions[0].id == "answer"
+        assert loaded.validate_response(
+            FormResponse(action="accept", content={"answer": "main"})
+        ).content == {"answer": "main"}
+
+
+@pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
+async def test_form_claim_is_one_shot_and_withdrawal_does_not_resurrect(make_session, action):
+    session, _ = make_session(start=False)
+    session.restore_input_request(
+        "need_input_form",
+        {
+            "kind": "form",
+            "heading": "Name?",
+            "request_id": "request-a",
+            "questions": [{"kind": "text", "id": "answer", "label": "Name?"}],
+        },
+    )
+    need = session._pending_form
+    response = FormResponse(action=action, content={"answer": "a"} if action == "accept" else None)
+    receipt = session.admit_form_response(need, response, source="acp:form-answer")
+    assert receipt is not None
+    assert session.admit_form_response(need, response, source="acp:form-answer") is None
+    with pytest.raises(ValueError, match="No pending"):
+        await session.submit(response.model_dump())
+    assert session.withdraw(receipt)
+    assert not session.form_is_current(need)
+
+
+@pytest.mark.parametrize("admission", ["submit", "steer"])
+async def test_raw_submission_and_request_tokens_supersede_old_forms(make_session, admission):
+    session, _ = make_session(start=False)
+    data = {
+        "kind": "form",
+        "heading": "A",
+        "request_id": "a",
+        "questions": [{"kind": "text", "id": "answer", "label": "A?"}],
+    }
+    session.restore_input_request("need_input_form", data)
+    need = session._pending_form
+    receipt = await getattr(session, admission)("never mind")
+    assert session.withdraw(receipt)
+    assert not session.form_is_current(need)
+    assert (
+        session.admit_form_response(need, FormResponse(action="cancel"), source="acp:form-answer")
+        is None
+    )
+    session.restore_input_request("need_input_form", {**data, "heading": "B", "request_id": "b"})
+    for action in ("accept", "decline", "cancel"):
+        response = FormResponse(
+            action=action, content={"answer": "a"} if action == "accept" else None
+        )
+        with pytest.raises(ValueError, match="superseded"):
+            await session.submit(response, request_id="a")
+    await session.submit(FormResponse(action="accept", content={"answer": "b"}), request_id="b")
+
+
+@pytest.mark.parametrize("content", [{"answer": "x"}, {"answer": 4}])
+async def test_no_owner_response_dictionaries_are_rejected(make_session, content):
+    session, _ = make_session(start=False)
+    with pytest.raises(ValueError, match="No pending"):
+        await session.submit({"action": "accept", "content": content})

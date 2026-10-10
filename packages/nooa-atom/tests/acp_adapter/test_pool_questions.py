@@ -1,449 +1,190 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A NeedInput question to Pool: its ``_poolside/elicitation`` form, string fields only."""
+"""Pool explicit descriptors: string answers, one-shot failure, actions and Stop."""
 
 import asyncio
 import json
 
 import pytest
 from acp import RequestError, text_block
-from acp.schema import (
-    AgentMessageChunk,
-    AllowedOutcome,
-    Implementation,
-    RequestPermissionResponse,
-    UserMessageChunk,
-)
-from atom_test_agents import ScriptedModels, cell, reply
+from acp.schema import AgentMessageChunk, Implementation, UserMessageChunk
+from atom_test_agents import ScriptedModels, cell
 
-TIMEOUT = 30
+from nooa.interactive import FormResponse
+
 POOL = Implementation(name="pool", version="1.0.16")
-POOL_ELICITATION = "poolside/elicitation"
+TIMEOUT = 30
 
 
-def _show_answer():
-    """A cell that sends the answer's repr to the user."""
+def _ask(typed=True, options=None):
+    if typed:
+        questions = "[TextQuestion(id='target', label='Target?'), TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')]"
+    elif options:
+        choices = [{"value": value, "title": value} for value in options]
+        questions = f"[PickOneQuestion(id='answer', label='Answer?', choices={choices!r})]"
+    else:
+        questions = "[TextQuestion(id='answer', label='Answer?')]"
     return cell(
-        "[a] = notification['user_messages']\n"
-        "self.message(repr(a))\n"
-        "return_result(Done(explanation='answered'))"
+        f"return_result(NeedInputForm(heading='Details?', reason='Safety.', questions={questions}))"
     )
 
 
-async def _run(adapter, workspace, text="push it"):
-    session_id = (await adapter.new_session(str(workspace))).session_id
-    response = await asyncio.wait_for(adapter.prompt(session_id, [text_block(text)]), TIMEOUT)
-    return session_id, response
-
-
-def _assert_echo(client, adapter, session_id, expected):
-    """Exactly one admitted answer, before the agent's reply; no prompt echo."""
-    assert client.texts(UserMessageChunk, session_id) == [expected]
-    conversation = [
-        u
-        for u in client.updates(session_id)
-        if isinstance(u, (AgentMessageChunk, UserMessageChunk))
-    ]
-    assert isinstance(conversation[-2], UserMessageChunk)
-    assert isinstance(conversation[-1], AgentMessageChunk)
-    assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
-        "push it",
-        expected,
-    ]
+def _inspect():
+    return cell(
+        "[a] = notification['user_messages']\nself.v.answer = a\n"
+        "return_result(Done(explanation='received', message='Okay.'))"
+    )
 
 
 def _requests(client):
-    return [(method, params) for kind, method, params in _ext(client)]
+    return [e[2] for e in client.log if e[0] == "ext"]
 
 
-def _ext(client):
-    return [entry for entry in client.log if entry[0] == "ext"]
+async def _run(adapter, workspace):
+    sid = (await adapter.new_session(str(workspace))).session_id
+    return sid, await asyncio.wait_for(adapter.prompt(sid, [text_block("go")]), TIMEOUT)
 
 
-async def test_a_free_text_question_is_a_one_field_pool_form(make_adapter, workspace, client):
-    models = ScriptedModels(
-        {
-            None: [
-                cell(
-                    "return_result(NeedInput(question='Name the release?', "
-                    "reason='The tag needs it.'))"
-                ),
-                _show_answer(),
-            ]
-        }
-    )
-    client.ext_answers = [{"action": "accept", "content": {"answer": "Aurora"}}]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    assert _requests(client) == [
+@pytest.mark.parametrize(
+    "typed,options,content,expected",
+    [
         (
-            POOL_ELICITATION,
-            {
-                "sessionId": session_id,
-                "mode": "form",
-                "message": "Name the release?\n\nThe tag needs it.",
-                "requestedSchema": {
-                    "type": "object",
-                    "properties": {"answer": {"type": "string", "title": "Name the release?"}},
-                    "required": ["answer"],
-                },
-            },
-        )
-    ]
-    _assert_echo(client, adapter, session_id, "Aurora")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "'Aurora'\n\n"
-
-
-async def test_a_string_answer_type_is_a_pool_form(make_adapter, workspace, client):
-    models = ScriptedModels(
-        {
-            None: [
-                cell("return_result(NeedInput(question='Which branch?', answer_type=Answer))"),
-                _show_answer(),
-            ]
-        }
-    )
-    client.ext_answers = [{"action": "accept", "content": {"branch": "dev"}}]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    [(_, params)] = _requests(client)
-    assert params["message"] == "Which branch?"
-    assert params["requestedSchema"] == {
-        "type": "object",
-        "properties": {"branch": {"type": "string", "title": "Branch"}},
-        "required": ["branch"],
-    }
-    [echo] = client.texts(UserMessageChunk, session_id)
-    assert json.loads(echo) == {"branch": "dev"}
-    _assert_echo(client, adapter, session_id, echo)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Answer(branch='dev')\n\n"
-
-
-def _ask_rollout():
-    return cell("return_result(NeedInput(question='Deploy how?', answer_type=Rollout))")
-
-
-ROLLOUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "target": {"type": "string", "title": "Target", "description": "Where to deploy"},
-        "replicas": {"type": "string", "title": "Replicas", "description": "a whole number"},
-        "dry_run": {"type": "string", "title": "Dry Run", "description": "yes or no"},
-    },
-    "required": ["target", "replicas", "dry_run"],
-}
-
-
-async def test_non_string_fields_are_asked_as_strings_and_converted(
-    make_adapter, workspace, client
+            True,
+            None,
+            {"target": "prod", "replicas": "3", "dry_run": "no"},
+            {"target": "prod", "replicas": "3", "dry_run": "no"},
+        ),
+        (False, None, {"answer": "Aurora"}, {"answer": "Aurora"}),
+        (False, ["main", "dev"], {"answer": "dev"}, {"answer": "dev"}),
+        (False, ["Yes", "No"], {"answer": "Yes"}, {"answer": "Yes"}),
+    ],
+)
+async def test_pool_accept_has_validated_content_and_order(
+    make_adapter, workspace, client, typed, options, content, expected
 ):
-    models = ScriptedModels({None: [_ask_rollout(), _show_answer()]})
+    models = ScriptedModels({None: [_ask(typed, options), _inspect()]})
+    client.ext_answers = [
+        {
+            "action": "accept",
+            "content": content,
+            "field_meta": {"answer": {"source": "user"}},
+            "_meta": {"trace": "reply"},
+        }
+    ]
+    adapter = await make_adapter(models, client_info=POOL)
+    sid, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    answer = adapter.session(sid)._agent.v.answer
+    assert isinstance(answer, FormResponse) and answer.action == "accept"
+    assert answer.content == expected
+    [params] = _requests(client)
+    assert params["mode"] == "form"
+    assert params["message"] == "Details?\n\nSafety."
+    if typed:
+        assert params["_meta"] == {"poolside/field_order": ["target", "replicas", "dry_run"]}
+        assert all(p["type"] == "string" for p in params["requestedSchema"]["properties"].values())
+    [echo] = client.texts(UserMessageChunk, sid)
+    assert json.loads(echo) == {"action": "accept", "content": expected}
+    assert len(models.llms[None].calls) == 2
+    assert not any(e[0] == "permission" for e in client.log)
+
+
+@pytest.mark.parametrize("action", ["decline", "cancel"])
+async def test_pool_actions_survive_transport_and_replay(make_adapter, workspace, client, action):
+    models = ScriptedModels({None: [_ask(), _inspect()]})
+    client.ext_answers = [{"action": action, "_meta": {"trace": "reply"}, "field_meta": {}}]
+    adapter = await make_adapter(models, client_info=POOL)
+    sid, _ = await _run(adapter, workspace)
+    assert adapter.session(sid)._agent.v.answer == FormResponse(action=action)
+    assert len(_requests(client)) == 1
+    visible = "".join(client.texts(AgentMessageChunk, sid))
+    assert "Details?" in visible and "Safety." in visible
+    for field in ("target", "replicas", "dry_run"):
+        assert f'"id": "{field}"' in visible
+    assert "Client-reported decline does not tell us" in visible
+    assert "questions remain visible as text" in visible
+    assert "user declined" not in visible.lower()
+    assert len(models.llms[None].calls) == 2
+    [echo] = client.texts(UserMessageChunk, sid)
+    assert json.loads(echo) == {"action": action, "content": None}
+    client.log.clear()
+    await adapter.load_session(str(workspace), sid)
+    assert json.loads(client.texts(UserMessageChunk, sid)[-1])["action"] == action
+    replayed = "".join(client.texts(AgentMessageChunk, sid))
+    assert "Details?" in replayed
+    for field in ("target", "replicas", "dry_run"):
+        assert f'"id": "{field}"' in replayed
+    assert not _requests(client)
+
+
+@pytest.mark.parametrize(
+    "invalid", [None, {}, {"answer": " "}, {"answer": 2}, {"answer": "unlisted"}]
+)
+async def test_pool_invalid_choice_fails_closed_once(make_adapter, workspace, client, invalid):
+    models = ScriptedModels({None: [_ask(False, ["main", "dev"])]})
+    client.ext_answers = [
+        {"action": "accept", "content": invalid},
+        {"action": "accept", "content": {"answer": "dev"}},
+    ]
+    adapter = await make_adapter(models, client_info=POOL)
+    sid, _ = await _run(adapter, workspace)
+    assert len(_requests(client)) == 1
+    assert len(models.llms[None].calls) == 1
+    assert not client.texts(UserMessageChunk, sid)
+    assert "No automatic retry" in client.texts(AgentMessageChunk, sid)[-1]
+
+
+@pytest.mark.parametrize("failure", ["bad-content", "unknown-action", "client-error"])
+async def test_pool_unsupported_or_invalid_never_manufactures_response(
+    make_adapter, workspace, client, failure
+):
+    ask = _ask()
+    bad = {"action": "accept", "content": {"target": "prod", "replicas": 2, "dry_run": "no"}}
+    client.ext_answers = [bad, bad]
+    if failure == "unknown-action":
+        client.ext_answers = [{"action": "unknown"}]
+    elif failure == "client-error":
+        client.ext_answers = [RequestError(-32601, "Method not found")]
+    models = ScriptedModels({None: [ask]})
+    adapter = await make_adapter(models, client_info=POOL)
+    sid, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    assert client.updates(sid, UserMessageChunk) == []
+    assert len(models.llms[None].calls) == 1
+    assert "Explicit form request" in "".join(client.texts(AgentMessageChunk, sid))
+
+
+async def test_pool_stop_never_submits_pending_response(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_ask()]})
+    client.ext_gate = asyncio.Event()
     client.ext_answers = [
         {"action": "accept", "content": {"target": "prod", "replicas": "3", "dry_run": "no"}}
     ]
     adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    [(_, params)] = _requests(client)
-    assert params["requestedSchema"] == ROLLOUT_SCHEMA
-    # A form with more than one field says the order to show them in.
-    assert params["_meta"] == {"poolside/field_order": ["target", "replicas", "dry_run"]}
-    [echo] = client.texts(UserMessageChunk, session_id)
-    assert json.loads(echo) == {"target": "prod", "replicas": 3, "dry_run": False}
-    _assert_echo(client, adapter, session_id, echo)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "Rollout(target='prod', replicas=3, dry_run=False)\n\n"
-    )
+    sid = (await adapter.new_session(str(workspace))).session_id
+    pending = asyncio.create_task(adapter.prompt(sid, [text_block("go")]))
+    await client.wait_for(lambda: bool(_requests(client)))
+    await adapter.cancel(sid)
+    assert (await asyncio.wait_for(pending, TIMEOUT)).stop_reason == "cancelled"
+    assert client.updates(sid, UserMessageChunk) == []
+    assert len(models.llms[None].calls) == 1 and len(client.ext_answers) == 1
 
 
-async def test_a_value_that_does_not_convert_is_asked_again_with_the_error(
-    make_adapter, workspace, client
-):
-    models = ScriptedModels({None: [_ask_rollout(), _show_answer()]})
-    client.ext_answers = [
-        {"action": "accept", "content": {"target": "prod", "replicas": "two", "dry_run": "no"}},
-        {"action": "accept", "content": {"target": "prod", "replicas": "2", "dry_run": "no"}},
-    ]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    [(_, first), (_, second)] = _requests(client)
-    assert first["message"] == "Deploy how?"
-    assert second["message"].startswith("Deploy how?\n\nThat answer was not accepted: replicas: ")
-    assert "integer" in second["message"]
-    assert second["requestedSchema"] == ROLLOUT_SCHEMA
-    [echo] = client.texts(UserMessageChunk, session_id)
-    assert json.loads(echo) == {"target": "prod", "replicas": 2, "dry_run": False}
-    _assert_echo(client, adapter, session_id, echo)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "Rollout(target='prod', replicas=2, dry_run=False)\n\n"
-    )
-
-
-async def test_a_second_bad_value_falls_back_to_text(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask_rollout()]})
-    bad = {"action": "accept", "content": {"target": "prod", "replicas": "two", "dry_run": "no"}}
-    client.ext_answers = [bad, bad]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    assert len(_requests(client)) == 2
-    assert client.updates(session_id, UserMessageChunk) == []
-    assert len(models.llms[None].calls) == 1  # nothing was submitted
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Deploy how?\n\n"
-
-
-@pytest.mark.parametrize("action", ["decline", "cancel"])
-async def test_a_declined_pool_form_tells_the_agent(make_adapter, workspace, client, action):
-    models = ScriptedModels({None: [_ask_rollout(), reply("Okay.")]})
-    client.ext_answers = [{"action": action}]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-    assert client.updates(session_id, UserMessageChunk) == []
-    assert "(declined to answer)" in str(models.llms[None].calls[1].messages)
-
-
-async def test_a_failed_pool_form_falls_back_to_text_for_the_connection(
-    make_adapter, workspace, client
-):
-    ask = cell("return_result(NeedInput(question='Name the release?'))")
-    models = ScriptedModels({None: [ask, ask]})
-    client.ext_answers = [RequestError(-32601, "Method not found")]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Name the release?\n\n"
-
-    response = await asyncio.wait_for(adapter.prompt(session_id, [text_block("Aurora")]), TIMEOUT)
-    assert response.stop_reason == "end_turn"
-    assert len(_requests(client)) == 1  # not asked again
-
-
-async def test_other_clients_do_not_get_pool_forms(make_adapter, workspace, client):
-    models = ScriptedModels({None: [cell("return_result(NeedInput(question='Name it?'))")]})
-    adapter = await make_adapter(models, client_info=Implementation(name="zed", version="1"))
-    session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-    assert _ext(client) == []
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Name it?\n\n"
-
-
-async def test_a_yes_no_question_to_pool_is_still_a_permission_request(
+async def test_pool_literal_or_text_field_explicitly_accepts_alternative(
     make_adapter, workspace, client
 ):
     models = ScriptedModels(
         {
             None: [
-                cell("return_result(NeedInput(question='Delete it?', options=['Yes', 'No']))"),
-                reply("Deleted."),
+                cell(
+                    "return_result(NeedInputForm(heading='Branch?', questions=[PickOneOrTextQuestion(id='name', label='Branch?', choices=[FormChoice(value='main', title='Main branch')])]))"
+                ),
+                _inspect(),
             ]
         }
     )
-    client.permission_answers = [
-        RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id="Yes"))
-    ]
+    client.ext_answers = [{"action": "accept", "content": {"name": "release"}}]
     adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-    assert _ext(client) == []
-    assert client.updates(session_id, UserMessageChunk) == []
-    assert len([e for e in client.log if e[0] == "permission"]) == 1
-
-
-def _ask_branch():
-    return cell("return_result(NeedInput(question='Which branch?', options=['main', 'dev']))")
-
-
-BRANCH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "answer": {
-            "description": "Which branch?",
-            "anyOf": [
-                {"oneOf": [{"const": "main", "title": "main"}, {"const": "dev", "title": "dev"}]},
-                {"type": "string"},
-            ],
-        }
-    },
-    "required": ["answer"],
-}
-
-
-async def test_a_choice_question_is_a_one_field_pool_form(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
-    client.ext_answers = [{"action": "accept", "content": {"answer": "dev"}}]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    assert _requests(client) == [
-        (
-            POOL_ELICITATION,
-            {
-                "sessionId": session_id,
-                "mode": "form",
-                "message": "Which branch?",
-                "requestedSchema": BRANCH_SCHEMA,
-            },
-        )
-    ]
-    _assert_echo(client, adapter, session_id, "dev")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'\n\n"
-
-
-async def test_a_choice_answer_matches_ignoring_case_and_spaces(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
-    client.ext_answers = [{"action": "accept", "content": {"answer": "  MAIN "}}]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    _assert_echo(client, adapter, session_id, "main")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "'main'\n\n"
-
-
-@pytest.mark.parametrize(
-    "content",
-    [
-        None,
-        {},
-        {"answer": ""},
-        {"answer": " \t "},
-        {"answer": None},
-        {"answer": 2},
-        {"answer": ["release"]},
-        "release",
-        [],
-        1,
-    ],
-)
-async def test_an_invalid_choice_answer_is_asked_again(make_adapter, workspace, client, content):
-    models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
-    client.ext_answers = [
-        {"action": "accept", "content": content},
-        {"action": "accept", "content": {"answer": "Dev"}},
-    ]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    [(_, first), (_, second)] = _requests(client)
-    assert first["message"] == "Which branch?"
-    error = (
-        "Enter a choice or a nonblank text answer."
-        if content is None or isinstance(content, dict)
-        else "That answer must be an object of form fields."
-    )
-    assert second["message"] == "Which branch?\n\n" + error
-    assert second["requestedSchema"] == BRANCH_SCHEMA
-    _assert_echo(client, adapter, session_id, "dev")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'\n\n"
-
-
-async def test_a_second_blank_choice_answer_falls_back_to_text(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask_branch()]})
-    bad = {"action": "accept", "content": {"answer": " "}}
-    client.ext_answers = [bad, bad]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    assert len(_requests(client)) == 2
-    assert client.updates(session_id, UserMessageChunk) == []
-    assert len(models.llms[None].calls) == 1  # nothing was submitted
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev\n\n"
-
-
-async def test_other_clients_keep_choice_questions_as_text(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask_branch()]})
-    adapter = await make_adapter(models, client_info=Implementation(name="zed", version="1"))
-    session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-    assert _ext(client) == []
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev\n\n"
-
-
-@pytest.mark.parametrize("text", ["release", "  Release Candidate  ", "Ship\nwith tests"])
-async def test_an_alternative_is_submitted_without_retry(make_adapter, workspace, client, text):
-    models = ScriptedModels({None: [_ask_branch(), _show_answer()]})
-    client.ext_answers = [{"action": "accept", "content": {"answer": text}}]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    assert len(_requests(client)) == 1
-    assert _requests(client)[0][1]["requestedSchema"] == BRANCH_SCHEMA
-    _assert_echo(client, adapter, session_id, text)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == repr(text) + "\n\n"
-
-
-async def test_cancel_while_a_pool_choice_form_is_open(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask_branch()]})
-    client.ext_gate = asyncio.Event()
-    client.ext_answers = [{"action": "accept", "content": {"answer": "release"}}]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id = (await adapter.new_session(str(workspace))).session_id
-    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("push it")]))
-    await client.wait_for(lambda: bool(_requests(client)))
-    await adapter.cancel(session_id)
-    response = await asyncio.wait_for(prompt, TIMEOUT)
-
-    assert response.stop_reason == "cancelled"
-    assert len(_requests(client)) == 1
-    assert client.updates(session_id, UserMessageChunk) == []
-    assert len(models.llms[None].calls) == 1  # no alternative was submitted
-    assert len(client.ext_answers) == 1  # pending form response was not consumed
-
-
-def _ask_typed_choice(*, free_text=False):
-    annotation = 'Literal["main", "dev"]' + (" | str" if free_text else "")
-    return cell(
-        "from typing import Literal\n"
-        "from pydantic import BaseModel\n"
-        "class BranchAnswer(BaseModel):\n"
-        f"    branch: {annotation}\n"
-        "return_result(NeedInput(question='Which branch?', answer_type=BranchAnswer))"
-    )
-
-
-async def test_a_typed_literal_or_string_accepts_an_alternative(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask_typed_choice(free_text=True), _show_answer()]})
-    client.ext_answers = [{"action": "accept", "content": {"branch": "release"}}]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    assert len(_requests(client)) == 1
-    assert _requests(client)[0][1]["requestedSchema"]["properties"]["branch"] == {
-        "title": "Branch",
-        "anyOf": [
-            {"oneOf": [{"const": "main", "title": "main"}, {"const": "dev", "title": "dev"}]},
-            {"type": "string"},
-        ],
-    }
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "BranchAnswer(branch='release')\n\n"
-
-
-async def test_a_typed_literal_retries_an_unlisted_answer(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask_typed_choice(), _show_answer()]})
-    client.ext_answers = [
-        {"action": "accept", "content": {"branch": "release"}},
-        {"action": "accept", "content": {"branch": " DEV "}},
-    ]
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    [(_, first), (_, second)] = _requests(client)
-    assert "anyOf" not in first["requestedSchema"]["properties"]["branch"]
-    assert second["message"].startswith("Which branch?\n\nThat answer was not accepted: branch:")
-    assert second["requestedSchema"] == first["requestedSchema"]
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "BranchAnswer(branch='dev')\n\n"
+    sid, _ = await _run(adapter, workspace)
+    assert "anyOf" in _requests(client)[0]["requestedSchema"]["properties"]["name"]
+    assert adapter.session(sid)._agent.v.answer.content["name"] == "release"

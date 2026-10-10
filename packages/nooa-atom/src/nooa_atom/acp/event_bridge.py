@@ -53,7 +53,7 @@ from acp.schema import (
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
-from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
+from nooa.interactive import AgentMessage, Done, NeedInput, NeedInputForm, Waiting
 from nooa_atom.agent.activity import (
     FileEdit,
     TerminalCommandFinished,
@@ -83,16 +83,16 @@ _STOP = object()
 _MAX_TITLE_CODE_CHARS = 80
 
 # Values of return_result(...): the turn's result, not a cell's output.
-_TURN_RESULTS = (Done, NeedInput, Waiting)
+_TURN_RESULTS = (Done, NeedInput, NeedInputForm, Waiting)
 
 # Bound on a rendered Out[n] value; large results belong in the agent's
 # context, not repeated in full inside a client tool card.
 _MAX_VALUE_CHARS = 10_000
 
 OWN_SOURCES = frozenset({"acp", "user:declined"})
-"""Already-visible client input/permission answers and silent decline markers.
+"""Already-visible client input and historical silent decline markers.
 
-Accepted form answers use ``acp:form-answer`` instead, so admission echoes them.
+Structured form outcomes use ``acp:form-answer``, so admission echoes them.
 """
 
 _ECHOED_CHANNELS = frozenset({"user_messages", "steer"})
@@ -548,17 +548,26 @@ class ACPEventBridge:
             self._start_close()
 
     def _on_turn_ended(self, update: TurnEndedUpdate) -> None:
-        if update.outcome_kind == "need_input":
+        if update.outcome_kind in ("need_input", "need_input_form"):
             # Rendered once per turn, here; the prompt that owns the consumed
             # item decides whether to also open a form.
-            question = str(update.outcome.get("question", ""))
+            question = str(update.outcome.get("heading", update.outcome.get("question", "")))
             options = update.outcome.get("options")
             reason = update.outcome.get("reason")
-            self._enqueue(
-                update_agent_message(
-                    text_block(question_text(question, options, str(reason) if reason else None))
+            text = question_text(question, options, str(reason) if reason else None)
+            if update.outcome_kind == "need_input_form":
+                import json
+
+                text += (
+                    "\n\nExplicit form request. Submit FormResponse(action='accept', content={id: string}), "
+                    "or decline/cancel. Client-reported decline does not tell us whether the form "
+                    "was dismissed or could not render; these questions remain visible as text. "
+                    "Optional blank answers are empty strings. Raw text is not "
+                    "an accepted form response; it remains unvalidated. Domain validation belongs to the agent. Questions:\n```json\n"
+                    + json.dumps(update.outcome.get("questions", []), indent=2, ensure_ascii=False)
+                    + "\n```"
                 )
-            )
+            self._enqueue(update_agent_message(text_block(text)))
         elif update.outcome_kind == "error":
             # A turn ending on an error does not always write the PythonOutput
             # for a cell it announced; close its card rather than leave it

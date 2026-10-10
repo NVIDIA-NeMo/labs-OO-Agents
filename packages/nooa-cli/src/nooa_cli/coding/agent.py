@@ -13,9 +13,17 @@ from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
     Done,
+    FormChoice,  # noqa: F401 - generation constructor
+    FormQuestion,  # noqa: F401 - generation descriptor union
+    FormResponse,  # noqa: F401 - visible to generated cells
+    InputRequest,
     InteractiveAgent,
-    NeedInput,
+    NeedInput,  # noqa: F401 - visible generation constructor
+    NeedInputForm,  # noqa: F401 - visible generation constructor
+    PickOneOrTextQuestion,  # noqa: F401 - generation constructor
+    PickOneQuestion,  # noqa: F401 - generation constructor
     SummarizationConfig,
+    TextQuestion,  # noqa: F401 - generation constructor
     Waiting,
     install_summarizer,
 )
@@ -192,7 +200,7 @@ class CodingAgent(InteractiveAgent):
 
     @hidden
     @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))
-    async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
+    async def handle(self, notification: dict[str, list[Any]]) -> Done | InputRequest | Waiting:
         """Fulfill the newest coding request delivered in ``notification``.
 
         Work until the request is complete or genuinely needs user input. Use
@@ -206,7 +214,12 @@ class CodingAgent(InteractiveAgent):
           is a short status line. Add ``evidence=[...]`` for checks you ran.
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. The host shows the question, so do not also send it with
-          ``self.message()``. Add ``options=[...]`` for a single choice.
+          ``self.message()``. Add ``options=[...]`` for suggested answers, not a dialog.
+        - ``NeedInputForm(heading=..., questions=[TextQuestion(id="name", label="Name?")])`` — explicit form;
+          Use PickOneQuestion or PickOneOrTextQuestion with FormChoice(value=..., title=...)
+          for choices. Stable ids key the accepted string dictionary in FormResponse.
+          Decline/cancel carry no content. Domain validation is yours: ask targeted
+          follow-ups, never automatically repeat the whole form. Text-only hosts cannot promise validated answers.
         - ``Waiting(message=..., explanation=..., on=[...])`` — a background
           job is still running; ``on`` names the job or channel.
         """

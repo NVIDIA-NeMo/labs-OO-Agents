@@ -1,35 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A NeedInput question over ACP: a form, a yes/no permission, or text."""
+"""Explicit conversational questions and standard ACP form outcomes."""
 
 import asyncio
+import json
 
 import pytest
 from acp import text_block
 from acp.schema import (
     AcceptElicitationResponse,
     AgentMessageChunk,
-    AllowedOutcome,
     CancelElicitationResponse,
     ClientCapabilities,
     DeclineElicitationResponse,
-    DeniedOutcome,
     ElicitationCapabilities,
     ElicitationFormCapabilities,
-    ElicitationFormSessionMode,
-    RequestPermissionResponse,
-    ToolCallProgress,
-    ToolCallStart,
+    Implementation,
     UserMessageChunk,
 )
 from atom_test_agents import ScriptedModels, cell, reply
 
+from nooa.interactive import FormResponse
+
 TIMEOUT = 30
 FORMS = ClientCapabilities(elicitation=ElicitationCapabilities(form=ElicitationFormCapabilities()))
-
-
-def _ask(question: str, options: list[str] | None = None) -> object:
-    return cell(f"return_result(NeedInput(question={question!r}, options={options!r}))")
 
 
 async def _run(adapter, workspace, text="push it"):
@@ -38,234 +32,132 @@ async def _run(adapter, workspace, text="push it"):
     return session_id, response
 
 
-async def test_a_form_answer_goes_to_the_agent_and_the_same_prompt_continues(
-    make_adapter, workspace, client
-):
-    models = ScriptedModels({None: [_ask("Which branch?", ["main", "dev"]), reply("Using dev.")]})
-    client.elicitation_answers = [
-        AcceptElicitationResponse(action="accept", content={"answer": "dev"})
-    ]
-    adapter = await make_adapter(models, capabilities=FORMS)
-    session_id, response = await _run(adapter, workspace)
-
-    assert response.stop_reason == "end_turn"
-    [(_, message, mode)] = [entry for entry in client.log if entry[0] == "elicitation"]
-    assert message == "Which branch?"
-    assert isinstance(mode, ElicitationFormSessionMode)
-    assert mode.session_id == session_id
-    assert mode.requested_schema.model_dump(mode="json", by_alias=True, exclude_none=True) == {
-        "type": "object",
-        "properties": {
-            "answer": {"type": "string", "title": "Which branch?", "enum": ["main", "dev"]}
-        },
-        "required": ["answer"],
-    }
-    # The question is the turn's final message, sent before the form.
-    kinds = [
-        entry[0] if entry[0] != "update" else type(entry[2]).__name__
-        for entry in client.log
-        if entry[0] != "update" or isinstance(entry[2], AgentMessageChunk)
-    ]
-    assert kinds[kinds.index("elicitation") - 1] == "AgentMessageChunk"
-    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
-        "Which branch?\n\n- main\n- dev\n\n",
-        "Using dev.\n\n",
-    ]
-    assert "dev" in str(models.llms[None].calls[1].messages[-2:])
-    assert client.texts(UserMessageChunk, session_id) == ["dev"]
-    conversation = [
-        u
-        for u in client.updates(session_id)
-        if isinstance(u, (AgentMessageChunk, UserMessageChunk))
-    ]
-    assert isinstance(conversation[-2], UserMessageChunk)
-    assert conversation[-1].content.text == "Using dev.\n\n"
-    assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
-        "push it",
-        "dev",
-    ]
-    assert len(models.llms[None].calls) == 2
+def _form(typed=True, options=None):
+    if typed:
+        questions = "[TextQuestion(id='target', label='Target?'), TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')]"
+    elif options:
+        choices = [{"value": value, "title": value} for value in options]
+        questions = f"[PickOneQuestion(id='answer', label='Answer?', choices={choices!r})]"
+    else:
+        questions = "[TextQuestion(id='answer', label='Answer?')]"
+    return cell(
+        f"return_result(NeedInputForm(heading='Details?', reason='Safety.', questions={questions}))"
+    )
 
 
-@pytest.mark.parametrize(
-    "answer",
-    [DeclineElicitationResponse(action="decline"), CancelElicitationResponse(action="cancel")],
-)
-async def test_a_declined_form_tells_the_agent(make_adapter, workspace, client, answer):
-    models = ScriptedModels({None: [_ask("Which branch?", ["main", "dev"]), reply("Okay.")]})
-    client.elicitation_answers = [answer]
-    adapter = await make_adapter(models, capabilities=FORMS)
-    session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-    assert "(declined to answer)" in str(models.llms[None].calls[1].messages)
-    assert client.updates(session_id, UserMessageChunk) == []
+def _inspect_answer():
+    return cell(
+        "[a] = notification['user_messages']\n"
+        "self.v.answer = a\n"
+        "return_result(Done(explanation='received', message='Okay.'))"
+    )
 
 
-async def test_a_free_text_question_uses_a_one_field_form(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask("Name the release?"), reply("Named.")]})
-    client.elicitation_answers = [
-        AcceptElicitationResponse(action="accept", content={"answer": "Aurora"})
-    ]
-    adapter = await make_adapter(models, capabilities=FORMS)
-    session_id, response = await _run(adapter, workspace)
-    assert client.texts(UserMessageChunk, session_id) == ["Aurora"]
-    assert response.stop_reason == "end_turn"
-    assert "Aurora" in str(models.llms[None].calls[1].messages)
-
-
-async def test_without_forms_a_yes_no_question_is_a_permission_request(
-    make_adapter, workspace, client
-):
-    models = ScriptedModels({None: [_ask("Delete the branch?", ["Yes", "No"]), reply("Deleted.")]})
-    client.permission_answers = [
-        RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id="Yes"))
-    ]
-    adapter = await make_adapter(models)
-    session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-
-    [(_, permission_session, tool_call, options)] = [e for e in client.log if e[0] == "permission"]
-    assert permission_session == session_id
-    assert [(o.option_id, o.kind) for o in options] == [
-        ("Yes", "allow_once"),
-        ("No", "reject_once"),
-    ]
-    [card] = [
-        u
-        for u in client.updates(session_id, ToolCallStart)
-        if u.tool_call_id == tool_call.tool_call_id
-    ]
-    assert (card.title, card.kind, card.status) == ("Delete the branch?", "other", "pending")
-    [done] = [
-        u
-        for u in client.updates(session_id, ToolCallProgress)
-        if u.tool_call_id == card.tool_call_id
-    ]
-    assert done.status == "completed"
-    assert "Yes" in str(models.llms[None].calls[1].messages[-2:])
-    assert client.updates(session_id, UserMessageChunk) == []
-
-
-async def test_a_refused_permission_is_a_declined_answer(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask("Delete the branch?", ["yes", "no"]), reply("Kept.")]})
-    client.permission_answers = [
-        RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
-    ]
-    adapter = await make_adapter(models)
-    _session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-    assert "(declined to answer)" in str(models.llms[None].calls[1].messages)
-
-
-async def test_without_forms_other_questions_end_the_turn_as_text(make_adapter, workspace, client):
-    models = ScriptedModels({None: [_ask("Which branch?", ["main", "dev"])]})
-    adapter = await make_adapter(models)
-    session_id, response = await _run(adapter, workspace)
-    assert response.stop_reason == "end_turn"
-    assert not [e for e in client.log if e[0] in ("elicitation", "permission")]
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Which branch?\n\n- main\n- dev\n\n"
-
-
-async def test_a_questions_reason_follows_it(make_adapter, workspace, client):
+@pytest.mark.parametrize("pool", [False, True])
+@pytest.mark.parametrize("options", [None, ["main", "dev"], ["Yes", "No"]])
+async def test_question_never_opens_a_dialog(make_adapter, workspace, client, pool, options):
     models = ScriptedModels(
         {
             None: [
                 cell(
-                    "return_result(NeedInput(question='Which branch?', options=['main', 'dev'], "
-                    "reason='Both have the fix.'))"
-                )
+                    f"return_result(NeedInput(question='Which?', reason='Safety.', options={options!r}))"
+                ),
+                _inspect_answer(),
             ]
         }
     )
-    adapter = await make_adapter(models)
-    session_id, _ = await _run(adapter, workspace)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "Which branch?\n\n- main\n- dev\n\nBoth have the fix.\n\n"
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
     )
-
-
-async def test_a_done_message_reaches_the_client_before_the_prompt_answers(
-    make_adapter, workspace, client
-):
-    models = ScriptedModels(
-        {None: [cell("return_result(Done(explanation='x', message='All set.'))")]}
-    )
-    adapter = await make_adapter(models)
     session_id, response = await _run(adapter, workspace)
-    client.log.append(("response", "prompt", response))
-    assert client.texts(AgentMessageChunk, session_id) == ["All set.\n\n"]
-    kinds = [
-        "message" if entry[0] == "update" and isinstance(entry[2], AgentMessageChunk) else entry[0]
-        for entry in client.log
-        if entry[0] == "response" or isinstance(entry[2], AgentMessageChunk)
-    ]
-    assert kinds == ["message", "response"]
-
-
-async def test_cancel_while_a_form_is_open_ends_the_prompt_cancelled(
-    make_adapter, workspace, client
-):
-    models = ScriptedModels({None: [_ask("Which branch?", ["main", "dev"])]})
-    client.elicitation_gate = asyncio.Event()  # never answered
-    adapter = await make_adapter(models, capabilities=FORMS)
-    session_id = (await adapter.new_session(str(workspace))).session_id
-    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("push it")]))
-    await asyncio.wait_for(client.elicitation_started.wait(), TIMEOUT)
-    await adapter.cancel(session_id)
-    response = await asyncio.wait_for(prompt, TIMEOUT)
-    assert response.stop_reason == "cancelled"
-    assert len(models.llms[None].calls) == 1  # nothing was submitted
-    assert client.updates(session_id, UserMessageChunk) == []
-
-
-@pytest.mark.parametrize("failure", [RuntimeError("client error")])
-async def test_a_failing_form_request_falls_back_to_text(make_adapter, workspace, client, failure):
-    models = ScriptedModels({None: [_ask("Which branch?", ["main", "dev"])]})
-
-    async def broken(message, mode, **kwargs):
-        raise failure
-
-    client.create_elicitation = broken
-    adapter = await make_adapter(models, capabilities=FORMS)
-    _session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
+    assert not any(e[0] in ("elicitation", "permission", "ext") for e in client.log)
+    assert "Safety." in client.texts(AgentMessageChunk, session_id)[-1]
+    assert len(models.llms[None].calls) == 1
+    await adapter.prompt(session_id, [text_block("unlisted answer")])
+    assert adapter.session(session_id)._agent.v.answer == "unlisted answer"
 
 
-async def test_a_typed_standard_form_echoes_serialized_validated_answer(
-    make_adapter, workspace, client
+@pytest.mark.parametrize(
+    "typed,options,content,expected",
+    [
+        (
+            True,
+            None,
+            {"target": "prod", "replicas": "3", "dry_run": "no"},
+            {"target": "prod", "replicas": "3", "dry_run": "no"},
+        ),
+        (False, None, {"answer": "Aurora"}, {"answer": "Aurora"}),
+        (False, ["main", "dev"], {"answer": "dev"}, {"answer": "dev"}),
+        (False, ["Yes", "No"], {"answer": "Yes"}, {"answer": "Yes"}),
+    ],
+)
+async def test_standard_accept_is_structured_validated_and_echoed_once(
+    make_adapter, workspace, client, typed, options, content, expected
 ):
-    import json
-
-    models = ScriptedModels(
-        {
-            None: [
-                cell("return_result(NeedInput(question='Deploy how?', answer_type=Rollout))"),
-                reply("Deploying."),
-            ]
-        }
-    )
+    models = ScriptedModels({None: [_form(typed, options), _inspect_answer()]})
     client.elicitation_answers = [
         AcceptElicitationResponse(
-            action="accept", content={"target": "prod", "replicas": 3, "dry_run": False}
+            action="accept",
+            content=content,
+            field_meta={"target": {"source": "user"}},
+            **{"_meta": {"trace": "reply"}},
         )
     ]
     adapter = await make_adapter(models, capabilities=FORMS)
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
+    session = adapter.session(session_id)
+    answer = session._agent.v.answer
+    assert isinstance(answer, FormResponse) and answer.action == "accept"
+    assert answer.content == expected
     [echo] = client.texts(UserMessageChunk, session_id)
-    assert json.loads(echo) == {"target": "prod", "replicas": 3, "dry_run": False}
-    conversation = [
-        u
-        for u in client.updates(session_id)
-        if isinstance(u, (AgentMessageChunk, UserMessageChunk))
-    ]
-    assert isinstance(conversation[-2], UserMessageChunk)
-    assert conversation[-1].content.text == "Deploying.\n\n"
-    assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
-        "push it",
-        echo,
-    ]
+    assert json.loads(echo) == {"action": "accept", "content": expected}
+    [(_, _, mode)] = [e for e in client.log if e[0] == "elicitation"]
+    assert list(mode.requested_schema.properties) == (list(content) if typed else ["answer"])
+    assert not any(e[0] == "permission" for e in client.log)
     assert len(models.llms[None].calls) == 2
+    assert [e.content for e in session.transcript() if e.role == "user"] == ["push it", echo]
+    client.log.clear()
+    await adapter.load_session(str(workspace), session_id)
+    assert client.texts(UserMessageChunk, session_id) == ["push it\n", echo + "\n"]
+    assert not any(e[0] == "elicitation" for e in client.log)
+
+
+@pytest.mark.parametrize(
+    "action,response_model",
+    [
+        ("decline", DeclineElicitationResponse),
+        ("cancel", CancelElicitationResponse),
+    ],
+)
+@pytest.mark.parametrize("metadata", [False, True])
+async def test_standard_decline_and_cancel_remain_distinct(
+    make_adapter, workspace, client, action, response_model, metadata
+):
+    models = ScriptedModels({None: [_form(), _inspect_answer()]})
+    client.elicitation_answers = [
+        response_model(action=action, **({"_meta": {"trace": "reply"}} if metadata else {}))
+    ]
+    adapter = await make_adapter(models, capabilities=FORMS)
+    session_id, _ = await _run(adapter, workspace)
+    session = adapter.session(session_id)
+    assert session._agent.v.answer == FormResponse(action=action)
+    [echo] = client.texts(UserMessageChunk, session_id)
+    assert json.loads(echo) == {"action": action, "content": None}
+    from nooa_atom.session.events import ItemAdmitted
+
+    [event] = [
+        e
+        for e in session.handle.events.all_events()
+        if isinstance(e, ItemAdmitted) and e.source == "acp:form-answer"
+    ]
+    assert json.loads(event.item_json)["action"] == action
+    client.log.clear()
+    await adapter.load_session(str(workspace), session_id)
+    assert json.loads(client.texts(UserMessageChunk, session_id)[-1])["action"] == action
 
 
 @pytest.mark.parametrize(
@@ -276,103 +168,70 @@ async def test_a_typed_standard_form_echoes_serialized_validated_answer(
         (False, {"answer": ""}),
         (False, {"answer": " "}),
         (False, {"answer": 2}),
-        (False, {"answer": "release"}),
+        (False, {"answer": "unlisted"}),
         (True, {"target": "prod"}),
-        (True, {"target": "prod", "replicas": "two", "dry_run": False}),
+        (True, {"target": "prod", "replicas": "bad", "dry_run": False}),
     ],
 )
-async def test_invalid_standard_form_answers_are_not_admitted_or_echoed(
+async def test_invalid_standard_content_is_not_admitted(
     make_adapter, workspace, client, typed, content
 ):
-    ask = (
-        cell("return_result(NeedInput(question='Deploy how?', answer_type=Rollout))")
-        if typed
-        else _ask("Which branch?", ["main", "dev"])
-    )
-    models = ScriptedModels({None: [ask]})
+    models = ScriptedModels({None: [_form(typed, ["main", "dev"] if not typed else None)]})
     client.elicitation_answers = [AcceptElicitationResponse(action="accept", content=content)]
     adapter = await make_adapter(models, capabilities=FORMS)
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
     assert client.updates(session_id, UserMessageChunk) == []
     assert len(models.llms[None].calls) == 1
-    assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
-        "push it"
-    ]
+    assert "not accepted" in client.texts(AgentMessageChunk, session_id)[-1]
 
 
-@pytest.mark.parametrize("pool", [False, True])
-@pytest.mark.parametrize("accepted", [False, True])
-async def test_form_answer_replay_preserves_admitted_sources_once(
-    make_adapter, workspace, client, pool, accepted
+async def test_stop_open_standard_form_never_injects_an_answer(make_adapter, workspace, client):
+    models = ScriptedModels({None: [_form()]})
+    client.elicitation_gate = asyncio.Event()
+    adapter = await make_adapter(models, capabilities=FORMS)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    pending = asyncio.create_task(adapter.prompt(session_id, [text_block("go")]))
+    await asyncio.wait_for(client.elicitation_started.wait(), TIMEOUT)
+    await adapter.cancel(session_id)
+    assert (await asyncio.wait_for(pending, TIMEOUT)).stop_reason == "cancelled"
+    assert len(models.llms[None].calls) == 1
+    assert client.updates(session_id, UserMessageChunk) == []
+
+
+@pytest.mark.parametrize("failure", ["unsupported", "client-error"])
+async def test_fallback_preserves_form_intent_and_does_not_validate_raw_text(
+    make_adapter, workspace, client, failure
 ):
-    from acp.schema import Implementation
-    from nooa_atom.session.events import ItemAdmitted
+    ask = _form()
+    models = ScriptedModels({None: [ask, _inspect_answer()]})
 
-    models = ScriptedModels({None: [_ask("Name?"), reply("Okay.")]})
-    if pool:
-        client.ext_answers = [
-            {"action": "accept", "content": {"answer": "Aurora"}}
-            if accepted
-            else {"action": "decline"}
-        ]
-    else:
-        client.elicitation_answers = [
-            AcceptElicitationResponse(action="accept", content={"answer": "Aurora"})
-            if accepted
-            else DeclineElicitationResponse(action="decline")
-        ]
-    adapter = await make_adapter(
-        models,
-        capabilities=FORMS,
-        client_info=Implementation(name="pool", version="1.0.16") if pool else None,
-    )
-    session_id, _ = await _run(adapter, workspace)
-    answer = "Aurora" if accepted else "(declined to answer)"
-    assert client.texts(UserMessageChunk, session_id) == ([answer] if accepted else [])
-    session = adapter.session(session_id)
-    admitted = [
-        e
-        for e in session.handle.events.all_events()
-        if isinstance(e, ItemAdmitted) and e.channel == "user_messages"
-    ]
-    assert [e.source for e in admitted] == [
-        "acp",
-        "acp:form-answer" if accepted else "user:declined",
-    ]
-    assert len(models.llms[None].calls) == 2
+    async def broken(*args, **kwargs):
+        raise RuntimeError("client error")
 
+    if failure == "client-error":
+        client.create_elicitation = broken
+    adapter = await make_adapter(models, capabilities=None if failure == "unsupported" else FORMS)
+    session_id, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    [text] = client.texts(AgentMessageChunk, session_id)
+    assert "Explicit form request" in text and "unvalidated" in text and '"replicas"' in text
+    assert len(models.llms[None].calls) == 1
     client.log.clear()
     await adapter.load_session(str(workspace), session_id)
-    # Replay deliberately includes stored declines; live declines remain silent.
-    assert client.texts(UserMessageChunk, session_id) == ["push it\n", answer + "\n"]
-    conversation = [
-        u
-        for u in client.updates(session_id)
-        if isinstance(u, (AgentMessageChunk, UserMessageChunk))
-    ]
-    assert [type(u) for u in conversation] == [
-        UserMessageChunk,
-        AgentMessageChunk,
-        UserMessageChunk,
-        AgentMessageChunk,
-    ]
-    if pool:
-        updates = client.updates(session_id)
-        for entry in session.transcript():
-            if entry.role == "user":
-                index = next(
-                    i
-                    for i, u in enumerate(updates)
-                    if isinstance(u, UserMessageChunk) and u.content.text == entry.content + "\n"
-                )
-                assert updates[index + 1].field_meta == {"poolside/inputEventId": entry.item_id}
-    # Loading twice must reuse the bridge; subsequent prompts must not double-echo.
-    await adapter.load_session(str(workspace), session_id)
-    client.log.clear()
-    session.admit("from another host", source="tui")
-    await adapter.bridge(session_id).flush()
-    assert client.texts(UserMessageChunk, session_id) == ["from another host"]
+    assert "Explicit form request" in client.texts(AgentMessageChunk, session_id)[-1]
+    assert "unvalidated" in client.texts(AgentMessageChunk, session_id)[-1]
+    assert len(models.llms[None].calls) == 1
+    await adapter.prompt(session_id, [text_block('{"target":"prod","replicas":3,"dry_run":false}')])
+    assert isinstance(adapter.session(session_id)._agent.v.answer, str)
+
+
+async def test_done_message_is_sent_before_prompt_completion(make_adapter, workspace, client):
+    models = ScriptedModels({None: [reply("All set.")]})
+    adapter = await make_adapter(models)
+    session_id, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    assert client.texts(AgentMessageChunk, session_id) == ["All set.\n\n"]
 
 
 async def test_mcp_sign_in_callback_is_not_admitted_or_echoed(
@@ -415,3 +274,255 @@ async def test_mcp_sign_in_callback_is_not_admitted_or_echoed(
     assert "UNIQUE_SENTINEL" not in visible
     assert "STATE_SENTINEL" not in visible
     assert address not in visible
+
+
+@pytest.mark.parametrize("pool", [False, True])
+async def test_stop_wins_if_client_swallows_cancellation(make_adapter, workspace, client, pool):
+    started = asyncio.Event()
+
+    async def late_accept(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            content = {
+                "target": "prod",
+                "replicas": "3",
+                "dry_run": "no",
+            }
+            return (
+                {"action": "accept", "content": content}
+                if pool
+                else AcceptElicitationResponse(action="accept", content=content)
+            )
+
+    if pool:
+        client.ext_method = late_accept
+    else:
+        client.create_elicitation = late_accept
+    models = ScriptedModels({None: [_form()]})
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid = (await adapter.new_session(str(workspace))).session_id
+    pending = asyncio.create_task(adapter.prompt(sid, [text_block("go")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    await adapter.cancel(sid)
+    assert (await asyncio.wait_for(pending, TIMEOUT)).stop_reason == "cancelled"
+    assert len(models.llms[None].calls) == 1
+    assert client.updates(sid, UserMessageChunk) == []
+
+
+@pytest.mark.parametrize("pool", [False, True])
+async def test_domain_invalid_text_is_delivered_without_form_retry(
+    make_adapter, workspace, client, pool
+):
+    models = ScriptedModels({None: [_form(), _inspect_answer()]})
+    content = {"target": "prod", "replicas": "not a number", "dry_run": "anything"}
+    if pool:
+        client.ext_answers = [{"action": "accept", "content": content}]
+    else:
+        client.elicitation_answers = [AcceptElicitationResponse(action="accept", content=content)]
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid, _ = await _run(adapter, workspace)
+    assert adapter.session(sid)._agent.v.answer.content == content
+    assert len([e for e in client.log if e[0] in ("ext", "elicitation")]) == 1
+    assert len(models.llms[None].calls) == 2
+
+
+@pytest.mark.parametrize("pool", [False, True])
+async def test_superseded_dialog_cannot_admit_stale_accept(make_adapter, workspace, client, pool):
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def accept_later(*args, **kwargs):
+        started.set()
+        await gate.wait()
+        content = {
+            "target": "prod",
+            "replicas": "3",
+            "dry_run": "no",
+        }
+        return (
+            {"action": "accept", "content": content}
+            if pool
+            else AcceptElicitationResponse(action="accept", content=content)
+        )
+
+    if pool:
+        client.ext_method = accept_later
+    else:
+        client.create_elicitation = accept_later
+    models = ScriptedModels({None: [_form(), reply("Never mind.")]})
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid = (await adapter.new_session(str(workspace))).session_id
+    pending = asyncio.create_task(adapter.prompt(sid, [text_block("go")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    assert (await adapter.prompt(sid, [text_block("never mind")])).stop_reason == "end_turn"
+    gate.set()
+    assert (await asyncio.wait_for(pending, TIMEOUT)).stop_reason == "end_turn"
+    assert len(models.llms[None].calls) == 2
+    assert client.updates(sid, UserMessageChunk) == []
+
+
+@pytest.mark.parametrize("pool", [False, True])
+async def test_stop_during_pre_dialog_flush_never_opens_dialog(
+    make_adapter, workspace, client, monkeypatch, pool
+):
+    models = ScriptedModels({None: [_form()]})
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid = (await adapter.new_session(str(workspace))).session_id
+    bridge = adapter.bridge(sid)
+    original = bridge.flush
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def paused_flush():
+        if sid in adapter._asking and not entered.is_set():
+            entered.set()
+            await release.wait()
+        await original()
+
+    monkeypatch.setattr(bridge, "flush", paused_flush)
+    pending = asyncio.create_task(adapter.prompt(sid, [text_block("go")]))
+    await asyncio.wait_for(entered.wait(), TIMEOUT)
+    await adapter.cancel(sid)
+    try:
+        done, _ = await asyncio.wait({pending}, timeout=1)
+        assert pending in done
+        assert pending.result().stop_reason == "cancelled"
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+    assert not any(e[0] in ("ext", "elicitation") for e in client.log)
+    assert len(models.llms[None].calls) == 1
+
+
+@pytest.mark.parametrize("pool", [False, True])
+@pytest.mark.parametrize(
+    "payload", [{}, {"action": "unknown"}, {"action": "decline", "content": {"x": "y"}}]
+)
+async def test_malformed_transport_envelope_fails_closed_once(
+    make_adapter, workspace, client, pool, payload
+):
+    async def malformed(*args, **kwargs):
+        return payload
+
+    if pool:
+        client.ext_method = malformed
+    else:
+        client.create_elicitation = malformed
+    models = ScriptedModels({None: [_form()]})
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    assert not client.texts(UserMessageChunk, sid)
+    assert len(models.llms[None].calls) == 1
+    assert sum("No automatic retry" in t for t in client.texts(AgentMessageChunk, sid)) == 1
+
+
+@pytest.mark.parametrize("pool", [False, True])
+@pytest.mark.parametrize("operation", ["close", "delete", "teardown", "stop", "session-close"])
+@pytest.mark.parametrize("swallow", [False, True])
+async def test_teardown_settles_open_form_without_waiting_for_client(
+    make_adapter, workspace, client, pool, operation, swallow
+):
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def blocked_client(*args, **kwargs):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            if not swallow:
+                raise
+            await release.wait()
+        return {"action": "accept", "content": {"answer": "late"}}
+
+    if pool:
+        client.ext_method = blocked_client
+    else:
+        client.create_elicitation = blocked_client
+    models = ScriptedModels({None: [_form(False)]})
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid = (await adapter.new_session(str(workspace))).session_id
+    session = adapter.session(sid)
+    pending = asyncio.create_task(adapter.prompt(sid, [text_block("go")]))
+    await asyncio.wait_for(entered.wait(), TIMEOUT)
+    try:
+        if operation == "close":
+            await adapter.close_session(sid)
+        elif operation == "delete":
+            await adapter.ext_method("nooa/session/delete", {"sessionId": sid})
+        elif operation == "teardown":
+            await adapter.close()
+        elif operation == "session-close":
+            await session.close()
+        else:
+            await adapter.cancel(sid)
+        done, _ = await asyncio.wait({pending}, timeout=1)
+        assert pending in done, "teardown left ACP prompt waiting on client"
+        assert pending.result().stop_reason == "cancelled"
+        assert sid not in adapter._asks and sid not in adapter._asking
+        assert cancelled.is_set()
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+    assert len(models.llms[None].calls) == 1
+    assert client.updates(sid, UserMessageChunk) == []
+    assert not adapter._asks and not adapter._asking and not adapter._ask_stops
+
+
+async def test_caller_cancel_settles_without_cancellation_swallowing_client(
+    make_adapter, workspace, client
+):
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def stuck(*args, **kwargs):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+        return {"action": "accept", "content": {"answer": "late"}}
+
+    client.create_elicitation = stuck
+    models = ScriptedModels({None: [_form(False)]})
+    adapter = await make_adapter(models, capabilities=FORMS)
+    sid = (await adapter.new_session(str(workspace))).session_id
+    pending = asyncio.create_task(adapter.prompt(sid, [text_block("go")]))
+    await asyncio.wait_for(entered.wait(), TIMEOUT)
+    pending.cancel()
+    try:
+        done, _ = await asyncio.wait({pending}, timeout=1)
+        assert pending in done and pending.cancelled()
+        await asyncio.wait_for(cancelled.wait(), TIMEOUT)
+        assert not adapter._asks and not adapter._asking
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+    assert len(models.llms[None].calls) == 1
+    assert client.updates(sid, UserMessageChunk) == []

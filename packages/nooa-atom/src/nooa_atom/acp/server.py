@@ -22,7 +22,6 @@ from pathlib import Path
 from string import Formatter
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
 
 from acp import (
     InitializeResponse,
@@ -30,10 +29,8 @@ from acp import (
     NewSessionResponse,
     PromptResponse,
     RequestError,
-    start_tool_call,
     text_block,
     update_agent_message,
-    update_tool_call,
     update_user_message,
 )
 from acp.agent.connection import AgentSideConnection
@@ -49,7 +46,6 @@ from acp.schema import (
     Implementation,
     ListSessionsResponse,
     McpServerStdio,
-    PermissionOption,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
     SessionMode,
@@ -57,13 +53,12 @@ from acp.schema import (
     SetSessionConfigOptionResponse,
     SetSessionModeResponse,
     SseMcpServer,
-    ToolCallUpdate,
     UnstructuredCommandInput,
 )
 from pydantic import ValidationError
 
 from nooa.errors import GenerationError
-from nooa.interactive import NeedInput
+from nooa.interactive import FormResponse, NeedInputForm
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
@@ -71,9 +66,7 @@ from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUS
 from nooa_atom.acp.event_bridge import ACPEventBridge, cancel_text, pool_input_event
 from nooa_atom.acp.listing import list_sessions, validate_workspace
 from nooa_atom.acp.need_input import (
-    answer_from_content,
     need_input_schema,
-    pool_answer,
     pool_form_schema,
 )
 from nooa_atom.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
@@ -123,11 +116,7 @@ INJECT_SOURCE = "acp:inject"
 """Injected inputs are not ordinary prompts: echo their admission once."""
 
 FORM_ANSWER_SOURCE = "acp:form-answer"
-"""Accepted NeedInput form answers, echoed once by the admission bridge."""
-
-DECLINED = "(declined to answer)"
-"""What the agent receives when the person declines or dismisses a question."""
-DECLINED_SOURCE = "user:declined"
+"""Structured form outcomes, echoed once by the admission bridge."""
 
 _CANCELLED = object()  # a client request stopped by session/cancel
 
@@ -272,6 +261,8 @@ class AtomACPAgent:
         # The client is Pool and has not failed a ``_poolside/elicitation`` request.
         self._pool_forms = False
         self._bridges: dict[str, ACPEventBridge] = {}
+        self._attachments: dict[ACPEventBridge, asyncio.Future[None]] = {}
+        self._attachment_unsubscribes: dict[ACPEventBridge, Callable[[], None]] = {}
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
         # Receipts of prompts still waiting for their turn, by session: Stop
@@ -288,9 +279,15 @@ class AtomACPAgent:
         # Client requests (forms, permissions) a prompt is waiting on, by
         # session: session/cancel stops them.
         self._asks: dict[str, asyncio.Task[Any]] = {}
+        self._ask_stops: dict[str, asyncio.Future[None]] = {}
+        # Retain cancelled requests until they finish, but never wait for a client
+        # that suppresses cancellation to settle an ACP prompt.
+        self._detached_asks: set[asyncio.Future[Any]] = set()
         # The question each session's prompt is asking, so two prompts that
         # returned with the same turn ask it once.
-        self._asking: dict[str, NeedInput] = {}
+        self._asking: dict[str, NeedInputForm] = {}
+        self._stopped_forms: set[str] = set()
+        self._form_stops: dict[str, asyncio.Future[None]] = {}
         # Workspaces whose model configuration files were logged.
         self._logged_config: set[Path] = set()
 
@@ -381,6 +378,7 @@ class AtomACPAgent:
         except BaseException:
             for bridge in attached:
                 self._bridges.pop(bridge.session_id, None)
+                self._detach(bridge)
                 await bridge.close(finish_open=False)
             raise
         self._defer_bootstrap_updates(session, warnings)
@@ -431,6 +429,7 @@ class AtomACPAgent:
         except BaseException as exc:
             for bridge in attached:
                 self._bridges.pop(bridge.session_id, None)
+                self._detach(bridge)
                 await bridge.close(finish_open=False)
             raise _load_error(session_id, exc) from exc
         await self._bridges[session.id].flush()
@@ -480,14 +479,15 @@ class AtomACPAgent:
         bridge = self._bridges.pop(session_id, None)
         if session is None and bridge is None:
             raise RequestError.resource_not_found(session_id)
+        self._detach(bridge)
         if session is not None and self._parent_is_live(session):
             if bridge is not None:
                 await bridge.close(finish_open=False)
             return CloseSessionResponse()
-        if session is not None:
-            await session.close()
-        if bridge is not None:
-            await bridge.close()
+        await _close_in_order(
+            session.close if session is not None else None,
+            bridge.close if bridge is not None else None,
+        )
         return CloseSessionResponse()
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -520,12 +520,15 @@ class AtomACPAgent:
         if registry is None:
             raise RequestError.resource_not_found(session_id)
         bridge = self._bridges.pop(session_id, None)
-        try:
-            await registry.delete(session_id, keep_files=bool(params.get("keepFiles")))
-        except (SessionNotFoundError, InvalidSessionIdError):
-            raise RequestError.resource_not_found(session_id) from None
-        if bridge is not None:
-            await bridge.close()
+        self._detach(bridge)
+
+        async def delete() -> None:
+            try:
+                await registry.delete(session_id, keep_files=bool(params.get("keepFiles")))
+            except (SessionNotFoundError, InvalidSessionIdError):
+                raise RequestError.resource_not_found(session_id) from None
+
+        await _close_in_order(delete, bridge.close if bridge is not None else None)
         return {}
 
     async def _inject(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -635,6 +638,10 @@ class AtomACPAgent:
 
     async def close(self) -> None:
         """Close every session this process runs and every bridge."""
+        for bridge in list(self._attachments):
+            self._detach(bridge)
+        for session_id in set(self._asking) | set(self._asks):
+            self._stop_client_request(session_id)
         for task in list(self._background):
             task.cancel()
         await asyncio.gather(*self._background, return_exceptions=True)
@@ -733,7 +740,7 @@ class AtomACPAgent:
         # Taken now: Stop pops the list but leaves in it the followers a
         # turn took, whose outcome is then the cancelled turn's.
         followers = self._followers.setdefault(session.id, [])
-        asked: list[NeedInput] = []
+        asked: list[NeedInputForm] = []
         try:
             response = await self._finish_item(
                 session, bridge, item_id, asked, later=lambda: bool(followers)
@@ -760,14 +767,13 @@ class AtomACPAgent:
         session: Session,
         bridge: ACPEventBridge,
         item_id: str,
-        asked: list[NeedInput],
+        asked: list[NeedInputForm],
         *,
         later: Callable[[], bool],
     ) -> PromptResponse:
         """Wait for the turn that consumes ``item_id``; answer questions until it is done.
 
-        A ``NeedInput`` the client can answer (a form, or a yes/no
-        permission) is submitted and the same prompt waits for the next
+        An explicit ``NeedInputForm`` the client can answer is submitted and the same prompt waits for the next
         turn; otherwise the question, already sent by the bridge as the
         turn's final message, ends the item with ``end_turn``. ``asked``
         holds the questions this prompt already handled: an item consumed by
@@ -775,18 +781,24 @@ class AtomACPAgent:
         which is not asked again. While ``later()`` (followers wait after
         this item), a question is left as text and the item is done.
         """
+        lifetime = self._attachments.get(bridge)
+        if lifetime is None:
+            return PromptResponse(stop_reason="cancelled")
         while True:
-            outcome = await session.outcome(item_id)
+            outcome = await self._wait_attached(session.outcome(item_id), lifetime)
+            if outcome is _CANCELLED:
+                return PromptResponse(stop_reason="cancelled")
             if isinstance(outcome, TurnCancelledOutcome):
                 # The bridge closed the open cards when the Session reported
                 # the cancel, which happens before this outcome resolves.
                 await bridge.flush()
                 return PromptResponse(stop_reason="cancelled")
             if (
-                not isinstance(outcome, NeedInput)
+                not isinstance(outcome, NeedInputForm)
                 or self._asking.get(session.id) is outcome
                 or any(known is outcome for known in asked)
                 or later()
+                or not session.form_is_current(outcome)
             ):
                 # Done; or a question another prompt of this turn is asking,
                 # this prompt already asked, or a queued message answers first.
@@ -794,30 +806,49 @@ class AtomACPAgent:
                 return PromptResponse(stop_reason="end_turn")
             asked.append(outcome)
             self._asking[session.id] = outcome
+            form_stop = asyncio.get_running_loop().create_future()
+            self._form_stops[session.id] = form_stop
+            self._stopped_forms.discard(session.id)
+            stopped = False
             try:
-                await bridge.flush()
-                answer = await self._ask(session, bridge, outcome)
+                await self._wait_attached(bridge.flush(), lifetime, form_stop)
+                if form_stop.done() or lifetime.done():
+                    answer = _CANCELLED
+                elif not session.form_is_current(outcome):
+                    answer = None
+                else:
+                    answer = await self._wait_attached(
+                        self._ask(session, bridge, outcome), lifetime, form_stop
+                    )
+                stopped = form_stop.done() or lifetime.done()
             finally:
-                if self._asking.get(session.id) is outcome:
-                    del self._asking[session.id]
-            if answer is _CANCELLED:
-                await bridge.flush()
+                if self._form_stops.get(session.id) is form_stop:
+                    del self._form_stops[session.id]
+                    self._asking.pop(session.id, None)
+                    self._stopped_forms.discard(session.id)
+            if stopped or answer is _CANCELLED:
+                # The update pump continues independently. Revoked form ownership
+                # must not wait on a client that also stalls update delivery.
                 return PromptResponse(stop_reason="cancelled")
             if answer is None:
                 return PromptResponse(stop_reason="end_turn")
             value, source = answer
-            receipt = await session.submit(value, source=source)
+            receipt = session.admit_form_response(outcome, value, source=source)
+            if receipt is None:
+                return PromptResponse(stop_reason="end_turn")
             item_id = receipt.item_id
 
-    async def _ask(self, session: Session, bridge: ACPEventBridge, need: NeedInput) -> Any:
+    async def _ask(self, session: Session, bridge: ACPEventBridge, need: NeedInputForm) -> Any:
         """Ask the client to answer ``need``: ``(item, source)``, ``None`` or ``_CANCELLED``.
 
-        Pool's own form for a free-text, choice or typed question when the
-        client is Pool (not yes/no); else a form when the client advertised ``elicitation.form``
-        and the question flattens; else a permission request for a yes/no
-        question; else ``None`` (the question stays as text). A client error
-        falls back to ``None``.
+        Only explicit forms route here: Pool's own form extension, then standard
+        ACP form capability. Unsupported schemas/clients leave a clearly marked
+        request in the conversation. Client failure never manufactures an answer.
         """
+        if bridge not in self._attachments or session.id in self._stopped_forms:
+            return _CANCELLED
+        if not isinstance(need, NeedInputForm):
+            return None
         conn = self._require_conn()
         pool_schema = pool_form_schema(need) if self._pool_forms else None
         if pool_schema is not None:
@@ -832,106 +863,78 @@ class AtomACPAgent:
         if forms and schema is not None:
             mode = ElicitationFormSessionMode(session_id=session.id, requested_schema=schema)
             response = await self._client_call(
-                session.id, conn.create_elicitation(message=need.question, mode=mode)
+                session.id,
+                conn.create_elicitation(
+                    message=f"{need.heading}\n\n{need.reason}" if need.reason else need.heading,
+                    mode=mode,
+                ),
             )
             if response is None or response is _CANCELLED:
                 return response
-            if response.action == "accept":
-                try:
-                    return answer_from_content(need, response.content), FORM_ANSWER_SOURCE
-                except (ValidationError, ValueError):
-                    # Invalid client data is not an answer; leave the question as text.
-                    return None
-            return DECLINED, DECLINED_SOURCE
-        options = need.options or []
-        if sorted(option.lower() for option in options) == ["no", "yes"]:
-            return await self._ask_yes_no(session, bridge, need.question, options)
-        return None
-
-    async def _ask_pool(self, session: Session, need: NeedInput, schema: dict[str, Any]) -> Any:
-        """Ask with Pool's ``_poolside/elicitation`` form; the result is as ``_ask``'s.
-
-        A malformed or blank options answer, or a typed answer that does not
-        validate, is asked once more with the error, then left as text. Options
-        are suggestions; typed Literal fields still restrict their values.
-        A failed request turns Pool forms off for this connection.
-        """
-        conn = self._require_conn()
-        question = f"{need.question}\n\n{need.reason}" if need.reason else need.question
-        message = question
-        for _attempt in range(2):
-            params: dict[str, Any] = {
-                "sessionId": session.id,
-                "mode": "form",
-                "message": message,
-                "requestedSchema": schema,
-            }
-            if len(schema["properties"]) > 1:
-                # Pool's own agent sends the field order with every multi-field form.
-                params["_meta"] = {"poolside/field_order": list(schema["properties"])}
-            response = await self._client_call(
-                session.id, conn.ext_method(_POOL_FORM_METHOD, params)
-            )
-            if response is _CANCELLED:
-                return response
-            if response is None:
-                self._pool_forms = False
+            if not session.form_is_current(need):
                 return None
-            if not isinstance(response, dict) or response.get("action") != "accept":
-                return DECLINED, DECLINED_SOURCE
+            if session.id in self._stopped_forms:
+                return _CANCELLED
             try:
-                return pool_answer(need, response.get("content")), FORM_ANSWER_SOURCE
-            except ValidationError as exc:
-                problems = "; ".join(
-                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-                    for error in exc.errors()
+                envelope = (
+                    response
+                    if isinstance(response, dict)
+                    else response.model_dump(mode="json", exclude_none=True)
                 )
-                message = f"{question}\n\nThat answer was not accepted: {problems}"
-            except ValueError as exc:
-                message = f"{question}\n\n{exc}"
+                # SDK/protocol metadata belongs to transport, not the strict answer.
+                outcome = FormResponse(
+                    action=envelope.get("action"), content=envelope.get("content")
+                )
+                return need.validate_response(outcome), FORM_ANSWER_SOURCE
+            except (ValidationError, ValueError, AttributeError, TypeError) as exc:
+                await self._form_failure(session, exc)
+                return None
         return None
 
-    async def _ask_yes_no(
-        self, session: Session, bridge: ACPEventBridge, question: str, options: list[str]
-    ) -> Any:
-        """A yes/no question as a pending card and a permission request."""
+    async def _ask_pool(self, session: Session, need: NeedInputForm, schema: dict[str, Any]) -> Any:
+        """One Pool request. Malformed payload fails closed once, never a wizard retry."""
         conn = self._require_conn()
-        yes = next(option for option in options if option.lower() == "yes")
-        no = next(option for option in options if option.lower() == "no")
-        tool_call_id = f"question-{uuid4()}"
-        bridge.publish(start_tool_call(tool_call_id, question, kind="other", status="pending"))
-        await bridge.flush()
-        response = await self._client_call(
+        if session.id in self._stopped_forms:
+            return _CANCELLED
+        if not session.form_is_current(need):
+            return None
+        params: dict[str, Any] = {
+            "sessionId": session.id,
+            "mode": "form",
+            "message": f"{need.heading}\n\n{need.reason}" if need.reason else need.heading,
+            "requestedSchema": schema,
+        }
+        if len(schema["properties"]) > 1:
+            params["_meta"] = {"poolside/field_order": list(schema["properties"])}
+        response = await self._client_call(session.id, conn.ext_method(_POOL_FORM_METHOD, params))
+        if response is _CANCELLED:
+            return response
+        if session.id in self._stopped_forms:
+            return _CANCELLED
+        if not session.form_is_current(need):
+            return None
+        if response is None:
+            self._pool_forms = False
+            return None
+        try:
+            outcome = FormResponse(action=response.get("action"), content=response.get("content"))
+            return need.validate_response(outcome), FORM_ANSWER_SOURCE
+        except (ValidationError, ValueError, AttributeError, TypeError) as exc:
+            await self._form_failure(session, exc)
+            return None
+
+    async def _form_failure(self, session: Session, exc: Exception) -> None:
+        """Actionable fallback without creating an answer or opening another dialog."""
+        await self._require_conn().session_update(
             session.id,
-            conn.request_permission(
-                session_id=session.id,
-                tool_call=ToolCallUpdate(
-                    tool_call_id=tool_call_id, title=question, status="pending"
-                ),
-                options=[
-                    PermissionOption(option_id=yes, name=yes, kind="allow_once"),
-                    PermissionOption(option_id=no, name=no, kind="reject_once"),
-                ],
+            update_agent_message(
+                text_block(
+                    f"Form response was not accepted: {exc}\n\n"
+                    "No automatic retry was made. Submit a FormResponse with a string dictionary "
+                    "keyed by the question ids, decline/cancel, or ask the agent for a targeted follow-up."
+                )
             ),
         )
-        chosen = getattr(getattr(response, "outcome", None), "option_id", None)
-        if response is _CANCELLED or response is None or chosen not in (yes, no):
-            bridge.publish(
-                update_tool_call(
-                    tool_call_id,
-                    status="failed",
-                    title="Cancelled" if response is _CANCELLED else question,
-                )
-            )
-            await bridge.flush()
-            if response is None or response is _CANCELLED:
-                return response
-            return DECLINED, DECLINED_SOURCE
-        bridge.publish(
-            update_tool_call(tool_call_id, status="completed", content=None, raw_output=chosen)
-        )
-        await bridge.flush()
-        return chosen, SOURCE
 
     async def _client_call(self, session_id: str, request: Any) -> Any:
         """Await a request to the client that session/cancel can stop.
@@ -940,9 +943,14 @@ class AtomACPAgent:
         the client failed it (the caller falls back to text).
         """
         task = asyncio.ensure_future(request)
+        stop = asyncio.get_running_loop().create_future()
         self._asks[session_id] = task
+        self._ask_stops[session_id] = stop
         try:
-            return await task
+            await asyncio.wait({task, stop}, return_when=asyncio.FIRST_COMPLETED)
+            if stop.done():
+                return _CANCELLED
+            return task.result()
         except asyncio.CancelledError:
             current = asyncio.current_task()
             if task.cancelled() and not (current is not None and current.cancelling()):
@@ -954,6 +962,52 @@ class AtomACPAgent:
         finally:
             if self._asks.get(session_id) is task:
                 del self._asks[session_id]
+            if self._ask_stops.get(session_id) is stop:
+                del self._ask_stops[session_id]
+            stop.cancel()
+            if not task.done():
+                if not task.cancelling():
+                    task.cancel()
+                self._detached_asks.add(task)
+                task.add_done_callback(self._client_request_done)
+            elif not task.cancelled():
+                task.exception()
+
+    async def _wait_attached(
+        self, request: Any, lifetime: asyncio.Future[None], stop: asyncio.Future[None] | None = None
+    ) -> Any:
+        """Detach ends local waiting without cancelling the session-owned outcome."""
+        task = asyncio.ensure_future(request)
+        try:
+            signals = {lifetime} if stop is None else {lifetime, stop}
+            await asyncio.wait({task, *signals}, return_when=asyncio.FIRST_COMPLETED)
+            return _CANCELLED if any(signal.done() for signal in signals) else task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                self._detached_asks.add(task)
+                task.add_done_callback(self._client_request_done)
+            elif not task.cancelled():
+                task.exception()
+
+    def _client_request_done(self, task: asyncio.Future[Any]) -> None:
+        self._detached_asks.discard(task)
+        if not task.cancelled():
+            task.exception()  # Retrieve failures from a detached client request.
+
+    def _stop_client_request(self, session_id: str) -> None:
+        """Revoke adapter dialog ownership without trusting client cancellation."""
+        if session_id in self._asking:
+            self._stopped_forms.add(session_id)
+        form_stop = self._form_stops.get(session_id)
+        if form_stop is not None and not form_stop.done():
+            form_stop.set_result(None)
+        stop = self._ask_stops.pop(session_id, None)
+        if stop is not None and not stop.done():
+            stop.set_result(None)
+        ask = self._asks.pop(session_id, None)
+        if ask is not None:
+            ask.cancel()
 
     async def _turn_failed(self, bridge: ACPEventBridge, exc: TurnFailedError) -> PromptResponse:
         """Map a failed turn: generation limits are stop reasons, anything else an error."""
@@ -1052,9 +1106,7 @@ class AtomACPAgent:
         session = self.session(session_id)
         if session is None or session_id not in self._bridges:
             return  # a notification: nothing to answer
-        ask = self._asks.get(session_id)
-        if ask is not None:
-            ask.cancel()
+        self._stop_client_request(session_id)
         # A prompt request must be answered: a prompt whose message no turn
         # took is withdrawn and returns "cancelled"; the one the running turn
         # took returns "cancelled" with it. Injected messages stay queued.
@@ -1210,17 +1262,35 @@ class AtomACPAgent:
         conn = self._require_conn()
         bridge = ACPEventBridge(session, conn, resolve_child=self.session)
         self._bridges[session.id] = bridge
+        self._attachments[bridge] = asyncio.get_running_loop().create_future()
 
         def on_update(update: Any) -> None:
             if isinstance(update, CommandsChangedUpdate):
                 bridge.publish(_available_commands_update(update.commands))
             elif getattr(update, "kind", None) == "closed":
+                self._detach(bridge)
                 if self._bridges.get(session.id) is bridge:
                     del self._bridges[session.id]
                 unsubscribe()
 
         unsubscribe = session.subscribe(on_update)
+        self._attachment_unsubscribes[bridge] = unsubscribe
         return bridge
+
+    def _detach(self, bridge: ACPEventBridge | None) -> None:
+        """End this attachment only; a followed child remains owned by its parent."""
+        if bridge is None:
+            return
+        lifetime = self._attachments.pop(bridge, None)
+        if lifetime is not None and not lifetime.done():
+            lifetime.set_result(None)
+            self._stop_client_request(bridge.session.id)
+            self._asking.pop(bridge.session.id, None)
+            self._form_stops.pop(bridge.session.id, None)
+            self._stopped_forms.discard(bridge.session.id)
+        unsubscribe = self._attachment_unsubscribes.pop(bridge, None)
+        if unsubscribe is not None:
+            unsubscribe()
 
     def _parent_is_live(self, session: Session) -> bool:
         return session.parent_id is not None and self.session(session.parent_id) is not None

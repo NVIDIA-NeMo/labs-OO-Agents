@@ -11,7 +11,7 @@ queues and re-enters ``handle()`` once per notification. It provides:
 * ``self.v`` — snapshot-backed persistent variables that survive turns
   and sessions,
 * ``message()`` — send a Markdown message to the user,
-* the turn protocol: ``handle()`` returns ``Done``, ``NeedInput`` or
+* the turn protocol: ``handle()`` returns ``Done``, ``NeedInput``, ``NeedInputForm`` or
   ``Waiting``; ``handle_batch()`` runs unattended turns and returns ``Done`` or ``Waiting``,
 * token-budget history summarization (``install_summarizer`` /
   ``apply_model_limits``).
@@ -134,29 +134,17 @@ class Done(BaseModel):
 
 
 class NeedInput(BaseModel):
-    """Turn result: a question the agent cannot continue without.
+    """Conversational question, answered by the next user message; never a dialog.
 
-    ``question`` is the question itself; the host shows it to the person,
-    so do not also send it with ``self.message()``. Set ``options`` for a
-    single choice, or ``answer_type`` (a pydantic model class whose fields
-    are simple values: str, int, float, bool, or a list of str) for a typed
-    answer, or neither for free text. The host turns ``answer_type`` into a
-    form and the answer arrives in the next notification as an instance of
-    it. ``reason`` optionally says in one sentence why progress is not
-    possible or not desirable without the answer.
+    Options are suggestions, not a validation constraint. Use NeedInputForm for
+    explicit string-question forms. The host displays the question and optional reason.
     """
 
-    question: str = Field(description="The question to show the person")
-    reason: str | None = Field(
-        default=None, description="Why progress is not possible or not desirable without it"
-    )
-    options: list[str] | None = Field(
-        default=None, min_length=1, description="Choices for a single choice"
-    )
-    answer_type: type[BaseModel] | None = Field(
-        default=None,
-        description="Pydantic model class with simple fields; the answer comes back as an instance",
-    )
+    model_config = {"extra": "forbid"}
+    kind: Literal["question"] = "question"
+    question: str
+    reason: str | None = None
+    options: list[str] | None = Field(default=None, min_length=1)
 
     _check_question = field_validator("question")(_non_blank)
 
@@ -165,16 +153,143 @@ class NeedInput(BaseModel):
     def _options_not_blank(cls, value: list[str] | None) -> list[str] | None:
         return None if value is None else [_non_blank(option) for option in value]
 
-    @field_serializer("answer_type", when_used="json")
-    def _serialize_answer_type(self, value: type[BaseModel] | None) -> str | None:
-        """A class cannot be JSON-encoded; record it as ``module:qualname``."""
-        return None if value is None else f"{value.__module__}:{value.__qualname__}"
+
+class FormChoice(BaseModel):
+    """A stored string value and the label shown in a picker."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    value: str
+    title: str
+    _check_value = field_validator("value")(_non_blank)
+    _check_title = field_validator("title")(_non_blank)
+
+
+class TextQuestion(BaseModel):
+    """One text input. Optional omitted/blank answers become the empty string."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    kind: Literal["text"] = "text"
+    id: str
+    label: str
+    help: str | None = None
+    required: bool = True
+    _check_id = field_validator("id")(_non_blank)
+    _check_label = field_validator("label")(_non_blank)
+
+
+class PickOneQuestion(TextQuestion):
+    """Choose exactly one listed value (not its display title)."""
+
+    kind: Literal["pick_one"] = "pick_one"
+    choices: list[FormChoice] = Field(min_length=1)
+
+    @field_validator("required")
+    @classmethod
+    def _required_picker(cls, required: bool) -> bool:
+        if not required:
+            raise ValueError(
+                "Optional picker questions are unsupported by Pool 1.0.16 and abort the whole form. "
+                "Use an explicit optional TextQuestion with choices in help (text, not a strict "
+                "picker), or a required picker if an answer really is required."
+            )
+        return required
+
+    @field_validator("choices")
+    @classmethod
+    def _unique_values(cls, choices: list[FormChoice]) -> list[FormChoice]:
+        if len({choice.value for choice in choices}) != len(choices):
+            raise ValueError("choice values must be unique")
+        return choices
+
+
+class PickOneOrTextQuestion(PickOneQuestion):
+    """Choose a listed value or enter a different string."""
+
+    kind: Literal["pick_one_or_text"] = "pick_one_or_text"
+
+
+FormQuestion = Annotated[
+    TextQuestion | PickOneQuestion | PickOneOrTextQuestion, Field(discriminator="kind")
+]
+
+
+class FormResponse(BaseModel):
+    """Form outcome; accepted content is a string dictionary, never a typed model.
+
+    Decline and cancel carry no content. Stop aborts the prompt separately.
+    Validate protocol shape against the owning request with validate_response().
+    Domain validation belongs to the agent, which can ask a targeted follow-up.
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    action: Literal["accept", "decline", "cancel"]
+    content: dict[str, str] | None = None
 
     @model_validator(mode="after")
-    def _one_answer_shape(self) -> "NeedInput":
-        if self.options is not None and self.answer_type is not None:
-            raise ValueError("set options or answer_type, not both")
+    def _content_for_action(self) -> "FormResponse":
+        if self.action == "accept" and self.content is None:
+            raise ValueError("accept requires content")
+        if self.action != "accept" and self.content is not None:
+            raise ValueError("decline/cancel must not carry content")
         return self
+
+
+class NeedInputForm(BaseModel):
+    """Explicit ordered string questions, not a permission or conversational question.
+
+    Supported descriptors describe text, pick one, and pick one or text. These
+    are experimentally verified Pool mappings, not an inventory of all Pool UI
+    types. Pickers must be required: Pool 1.0.16 rejects optional non-text fields
+    and aborts the whole form. Use an explicitly authored optional TextQuestion
+    instead when a text input is appropriate. No implicit conversions, defaults,
+    or domain constraints are applied.
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    kind: Literal["form"] = "form"
+    heading: str
+    reason: str | None = None
+    questions: list[FormQuestion] = Field(min_length=1)
+    _check_heading = field_validator("heading")(_non_blank)
+
+    @field_validator("questions")
+    @classmethod
+    def _unique_ids(cls, questions: list[FormQuestion]) -> list[FormQuestion]:
+        if len({question.id for question in questions}) != len(questions):
+            raise ValueError("question ids must be unique")
+        return questions
+
+    def validate_response(self, response: FormResponse) -> FormResponse:
+        """Check ids, strings, required presence and strict selection, not domain rules.
+
+        Preserve nonblank text verbatim. Missing or whitespace-only optional
+        fields become ""; required blanks fail. Never retry the whole form here.
+        """
+        response = FormResponse.model_validate(response)
+        if response.action != "accept":
+            return response
+        content = response.content
+        assert content is not None
+        unknown = content.keys() - {question.id for question in self.questions}
+        if unknown:
+            raise ValueError(f"Unknown answer ids: {sorted(unknown)}")
+        answers: dict[str, str] = {}
+        for question in self.questions:
+            value = content.get(question.id, "")
+            if not value.strip():
+                if question.required:
+                    raise ValueError(f"{question.id}: a nonblank answer is required")
+                value = ""
+            elif question.kind == "pick_one" and value not in {
+                choice.value for choice in question.choices
+            }:
+                raise ValueError(f"{question.id}: choose a listed value")
+            answers[question.id] = value
+        return FormResponse(action="accept", content=answers)
+
+
+InputRequest = Annotated[NeedInput | NeedInputForm, Field(discriminator="kind")]
+"""Structured request outputs require kind=question/form; constructors supply it."""
 
 
 class Waiting(BaseModel):
@@ -514,7 +629,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     async def handle(
         self,
         notification: dict[str, list],
-    ) -> Done | NeedInput | Waiting:
+    ) -> Done | InputRequest | Waiting:
         """Handle one interactive turn.
 
         Called once per inbound notification (or batch). Unpack
@@ -555,9 +670,13 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. ``question`` is the question; the host shows it, so do
-          not also send it with ``message()``. Add ``options=[...]`` for a
-          single choice, or ``answer_type=SomeModel`` (a pydantic class you
-          define with simple fields) for a typed answer. The answer arrives
+          not also send it with ``message()``. Add ``options=[...]`` for
+          suggested answers. This never opens a dialog; the next message answers.
+          For explicit forms use ``NeedInputForm(heading=...,
+          questions=[TextQuestion(id="name", label="Name?")])``. Domain validation
+          belongs to the agent; ask targeted follow-ups, never repeat the whole wizard. The answer is a ``FormResponse`` with action
+          accept (a string dictionary keyed by ids), decline or cancel. Raw fallback text is
+          unvalidated, not accepted form content. The answer arrives
           in the next notification. ``reason`` optionally says why you
           need it::
 

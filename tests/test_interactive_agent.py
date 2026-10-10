@@ -19,9 +19,13 @@ from nooa.interactive import (
     AgentMessage,
     AgentVars,
     Done,
+    FormResponse,
+    InputRequest,
     InteractiveAgent,
     NeedInput,
+    NeedInputForm,
     SummarizationConfig,
+    TextQuestion,
     Waiting,
     install_summarizer,
 )
@@ -128,15 +132,12 @@ def test_blank_text_is_rejected_with_one_message(build):
         build()
 
 
-def test_need_input_takes_options_or_answer_type_not_both():
-    class HowMany(BaseModel):
-        n: int
-
-    assert NeedInput(question="How many?", answer_type=HowMany).answer_type is HowMany
-    with pytest.raises(ValidationError):
-        NeedInput(question="How many?", options=["1", "2"], answer_type=HowMany)
-    with pytest.raises(ValidationError):
-        NeedInput(question="How many?", answer_type=int)  # type: ignore[arg-type]
+def test_form_rejects_obsolete_authoring():
+    for kwargs in ({"question": "Why?"}, {"answer_type": BaseModel}, {"options": ["yes"]}):
+        with pytest.raises(ValidationError):
+            NeedInputForm(
+                heading="Why?", questions=[TextQuestion(id="answer", label="Why?")], **kwargs
+            )
 
 
 class _Opaque:
@@ -156,19 +157,12 @@ def test_done_result_serialises_when_it_holds_an_arbitrary_object():
     }
 
 
-def test_need_input_answer_type_serialises_as_a_class_name():
-    class HowMany(BaseModel):
-        n: int
-
-    event = ToolCallEvent(
-        tool_call_id="c1",
-        name="return_result",
-        arguments={"result": NeedInput(question="How many?", answer_type=HowMany)},
-    )
-    dumped = json.loads(event.model_dump_json())
-    answer_type = dumped["arguments"]["result"]["answer_type"]
-    assert answer_type == f"{__name__}:{HowMany.__qualname__}"
-    assert json.loads(NeedInput(question="Why?").model_dump_json())["answer_type"] is None
+def test_form_descriptors_serialise_in_tool_events():
+    form = NeedInputForm(heading="Details", questions=[TextQuestion(id="name", label="Name?")])
+    event = ToolCallEvent(tool_call_id="c1", name="return_result", arguments={"result": form})
+    data = json.loads(event.model_dump_json())["arguments"]["result"]
+    assert data == form.model_dump(mode="json")
+    assert NeedInputForm.model_validate_json(form.model_dump_json()) == form
 
 
 def test_need_input_options_must_not_be_empty():
@@ -210,6 +204,10 @@ _NOTIFICATION = {"user_messages": ["hi"]}
     [
         ('return_result(Done(explanation="finished"))', Done),
         ('return_result(NeedInput(question="Which branch?"))', NeedInput),
+        (
+            'return_result(NeedInputForm(heading="Details?", questions=[TextQuestion(id="answer", label="Details?")]))',
+            NeedInputForm,
+        ),
         ('return_result(Waiting(explanation="waiting for job ci-42", on=["jobs:ci-42"]))', Waiting),
     ],
 )
@@ -248,10 +246,20 @@ async def test_handle_rejects_other_results():
     assert "return_result validation error" in error
 
 
-async def test_handle_batch_rejects_need_input_and_names_allowed_types():
+@pytest.mark.parametrize("name", ["NeedInput", "NeedInputForm"])
+async def test_handle_batch_rejects_need_input_and_names_allowed_types(name):
     llm = FakeLLMClient(
         [
-            _cell('return_result(NeedInput(question="Which branch?"))', "c1"),
+            _cell(
+                "return_result("
+                + (
+                    'NeedInput(question="Which?")'
+                    if name == "NeedInput"
+                    else 'NeedInputForm(heading="Which?", questions=[TextQuestion(id="answer", label="Which?")])'
+                )
+                + ")",
+                "c1",
+            ),
             _cell('return_result(Done(explanation="blocked: branch not given"))', "c2"),
         ]
     )
@@ -261,7 +269,7 @@ async def test_handle_batch_rejects_need_input_and_names_allowed_types():
     [error] = _cell_errors(agent)
     assert "return_result validation error" in error
     assert "Done | " in error and "Waiting" in error
-    assert "NeedInput" in error  # names what was returned
+    assert name in error  # names what was returned
 
 
 class _NarrowHost(InteractiveAgent, llm=FakeLLMClient()):
@@ -324,3 +332,111 @@ def test_install_summarizer_attaches(agent):
 def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction):
     with pytest.raises(ValidationError):
         SummarizationConfig(threshold_fraction=fraction)
+
+
+def test_explicit_input_roundtrip_and_extra_rejection():
+    for need in (
+        NeedInput(question="Which?", options=["main", "dev"]),
+        NeedInputForm(heading="Which?", questions=[TextQuestion(id="name", label="Name?")]),
+    ):
+        assert type(need).model_validate_json(need.model_dump_json()) == need
+        with pytest.raises(ValidationError):
+            type(need).model_validate({**need.model_dump(), "presentation": "auto"})
+
+
+def test_question_rejects_typed_answer_and_form_response_actions():
+    with pytest.raises(ValidationError):
+        NeedInput(question="How many?", answer_type=BaseModel)
+    form = NeedInputForm(heading="How many?", questions=[TextQuestion(id="count", label="Count?")])
+    assert form.validate_response(
+        FormResponse(action="accept", content={"count": "bad"})
+    ).content == {"count": "bad"}
+    for action in ("decline", "cancel"):
+        assert form.validate_response(FormResponse(action=action)).action == action
+        with pytest.raises(ValidationError):
+            FormResponse(action=action, content={"count": "1"})
+    with pytest.raises(ValidationError):
+        FormResponse(action="accept")
+
+
+def test_return_union_disambiguates_forms():
+    from pydantic import TypeAdapter
+
+    adapter = TypeAdapter(Done | InputRequest | Waiting)
+    assert isinstance(
+        adapter.validate_python(
+            {
+                "kind": "form",
+                "heading": "Details?",
+                "questions": [{"kind": "text", "id": "answer", "label": "Details?"}],
+            }
+        ),
+        NeedInputForm,
+    )
+    assert isinstance(adapter.validate_python({"kind": "question", "question": "Why?"}), NeedInput)
+    assert not issubclass(NeedInputForm, NeedInput)
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"kind": "form", "question": "Why?", "presentation": "auto"})
+
+
+def test_untagged_request_dicts_are_not_guessed():
+    from pydantic import TypeAdapter
+
+    for value in ({"question": "Why?"}, {"question": "Why?", "answer_type": None}):
+        with pytest.raises(ValidationError, match="union_tag_not_found"):
+            TypeAdapter(InputRequest).validate_python(value)
+
+
+@pytest.mark.parametrize("value", [object(), float("nan"), {"opaque": object()}])
+def test_form_response_rejects_opaque_content(value):
+    with pytest.raises(ValidationError):
+        FormResponse(action="accept", content=value)
+
+
+@pytest.mark.parametrize("value", [1, {}, ["answer"], {"answer": 2}])
+def test_form_rejects_invalid_content(value):
+    with pytest.raises(ValueError):
+        NeedInputForm(
+            heading="Name?", questions=[TextQuestion(id="answer", label="Name?")]
+        ).validate_response(FormResponse(action="accept", content=value))
+
+
+@pytest.mark.parametrize("strategy_name", ["codeact", "predict"])
+def test_strategy_return_wrappers_preserve_explicit_discriminator(strategy_name):
+    annotation = Done | InputRequest | Waiting
+    if strategy_name == "codeact":
+        from nooa.strategies.codeact import CodeActStrategy
+
+        model, validated = CodeActStrategy()._create_return_model(annotation, "handle")
+        assert validated
+        field = "result"
+    else:
+        from nooa.strategies.predict import PredictStrategy
+
+        model = PredictStrategy()._create_response_model(annotation, "handle")
+        field = "value"
+    assert "discriminator" in json.dumps(model.model_json_schema())
+    output = model.model_validate(
+        {
+            field: {
+                "kind": "form",
+                "heading": "Details?",
+                "questions": [{"kind": "text", "id": "answer", "label": "Details?"}],
+            }
+        }
+    )
+    assert isinstance(getattr(output, field), NeedInputForm)
+    with pytest.raises(ValidationError):
+        model.model_validate({field: {"question": "Details?"}})
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+async def test_handle_tagged_form_dictionary_and_json_return(as_json):
+    data = {
+        "kind": "form",
+        "heading": "Details?",
+        "questions": [{"kind": "text", "id": "answer", "label": "Details?"}],
+    }
+    code = f"return_result({json.dumps(data)!r})" if as_json else f"return_result({data!r})"
+    agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
+    assert isinstance(await agent.handle(_NOTIFICATION), NeedInputForm)

@@ -11,6 +11,7 @@ never by an agent; an agent reaches the registry only through its port.
 import asyncio
 import contextlib
 import contextvars
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
@@ -377,7 +378,7 @@ class SessionRegistry:
         if parent is None or parent.closing:
             return
         kind = update.outcome_kind
-        if kind not in ("done", "need_input", "error", "cancelled"):
+        if kind not in ("done", "need_input", "need_input_form", "error", "cancelled"):
             return
         ref = self.child_ref(child)
         source = f"child:{child.name or child.id}"
@@ -407,8 +408,18 @@ class SessionRegistry:
             else:
                 question = ChildQuestion(
                     child=ref,
-                    question=str(update.outcome.get("question", "")),
+                    question=str(update.outcome.get("heading", update.outcome.get("question", ""))),
+                    request_kind=(
+                        "form"
+                        if kind == "need_input_form"
+                        or update.outcome.get("presentation") == "form"
+                        or update.outcome.get("answer_schema") is not None
+                        else "question"
+                    ),
+                    reason=update.outcome.get("reason"),
                     options=update.outcome.get("options"),
+                    questions=update.outcome.get("questions"),
+                    request_id=update.outcome.get("request_id"),
                     answer_schema=update.outcome.get("answer_schema"),
                 )
                 if waiter is not None:
@@ -422,7 +433,11 @@ class SessionRegistry:
             delivered = True
         finally:
             # Keep a child's own durable result available if parent admission fails.
-            if delivered and kind != "need_input" and not child.options.retain:
+            if (
+                delivered
+                and kind not in ("need_input", "need_input_form")
+                and not child.options.retain
+            ):
                 # Not from inside this callback: closing awaits the child's own loop.
                 task = asyncio.get_running_loop().create_task(self.close(child.id))
                 self._background.add(task)
@@ -642,6 +657,22 @@ class SessionRegistry:
         That includes steers no model call saw (on ``user_messages``); a
         steer a model call saw was marked consumed.
         """
+        ownership = self.store.load_rows(
+            session.id, frozenset(("TurnEnded", "TurnStarted", "ItemAdmitted"))
+        )
+        pending = None
+        for event_type, raw in ownership:
+            if event_type == "TurnEnded":
+                pending = raw
+            elif event_type == "TurnStarted" or (
+                event_type == "ItemAdmitted" and raw.get("channel") == "user_messages"
+            ):
+                pending = None
+        if pending:
+            session.restore_input_request(
+                str(pending.get("outcome_kind", "")),
+                json.loads(str(pending.get("result_json", "{}"))),
+            )
         rows = self.store.load_rows(
             session.id,
             frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn", "ItemDiscarded")),

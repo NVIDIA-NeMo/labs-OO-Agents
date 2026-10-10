@@ -202,8 +202,53 @@ def load_typed(type_name: str | None, data: Any) -> Any:
         return value
     if not (isinstance(target, type) and issubclass(target, BaseModel)):
         return value
+    if (
+        target.__module__ == "nooa.interactive"
+        and target.__name__ in ("NeedInput", "NeedInputForm")
+        and isinstance(value, dict)
+    ):
+        record = migrate_input_request(value, form=target.__name__ == "NeedInputForm")
+        if record is None:
+            return value  # preserve obsolete typed request as data, not a fake restored class
+        from nooa.interactive import NeedInput, NeedInputForm
+
+        target = NeedInputForm if record.get("kind") == "form" else NeedInput
+        value = record
+    if target.__name__ == "ChildQuestion" and isinstance(value, dict):
+        value = dict(value)
+        presentation = value.pop("presentation", None)
+        if "request_kind" not in value:
+            value["request_kind"] = (
+                "form"
+                if presentation == "form" or value.get("answer_schema") is not None
+                else "question"
+            )
     try:
         return target.model_validate(value)
     except Exception:
         logger.warning("Recorded data does not validate as %s; keeping JSON data", type_name)
         return value
+
+
+def migrate_input_request(value: dict[str, Any], *, form: bool = False) -> dict[str, Any] | None:
+    """Migrate old untyped records; typed class/schema records stay unavailable data."""
+    record = dict(value)
+    record.pop("request_id", None)
+    presentation = record.pop("presentation", None)
+    answer_type = record.pop("answer_type", None)
+    answer_schema = record.pop("answer_schema", None)
+    form = form or record.get("kind") == "form" or presentation == "form"
+    if answer_type is not None or answer_schema is not None:
+        return None
+    if not form:
+        record["kind"] = "question"
+        return record
+    if "questions" in record:
+        return record
+    question = record.pop("question", "Details")
+    options = record.pop("options", None)
+    descriptor: dict[str, Any] = {"id": "answer", "label": question, "kind": "text"}
+    if options:
+        descriptor.update(kind="pick_one", choices=[{"value": c, "title": c} for c in options])
+    record.update(kind="form", heading=question, questions=[descriptor])
+    return record

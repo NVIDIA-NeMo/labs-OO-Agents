@@ -795,13 +795,36 @@ class SessionStore:
                         role="agent", content=str(raw.get("content", "")), timestamp=timestamp
                     )
                 )
-            elif event_type == "TurnEnded" and raw.get("outcome_kind") == "need_input":
-                entries.append(
-                    TranscriptEntry(
-                        role="question",
-                        content=str(raw.get("explanation", "")),
-                        timestamp=timestamp,
+            elif event_type == "TurnEnded" and raw.get("outcome_kind") in (
+                "need_input",
+                "need_input_form",
+            ):
+                content = str(raw.get("explanation", ""))
+                if raw.get("outcome_kind") == "need_input_form":
+                    try:
+                        request = json.loads(str(raw.get("result_json", "{}")))
+                    except (ValueError, TypeError):
+                        request = {}
+                    content += (
+                        "\n\nExplicit form request: FormResponse with action accept and validated "
+                        "content, decline, or cancel. Raw text remains unvalidated."
                     )
+                    if request.get("reason"):
+                        content += "\n\n" + str(request["reason"])
+                    if request.get("options"):
+                        content += "\n\nChoices: " + ", ".join(request["options"])
+                    if request.get("questions") or request.get("answer_schema"):
+                        content += (
+                            "\n\nQuestion descriptors (legacy schema if unavailable):\n```json\n"
+                        )
+                        content += json.dumps(
+                            request.get("questions", request.get("answer_schema")),
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                        content += "\n```"
+                entries.append(
+                    TranscriptEntry(role="question", content=content, timestamp=timestamp)
                 )
             elif event_type == "TurnCancelled":
                 entries.append(

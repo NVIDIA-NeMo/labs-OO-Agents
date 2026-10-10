@@ -459,3 +459,41 @@ async def test_closing_the_adapter_removes_empty_sessions_and_keeps_used_ones(
     await adapter.close()
     assert store.path_for(used).exists()
     assert not store.path_for(empty).exists()
+
+
+async def test_delete_cancellation_does_not_wait_for_bridge_cleanup(
+    make_adapter, workspace, monkeypatch
+):
+    adapter = await make_adapter(ScriptedModels())
+    sid = (await adapter.new_session(str(workspace))).session_id
+    registry = adapter.registry_for(workspace)
+    bridge = adapter.bridge(sid)
+    started, cleanup_started, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = bridge.close
+    original_delete = registry.delete
+    cleanup_done = asyncio.Event()
+
+    async def delete(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    async def close():
+        cleanup_started.set()
+        await release.wait()
+        await original()
+        cleanup_done.set()
+
+    monkeypatch.setattr(registry, "delete", delete)
+    monkeypatch.setattr(bridge, "close", close)
+    pending = asyncio.create_task(adapter.ext_method("nooa/session/delete", {"sessionId": sid}))
+    await asyncio.wait_for(started.wait(), 5)
+    pending.cancel()
+    try:
+        done, _ = await asyncio.wait({pending}, timeout=1)
+        assert pending in done and pending.cancelled()
+        await asyncio.wait_for(cleanup_started.wait(), 5)
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        await asyncio.wait_for(cleanup_done.wait(), 5)
+        monkeypatch.setattr(registry, "delete", original_delete)
