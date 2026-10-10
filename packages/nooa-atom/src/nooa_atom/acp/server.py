@@ -207,6 +207,17 @@ async def _close_in_order(*closers: Callable[[], Any] | None) -> None:
         raise pending
 
 
+def _default_model(workspace: Path) -> str | None:
+    """The first configured alias; the client can change it with ``session/set_config_option``."""
+    from nooa_atom.workspace.models import default_model
+
+    try:
+        return default_model(workspace)
+    except Exception:
+        logger.warning("Could not load the model configuration of %s", workspace, exc_info=True)
+        return None
+
+
 def model_aliases(workspace: Path) -> list[str]:
     """The model aliases configured for ``workspace``, sorted.
 
@@ -1126,7 +1137,7 @@ class AtomACPAgent:
         """The model select option (the registry's aliases plus the current model),
         and a reasoning option when the current client declares levels."""
         options: list[Any] = []
-        current = session.info.model or self._model
+        current = session.info.model or self._model or _default_model(session.options.workspace)
         aliases = model_aliases(session.options.workspace)
         if current and current not in aliases:
             aliases = [current, *aliases]

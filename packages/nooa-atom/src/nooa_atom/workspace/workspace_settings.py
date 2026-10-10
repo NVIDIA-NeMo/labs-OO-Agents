@@ -116,7 +116,7 @@ class WorkspaceSettings(Skill):
 
         Does not switch the running agent or alter a resumed session's model.
         Explicit launch overrides still take precedence; the current ACP CLI
-        requires --model or NOOA_MODEL, so it continues to use that override.
+        uses NOOA_MODEL when set, so that override still wins.
         Model availability and
         credentials are checked when the model is used, not by this operation.
         """

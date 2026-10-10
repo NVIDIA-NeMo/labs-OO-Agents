@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> None:
         description=(
             "Run an ACP agent server and record every JSON-RPC frame in both directions "
             "to a JSON Lines log. Example: python -m nooa_atom.acp.tee --log acp.jsonl -- "
-            "nooa atom --model my-alias"
+            "nooa atom"
         ),
     )
     parser.add_argument(
