@@ -3,7 +3,7 @@
 """LSP Skill module for NOOA agents."""
 
 import pathlib
-from typing import Dict
+from typing import Any, Dict
 
 from nooa.skill import Skill
 
@@ -15,13 +15,19 @@ from .registry import LSPServerRegistry
 class LSPSkill(Skill):
     """Provides Language Server Protocol (LSP) capabilities for code intelligence.
 
+    ALL methods are async coroutines - always await them; calling without
+    `await` returns a coroutine object, not a facade/result. Symbols returned
+    by document_symbols() are dicts - use symbol["name"] and
+    symbol["location"]["range"], not attribute access.
+    However, `LSPDocumentFacade.diagnostics()` is synchronous and must not be awaited.
+
     Use this skill to perform repository-aware semantic code navigation:
         lsp = await self.lsp.for_file("src/orders.py")
         defs = await lsp.definition(line=10, character=5)
         refs = await lsp.references(line=10, character=5)
         
-    Note: All methods in this skill and the returned facade document requests are async coroutines
-    and must be awaited. However, `LSPDocumentFacade.diagnostics()` is synchronous and must not be awaited.
+    For a name-based one-shot lookup (compiler-accurate alternative to text search):
+        refs = await self.lsp.find_references("src/orders.py", "OrderService")
     """
 
     def __init__(self, root_uri: str | None = None):
@@ -39,7 +45,7 @@ class LSPSkill(Skill):
         self._opened_documents: dict[str, tuple[int, str]] = {}
 
     async def for_file(self, filepath: str) -> LSPDocumentFacade | None:
-        """Get an LSP facade for a given file.
+        """Get an LSP facade for a given file. Must be awaited.
 
         Args:
             filepath: Path to the source file (e.g., 'src/main.py').
@@ -112,13 +118,32 @@ class LSPSkill(Skill):
 
         return LSPDocumentFacade(client, uri)
 
-    async def find_references(self, filepath: str, symbol: str) -> Any:
-        """Find all references to a named symbol - compiler-accurate via LSP.
-        
-        Prefer this over text search when precision matters. 
-        Note that this returns LSP Locations and requires the symbol to be present
-        in the document's document_symbols first to find its position. If you know
-        the position, use `lsp.for_file` and then `references(line, character)` directly.
+    async def find_references(
+        self, filepath: str, symbol: str
+    ) -> list[dict[str, Any]]:
+        """Find references to a named symbol using the language server. Must be awaited.
+
+        Compiler-accurate alternative to text-based search: resolves the
+        symbol's declaration via document_symbols, then queries references
+        at that exact position (declaration included in results).
+
+        Prefer this to text search when precision matters. The symbol must be
+        present in the document's symbols. For a known position, use
+        ``lsp.for_file`` and then ``references(line, character)`` directly.
+
+        Args:
+            filepath: Path to the file where the symbol is defined.
+            symbol: The symbol name to find references for (e.g. 'get_llm_client').
+
+        Returns:
+            Decoded LSP Location dictionaries. Empty if no server or symbol is
+            available.
+
+        Raises:
+            LSPClientError: If the language server returns a malformed result.
+
+        Example:
+            refs = await self.lsp.find_references("src/nooa/unifiedllm/registry.py", "get_llm_client")
         """
         facade = await self.for_file(filepath)
         if not facade:
@@ -154,7 +179,7 @@ class LSPSkill(Skill):
         return []
 
     async def shutdown(self):
-        """Shutdown all running LSP clients."""
+        """Shutdown all running LSP clients. Must be awaited."""
         for client in self._clients.values():
             await client.stop()
         self._clients.clear()

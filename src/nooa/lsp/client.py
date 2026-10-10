@@ -256,17 +256,49 @@ class LSPClient:
         self.process.stdin.write(header + content)
 
     # High-level LSP methods
-    async def definition(self, uri: str, position: dict[str, int]) -> Any:
-        """Return the definition locations for a document position."""
-        return await self.send_request(
+    async def definition(
+        self, uri: str, position: dict[str, int]
+    ) -> list[dict[str, Any]]:
+        """Return definition locations for a document position.
+
+        A single location is wrapped in a list, and a null result becomes an
+        empty list. Raises LSPClientError if the server returns an invalid
+        result.
+        """
+        result = await self.send_request(
             "textDocument/definition", {"textDocument": {"uri": uri}, "position": position}
+        )
+        if result is None:
+            return []
+        if isinstance(result, dict):
+            return [result]
+        if isinstance(result, list) and all(
+            isinstance(location, dict) for location in result
+        ):
+            return result
+        raise LSPClientError(
+            "Invalid textDocument/definition response: expected a location, "
+            "a list of locations, or null"
         )
 
     async def references(
         self, uri: str, position: dict[str, int], include_declaration: bool = False
-    ) -> Any:
-        """Return symbol references, optionally including its declaration."""
-        return await self.send_request(
+    ) -> list[dict[str, Any]]:
+        """Return references to the symbol at a document position.
+
+        Args:
+            uri: URI of the document to query.
+            position: Zero-based line and character of the symbol.
+            include_declaration: Whether to include the symbol declaration.
+
+        Returns:
+            Decoded LSP Location dictionaries; an empty list if none are found.
+
+        Raises:
+            LSPClientError: If the server response is not a list of locations
+                or null.
+        """
+        result = await self.send_request(
             "textDocument/references",
             {
                 "textDocument": {"uri": uri},
@@ -274,6 +306,16 @@ class LSPClient:
                 "context": {"includeDeclaration": include_declaration},
             },
         )
+        if result is None:
+            return []
+        if not isinstance(result, list) or not all(
+            isinstance(location, dict) for location in result
+        ):
+            raise LSPClientError(
+                "Invalid textDocument/references response: expected a list "
+                "of locations or null"
+            )
+        return result
 
     async def document_symbol(self, uri: str) -> Any:
         """Return the symbols declared in a document."""

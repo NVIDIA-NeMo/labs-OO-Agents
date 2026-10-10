@@ -17,15 +17,17 @@ class LSPDocumentFacade:
         self._client = client
         self._uri = uri
 
-    async def definition(self, line: int, character: int) -> Any:
-        """Find the definition of the symbol at the given position.
+    async def definition(
+        self, line: int, character: int
+    ) -> list[dict[str, Any]]:
+        """Find the definition of the symbol at the given position. Must be awaited.
         
         Args:
             line: 0-indexed line number.
             character: 0-indexed character offset.
             
         Returns:
-            The raw LSP location result (either a single Location or a list).
+            Decoded LSP Location dictionaries, or an empty list if none exist.
         """
         return await self._client.definition(
             self._uri, {"line": line, "character": character}
@@ -33,8 +35,8 @@ class LSPDocumentFacade:
 
     async def references(
         self, line: int, character: int, include_declaration: bool = True
-    ) -> Any:
-        """Find all references to the symbol at the given position.
+    ) -> list[dict[str, Any]]:
+        """Find all references to the symbol at the given position. Must be awaited.
         
         Args:
             line: 0-indexed line number.
@@ -42,14 +44,14 @@ class LSPDocumentFacade:
             include_declaration: Whether to include the declaration itself in the results.
             
         Returns:
-            A list of LSP Locations.
+            A list of decoded LSP Location dictionaries, or an empty list.
         """
         return await self._client.references(
             self._uri, {"line": line, "character": character}, include_declaration
         )
 
     async def document_symbols(self) -> Any:
-        """Get all symbols defined in this document.
+        """Get all symbols defined in this document. Must be awaited.
         
         Returns:
             A list of LSP SymbolInformation or DocumentSymbol objects.

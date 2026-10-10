@@ -225,6 +225,42 @@ class TestStartupTransition:
         await client.stop()
 
 
+class TestDefinitionResult:
+    @pytest.mark.parametrize(
+        ("raw_result", "expected"),
+        [
+            (None, []),
+            ({"uri": "file:///tmp/x.py", "range": {}}, [{"uri": "file:///tmp/x.py", "range": {}}]),
+            ([{"uri": "file:///tmp/x.py", "range": {}}], [{"uri": "file:///tmp/x.py", "range": {}}]),
+        ],
+    )
+    async def test_definition_always_returns_a_list(
+        self, monkeypatch, raw_result, expected
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+
+        async def fake_send_request(method, params=None):
+            return raw_result
+
+        monkeypatch.setattr(client, "send_request", fake_send_request)
+
+        result = await client.definition("file:///tmp/x.py", {"line": 0, "character": 0})
+
+        assert result == expected
+        assert isinstance(result, list)
+
+    async def test_definition_rejects_malformed_result(self, monkeypatch):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+
+        async def fake_send_request(method, params=None):
+            return "not a location"
+
+        monkeypatch.setattr(client, "send_request", fake_send_request)
+
+        with pytest.raises(LSPClientError, match="textDocument/definition"):
+            await client.definition("file:///tmp/x.py", {"line": 0, "character": 0})
+
+
 # ---------------------------------------------------------------------------
 # DEGRADED on undecodable server output
 # ---------------------------------------------------------------------------
