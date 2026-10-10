@@ -518,7 +518,7 @@ class TestLSPPackageInterface:
         monkeypatch.setattr(facade, "document_symbols", fake_document_symbols)
         monkeypatch.setattr(facade, "references", fake_references)
 
-        assert await skill.find_references("src/x.py", "Target") == []
+        assert await skill.find_references("/tmp/x.py", "Target") == []
         assert captured == [(2, 4)]
 
     @pytest.mark.parametrize(
@@ -533,7 +533,7 @@ class TestLSPPackageInterface:
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
         client.position_encoding = encoding
         facade = LSPDocumentFacade(client, uri)
-        source = f"def \U00010400Target():\n"
+        source = "def \U00010400Target():\n"
         skill._opened_documents[uri] = (1, source)
         client_key = tuple(client.command)
         skill._clients[client_key] = client
@@ -565,7 +565,7 @@ class TestLSPPackageInterface:
         monkeypatch.setattr(facade, "document_symbols", fake_document_symbols)
         monkeypatch.setattr(facade, "references", fake_references)
 
-        assert await skill.find_references("src/x.py", "Target") == []
+        assert await skill.find_references("/tmp/x.py", "Target") == []
         assert captured == [(0, target_start)]
 
     @pytest.mark.parametrize(
@@ -610,9 +610,53 @@ class TestLSPPackageInterface:
         monkeypatch.setattr(facade, "document_symbols", fake_document_symbols)
         monkeypatch.setattr(facade, "references", fake_references)
 
-        assert await skill.find_references("src/x.py", "Target") == []
+        assert await skill.find_references("/tmp/x.py", "Target") == []
         expected_calls = [expected_position] if expected_position else []
         assert captured == expected_calls
+
+    async def test_flat_symbol_uses_facade_uri_and_lsp_line_endings(
+        self, monkeypatch, tmp_path
+    ):
+        skill = LSPSkill(root_uri=tmp_path.as_uri())
+        source = tmp_path / "x.py"
+        document_uri = source.as_uri()
+        client = LSPClient(command=["fake-server"], root_uri=tmp_path.as_uri())
+        facade = LSPDocumentFacade(client, document_uri)
+        source_text = "head\u2028line\rsecond\r\nthird\nprefix\x85def Target()\n"
+        skill._opened_documents[document_uri] = (1, source_text)
+        client_key = tuple(client.command)
+        skill._clients[client_key] = client
+        skill._opened_document_clients[document_uri] = client_key
+        symbol_line = "prefix\x85def Target()"
+        flat_symbol = SymbolInformation(
+            name="Target",
+            kind=12,
+            location=Location(
+                uri="file:///tmp/other.py",
+                range=Range(
+                    start=Position(line=3, character=0),
+                    end=Position(line=3, character=len(symbol_line)),
+                ),
+            ),
+        )
+        captured = []
+
+        async def fake_for_file(filepath):
+            return facade
+
+        async def fake_document_symbols():
+            return [flat_symbol]
+
+        async def fake_references(line, character, include_declaration=True):
+            captured.append((line, character))
+            return []
+
+        monkeypatch.setattr(skill, "for_file", fake_for_file)
+        monkeypatch.setattr(facade, "document_symbols", fake_document_symbols)
+        monkeypatch.setattr(facade, "references", fake_references)
+
+        assert await skill.find_references(str(source), "Target") == []
+        assert captured == [(3, len("prefix\x85def "))]
 
     async def test_document_symbol_information_is_typed(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
@@ -859,6 +903,36 @@ class TestLSPPackageInterface:
 
 
 class TestDegradedTransition:
+    @pytest.mark.parametrize("invalid_message", [b"\xff", b"[]", b"42", b"null"])
+    async def test_invalid_messages_degrade_and_reader_continues(
+        self, monkeypatch, invalid_message
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        response = json.dumps(
+            {"jsonrpc": "2.0", "id": 2, "result": []}
+        ).encode()
+        process = _FakeProcess(
+            responses={1: [_initialize_response(), invalid_message], 2: [response]}
+        )
+
+        async def fake_exec(*args, **kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await client.start()
+
+        for _ in range(100):
+            if client.status == LSPClientStatus.DEGRADED:
+                break
+            await asyncio.sleep(0.01)
+
+        assert client.status == LSPClientStatus.DEGRADED
+        assert client._decode_errors == 1
+        assert await client.definition(
+            "file:///tmp/x.py", {"line": 0, "character": 0}
+        ) == []
+        await client.stop()
+
     async def test_json_parse_error_marks_degraded(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
         # The bad frame is pushed alongside the initialize response.

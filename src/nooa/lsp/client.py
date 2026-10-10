@@ -187,11 +187,20 @@ class LSPClient:
                     return
                 try:
                     message = json.loads(content)
-                    self._handle_message(message)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     self._decode_errors += 1
                     self.status = LSPClientStatus.DEGRADED
                     logger.error("Failed to decode LSP message: %s", content)
+                    continue
+                if not isinstance(message, dict):
+                    self._decode_errors += 1
+                    self.status = LSPClientStatus.DEGRADED
+                    logger.error(
+                        "Invalid LSP message: expected a JSON object, got %s",
+                        type(message).__name__,
+                    )
+                    continue
+                self._handle_message(message)
             # The loop only ends when the stream reaches EOF: the pipe closed
             # under us, so the server is gone. asyncio's process.wait() can stay
             # pending even after the child dies (returncode set, waiter never

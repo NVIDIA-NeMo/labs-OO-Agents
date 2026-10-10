@@ -4,6 +4,7 @@
 
 import asyncio
 import pathlib
+import re
 from collections.abc import Sequence
 from typing import Dict
 
@@ -162,6 +163,7 @@ class LSPSkill(Skill):
                 self._opened_documents.pop(stale_uri, None)
                 self._opened_document_clients.pop(stale_uri, None)
             self._clients.pop(server_cmd_key)
+            await client.stop()
             client = None
 
         if client is None:
@@ -204,11 +206,14 @@ class LSPSkill(Skill):
         facade = await self.for_file(filepath)
         if not facade:
             return []
-            
+
+        document_uri = pathlib.Path(filepath).absolute().as_uri()
         symbols = await facade.document_symbols()
-        
+
         def _find_symbol_pos(
-            syms: Sequence[DocumentSymbol | SymbolInformation], target: str
+            syms: Sequence[DocumentSymbol | SymbolInformation],
+            target: str,
+            uri: str,
         ) -> Position | None:
             """Find a symbol's LSP position, searching nested symbols too."""
             for item in syms:
@@ -218,15 +223,17 @@ class LSPSkill(Skill):
 
                     symbol_range = item.location.range
                     start = symbol_range.start
-                    sym_uri = item.location.uri
-                    client_key = self._opened_document_clients.get(sym_uri)
+                    client_key = self._opened_document_clients.get(uri)
                     if (
-                        sym_uri not in self._opened_documents
+                        uri not in self._opened_documents
+                        or client_key is None
                         or client_key not in self._clients
                     ):
                         return None
 
-                    lines = self._opened_documents[sym_uri][1].splitlines()
+                    lines = re.split(
+                        r"\r\n|\r|\n", self._opened_documents[uri][1]
+                    )
                     end = symbol_range.end
                     encoding = self._clients[client_key].position_encoding
                     if (
@@ -266,13 +273,13 @@ class LSPSkill(Skill):
 
                 if isinstance(item, DocumentSymbol) and item.children:
                     result = _find_symbol_pos(
-                        item.children, target
+                        item.children, target, uri
                     )
                     if result:
                         return result
             return None
             
-        pos = _find_symbol_pos(symbols, symbol)
+        pos = _find_symbol_pos(symbols, symbol, document_uri)
         if pos:
             return await facade.references(pos.line, pos.character)
         return []

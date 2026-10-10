@@ -99,6 +99,7 @@ async def test_for_file_replaces_failed_cached_client(tmp_path, monkeypatch):
     skill._opened_document_clients[healthy_uri] = healthy_key
     started = []
     sent = []
+    stopped = []
 
     async def start(client):
         client.status = LSPClientStatus.COMPLETE
@@ -107,8 +108,12 @@ async def test_for_file_replaces_failed_cached_client(tmp_path, monkeypatch):
     async def send_notification(client, method, params=None):
         sent.append((method, params))
 
+    async def stop(client):
+        stopped.append(client)
+
     monkeypatch.setattr(LSPClient, "start", start)
     monkeypatch.setattr(LSPClient, "send_notification", send_notification)
+    monkeypatch.setattr(LSPClient, "stop", stop)
 
     await skill.for_file(str(source))
 
@@ -116,6 +121,7 @@ async def test_for_file_replaces_failed_cached_client(tmp_path, monkeypatch):
     assert replacement is not failed_client
     assert replacement.status == LSPClientStatus.COMPLETE
     assert started == [replacement]
+    assert stopped == [failed_client]
     assert [method for method, _ in sent] == ["textDocument/didOpen"]
     assert sent[0][1]["textDocument"]["version"] == 1
     assert skill._opened_documents[uri] == (1, "value = 1\n")
