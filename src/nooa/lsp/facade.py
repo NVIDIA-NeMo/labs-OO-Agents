@@ -2,9 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Agent-facing facade for interacting with LSP documents."""
 
-from typing import Any
-
 from .client import LSPClient
+from .protocol import (
+    Diagnostic,
+    DocumentSymbol,
+    Location,
+    LocationLink,
+    SymbolInformation,
+    WorkspaceEdit,
+    WorkspaceSymbol,
+)
 
 
 class LSPDocumentFacade:
@@ -20,7 +27,7 @@ class LSPDocumentFacade:
 
     async def definition(
         self, line: int, character: int
-    ) -> list[dict[str, Any]]:
+    ) -> list[Location | LocationLink]:
         """Find the definition of the symbol at the given position. Must be awaited.
         
         Args:
@@ -28,7 +35,7 @@ class LSPDocumentFacade:
             character: 0-indexed character offset.
             
         Returns:
-            Decoded LSP Location dictionaries, or an empty list if none exist.
+            Typed LSP Location models, or an empty list if none exist.
         """
         return await self._client.definition(
             self._uri, {"line": line, "character": character}
@@ -36,7 +43,7 @@ class LSPDocumentFacade:
 
     async def references(
         self, line: int, character: int, include_declaration: bool = True
-    ) -> list[dict[str, Any]]:
+    ) -> list[Location]:
         """Find all references to the symbol at the given position. Must be awaited.
         
         Args:
@@ -45,21 +52,28 @@ class LSPDocumentFacade:
             include_declaration: Whether to include the declaration itself in the results.
             
         Returns:
-            A list of decoded LSP Location dictionaries, or an empty list.
+            A list of typed LSP Location models, or an empty list.
         """
         return await self._client.references(
             self._uri, {"line": line, "character": character}, include_declaration
         )
 
-    async def document_symbols(self) -> Any:
+    async def document_symbols(self) -> list[DocumentSymbol | SymbolInformation]:
         """Get all symbols defined in this document. Must be awaited.
         
         Returns:
-            A list of LSP SymbolInformation or DocumentSymbol objects.
+            Typed LSP SymbolInformation or DocumentSymbol models. A null
+            server response is normalized to an empty list.
         """
         return await self._client.document_symbol(self._uri)
 
-    async def rename(self, line: int, character: int, new_name: str) -> Any:
+    async def workspace_symbols(self, query: str) -> list[WorkspaceSymbol]:
+        """Find typed symbols across the workspace matching a query."""
+        return await self._client.workspace_symbol(query)
+
+    async def rename(
+        self, line: int, character: int, new_name: str
+    ) -> WorkspaceEdit | None:
         """Rename the symbol at the given position.
         
         Args:
@@ -68,13 +82,13 @@ class LSPDocumentFacade:
             new_name: The new name to apply.
             
         Returns:
-            A WorkspaceEdit object describing the required file modifications.
+            A typed WorkspaceEdit model, or None if the rename is unavailable.
         """
         return await self._client.rename(
             self._uri, {"line": line, "character": character}, new_name
         )
 
-    def diagnostics(self) -> list[Any]:
+    def diagnostics(self) -> list[Diagnostic]:
         """Get the latest diagnostics (errors, warnings) for this document.
         
         Returns:

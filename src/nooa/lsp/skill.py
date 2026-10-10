@@ -3,12 +3,14 @@
 """LSP Skill module for NOOA agents."""
 
 import pathlib
-from typing import Any, Dict
+from collections.abc import Sequence
+from typing import Dict
 
 from nooa.skill import Skill
 
 from .client import LSPClient
 from .facade import LSPDocumentFacade
+from .protocol import DocumentSymbol, Location, Position, SymbolInformation
 from .registry import LSPServerRegistry
 
 
@@ -16,9 +18,9 @@ class LSPSkill(Skill):
     """Provides Language Server Protocol (LSP) capabilities for code intelligence.
 
     ALL methods are async coroutines - always await them; calling without
-    `await` returns a coroutine object, not a facade/result. Symbols returned
-    by document_symbols() are dicts - use symbol["name"] and
-    symbol["location"]["range"], not attribute access.
+    `await` returns a coroutine object, not a facade/result. Symbol results are
+    typed models with fields such as `symbol.name`, `symbol.selectionRange`,
+    or `symbol.location`.
     However, `LSPDocumentFacade.diagnostics()` is synchronous and must not be awaited.
 
     Use this skill to perform repository-aware semantic code navigation:
@@ -121,7 +123,7 @@ class LSPSkill(Skill):
 
     async def find_references(
         self, filepath: str, symbol: str
-    ) -> list[dict[str, Any]]:
+    ) -> list[Location]:
         """Find references to a named symbol using the language server. Must be awaited.
 
         Compiler-accurate alternative to text-based search: resolves the
@@ -137,7 +139,7 @@ class LSPSkill(Skill):
             symbol: The symbol name to find references for (e.g. 'get_llm_client').
 
         Returns:
-            Decoded LSP Location dictionaries. Empty if no server or symbol is
+            Typed LSP Location models. Empty if no server or symbol is
             available.
 
         Raises:
@@ -152,32 +154,41 @@ class LSPSkill(Skill):
             
         symbols = await facade.document_symbols()
         
-        def _find_symbol_pos(syms: list[Any], target: str) -> dict[str, int] | None:
+        def _find_symbol_pos(
+            syms: Sequence[DocumentSymbol | SymbolInformation], target: str
+        ) -> Position | None:
             """Find a symbol's LSP position, searching nested symbols too."""
-            for s in syms:
-                if s.get("name") == target:
-                    if "selectionRange" in s:
-                        return s["selectionRange"]["start"]
-                    elif "location" in s and "range" in s["location"]:
-                        start = s["location"]["range"]["start"]
-                        sym_uri = s["location"]["uri"]
-                        if sym_uri in self._opened_documents:
-                            content = self._opened_documents[sym_uri][1]
-                            lines = content.splitlines()
-                            if 0 <= start["line"] < len(lines):
-                                offset = lines[start["line"]].find(target, start["character"])
-                                if offset != -1:
-                                    return {"line": start["line"], "character": offset}
-                        return start
-                if "children" in s and s["children"]:
-                    res = _find_symbol_pos(s["children"], target)
-                    if res:
-                        return res
+            for item in syms:
+                if item.name == target:
+                    if isinstance(item, DocumentSymbol):
+                        return item.selectionRange.start
+
+                    start = item.location.range.start
+                    sym_uri = item.location.uri
+                    if sym_uri in self._opened_documents:
+                        content = self._opened_documents[sym_uri][1]
+                        lines = content.splitlines()
+                        if 0 <= start.line < len(lines):
+                            offset = lines[start.line].find(
+                                target, start.character
+                            )
+                            if offset != -1:
+                                return Position(
+                                    line=start.line, character=offset
+                                )
+                    return start
+
+                if isinstance(item, DocumentSymbol) and item.children:
+                    result = _find_symbol_pos(
+                        item.children, target
+                    )
+                    if result:
+                        return result
             return None
             
-        pos = _find_symbol_pos(symbols if isinstance(symbols, list) else [], symbol)
+        pos = _find_symbol_pos(symbols, symbol)
         if pos:
-            return await facade.references(pos["line"], pos["character"])
+            return await facade.references(pos.line, pos.character)
         return []
 
     async def shutdown(self):

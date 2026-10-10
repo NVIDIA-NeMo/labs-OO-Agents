@@ -18,6 +18,7 @@ for one integration test that uses pyright-langserver when available.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import shutil
 from collections.abc import Callable
@@ -25,6 +26,21 @@ from collections.abc import Callable
 import pytest
 
 from nooa.lsp.client import LSPClient, LSPClientError, LSPClientStatus
+from nooa.lsp.facade import LSPDocumentFacade
+from nooa.lsp.protocol import (
+    Diagnostic,
+    DocumentSymbol,
+    Location,
+    Position,
+    Range,
+    SymbolInformation,
+    TextDocumentEdit,
+    TextEdit,
+    WorkspaceEdit,
+    WorkspaceSymbol,
+)
+from nooa.lsp.registry import LSPServerConfig, LSPServerRegistry
+from nooa.lsp.skill import LSPSkill
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -209,7 +225,19 @@ class TestStartupTransition:
     async def test_queries_work_when_complete(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
         definition_result = json.dumps(
-            {"jsonrpc": "2.0", "id": 2, "result": [{"uri": "file:///tmp/x.py"}]}
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": [
+                    {
+                        "uri": "file:///tmp/x.py",
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 4},
+                        },
+                    }
+                ],
+            }
         ).encode()
         process = _FakeProcess(responses={1: [_initialize_response()], 2: [definition_result]})
 
@@ -220,7 +248,15 @@ class TestStartupTransition:
         await client.start()
 
         result = await client.definition("file:///tmp/x.py", {"line": 1, "character": 2})
-        assert result == [{"uri": "file:///tmp/x.py"}]
+        assert result == [
+            Location(
+                uri="file:///tmp/x.py",
+                range={
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 4},
+                },
+            )
+        ]
         assert client.status == LSPClientStatus.COMPLETE
         await client.stop()
 
@@ -230,8 +266,44 @@ class TestDefinitionResult:
         ("raw_result", "expected"),
         [
             (None, []),
-            ({"uri": "file:///tmp/x.py", "range": {}}, [{"uri": "file:///tmp/x.py", "range": {}}]),
-            ([{"uri": "file:///tmp/x.py", "range": {}}], [{"uri": "file:///tmp/x.py", "range": {}}]),
+            (
+                {
+                    "uri": "file:///tmp/x.py",
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 4},
+                    },
+                },
+                [
+                    Location(
+                        uri="file:///tmp/x.py",
+                        range={
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 4},
+                        },
+                    )
+                ],
+            ),
+            (
+                [
+                    {
+                        "uri": "file:///tmp/x.py",
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 4},
+                        },
+                    }
+                ],
+                [
+                    Location(
+                        uri="file:///tmp/x.py",
+                        range={
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 4},
+                        },
+                    )
+                ],
+            ),
         ],
     )
     async def test_definition_always_returns_a_list(
@@ -259,6 +331,308 @@ class TestDefinitionResult:
 
         with pytest.raises(LSPClientError, match="textDocument/definition"):
             await client.definition("file:///tmp/x.py", {"line": 0, "character": 0})
+
+
+class TestLSPPackageInterface:
+    def test_skill_and_protocol_models_are_importable(self):
+        package = importlib.import_module("nooa.lsp")
+        skill_module = importlib.import_module("nooa.lsp.skill")
+
+        assert skill_module.LSPSkill is package.LSPSkill
+        assert package.WorkspaceSymbol is WorkspaceSymbol
+
+    def test_registry_resolves_and_registers_extensions(self):
+        registry = LSPServerRegistry()
+
+        assert registry.get_server_for_extension(".py").command == [
+            "pyright-langserver",
+            "--stdio",
+        ]
+        assert registry.get_server_for_extension(".unknown") is None
+
+        custom = LSPServerConfig(
+            command=["custom-lsp"], extensions=[".custom"]
+        )
+        registry.register(custom)
+        assert registry.get_server_for_extension(".custom") is custom
+
+    async def test_references_are_parsed_as_locations(self, monkeypatch):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        raw_location = {
+            "uri": "file:///tmp/x.py",
+            "range": {
+                "start": {"line": 1, "character": 2},
+                "end": {"line": 1, "character": 5},
+            },
+        }
+        calls = []
+
+        async def fake_send_request(method, params=None):
+            calls.append((method, params))
+            return [raw_location]
+
+        monkeypatch.setattr(client, "send_request", fake_send_request)
+        result = await client.references(
+            "file:///tmp/x.py", {"line": 1, "character": 2}, True
+        )
+
+        assert result == [Location.model_validate(raw_location)]
+        assert calls == [
+            (
+                "textDocument/references",
+                {
+                    "textDocument": {"uri": "file:///tmp/x.py"},
+                    "position": {"line": 1, "character": 2},
+                    "context": {"includeDeclaration": True},
+                },
+            )
+        ]
+
+    async def test_document_symbols_are_typed_recursively(self, monkeypatch):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        raw_symbol = {
+            "name": "Outer",
+            "kind": 5,
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 4, "character": 0},
+            },
+            "selectionRange": {
+                "start": {"line": 0, "character": 6},
+                "end": {"line": 0, "character": 11},
+            },
+            "children": [
+                {
+                    "name": "Inner",
+                    "kind": 6,
+                    "range": {
+                        "start": {"line": 1, "character": 4},
+                        "end": {"line": 2, "character": 0},
+                    },
+                    "selectionRange": {
+                        "start": {"line": 1, "character": 8},
+                        "end": {"line": 1, "character": 13},
+                    },
+                }
+            ],
+        }
+
+        async def fake_send_request(method, params=None):
+            assert method == "textDocument/documentSymbol"
+            return [raw_symbol]
+
+        monkeypatch.setattr(client, "send_request", fake_send_request)
+        symbols = await client.document_symbol("file:///tmp/x.py")
+
+        assert isinstance(symbols[0], DocumentSymbol)
+        assert isinstance(symbols[0].children[0], DocumentSymbol)
+        assert symbols[0].children[0].name == "Inner"
+
+    async def test_skill_resolves_nested_typed_document_symbol(
+        self, monkeypatch
+    ):
+        skill = LSPSkill(root_uri="file:///tmp")
+        facade = LSPDocumentFacade(
+            LSPClient(command=["fake-server"], root_uri="file:///tmp"),
+            "file:///tmp/x.py",
+        )
+        nested_symbol = DocumentSymbol(
+            name="Target",
+            kind=12,
+            range=Range(
+                start=Position(line=2, character=0),
+                end=Position(line=2, character=12),
+            ),
+            selectionRange=Range(
+                start=Position(line=2, character=4),
+                end=Position(line=2, character=10),
+            ),
+        )
+        parent_symbol = DocumentSymbol(
+            name="Parent",
+            kind=5,
+            range=Range(
+                start=Position(line=0, character=0),
+                end=Position(line=4, character=0),
+            ),
+            selectionRange=Range(
+                start=Position(line=0, character=6),
+                end=Position(line=0, character=12),
+            ),
+            children=[nested_symbol],
+        )
+        captured = []
+
+        async def fake_for_file(filepath):
+            return facade
+
+        async def fake_document_symbols():
+            return [parent_symbol]
+
+        async def fake_references(line, character, include_declaration=True):
+            captured.append((line, character))
+            return []
+
+        monkeypatch.setattr(skill, "for_file", fake_for_file)
+        monkeypatch.setattr(facade, "document_symbols", fake_document_symbols)
+        monkeypatch.setattr(facade, "references", fake_references)
+
+        assert await skill.find_references("src/x.py", "Target") == []
+        assert captured == [(2, 4)]
+
+    async def test_document_symbol_information_is_typed(self, monkeypatch):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        raw_symbol = {
+            "name": "Target",
+            "kind": 12,
+            "containerName": "module",
+            "location": {
+                "uri": "file:///tmp/x.py",
+                "range": {
+                    "start": {"line": 0, "character": 4},
+                    "end": {"line": 0, "character": 10},
+                },
+            },
+        }
+
+        async def fake_send_request(method, params=None):
+            return [raw_symbol]
+
+        monkeypatch.setattr(client, "send_request", fake_send_request)
+        symbols = await client.document_symbol("file:///tmp/x.py")
+
+        assert isinstance(symbols[0], SymbolInformation)
+        assert symbols[0].location.range.start == Position(line=0, character=4)
+
+    async def test_workspace_symbols_are_typed_and_exposed_by_facade(
+        self, monkeypatch
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        raw_symbol = {
+            "name": "Target",
+            "kind": 12,
+            "containerName": "module",
+            "location": {"uri": "file:///tmp/x.py"},
+        }
+        calls = []
+
+        async def fake_send_request(method, params=None):
+            calls.append((method, params))
+            return [raw_symbol]
+
+        monkeypatch.setattr(client, "send_request", fake_send_request)
+        facade = LSPDocumentFacade(client, "file:///tmp/x.py")
+        symbols = await facade.workspace_symbols("Target")
+
+        assert symbols == [WorkspaceSymbol.model_validate(raw_symbol)]
+        assert calls == [("workspace/symbol", {"query": "Target"})]
+
+    async def test_rename_returns_a_typed_workspace_edit(self, monkeypatch):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        raw_edit = {
+            "changes": {
+                "file:///tmp/x.py": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 3},
+                        },
+                        "newText": "New",
+                    }
+                ]
+            },
+            "documentChanges": [
+                {
+                    "textDocument": {
+                        "uri": "file:///tmp/x.py",
+                        "version": 2,
+                    },
+                    "edits": [
+                        {
+                            "range": {
+                                "start": {"line": 1, "character": 0},
+                                "end": {"line": 1, "character": 3},
+                            },
+                            "newText": "New",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        async def fake_send_request(method, params=None):
+            assert method == "textDocument/rename"
+            return raw_edit
+
+        monkeypatch.setattr(client, "send_request", fake_send_request)
+        edit = await client.rename(
+            "file:///tmp/x.py", {"line": 0, "character": 0}, "New"
+        )
+
+        assert isinstance(edit, WorkspaceEdit)
+        assert edit.changes["file:///tmp/x.py"][0] == TextEdit.model_validate(
+            raw_edit["changes"]["file:///tmp/x.py"][0]
+        )
+        assert isinstance(edit.documentChanges[0], TextDocumentEdit)
+
+    def test_diagnostics_are_typed_and_malformed_data_degrades_client(self):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        raw_diagnostic = {
+            "range": {
+                "start": {"line": 1, "character": 0},
+                "end": {"line": 1, "character": 4},
+            },
+            "severity": 1,
+            "message": "problem",
+        }
+        message = {
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": "file:///tmp/x.py",
+                "diagnostics": [raw_diagnostic],
+            },
+        }
+
+        client._handle_message(message)
+        diagnostics = client.get_diagnostics("file:///tmp/x.py")
+        assert diagnostics == [Diagnostic.model_validate(raw_diagnostic)]
+        assert isinstance(diagnostics[0], Diagnostic)
+
+        client._handle_message(
+            {
+                **message,
+                "params": {
+                    "uri": "file:///tmp/x.py",
+                    "diagnostics": ["invalid"],
+                },
+            }
+        )
+        assert client.status == LSPClientStatus.DEGRADED
+        assert client.get_diagnostics("file:///tmp/x.py") == diagnostics
+
+    async def test_json_rpc_error_is_raised_as_client_error(self, monkeypatch):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        response = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "error": {"code": -32601, "message": "method not found"},
+            }
+        ).encode()
+        process = _FakeProcess(
+            responses={1: [_initialize_response()], 2: [response]}
+        )
+
+        async def fake_exec(*args, **kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await client.start()
+        try:
+            with pytest.raises(LSPClientError):
+                await client.workspace_symbol("Target")
+        finally:
+            await client.stop()
 
 
 # ---------------------------------------------------------------------------

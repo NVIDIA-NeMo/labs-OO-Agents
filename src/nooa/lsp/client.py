@@ -7,7 +7,18 @@ import json
 import logging
 from typing import Any, Dict
 
-from .protocol import InitializeResult
+from pydantic import TypeAdapter, ValidationError
+
+from .protocol import (
+    Diagnostic,
+    DocumentSymbol,
+    InitializeResult,
+    Location,
+    LocationLink,
+    SymbolInformation,
+    WorkspaceEdit,
+    WorkspaceSymbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +87,10 @@ class LSPClient:
                 },
             },
         )
-        self.capabilities = init_res.get("capabilities", {})
+        initialize_result = self._parse_response(
+            "initialize", init_res, InitializeResult
+        )
+        self.capabilities = initialize_result.capabilities
 
         # Send initialized
         await self.send_notification("initialized", {})
@@ -88,7 +102,7 @@ class LSPClient:
         elif self.status == LSPClientStatus.DEGRADED and not self._decode_errors:
             # DEGRADED here is just the handshake placeholder, not a decode error.
             self.status = LSPClientStatus.COMPLETE
-        return InitializeResult(capabilities=self.capabilities)
+        return initialize_result
 
     async def stop(self):
         """Shutdown the LSP server and clean up resources."""
@@ -214,7 +228,34 @@ class LSPClient:
                 params = message.get("params", {})
                 uri = params.get("uri")
                 if uri:
-                    self._diagnostics[uri] = params.get("diagnostics", [])
+                    try:
+                        self._diagnostics[uri] = self._parse_list_response(
+                            "textDocument/publishDiagnostics",
+                            params.get("diagnostics", []),
+                            Diagnostic,
+                        )
+                    except LSPClientError as error:
+                        self.status = LSPClientStatus.DEGRADED
+                        logger.error("Invalid LSP diagnostics: %s", error)
+
+    @staticmethod
+    def _parse_response(method: str, result: Any, result_type: Any) -> Any:
+        try:
+            return TypeAdapter(result_type).validate_python(result)
+        except ValidationError as error:
+            raise LSPClientError(f"Invalid {method} response") from error
+
+    @classmethod
+    def _parse_list_response(
+        cls, method: str, result: Any, item_type: Any
+    ) -> list[Any]:
+        if result is None:
+            return []
+        if not isinstance(result, list):
+            raise LSPClientError(
+                f"Invalid {method} response: expected a list or null"
+            )
+        return cls._parse_response(method, result, list[item_type])
 
     async def send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Send a JSON-RPC request and return its response result."""
@@ -258,7 +299,7 @@ class LSPClient:
     # High-level LSP methods
     async def definition(
         self, uri: str, position: dict[str, int]
-    ) -> list[dict[str, Any]]:
+    ) -> list[Location | LocationLink]:
         """Return definition locations for a document position.
 
         A single location is wrapped in a list, and a null result becomes an
@@ -271,19 +312,14 @@ class LSPClient:
         if result is None:
             return []
         if isinstance(result, dict):
-            return [result]
-        if isinstance(result, list) and all(
-            isinstance(location, dict) for location in result
-        ):
-            return result
-        raise LSPClientError(
-            "Invalid textDocument/definition response: expected a location, "
-            "a list of locations, or null"
+            result = [result]
+        return self._parse_list_response(
+            "textDocument/definition", result, Location | LocationLink
         )
 
     async def references(
         self, uri: str, position: dict[str, int], include_declaration: bool = False
-    ) -> list[dict[str, Any]]:
+    ) -> list[Location]:
         """Return references to the symbol at a document position.
 
         Args:
@@ -292,7 +328,7 @@ class LSPClient:
             include_declaration: Whether to include the symbol declaration.
 
         Returns:
-            Decoded LSP Location dictionaries; an empty list if none are found.
+            Typed LSP Location models; an empty list if none are found.
 
         Raises:
             LSPClientError: If the server response is not a list of locations
@@ -306,30 +342,44 @@ class LSPClient:
                 "context": {"includeDeclaration": include_declaration},
             },
         )
-        if result is None:
-            return []
-        if not isinstance(result, list) or not all(
-            isinstance(location, dict) for location in result
-        ):
-            raise LSPClientError(
-                "Invalid textDocument/references response: expected a list "
-                "of locations or null"
-            )
-        return result
-
-    async def document_symbol(self, uri: str) -> Any:
-        """Return the symbols declared in a document."""
-        return await self.send_request(
-            "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
+        return self._parse_list_response(
+            "textDocument/references", result, Location
         )
 
-    async def rename(self, uri: str, position: dict[str, int], new_name: str) -> Any:
-        """Return the workspace edit for renaming a symbol."""
-        return await self.send_request(
+    async def document_symbol(
+        self, uri: str
+    ) -> list[DocumentSymbol | SymbolInformation]:
+        """Return typed symbols declared in a document."""
+        result = await self.send_request(
+            "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
+        )
+        return self._parse_list_response(
+            "textDocument/documentSymbol",
+            result,
+            DocumentSymbol | SymbolInformation,
+        )
+
+    async def workspace_symbol(self, query: str) -> list[WorkspaceSymbol]:
+        """Return typed workspace symbols matching a query string."""
+        result = await self.send_request("workspace/symbol", {"query": query})
+        return self._parse_list_response(
+            "workspace/symbol", result, WorkspaceSymbol
+        )
+
+    async def rename(
+        self, uri: str, position: dict[str, int], new_name: str
+    ) -> WorkspaceEdit | None:
+        """Return a typed workspace edit for renaming a symbol."""
+        result = await self.send_request(
             "textDocument/rename",
             {"textDocument": {"uri": uri}, "position": position, "newName": new_name},
         )
+        if result is None:
+            return None
+        return self._parse_response(
+            "textDocument/rename", result, WorkspaceEdit
+        )
 
-    def get_diagnostics(self, uri: str) -> list[Any]:
+    def get_diagnostics(self, uri: str) -> list[Diagnostic]:
         """Return the latest diagnostics published for a document URI."""
         return self._diagnostics.get(uri, [])

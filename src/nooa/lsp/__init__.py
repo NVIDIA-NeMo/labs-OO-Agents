@@ -4,7 +4,25 @@
 
 from .client import LSPClient, LSPClientError
 from .facade import LSPDocumentFacade
-from .protocol import Diagnostic, InitializeResult, Location, Position, Range, SymbolInformation
+from .protocol import (
+    CreateFile,
+    DeleteFile,
+    Diagnostic,
+    DocumentSymbol,
+    InitializeResult,
+    Location,
+    LocationLink,
+    Position,
+    Range,
+    RenameFile,
+    SymbolInformation,
+    TextDocumentEdit,
+    TextEdit,
+    VersionedTextDocumentIdentifier,
+    WorkspaceEdit,
+    WorkspaceSymbol,
+    WorkspaceSymbolLocation,
+)
 from .registry import LSPServerConfig, LSPServerRegistry
 from .skill import LSPSkill
 
@@ -19,6 +37,17 @@ __all__ = [
     "Position",
     "Range",
     "Location",
+    "LocationLink",
     "Diagnostic",
+    "CreateFile",
+    "DeleteFile",
+    "DocumentSymbol",
+    "RenameFile",
     "SymbolInformation",
+    "TextEdit",
+    "TextDocumentEdit",
+    "VersionedTextDocumentIdentifier",
+    "WorkspaceEdit",
+    "WorkspaceSymbol",
+    "WorkspaceSymbolLocation",
 ]
