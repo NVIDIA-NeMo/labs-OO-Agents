@@ -14,6 +14,7 @@ class LSPDocumentFacade:
     """
 
     def __init__(self, client: LSPClient, uri: str):
+        """Create a document facade backed by a client and document URI."""
         self._client = client
         self._uri = uri
 

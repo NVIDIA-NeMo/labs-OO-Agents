@@ -15,6 +15,7 @@ class LSPServerRegistry:
     """Registry to look up LSP servers based on file extensions."""
 
     def __init__(self):
+        """Initialize the registry with common language server commands."""
         self._servers: list[LSPServerConfig] = []
         
         # Register standard language servers

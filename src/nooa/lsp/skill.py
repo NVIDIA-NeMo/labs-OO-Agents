@@ -31,6 +31,7 @@ class LSPSkill(Skill):
     """
 
     def __init__(self, root_uri: str | None = None):
+        """Initialize language server clients for the given workspace URI."""
         super().__init__()
         if root_uri is None:
             self._root_uri = pathlib.Path.cwd().as_uri()
@@ -152,6 +153,7 @@ class LSPSkill(Skill):
         symbols = await facade.document_symbols()
         
         def _find_symbol_pos(syms: list[Any], target: str) -> dict[str, int] | None:
+            """Find a symbol's LSP position, searching nested symbols too."""
             for s in syms:
                 if s.get("name") == target:
                     if "selectionRange" in s:
