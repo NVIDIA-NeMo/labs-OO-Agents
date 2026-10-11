@@ -5,7 +5,8 @@
 Runs the real server (``nooa_atom.acp.cli.run``) and the real Atom
 agent with a fake model. Flags pick the model's script: ``--blocking``
 (a cell that never ends), ``--shell`` (a cell blocked in a shell command),
-``--question`` (asks which branch, then finishes), ``--noisy`` (prints to
+``--question`` (conversational branch question), ``--form`` (explicit branch form),
+``--noisy`` (prints to
 stdout while building each session's model, as tracing does); default: one message
 and ``Done``. ``--tee PATH`` turns on the in-process tee.
 """
@@ -56,6 +57,13 @@ def llm_factory(alias, workspace) -> FakeLLMClient:
         script = [_cell("await self.shell.run('sleep 30', timeout=30)")]
     elif "--blocking" in sys.argv:
         script = [_cell("await asyncio.Event().wait()")]
+    elif "--form" in sys.argv:
+        script = [
+            _cell(
+                "return_result(NeedInputForm(heading='Which branch?', questions=[PickOneQuestion(id='answer', label='Branch', choices=[{'value': 'main', 'title': 'main'}, {'value': 'dev', 'title': 'dev'}])]))"
+            ),
+            _cell("self.message('Using the answer.')\nreturn_result(Done(explanation='answered'))"),
+        ]
     elif "--question" in sys.argv:
         script = [
             _cell("return_result(NeedInput(question='Which branch?', options=['main', 'dev']))"),

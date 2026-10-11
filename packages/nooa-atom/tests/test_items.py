@@ -25,14 +25,9 @@ from nooa_atom.session.items import (
 from nooa_atom.session.options import SessionOptions
 from pydantic import BaseModel, ValidationError
 
-from nooa.interactive import Done, NeedInput
+from nooa.interactive import Done, NeedInput, NeedInputForm, TextQuestion
 
 _CHILD = ChildRef(id="c1", name="Review auth", depth=1, status="running")
-
-
-class _Answer(BaseModel):
-    branch: str
-    force: bool = False
 
 
 def test_models_validate():
@@ -57,9 +52,12 @@ def test_models_validate():
 
 def test_child_question_from_need_input_carries_the_json_schema():
     question = ChildQuestion.from_need_input(
-        _CHILD, NeedInput(question="Which branch?", answer_type=_Answer)
+        _CHILD,
+        NeedInputForm(
+            heading="Which branch?", questions=[TextQuestion(id="branch", label="Branch?")]
+        ),
     )
-    assert question.answer_schema == _Answer.model_json_schema()
+    assert question.questions == [TextQuestion(id="branch", label="Branch?")]
     assert question.options is None
     assert ChildQuestion.model_validate_json(question.model_dump_json()) == question
 
@@ -164,3 +162,22 @@ def test_options_require_an_agent_and_do_not_serialise_the_llm(tmp_path):
     options = SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent", llm=object())
     assert "llm" not in options.model_dump()
     assert Path(options.model_dump(mode="json")["workspace"]) == tmp_path
+
+
+@pytest.mark.parametrize("request_model", [NeedInput, NeedInputForm])
+def test_child_question_retains_explicit_kind_and_reason(request_model):
+    question = ChildQuestion.from_need_input(
+        _CHILD,
+        (
+            NeedInputForm(
+                heading="Which?",
+                reason="Avoid mistakes.",
+                questions=[TextQuestion(id="answer", label="Which?")],
+            )
+            if request_model is NeedInputForm
+            else NeedInput(question="Which?", reason="Avoid mistakes.")
+        ),
+    )
+    assert question.request_kind == ("form" if request_model is NeedInputForm else "question")
+    assert question.reason == "Avoid mistakes."
+    assert ChildQuestion.model_validate_json(question.model_dump_json()) == question

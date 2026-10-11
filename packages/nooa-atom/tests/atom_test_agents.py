@@ -26,7 +26,19 @@ from pydantic import BaseModel, Field
 
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
-from nooa.interactive import Done, InteractiveAgent, NeedInput, Waiting  # noqa: F401
+from nooa.interactive import (  # noqa: F401
+    Done,
+    FormChoice,  # noqa: F401 - generation constructor
+    FormQuestion,  # noqa: F401 - generation descriptor union
+    FormResponse,
+    InteractiveAgent,
+    NeedInput,
+    NeedInputForm,
+    PickOneOrTextQuestion,  # noqa: F401 - generation constructor
+    PickOneQuestion,  # noqa: F401 - generation constructor
+    TextQuestion,  # noqa: F401 - generation constructor
+    Waiting,
+)
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage, ToolCall
 
 # Cells can reach these; tests replace them with fresh events per test.

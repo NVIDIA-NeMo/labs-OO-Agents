@@ -173,6 +173,14 @@ class SessionPort:
         )
 
     @hidden
+    async def answer_child(self, child_id: str, item: Any, *, request_id: str) -> Receipt:
+        """Answer only the exact durable request carried by a ChildQuestion."""
+        child = await self._registry.open_child(self._session, child_id)
+        return await child.submit(
+            as_data(item), source=_parent_source(self._session), request_id=request_id
+        )
+
+    @hidden
     async def steer_child(self, child_id: str, text: str) -> Receipt:
         """Steer a child's running turn (a message if it is idle)."""
         child = await self._registry.open_child(self._session, child_id)

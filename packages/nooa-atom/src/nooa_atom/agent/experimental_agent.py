@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from nooa import hidden, strategy
 from nooa.agentdoc import doc  # noqa: F401 — used by dynamic context expressions
 from nooa.config import CodeActConfig
-from nooa.interactive import Done, NeedInput, Waiting
+from nooa.interactive import Done, InputRequest, Waiting
 from nooa.strategies import CodeActV2
 from nooa_atom.agent.agent import AtomAgent
 
@@ -64,19 +64,26 @@ class ExperimentalAtomAgent(AtomAgent):
 
     End every turn with exactly one in-cell ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=..., options=[...])`` only when a person must answer, and
+    ``NeedInput(question=..., options=[...])`` for a
+    lightweight question only when a person must answer; use
+    ``NeedInputForm(heading=..., questions=[TextQuestion(id="name", label="Name?")])``
+    for explicit forms. Use TextQuestion, PickOneQuestion or PickOneOrTextQuestion
+    with stable unique ids and FormChoice(value=..., title=...) choices. Domain validation
+    belongs to the agent: ask a targeted follow-up, never repeat the whole wizard. Answers are ``FormResponse(action="accept", content=...)``
+    with a string dictionary keyed by question ids, or action ``decline``/``cancel``. Unsupported hosts
+    preserve the request as text; raw text is not validated accepted content, and
     ``Waiting(explanation=..., on=[...])`` only while something you started is still
     running, naming the channel or job it waits on.
     """
 
     @hidden
     @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_EXPERIMENTAL_CONTEXT)
-    async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
+    async def handle(self, notification: dict[str, list[Any]]) -> Done | InputRequest | Waiting:
         """Handle the newest request and anything else that arrived.
 
         ``notification`` maps a channel name to the items that arrived on it
         (``"user_messages"``, ``"system_messages"``, ``"slash_commands"``,
-        ``"delegates"``). End with ``Done``, ``NeedInput`` or ``Waiting`` as the
+        ``"delegates"``). End with ``Done``, ``NeedInput``, ``NeedInputForm`` or ``Waiting`` as the
         class instructions say.
 
         Python locals live for one method call; when the call returns they

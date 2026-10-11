@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from pydantic import BaseModel, Field, SerializeAsAny, ValidationError, field_validator
 
 from nooa.context_blocks import EventBase
-from nooa.interactive import Done, NeedInput
+from nooa.interactive import Done, FormQuestion, FormResponse, NeedInput, NeedInputForm
 from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:
@@ -149,25 +149,47 @@ class ChildResult(BaseModel):
 
 
 class ChildQuestion(BaseModel):
-    """A child asked a question (its ``NeedInput``); answer with ``item.answer(...)``.
+    """A child's input request. Forms carry ordered descriptors, not answer classes.
 
-    ``answer_schema`` is the JSON schema of the child's ``answer_type`` when
-    it gave one; the answer is then a dict matching it.
+    Submit a FormResponse; the child validates protocol shape and owns the request.
+    Legacy answer_schema data is retained only for unavailable old typed requests.
     """
 
     child: ChildRef
     question: str
+    request_kind: Literal["question", "form"] = "question"
+    reason: str | None = None
     options: list[str] | None = None
+    questions: list[FormQuestion] | None = None
+    request_id: str | None = None
     answer_schema: dict[str, Any] | None = None
 
     @classmethod
-    def from_need_input(cls, child: ChildRef, need: NeedInput) -> "ChildQuestion":
-        """Convert a child's ``NeedInput``; its answer class becomes a JSON schema."""
-        schema = need.answer_type.model_json_schema() if need.answer_type is not None else None
-        return cls(child=child, question=need.question, options=need.options, answer_schema=schema)
+    def from_need_input(
+        cls, child: ChildRef, need: NeedInput | NeedInputForm, *, request_id: str | None = None
+    ) -> "ChildQuestion":
+        """Copy question descriptors as durable data for the parent."""
+        return cls(
+            child=child,
+            question=need.heading if isinstance(need, NeedInputForm) else need.question,
+            request_kind=need.kind,
+            request_id=request_id,
+            reason=need.reason,
+            options=need.options if isinstance(need, NeedInput) else None,
+            questions=need.questions if isinstance(need, NeedInputForm) else None,
+        )
 
     async def answer(self, answer: Any) -> "Receipt":
         """Send the answer to the child; shorthand for ``self.child.send(answer)``."""
+        if self.request_kind == "form":
+            answer = FormResponse.model_validate(answer)
+            if self.request_id is None:
+                raise ValueError(
+                    "Legacy child form has no request ownership token; request a fresh form."
+                )
+            return await _port(self.child).answer_child(
+                self.child.id, answer, request_id=self.request_id
+            )
         return await self.child.send(answer)
 
 
@@ -367,14 +389,14 @@ class TurnEndedUpdate(_Update):
     """A turn ended.
 
     ``outcome`` is the outcome as data (``Done``/``Waiting`` fields; for a
-    question: ``question``, ``options``, ``answer_schema``; for a cancel:
+    question: ``question``, ``options``; form: ``heading``, ``questions``, ``request_id``; for a cancel:
     ``by``; for an error: ``error``). ``result_type`` is the
     ``module:qualname`` of a pydantic ``Done.result``, so a receiver can
     rebuild it. ``usage`` is this turn's own delta.
     """
 
     kind: Literal["turn_ended"] = "turn_ended"
-    outcome_kind: Literal["done", "need_input", "waiting", "cancelled", "error"]
+    outcome_kind: Literal["done", "need_input", "need_input_form", "waiting", "cancelled", "error"]
     outcome: dict[str, Any] = Field(default_factory=dict)
     result_type: str | None = None
     usage: Usage = Field(default_factory=Usage)

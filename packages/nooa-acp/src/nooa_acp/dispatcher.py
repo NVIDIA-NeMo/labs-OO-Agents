@@ -8,12 +8,11 @@ from contextlib import suppress
 from typing import Any
 
 from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
-from pydantic import BaseModel
 
-from nooa.interactive import Done, NeedInput, Waiting
+from nooa.interactive import Done, InputRequest, NeedInput, NeedInputForm, Waiting
 from nooa.slash_dispatch import SlashCommandResult
 
-TurnResult = Done | NeedInput | Waiting
+TurnResult = Done | InputRequest | Waiting
 
 
 class InteractiveSessionDispatcher:
@@ -91,21 +90,34 @@ class InteractiveSessionDispatcher:
     def _show(self, result: TurnResult) -> None:
         """Send the person the text a typed result carries, as an agent message.
 
-        ``Done.message`` is the reply, ``Waiting.message`` the line shown while
-        waiting, and a ``NeedInput`` shows its question, its reason, and its
-        choices or the fields of its ``answer_type`` with their types and
-        descriptions. This server has no forms, so a typed answer still
-        arrives as the person's text reply. The agent is told not to send
-        these itself, so the host must.
+        Done/Waiting carry optional messages. Questions show suggestions; explicit
+        forms show response/validation guidance and field descriptions. This legacy
+        text-only host does not validate text as accepted form content.
         """
-        if isinstance(result, NeedInput):
-            parts = [result.question]
+        if isinstance(result, (NeedInput, NeedInputForm)):
+            parts = [result.heading if isinstance(result, NeedInputForm) else result.question]
             if result.reason:
                 parts.append(result.reason)
-            if result.options:
+            if isinstance(result, NeedInput) and result.options:
                 parts.append("\n".join(f"- {option}" for option in result.options))
-            if result.answer_type is not None:
-                parts.append("Reply with these fields:\n" + _describe_fields(result.answer_type))
+            if isinstance(result, NeedInputForm):
+                parts.append(
+                    "Explicit form requested; this host has no dialog. Text is unvalidated.\n"
+                    "Text replies require agent interpretation and targeted follow-up. Structured "
+                    "FormResponse submission requires a capable session host."
+                )
+                parts.append(
+                    "\n".join(
+                        f"- {q.id}: {q.label}"
+                        + (f" — {q.help}" if q.help else "")
+                        + (
+                            " Choices: " + ", ".join(f"{c.title} ({c.value})" for c in q.choices)
+                            if q.kind != "text"
+                            else ""
+                        )
+                        for q in result.questions
+                    )
+                )
             text: str | None = "\n\n".join(parts)
         else:
             text = result.message
@@ -134,16 +146,3 @@ class InteractiveSessionDispatcher:
     async def close(self) -> None:
         await self.cancel()
         await self.agent.close()
-
-
-def _describe_fields(model: type[BaseModel]) -> str:
-    """One ``- name (type): description`` line per field of ``model``."""
-    lines = []
-    for name, field in model.model_fields.items():
-        annotation = field.annotation
-        type_name = annotation.__name__ if isinstance(annotation, type) else str(annotation)
-        line = f"- {name} ({type_name})"
-        if field.description:
-            line += f": {field.description}"
-        lines.append(line)
-    return "\n".join(lines)

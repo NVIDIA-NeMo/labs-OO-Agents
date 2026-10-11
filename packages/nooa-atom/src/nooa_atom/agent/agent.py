@@ -12,9 +12,17 @@ from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
     Done,
+    FormChoice,  # noqa: F401 - generation constructor
+    FormQuestion,  # noqa: F401 - generation descriptor union
+    FormResponse,
+    InputRequest,
     InteractiveAgent,
     NeedInput,
+    NeedInputForm,
+    PickOneOrTextQuestion,  # noqa: F401 - generation constructor
+    PickOneQuestion,  # noqa: F401 - generation constructor
     SummarizationConfig,
+    TextQuestion,  # noqa: F401 - generation constructor
     Waiting,
     install_summarizer,
 )
@@ -62,6 +70,8 @@ __all__ = [
     "DepthLimitError",
     "Done",
     "NeedInput",
+    "NeedInputForm",
+    "FormResponse",
     "TaskResult",
     "Waiting",
     "session_title_request",
@@ -112,7 +122,14 @@ class AtomAgent(InteractiveAgent):
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=..., options=[...])`` only when a person must answer,
+    ``NeedInput(question=..., options=[...])`` for a
+    lightweight question only when a person must answer; use
+    ``NeedInputForm(heading=..., questions=[TextQuestion(id="name", label="Name?")])``
+    for explicit forms. Use TextQuestion, PickOneQuestion or PickOneOrTextQuestion
+    with stable unique ids and FormChoice(value=..., title=...) choices. Domain validation
+    belongs to the agent: ask a targeted follow-up, never repeat the whole wizard. Answers are ``FormResponse(action="accept", content=...)``
+    with a string dictionary keyed by question ids, or action ``decline``/``cancel``. Unsupported hosts
+    preserve the request as text; raw text is not validated accepted content,
     and ``Waiting(explanation=..., on=[...])`` only while something you started
     is still running, naming the channel or job it waits on.
     """
@@ -448,7 +465,7 @@ class AtomAgent(InteractiveAgent):
 
     @hidden
     @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
-    async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
+    async def handle(self, notification: dict[str, list[Any]]) -> Done | InputRequest | Waiting:
         """Handle one interactive turn: the newest request and anything else that arrived.
 
         ``notification`` maps a channel name to the items that arrived on it:
@@ -467,10 +484,16 @@ class AtomAgent(InteractiveAgent):
               self.message("Fixed the off-by-one in `parse()`; the parser tests pass.")
               return_result(Done(explanation="fixed parse() and ran its tests"))
 
-        - ``NeedInput(question=..., options=[...])`` when you cannot go on
-          without an answer from the person. The host shows ``question``, so
+        - ``NeedInput(question=..., options=[...])``
+          for a lightweight question. For an explicit form use
+          ``NeedInputForm(heading=..., questions=[TextQuestion(id="name", label="Name?")])``.
+          Choice descriptors are PickOneQuestion and PickOneOrTextQuestion, with
+          FormChoice(value=..., title=...) choices and stable unique question ids.
+          Domain validation belongs to you: ask a targeted follow-up, not the entire wizard. The host shows ``question``, so
           do not also send it with ``self.message()``. Use ``options`` for a
-          choice; the answer arrives in the next notification.
+          suggested answer; questions never open dialogs. Forms deliver a ``FormResponse``
+          with action accept (a string dictionary keyed by ids), decline or cancel in the next
+          notification. Raw fallback text remains unvalidated.
 
         - ``Waiting(explanation=..., on=[...])`` when a job you started is
           still running and nothing else is left to do. ``on`` names what

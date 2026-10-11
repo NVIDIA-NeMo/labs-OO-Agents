@@ -59,46 +59,134 @@ Pool team says which of the two the request means. The open prompt stays open
 until those messages are handled; Stop withdraws the ones no turn took and
 lists them.
 
-A question the agent asks (`NeedInput`) goes to the client as a form when
-the client advertises `elicitation.form`, as a permission request when it
-is a yes/no choice, and otherwise as text answered by the next message.
-When the client is Pool (`clientInfo.name` is `pool`), free-text, choice and
-typed questions use Pool's `_poolside/elicitation` form instead. Pool shows
-string fields only, so every field is sent as a string with the expected type
-in its description ("a whole number", "yes or no", "a comma-separated list")
-and the answer is converted back. `NeedInput(options=[...])` offers suggestions
-in a picker plus free text (`anyOf` of a `oneOf` of `{const, title}` entries
-and a string). The person can type an alternative in the form without Escape.
-A listed choice matches ignoring case and surrounding spaces; any other
-nonblank string is passed through exactly as entered. Missing, blank or
-non-string option answers are asked once more, then left as text.
+### Questions and explicit forms
 
-Typed `answer_type` fields still validate against the Pydantic model. A string
-`Literal` is a strict picker; `Literal[...] | str` deliberately adds free text.
-A typed answer that does not validate is asked once more, then left as text.
-A form with more than one field sends `_meta["poolside/field_order"]` with the
-fields in model order. Yes/no questions keep the permission request. Other ACP
-clients still receive an enum for `options` when they support standard forms.
-If Pool fails the request, questions fall back to text for the rest of the
-connection.
+Module-visible constructors from `nooa.interactive` work in generated CodeAct
+cells and tagged JSON/Predict outputs:
 
-Accepted Pool and standard ACP form answers are echoed once as user messages before
-any subsequent agent reply. Typed answers display their validated JSON; text answers
-keep their text. Ordinary prompts, Pool inputs and yes/no permission answers are not
-re-echoed. `_nooa/session/inject` inputs echo once on admission, including a buffered
-steer's same-ID queued fallback. Invalid standard form answers are not admitted and
-leave the question as
-text (Pool retries once). Declined/dismissed forms still submit the silent
-`(declined to answer)` marker; stopping an open form submits nothing. Loading a
-session replays every admitted user item once, including the stored decline marker,
-as before.
+```python
+from nooa.interactive import (
+    NeedInput, NeedInputForm, FormResponse, TextQuestion,
+    PickOneQuestion, PickOneOrTextQuestion, FormChoice,
+)
 
-These picker/text shapes were measured in Pool 1.0.16. Its built-in agent's
-wire capture accepts unlisted text for both single-field and multi-field
-`anyOf[oneOf, string]` forms. This is a Pool extension, not general JSON Schema
-support: native number, boolean and array widgets are not supported. The
-capture establishes accepted values, not the exact on-screen label or key
-sequence; rendering in other versions must be checked separately.
+# Suggestions only: next ordinary message answers; never a dialog/permission.
+return_result(NeedInput(question="Which branch?", options=["main", "dev"]))
+
+# Explicit ordered questions; ids are stable, unique answer keys.
+return_result(NeedInputForm(
+    heading="Release details", reason="Choose the destination before deploying.",
+    questions=[
+        TextQuestion(id="name", label="Release name?", help="A human-readable name"),
+        PickOneQuestion(id="branch", label="Branch?", choices=[
+            FormChoice(value="main", title="Main branch"),
+            FormChoice(value="dev", title="Development branch"),
+        ]),
+        PickOneOrTextQuestion(id="target", label="Destination?", choices=[
+            FormChoice(value="staging", title="Staging cluster"),
+        ]),
+        TextQuestion(id="notes", label="Notes?", required=False),
+    ],
+))
+
+# Outcome on notification["user_messages"], or external host/parent submission:
+await session.submit(FormResponse(action="accept", content={
+    "name": "Aurora", "branch": "dev", "target": "another cluster", "notes": "",
+}))
+await child_question.answer(FormResponse(action="decline"))
+FormResponse(action="cancel")
+```
+
+`NeedInputForm` has `heading`, optional `reason`, and a nonempty `questions` list.
+`FormQuestion` is a discriminated union (`kind`: `text`, `pick_one`,
+`pick_one_or_text`); constructors supply tags, JSON descriptors must include them.
+Each has `id`, `label`, optional `help`, and `required` (default true). Choice
+values and question ids must be unique and nonblank. Every accepted answer is a
+**dictionary of strings keyed by ids**, live and after JSON roundtrip. Strict
+pickers accept exact **values**, not titles or case/whitespace-normalized matches.
+Optional missing/whitespace-only answers explicitly become `""`; required missing
+or blank answers fail protocol validation. Nonblank text is preserved verbatim.
+The required list is sent to clients, but server-side checks do not assume clients
+enforce it. No native multi-select, integer, boolean, implicit parsing, defaults,
+or domain constraints are promised by this API. Agents validate domain meaning
+and ask targeted follow-ups instead of automatically repeating the entire wizard.
+
+`InputRequest` discriminates `kind="question"`/`"form"`; the turn result annotation
+is `Done | InputRequest | Waiting`. Both input results are forbidden in unattended
+`handle_batch`. The host renders requests, so do not also send them via `message()`.
+
+### Capabilities and failure guarantees
+
+Pool (`clientInfo.name="pool"`) uses `_poolside/elicitation`, with experimentally
+tested text (`type: string`), strict picker (`oneOf` const/title), and picker or
+free text (`anyOf` picker/string) schemas. These mappings derive from Pool 1.0.16;
+**they are not an inventory of all Pool UI types**. Distinct choice labels are
+preserved. **Pickers must be required.** Pool 1.0.16 automatically declines the
+entire form if any non-text picker is optional; constructors reject
+`PickOneQuestion(required=False)` and `PickOneOrTextQuestion(required=False)`
+with actionable guidance before a UI request. Optional text remains supported.
+If text is appropriate, explicitly author a `TextQuestion(required=False)` with
+choice values/titles in its help. This is a text input, not a strict picker:
+validate any domain restriction yourself. Neither required flags nor picker
+meaning are silently changed. The original seven-field shape with two optional
+pickers cannot render unchanged in this version.
+
+Multi-question requests send `_meta["poolside/field_order"]` in list order. No
+additional widget flags or speculative constraints are sent. The nested
+picker branch of `anyOf` does not need `type: string` in this binary; missing
+that type was not the cause of the seven-field failure.
+
+Standard ACP uses advertised `elicitation.form`: text and single string `enum`
+map directly. Distinct labels appear in help because a distinct enum-label field
+has not been verified. Choice-or-text explicitly falls back to a text property
+with suggestions in help, **not** a strict enum or an unverified `anyOf`.
+
+Accept, decline, and cancel retain their separate `FormResponse` actions. Only
+accept carries content. A Pool automatic unsupported-schema decline and a user's
+Escape decline return the same `{"action":"decline"}` without a reason. The
+adapter cannot infer intent from this wire action and does not label it a user
+decision or reinterpret it as a pending request. The original heading/reason and
+complete descriptors are rendered as visible text before asking, and preserved
+on replay; decline is still admitted once as the actual client-reported outcome.
+No automatic reask of the whole form is performed. Stop is transport/prompt cancellation and submits no
+answer, even if a client swallows cancellation. Ownership is checked without an
+await before admission; superseded dialogs cannot admit stale responses. Successful
+user-message admission claims/invalidates the form once, even before dispatch starts.
+Withdrawal does not resurrect the dialog. ChildQuestion carries an internal durable
+request token; its answer method rejects superseded same-id forms. Manual session
+submit targets the current request; hosts retaining a request can supply request_id. Responses
+are recorded before queueing, echoed once, and replayed without reopening dialogs.
+Malformed client payloads fail closed **once** with actionable fallback guidance;
+there is no whole-form retry or manufactured answer. Failed Pool extension calls
+disable the extension for that connection. Unsupported/text-only hosts preserve
+an explicit request with descriptors and response guidance; raw text stays raw,
+not an accepted form outcome. No URL/nested-object widget support is claimed.
+
+`FormResponse` validates its envelope and string-dictionary shape. The owning
+request's `validate_response()` additionally checks ids, required answers, and
+strict selections. External hosts should use `session.submit()`; `admit()` is
+record-before-queue plumbing, not an external form-validation API. Child requests
+carry descriptors as data; the owning child validates at submission.
+
+### Migration and durable records
+
+Replace draft `NeedInputForm(question=..., answer_type=Model/options=...)` with
+`NeedInputForm(heading=..., questions=[...])`. Old typed authoring and presentation
+switches are rejected. No dynamic Pydantic answer class is needed or restored.
+
+New durable forms store `outcome_kind="need_input_form"`, `kind="form"`, heading,
+reason, ordered descriptors, and an internal ownership token directly; JSON roundtrips preserve them.
+Questions retain `need_input`. Recovery preserves request intent without reopening
+historical dialogs, and does not restore forms superseded by later admission or
+an unfinished turn. Legacy child forms without ownership tokens require a fresh
+request before they can be answered through ChildQuestion.answer(). Old explicitly untyped text/choice forms migrate to one
+`answer` descriptor with string-dictionary content. Old records containing an
+answer class or JSON answer schema remain unavailable original data: acceptance
+is refused and the agent must request a new descriptor form, even if the old class
+is importable. This does not claim recovery of old custom validators. Decline,
+cancel, or explanatory raw text remain possible. Old options-only/auto question
+records remain conversational. Old ChildQuestion schema data is retained only as
+legacy display data. Historical decline markers cannot recover lost action intent.
 
 ## Skills and MCP servers
 
