@@ -154,7 +154,7 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
 
     Behaves identically to :class:`TruncatingStringIO` for in-memory
     head/tail truncation, but additionally streams all written content to a
-    temporary file on disk.  When truncated, ``getvalue()`` includes the
+    temporary UTF-8 file on disk.  When truncated, ``getvalue()`` includes the
     file path in the notice so the user can inspect the full output.
 
     File I/O errors are handled gracefully — if the temp file cannot be
@@ -181,7 +181,7 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         self._file: io.TextIOWrapper | None = None
         try:
             fd, path = tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
-            self._file = os.fdopen(fd, "w")
+            self._file = os.fdopen(fd, "w", encoding="utf-8")
             self._file_path = path
         except OSError:
             _log.warning(
@@ -196,7 +196,7 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
             try:
                 self._file.write(s)
                 self._file.flush()
-            except OSError:
+            except (OSError, UnicodeEncodeError):
                 _log.warning("Failed to write to temp file; disabling file backing", exc_info=True)
                 self._file_failed = True
         return super().write(s)
