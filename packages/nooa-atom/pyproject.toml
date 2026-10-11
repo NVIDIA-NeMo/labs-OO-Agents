@@ -7,8 +7,9 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "nooa[mcp]",
-    # The `nooa` command; the server is its `atom` subcommand.
-    "nooa-cli",
+    # The `nooa` command; the server is its `atom` subcommand. `[ast]` brings the
+    # tree-sitter grammars so RepoTools uses AST-aware code analysis by default.
+    "nooa-cli[ast]",
     "agent-client-protocol>=0.12.1,<0.13",
     "click>=8.1.0",
     "pydantic>=2.5.0",
@@ -21,16 +22,9 @@ dependencies = [
 atom = "nooa_atom.acp.cli:command"
 
 [project.optional-dependencies]
-# AST-aware code analysis for RepoTools (tree-sitter grammars).
-# The Atom agent works without these; RepoTools falls back to regex.
-ast = [
-    "tree-sitter>=0.23.0",
-    "tree-sitter-python>=0.23.0",
-    "tree-sitter-javascript>=0.23.0",
-    "tree-sitter-typescript>=0.23.0",
-    "tree-sitter-go>=0.23.0",
-    "tree-sitter-rust>=0.23.0",
-]
+# tree-sitter is now a regular dependency (via nooa-cli[ast]); kept so existing
+# `nooa-atom[ast]` installs still resolve.
+ast = []
 
 [project.urls]
 Homepage = "https://github.com/NVIDIA-NeMo/labs-OO-Agents"

@@ -1575,20 +1575,10 @@ dependencies = [
     { name = "agent-client-protocol" },
     { name = "click" },
     { name = "nooa", extra = ["mcp"] },
-    { name = "nooa-cli" },
+    { name = "nooa-cli", extra = ["ast"] },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "websockets" },
-]
-
-[package.optional-dependencies]
-ast = [
-    { name = "tree-sitter" },
-    { name = "tree-sitter-go" },
-    { name = "tree-sitter-javascript" },
-    { name = "tree-sitter-python" },
-    { name = "tree-sitter-rust" },
-    { name = "tree-sitter-typescript" },
 ]
 
 [package.metadata]
@@ -1596,15 +1586,9 @@ requires-dist = [
     { name = "agent-client-protocol", specifier = ">=0.12.1,<0.13" },
     { name = "click", specifier = ">=8.1.0" },
     { name = "nooa", extras = ["mcp"], editable = "." },
-    { name = "nooa-cli", editable = "packages/nooa-cli" },
+    { name = "nooa-cli", extras = ["ast"], editable = "packages/nooa-cli" },
     { name = "pydantic", specifier = ">=2.5.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "tree-sitter", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-go", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-javascript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-python", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-rust", marker = "extra == 'ast'", specifier = ">=0.23.0" },
-    { name = "tree-sitter-typescript", marker = "extra == 'ast'", specifier = ">=0.23.0" },
     { name = "websockets", specifier = ">=14" },
 ]
 provides-extras = ["ast"]
