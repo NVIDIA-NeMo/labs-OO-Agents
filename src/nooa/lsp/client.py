@@ -346,7 +346,10 @@ class LSPClient:
         except BaseException:
             self._pending_requests.pop(msg_id, None)
             raise
-        return await future
+        try:
+            return await future
+        finally:
+            self._pending_requests.pop(msg_id, None)
 
     async def send_notification(self, method: str, params: dict[str, Any] | None = None):
         """Send a JSON-RPC notification without waiting for a response."""

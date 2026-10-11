@@ -227,6 +227,22 @@ class TestInitialStatus:
 
         assert client._pending_requests == {}
 
+    async def test_send_request_removes_future_when_cancelled(self):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        client.process = _FakeProcess(responses={1: []})
+        client.status = LSPClientStatus.COMPLETE
+        request = asyncio.create_task(
+            client.send_request("textDocument/definition")
+        )
+        await asyncio.sleep(0)
+
+        assert list(client._pending_requests) == [1]
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+        assert client._pending_requests == {}
+
 
 # ---------------------------------------------------------------------------
 # Successful startup
