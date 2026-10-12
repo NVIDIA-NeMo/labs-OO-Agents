@@ -11,11 +11,16 @@ import pytest
 from nooa.runtime.channels import QueueManager
 
 
-def test_no_cheat_sheet_with_only_user_messages():
-    """No cheat sheet when only user_messages is registered."""
+@pytest.mark.parametrize(
+    "names", [("user_messages",), ("ci_monitor",), ("user_messages", "ci_monitor")]
+)
+def test_no_cheat_sheet_with_empty_channels(names):
+    """Empty registered queues have the same status as no channels."""
     qm = QueueManager()
-    qm.queue("user_messages")
+    for name in names:
+        qm.queue(name)
     status = qm.status()
+    assert status == "(nothing queued)"
     assert "queue_manager" not in status.lower()
     assert "remove_channel" not in status
     assert "shutdown" not in status
@@ -59,8 +64,31 @@ def test_no_cheat_sheet_when_no_channels():
     """No cheat sheet when no channels at all."""
     qm = QueueManager()
     status = qm.status()
-    assert status == ""
+    assert status == "(nothing queued)"
     assert "remove_channel" not in status
+
+
+def test_status_populated_formatting_unchanged_then_drained():
+    qm = QueueManager()
+    messages = qm.queue("user_messages")
+    monitor = qm.queue("ci_monitor")
+    qm.queue("empty")
+    messages.put("first")
+    messages.put("second")
+    monitor.put("ok")
+
+    assert qm.status(max_items=1) == (
+        "user_messages: 2 pending\n"
+        "  1. first\n"
+        "  … 1 more\n"
+        "ci_monitor: 1 pending\n"
+        "  1. ok\n"
+        "💡 self.queue_manager.remove_channel('ci_monitor') | .shutdown()"
+    )
+    assert messages.drain() == ["first", "second"]
+    assert monitor.drain() == ["ok"]
+    assert qm.status() == "(nothing queued)"
+    assert messages.status() == monitor.status() == ""
 
 
 async def _dummy_gen():

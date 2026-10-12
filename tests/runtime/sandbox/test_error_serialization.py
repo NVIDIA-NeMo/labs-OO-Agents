@@ -33,6 +33,7 @@ from nooa.runtime.sandbox.serialization import (
     dto_to_wire,
     result_to_dto,
 )
+from nooa.tools.shell_tools import Match, ShellTools, StaleMatchError
 
 
 def _result_with_error(error: Exception, *, line_offset: int = 0) -> ExecutionResult:
@@ -84,6 +85,64 @@ def test_builtin_exception_reconstruction_keeps_worker_diagnostic() -> None:
     assert isinstance(result.error.original_error, ValueError)
     assert result.error.original_type == "ValueError"
     assert format_error_for_llm(result.error) == diagnostic
+
+
+@pytest.mark.parametrize("size", [3, 20_000], ids=["small-diff", "omitted-diff"])
+async def test_stale_match_diagnostic_survives_error_transport(tmp_path, size):
+    path = tmp_path / "example.txt"
+    path.write_text("x" * size + "\n")
+    shell = ShellTools(cwd=str(tmp_path))
+    try:
+        match = await shell.read("example.txt")
+        path.write_text("y" * size + "\n")
+        with pytest.raises(StaleMatchError) as caught:
+            await shell.replace(match, "replacement")
+        message = str(caught.value)
+        result = dto_to_result(_transport(result_to_dto(_result_with_error(caught.value))))
+        assert isinstance(result.error, SandboxExecutionError)
+        assert result.error.original_type == "StaleMatchError"
+        assert message.rstrip() in format_error_for_llm(result.error)
+        # Existing custom-error transport preserves text/type name, not custom fields.
+        assert not isinstance(result.error.original_error, StaleMatchError)
+        assert "No file was changed" in format_error_for_llm(result.error)
+        assert "recompute the Match" in format_error_for_llm(result.error)
+        if size > 16_384:
+            assert "Diff omitted (incomplete)" in format_error_for_llm(result.error)
+            assert "x" * size not in format_error_for_llm(result.error)
+    finally:
+        await shell.close()
+
+
+async def test_stale_match_broker_error_survives_as_actionable_surrogate(tmp_path):
+    from nooa.runtime.sandbox.worker import ParentToolError, _raise_broker_error
+
+    path = tmp_path / "example.txt"
+    path.write_text("current\n")
+    match = Match("example.txt", 1, 1, "captured\n", resolved_path=path)
+    shell = ShellTools(cwd=str(tmp_path))
+
+    class Target:
+        async def edit(self):
+            return await shell.replace(match, "replacement")
+
+    executor = object.__new__(SandboxedExecutor)
+    executor._agent = Target()
+    executor._max_error = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+    try:
+        response = await executor._dispatch_tool_call(
+            {"kind": "call", "path": ["edit"], "args": (), "kwargs": {}}
+        )
+        assert response["ok"] is False
+        assert response["error_type"] == "StaleMatchError"
+        for text in [str(path), "captured lines 1-1", "No file was changed", "recompute the Match"]:
+            assert text in response["error"]
+        with pytest.raises(ParentToolError) as caught:
+            _raise_broker_error(response)
+        # Broker uses ParentToolError for unknown custom types; response retains type name.
+        assert str(caught.value) == response["error"]
+        assert path.read_bytes() == b"current\n"
+    finally:
+        await shell.close()
 
 
 def test_custom_exception_uses_surrogate_with_original_type_and_diagnostic() -> None:

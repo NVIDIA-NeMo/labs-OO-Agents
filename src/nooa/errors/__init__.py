@@ -42,6 +42,12 @@ class GenerationAborted(GenerationError):
     pass
 
 
+class LoopDetectedError(GenerationError):
+    """Generation stopped because the model repeated a tool call after a loop-guard warning."""
+
+    pass
+
+
 # =============================================================================
 # Validation Errors
 # =============================================================================

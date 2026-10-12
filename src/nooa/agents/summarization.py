@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 _in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
 
 
+@hidden
+def summary_fork_active() -> bool:
+    """Whether this model call is best-effort memory compaction, not parent execution.
+
+    Integrations can use this task-local marker to avoid treating a contained
+    summary transport failure as the parent's terminal failure.
+    """
+    return _in_summary_fork.get()
+
+
 def _copy_request_containers(value: Any) -> Any:
     """Detach mutable JSON containers; borrow tools, responses and other objects."""
     if isinstance(value, dict):
@@ -617,16 +627,18 @@ class TokenBudgetSummarizer(SummarizationAgent):
     """Summarize old events asynchronously when provider input exceeds the budget.
 
     Fork the completed parent request with a trailing summary
-    instruction. Tools, model settings and cache key stay unchanged so the
-    provider can reuse its prefix. Only events present before that request
-    are eligible for collapse; the latest response/tool work stays active.
+    instruction. History, tool definitions, output schema, model settings,
+    cache key and tool choice stay unchanged so the provider can reuse its prefix.
+    The appended instruction requests text; executable-tool replies are rejected.
+    Only events present before that request are eligible for collapse; the latest
+    response/tool work stays active.
 
     The fork never executes tools. A nonempty string returned through one
     return_result call is read as data. Failed or unusable replies leave history
     unchanged; there is no standalone retry. Filtered history is skipped because
     the request cannot explain all events selected for collapse. Structured
-    parents drop their output schema on the fork so it can return summary text;
-    that schema change may reduce cache reuse.
+    parents retain their output schema to preserve the rendered prefix; the
+    summary must also satisfy that contract.
 
     Completed summaries apply at BeforeTurn, provided the selected event IDs
     still match. Owners should await aclose() before closing the shared client.
@@ -725,7 +737,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         try:
             messages = _copy_request_containers(ctx.messages)
             params = _copy_request_containers(ctx.params)
-            params["output_model"] = None
+            params.setdefault("output_model", None)
         except Exception:
             logger.warning(
                 "Could not snapshot summary fork; parent call is unchanged", exc_info=True
@@ -737,9 +749,13 @@ class TokenBudgetSummarizer(SummarizationAgent):
                 "content": (
                     f"Background memory compaction: summarize only events {start} through {end} "
                     f"in approximately {self.config.target_chars} characters. Other events are "
-                    "context only. Preserve decisions, exact numbers, outcomes and pending work. "
-                    "Write only the summary as plain text. Do not continue the original task "
-                    "or call any tools. This is an isolated summary, not an execution turn."
+                    "context only. Preserve decisions, exact numbers, outcomes, files, failed "
+                    "approaches and pending work. Distinguish completed work from proposals. "
+                    "For this request only, produce a memory summary rather than continuing "
+                    "the original task. Respond directly with the summary as text. Do not call "
+                    "python_cell, execute_python, return_result, or any other tool; do not "
+                    "write code to produce the summary. Earlier execution instructions are "
+                    "historical context for this isolated summary turn."
                 ),
             }
         )
@@ -760,12 +776,18 @@ class TokenBudgetSummarizer(SummarizationAgent):
     async def _run_fork(self, ctx: Any) -> None:
         """Use the same policy chain; read a final answer without executing tools."""
         token = _in_summary_fork.set(True)
+        # Keep the exact snapshotted prefix/contracts through final rendering.
+        # Middleware still observes the fork, but cannot rewrite its prompt,
+        # effective client or tool/schema settings at the final dispatch boundary.
+        client = ctx.client
+        messages = _copy_request_containers(ctx.messages)
+        params = _copy_request_containers(ctx.params)
         try:
 
             async def dispatch(request: Any) -> Any:
-                params = dict(request.params)
-                params.setdefault("output_model", None)
-                request.response = await request.client.acall(request.messages, **params)
+                request.response = await client.acall(
+                    _copy_request_containers(messages), **_copy_request_containers(params)
+                )
                 return request
 
             result = await self.target_event_manager.run_middleware("llm_call", ctx, dispatch)

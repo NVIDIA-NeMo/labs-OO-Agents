@@ -17,6 +17,7 @@ from nooa_cli.coding.activity import (
 
 from nooa.runtime.event_manager import EventManager
 from nooa.tools import ShellTools
+from nooa.tools.shell_tools import StaleMatchError
 
 
 def _observed_shell(tmp_path):
@@ -78,6 +79,22 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     assert (edit.start_line, edit.end_line) == (2, 2)
     # difflib omits the count for a single-line hunk; the offset is what matters.
     assert "@@ -2 +2 @@" in edit.diff
+
+
+async def test_stale_match_rejection_emits_no_successful_file_edit(tmp_path):
+    shell, events = _observed_shell(tmp_path)
+    path = tmp_path / "example.txt"
+    path.write_bytes(b"one\ntwo\nthree\n")
+    try:
+        match = await shell.read("example.txt", lines=(2, 2))
+        path.write_bytes(b"one\nchanged externally\nthree\n")
+        before = path.read_bytes()
+        with pytest.raises(StaleMatchError, match="No file was changed"):
+            await shell.replace(match, "replacement")
+        assert path.read_bytes() == before
+        assert not any(isinstance(event, FileEdit) for event in events)
+    finally:
+        await shell.close()
 
 
 async def test_match_replace_at_end_of_file_keeps_the_file_terminated(tmp_path):

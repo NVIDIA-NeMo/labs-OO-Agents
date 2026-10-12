@@ -2698,6 +2698,9 @@ class ActorRuntime:
                     # Authoritative ordered names from the live signature (excludes
                     # 'self') so format_parameters_as_code never re-parses the string.
                     param_names=[p for p in sig.parameters if p != "self"],
+                    # Preserve Annotated parameter overrides on top-level calls,
+                    # just as the nested method wrapper does.
+                    param_specs=CurrentCall.from_method(method).param_specs,
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()
