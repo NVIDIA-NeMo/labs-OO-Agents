@@ -752,6 +752,27 @@ async def test_filesystem_guard_inside_cell():
             await ex2.aclose()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc/self/environ is Linux-only")
+async def test_env_allowlist_inside_cell(monkeypatch):
+    monkeypatch.setenv("FAKE_HOST_SECRET", "leak-me")
+    ex = _executor(
+        SandboxConfig(require=False, network=True, filesystem=False, env_allowlist=("PATH",))
+    )
+    try:
+        res = await _run(
+            ex,
+            "import os\n"
+            "block = open('/proc/self/environ', 'rb').read()\n"
+            "{'os_environ': sorted(os.environ),\n"
+            " 'proc_environ': [e.split(b'=')[0].decode() for e in block.split(b'\\0') if e]}",
+        )
+        assert res.success, res.error
+        assert res.returned_value == {"os_environ": ["PATH"], "proc_environ": []}
+    finally:
+        await ex.aclose()
+    assert os.environ["FAKE_HOST_SECRET"] == "leak-me"  # the parent keeps its environment
+
+
 @pytest.mark.skipif(not CAPS.rlimit, reason="RLIMIT unavailable")
 async def test_cpu_guard_kills_spin_loop():
     ex = _executor(

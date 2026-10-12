@@ -13,6 +13,10 @@ lifted by subsequent code — that is the "no leakage by design" guarantee:
 All are implemented with raw ``ctypes`` syscalls — no third-party dependency.
 They target Linux; on other platforms the probes report the mechanism as
 unavailable and the executor fails closed (see ``capabilities.py``).
+
+``apply_env_allowlist`` is not one of them: it drops the inherited environment
+variables before any cell runs, is not a kernel restriction, and off Linux only
+clears ``os.environ`` instead of failing closed.
 """
 
 from __future__ import annotations
@@ -353,15 +357,56 @@ def apply_seccomp_no_inet() -> None:
 
 
 # ---------------------------------------------------------------------------
+# environment
+# ---------------------------------------------------------------------------
+def _env_block_bounds() -> tuple[int, int]:
+    """Address range of this process's exec-time environment block (Linux).
+
+    ``env_start`` / ``env_end`` are fields 50 and 51 of ``/proc/self/stat``. The
+    command name (field 2) may contain spaces and parentheses, so fields are
+    counted from the last ``)``; the slice after it starts at field 3.
+    """
+    with open("/proc/self/stat", "rb") as fh:
+        stat_line = fh.read()
+    fields = stat_line[stat_line.rindex(b")") + 2 :].split()
+    return int(fields[47]), int(fields[48])
+
+
+def apply_env_allowlist(allowed: tuple[str, ...]) -> None:
+    """Drop every environment variable not in ``allowed`` from this process.
+
+    ``unsetenv`` only edits libc's ``environ``; ``/proc/self/environ`` keeps
+    showing the block the kernel copied in at ``exec``, which a forked worker
+    inherits. So libc's environment is cleared, that block is zeroed and read
+    back (raising if anything is left), and the allowed variables are set again.
+    Values the parent already copied elsewhere in memory are not removed.
+    """
+    keep = {key: value for key, value in os.environ.items() if key in allowed}
+    os.environ.clear()
+    if platform.system() == "Linux":
+        _libc().clearenv()  # also drops variables set from C that os.environ never saw
+        start, end = _env_block_bounds()
+        if end > start:
+            ctypes.memset(start, 0, end - start)
+        with open("/proc/self/environ", "rb") as fh:
+            if fh.read().strip(b"\0"):
+                raise RuntimeError("/proc/self/environ still readable after zeroing it")
+    os.environ.update(keep)
+
+
+# ---------------------------------------------------------------------------
 # orchestration
 # ---------------------------------------------------------------------------
 def install_guards(spec: ResolvedSpec) -> None:
     """Apply every requested guardrail to the current process, in a safe order.
 
-    Order matters: rlimits first (no dependency), then Landlock (needs to
-    ``open()`` rule paths — must precede filesystem lock-down), then seccomp
-    (does not affect ``open()``). All three are irrevocable once set.
+    Order matters: the environment allowlist first (reads ``/proc/self/stat``),
+    then rlimits (no dependency), then Landlock (needs to ``open()`` rule
+    paths — must precede filesystem lock-down), then seccomp (does not affect
+    ``open()``). All are irrevocable once set.
     """
+    if spec.env_allowlist is not None:
+        apply_env_allowlist(spec.env_allowlist)
     apply_rlimits(max_memory_mb=spec.max_memory_mb, max_cpu_seconds=spec.max_cpu_seconds)
     if spec.filesystem:
         apply_landlock(list(spec.landlock_rules))

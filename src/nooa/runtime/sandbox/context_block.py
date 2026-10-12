@@ -52,6 +52,16 @@ def render_sandbox_block(config: SandboxConfig, *, cell_timeout: float | None) -
             "- Network: disabled. Opening a socket to the internet raises PermissionError; "
             "do not attempt downloads or API calls from a cell."
         )
+    if config.env_allowlist is not None:
+        kept = (
+            f"at most {', '.join(sorted(config.env_allowlist))} are set"
+            if config.env_allowlist
+            else "no variables are set"
+        )
+        lines.append(
+            f"- Environment: {kept}. Host credentials are not in os.environ; "
+            "reach external services through self.* methods."
+        )
     lines.append(
         "- Values returned from a cell must be picklable (numbers, str, list, dict, ndarray). "
         "Keep live objects in the namespace and return a summary instead."

@@ -22,6 +22,7 @@ import pytest
 from nooa.runtime.sandbox import guards
 from nooa.runtime.sandbox.config import LandlockRule
 from nooa.runtime.sandbox.guards import (
+    apply_env_allowlist,
     apply_landlock,
     apply_rlimits,
     apply_seccomp_no_inet,
@@ -143,6 +144,54 @@ def test_file_write_closed_but_workspace_allowed():
         inside_msg, _ = run_child(write_inside)
         assert "PermissionError" in outside_msg
         assert inside_msg == "OK"
+
+
+# --- environment ------------------------------------------------------------
+def _exec_time_env_keys() -> set[str]:
+    with open("/proc/self/environ", "rb") as fh:
+        entries = fh.read().split(b"\0")
+    return {e.split(b"=", 1)[0].decode() for e in entries if b"=" in e}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc/self/environ is Linux-only")
+def test_env_leak_without_allowlist():
+    # A fork sees the parent's exec-time environment both ways a cell would look.
+    assert {"PATH"} < _exec_time_env_keys(), "test needs more than PATH in its environment"
+
+    def child():
+        leaked = _exec_time_env_keys() - {"PATH"}
+        assert leaked, "expected inherited variables in /proc/self/environ"
+        assert set(os.environ) - {"PATH"}, "expected inherited variables in os.environ"
+
+    msg, _ = run_child(child)
+    assert msg == "OK", msg
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc/self/environ is Linux-only")
+def test_env_closed_with_allowlist():
+    path = os.environ["PATH"]
+
+    def child():
+        apply_env_allowlist(("PATH",))
+        assert set(os.environ) == {"PATH"}, sorted(os.environ)
+        assert os.environ["PATH"] == path
+        assert _exec_time_env_keys() == set(), sorted(_exec_time_env_keys())
+        # Subprocesses get the allowlisted environment, not the original block.
+        import subprocess
+
+        out = subprocess.run(["env"], capture_output=True, text=True, check=True).stdout
+        assert {line.split("=", 1)[0] for line in out.splitlines()} == {"PATH"}, out
+
+    msg, _ = run_child(child)
+    assert msg == "OK", msg
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc/self/environ is Linux-only")
+def test_env_allowlist_fails_closed_when_block_not_zeroed(monkeypatch):
+    # No usable env_start/env_end (e.g. a /proc that reports zeros): refuse to run.
+    monkeypatch.setattr(guards, "_env_block_bounds", lambda: (0, 0))
+    msg, _ = run_child(lambda: apply_env_allowlist(("PATH",)))
+    assert msg.startswith("RuntimeError"), msg
 
 
 # --- guardrail 4: network ---------------------------------------------------
