@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- LLM provider calls are bounded by an overall per-attempt deadline
+  (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
+  gap between received bytes, so a stalled stream that still trickled keepalive
+  bytes was never timed out and the attempt awaited forever. On expiry the
+  attempt is cancelled and a retryable `TimeoutError` is raised, so the retry
+  layer recovers. Set `request_timeout=None` to disable.
 - `nooa-atom`: `_nooa/session/inject` inputs now echo once on admission with a
   distinct `acp:inject` source, including a buffered steer's same-ID queued
   fallback. Ordinary prompts/Pool inputs remain un-echoed; replay is unchanged.

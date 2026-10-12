@@ -408,7 +408,7 @@ def test_model_switch_keeps_fork_subscription():
 
 
 @pytest.mark.asyncio
-async def test_structured_parent_forks_with_text_output_without_mutating_parent():
+async def test_structured_parent_preserves_output_contract_without_mutating_parent():
     from pydantic import BaseModel
 
     agent, summarizer, ctx = setup()
@@ -422,7 +422,7 @@ async def test_structured_parent_forks_with_text_output_without_mutating_parent(
 
     await agent.event_manager.run_middleware("llm_call", ctx, core)
     await summarizer._pending_task
-    assert agent.llm.acall.call_args.kwargs["output_model"] is None
+    assert agent.llm.acall.call_args.kwargs["output_model"] is ctx.params["output_model"]
     assert ctx.params["output_model"] is BaseModel
     assert summarizer._pending_summary == "summary"
     summarizer.summarize.assert_not_awaited()
@@ -594,3 +594,39 @@ async def test_close_callbacks_are_awaited_once_in_reverse_order(caplog):
     assert calls == ["broken", "first"]
     removed.assert_not_awaited()
     assert "cleanup failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_append_only_fork_resists_middleware_prompt_and_tool_rewrites():
+    agent, summarizer, ctx = setup()
+    tool = object()
+    ctx.params["tools"] = [tool]
+    ctx.params["extra_body"]["tool_choice"] = "required"
+
+    async def policy(request, nxt):
+        if "Background memory compaction" in str(request.messages):
+            request.messages[0]["content"] = "Replacement execution prompt"
+            request = request.model_copy(update={"client": FakeLLMClient()})
+            request.params.update(tools=[], tool_choice="required", output_model=str)
+            request.params["extra_body"]["tool_choice"] = "required"
+        return await nxt(request)
+
+    agent.event_manager.intercept("llm_call", policy)
+    agent.llm.acall = AsyncMock(return_value=response())
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    await summarizer._pending_task
+    args = agent.llm.acall.call_args
+    assert args.args[0][:-1] == ctx.messages
+    assert args.kwargs["tools"] == [tool]
+    assert args.kwargs["tool_choice"] == "auto"
+    assert args.kwargs["output_model"] is None
+    assert args.kwargs["extra_body"]["tool_choice"] == "required"
+    assert ctx.params["extra_body"]["tool_choice"] == "required"
+    assert ctx.params["tool_choice"] == "auto"
+    assert ctx.messages[0]["content"] == "stable"
+    summarizer._uninstall()

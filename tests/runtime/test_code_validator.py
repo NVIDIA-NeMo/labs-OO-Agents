@@ -1328,6 +1328,22 @@ exec('2')
         with pytest.raises(ValidationError, match="[Ss]yntax"):
             validator.validate(code, default_context)
 
+    def test_syntax_error_uses_execution_cell_filename(
+        self,
+        validator: UnifiedCodeValidator,
+        default_context: ValidationContext,
+    ):
+        """Syntax errors should identify the current execution cell."""
+        default_context.execution_count = 7
+        code = "def incomplete("
+
+        with pytest.raises(ValidationError) as exc_info:
+            validator.validate(code, default_context)
+
+        error = exc_info.value.original_exception
+        assert isinstance(error, SyntaxError)
+        assert error.filename == "Cell In[7]"
+
     def test_validators_run_in_order(
         self, validator: UnifiedCodeValidator, default_context: ValidationContext
     ):

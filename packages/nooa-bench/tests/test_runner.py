@@ -232,8 +232,9 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
         )
 
     first = response(
-        "task = self.todo.add('Verify workspace')\n"
-        "report = await self.delegate(task, supplied_context={'api_key': 'private-sentinel'})",
+        "report = await self.delegate(\n"
+        "    'Verify workspace', supplied_context={'api_key': 'private-sentinel'}\n"
+        ")",
         "parent-start",
         native=True,
     )
@@ -244,17 +245,12 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
                 f"assert str(self.shell.cwd) == {str(tmp_path)!r}\n"
                 "checked = await self.shell.run('printf verified')\n"
                 "assert checked.returncode == 0 and checked.stdout == 'verified'\n"
-                "task = self.todo.list_todos()[0]\n"
-                "self.todo.comment(task, 'Observed verification')\n"
-                "self.todo.set_var(task, 'checked', True)\n"
                 "return_result(TaskResult(solution_description='Verified workspace', "
                 "evidence=checked.stdout, how_to_verify='true'))",
                 "worker-check",
             ),
             response(
-                "assert task.v.checked\n"
-                "assert task.comments[0].body == 'Observed verification'\n"
-                "return_result(report)",
+                "assert report.evidence == 'verified'\nreturn_result(report)",
                 "parent-finish",
             ),
         ]

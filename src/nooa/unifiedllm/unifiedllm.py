@@ -9,7 +9,7 @@ import math
 import re
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1565,9 +1565,9 @@ async def _collect_async(raw: Any) -> "litellm.ModelResponse":
 
 
 async def _run_async_provider_call[T](
-    call: Callable[[], Awaitable[T]],
+    call: Callable[[], Coroutine[Any, Any, T]],
     *,
-    unadmitted_call: Callable[[], Awaitable[T]] | None = None,
+    request_timeout: float | None,
 ) -> T:
     """Run one provider attempt, holding admission through its actual exit.
 
@@ -1576,14 +1576,17 @@ async def _run_async_provider_call[T](
     provider task owns the permit and releases it in ``finally``.  Shielding
     keeps that accounting correct when the caller is cancelled while remote
     work or a stream is still active.
+
+    ``request_timeout`` bounds the whole attempt, stream included. On expiry it
+    cancels the task and raises TimeoutError. None disables it.
     """
     admission_controller = _current_admission_controller()
     if admission_controller is None:
-        return await (unadmitted_call or call)()
+        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
 
     permit = await admission_controller.acquire(_record_admission_observation)
     if permit is None:
-        return await (unadmitted_call or call)()
+        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
 
     async def run_and_release() -> T:
         try:
@@ -1597,35 +1600,36 @@ async def _run_async_provider_call[T](
         permit.release()
         raise
 
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        task.add_done_callback(_consume_async_provider_result)
-        raise
+    return await _await_provider_task(task, request_timeout)
 
 
-async def _litellm_acompletion(
-    api_params: dict[str, Any],
-) -> Any:
-    """Await LiteLLM without cancelling its nested provider coroutine.
+async def _await_provider_task[T](task: asyncio.Task[T], request_timeout: float | None) -> T:
+    """Await a shielded provider task, bounded by ``request_timeout`` if set.
 
-    LiteLLM runs sync ``completion()`` in an executor for async chat calls.
-    OpenAI-compatible providers return ``OpenAIChatCompletion.acompletion``
-    from that sync frame, then LiteLLM awaits it on the event loop. If a TUI
-    soft-cancel lands in that handoff window, Python can garbage-collect the
-    provider coroutine before it is awaited and print::
-
-        RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion' was never awaited
-
-    Shielding lets LiteLLM finish consuming that provider coroutine while the
-    caller still receives ``CancelledError`` immediately.
+    The deadline is armed on the task, not on this await, so it still fires
+    after the caller cancels. A caller cancel raises CancelledError, even when
+    it lands with the deadline.
     """
+    task.add_done_callback(_consume_async_provider_result)
+    if request_timeout is None:
+        return await asyncio.shield(task)
 
-    task = asyncio.create_task(litellm.acompletion(**api_params))
+    timed_out = False
+
+    def _on_deadline() -> None:
+        nonlocal timed_out
+        if not task.done():
+            timed_out = True
+            task.cancel()
+
+    handle = asyncio.get_running_loop().call_later(request_timeout, _on_deadline)
+    task.add_done_callback(lambda _done: handle.cancel())
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        task.add_done_callback(_consume_async_provider_result)
+        current = asyncio.current_task()
+        if timed_out and (current is None or not current.cancelling()):
+            raise TimeoutError from None
         raise
 
 
@@ -2137,15 +2141,12 @@ class CompletionClient(UnifiedLLM):
             api_params.setdefault("client", http_client)
 
         async def _make_call():
-            async def admitted_call():
+            async def provider_call():
                 return await _collect_async(await litellm.acompletion(**api_params))
 
-            async def unadmitted_call():
-                return await _collect_async(await _litellm_acompletion(api_params))
-
             raw_response = await _run_async_provider_call(
-                admitted_call,
-                unadmitted_call=unadmitted_call,
+                provider_call,
+                request_timeout=self._http_config.request_timeout,
             )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
@@ -2502,6 +2503,7 @@ class ResponsesClient(UnifiedLLM):
 
             return await _run_async_provider_call(
                 call_provider,
+                request_timeout=self._http_config.request_timeout,
             )
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)

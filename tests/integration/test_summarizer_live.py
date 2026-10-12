@@ -161,6 +161,8 @@ async def exercise_summarization(client, family, monkeypatch):
         else:
             assert fork[key][:-1] == first[key][:-1], "Fork changed the parent prefix"
             assert fork[key][-1]["content"][:-1] == first[key][-1]["content"]
+        assert first.get("tools") == fork.get("tools")
+        assert fork.get("tool_choice") == first.get("tool_choice")
         # Summary renderers may quote/escape multiline text. Check its facts in
         # the outgoing request as well as the exact stored summary above.
         assert all(fact in json.dumps(continuation).lower() for fact in FACTS), (

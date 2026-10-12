@@ -199,7 +199,7 @@ async def classify(self, text: str) -> Intent: ...
 async def implement(self, task: str) -> str: ...
 ```
 
-**Configuration fields go through `config=`.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Strategy-level extension points such as `CodeActStrategy(on_text_only=...)` remain direct constructor arguments. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `restrictions`.
+**Configuration fields go through `config=`.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Strategy-level extension points such as `CodeActStrategy(on_text_only=...)` remain direct constructor arguments. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `loop_guard`, `restrictions`.
 
 CodeAct preserves a model response that contains prose but no tool call. By
 default it appends an `Error` asking the model to use `execute_python` or

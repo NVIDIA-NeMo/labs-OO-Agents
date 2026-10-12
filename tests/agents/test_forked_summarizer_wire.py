@@ -130,5 +130,8 @@ async def test_fork_wire_prefix_and_settings_are_identical(family, monkeypatch):
         assert fork[key][:-1] == parent[key][:-1]
         assert fork[key][-1]["content"][:-1] == parent[key][-1]["content"]
         assert "cache_control" in json.dumps(parent[key])
+    assert parent.get("tools") == fork.get("tools")
+    assert parent.get("instructions") == fork.get("instructions")
+    assert fork.get("tool_choice") == parent.get("tool_choice")
     assert "live=1" in json.dumps(fork[key])
     assert "Background memory compaction" in json.dumps(fork[key][-1])
