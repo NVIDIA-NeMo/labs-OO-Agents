@@ -362,13 +362,24 @@ def _ambiguous_replace_message(path: str, content: str, old: str, count: int) ->
         boundary: str = "",
         column_origin: int = 1,
     ) -> None:
+        # Trim only ordinary line endings for display, using the full span so
+        # a boundary inside CRLF cannot expose either half of the terminator.
+        line_start, display_end = spans[number]
+        if content.endswith("\r\n", line_start, display_end):
+            display_end -= 2
+        elif content[display_end - 1] in "\r\n":
+            display_end -= 1
+        end = min(end, display_end)
+        if boundary and start >= end:
+            return
+        focus = max(start, min(focus, end))
         label = f"  {number}| "
         if boundary:
             label += f"[{boundary} columns {column_origin}-{column_origin + end - start - 1}] "
         text = _replace_diagnostic_excerpt(
             content, start, end, focus, 160 - len(label), column_origin
         )
-        rows.append((label + text, True))
+        rows.append((label + text if text else label[:-1], True))
 
     for index, (position, first, first_col, last, last_col) in enumerate(samples, 1):
         rows.append(

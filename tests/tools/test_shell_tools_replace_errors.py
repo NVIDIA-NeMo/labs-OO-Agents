@@ -37,7 +37,7 @@ def sections(message):
 def source_rows(message):
     return [
         (mark, int(number), text)
-        for mark, number, text in re.findall(r"(?m)^([> ]) (\d+)\| (.*)$", message)
+        for mark, number, text in re.findall(r"(?m)^([> ]) (\d+)\|(?: (.*))?$", message)
     ]
 
 
@@ -58,7 +58,7 @@ async def test_ambiguous_replace_shows_distinct_context_and_recovery(shell, tmp_
     assert "line:column, 1-based, inclusive; Python characters, not tab width" in message
     assert headers(message) == ["lines 2-2 (2:5-2:16)", "lines 5-5 (5:5-5:16)"]
     assert "  2| [prefix columns 1-4]     \n" in message  # Preserve usable indentation.
-    assert "  2| [suffix columns 17-17] \\n" in message
+    assert "[suffix columns" not in message
     assert message.count("> [1 matching line omitted; identical to the supplied old text]") == 2
     assert "def first():" in message
     assert "def second():" in message
@@ -105,7 +105,9 @@ async def test_ambiguous_replace_line_numbers_agree_with_read(shell, tmp_path, s
     content = f"before{separator}λ hit{separator}β hit{separator}after{separator}"
     message = await ambiguous_error(shell, tmp_path, content, "hit")
     assert headers(message) == ["lines 2-2 (2:3-2:5)", "lines 3-3 (3:3-3:5)"]
-    assert [number for _, number, _ in source_rows(sections(message)[0])] == [1, 2, 2, 3, 4]
+    assert [number for _, number, _ in source_rows(sections(message)[0])] == (
+        [1, 2, 3, 4] if separator in ["\n", "\r\n", "\r"] else [1, 2, 2, 3, 4]
+    )
     second_line = await shell.read("example.py", (2, 2))
     assert second_line.text.splitlines() == ["λ hit"]
     assert_bounded(message)
@@ -143,11 +145,8 @@ def test_raw_partial_crlf_matches_stay_on_preceding_line(old):
         boundaries = [
             (number, text) for _, number, text in source_rows(section) if "columns" in text
         ]
-        assert boundaries == (
-            [(line, "[prefix columns 1-1] a"), (line, "[suffix columns 3-3] \\n")]
-            if old == "\r"
-            else [(line, "[prefix columns 1-2] a\\r")]
-        )
+        assert boundaries == [(line, "[prefix columns 1-1] a")]
+        assert "\\r" not in section and "\\n" not in section
         assert "> [1 matching line omitted; identical to the supplied old text]" in section
     assert_bounded(message)
 
@@ -171,7 +170,7 @@ async def test_five_lines_before_and_after_entire_match(shell, tmp_path, matched
             list(range(first - 5, first)) + list(range(last + 1, last + 6))
         )
         assert [text for _, _, text in rows] == (
-            [f"before {n}\\n" for n in range(2, 7)] + [f"after {n}\\n" for n in range(1, 6)]
+            [f"before {n}" for n in range(2, 7)] + [f"after {n}" for n in range(1, 6)]
         )
         assert not any(mark == ">" for mark, _, _ in rows)
         assert not any("match " in text for _, _, text in rows)
@@ -189,13 +188,11 @@ async def test_borders_have_no_phantom_context_lines(shell, tmp_path, terminal_n
     content = "hit\n\nhit" + ("\n" if terminal_newline else "")
     message = await ambiguous_error(shell, tmp_path, content, "hit")
     first, second = sections(message)
-    assert [number for _, number, _ in source_rows(first)] == [1, 2, 3]
-    assert [number for _, number, _ in source_rows(second)] == (
-        [1, 2, 3] if terminal_newline else [1, 2]
-    )
-    assert "  1| [suffix columns 4-4] \\n" in first
-    assert ("suffix" in second) == terminal_newline
-    assert source_rows(sections(message)[0])[1] == (" ", 2, "\\n")
+    assert [number for _, number, _ in source_rows(first)] == [2, 3]
+    assert [number for _, number, _ in source_rows(second)] == [1, 2]
+    assert "[suffix columns" not in message
+    assert source_rows(first)[0] == (" ", 2, "")
+    assert "  2|\n" in message  # Blank rows have no trailing display space.
 
 
 async def test_ambiguous_replace_bounds_many_matches_and_escapes_context(shell, tmp_path):
@@ -298,8 +295,7 @@ async def test_short_deeply_indented_lines_are_not_clipped(shell, tmp_path):
         assert sorted(texts) == sorted(
             [
                 "[prefix columns 1-60] " + " " * 60,
-                "[suffix columns 64-64] \\n",
-                " " * 60 + "hit\\n",  # The other occurrence is legitimate context.
+                " " * 60 + "hit",  # The other occurrence is legitimate context.
             ]
         )
     assert_bounded(message)
@@ -391,13 +387,11 @@ async def test_multiline_partial_boundaries_omit_all_current_text(
         boundaries = [
             (number, text) for _, number, text in source_rows(section) if "columns" in text
         ]
-        newline = index == 0 or terminal_newline
         assert boundaries == [
             (1 + index * 9, "[prefix columns 1-9] λ prefix "),
             (
                 3 + index * 9,
-                f"[suffix columns 12-{21 if newline else 20}]  suffix 🙂"
-                + ("\\n" if newline else ""),
+                "[suffix columns 12-20]  suffix 🙂",
             ),
         ]
     assert_bounded(message)
@@ -455,4 +449,113 @@ def test_maximal_boundaries_context_and_path_stay_within_global_budget():
     assert message.count("> [2 matching lines omitted; identical to the supplied old text]") == 5
     assert "Showing 5 of 6 matches; 1 more matches not shown." in message
     assert "context lines omitted" not in message
+    assert_bounded(message)
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r\n", "\r"])
+def test_raw_ordinary_terminators_are_display_only(terminator):
+    content = terminator.join([" before  ", "", "hit", " after  ", "hit", ""])
+    message = _ambiguous_replace_message("example.py", content, "hit", 2)
+    assert headers(message) == ["lines 3-3 (3:1-3:3)", "lines 5-5 (5:1-5:3)"]
+    assert source_rows(sections(message)[0]) == [
+        (" ", 1, " before  "),
+        (" ", 2, ""),
+        (" ", 4, " after  "),
+        (" ", 5, "hit"),
+    ]
+    assert "  2|\n" in message
+    assert "[suffix columns" not in message
+    assert "\\n" not in message and "\\r" not in message
+    assert_bounded(message)
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r\n", "\r"])
+def test_boundary_spaces_literals_and_controls_survive_terminator_trimming(terminator):
+    prefix = " \\n\t\x1b\x00 "
+    suffix = " \\r\t\x1b\x00  "
+    line = prefix + "hit" + suffix
+    message = _ambiguous_replace_message("example.py", (line + terminator) * 2, "hit", 2)
+    escaped_prefix = r" \\n\t\x1b\x00 "
+    escaped_suffix = r" \\r\t\x1b\x00  "
+    for section in sections(message):
+        boundaries = [text for _, _, text in source_rows(section) if "columns" in text]
+        assert boundaries == [
+            f"[prefix columns 1-{len(prefix)}] " + escaped_prefix,
+            f"[suffix columns {len(prefix) + 4}-{len(line)}] " + escaped_suffix,
+        ]
+        context = [text for _, _, text in source_rows(section) if "columns" not in text]
+        assert context == [escaped_prefix + "hit" + escaped_suffix]
+    assert_bounded(message)
+
+
+@pytest.mark.parametrize(
+    "separator", ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+def test_other_line_separators_still_escape_in_context_and_boundaries(separator):
+    message = _ambiguous_replace_message("example.py", ("hit" + separator) * 2, "hit", 2)
+    escaped = repr(separator)[1:-1]
+    assert source_rows(sections(message)[0]) == [
+        (" ", 1, "[suffix columns 4-4] " + escaped),
+        (" ", 2, "hit" + escaped),
+    ]
+    assert_bounded(message)
+
+
+@pytest.mark.parametrize("old", ["\r", "\n", "\r\n"])
+def test_terminator_only_prefix_and_suffix_are_omitted(old):
+    message = _ambiguous_replace_message("example.py", "\r\n\r\n", old, 2)
+    assert source_rows(sections(message)[0]) == [(" ", 2, "")]
+    assert source_rows(sections(message)[1]) == [(" ", 1, "")]
+    assert "[prefix columns" not in message and "[suffix columns" not in message
+    first_col = 2 if old == "\n" else 1
+    last_col = 1 if old == "\r" else 2
+    assert headers(message) == [
+        f"lines {line}-{line} ({line}:{first_col}-{line}:{last_col})" for line in [1, 2]
+    ]
+    assert_bounded(message)
+
+
+@pytest.mark.parametrize("old", ["a", "a\r"])
+def test_partial_crlf_suffix_is_omitted_after_visible_match(old):
+    message = _ambiguous_replace_message("example.py", "a\r\na\r\n", old, 2)
+    assert headers(message) == [
+        f"lines {line}-{line} ({line}:1-{line}:{len(old)})" for line in [1, 2]
+    ]
+    assert source_rows(sections(message)[0]) == [(" ", 2, "a")]
+    assert source_rows(sections(message)[1]) == [(" ", 1, "a")]
+    assert_bounded(message)
+
+
+@pytest.mark.parametrize("prefix", ["p" * 100_000, "\x1b" * 100_000])
+def test_long_prefix_focus_is_clamped_before_partial_crlf(prefix):
+    content = (prefix + "\r\n") * 2
+    message = _ambiguous_replace_message("example.py", content, "\n", 2)
+    assert headers(message) == [
+        f"lines {line}-{line} ({line}:{len(prefix) + 2}-{line}:{len(prefix) + 2})"
+        for line in [1, 2]
+    ]
+    for section in sections(message):
+        boundary = [text for _, _, text in source_rows(section) if "prefix columns" in text]
+        assert len(boundary) == 1
+        window = re.fullmatch(
+            r"\[prefix columns 1-(\d+)\] \[columns (\d+)-(\d+); clipped\] \.\.\. (.*)",
+            boundary[0],
+        )
+        assert window is not None
+        assert int(window[1]) == int(window[3]) == len(prefix)
+        assert 1 < int(window[2]) <= int(window[3])
+        expected = "".join(repr(char)[1:-1] for char in prefix[int(window[2]) - 1 :])
+        assert window[4] == expected
+    assert "\\r" not in message and "\\n" not in message
+    assert_bounded(message)
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r\n", "\r"])
+def test_ordinary_terminators_in_paths_are_still_escaped(terminator):
+    path = "example" + terminator + ".py" + terminator
+    message = _ambiguous_replace_message(path, "hit hit", "hit", 2)
+    escaped = "".join(repr(char)[1:-1] for char in terminator)
+    assert message.splitlines()[0] == (
+        f"old text matched 2 times in example{escaped}.py{escaped}. No file was changed."
+    )
     assert_bounded(message)
