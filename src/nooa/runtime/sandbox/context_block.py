@@ -59,8 +59,8 @@ def render_sandbox_block(config: SandboxConfig, *, cell_timeout: float | None) -
             else "no variables are set"
         )
         lines.append(
-            f"- Environment: {kept}. Host credentials are not in os.environ; "
-            "reach external services through self.* methods."
+            f"- Environment: {kept}; every other host variable was removed. "
+            "Reach external services through self.* methods."
         )
     lines.append(
         "- Values returned from a cell must be picklable (numbers, str, list, dict, ndarray). "
