@@ -240,6 +240,54 @@ _LONG_ANCHOR_BREAKING = (
 )
 
 
+@hidden
+def _ambiguous_replace_message(path: str, content: str, old: str, count: int) -> str:
+    """Show bounded context for the first few exact, non-overlapping matches."""
+    message = [f"old text matched {count} times in {path}. No file was changed."]
+    if not old:
+        message.append(
+            "The old text is empty and matches every character boundary. "
+            "Supply non-empty old text copied from the file."
+        )
+        return "\n".join(message)
+
+    message.append("Match starts (line:column, 1-based); escaped context:")
+    # Match read()/Match.numbered's splitlines() convention without allocating
+    # every line or every occurrence just to show a handful of locations.
+    breaks = re.finditer(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", content)
+    boundary = next(breaks, None)
+    line, line_start, search_start = 1, 0, 0
+    shown = min(count, 5)
+    for _ in range(shown):
+        position = content.find(old, search_start)
+        while boundary is not None and boundary.end() <= position:
+            line += 1
+            line_start = boundary.end()
+            boundary = next(breaks, None)
+        start, end = max(0, position - 40), min(len(content), position + 80)
+        # Slice before escaping: neither a huge old string nor a long source
+        # line should produce an unbounded error (or echo the replacement).
+        while len(repr(content[start:end])) > 160:
+            if start < position:
+                start += 1
+            else:
+                end -= 1
+        excerpt = repr(content[start:end])
+        if start:
+            excerpt = "... " + excerpt
+        if end < len(content):
+            excerpt += " ..."
+        message.append(f"  {line}:{position - line_start + 1}  {excerpt}")
+        search_start = position + len(old)
+    if count > shown:
+        message.append(f"... {count - shown} more matches not shown.")
+    message.append(
+        "It must match exactly once — add surrounding context to old text to make it unique. "
+        "Use read() to inspect the reported lines before retrying."
+    )
+    return "\n".join(message)
+
+
 def _has_unquoted_pipe(cmd: str) -> bool:
     """True if cmd contains a shell pipe ``|`` outside of quotes."""
     in_single = in_double = False
@@ -875,10 +923,7 @@ class ShellTools(Skill):
                     "It must match exactly once — check whitespace and indentation."
                 )
             if count > 1:
-                raise ValueError(
-                    f"old text matched {count} times in {target}. "
-                    "It must match exactly once — add surrounding context to make it unique."
-                )
+                raise ValueError(_ambiguous_replace_message(target, content, old_text, count))
 
             new_content = content.replace(old_text, new, 1)
             resolved.write_text(new_content)
