@@ -5,7 +5,9 @@
 import base64
 import io
 import os
+import re
 from importlib.metadata import entry_points
+from inspect import cleandoc
 
 import pytest
 from nooa_atom.agent.agent import AtomAgent
@@ -43,12 +45,13 @@ async def test_installed_skill_is_discoverable_and_guidance_is_on_demand(tmp_pat
         for query in ("multimodal", "screenshots", "charts", "audio", "video", "files"):
             assert "multimodal (code, available)" in agent.skills.search(query)
         await agent.handle({"user_messages": ["finish without media"]})
-        assert "## Construct and show media" not in str(llm.calls[0].messages)
+        guide_opening = cleandoc(Multimodal.__doc__).splitlines()[0]
+        assert guide_opening not in str(llm.calls[0].messages)
         assert await agent.skills.activate(["multimodal"]) == (
             "multimodal: active; use self.multimodal"
         )
         guide = agent.skills.doc("multimodal")
-        assert "## Construct and show media" in guide
+        assert guide_opening in guide
         assert agent.multimodal.context_block is None
         assert "multimodal" in agent.skills.status().splitlines()[0]
         assert await agent.skills.deactivate(["multimodal"]) == "multimodal: inactive"
@@ -57,29 +60,36 @@ async def test_installed_skill_is_discoverable_and_guidance_is_on_demand(tmp_pat
 
 
 def test_guidance_matches_runtime_contract_and_limits():
-    guide = Multimodal.__doc__
-    for phrase in (
-        "from nooa import Image, Audio, Video, File",
-        "from nooa.runtime.media_capture import show",
-        "from_file reads the entire file",
-        "from_bytes(png_bytes, media_type=",
-        "PIL.Image.Image and matplotlib.figure.Figure",
-        "NumPy arrays, Plotly figures and HTML",
-        "default 5",
-        "fixed count cap of 100",
-        "NOT exact sandbox-origin",
-        "self.multimodal.from_file",
-        "fresh shell cwd",
-        "not a size cap",
-        "from_url does not download",
-        "Audio uses input_audio.data",
-        "NOT a portable fetch contract",
-        "events/traces",
-        "untrusted content",
-        "not user/Pool delivery",
-        "Support depends on modality, model, provider and client",
+    guide = cleandoc(Multimodal.__doc__)
+    # Bound prompt cost without pinning exact wording or line wrapping.
+    assert len(guide.splitlines()) <= 80
+    assert len(guide.split()) <= 650
+    assert guide.startswith("Use model-native multimodal capability to inspect")
+    assert "self.skills." not in guide  # Already-reading models need no activation recipe.
+    assert "self.multimodal.from_file(" in guide
+    assert "self.multimodal.show(" in guide
+
+    # Check actionable processing and safety contracts, not implementation jargon.
+    normalized = " ".join(guide.split()).lower()
+    for contract in (
+        r"screenshots:.*crop.*preserve readable text",
+        r"charts:.*underlying data.*exact values",
+        r"audio:.*short relevant excerpt",
+        r"video:.*relevant segment or timestamped frames",
+        r"pdfs:.*relevant pages",
+        r"model/provider must support the format",
+        r"do not transcribe, extract, capture screens, browse or upload",
+        r"inspect.*next model step.*do not complete.*return_result.*same cell",
+        r"in-process nooa python cell.*sandbox.*raise before file access/conversion",
+        r"relative paths.*current shell cwd",
+        r"ambiguous/unknown extensions.*explicit media_type mime",
+        r"10 mib cap.*max_bytes applies only to paths",
+        r"existing-object size is the caller's responsibility",
+        r"configured model service.*events/traces",
+        r"untrusted content",
+        r"not user/pool delivery",
     ):
-        assert phrase in guide
+        assert re.search(contract, normalized), contract
 
 
 class SandboxedMediaAtom(AtomAgent):
