@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gym-atom-bridge"
+version = "0.0.1"
+description = "External native Atom session adapter for NeMo Gym's NOOA runner"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "NVIDIA NeMo Team"}]
+requires-python = ">=3.13.14,<3.14"
+# Gym supplies nemo_gym and responses_api_agents in its task runtime archive.
+# Do not pull the full Gym distribution into a task environment.
+dependencies = ["nooa", "nooa-atom", "jsonschema>=4.25.1,<5"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.urls]
+Repository = "https://github.com/NVIDIA-NeMo/labs-OO-Agents"
+
+[tool.hatch.build.targets.wheel]
+include = ["gym_atom_bridge.py"]
+
+[tool.hatch.build.targets.sdist]
+include = ["gym_atom_bridge.py", "pyproject.toml", "README.md", "LICENSE", "tests"]
