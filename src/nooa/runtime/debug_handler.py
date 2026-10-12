@@ -424,13 +424,14 @@ def install_debug_handler(dump_dir: Path | None = None) -> None:
     except (RuntimeError, AttributeError, OSError) as exc:
         logger.debug("faulthandler.enable() skipped: %s", exc)
 
-    # Install SIGUSR2 handler (less commonly used than SIGUSR1)
-    try:
-        signal.signal(signal.SIGUSR2, _debug_signal_handler)
-        _handler_installed = True
-    except (ValueError, OSError):
-        # Can't set signal handler (not main thread, or platform issue)
-        pass
+    # Install SIGUSR2 handler (less commonly used than SIGUSR1; Unix only)
+    if hasattr(signal, "SIGUSR2"):
+        try:
+            signal.signal(signal.SIGUSR2, _debug_signal_handler)
+            _handler_installed = True
+        except (ValueError, OSError, AttributeError):
+            # Can't set signal handler (not main thread, or platform issue)
+            pass
 
 
 def dump_debug_info(file: IO[str] | None = None) -> None:

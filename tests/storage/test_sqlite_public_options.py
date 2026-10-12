@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """SQLiteStorageManager public options: save_snapshot_json, must_exist, journal_mode."""
 
-import fcntl
 import json
 import os
 import socket
@@ -169,8 +168,7 @@ def test_read_lock_owner_is_public_and_reads_the_owner_record(tmp_path):
     try:
         assert read_lock_owner(lock_path) == (os.getpid(), socket.gethostname())
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        sqlite_module._release_session_lock(fd)
 
 
 def test_delete_leaves_a_blank_lock_record(tmp_path):
