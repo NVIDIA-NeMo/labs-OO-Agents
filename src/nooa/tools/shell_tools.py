@@ -241,51 +241,163 @@ _LONG_ANCHOR_BREAKING = (
 
 
 @hidden
+def _replace_diagnostic_excerpt(content: str, start: int, end: int, focus: int, limit: int) -> str:
+    """Escape a bounded window, retaining indentation and whole escape sequences."""
+
+    def escape(char: str) -> str:
+        return char if char.isprintable() and char != "\\" else repr(char)[1:-1]
+
+    # Keep short rows whole, including deep indentation before the match.
+    # The raw-length guard also bounds escaping work for control-heavy rows.
+    if end - start <= limit:
+        text = "".join(escape(char) for char in content[start:end])
+        if len(text) <= limit:
+            return text
+
+    # Reserve room for explicit clipping/column labels before collecting text.
+    # Never slice or escape an entire potentially enormous source line.
+    budget = limit - len(f"[columns {end - start}-{end - start}; clipped] ...  ...")
+    left = focus
+    preceding = 0
+    while left > start:
+        size = len(escape(content[left - 1]))
+        if preceding + size > min(20, budget // 3):
+            break
+        preceding += size
+        left -= 1
+    pieces: list[str] = []
+    right, size = left, 0
+    while right < end:
+        piece = escape(content[right])
+        if size + len(piece) > budget:
+            break
+        pieces.append(piece)
+        size += len(piece)
+        right += 1
+    text = "".join(pieces)
+    if left == start and right == end:
+        return text
+    return (
+        f"[columns {left - start + 1}-{right - start}; clipped] "
+        + ("... " if left > start else "")
+        + text
+        + (" ..." if right < end else "")
+    )
+
+
+@hidden
 def _ambiguous_replace_message(path: str, content: str, old: str, count: int) -> str:
-    """Show bounded context for the first few exact, non-overlapping matches."""
-    message = [f"old text matched {count} times in {path}. No file was changed."]
+    """At most five matches, 160 chars/source row, 12,000 chars/diagnostic.
+
+    Coordinates are inclusive Python-character offsets in read_text() content;
+    a line terminator belongs to its preceding line, including both CRLF chars.
+    Two streaming boundary passes retain only coordinates and selected spans,
+    never copies of entire lines, the old payload, or the file's line index.
+    """
+    path = _replace_diagnostic_excerpt(path, 0, len(path), 0, 160)
+    header = f"old text matched {count} times in {path}. No file was changed."
     if not old:
-        message.append(
-            "The old text is empty and matches every character boundary. "
+        return (
+            header + "\nThe old text is empty and matches every character boundary. "
             "Supply non-empty old text copied from the file."
         )
-        return "\n".join(message)
 
-    message.append("Match starts (line:column, 1-based); escaped context:")
-    # Match read()/Match.numbered's splitlines() convention without allocating
-    # every line or every occurrence just to show a handful of locations.
-    breaks = re.finditer(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", content)
+    line_break = r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]"
+    breaks = re.finditer(line_break, content)
     boundary = next(breaks, None)
     line, line_start, search_start = 1, 0, 0
     shown = min(count, 5)
+    samples: list[tuple[int, int, int, int, int]] = []
+    wanted: set[int] = set()
     for _ in range(shown):
         position = content.find(old, search_start)
-        while boundary is not None and boundary.end() <= position:
-            line += 1
-            line_start = boundary.end()
-            boundary = next(breaks, None)
-        start, end = max(0, position - 40), min(len(content), position + 80)
-        # Slice before escaping: neither a huge old string nor a long source
-        # line should produce an unbounded error (or echo the replacement).
-        while len(repr(content[start:end])) > 160:
-            if start < position:
-                start += 1
-            else:
-                end -= 1
-        excerpt = repr(content[start:end])
-        if start:
-            excerpt = "... " + excerpt
-        if end < len(content):
-            excerpt += " ..."
-        message.append(f"  {line}:{position - line_start + 1}  {excerpt}")
+        coordinates = []
+        # Inclusive end avoids a phantom matched line after a terminal newline.
+        for offset in (position, position + len(old) - 1):
+            while boundary is not None and boundary.end() <= offset:
+                line += 1
+                line_start = boundary.end()
+                boundary = next(breaks, None)
+            coordinates.append((line, offset - line_start + 1))
+        (first, first_col), (last, last_col) = coordinates
+        samples.append((position, first, first_col, last, last_col))
+        wanted.update(range(max(1, first - 5), first))
+        wanted.update(range(first, min(first + 2, last + 1)))
+        wanted.update(range(max(first, last - 1), last + 6))
         search_start = position + len(old)
-    if count > shown:
-        message.append(f"... {count - shown} more matches not shown.")
-    message.append(
-        "It must match exactly once — add surrounding context to old text to make it unique. "
-        "Use read() to inspect the reported lines before retrying."
+
+    spans: dict[int, tuple[int, int]] = {}
+    start = 0
+    last_wanted = max(wanted)
+    # The final zero-width boundary covers a non-newline-terminated last line;
+    # ignore it after a terminal separator (splitlines() has no phantom line).
+    for number, boundary in enumerate(re.finditer(line_break + r"|\Z", content), 1):
+        end = boundary.end()
+        if number > last_wanted or start == end:
+            break
+        if number in wanted:
+            spans[number] = (start, end)
+        start = end
+
+    rows = [
+        (header, False),
+        (
+            "Match ranges (line:column, 1-based, inclusive; Python characters, not tab width). "
+            "Terminators belong to the preceding line. > marks matched lines; "
+            "escaped source, up to 5 lines before/after the entire match. "
+            "Source rows limited to 160 characters; diagnostic limited to 12000 characters.",
+            False,
+        ),
+    ]
+    for index, (position, first, first_col, last, last_col) in enumerate(samples, 1):
+        rows.append(
+            (f"Match {index}: lines {first}-{last} ({first}:{first_col}-{last}:{last_col})", False)
+        )
+        matched_numbers = (
+            list(range(first, last + 1))
+            if last - first + 1 <= 4
+            else [first, first + 1, last - 1, last]
+        )
+        numbers = list(range(max(1, first - 5), first))
+        numbers += matched_numbers + list(range(last + 1, last + 6))
+        for number in numbers:
+            if number not in spans:
+                continue
+            if last - first + 1 > 4 and number == last - 1:
+                rows.append((f"  ... {last - first - 3} matched lines omitted ...", False))
+            start, end = spans[number]
+            matched = first <= number <= last
+            label = f"{'>' if matched else ' '} {number}| "
+            focus = max(start, min(position, end - 1)) if matched else start
+            text = _replace_diagnostic_excerpt(content, start, end, focus, 160 - len(label))
+            rows.append((label + text, not matched))
+    rows.append(
+        (f"Showing {shown} of {count} matches; {count - shown} more matches not shown.", False)
     )
-    return "\n".join(message)
+    rows.append(
+        (
+            "It must match exactly once — add surrounding context to old text to make it unique. "
+            "Use read() to inspect the reported lines before retrying.",
+            False,
+        )
+    )
+    # Keep all five headers and matched rows even if the global budget is hit.
+    # Omit whole context rows, not fragments of escaped characters.
+    total = sum(len(text) + 1 for text, _ in rows) - 1
+    if total > 12_000:
+        omitted = 0
+        for index in range(len(rows) - 1, -1, -1):
+            text, context = rows[index]
+            if context:
+                total -= len(text) + 1
+                del rows[index]
+                omitted += 1
+            if total <= 12_000 - 80:
+                break
+        rows.append(
+            (f"... {omitted} context lines omitted (12000-character diagnostic limit).", False)
+        )
+    return "\n".join(text for text, _ in rows)
 
 
 def _has_unquoted_pipe(cmd: str) -> bool:
