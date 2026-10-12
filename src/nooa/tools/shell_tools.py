@@ -241,8 +241,10 @@ _LONG_ANCHOR_BREAKING = (
 
 
 @hidden
-def _replace_diagnostic_excerpt(content: str, start: int, end: int, focus: int, limit: int) -> str:
-    """Escape a bounded window, retaining indentation and whole escape sequences."""
+def _replace_diagnostic_excerpt(
+    content: str, start: int, end: int, focus: int, limit: int, column_origin: int = 1
+) -> str:
+    """Escape a bounded window with original columns, indentation, and whole escapes."""
 
     def escape(char: str) -> str:
         return char if char.isprintable() and char != "\\" else repr(char)[1:-1]
@@ -256,7 +258,8 @@ def _replace_diagnostic_excerpt(content: str, start: int, end: int, focus: int, 
 
     # Reserve room for explicit clipping/column labels before collecting text.
     # Never slice or escape an entire potentially enormous source line.
-    budget = limit - len(f"[columns {end - start}-{end - start}; clipped] ...  ...")
+    last_column = column_origin + end - start - 1
+    budget = limit - len(f"[columns {last_column}-{last_column}; clipped] ...  ...")
     left = focus
     preceding = 0
     while left > start:
@@ -278,7 +281,7 @@ def _replace_diagnostic_excerpt(content: str, start: int, end: int, focus: int, 
     if left == start and right == end:
         return text
     return (
-        f"[columns {left - start + 1}-{right - start}; clipped] "
+        f"[columns {column_origin + left - start}-{column_origin + right - start - 1}; clipped] "
         + ("... " if left > start else "")
         + text
         + (" ..." if right < end else "")
@@ -322,8 +325,8 @@ def _ambiguous_replace_message(path: str, content: str, old: str, count: int) ->
         (first, first_col), (last, last_col) = coordinates
         samples.append((position, first, first_col, last, last_col))
         wanted.update(range(max(1, first - 5), first))
-        wanted.update(range(first, min(first + 2, last + 1)))
-        wanted.update(range(max(first, last - 1), last + 6))
+        wanted.add(first)
+        wanted.update(range(last, last + 6))
         search_start = position + len(old)
 
     spans: dict[int, tuple[int, int]] = {}
@@ -343,34 +346,57 @@ def _ambiguous_replace_message(path: str, content: str, old: str, count: int) ->
         (header, False),
         (
             "Match ranges (line:column, 1-based, inclusive; Python characters, not tab width). "
-            "Terminators belong to the preceding line. > marks matched lines; "
-            "escaped source, up to 5 lines before/after the entire match. "
+            "Terminators belong to the preceding line. > marks omitted matching text; "
+            "escaped source, up to 5 lines before/after the entire match, "
+            "plus unmatched boundary prefixes/suffixes at original columns. "
             "Source rows limited to 160 characters; diagnostic limited to 12000 characters.",
             False,
         ),
     ]
+
+    def source_row(
+        number: int,
+        start: int,
+        end: int,
+        focus: int,
+        boundary: str = "",
+        column_origin: int = 1,
+    ) -> None:
+        label = f"  {number}| "
+        if boundary:
+            label += f"[{boundary} columns {column_origin}-{column_origin + end - start - 1}] "
+        text = _replace_diagnostic_excerpt(
+            content, start, end, focus, 160 - len(label), column_origin
+        )
+        rows.append((label + text, True))
+
     for index, (position, first, first_col, last, last_col) in enumerate(samples, 1):
         rows.append(
             (f"Match {index}: lines {first}-{last} ({first}:{first_col}-{last}:{last_col})", False)
         )
-        matched_numbers = (
-            list(range(first, last + 1))
-            if last - first + 1 <= 4
-            else [first, first + 1, last - 1, last]
-        )
-        numbers = list(range(max(1, first - 5), first))
-        numbers += matched_numbers + list(range(last + 1, last + 6))
-        for number in numbers:
-            if number not in spans:
-                continue
-            if last - first + 1 > 4 and number == last - 1:
-                rows.append((f"  ... {last - first - 3} matched lines omitted ...", False))
+
+        for number in range(max(1, first - 5), first):
             start, end = spans[number]
-            matched = first <= number <= last
-            label = f"{'>' if matched else ' '} {number}| "
-            focus = max(start, min(position, end - 1)) if matched else start
-            text = _replace_diagnostic_excerpt(content, start, end, focus, 160 - len(label))
-            rows.append((label + text, not matched))
+            source_row(number, start, end, start)
+        start, _ = spans[first]
+        if start < position:
+            source_row(first, start, position, position, "prefix")
+        matching_lines = last - first + 1
+        unit = "line" if matching_lines == 1 else "lines"
+        rows.append(
+            (
+                f"> [{matching_lines} matching {unit} omitted; identical to the supplied old text]",
+                False,
+            )
+        )
+        _, end = spans[last]
+        suffix_start = position + len(old)
+        if suffix_start < end:
+            source_row(last, suffix_start, end, suffix_start, "suffix", last_col + 1)
+        for number in range(last + 1, last + 6):
+            if number in spans:
+                start, end = spans[number]
+                source_row(number, start, end, start)
     rows.append(
         (f"Showing {shown} of {count} matches; {count - shown} more matches not shown.", False)
     )
@@ -381,7 +407,7 @@ def _ambiguous_replace_message(path: str, content: str, old: str, count: int) ->
             False,
         )
     )
-    # Keep all five headers and matched rows even if the global budget is hit.
+    # Keep all five headers and omission placeholders even if the global budget is hit.
     # Omit whole context rows, not fragments of escaped characters.
     total = sum(len(text) + 1 for text, _ in rows) - 1
     if total > 12_000:
