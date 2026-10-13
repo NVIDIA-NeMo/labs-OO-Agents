@@ -303,7 +303,8 @@ class AtomACPAgent:
         self._injects: dict[str, dict[str, Receipt]] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
         # session: session/cancel stops them.
-        self._asks: dict[str, asyncio.Task[Any]] = {}
+        self._asks: dict[str, set[asyncio.Future[Any]]] = {}
+        self._ask_epochs: dict[str, int] = {}
         # The question each session's prompt is asking, so two prompts that
         # returned with the same turn ask it once.
         self._asking: dict[str, NeedInput] = {}
@@ -494,6 +495,7 @@ class AtomACPAgent:
         del kwargs
         session = self.session(session_id)
         bridge = self._bridges.pop(session_id, None)
+        self._cancel_client_calls(session_id)
         if session is None and bridge is None:
             raise RequestError.resource_not_found(session_id)
         if session is not None and self._parent_is_live(session):
@@ -536,6 +538,7 @@ class AtomACPAgent:
         if registry is None:
             raise RequestError.resource_not_found(session_id)
         bridge = self._bridges.pop(session_id, None)
+        self._cancel_client_calls(session_id)
         try:
             await registry.delete(session_id, keep_files=bool(params.get("keepFiles")))
         except (SessionNotFoundError, InvalidSessionIdError):
@@ -656,11 +659,13 @@ class AtomACPAgent:
 
     async def close(self) -> None:
         """Close every session this process runs and every bridge."""
+        bridges = list(self._bridges.values())
+        self._bridges.clear()
+        for session_id in tuple(self._asks):
+            self._cancel_client_calls(session_id)
         for task in list(self._background):
             task.cancel()
         await asyncio.gather(*self._background, return_exceptions=True)
-        bridges = list(self._bridges.values())
-        self._bridges.clear()
         empty = [
             (registry, session.id)
             for registry in self._registries.values()
@@ -796,6 +801,7 @@ class AtomACPAgent:
         which is not asked again. While ``later()`` (followers wait after
         this item), a question is left as text and the item is done.
         """
+        epoch = self._ask_epochs.get(session.id, 0)
         while True:
             outcome = await session.outcome(item_id)
             if isinstance(outcome, TurnCancelledOutcome):
@@ -817,10 +823,14 @@ class AtomACPAgent:
             self._asking[session.id] = outcome
             try:
                 await bridge.flush()
+                if not self._client_answer_is_current(session, bridge, epoch):
+                    return PromptResponse(stop_reason="cancelled")
                 answer = await self._ask(session, bridge, outcome)
             finally:
                 if self._asking.get(session.id) is outcome:
                     del self._asking[session.id]
+            if not self._client_answer_is_current(session, bridge, epoch):
+                return PromptResponse(stop_reason="cancelled")
             if answer is _CANCELLED:
                 await bridge.flush()
                 return PromptResponse(stop_reason="cancelled")
@@ -920,8 +930,12 @@ class AtomACPAgent:
         yes = next(option for option in options if option.lower() == "yes")
         no = next(option for option in options if option.lower() == "no")
         tool_call_id = f"question-{uuid4()}"
+        epoch = self._ask_epochs.get(session.id, 0)
         bridge.publish(start_tool_call(tool_call_id, question, kind="other", status="pending"))
         await bridge.flush()
+        if not self._client_answer_is_current(session, bridge, epoch):
+            bridge.publish(update_tool_call(tool_call_id, status="failed", title="Cancelled"))
+            return _CANCELLED
         response = await self._client_call(
             session.id,
             conn.request_permission(
@@ -954,26 +968,55 @@ class AtomACPAgent:
         await bridge.flush()
         return chosen, SOURCE
 
+    def _client_answer_is_current(
+        self, session: Session, bridge: ACPEventBridge, epoch: int
+    ) -> bool:
+        return (
+            self._bridges.get(session.id) is bridge
+            and self.session(session.id) is session
+            and self._ask_epochs.get(session.id, 0) == epoch
+        )
+
+    def _cancel_client_calls(self, session_id: str) -> None:
+        # Invalidate answers even if a client coroutine swallows cancellation.
+        self._ask_epochs[session_id] = self._ask_epochs.get(session_id, 0) + 1
+        for task in tuple(self._asks.get(session_id, ())):
+            task.cancel()
+
     async def _client_call(self, session_id: str, request: Any) -> Any:
         """Await a request to the client that session/cancel can stop.
 
         Returns the response, ``_CANCELLED`` when cancelled, or ``None`` when
         the client failed it (the caller falls back to text).
         """
+        epoch = self._ask_epochs.get(session_id, 0)
         task = asyncio.ensure_future(request)
-        self._asks[session_id] = task
+        tasks = self._asks.setdefault(session_id, set())
+        tasks.add(task)
         try:
-            return await task
+            answer = await task
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise asyncio.CancelledError
+            if self._ask_epochs.get(session_id, 0) != epoch:
+                return _CANCELLED
+            return answer
         except asyncio.CancelledError:
             current = asyncio.current_task()
             if task.cancelled() and not (current is not None and current.cancelling()):
                 return _CANCELLED
             raise
         except Exception:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise asyncio.CancelledError from None
+            if self._ask_epochs.get(session_id, 0) != epoch:
+                return _CANCELLED
             logger.warning("The client failed a request in session %s", session_id, exc_info=True)
             return None
         finally:
-            if self._asks.get(session_id) is task:
+            tasks.discard(task)
+            if not tasks and self._asks.get(session_id) is tasks:
                 del self._asks[session_id]
 
     async def _turn_failed(self, bridge: ACPEventBridge, exc: TurnFailedError) -> PromptResponse:
@@ -1067,7 +1110,10 @@ class AtomACPAgent:
             question=f"ACP verbosity: {bridge.verbosity}. Choose activity detail.",
             answer_type=_VerbosityAnswer,
         )
+        epoch = self._ask_epochs.get(session.id, 0)
         answer = await self._ask(session, bridge, need)
+        if not self._client_answer_is_current(session, bridge, epoch):
+            return PromptResponse(stop_reason="cancelled")
         if answer is _CANCELLED:
             await bridge.flush()
             return PromptResponse(stop_reason="cancelled")
@@ -1117,9 +1163,7 @@ class AtomACPAgent:
         session = self.session(session_id)
         if session is None or session_id not in self._bridges:
             return  # a notification: nothing to answer
-        ask = self._asks.get(session_id)
-        if ask is not None:
-            ask.cancel()
+        self._cancel_client_calls(session_id)
         # A prompt request must be answered: a prompt whose message no turn
         # took is withdrawn and returns "cancelled"; the one the running turn
         # took returns "cancelled" with it. Injected messages stay queued.
@@ -1195,8 +1239,10 @@ class AtomACPAgent:
             ) from exc
         return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
 
-    @staticmethod
-    async def _set_verbosity(session: Session, bridge: ACPEventBridge, level: str) -> None:
+    async def _set_verbosity(self, session: Session, bridge: ACPEventBridge, level: str) -> None:
+        followed, current_bridge = self._followed(session.id)
+        if followed is not session or current_bridge is not bridge:
+            raise RequestError.resource_not_found(session.id)
         # Save only this key at project scope, retaining unrelated settings.
         # A failed write must not report a successful persistent change.
         try:
@@ -1327,6 +1373,7 @@ class AtomACPAgent:
             elif getattr(update, "kind", None) == "closed":
                 if self._bridges.get(session.id) is bridge:
                     del self._bridges[session.id]
+                    self._cancel_client_calls(session.id)
                 unsubscribe()
 
         unsubscribe = session.subscribe(on_update)
