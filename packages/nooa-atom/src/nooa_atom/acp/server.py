@@ -108,6 +108,7 @@ from nooa_atom.session.store import (
     SessionStore,
     sessions_root,
 )
+from nooa_atom.workspace.settings import load_acp_verbosity, write_settings_updates
 
 
 class _VerbosityAnswer(BaseModel):
@@ -1001,7 +1002,12 @@ class AtomACPAgent:
             elif level not in VERBOSITY_LEVELS:
                 message = "Usage: /verbosity silent|concise|verbose"
             else:
-                bridge.set_verbosity(level)
+                try:
+                    await self._set_verbosity(session, bridge, level)
+                except RequestError as exc:
+                    return await self._say(
+                        bridge, f"/verbosity: could not save setting: {exc.data}"
+                    )
                 bridge.publish(
                     ConfigOptionUpdate(
                         session_update="config_option_update",
@@ -1166,7 +1172,7 @@ class AtomACPAgent:
                         "reason": "Use silent, concise, or verbose",
                     }
                 )
-            _bridge.set_verbosity(value)
+            await self._set_verbosity(session, _bridge, value)
             return SetSessionConfigOptionResponse(
                 config_options=self._config_options(session) or []
             )
@@ -1188,6 +1194,23 @@ class AtomACPAgent:
                 {"configId": config_id, "value": value, "reason": str(exc)}
             ) from exc
         return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
+
+    @staticmethod
+    async def _set_verbosity(session: Session, bridge: ACPEventBridge, level: str) -> None:
+        # Save only this key at project scope, retaining unrelated settings.
+        # A failed write must not report a successful persistent change.
+        try:
+            # Match existing workspace controls: this small local write and
+            # bridge update have no await between them, so concurrent ACP
+            # requests in this process cannot reorder persistence/application.
+            write_settings_updates(
+                {("atom", "verbosity"): level}, workspace=session.options.workspace
+            )
+        except Exception as exc:
+            raise RequestError.internal_error(
+                {"reason": f"Could not save ACP verbosity: {exc}"}
+            ) from exc
+        bridge.set_verbosity(level)
 
     @staticmethod
     async def _set_reasoning(session: Session, level: str) -> None:
@@ -1295,6 +1318,7 @@ class AtomACPAgent:
     def _attach(self, session: Session) -> ACPEventBridge:
         conn = self._require_conn()
         bridge = ACPEventBridge(session, conn, resolve_child=self.session)
+        bridge.set_verbosity(load_acp_verbosity(session.options.workspace))
         self._bridges[session.id] = bridge
 
         def on_update(update: Any) -> None:

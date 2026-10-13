@@ -193,6 +193,17 @@ def load_settings_data(workspace: str | Path | None = None) -> dict[str, Any]:
     return load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project)
 
 
+def load_acp_verbosity(workspace: str | Path) -> Literal["silent", "concise", "verbose"]:
+    """Read ACP-only presentation detail from layered Atom settings."""
+    data = load_settings_data(workspace)
+    section = data.get(SETTINGS_SECTION)
+    level = section.get("verbosity", "verbose") if isinstance(section, dict) else "verbose"
+    if isinstance(level, str) and level in ("silent", "concise", "verbose"):
+        return level
+    logger.warning("Invalid atom.verbosity %r; using verbose", level)
+    return "verbose"
+
+
 def load_behavior_settings(workspace: str | Path) -> dict[str, Any]:
     """The workspace's resolved behaviour settings; the defaults if they are invalid.
 
@@ -252,6 +263,9 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
         if name == "tui" and section:
             logger.warning("Reading legacy tui settings; move shared behavior settings to atom")
         for key, value in section.items():
+            if name == SETTINGS_SECTION and key == "verbosity":
+                # ACP presentation only; do not pass it to agent options.
+                continue
             if key == "agent_spec":
                 _warn_ignored_agent_spec()
             if key not in behavior_fields():

@@ -72,9 +72,23 @@ The adapter also advertises a **Verbosity** select option through
 `session/set_config_option` (`configId: "verbosity"`), the protocol used by Pool's
 `/mode` picker. Whether arbitrary config options appear in the client's UI is
 client-dependent; `/verbosity` explicitly requests a form rather than relying
-on that UI. All input paths share the same setting. The setting
-is local to this session's ACP attachment; a new attachment starts at `verbose`.
-It does not change the model, its reasoning effort, execution, or stored events.
+on that UI. All input paths share the same setting. Changes are saved as
+`atom.verbosity` in the workspace's `.nooa/settings.yaml`, preserving other
+settings. New sessions and newly loaded attachments use that saved preference;
+already-open sibling sessions keep their current level.
+
+```yaml
+atom:
+  verbosity: concise
+```
+
+You can also set a user default in `~/.config/nooa/settings.yaml`. Normal settings
+precedence applies: user, workspace, then `NEMO_OO_SETTINGS` overrides. Saves go
+to workspace scope, not to user or environment-override files. An environment
+override can therefore take precedence again on the next attachment. Without a
+configured value (or with an invalid value), verbosity defaults to `verbose`.
+This is ACP-only presentation state: it does not change agent/model behavior,
+reasoning effort, or stored agent events.
 
 | Level | Python cells | Bash and diffs | Summarization and returned turn results |
 | --- | --- | --- | --- |

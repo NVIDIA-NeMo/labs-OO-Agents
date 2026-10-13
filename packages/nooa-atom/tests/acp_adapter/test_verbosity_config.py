@@ -43,7 +43,7 @@ async def test_pool_verbosity_picker_and_text_command_share_state(make_adapter, 
     assert adapter.bridge(session_id).verbosity == "concise"
     with pytest.raises(RequestError):
         await adapter.set_config_option("verbosity", "missing", "silent")
-    # ACP attachment-local: loading resets the display setting, not model state.
+    # New attachments use the saved workspace verbosity.
     await adapter.close_session(session_id)
     loaded = await adapter.load_session(str(workspace), session_id)
-    assert verbosity(loaded.config_options).current_value == "verbose"
+    assert verbosity(loaded.config_options).current_value == "concise"
