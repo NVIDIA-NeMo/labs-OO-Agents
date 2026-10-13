@@ -68,7 +68,7 @@ async def test_concise_python_is_compact_tool_output_not_message(make_adapter, w
     assert start.title == end.title == "python: # Check repository status"
     assert start.kind == "other" and end.status == "completed"
     for card in (start, end):
-        assert card.raw_input == {"code": "# Check repository status"}
-        assert card.content is not None and len(card.content) == 1
-        assert card.content[0].content.text == "```python\n# Check repository status\n```"
+        assert card.raw_input is None
+        assert card.content is None
+        assert card.raw_output is None
         assert "private" not in str(card.model_dump())

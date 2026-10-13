@@ -1621,9 +1621,9 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
         assert [card.status for card in cards] == ["in_progress", "completed"]
         for card in cards:
             assert card.title == "python: # Inspect the repository"
-            assert card.raw_input == {"code": "# Inspect the repository"}
-            assert card.content is not None and len(card.content) == 1
-            assert _content_text(card.content[0]) == "```python\n# Inspect the repository\n```"
+            assert card.raw_input is None
+            assert card.content is None
+            assert card.raw_output is None
     else:
         assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
         assert thoughts[0] == "Long reasoning"
@@ -1770,7 +1770,8 @@ async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
     )
     for card in cards:
         assert card.title == "python: # inspect"
-        assert card.raw_input == {"code": "# inspect"}
+        assert card.raw_input is None
+        assert card.content is None
     await bridge.close()
     for agent in agents.values():
         await agent.aclose()
@@ -1817,9 +1818,9 @@ async def test_compact_python_output_keeps_shape_without_full_detail(tmp_path, s
     )
     assert end.title == "python: # Check status" + suffix
     for update in (start, end):
-        assert update.raw_input == {"code": "# Check status"}
-        assert update.content is not None and len(update.content) == 1
-        assert _content_text(update.content[0]) == "```python\n# Check status\n```"
+        assert update.raw_input is None
+        assert update.content is None
+        assert update.raw_output is None
         assert "private" not in str(update.model_dump())
     await bridge.close()
     await agent.aclose()
@@ -1845,8 +1846,9 @@ async def test_compact_python_cleanup_never_reveals_full_source(tmp_path, finish
     await bridge.flush()
     [start, end] = [u for _, u in client.updates]
     assert end.status == "failed"
-    assert end.content is not None and len(end.content) == 1
-    assert _content_text(end.content[0]) == "```python\n# Check status\n```"
+    assert end.content is None
+    assert end.raw_input is None
+    assert end.raw_output is None
     assert "private" not in str(end.model_dump())
     assert "private" not in str(start.model_dump())
     client.updates.clear()
@@ -1860,5 +1862,38 @@ async def test_compact_python_cleanup_never_reveals_full_source(tmp_path, finish
     )
     await bridge.flush()
     assert client.updates == []
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_concise_long_source_is_only_a_bounded_tool_title(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    first = 'res = await self.shell.run("' + "command; " * 100 + '")'
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="cell", name="python_cell", arguments={"code": first + "\nprivate()"}
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="private output",
+        )
+    )
+    await bridge.flush()
+    [start, end] = [u for _, u in client.updates]
+    assert start.title == end.title == "python: " + first[:79] + "…"
+    for update in (start, end):
+        wire = update.model_dump(mode="json", by_alias=True, exclude_none=True)
+        assert "content" not in wire
+        assert "rawInput" not in wire
+        assert "rawOutput" not in wire
+        assert first not in str(wire)
+        assert "private" not in str(wire)
     await bridge.close()
     await agent.aclose()

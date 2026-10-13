@@ -79,12 +79,14 @@ It does not change the model, its reasoning effort, execution, or stored events.
 | Level | Python cells | Bash and diffs | Summarization and returned turn results |
 | --- | --- | --- | --- |
 | `verbose` (default) | Full source and output cards | Full activity cards | Full summary and result details |
-| `concise` | Same tool cards, containing only the first nonblank source line | Hidden | Same thought output, shortened to one status line each |
+| `concise` | Title-only tool cards naming the first nonblank source line | Hidden | Same thought output, shortened to one status line each |
 | `silent` | Hidden | Hidden | Hidden |
 
 Concise changes the amount of activity, not its ACP output shape. Python keeps
-its tool start/completion cards with one source line; printed output, errors,
-returned cell values and subsequent source lines are omitted. Summarization and
+its tool start/completion cards with a bounded first-line title only; the
+body and raw input/output are omitted so clients do not duplicate or wrap the
+source below the title. Printed output, errors and returned cell values are
+also omitted. Summarization and
 turn-result notices keep their thought output type with one status line. These
 are ACP-only presentations and are not added to the agent's history.
 

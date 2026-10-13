@@ -653,8 +653,6 @@ class ACPEventBridge:
                     _python_title(first),
                     kind="other",
                     status="in_progress",
-                    content=_python_content(first),
-                    raw_input={"code": first},
                 )
             )
             return
@@ -689,8 +687,6 @@ class ACPEventBridge:
                         card.code, "cancelled" if cancelled else "failed" if failed else None
                     ),
                     status="failed" if failed else "completed",
-                    content=_python_content(card.code),
-                    raw_input={"code": card.code},
                 )
             )
             if source is None:
@@ -1025,7 +1021,7 @@ class ACPEventBridge:
             if card is None:
                 continue
             if card.compact:
-                content = _python_content(card.code)
+                content = None
             elif card.kind == "python":
                 content = _python_content(card.code, reason)
             else:
