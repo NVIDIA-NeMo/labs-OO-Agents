@@ -11,18 +11,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import os
 import re
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
+
+from .cooldown import retry_after_delay
+
+logger = logging.getLogger(__name__)
 
 _GROUP_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 
@@ -91,6 +96,34 @@ class AdmissionController(Protocol):
 
     async def acquire(self, observer: AdmissionObserver) -> AdmissionPermit | None:
         """Acquire capacity or raise before provider dispatch."""
+
+
+async def _run_admitted_attempt[T](
+    call: Callable[[], Coroutine[Any, Any, T]],
+    permit: AdmissionPermit,
+) -> T:
+    """Run an admitted attempt, publishing optional feedback before release.
+
+    The provider task owns this lifecycle so feedback and cleanup still happen
+    after its caller stops waiting. Overload interpretation and permit-specific
+    feedback stay inside the admission layer; transports need only schedule
+    this generic attempt wrapper. Release-only external permits remain valid.
+    """
+    try:
+        return await call()
+    except Exception as error:
+        if isinstance(permit, CooldownAdmissionPermit):
+            try:
+                delay = retry_after_delay(error)
+                if delay is not None:
+                    await permit.cooldown(delay)
+            except Exception:
+                # Feedback must not replace the provider failure or skip
+                # cleanup. Headers and exception messages can contain secrets.
+                logger.warning("Could not publish shared LLM cooldown")
+        raise
+    finally:
+        permit.release()
 
 
 _current_controller: ContextVar[AdmissionController | None] = ContextVar(
