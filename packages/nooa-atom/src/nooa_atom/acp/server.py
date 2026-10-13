@@ -61,7 +61,7 @@ from acp.schema import (
     ToolCallUpdate,
     UnstructuredCommandInput,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from nooa.errors import GenerationError
 from nooa.interactive import NeedInput
@@ -72,6 +72,7 @@ from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUS
 from nooa_atom.acp.event_bridge import (
     VERBOSITY_LEVELS,
     ACPEventBridge,
+    Verbosity,
     cancel_text,
     pool_input_event,
 )
@@ -107,6 +108,14 @@ from nooa_atom.session.store import (
     SessionStore,
     sessions_root,
 )
+
+
+class _VerbosityAnswer(BaseModel):
+    verbosity: Verbosity = Field(
+        title="Verbosity",
+        description="silent: no activity; concise: one-line notices; verbose: full activity (default).",
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -988,17 +997,7 @@ class AtomACPAgent:
         if name == "verbosity":
             level = raw_args.strip().lower()
             if not level:
-                bridge.publish(
-                    ConfigOptionUpdate(
-                        session_update="config_option_update",
-                        config_options=self._config_options(session) or [],
-                    )
-                )
-                message = (
-                    f"ACP verbosity: {bridge.verbosity}. "
-                    "Choose Verbosity in the client's session settings, "
-                    "or use /verbosity silent|concise|verbose."
-                )
+                return await self._pick_verbosity(session, bridge)
             elif level not in VERBOSITY_LEVELS:
                 message = "Usage: /verbosity silent|concise|verbose"
             else:
@@ -1055,6 +1054,29 @@ class AtomACPAgent:
             receipt = await session.submit(result.text, channel=channel, source=SOURCE)
             return await self._finish(session, bridge, receipt.item_id)
         return await self._say(bridge, result.text)
+
+    async def _pick_verbosity(self, session: Session, bridge: ACPEventBridge) -> PromptResponse:
+        """Ask the client locally; neither the command nor its answer enters the agent."""
+        need = NeedInput(
+            question=f"ACP verbosity: {bridge.verbosity}. Choose activity detail.",
+            answer_type=_VerbosityAnswer,
+        )
+        answer = await self._ask(session, bridge, need)
+        if answer is _CANCELLED:
+            await bridge.flush()
+            return PromptResponse(stop_reason="cancelled")
+        if answer is None:
+            return await self._say(
+                bridge,
+                f"ACP verbosity: {bridge.verbosity}. Usage: /verbosity silent|concise|verbose",
+            )
+        value, _source = answer
+        if not isinstance(value, _VerbosityAnswer):
+            return await self._say(bridge, f"ACP verbosity unchanged: {bridge.verbosity}.")
+        # Reuse local dispatch for validation, confirmation and config-picker sync.
+        response = await self._run_command(session, bridge, "verbosity", value.verbosity)
+        assert response is not None
+        return response
 
     async def _recover(self, session: Session, raw_args: str) -> str:
         """``/recover``: over the store that holds ``session``, for its workspace."""
@@ -1536,7 +1558,7 @@ def _available_commands_update(commands: list[CommandInfo]) -> Any:
     names = {command.name for command in commands}
     verbosity = CommandInfo(
         name="verbosity",
-        description="Set ACP activity detail (default verbose); also available in session settings.",
+        description="Set ACP activity detail (default verbose); no argument opens a picker when supported.",
         input_hint="[silent|concise|verbose]",
     )
     # The ACP-local command wins over a skill command with the same name.
