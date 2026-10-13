@@ -39,7 +39,7 @@ async def test_verbosity_is_advertised_and_session_local(make_adapter, workspace
     assert adapter.session(first).info.reply_count == 0
 
 
-async def test_concise_python_is_compact_tool_output_not_message(make_adapter, workspace, client):
+async def test_concise_python_is_full_tool_card_not_message(make_adapter, workspace, client):
     from acp.schema import AgentThoughtChunk, ToolCallProgress, ToolCallStart
     from atom_test_agents import cell
 
@@ -68,7 +68,7 @@ async def test_concise_python_is_compact_tool_output_not_message(make_adapter, w
     assert start.title == end.title == "python: # Check repository status"
     assert start.kind == "other" and end.status == "completed"
     for card in (start, end):
-        assert card.raw_input is None
-        assert card.content is None
-        assert card.raw_output is None
-        assert "private" not in str(card.model_dump())
+        assert card.raw_input is not None and "private output" in card.raw_input["code"]
+        assert card.content is not None
+    assert len(start.content) == 1 and len(end.content) == 2
+    assert "private output" in end.content[1].content.text

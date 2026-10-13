@@ -79,16 +79,22 @@ It does not change the model, its reasoning effort, execution, or stored events.
 | Level | Python cells | Bash and diffs | Summarization and returned turn results |
 | --- | --- | --- | --- |
 | `verbose` (default) | Full source and output cards | Full activity cards | Full summary and result details |
-| `concise` | Title-only tool cards naming the first nonblank source line | Hidden | Same thought output, shortened to one status line each |
+| `concise` (experiment) | One rolling full Python tool card per turn | Hidden | Same thought output, shortened to one status line each |
 | `silent` | Hidden | Hidden | Hidden |
 
-Concise changes the amount of activity, not its ACP output shape. Python keeps
-its tool start/completion cards with a bounded first-line title only; the
-body and raw input/output are omitted so clients do not duplicate or wrap the
-source below the title. Printed output, errors and returned cell values are
-also omitted. Summarization and
-turn-result notices keep their thought output type with one status line. These
-are ACP-only presentations and are not added to the agent's history.
+Concise currently experiments with one rolling **full Python tool card** rather
+than a history of individual cell cards. The first cell opens it; subsequent
+cells update the same card's title, source, output and status. Only the latest
+cell is displayed, including mirrored child activity (attributed in its title).
+Delayed results from superseded cells cannot replace the latest activity.
+
+The display slot resets on parent turn boundaries or a verbosity change. Child
+activity between parent turns can open an idle slot, which is finalized when
+the next parent turn starts. Completed turns leave their last card in the GUI;
+a new turn gets a fresh card. Bash and diffs are still hidden. Summarization and
+turn-result notices keep their thought output type with one status line. This
+experiment is isolated in a separate commit for easy reversion to title-only
+per-cell concise cards. ACP presentations are not added to the agent's history.
 
 Model reasoning is only forwarded in `verbose`. Normal agent messages, final
 answers, questions/forms, command confirmations, cancellation notices, plans,

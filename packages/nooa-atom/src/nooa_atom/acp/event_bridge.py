@@ -115,8 +115,8 @@ class _OpenCard:
     """What the bridge keeps about one tool card it has opened and not yet closed."""
 
     kind: Literal["python", "terminal"]
-    code: str = ""  # a Python card's source (first line only for compact cards)
-    compact: bool = False  # preserve admitted detail through completion/cleanup
+    code: str = ""  # a Python card's full source
+    wire_id: str | None = None  # concise cells replace the same rolling card
     output: str = ""  # what a terminal command has streamed so far
     note: str | None = None  # a terminal card's truncation note, kept at the top
 
@@ -140,6 +140,12 @@ class BridgedSession(Protocol):
 @dataclass(frozen=True, slots=True)
 class _BestEffortUpdate:
     value: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _RollingUpdate:
+    value: Any
+    epoch: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +323,10 @@ class ACPEventBridge:
         # wins, whoever started the close.
         self._finish_open = True
         self._open: dict[ToolKey, _OpenCard] = {}
+        self._rolling_id: str | None = None
+        self._rolling_key: ToolKey | None = None
+        self._rolling_seen: set[ToolKey] = set()  # ACP execution ids must not be reused
+        self._invalid_rolling: set[str] = set()
         self._plan: list[PlanEntry] = []
         self._children: list[dict[str, Any]] = []
         self._mirrors: dict[str, list[Callable[[], None]]] = {}
@@ -356,6 +366,8 @@ class ACPEventBridge:
         # A mirrored child can still be running when the parent changes verbosity.
         # Finalise already-visible cards so reduced detail leaves no spinning cards.
         self._fail_tools(list(self._open), "Activity detail changed.", title="Display ended")
+        self._rolling_id = None
+        self._rolling_key = None
         self.verbosity = cast(Verbosity, level)
 
     def _activity_text(self, full: str, concise: str | None = None) -> None:
@@ -422,11 +434,40 @@ class ACPEventBridge:
         session_id, tool_call_id = key
         return tool_call_id if session_id == self.session_id else f"{session_id}:{tool_call_id}"
 
+    def _discard_rolling(self) -> None:
+        """Forget a failed display epoch; a fresh start follows transport recovery.
+
+        Send failure is ambiguous, so do not retry/reuse its client-side card.
+        """
+        if self._rolling_id is not None:
+            self._invalid_rolling.add(self._rolling_id)
+        if self._rolling_key is not None:
+            self._open.pop(self._rolling_key, None)
+        self._rolling_id = None
+        self._rolling_key = None
+
+    def _reset_rolling(self, reason: str, *, title: str = "Unfinished") -> None:
+        if self._rolling_key is not None:
+            self._fail_tools([self._rolling_key], reason, title=title)
+        self._rolling_id = None
+        self._rolling_key = None
+
+    def _card_title(self, key: ToolKey, card: _OpenCard, status: str | None = None) -> str:
+        title = _python_title(card.code, status)
+        if card.wire_id is not None and key[0] != self.session_id:
+            title = title.replace("python", f"python [{key[0]}]", 1)
+        return title
+
     # ---- queue -------------------------------------------------------
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
             for part in split_text_chunk(end_line(update)):
+                if (
+                    self._rolling_id is not None
+                    and getattr(part, "tool_call_id", None) == self._rolling_id
+                ):
+                    part = _RollingUpdate(part, self._rolling_id)
                 self._queue.put_nowait(part)
 
     def publish(self, update: Any) -> None:
@@ -560,7 +601,10 @@ class ACPEventBridge:
             self._enqueue(
                 CurrentModeUpdate(session_update="current_mode_update", current_mode_id=update.mode)
             )
+        elif getattr(update, "kind", None) == "turn_started":
+            self._reset_rolling("A new turn started.")
         elif isinstance(update, CancelledUpdate):
+            self._reset_rolling(cancel_text(update.by), title="Cancelled")
             # Before the prompt's future resolves: the Session emits this first,
             # so the cards are closed before the prompt answers "cancelled".
             self.fail_open_tools(cancel_text(update.by), title="Cancelled")
@@ -575,6 +619,7 @@ class ACPEventBridge:
             self._start_close()
 
     def _on_turn_ended(self, update: TurnEndedUpdate) -> None:
+        self._reset_rolling("Turn ended before this finished.")
         if update.outcome_kind == "need_input":
             # Rendered once per turn, here; the prompt that owns the consumed
             # item decides whether to also open a form.
@@ -641,20 +686,45 @@ class ACPEventBridge:
         code = event.arguments.get("code", "")
         if not isinstance(code, str):
             code = repr(code)
+        key = self._key(event.tool_call_id, source)
+        repeated = key in self._rolling_seen
+        self._rolling_seen.add(key)
         if self.verbosity == "silent":
             return
-        key = self._key(event.tool_call_id, source)
         if self.verbosity == "concise":
-            first = next((line.strip() for line in code.splitlines() if line.strip()), "")
-            self._open[key] = _OpenCard("python", code=first, compact=True)
-            self._enqueue(
-                start_tool_call(
-                    self._wire_id(key),
-                    _python_title(first),
+            # Reused execution ids cannot distinguish old/new results. Ignore
+            # repeated admissions rather than pair stale output with new source.
+            if repeated:
+                return
+            # Only the latest cell owns this display slot. Older completions must
+            # not restore stale titles/output when children run concurrently.
+            if self._rolling_key is not None:
+                self._open.pop(self._rolling_key, None)
+            first = self._rolling_id is None
+            if first:
+                self._rolling_id = f"concise-python-{uuid4()}"
+            self._rolling_key = key
+            card = _OpenCard("python", code=code, wire_id=self._rolling_id)
+            self._open[key] = card
+            title = self._card_title(key, card)
+            if first:
+                update = start_tool_call(
+                    card.wire_id,
+                    title,
                     kind="other",
                     status="in_progress",
+                    content=_python_content(code),
+                    raw_input={"code": code},
                 )
-            )
+            else:
+                update = update_tool_call(
+                    card.wire_id,
+                    title=title,
+                    status="in_progress",
+                    content=_python_content(code),
+                    raw_input={"code": code},
+                )
+            self._enqueue(update)
             return
         self._open[key] = _OpenCard("python", code=code)
         self._enqueue(
@@ -677,21 +747,6 @@ class ACPEventBridge:
             return
         key = self._key(event.tool_call_id, source)
         card = self._open.pop(key, None)
-        if card is not None and card.compact:
-            cancelled = event.execution_status is ResultStatus.CANCELLED
-            failed = event.execution_status in (ResultStatus.ERROR, ResultStatus.CANCELLED)
-            self._enqueue(
-                update_tool_call(
-                    self._wire_id(key),
-                    title=_python_title(
-                        card.code, "cancelled" if cancelled else "failed" if failed else None
-                    ),
-                    status="failed" if failed else "completed",
-                )
-            )
-            if source is None:
-                self._publish_plan()
-            return
         if card is not None:
             code = card.code
             parts = [
@@ -712,12 +767,12 @@ class ACPEventBridge:
                 if event.execution_status in (ResultStatus.ERROR, ResultStatus.CANCELLED)
                 else "completed"
             )
-            title = _python_title(
-                code, "cancelled" if cancelled else "failed" if status == "failed" else None
+            title = self._card_title(
+                key, card, "cancelled" if cancelled else "failed" if status == "failed" else None
             )
             self._enqueue(
                 update_tool_call(
-                    self._wire_id(key),
+                    card.wire_id or self._wire_id(key),
                     title=title,
                     status=status,
                     content=_python_content(code, output),
@@ -952,6 +1007,7 @@ class ACPEventBridge:
                         if error is None:
                             item.set_result(None)
                         else:
+                            self._discard_rolling()
                             item.set_exception(error)
                     continue
                 if isinstance(item, _InputEvent):
@@ -964,6 +1020,7 @@ class ACPEventBridge:
                     except BaseException as exc:
                         if isinstance(exc, Exception):
                             self._error = exc
+                            self._discard_rolling()
                             error = exc
                         else:
                             error = self._stopped_error(exc)
@@ -975,6 +1032,12 @@ class ACPEventBridge:
                         if not item.future.done():
                             item.future.set_result(None)
                     continue
+                rolling_epoch = None
+                if isinstance(item, _RollingUpdate):
+                    if item.epoch in self._invalid_rolling:
+                        continue
+                    rolling_epoch = item.epoch
+                    item = item.value
                 if isinstance(item, _BestEffortUpdate):
                     try:
                         await self.client.session_update(self.session_id, item.value)
@@ -991,6 +1054,9 @@ class ACPEventBridge:
                         # hammering a transport that just failed; the next
                         # flush reports the error and resets.
                         self._error = exc
+                        if rolling_epoch is not None:
+                            self._invalid_rolling.add(rolling_epoch)
+                        self._discard_rolling()
                         logger.warning(
                             "ACP session %s dropped an update after a failed send",
                             self.session_id,
@@ -1020,9 +1086,7 @@ class ACPEventBridge:
             card = self._open.get(key)
             if card is None:
                 continue
-            if card.compact:
-                content = None
-            elif card.kind == "python":
+            if card.kind == "python":
                 content = _python_content(card.code, reason)
             else:
                 # What the command streamed so far stays above the reason.
@@ -1033,9 +1097,9 @@ class ACPEventBridge:
             del self._open[key]
             self._enqueue(
                 update_tool_call(
-                    self._wire_id(key),
+                    card.wire_id or self._wire_id(key),
                     # A Python card keeps its code in the title, with the reason.
-                    title=_python_title(card.code, (title or "interrupted").lower())
+                    title=self._card_title(key, card, (title or "interrupted").lower())
                     if card.kind == "python"
                     else title,
                     status="failed",
@@ -1098,6 +1162,8 @@ class ACPEventBridge:
             )
         else:
             self._open.clear()
+        self._rolling_id = None
+        self._rolling_key = None
         with suppress(Exception):
             await self.flush()
         self._closed = True
