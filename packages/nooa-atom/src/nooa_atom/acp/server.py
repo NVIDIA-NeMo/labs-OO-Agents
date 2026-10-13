@@ -44,6 +44,7 @@ from acp.schema import (
     AvailableCommandInput,
     ClientCapabilities,
     CloseSessionResponse,
+    ConfigOptionUpdate,
     ElicitationFormSessionMode,
     HttpMcpServer,
     Implementation,
@@ -68,7 +69,12 @@ from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
-from nooa_atom.acp.event_bridge import ACPEventBridge, cancel_text, pool_input_event
+from nooa_atom.acp.event_bridge import (
+    VERBOSITY_LEVELS,
+    ACPEventBridge,
+    cancel_text,
+    pool_input_event,
+)
 from nooa_atom.acp.listing import list_sessions, validate_workspace
 from nooa_atom.acp.need_input import (
     answer_from_content,
@@ -551,6 +557,11 @@ class AtomACPAgent:
         elif not text.strip():
             raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
         session, _bridge = self._followed(session_id)
+        slash = _slash_invocation(text)
+        if slash is not None and slash[0] == "verbosity":
+            raise RequestError.invalid_params(
+                {"reason": "ACP /verbosity is a local command; send it as session/prompt"}
+            )
         try:
             if mode == "steer":
                 receipt = await session.steer(text, source=INJECT_SOURCE)
@@ -974,6 +985,24 @@ class AtomACPAgent:
         self, session: Session, bridge: ACPEventBridge, name: str, raw_args: str
     ) -> PromptResponse | None:
         """Run ``/name args``; ``None`` when it is not a command, so the text is a prompt."""
+        if name == "verbosity":
+            level = raw_args.strip().lower()
+            if not level:
+                message = (
+                    f"ACP verbosity: {bridge.verbosity}. Usage: /verbosity silent|concise|verbose"
+                )
+            elif level not in VERBOSITY_LEVELS:
+                message = "Usage: /verbosity silent|concise|verbose"
+            else:
+                bridge.set_verbosity(level)
+                bridge.publish(
+                    ConfigOptionUpdate(
+                        session_update="config_option_update",
+                        config_options=self._config_options(session) or [],
+                    )
+                )
+                message = f"ACP verbosity: {bridge.verbosity}."
+            return await self._say(bridge, message)
         if name == RECOVER.name:
             return await self._say(bridge, await self._recover(session, raw_args))
         if name not in {command.name for command in session.commands()}:
@@ -1095,9 +1124,22 @@ class AtomACPAgent:
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse:
-        """``model``: switch the model from the next turn on; ``reasoning``: the level."""
+        """Set a model, reasoning level, or ACP-local activity verbosity."""
         del kwargs
         session, _bridge = self._followed(session_id)
+        if config_id == "verbosity":
+            if not isinstance(value, str) or value not in VERBOSITY_LEVELS:
+                raise RequestError.invalid_params(
+                    {
+                        "configId": config_id,
+                        "value": value,
+                        "reason": "Use silent, concise, or verbose",
+                    }
+                )
+            _bridge.set_verbosity(value)
+            return SetSessionConfigOptionResponse(
+                config_options=self._config_options(session) or []
+            )
         if config_id == "reasoning" and isinstance(value, str):
             await self._set_reasoning(session, value)
             return SetSessionConfigOptionResponse(
@@ -1135,7 +1177,7 @@ class AtomACPAgent:
 
     def _config_options(self, session: Session) -> list[Any] | None:
         """The model select option (the registry's aliases plus the current model),
-        and a reasoning option when the current client declares levels."""
+        a reasoning option when the current client declares levels, and ACP verbosity."""
         options: list[Any] = []
         current = session.info.model or self._model or _default_model(session.options.workspace)
         aliases = model_aliases(session.options.workspace)
@@ -1158,7 +1200,21 @@ class AtomACPAgent:
         reasoning = self._reasoning_option(session)
         if reasoning is not None:
             options.append(reasoning)
-        return options or None
+        bridge = self._bridges.get(session.id)
+        options.append(
+            SessionConfigOptionSelect(
+                id="verbosity",
+                name="Verbosity",
+                description="ACP activity detail only; does not change the agent or its reasoning.",
+                type="select",
+                current_value=bridge.verbosity if bridge is not None else "verbose",
+                options=[
+                    SessionConfigSelectOption(value=level, name=level.title())
+                    for level in VERBOSITY_LEVELS
+                ],
+            )
+        )
+        return options
 
     @staticmethod
     def _reasoning_option(session: Session) -> Any | None:
@@ -1467,10 +1523,20 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
 
 
 def _available_commands_update(commands: list[CommandInfo]) -> Any:
-    """The session's commands, and the ones this adapter runs itself (``/recover``)."""
+    """The session's commands, and the ones this adapter runs itself (``/recover`` and ``/verbosity``)."""
     available: list[AvailableCommand] = []
     names = {command.name for command in commands}
-    for command in [*commands, *(c for c in (RECOVER,) if c.name not in names)]:
+    verbosity = CommandInfo(
+        name="verbosity",
+        description="Set ACP activity detail (default verbose); no argument shows the current level.",
+        input_hint="[silent|concise|verbose]",
+    )
+    # The ACP-local command wins over a skill command with the same name.
+    for command in [
+        *(c for c in commands if c.name != verbosity.name),
+        *(c for c in (RECOVER,) if c.name not in names),
+        verbosity,
+    ]:
         input_spec = (
             AvailableCommandInput(UnstructuredCommandInput(hint=command.input_hint))
             if command.input_hint

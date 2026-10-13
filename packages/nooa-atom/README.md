@@ -59,6 +59,29 @@ Pool team says which of the two the request means. The open prompt stays open
 until those messages are handled; Stop withdraws the ones no turn took and
 lists them.
 
+### ACP activity verbosity
+
+Use `/verbosity silent`, `/verbosity concise`, or `/verbosity verbose` to control
+activity sent to the ACP GUI. Pool also offers a **Verbosity** select option
+using the same `session/set_config_option` input method as its `/mode` picker
+(`configId: "verbosity"`). The picker and text command share the same setting;
+`/verbosity` shows the current level. The setting
+is local to this session's ACP attachment; a new attachment starts at `verbose`.
+It does not change the model, its reasoning effort, execution, or stored events.
+
+| Level | Python cells | Bash and diffs | Summarization and returned turn results |
+| --- | --- | --- | --- |
+| `verbose` (default) | Full source and output cards | Full activity cards | Full summary and result details |
+| `concise` | One line: the first nonblank source line | Hidden | One status line each |
+| `silent` | Hidden | Hidden | Hidden |
+
+Model reasoning is only forwarded in `verbose`. Normal agent messages, final
+answers, questions/forms, command confirmations, cancellation notices, plans,
+and protocol metadata remain visible at every level. Setup/synthetic Python
+cells and truncation without a summary do not produce activity lines. Changing
+levels finalizes any already-visible open cards (including mirrored child
+cards); subsequent activity uses the new level.
+
 A question the agent asks (`NeedInput`) goes to the client as a form when
 the client advertises `elicitation.form`, as a permission request when it
 is a yes/no choice, and otherwise as text answered by the next message.

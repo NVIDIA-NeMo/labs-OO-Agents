@@ -44,7 +44,7 @@ from nooa_atom.session.items import (
 from nooa_atom.session.session import Session
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
-from nooa.events import LLMResponse, PythonOutput
+from nooa.events import LLMResponse, PythonOutput, Summary
 from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa.llm_types import AssistantReasoning, LLMUsage
 from nooa.unifiedllm import FakeLLMClient
@@ -1556,3 +1556,220 @@ async def test_evicted_unregistered_input_is_not_claimed_shown(bridged):
     assert client.updates == []
     bridge.forget_client_input("0")
     assert shown.cancelled()
+
+
+@pytest.mark.parametrize("level", ["silent", "concise", "verbose"])
+@pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
+async def test_activity_verbosity(tmp_path, level, tool_name):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)
+    assert bridge.verbosity == "verbose"
+    bridge.set_verbosity(level)
+    code = "# Inspect the repository\nprint('private output')"
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="cell", name=tool_name, arguments={"code": code})
+    )
+    agent.event_manager.add(
+        TerminalCommandStarted(command_id="bash", command="ls", working_directory="/")
+    )
+    agent.event_manager.add(TerminalCommandOutput(command_id="bash", stdout="files"))
+    agent.event_manager.add(TerminalCommandFinished(command_id="bash", exit_code=0))
+    agent.event_manager.add(
+        FileEdit(path="/file.py", operation="update", old_text="old", new_text="new")
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="private output",
+            value={"detail": "hidden"},
+        )
+    )
+    agent.event_manager.add(LLMResponse(reasoning="Long reasoning"))
+    # Real collapse emission, not merely a manually added Summary event.
+    agent.event_manager.collapse("1", "2", summary_text="Full recap\nMore recap")
+    agent.event_manager.add(AgentMessage(content="User-facing answer\nStill visible"))
+    session.emit(
+        TurnEndedUpdate(
+            session_id=session.id,
+            outcome_kind="done",
+            outcome={
+                "explanation": "Task completed\nMore details",
+                "result": {"evidence": "all details"},
+            },
+        )
+    )
+    await bridge.flush()
+    updates = [u for _, u in client.updates]
+    thoughts = [u.content.text for u in updates if isinstance(u, AgentThoughtChunk)]
+    cards = [u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert [u.content.text for u in updates if isinstance(u, AgentMessageChunk)] == [
+        "User-facing answer\nStill visible\n\n"
+    ]
+    if level == "silent":
+        assert thoughts == []
+        assert cards == []
+    elif level == "concise":
+        assert thoughts == [
+            "python: # Inspect the repository\n\n",
+            "Summarized context (1..2).\n\n",
+            "Returned done: Task completed\n\n",
+        ]
+        assert cards == []
+    else:
+        assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
+        assert thoughts[0] == "Long reasoning"
+        assert "Full recap\nMore recap" in thoughts[1]
+        assert "all details" in thoughts[2]
+        assert "More details" in thoughts[2]
+    await bridge.close()
+    await agent.aclose()
+
+
+@pytest.mark.parametrize("level", ["silent", "concise"])
+async def test_reduced_detail_ignores_setup_synthetic_and_truncation(tmp_path, level):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity(level)
+    for metadata in ({"prefill": True}, {"synthetic": True}):
+        agent.event_manager.add(
+            ToolCallEvent(
+                tool_call_id="internal",
+                name="execute_python",
+                arguments={"code": "# not executed"},
+                metadata=metadata,
+            )
+        )
+    agent.event_manager.add(Summary(summary_tag="1..2", replaced_range=(1, 2)))
+    await bridge.flush()
+    assert client.updates == []
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_changing_detail_closes_open_cards_and_suppresses_late_output(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    agent.event_manager.add(
+        TerminalCommandStarted(command_id="bash", command="make", working_directory="/")
+    )
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="cell", name="python_cell", arguments={"code": "await build()"})
+    )
+    bridge.set_verbosity("silent")
+    await bridge.flush()
+    assert len(client.updates) == 4
+    assert all(u.status == "failed" for _, u in client.updates[2:])
+    client.updates.clear()
+    bridge.set_verbosity("verbose")
+    agent.event_manager.add(TerminalCommandFinished(command_id="bash", exit_code=0))
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            stdout="late output",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+        )
+    )
+    await bridge.flush()
+    assert client.updates == []
+    with pytest.raises(ValueError):
+        bridge.set_verbosity("wrong")
+    assert bridge.verbosity == "verbose"
+    await bridge.close()
+    await agent.aclose()
+
+
+@pytest.mark.parametrize("level", ["silent", "concise", "verbose"])
+@pytest.mark.parametrize("kind", ["waiting", "need_input"])
+async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)
+    bridge.set_verbosity(level)
+    outcome = (
+        {"explanation": "Waiting for review\nMore detail", "on": ["delegates"]}
+        if kind == "waiting"
+        else {"question": "Which target?\nFull question", "options": ["first", "second"]}
+    )
+    session.emit(TurnEndedUpdate(session_id=session.id, outcome_kind=kind, outcome=outcome))
+    await bridge.flush()
+    thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
+    if level == "silent":
+        assert thoughts == []
+    elif level == "concise":
+        line = "Waiting for review" if kind == "waiting" else "Which target?"
+        assert thoughts == [f"Returned {kind}: {line}\n\n"]
+    else:
+        assert len(thoughts) == 1
+        assert "delegates" in thoughts[0] if kind == "waiting" else "second" in thoughts[0]
+    answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert answers == (
+        ["Which target?\nFull question\n\n- first\n- second\n\n"] if kind == "need_input" else []
+    )
+    await bridge.close()
+    await agent.aclose()
+
+
+@pytest.mark.parametrize("level", ["silent", "concise"])
+async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
+    agents = {name: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c", "g")}
+    parent = _FakeSession(agents["p"], "parent")
+    sessions = {
+        "child": _FakeSession(agents["c"], "child"),
+        "grandchild": _FakeSession(agents["g"], "grandchild"),
+    }
+    client = _RecordingClient()
+    bridge = ACPEventBridge(parent, client, resolve_child=sessions.get)
+    bridge.set_verbosity(level)
+    parent.emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child", name="helper", depth=1, retained=False
+        )
+    )
+    sessions["child"].emit(
+        ChildCreatedUpdate(
+            session_id="child", child_id="grandchild", name="scout", depth=2, retained=False
+        )
+    )
+    for name in ("p", "c", "g"):
+        agents[name].event_manager.add(
+            ToolCallEvent(
+                tool_call_id="cell",
+                name="python_cell",
+                arguments={"code": "# inspect\nprint('detail')"},
+            )
+        )
+    agents["g"].event_manager.add(
+        Summary(summary_tag="1..2", replaced_range=(1, 2), summary_text="Child summary")
+    )
+    agents["c"].event_manager.add(AgentMessage(content="Child answer"))
+    sessions["child"].emit(
+        TurnEndedUpdate(
+            session_id="child", outcome_kind="done", outcome={"explanation": "Child result"}
+        )
+    )
+    await bridge.flush()
+    thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
+    assert thoughts == (
+        [
+            "python: # inspect\n\n",
+            "python [child]: # inspect\n\n",
+            "python [grandchild]: # inspect\n\n",
+        ]
+        if level == "concise"
+        else []
+    )
+    assert not any(
+        isinstance(u, (ToolCallStart, ToolCallProgress, AgentMessageChunk))
+        for _, u in client.updates
+    )
+    await bridge.close()
+    for agent in agents.values():
+        await agent.aclose()

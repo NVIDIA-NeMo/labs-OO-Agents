@@ -20,7 +20,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from acp import (
@@ -52,7 +52,7 @@ from acp.schema import (
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
-from nooa.events import LLMResponse, PythonOutput
+from nooa.events import LLMResponse, PythonOutput, Summary
 from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa_atom.agent.activity import (
     FileEdit,
@@ -103,6 +103,9 @@ _TRUNCATION_NOTES = {
     (True, False): "The command was truncated for display.",
     (False, True): "Its standard input was truncated for display.",
 }
+
+Verbosity = Literal["silent", "concise", "verbose"]
+VERBOSITY_LEVELS = ("silent", "concise", "verbose")
 
 ToolKey = tuple[str, str]
 
@@ -298,6 +301,7 @@ class ACPEventBridge:
         self.session = session
         self.client = client
         self.session_id = session.id
+        self.verbosity: Verbosity = "verbose"
         self._resolve_child = resolve_child
         self._own_sources = own_sources
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -335,11 +339,33 @@ class ACPEventBridge:
         self._own_handlers: dict[str, Callable[[Any], None]] = {
             "AgentMessage": self._on_agent_message,
             "LLMResponse": self._on_llm_response,
+            "Summary": self._on_summary,
         }
         self._unsubscribers: list[Callable[[], None]] = [
             session.subscribe(self._on_session_update),
         ]
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
+
+    def set_verbosity(self, level: str) -> None:
+        """Set this ACP attachment's activity detail, without changing agent behavior."""
+        if level not in VERBOSITY_LEVELS:
+            raise ValueError("Use silent, concise, or verbose.")
+        if level == self.verbosity:
+            return
+        # A mirrored child can still be running when the parent changes verbosity.
+        # Finalise already-visible cards so reduced detail leaves no spinning cards.
+        self._fail_tools(list(self._open), "Activity detail changed.", title="Display ended")
+        self.verbosity = cast(Verbosity, level)
+
+    def _activity_text(self, full: str, concise: str | None = None) -> None:
+        """Activity is thought text, never an agent's answer or a question."""
+        if self.verbosity == "silent":
+            return
+        text = full if self.verbosity == "verbose" else (concise or full)
+        if self.verbosity == "concise":
+            text = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        if text:
+            self._enqueue(update_agent_thought_text(text.rstrip() + "\n\n"))
 
     # ---- subscriptions -----------------------------------------------
 
@@ -564,6 +590,13 @@ class ACPEventBridge:
             # for a cell it announced; close its card rather than leave it
             # spinning.
             self.fail_open_tools("Did not finish.", title="Unfinished")
+        if self.verbosity != "silent" and update.outcome_kind in {"done", "waiting", "need_input"}:
+            self._activity_text(
+                f"Returned {update.outcome_kind}: "
+                + pformat(update.outcome, max_string=None, unquote_strings=True),
+                f"Returned {update.outcome_kind}: "
+                + str(update.outcome.get("explanation") or update.outcome.get("question", "")),
+            )
         self._publish_plan()
 
     def _on_child_created(self, update: ChildCreatedUpdate) -> None:
@@ -607,6 +640,11 @@ class ACPEventBridge:
         code = event.arguments.get("code", "")
         if not isinstance(code, str):
             code = repr(code)
+        if self.verbosity != "verbose":
+            first = next((line.strip() for line in code.splitlines() if line.strip()), "")
+            label = f"python [{source}]" if source is not None else "python"
+            self._activity_text(f"{label}: {first}" if first else label)
+            return
         key = self._key(event.tool_call_id, source)
         self._open[key] = _OpenCard("python", code=code)
         self._enqueue(
@@ -665,7 +703,7 @@ class ACPEventBridge:
             self._publish_plan()
 
     def _on_file_edit(self, event: EventBase, source: str | None) -> None:
-        if not isinstance(event, FileEdit):
+        if self.verbosity != "verbose" or not isinstance(event, FileEdit):
             return
         tool_call_id = self._wire_id(self._key(f"file-edit-{uuid4()}", source))
         path = event.path
@@ -699,7 +737,7 @@ class ACPEventBridge:
         )
 
     def _on_terminal_started(self, event: EventBase, source: str | None) -> None:
-        if not isinstance(event, TerminalCommandStarted):
+        if self.verbosity != "verbose" or not isinstance(event, TerminalCommandStarted):
             return
         key = self._key(event.command_id, source)
         note = _TRUNCATION_NOTES.get((event.command_truncated, event.stdin_truncated))
@@ -752,7 +790,9 @@ class ACPEventBridge:
             return
         key = self._key(event.command_id, source)
         card = self._open.get(key)
-        output = card.output if card is not None else ""
+        if card is None:
+            return
+        output = card.output
         # ACP has no cancelled status, so a stopped command is still "failed" —
         # but it must read as the user's own action, not as a crash.
         reason = "Cancelled by user." if event.cancelled else event.error
@@ -780,11 +820,17 @@ class ACPEventBridge:
         )
 
     def _on_llm_response(self, event: EventBase) -> None:
-        if not isinstance(event, LLMResponse):
+        if self.verbosity != "verbose" or not isinstance(event, LLMResponse):
             return
         reasoning = event.reasoning
         if reasoning:
             self._enqueue(update_agent_thought_text(reasoning))
+
+    def _on_summary(self, event: EventBase) -> None:
+        if not isinstance(event, Summary) or event.summary_text is None:
+            return
+        line = f"Summarized context ({event.summary_tag})."
+        self._activity_text(f"{line}\n\n{event.summary_text}", line)
 
     # ---- derived updates ---------------------------------------------
 
