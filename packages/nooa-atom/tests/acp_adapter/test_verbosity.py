@@ -4,8 +4,14 @@
 
 import pytest
 from acp import RequestError, text_block
-from acp.schema import AgentMessageChunk, AvailableCommandsUpdate
-from atom_test_agents import ScriptedModels
+from acp.schema import (
+    AgentMessageChunk,
+    AgentThoughtChunk,
+    AvailableCommandsUpdate,
+    ToolCallProgress,
+    ToolCallStart,
+)
+from atom_test_agents import ScriptedModels, cell
 
 
 async def test_verbosity_is_advertised_and_session_local(make_adapter, workspace, client):
@@ -37,3 +43,38 @@ async def test_verbosity_is_advertised_and_session_local(make_adapter, workspace
             await adapter._inject({"sessionId": first, "mode": mode, "text": "/verbosity silent"})
         assert "local command" in str(exc.value.data)
     assert adapter.session(first).info.reply_count == 0
+
+
+async def test_concise_lines_use_visible_messages_without_entering_agent_history(
+    make_adapter, workspace, client
+):
+    models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    "# Check repository status\n"
+                    "print('private cell output')\n"
+                    "self.message('User-facing answer')\n"
+                    "return_result(Done(explanation='Checked repository\\nExtra detail'))"
+                )
+            ]
+        }
+    )
+    adapter = await make_adapter(models)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    await adapter.prompt(session_id, [text_block("/verbosity concise")])
+    client.log.clear()
+    response = await adapter.prompt(session_id, [text_block("Check it")])
+    assert response.stop_reason == "end_turn"
+    assert client.texts(AgentMessageChunk, session_id) == [
+        "python: # Check repository status\n\n",
+        "User-facing answer\n\n",
+        "Returned done: Checked repository\n\n",
+    ]
+    assert client.updates(session_id, AgentThoughtChunk) == []
+    assert client.updates(session_id, ToolCallStart) == []
+    assert client.updates(session_id, ToolCallProgress) == []
+    assert not any(
+        "python: # Check" in entry.content or "Returned done:" in entry.content
+        for entry in adapter.session(session_id).transcript()
+    )

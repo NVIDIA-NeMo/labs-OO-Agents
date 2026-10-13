@@ -358,14 +358,20 @@ class ACPEventBridge:
         self.verbosity = cast(Verbosity, level)
 
     def _activity_text(self, full: str, concise: str | None = None) -> None:
-        """Activity is thought text, never an agent's answer or a question."""
+        """Render concise status as visible text, not optional/collapsed model thoughts.
+
+        These are ACP-only notices, never messages added to the agent's events.
+        """
         if self.verbosity == "silent":
             return
         text = full if self.verbosity == "verbose" else (concise or full)
         if self.verbosity == "concise":
             text = next((line.strip() for line in text.splitlines() if line.strip()), "")
         if text:
-            self._enqueue(update_agent_thought_text(text.rstrip() + "\n\n"))
+            if self.verbosity == "concise":
+                self._enqueue(update_agent_message(text_block(text)))
+            else:
+                self._enqueue(update_agent_thought_text(text.rstrip() + "\n\n"))
 
     # ---- subscriptions -----------------------------------------------
 

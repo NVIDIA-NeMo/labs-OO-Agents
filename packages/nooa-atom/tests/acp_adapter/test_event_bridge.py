@@ -1606,20 +1606,23 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
     updates = [u for _, u in client.updates]
     thoughts = [u.content.text for u in updates if isinstance(u, AgentThoughtChunk)]
     cards = [u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
-    assert [u.content.text for u in updates if isinstance(u, AgentMessageChunk)] == [
-        "User-facing answer\nStill visible\n\n"
-    ]
+    messages = [u.content.text for u in updates if isinstance(u, AgentMessageChunk)]
+    answer = "User-facing answer\nStill visible\n\n"
     if level == "silent":
+        assert messages == [answer]
         assert thoughts == []
         assert cards == []
     elif level == "concise":
-        assert thoughts == [
+        assert thoughts == []
+        assert messages == [
             "python: # Inspect the repository\n\n",
             "Summarized context (1..2).\n\n",
+            answer,
             "Returned done: Task completed\n\n",
         ]
         assert cards == []
     else:
+        assert messages == [answer]
         assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
         assert thoughts[0] == "Long reasoning"
         assert "Full recap\nMore recap" in thoughts[1]
@@ -1704,15 +1707,18 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
     if level == "silent":
         assert thoughts == []
     elif level == "concise":
-        line = "Waiting for review" if kind == "waiting" else "Which target?"
-        assert thoughts == [f"Returned {kind}: {line}\n\n"]
+        assert thoughts == []
     else:
         assert len(thoughts) == 1
         assert "delegates" in thoughts[0] if kind == "waiting" else "second" in thoughts[0]
     answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
-    assert answers == (
+    expected = (
         ["Which target?\nFull question\n\n- first\n- second\n\n"] if kind == "need_input" else []
     )
+    if level == "concise":
+        line = "Waiting for review" if kind == "waiting" else "Which target?"
+        expected.append(f"Returned {kind}: {line}\n\n")
+    assert answers == expected
     await bridge.close()
     await agent.aclose()
 
@@ -1757,7 +1763,9 @@ async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
     )
     await bridge.flush()
     thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
-    assert thoughts == (
+    assert thoughts == []
+    messages = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert messages == (
         [
             "python: # inspect\n\n",
             "python [child]: # inspect\n\n",
@@ -1766,10 +1774,7 @@ async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
         if level == "concise"
         else []
     )
-    assert not any(
-        isinstance(u, (ToolCallStart, ToolCallProgress, AgentMessageChunk))
-        for _, u in client.updates
-    )
+    assert not any(isinstance(u, (ToolCallStart, ToolCallProgress)) for _, u in client.updates)
     await bridge.close()
     for agent in agents.values():
         await agent.aclose()
