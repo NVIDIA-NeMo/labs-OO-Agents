@@ -6,6 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `SandboxConfig.env_allowlist` keeps only the listed environment variables in
+  the sandbox worker. The worker is a fork, so it inherited every variable of the
+  parent, model API keys included, and a cell could print them. Removing them
+  from `os.environ` alone is not enough: `/proc/self/environ` still shows the
+  block the kernel copied in at `exec`, so the worker also zeroes that block,
+  and fails to start if it is still readable afterwards. Only the environment
+  is cleaned: a key the parent already holds in memory, such as an LLM client's,
+  is still in the forked worker. The default (`None`) keeps the current
+  behaviour, inheriting everything.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive
