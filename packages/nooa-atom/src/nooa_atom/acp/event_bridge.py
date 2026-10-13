@@ -142,10 +142,17 @@ class _BestEffortUpdate:
     value: Any
 
 
+@dataclass
+class _RollingSlot:
+    wire_id: str
+    key: ToolKey
+
+
 @dataclass(frozen=True, slots=True)
 class _RollingUpdate:
     value: Any
     epoch: str
+    transport_generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,10 +330,11 @@ class ACPEventBridge:
         # wins, whoever started the close.
         self._finish_open = True
         self._open: dict[ToolKey, _OpenCard] = {}
-        self._rolling_id: str | None = None
-        self._rolling_key: ToolKey | None = None
+        self._rolling: dict[str, _RollingSlot] = {}
+        self._helper_names: dict[str, str] = {}
         self._rolling_seen: set[ToolKey] = set()  # ACP execution ids must not be reused
         self._invalid_rolling: set[str] = set()
+        self._transport_generation = 0
         self._plan: list[PlanEntry] = []
         self._children: list[dict[str, Any]] = []
         self._mirrors: dict[str, list[Callable[[], None]]] = {}
@@ -366,8 +374,7 @@ class ACPEventBridge:
         # A mirrored child can still be running when the parent changes verbosity.
         # Finalise already-visible cards so reduced detail leaves no spinning cards.
         self._fail_tools(list(self._open), "Activity detail changed.", title="Display ended")
-        self._rolling_id = None
-        self._rolling_key = None
+        self._rolling.clear()
         self.verbosity = cast(Verbosity, level)
 
     def _activity_text(self, full: str, concise: str | None = None) -> None:
@@ -411,12 +418,19 @@ class ACPEventBridge:
                 # Announced like this session's own children, so the client
                 # knows the id before cards arrive under it.
                 self._on_child_created(update)
+            elif kind == "turn_started":
+                self._reset_rolling("A new helper turn started.", source=child.id)
+            elif isinstance(update, TurnEndedUpdate):
+                self._reset_rolling("Helper turn ended before this finished.", source=child.id)
+            elif isinstance(update, CancelledUpdate):
+                self._reset_rolling(cancel_text(update.by), source=child.id, title="Cancelled")
             elif kind == "closed":
                 self._unmirror(child.id)
 
         self._mirrors[child.id] = [child.subscribe(on_child_update)]
 
     def _unmirror(self, child_id: str) -> None:
+        self._reset_rolling("The subagent ended before this finished.", source=child_id)
         for unsubscribe in self._mirrors.pop(child_id, []):
             unsubscribe()
         self._fail_tools(
@@ -435,27 +449,28 @@ class ACPEventBridge:
         return tool_call_id if session_id == self.session_id else f"{session_id}:{tool_call_id}"
 
     def _discard_rolling(self) -> None:
-        """Forget a failed display epoch; a fresh start follows transport recovery.
+        """Discard all slots and queued updates, including already-ended epochs."""
+        self._transport_generation += 1
+        for slot in self._rolling.values():
+            self._invalid_rolling.add(slot.wire_id)
+            self._open.pop(slot.key, None)
+        self._rolling.clear()
 
-        Send failure is ambiguous, so do not retry/reuse its client-side card.
-        """
-        if self._rolling_id is not None:
-            self._invalid_rolling.add(self._rolling_id)
-        if self._rolling_key is not None:
-            self._open.pop(self._rolling_key, None)
-        self._rolling_id = None
-        self._rolling_key = None
-
-    def _reset_rolling(self, reason: str, *, title: str = "Unfinished") -> None:
-        if self._rolling_key is not None:
-            self._fail_tools([self._rolling_key], reason, title=title)
-        self._rolling_id = None
-        self._rolling_key = None
+    def _reset_rolling(
+        self, reason: str, *, source: str | None = None, title: str = "Unfinished"
+    ) -> None:
+        source_id = source or self.session_id
+        slot = self._rolling.get(source_id)
+        if slot is not None:
+            self._fail_tools([slot.key], reason, title=title)
+            self._rolling.pop(source_id, None)
 
     def _card_title(self, key: ToolKey, card: _OpenCard, status: str | None = None) -> str:
         title = _python_title(card.code, status)
         if card.wire_id is not None and key[0] != self.session_id:
-            title = title.replace("python", f"python [{key[0]}]", 1)
+            name = self._helper_names.get(key[0], "helper")
+            name = " ".join(name.split())[:40] or "helper"
+            title = title.replace("python", f"python [{name} · {key[0][:8]}]", 1)
         return title
 
     # ---- queue -------------------------------------------------------
@@ -463,11 +478,11 @@ class ACPEventBridge:
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
             for part in split_text_chunk(end_line(update)):
-                if (
-                    self._rolling_id is not None
-                    and getattr(part, "tool_call_id", None) == self._rolling_id
+                wire_id = getattr(part, "tool_call_id", None)
+                if wire_id is not None and any(
+                    slot.wire_id == wire_id for slot in self._rolling.values()
                 ):
-                    part = _RollingUpdate(part, self._rolling_id)
+                    part = _RollingUpdate(part, wire_id, self._transport_generation)
                 self._queue.put_nowait(part)
 
     def publish(self, update: Any) -> None:
@@ -646,6 +661,7 @@ class ACPEventBridge:
         self._publish_plan()
 
     def _on_child_created(self, update: ChildCreatedUpdate) -> None:
+        self._helper_names[update.child_id] = update.name or "helper"
         self._children.append(
             {
                 "sessionId": update.child_id,
@@ -696,15 +712,17 @@ class ACPEventBridge:
             # repeated admissions rather than pair stale output with new source.
             if repeated:
                 return
-            # Only the latest cell owns this display slot. Older completions must
-            # not restore stale titles/output when children run concurrently.
-            if self._rolling_key is not None:
-                self._open.pop(self._rolling_key, None)
-            first = self._rolling_id is None
-            if first:
-                self._rolling_id = f"concise-python-{uuid4()}"
-            self._rolling_key = key
-            card = _OpenCard("python", code=code, wire_id=self._rolling_id)
+            # Cells replace only their own source's display slot. Concurrent
+            # helpers retain separate cards and cannot overwrite one another.
+            slot = self._rolling.get(key[0])
+            first = slot is None
+            if slot is None:
+                slot = _RollingSlot(f"concise-python-{uuid4()}", key)
+                self._rolling[key[0]] = slot
+            else:
+                self._open.pop(slot.key, None)
+                slot.key = key
+            card = _OpenCard("python", code=code, wire_id=slot.wire_id)
             self._open[key] = card
             title = self._card_title(key, card)
             if first:
@@ -1034,7 +1052,10 @@ class ACPEventBridge:
                     continue
                 rolling_epoch = None
                 if isinstance(item, _RollingUpdate):
-                    if item.epoch in self._invalid_rolling:
+                    if (
+                        item.epoch in self._invalid_rolling
+                        or item.transport_generation != self._transport_generation
+                    ):
                         continue
                     rolling_epoch = item.epoch
                     item = item.value
@@ -1162,8 +1183,7 @@ class ACPEventBridge:
             )
         else:
             self._open.clear()
-        self._rolling_id = None
-        self._rolling_key = None
+        self._rolling.clear()
         with suppress(Exception):
             await self.flush()
         self._closed = True
