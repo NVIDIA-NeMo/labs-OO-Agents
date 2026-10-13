@@ -93,19 +93,22 @@ reasoning effort, or stored agent events.
 | Level | Python cells | Bash and diffs | Summarization and returned turn results |
 | --- | --- | --- | --- |
 | `verbose` (default) | Full source and output cards | Full activity cards | Full summary and result details |
-| `concise` (experiment) | One rolling full Python tool card per turn | Hidden | Same thought output, shortened to one status line each |
+| `concise` (experiment) | One rolling full Python tool card per agent/helper turn | Hidden | Same thought output, shortened to one status line each |
 | `silent` | Hidden | Hidden | Hidden |
 
-Concise currently experiments with one rolling **full Python tool card** rather
-than a history of individual cell cards. The first cell opens it; subsequent
-cells update the same card's title, source, output and status. Only the latest
-cell is displayed, including mirrored child activity (attributed in its title).
-Delayed results from superseded cells cannot replace the latest activity.
+Concise uses a rolling **full Python tool card** for the parent and a separate
+card for each helper, including grandchildren. Each agent's first cell opens
+its card; subsequent cells replace only that card's title, source, output and
+status. Helper cards show the name and a short session ID, for example
+`python [reviewer · abcdef12]: …`, so helpers with the same name remain
+recognizable. Delayed results from superseded cells cannot replace newer
+activity from that agent, and concurrent helpers never overwrite each other.
 
-The display slot resets on parent turn boundaries or a verbosity change. Child
-activity between parent turns can open an idle slot, which is finalized when
-the next parent turn starts. Completed turns leave their last card in the GUI;
-a new turn gets a fresh card. Bash and diffs are still hidden. Summarization and
+Each display slot resets on its own agent's turn boundaries. Parent completion
+or cancellation does not end a still-running helper's card; helper completion,
+cancellation or closure affects only that helper. A verbosity change or bridge
+shutdown finalizes all relevant cards. Completed turns leave their last card in
+the GUI; a new turn gets a fresh card. Bash and diffs are still hidden. Summarization and
 turn-result notices keep their thought output type with one status line. This
 experiment is isolated in a separate commit for easy reversion to title-only
 per-cell concise cards. ACP presentations are not added to the agent's history.

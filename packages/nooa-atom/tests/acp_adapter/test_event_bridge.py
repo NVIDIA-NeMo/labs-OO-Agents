@@ -1769,15 +1769,22 @@ async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
     assert not any(isinstance(u, AgentMessageChunk) for _, u in client.updates)
     cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
     if level == "concise":
-        assert [type(c) for c in cards] == [ToolCallStart, ToolCallProgress, ToolCallProgress]
-        assert len({c.tool_call_id for c in cards}) == 1
-        assert cards[0].tool_call_id.startswith("concise-python-")
-        assert [c.title for c in cards] == [
-            "python: # inspect",
-            "python [child]: # inspect",
-            "python [grandchild]: # inspect",
+        assert [type(c) for c in cards] == [
+            ToolCallStart,
+            ToolCallStart,
+            ToolCallStart,
+            ToolCallProgress,
         ]
-        assert all(c.raw_input == {"code": "# inspect\nprint('detail')"} for c in cards)
+        assert len({c.tool_call_id for c in cards}) == 3
+        assert cards[0].tool_call_id.startswith("concise-python-")
+        assert [c.title for c in cards[:3]] == [
+            "python: # inspect",
+            "python [helper · child]: # inspect",
+            "python [scout · grandchi]: # inspect",
+        ]
+        assert cards[3].tool_call_id == cards[1].tool_call_id
+        assert cards[3].status == "failed"
+        assert all(c.raw_input == {"code": "# inspect\nprint('detail')"} for c in cards[:3])
     else:
         assert cards == []
     await bridge.close()
@@ -1950,7 +1957,7 @@ async def test_concise_replaces_one_full_card_and_clears_previous_output(tmp_pat
     await agent.aclose()
 
 
-async def test_rolling_child_old_results_cannot_replace_latest_parent_cell(tmp_path):
+async def test_independent_child_results_do_not_replace_parent_card(tmp_path):
     agents = {name: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c")}
     parent = _FakeSession(agents["p"], "parent")
     child = _FakeSession(agents["c"], "child")
@@ -1989,13 +1996,20 @@ async def test_rolling_child_old_results_cannot_replace_latest_parent_cell(tmp_p
     )
     await bridge.flush()
     cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
-    assert len(cards) == 3
-    assert [type(u) for u in cards] == [ToolCallStart, ToolCallProgress, ToolCallProgress]
-    assert len({u.tool_call_id for u in cards}) == 1
-    assert cards[0].title == "python [child]: # owner c"
-    assert cards[1].title == cards[2].title == "python: # owner p"
-    assert "current parent output" in _content_text(cards[-1].content[1])
-    assert "stale child output" not in str(cards)
+    assert len(cards) == 4
+    assert [type(u) for u in cards] == [
+        ToolCallStart,
+        ToolCallStart,
+        ToolCallProgress,
+        ToolCallProgress,
+    ]
+    assert cards[0].tool_call_id == cards[2].tool_call_id
+    assert cards[1].tool_call_id == cards[3].tool_call_id != cards[0].tool_call_id
+    assert cards[0].title == cards[2].title == "python [helper · child]: # owner c"
+    assert cards[1].title == cards[3].title == "python: # owner p"
+    assert "current parent output" in _content_text(cards[3].content[1])
+    assert "stale child output" in _content_text(cards[2].content[1])
+    assert "stale child output" not in str(cards[3])
     await bridge.close()
     for agent in agents.values():
         await agent.aclose()
@@ -2047,7 +2061,7 @@ async def test_rolling_slot_resets_with_fresh_ids_and_ignores_late_results(tmp_p
     await agent.aclose()
 
 
-async def test_parent_turn_end_closes_child_owned_rolling_card(tmp_path):
+async def test_child_turn_end_closes_only_its_rolling_card(tmp_path):
     agents = {name: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c")}
     parent = _FakeSession(agents["p"], "parent")
     child = _FakeSession(agents["c"], "child")
@@ -2064,7 +2078,7 @@ async def test_parent_turn_end_closes_child_owned_rolling_card(tmp_path):
             tool_call_id="cell", name="python_cell", arguments={"code": "# child running"}
         )
     )
-    # Child turn completion must not reset the parent's display epoch.
+    # Child turn completion finalizes its own card, independently of the parent.
     child.emit(TurnEndedUpdate(session_id="child", outcome_kind="done"))
     parent.emit(
         TurnEndedUpdate(
@@ -2265,3 +2279,243 @@ async def test_verbose_execution_id_is_not_readmitted_as_rolling_cell(tmp_path):
     assert "STALE OLD RESULT" not in str(cards)
     await bridge.close()
     await agent.aclose()
+
+
+@pytest.mark.parametrize(
+    "name, label",
+    [
+        (None, "helper"),
+        ("  ", "helper"),
+        ("  test\n runner  ", "test runner"),
+        ("x" * 80, "x" * 40),
+    ],
+)
+async def test_helper_card_titles_use_name_and_short_id(tmp_path, name, label):
+    agents = [AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for _ in range(2)]
+    parent = _FakeSession(agents[0], "parent")
+    child = _FakeSession(agents[1], "abcdef12-long-child-session-id")
+    client = _RecordingClient()
+    bridge = ACPEventBridge(parent, client, resolve_child=lambda _: child)
+    bridge.set_verbosity("concise")
+    parent.emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id=child.id, name=name, depth=1, retained=False
+        )
+    )
+    agents[1].event_manager.add(
+        ToolCallEvent(tool_call_id="cell", name="python_cell", arguments={"code": "# work"})
+    )
+    agents[1].event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="result",
+        )
+    )
+    await bridge.flush()
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert [u.title for u in cards] == [f"python [{label} · abcdef12]: # work"] * 2
+    assert cards[0].tool_call_id == cards[1].tool_call_id
+    await bridge.close()
+    for agent in agents:
+        await agent.aclose()
+
+
+async def test_multiple_helpers_replace_only_their_own_full_card(tmp_path):
+    ids = ("parent", "abcdef12-child-one", "fedcba98-child-two", "12345678-grandchild")
+    agents = {sid: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for sid in ids}
+    sessions = {sid: _FakeSession(agent, sid) for sid, agent in agents.items()}
+    client = _RecordingClient()
+    bridge = ACPEventBridge(sessions["parent"], client, resolve_child=sessions.get)
+    bridge.set_verbosity("concise")
+    for sid in ids[1:3]:
+        sessions["parent"].emit(
+            ChildCreatedUpdate(
+                session_id="parent", child_id=sid, name="reviewer", depth=1, retained=False
+            )
+        )
+    sessions[ids[1]].emit(
+        ChildCreatedUpdate(
+            session_id=ids[1], child_id=ids[3], name="scout", depth=2, retained=False
+        )
+    )
+    for sid in ids:
+        agents[sid].event_manager.add(
+            ToolCallEvent(
+                tool_call_id="same-id", name="python_cell", arguments={"code": f"# {sid} first"}
+            )
+        )
+    # Supersede the first helper's cell, not other helpers or the parent.
+    agents[ids[1]].event_manager.add(
+        ToolCallEvent(
+            tool_call_id="new-id", name="python_cell", arguments={"code": "# helper next"}
+        )
+    )
+    for sid in reversed(ids):
+        agents[sid].event_manager.add(
+            PythonOutput(
+                tool_call_id="same-id",
+                execution_status=ResultStatus.COMPLETE,
+                execution_count=1,
+                stdout=f"result for {sid}",
+            )
+        )
+    agents[ids[1]].event_manager.add(
+        PythonOutput(
+            tool_call_id="new-id",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=2,
+            stdout="latest helper result",
+        )
+    )
+    await bridge.flush()
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    starts = [u for u in cards if isinstance(u, ToolCallStart)]
+    assert len(starts) == 4
+    assert len({u.tool_call_id for u in starts}) == 4
+    assert starts[1].title.startswith("python [reviewer · abcdef12]")
+    assert starts[2].title.startswith("python [reviewer · fedcba98]")
+    by_id = {u.tool_call_id: u for u in cards}
+    assert "latest helper result" in _content_text(by_id[starts[1].tool_call_id].content[1])
+    for index in (0, 2, 3):
+        assert f"result for {ids[index]}" in _content_text(
+            by_id[starts[index].tool_call_id].content[1]
+        )
+    assert f"result for {ids[1]}" not in str(cards)
+    replacement = [u for u in cards if u.title.endswith("# helper next")]
+    assert {u.tool_call_id for u in replacement} == {starts[1].tool_call_id}
+    assert len(replacement[0].content) == 1
+    await bridge.close()
+    for agent in agents.values():
+        await agent.aclose()
+
+
+@pytest.mark.parametrize(
+    "boundary", ["parent_end", "parent_cancel", "child_end", "child_cancel", "child_close"]
+)
+async def test_helper_boundaries_leave_unrelated_progress_running(tmp_path, boundary):
+    agents = {sid: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for sid in ("parent", "child")}
+    sessions = {sid: _FakeSession(agent, sid) for sid, agent in agents.items()}
+    client = _RecordingClient()
+    bridge = ACPEventBridge(sessions["parent"], client, resolve_child=sessions.get)
+    bridge.set_verbosity("concise")
+    sessions["parent"].emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child", name="helper", depth=1, retained=False
+        )
+    )
+    for sid in sessions:
+        agents[sid].event_manager.add(
+            ToolCallEvent(
+                tool_call_id="cell", name="python_cell", arguments={"code": f"# {sid} running"}
+            )
+        )
+    await bridge.flush()
+    starts = [u for _, u in client.updates if isinstance(u, ToolCallStart)]
+    client.updates.clear()
+    owner = "parent" if boundary.startswith("parent") else "child"
+    other = "child" if owner == "parent" else "parent"
+    if boundary.endswith("end"):
+        sessions[owner].emit(
+            TurnEndedUpdate(
+                session_id=owner,
+                outcome_kind="waiting",
+                outcome={"explanation": "Waiting", "on": ["delegates"]},
+            )
+        )
+    elif boundary.endswith("cancel"):
+        sessions[owner].emit(CancelledUpdate(session_id=owner, by="user"))
+    else:
+        sessions[owner].emit(ClosedUpdate(session_id=owner))
+    agents[other].event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout=f"{other} finished",
+        )
+    )
+    await bridge.flush()
+    ends = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
+    own_start = starts[0] if owner == "parent" else starts[1]
+    other_start = starts[1] if owner == "parent" else starts[0]
+    assert len(ends) == 2
+    assert ends[0].tool_call_id == own_start.tool_call_id and ends[0].status == "failed"
+    assert ends[1].tool_call_id == other_start.tool_call_id and ends[1].status == "completed"
+    assert f"{other} finished" in _content_text(ends[1].content[1])
+    await bridge.close()
+    for agent in agents.values():
+        await agent.aclose()
+
+
+async def test_failed_transport_invalidates_queued_ended_helper_epoch(tmp_path):
+    class GatedFailureClient(_RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.fail = False
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def session_update(self, session_id, update, **kwargs):
+            if self.fail:
+                self.fail = False
+                self.entered.set()
+                await self.release.wait()
+                raise ConnectionResetError("failed parent card send")
+            await super().session_update(session_id, update, **kwargs)
+
+    agents = {sid: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for sid in ("parent", "child")}
+    sessions = {sid: _FakeSession(agent, sid) for sid, agent in agents.items()}
+    client = GatedFailureClient()
+    bridge = ACPEventBridge(sessions["parent"], client, resolve_child=sessions.get)
+    bridge.set_verbosity("concise")
+    sessions["parent"].emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child", name="reviewer", depth=1, retained=False
+        )
+    )
+    await bridge.flush()
+    client.updates.clear()
+    client.fail = True
+    agents["parent"].event_manager.add(
+        ToolCallEvent(
+            tool_call_id="parent-cell", name="python_cell", arguments={"code": "# parent"}
+        )
+    )
+    await asyncio.wait_for(client.entered.wait(), 5)
+    flush = asyncio.create_task(bridge.flush())
+    await asyncio.sleep(0)  # place marker before helper's queued epoch
+    agents["child"].event_manager.add(
+        ToolCallEvent(
+            tool_call_id="old-child", name="python_cell", arguments={"code": "# obsolete helper"}
+        )
+    )
+    sessions["child"].emit(TurnEndedUpdate(session_id="child", outcome_kind="done"))
+    client.release.set()
+    with pytest.raises(ConnectionResetError):
+        await asyncio.wait_for(flush, 5)
+    await bridge.flush()
+    assert client.updates == []
+    agents["child"].event_manager.add(
+        ToolCallEvent(
+            tool_call_id="new-child", name="python_cell", arguments={"code": "# recovered helper"}
+        )
+    )
+    agents["child"].event_manager.add(
+        PythonOutput(
+            tool_call_id="new-child",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="fresh result",
+        )
+    )
+    await bridge.flush()
+    [start, end] = [u for _, u in client.updates]
+    assert isinstance(start, ToolCallStart) and isinstance(end, ToolCallProgress)
+    assert start.tool_call_id == end.tool_call_id
+    assert start.title == end.title == "python [reviewer · child]: # recovered helper"
+    assert "fresh result" in _content_text(end.content[1])
+    await bridge.close()
+    for agent in agents.values():
+        await agent.aclose()
