@@ -115,7 +115,8 @@ class _OpenCard:
     """What the bridge keeps about one tool card it has opened and not yet closed."""
 
     kind: Literal["python", "terminal"]
-    code: str = ""  # a Python card's source
+    code: str = ""  # a Python card's source (first line only for compact cards)
+    compact: bool = False  # preserve admitted detail through completion/cleanup
     output: str = ""  # what a terminal command has streamed so far
     note: str | None = None  # a terminal card's truncation note, kept at the top
 
@@ -358,20 +359,14 @@ class ACPEventBridge:
         self.verbosity = cast(Verbosity, level)
 
     def _activity_text(self, full: str, concise: str | None = None) -> None:
-        """Render concise status as visible text, not optional/collapsed model thoughts.
-
-        These are ACP-only notices, never messages added to the agent's events.
-        """
+        """Keep the activity's wire shape, reducing only its text in concise mode."""
         if self.verbosity == "silent":
             return
         text = full if self.verbosity == "verbose" else (concise or full)
         if self.verbosity == "concise":
             text = next((line.strip() for line in text.splitlines() if line.strip()), "")
         if text:
-            if self.verbosity == "concise":
-                self._enqueue(update_agent_message(text_block(text)))
-            else:
-                self._enqueue(update_agent_thought_text(text.rstrip() + "\n\n"))
+            self._enqueue(update_agent_thought_text(text.rstrip() + "\n\n"))
 
     # ---- subscriptions -----------------------------------------------
 
@@ -646,12 +641,23 @@ class ACPEventBridge:
         code = event.arguments.get("code", "")
         if not isinstance(code, str):
             code = repr(code)
-        if self.verbosity != "verbose":
-            first = next((line.strip() for line in code.splitlines() if line.strip()), "")
-            label = f"python [{source}]" if source is not None else "python"
-            self._activity_text(f"{label}: {first}" if first else label)
+        if self.verbosity == "silent":
             return
         key = self._key(event.tool_call_id, source)
+        if self.verbosity == "concise":
+            first = next((line.strip() for line in code.splitlines() if line.strip()), "")
+            self._open[key] = _OpenCard("python", code=first, compact=True)
+            self._enqueue(
+                start_tool_call(
+                    self._wire_id(key),
+                    _python_title(first),
+                    kind="other",
+                    status="in_progress",
+                    content=_python_content(first),
+                    raw_input={"code": first},
+                )
+            )
+            return
         self._open[key] = _OpenCard("python", code=code)
         self._enqueue(
             start_tool_call(
@@ -673,6 +679,23 @@ class ACPEventBridge:
             return
         key = self._key(event.tool_call_id, source)
         card = self._open.pop(key, None)
+        if card is not None and card.compact:
+            cancelled = event.execution_status is ResultStatus.CANCELLED
+            failed = event.execution_status in (ResultStatus.ERROR, ResultStatus.CANCELLED)
+            self._enqueue(
+                update_tool_call(
+                    self._wire_id(key),
+                    title=_python_title(
+                        card.code, "cancelled" if cancelled else "failed" if failed else None
+                    ),
+                    status="failed" if failed else "completed",
+                    content=_python_content(card.code),
+                    raw_input={"code": card.code},
+                )
+            )
+            if source is None:
+                self._publish_plan()
+            return
         if card is not None:
             code = card.code
             parts = [
@@ -1001,7 +1024,9 @@ class ACPEventBridge:
             card = self._open.get(key)
             if card is None:
                 continue
-            if card.kind == "python":
+            if card.compact:
+                content = _python_content(card.code)
+            elif card.kind == "python":
                 content = _python_content(card.code, reason)
             else:
                 # What the command streamed so far stays above the reason.

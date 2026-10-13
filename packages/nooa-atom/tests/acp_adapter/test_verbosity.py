@@ -4,14 +4,8 @@
 
 import pytest
 from acp import RequestError, text_block
-from acp.schema import (
-    AgentMessageChunk,
-    AgentThoughtChunk,
-    AvailableCommandsUpdate,
-    ToolCallProgress,
-    ToolCallStart,
-)
-from atom_test_agents import ScriptedModels, cell
+from acp.schema import AgentMessageChunk, AvailableCommandsUpdate
+from atom_test_agents import ScriptedModels
 
 
 async def test_verbosity_is_advertised_and_session_local(make_adapter, workspace, client):
@@ -45,15 +39,16 @@ async def test_verbosity_is_advertised_and_session_local(make_adapter, workspace
     assert adapter.session(first).info.reply_count == 0
 
 
-async def test_concise_lines_use_visible_messages_without_entering_agent_history(
-    make_adapter, workspace, client
-):
+async def test_concise_python_is_compact_tool_output_not_message(make_adapter, workspace, client):
+    from acp.schema import AgentThoughtChunk, ToolCallProgress, ToolCallStart
+    from atom_test_agents import cell
+
     models = ScriptedModels(
         {
             None: [
                 cell(
                     "# Check repository status\n"
-                    "print('private cell output')\n"
+                    "print('private output')\n"
                     "self.message('User-facing answer')\n"
                     "return_result(Done(explanation='Checked repository\\nExtra detail'))"
                 )
@@ -66,15 +61,14 @@ async def test_concise_lines_use_visible_messages_without_entering_agent_history
     client.log.clear()
     response = await adapter.prompt(session_id, [text_block("Check it")])
     assert response.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id) == [
-        "python: # Check repository status\n\n",
-        "User-facing answer\n\n",
-        "Returned done: Checked repository\n\n",
-    ]
-    assert client.updates(session_id, AgentThoughtChunk) == []
-    assert client.updates(session_id, ToolCallStart) == []
-    assert client.updates(session_id, ToolCallProgress) == []
-    assert not any(
-        "python: # Check" in entry.content or "Returned done:" in entry.content
-        for entry in adapter.session(session_id).transcript()
-    )
+    assert client.texts(AgentMessageChunk, session_id) == ["User-facing answer\n\n"]
+    assert client.texts(AgentThoughtChunk, session_id) == ["Returned done: Checked repository\n\n"]
+    [start] = client.updates(session_id, ToolCallStart)
+    [end] = client.updates(session_id, ToolCallProgress)
+    assert start.title == end.title == "python: # Check repository status"
+    assert start.kind == "other" and end.status == "completed"
+    for card in (start, end):
+        assert card.raw_input == {"code": "# Check repository status"}
+        assert card.content is not None and len(card.content) == 1
+        assert card.content[0].content.text == "```python\n# Check repository status\n```"
+        assert "private" not in str(card.model_dump())

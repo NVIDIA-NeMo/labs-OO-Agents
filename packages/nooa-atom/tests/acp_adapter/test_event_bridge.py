@@ -1606,23 +1606,25 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
     updates = [u for _, u in client.updates]
     thoughts = [u.content.text for u in updates if isinstance(u, AgentThoughtChunk)]
     cards = [u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
-    messages = [u.content.text for u in updates if isinstance(u, AgentMessageChunk)]
-    answer = "User-facing answer\nStill visible\n\n"
+    assert [u.content.text for u in updates if isinstance(u, AgentMessageChunk)] == [
+        "User-facing answer\nStill visible\n\n"
+    ]
     if level == "silent":
-        assert messages == [answer]
         assert thoughts == []
         assert cards == []
     elif level == "concise":
-        assert thoughts == []
-        assert messages == [
-            "python: # Inspect the repository\n\n",
+        assert thoughts == [
             "Summarized context (1..2).\n\n",
-            answer,
             "Returned done: Task completed\n\n",
         ]
-        assert cards == []
+        assert [type(card) for card in cards] == [ToolCallStart, ToolCallProgress]
+        assert [card.status for card in cards] == ["in_progress", "completed"]
+        for card in cards:
+            assert card.title == "python: # Inspect the repository"
+            assert card.raw_input == {"code": "# Inspect the repository"}
+            assert card.content is not None and len(card.content) == 1
+            assert _content_text(card.content[0]) == "```python\n# Inspect the repository\n```"
     else:
-        assert messages == [answer]
         assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
         assert thoughts[0] == "Long reasoning"
         assert "Full recap\nMore recap" in thoughts[1]
@@ -1707,18 +1709,15 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
     if level == "silent":
         assert thoughts == []
     elif level == "concise":
-        assert thoughts == []
+        line = "Waiting for review" if kind == "waiting" else "Which target?"
+        assert thoughts == [f"Returned {kind}: {line}\n\n"]
     else:
         assert len(thoughts) == 1
         assert "delegates" in thoughts[0] if kind == "waiting" else "second" in thoughts[0]
     answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
-    expected = (
+    assert answers == (
         ["Which target?\nFull question\n\n- first\n- second\n\n"] if kind == "need_input" else []
     )
-    if level == "concise":
-        line = "Waiting for review" if kind == "waiting" else "Which target?"
-        expected.append(f"Returned {kind}: {line}\n\n")
-    assert answers == expected
     await bridge.close()
     await agent.aclose()
 
@@ -1764,17 +1763,102 @@ async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
     await bridge.flush()
     thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
     assert thoughts == []
-    messages = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
-    assert messages == (
-        [
-            "python: # inspect\n\n",
-            "python [child]: # inspect\n\n",
-            "python [grandchild]: # inspect\n\n",
-        ]
-        if level == "concise"
-        else []
+    assert not any(isinstance(u, AgentMessageChunk) for _, u in client.updates)
+    cards = [u for _, u in client.updates if isinstance(u, ToolCallStart)]
+    assert [card.tool_call_id for card in cards] == (
+        ["cell", "child:cell", "grandchild:cell"] if level == "concise" else []
     )
-    assert not any(isinstance(u, (ToolCallStart, ToolCallProgress)) for _, u in client.updates)
+    for card in cards:
+        assert card.title == "python: # inspect"
+        assert card.raw_input == {"code": "# inspect"}
     await bridge.close()
     for agent in agents.values():
         await agent.aclose()
+
+
+@pytest.mark.parametrize(
+    "status", [ResultStatus.COMPLETE, ResultStatus.ERROR, ResultStatus.CANCELLED]
+)
+async def test_compact_python_output_keeps_shape_without_full_detail(tmp_path, status):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="cell",
+            name="python_cell",
+            arguments={"code": "\n# Check status\nprint('private source')"},
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=status,
+            execution_count=1,
+            stdout="private stdout",
+            stderr="private stderr",
+            error="private error",
+            value={"private": "value"},
+        )
+    )
+    await bridge.flush()
+    [start, end] = [u for _, u in client.updates]
+    assert isinstance(start, ToolCallStart) and isinstance(end, ToolCallProgress)
+    assert start.tool_call_id == end.tool_call_id == "cell"
+    assert start.kind == "other" and start.status == "in_progress"
+    assert end.status == ("completed" if status == ResultStatus.COMPLETE else "failed")
+    suffix = (
+        " (cancelled)"
+        if status == ResultStatus.CANCELLED
+        else " (failed)"
+        if status == ResultStatus.ERROR
+        else ""
+    )
+    assert end.title == "python: # Check status" + suffix
+    for update in (start, end):
+        assert update.raw_input == {"code": "# Check status"}
+        assert update.content is not None and len(update.content) == 1
+        assert _content_text(update.content[0]) == "```python\n# Check status\n```"
+        assert "private" not in str(update.model_dump())
+    await bridge.close()
+    await agent.aclose()
+
+
+@pytest.mark.parametrize("finish", ["cancel", "close", "silent", "verbose"])
+async def test_compact_python_cleanup_never_reveals_full_source(tmp_path, finish):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="cell", name="python_cell", arguments={"code": "# Check status\nprivate()"}
+        )
+    )
+    if finish == "cancel":
+        bridge.fail_open_tools("private failure reason", title="Cancelled")
+    elif finish == "close":
+        await bridge.close()
+    else:
+        bridge.set_verbosity(finish)
+    await bridge.flush()
+    [start, end] = [u for _, u in client.updates]
+    assert end.status == "failed"
+    assert end.content is not None and len(end.content) == 1
+    assert _content_text(end.content[0]) == "```python\n# Check status\n```"
+    assert "private" not in str(end.model_dump())
+    assert "private" not in str(start.model_dump())
+    client.updates.clear()
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="private late output",
+        )
+    )
+    await bridge.flush()
+    assert client.updates == []
+    await bridge.close()
+    await agent.aclose()
