@@ -61,20 +61,21 @@ lists them.
 
 ### ACP activity verbosity
 
-Use `/verbosity silent`, `/verbosity concise`, or `/verbosity verbose` to control
-activity sent to the ACP GUI. Enter `/verbosity` with no argument to open a
-three-choice **Verbosity** form in Pool (or another ACP client supporting forms).
-The form and its answer are handled entirely in ACP, without an agent turn.
-Dismissing it leaves the setting unchanged; clients without forms receive the
-current level and text-command usage instead.
+Use the client's **session settings** to select **Verbosity**: Silent, Concise,
+or Verbose. The adapter advertises this as an ACP `configOptions` select on
+session creation/loading; changes use `session/set_config_option`
+(`configId: "verbosity"`). It is a presentation preference, not a model or
+permission mode, so it does not reuse those settings' categories.
 
-The adapter also advertises a **Verbosity** select option through
-`session/set_config_option` (`configId: "verbosity"`), the protocol used by Pool's
-`/mode` picker. Whether arbitrary config options appear in the client's UI is
-client-dependent; `/verbosity` explicitly requests a form rather than relying
-on that UI. All input paths share the same setting. The setting
-is local to this session's ACP attachment; a new attachment starts at `verbose`.
-It does not change the model, its reasoning effort, execution, or stored events.
+The text commands `/verbosity silent`, `/verbosity concise`, and
+`/verbosity verbose` remain ACP-local shortcuts. `/verbosity` without arguments
+reports the current level, republishes settings, and points to session settings;
+it does **not** send an elicitation request. ACP provides configuration options,
+not a portable request to open a client's settings dialog, so UI discovery and
+opening the dialog remain client-controlled. All input paths share the same
+setting. It is local to this session's ACP attachment; a new attachment starts
+at `verbose`. It does not change the model, its reasoning effort, execution,
+or stored events.
 
 | Level | Python cells | Bash and diffs | Summarization and returned turn results |
 | --- | --- | --- | --- |
