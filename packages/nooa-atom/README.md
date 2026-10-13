@@ -62,10 +62,17 @@ lists them.
 ### ACP activity verbosity
 
 Use `/verbosity silent`, `/verbosity concise`, or `/verbosity verbose` to control
-activity sent to the ACP GUI. Pool also offers a **Verbosity** select option
-using the same `session/set_config_option` input method as its `/mode` picker
-(`configId: "verbosity"`). The picker and text command share the same setting;
-`/verbosity` shows the current level. The setting
+activity sent to the ACP GUI. Enter `/verbosity` with no argument to open a
+three-choice **Verbosity** form in Pool (or another ACP client supporting forms).
+The form and its answer are handled entirely in ACP, without an agent turn.
+Dismissing it leaves the setting unchanged; clients without forms receive the
+current level and text-command usage instead.
+
+The adapter also advertises a **Verbosity** select option through
+`session/set_config_option` (`configId: "verbosity"`), the protocol used by Pool's
+`/mode` picker. Whether arbitrary config options appear in the client's UI is
+client-dependent; `/verbosity` explicitly requests a form rather than relying
+on that UI. All input paths share the same setting. The setting
 is local to this session's ACP attachment; a new attachment starts at `verbose`.
 It does not change the model, its reasoning effort, execution, or stored events.
 
