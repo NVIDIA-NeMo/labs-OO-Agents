@@ -42,7 +42,7 @@ async def test_the_model_option_lists_the_aliases_and_the_current_model(make_ada
     factory = ModelFactory()
     adapter = await make_adapter(ScriptedModels(), llm_factory=factory, model="fast")
     response = await adapter.new_session(str(workspace))
-    [option] = response.config_options or []
+    option = next(o for o in response.config_options or [] if o.id == "model")
     assert option.id == "model" and option.type == "select"
     assert option.current_value == "fast"
     assert [choice.value for choice in option.options] == ["fast", "smart"]
@@ -51,7 +51,7 @@ async def test_the_model_option_lists_the_aliases_and_the_current_model(make_ada
 async def test_an_unlisted_current_model_is_offered_too(make_adapter, workspace):
     adapter = await make_adapter(ScriptedModels(), llm_factory=ModelFactory(), model="custom/x")
     response = await adapter.new_session(str(workspace))
-    [option] = response.config_options or []
+    option = next(o for o in response.config_options or [] if o.id == "model")
     assert [choice.value for choice in option.options] == ["custom/x", "fast", "smart"]
 
 
@@ -67,7 +67,7 @@ async def test_choosing_a_model_switches_the_next_turn(make_adapter, workspace, 
     adapter = await make_adapter(ScriptedModels(), llm_factory=factory, model="fast")
     session_id = (await adapter.new_session(str(workspace))).session_id
     response = await adapter.set_config_option("model", session_id, "smart")
-    [option] = response.config_options
+    option = next(o for o in response.config_options if o.id == "model")
     assert option.current_value == "smart"
     assert [alias for alias, _ in factory.calls][-1] == "smart"
     result = await asyncio.wait_for(adapter.prompt(session_id, [text_block("hi")]), TIMEOUT)
@@ -82,11 +82,11 @@ async def test_the_model_option_reports_the_chosen_model_at_once_and_after_a_loa
     session_id = (await adapter.new_session(str(workspace))).session_id
     await adapter.set_config_option("model", session_id, "smart")
     session = adapter.registry_for(workspace).get(session_id)
-    [option] = adapter._config_options(session)
+    option = next(o for o in adapter._config_options(session) if o.id == "model")
     assert option.current_value == "smart"  # before any turn used it
     await adapter.close_session(session_id)
     loaded = await adapter.load_session(str(workspace), session_id)
-    [option] = loaded.config_options or []
+    option = next(o for o in loaded.config_options or [] if o.id == "model")
     assert option.current_value == "smart"
 
 
@@ -129,7 +129,7 @@ async def test_the_reasoning_option_lists_the_client_levels(make_adapter, worksp
     adapter = await make_adapter(_LeveledModels(), model="fast")
     response = await adapter.new_session(str(workspace))
     by_id = {option.id: option for option in response.config_options or []}
-    assert set(by_id) == {"model", "reasoning"}
+    assert set(by_id) == {"model", "reasoning", "verbosity"}
     reasoning = by_id["reasoning"]
     assert reasoning.current_value == "default"
     assert [choice.value for choice in reasoning.options] == ["default", "low", "high"]
@@ -152,7 +152,7 @@ async def test_choosing_a_reasoning_level_applies_to_the_client(make_adapter, wo
 async def test_no_reasoning_option_without_declared_levels(make_adapter, workspace):
     adapter = await make_adapter(ScriptedModels(), model="fast")
     response = await adapter.new_session(str(workspace))
-    assert [option.id for option in response.config_options or []] == ["model"]
+    assert [option.id for option in response.config_options or []] == ["model", "verbosity"]
     with pytest.raises(RequestError):
         await adapter.set_config_option("reasoning", response.session_id, "high")
 

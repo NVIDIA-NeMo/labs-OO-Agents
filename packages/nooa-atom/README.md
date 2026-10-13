@@ -59,6 +59,64 @@ Pool team says which of the two the request means. The open prompt stays open
 until those messages are handled; Stop withdraws the ones no turn took and
 lists them.
 
+### ACP activity verbosity
+
+Use `/verbosity silent`, `/verbosity concise`, or `/verbosity verbose` to control
+activity sent to the ACP GUI. Enter `/verbosity` with no argument to open a
+three-choice **Verbosity** form in Pool (or another ACP client supporting forms).
+The form and its answer are handled entirely in ACP, without an agent turn.
+Dismissing it leaves the setting unchanged; clients without forms receive the
+current level and text-command usage instead.
+
+The adapter also advertises a **Verbosity** select option through
+`session/set_config_option` (`configId: "verbosity"`), the protocol used by Pool's
+`/mode` picker. Whether arbitrary config options appear in the client's UI is
+client-dependent; `/verbosity` explicitly requests a form rather than relying
+on that UI. All input paths share the same setting. Changes are saved as
+`atom.verbosity` in the workspace's `.nooa/settings.yaml`, preserving other
+settings. New sessions and newly loaded attachments use that saved preference;
+already-open sibling sessions keep their current level.
+
+```yaml
+atom:
+  verbosity: concise
+```
+
+You can also set a user default in `~/.config/nooa/settings.yaml`. Normal settings
+precedence applies: user, workspace, then `NEMO_OO_SETTINGS` overrides. Saves go
+to workspace scope, not to user or environment-override files. An environment
+override can therefore take precedence again on the next attachment. Without a
+configured value (or with an invalid value), verbosity defaults to `verbose`.
+This is ACP-only presentation state: it does not change agent/model behavior,
+reasoning effort, or stored agent events.
+
+| Level | Python cells | Bash and diffs | Summarization and returned turn results |
+| --- | --- | --- | --- |
+| `verbose` (default) | Full source and output cards | Full activity cards | Full summary and result details |
+| `concise` (experiment) | One rolling full Python tool card per turn | Hidden | Same thought output, shortened to one status line each |
+| `silent` | Hidden | Hidden | Hidden |
+
+Concise currently experiments with one rolling **full Python tool card** rather
+than a history of individual cell cards. The first cell opens it; subsequent
+cells update the same card's title, source, output and status. Only the latest
+cell is displayed, including mirrored child activity (attributed in its title).
+Delayed results from superseded cells cannot replace the latest activity.
+
+The display slot resets on parent turn boundaries or a verbosity change. Child
+activity between parent turns can open an idle slot, which is finalized when
+the next parent turn starts. Completed turns leave their last card in the GUI;
+a new turn gets a fresh card. Bash and diffs are still hidden. Summarization and
+turn-result notices keep their thought output type with one status line. This
+experiment is isolated in a separate commit for easy reversion to title-only
+per-cell concise cards. ACP presentations are not added to the agent's history.
+
+Model reasoning is only forwarded in `verbose`. Normal agent messages, final
+answers, questions/forms, command confirmations, cancellation notices, plans,
+and protocol metadata remain visible at every level. Setup/synthetic Python
+cells and truncation without a summary do not produce activity lines. Changing
+levels finalizes any already-visible open cards (including mirrored child
+cards); subsequent activity uses the new level.
+
 A question the agent asks (`NeedInput`) goes to the client as a form when
 the client advertises `elicitation.form`, as a permission request when it
 is a yes/no choice, and otherwise as text answered by the next message.

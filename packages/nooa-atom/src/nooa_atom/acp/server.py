@@ -44,6 +44,7 @@ from acp.schema import (
     AvailableCommandInput,
     ClientCapabilities,
     CloseSessionResponse,
+    ConfigOptionUpdate,
     ElicitationFormSessionMode,
     HttpMcpServer,
     Implementation,
@@ -60,7 +61,7 @@ from acp.schema import (
     ToolCallUpdate,
     UnstructuredCommandInput,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from nooa.errors import GenerationError
 from nooa.interactive import NeedInput
@@ -68,7 +69,13 @@ from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
-from nooa_atom.acp.event_bridge import ACPEventBridge, cancel_text, pool_input_event
+from nooa_atom.acp.event_bridge import (
+    VERBOSITY_LEVELS,
+    ACPEventBridge,
+    Verbosity,
+    cancel_text,
+    pool_input_event,
+)
 from nooa_atom.acp.listing import list_sessions, validate_workspace
 from nooa_atom.acp.need_input import (
     answer_from_content,
@@ -101,6 +108,15 @@ from nooa_atom.session.store import (
     SessionStore,
     sessions_root,
 )
+from nooa_atom.workspace.settings import load_acp_verbosity, write_settings_updates
+
+
+class _VerbosityAnswer(BaseModel):
+    verbosity: Verbosity = Field(
+        title="Verbosity",
+        description="silent: no activity; concise: one-line notices; verbose: full activity (default).",
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +303,8 @@ class AtomACPAgent:
         self._injects: dict[str, dict[str, Receipt]] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
         # session: session/cancel stops them.
-        self._asks: dict[str, asyncio.Task[Any]] = {}
+        self._asks: dict[str, set[asyncio.Future[Any]]] = {}
+        self._ask_epochs: dict[str, int] = {}
         # The question each session's prompt is asking, so two prompts that
         # returned with the same turn ask it once.
         self._asking: dict[str, NeedInput] = {}
@@ -478,6 +495,7 @@ class AtomACPAgent:
         del kwargs
         session = self.session(session_id)
         bridge = self._bridges.pop(session_id, None)
+        self._cancel_client_calls(session_id)
         if session is None and bridge is None:
             raise RequestError.resource_not_found(session_id)
         if session is not None and self._parent_is_live(session):
@@ -520,6 +538,7 @@ class AtomACPAgent:
         if registry is None:
             raise RequestError.resource_not_found(session_id)
         bridge = self._bridges.pop(session_id, None)
+        self._cancel_client_calls(session_id)
         try:
             await registry.delete(session_id, keep_files=bool(params.get("keepFiles")))
         except (SessionNotFoundError, InvalidSessionIdError):
@@ -551,6 +570,11 @@ class AtomACPAgent:
         elif not text.strip():
             raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
         session, _bridge = self._followed(session_id)
+        slash = _slash_invocation(text)
+        if slash is not None and slash[0] == "verbosity":
+            raise RequestError.invalid_params(
+                {"reason": "ACP /verbosity is a local command; send it as session/prompt"}
+            )
         try:
             if mode == "steer":
                 receipt = await session.steer(text, source=INJECT_SOURCE)
@@ -635,11 +659,13 @@ class AtomACPAgent:
 
     async def close(self) -> None:
         """Close every session this process runs and every bridge."""
+        bridges = list(self._bridges.values())
+        self._bridges.clear()
+        for session_id in tuple(self._asks):
+            self._cancel_client_calls(session_id)
         for task in list(self._background):
             task.cancel()
         await asyncio.gather(*self._background, return_exceptions=True)
-        bridges = list(self._bridges.values())
-        self._bridges.clear()
         empty = [
             (registry, session.id)
             for registry in self._registries.values()
@@ -775,6 +801,7 @@ class AtomACPAgent:
         which is not asked again. While ``later()`` (followers wait after
         this item), a question is left as text and the item is done.
         """
+        epoch = self._ask_epochs.get(session.id, 0)
         while True:
             outcome = await session.outcome(item_id)
             if isinstance(outcome, TurnCancelledOutcome):
@@ -796,10 +823,14 @@ class AtomACPAgent:
             self._asking[session.id] = outcome
             try:
                 await bridge.flush()
+                if not self._client_answer_is_current(session, bridge, epoch):
+                    return PromptResponse(stop_reason="cancelled")
                 answer = await self._ask(session, bridge, outcome)
             finally:
                 if self._asking.get(session.id) is outcome:
                     del self._asking[session.id]
+            if not self._client_answer_is_current(session, bridge, epoch):
+                return PromptResponse(stop_reason="cancelled")
             if answer is _CANCELLED:
                 await bridge.flush()
                 return PromptResponse(stop_reason="cancelled")
@@ -899,8 +930,12 @@ class AtomACPAgent:
         yes = next(option for option in options if option.lower() == "yes")
         no = next(option for option in options if option.lower() == "no")
         tool_call_id = f"question-{uuid4()}"
+        epoch = self._ask_epochs.get(session.id, 0)
         bridge.publish(start_tool_call(tool_call_id, question, kind="other", status="pending"))
         await bridge.flush()
+        if not self._client_answer_is_current(session, bridge, epoch):
+            bridge.publish(update_tool_call(tool_call_id, status="failed", title="Cancelled"))
+            return _CANCELLED
         response = await self._client_call(
             session.id,
             conn.request_permission(
@@ -933,26 +968,55 @@ class AtomACPAgent:
         await bridge.flush()
         return chosen, SOURCE
 
+    def _client_answer_is_current(
+        self, session: Session, bridge: ACPEventBridge, epoch: int
+    ) -> bool:
+        return (
+            self._bridges.get(session.id) is bridge
+            and self.session(session.id) is session
+            and self._ask_epochs.get(session.id, 0) == epoch
+        )
+
+    def _cancel_client_calls(self, session_id: str) -> None:
+        # Invalidate answers even if a client coroutine swallows cancellation.
+        self._ask_epochs[session_id] = self._ask_epochs.get(session_id, 0) + 1
+        for task in tuple(self._asks.get(session_id, ())):
+            task.cancel()
+
     async def _client_call(self, session_id: str, request: Any) -> Any:
         """Await a request to the client that session/cancel can stop.
 
         Returns the response, ``_CANCELLED`` when cancelled, or ``None`` when
         the client failed it (the caller falls back to text).
         """
+        epoch = self._ask_epochs.get(session_id, 0)
         task = asyncio.ensure_future(request)
-        self._asks[session_id] = task
+        tasks = self._asks.setdefault(session_id, set())
+        tasks.add(task)
         try:
-            return await task
+            answer = await task
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise asyncio.CancelledError
+            if self._ask_epochs.get(session_id, 0) != epoch:
+                return _CANCELLED
+            return answer
         except asyncio.CancelledError:
             current = asyncio.current_task()
             if task.cancelled() and not (current is not None and current.cancelling()):
                 return _CANCELLED
             raise
         except Exception:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise asyncio.CancelledError from None
+            if self._ask_epochs.get(session_id, 0) != epoch:
+                return _CANCELLED
             logger.warning("The client failed a request in session %s", session_id, exc_info=True)
             return None
         finally:
-            if self._asks.get(session_id) is task:
+            tasks.discard(task)
+            if not tasks and self._asks.get(session_id) is tasks:
                 del self._asks[session_id]
 
     async def _turn_failed(self, bridge: ACPEventBridge, exc: TurnFailedError) -> PromptResponse:
@@ -974,6 +1038,27 @@ class AtomACPAgent:
         self, session: Session, bridge: ACPEventBridge, name: str, raw_args: str
     ) -> PromptResponse | None:
         """Run ``/name args``; ``None`` when it is not a command, so the text is a prompt."""
+        if name == "verbosity":
+            level = raw_args.strip().lower()
+            if not level:
+                return await self._pick_verbosity(session, bridge)
+            elif level not in VERBOSITY_LEVELS:
+                message = "Usage: /verbosity silent|concise|verbose"
+            else:
+                try:
+                    await self._set_verbosity(session, bridge, level)
+                except RequestError as exc:
+                    return await self._say(
+                        bridge, f"/verbosity: could not save setting: {exc.data}"
+                    )
+                bridge.publish(
+                    ConfigOptionUpdate(
+                        session_update="config_option_update",
+                        config_options=self._config_options(session) or [],
+                    )
+                )
+                message = f"ACP verbosity: {bridge.verbosity}."
+            return await self._say(bridge, message)
         if name == RECOVER.name:
             return await self._say(bridge, await self._recover(session, raw_args))
         if name not in {command.name for command in session.commands()}:
@@ -1019,6 +1104,32 @@ class AtomACPAgent:
             return await self._finish(session, bridge, receipt.item_id)
         return await self._say(bridge, result.text)
 
+    async def _pick_verbosity(self, session: Session, bridge: ACPEventBridge) -> PromptResponse:
+        """Ask the client locally; neither the command nor its answer enters the agent."""
+        need = NeedInput(
+            question=f"ACP verbosity: {bridge.verbosity}. Choose activity detail.",
+            answer_type=_VerbosityAnswer,
+        )
+        epoch = self._ask_epochs.get(session.id, 0)
+        answer = await self._ask(session, bridge, need)
+        if not self._client_answer_is_current(session, bridge, epoch):
+            return PromptResponse(stop_reason="cancelled")
+        if answer is _CANCELLED:
+            await bridge.flush()
+            return PromptResponse(stop_reason="cancelled")
+        if answer is None:
+            return await self._say(
+                bridge,
+                f"ACP verbosity: {bridge.verbosity}. Usage: /verbosity silent|concise|verbose",
+            )
+        value, _source = answer
+        if not isinstance(value, _VerbosityAnswer):
+            return await self._say(bridge, f"ACP verbosity unchanged: {bridge.verbosity}.")
+        # Reuse local dispatch for validation, confirmation and config-picker sync.
+        response = await self._run_command(session, bridge, "verbosity", value.verbosity)
+        assert response is not None
+        return response
+
     async def _recover(self, session: Session, raw_args: str) -> str:
         """``/recover``: over the store that holds ``session``, for its workspace."""
         registry = self._registry_holding(session.id)
@@ -1052,9 +1163,7 @@ class AtomACPAgent:
         session = self.session(session_id)
         if session is None or session_id not in self._bridges:
             return  # a notification: nothing to answer
-        ask = self._asks.get(session_id)
-        if ask is not None:
-            ask.cancel()
+        self._cancel_client_calls(session_id)
         # A prompt request must be answered: a prompt whose message no turn
         # took is withdrawn and returns "cancelled"; the one the running turn
         # took returns "cancelled" with it. Injected messages stay queued.
@@ -1095,9 +1204,22 @@ class AtomACPAgent:
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse:
-        """``model``: switch the model from the next turn on; ``reasoning``: the level."""
+        """Set a model, reasoning level, or ACP-local activity verbosity."""
         del kwargs
         session, _bridge = self._followed(session_id)
+        if config_id == "verbosity":
+            if not isinstance(value, str) or value not in VERBOSITY_LEVELS:
+                raise RequestError.invalid_params(
+                    {
+                        "configId": config_id,
+                        "value": value,
+                        "reason": "Use silent, concise, or verbose",
+                    }
+                )
+            await self._set_verbosity(session, _bridge, value)
+            return SetSessionConfigOptionResponse(
+                config_options=self._config_options(session) or []
+            )
         if config_id == "reasoning" and isinstance(value, str):
             await self._set_reasoning(session, value)
             return SetSessionConfigOptionResponse(
@@ -1117,6 +1239,25 @@ class AtomACPAgent:
             ) from exc
         return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
 
+    async def _set_verbosity(self, session: Session, bridge: ACPEventBridge, level: str) -> None:
+        followed, current_bridge = self._followed(session.id)
+        if followed is not session or current_bridge is not bridge:
+            raise RequestError.resource_not_found(session.id)
+        # Save only this key at project scope, retaining unrelated settings.
+        # A failed write must not report a successful persistent change.
+        try:
+            # Match existing workspace controls: this small local write and
+            # bridge update have no await between them, so concurrent ACP
+            # requests in this process cannot reorder persistence/application.
+            write_settings_updates(
+                {("atom", "verbosity"): level}, workspace=session.options.workspace
+            )
+        except Exception as exc:
+            raise RequestError.internal_error(
+                {"reason": f"Could not save ACP verbosity: {exc}"}
+            ) from exc
+        bridge.set_verbosity(level)
+
     @staticmethod
     async def _set_reasoning(session: Session, level: str) -> None:
         """Select a reasoning level the session's model declares (``Session.set_reasoning``).
@@ -1135,7 +1276,7 @@ class AtomACPAgent:
 
     def _config_options(self, session: Session) -> list[Any] | None:
         """The model select option (the registry's aliases plus the current model),
-        and a reasoning option when the current client declares levels."""
+        a reasoning option when the current client declares levels, and ACP verbosity."""
         options: list[Any] = []
         current = session.info.model or self._model or _default_model(session.options.workspace)
         aliases = model_aliases(session.options.workspace)
@@ -1158,7 +1299,21 @@ class AtomACPAgent:
         reasoning = self._reasoning_option(session)
         if reasoning is not None:
             options.append(reasoning)
-        return options or None
+        bridge = self._bridges.get(session.id)
+        options.append(
+            SessionConfigOptionSelect(
+                id="verbosity",
+                name="Verbosity",
+                description="ACP activity detail only; does not change the agent or its reasoning.",
+                type="select",
+                current_value=bridge.verbosity if bridge is not None else "verbose",
+                options=[
+                    SessionConfigSelectOption(value=level, name=level.title())
+                    for level in VERBOSITY_LEVELS
+                ],
+            )
+        )
+        return options
 
     @staticmethod
     def _reasoning_option(session: Session) -> Any | None:
@@ -1209,6 +1364,7 @@ class AtomACPAgent:
     def _attach(self, session: Session) -> ACPEventBridge:
         conn = self._require_conn()
         bridge = ACPEventBridge(session, conn, resolve_child=self.session)
+        bridge.set_verbosity(load_acp_verbosity(session.options.workspace))
         self._bridges[session.id] = bridge
 
         def on_update(update: Any) -> None:
@@ -1217,6 +1373,7 @@ class AtomACPAgent:
             elif getattr(update, "kind", None) == "closed":
                 if self._bridges.get(session.id) is bridge:
                     del self._bridges[session.id]
+                    self._cancel_client_calls(session.id)
                 unsubscribe()
 
         unsubscribe = session.subscribe(on_update)
@@ -1467,10 +1624,20 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
 
 
 def _available_commands_update(commands: list[CommandInfo]) -> Any:
-    """The session's commands, and the ones this adapter runs itself (``/recover``)."""
+    """The session's commands, and the ones this adapter runs itself (``/recover`` and ``/verbosity``)."""
     available: list[AvailableCommand] = []
     names = {command.name for command in commands}
-    for command in [*commands, *(c for c in (RECOVER,) if c.name not in names)]:
+    verbosity = CommandInfo(
+        name="verbosity",
+        description="Set ACP activity detail (default verbose); no argument opens a picker when supported.",
+        input_hint="[silent|concise|verbose]",
+    )
+    # The ACP-local command wins over a skill command with the same name.
+    for command in [
+        *(c for c in commands if c.name != verbosity.name),
+        *(c for c in (RECOVER,) if c.name not in names),
+        verbosity,
+    ]:
         input_spec = (
             AvailableCommandInput(UnstructuredCommandInput(hint=command.input_hint))
             if command.input_hint

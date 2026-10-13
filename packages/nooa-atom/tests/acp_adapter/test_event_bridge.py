@@ -40,11 +40,12 @@ from nooa_atom.session.items import (
     SessionInfo,
     TitleChangedUpdate,
     TurnEndedUpdate,
+    TurnStartedUpdate,
 )
 from nooa_atom.session.session import Session
 
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent
-from nooa.events import LLMResponse, PythonOutput
+from nooa.events import LLMResponse, PythonOutput, Summary
 from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa.llm_types import AssistantReasoning, LLMUsage
 from nooa.unifiedllm import FakeLLMClient
@@ -1556,3 +1557,711 @@ async def test_evicted_unregistered_input_is_not_claimed_shown(bridged):
     assert client.updates == []
     bridge.forget_client_input("0")
     assert shown.cancelled()
+
+
+@pytest.mark.parametrize("level", ["silent", "concise", "verbose"])
+@pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
+async def test_activity_verbosity(tmp_path, level, tool_name):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)
+    assert bridge.verbosity == "verbose"
+    bridge.set_verbosity(level)
+    code = "# Inspect the repository\nprint('private output')"
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="cell", name=tool_name, arguments={"code": code})
+    )
+    agent.event_manager.add(
+        TerminalCommandStarted(command_id="bash", command="ls", working_directory="/")
+    )
+    agent.event_manager.add(TerminalCommandOutput(command_id="bash", stdout="files"))
+    agent.event_manager.add(TerminalCommandFinished(command_id="bash", exit_code=0))
+    agent.event_manager.add(
+        FileEdit(path="/file.py", operation="update", old_text="old", new_text="new")
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="private output",
+            value={"detail": "hidden"},
+        )
+    )
+    agent.event_manager.add(LLMResponse(reasoning="Long reasoning"))
+    # Real collapse emission, not merely a manually added Summary event.
+    agent.event_manager.collapse("1", "2", summary_text="Full recap\nMore recap")
+    agent.event_manager.add(AgentMessage(content="User-facing answer\nStill visible"))
+    session.emit(
+        TurnEndedUpdate(
+            session_id=session.id,
+            outcome_kind="done",
+            outcome={
+                "explanation": "Task completed\nMore details",
+                "result": {"evidence": "all details"},
+            },
+        )
+    )
+    await bridge.flush()
+    updates = [u for _, u in client.updates]
+    thoughts = [u.content.text for u in updates if isinstance(u, AgentThoughtChunk)]
+    cards = [u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert [u.content.text for u in updates if isinstance(u, AgentMessageChunk)] == [
+        "User-facing answer\nStill visible\n\n"
+    ]
+    if level == "silent":
+        assert thoughts == []
+        assert cards == []
+    elif level == "concise":
+        assert thoughts == [
+            "Summarized context (1..2).\n\n",
+            "Returned done: Task completed\n\n",
+        ]
+        assert [type(card) for card in cards] == [ToolCallStart, ToolCallProgress]
+        assert [card.status for card in cards] == ["in_progress", "completed"]
+        for card in cards:
+            assert card.title == "python: # Inspect the repository"
+            assert card.raw_input == {"code": code}
+            assert card.content is not None
+        assert len(cards[0].content) == 1
+        assert len(cards[1].content) == 2
+        assert "private output" in _content_text(cards[1].content[1])
+    else:
+        assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
+        assert thoughts[0] == "Long reasoning"
+        assert "Full recap\nMore recap" in thoughts[1]
+        assert "all details" in thoughts[2]
+        assert "More details" in thoughts[2]
+    await bridge.close()
+    await agent.aclose()
+
+
+@pytest.mark.parametrize("level", ["silent", "concise"])
+async def test_reduced_detail_ignores_setup_synthetic_and_truncation(tmp_path, level):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity(level)
+    for metadata in ({"prefill": True}, {"synthetic": True}):
+        agent.event_manager.add(
+            ToolCallEvent(
+                tool_call_id="internal",
+                name="execute_python",
+                arguments={"code": "# not executed"},
+                metadata=metadata,
+            )
+        )
+    agent.event_manager.add(Summary(summary_tag="1..2", replaced_range=(1, 2)))
+    await bridge.flush()
+    assert client.updates == []
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_changing_detail_closes_open_cards_and_suppresses_late_output(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    agent.event_manager.add(
+        TerminalCommandStarted(command_id="bash", command="make", working_directory="/")
+    )
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="cell", name="python_cell", arguments={"code": "await build()"})
+    )
+    bridge.set_verbosity("silent")
+    await bridge.flush()
+    assert len(client.updates) == 4
+    assert all(u.status == "failed" for _, u in client.updates[2:])
+    client.updates.clear()
+    bridge.set_verbosity("verbose")
+    agent.event_manager.add(TerminalCommandFinished(command_id="bash", exit_code=0))
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            stdout="late output",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+        )
+    )
+    await bridge.flush()
+    assert client.updates == []
+    with pytest.raises(ValueError):
+        bridge.set_verbosity("wrong")
+    assert bridge.verbosity == "verbose"
+    await bridge.close()
+    await agent.aclose()
+
+
+@pytest.mark.parametrize("level", ["silent", "concise", "verbose"])
+@pytest.mark.parametrize("kind", ["waiting", "need_input"])
+async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)
+    bridge.set_verbosity(level)
+    outcome = (
+        {"explanation": "Waiting for review\nMore detail", "on": ["delegates"]}
+        if kind == "waiting"
+        else {"question": "Which target?\nFull question", "options": ["first", "second"]}
+    )
+    session.emit(TurnEndedUpdate(session_id=session.id, outcome_kind=kind, outcome=outcome))
+    await bridge.flush()
+    thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
+    if level == "silent":
+        assert thoughts == []
+    elif level == "concise":
+        line = "Waiting for review" if kind == "waiting" else "Which target?"
+        assert thoughts == [f"Returned {kind}: {line}\n\n"]
+    else:
+        assert len(thoughts) == 1
+        assert "delegates" in thoughts[0] if kind == "waiting" else "second" in thoughts[0]
+    answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert answers == (
+        ["Which target?\nFull question\n\n- first\n- second\n\n"] if kind == "need_input" else []
+    )
+    await bridge.close()
+    await agent.aclose()
+
+
+@pytest.mark.parametrize("level", ["silent", "concise"])
+async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
+    agents = {name: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c", "g")}
+    parent = _FakeSession(agents["p"], "parent")
+    sessions = {
+        "child": _FakeSession(agents["c"], "child"),
+        "grandchild": _FakeSession(agents["g"], "grandchild"),
+    }
+    client = _RecordingClient()
+    bridge = ACPEventBridge(parent, client, resolve_child=sessions.get)
+    bridge.set_verbosity(level)
+    parent.emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child", name="helper", depth=1, retained=False
+        )
+    )
+    sessions["child"].emit(
+        ChildCreatedUpdate(
+            session_id="child", child_id="grandchild", name="scout", depth=2, retained=False
+        )
+    )
+    for name in ("p", "c", "g"):
+        agents[name].event_manager.add(
+            ToolCallEvent(
+                tool_call_id="cell",
+                name="python_cell",
+                arguments={"code": "# inspect\nprint('detail')"},
+            )
+        )
+    agents["g"].event_manager.add(
+        Summary(summary_tag="1..2", replaced_range=(1, 2), summary_text="Child summary")
+    )
+    agents["c"].event_manager.add(AgentMessage(content="Child answer"))
+    sessions["child"].emit(
+        TurnEndedUpdate(
+            session_id="child", outcome_kind="done", outcome={"explanation": "Child result"}
+        )
+    )
+    await bridge.flush()
+    thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
+    assert thoughts == []
+    assert not any(isinstance(u, AgentMessageChunk) for _, u in client.updates)
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    if level == "concise":
+        assert [type(c) for c in cards] == [ToolCallStart, ToolCallProgress, ToolCallProgress]
+        assert len({c.tool_call_id for c in cards}) == 1
+        assert cards[0].tool_call_id.startswith("concise-python-")
+        assert [c.title for c in cards] == [
+            "python: # inspect",
+            "python [child]: # inspect",
+            "python [grandchild]: # inspect",
+        ]
+        assert all(c.raw_input == {"code": "# inspect\nprint('detail')"} for c in cards)
+    else:
+        assert cards == []
+    await bridge.close()
+    for agent in agents.values():
+        await agent.aclose()
+
+
+@pytest.mark.parametrize(
+    "status", [ResultStatus.COMPLETE, ResultStatus.ERROR, ResultStatus.CANCELLED]
+)
+async def test_rolling_python_output_keeps_full_detail_and_status(tmp_path, status):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="cell",
+            name="python_cell",
+            arguments={"code": "\n# Check status\nprint('private source')"},
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=status,
+            execution_count=1,
+            stdout="private stdout",
+            stderr="private stderr",
+            error="private error",
+            value={"private": "value"},
+        )
+    )
+    await bridge.flush()
+    [start, end] = [u for _, u in client.updates]
+    assert isinstance(start, ToolCallStart) and isinstance(end, ToolCallProgress)
+    assert start.tool_call_id == end.tool_call_id
+    assert start.tool_call_id.startswith("concise-python-")
+    assert start.kind == "other" and start.status == "in_progress"
+    assert end.status == ("completed" if status == ResultStatus.COMPLETE else "failed")
+    suffix = (
+        " (cancelled)"
+        if status == ResultStatus.CANCELLED
+        else " (failed)"
+        if status == ResultStatus.ERROR
+        else ""
+    )
+    assert end.title == "python: # Check status" + suffix
+    for update in (start, end):
+        assert update.raw_input == {"code": "\n# Check status\nprint('private source')"}
+        assert update.content is not None
+    assert len(start.content) == 1
+    assert len(end.content) == 2
+    output = _content_text(end.content[1])
+    assert all(
+        text in output for text in ("private stdout", "private stderr", "private error", "value")
+    )
+    await bridge.close()
+    await agent.aclose()
+
+
+@pytest.mark.parametrize("finish", ["cancel", "close", "silent", "verbose"])
+async def test_rolling_python_cleanup_finishes_display_and_ignores_late_output(tmp_path, finish):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="cell", name="python_cell", arguments={"code": "# Check status\nprivate()"}
+        )
+    )
+    if finish == "cancel":
+        bridge.fail_open_tools("private failure reason", title="Cancelled")
+    elif finish == "close":
+        await bridge.close()
+    else:
+        bridge.set_verbosity(finish)
+    await bridge.flush()
+    [start, end] = [u for _, u in client.updates]
+    assert end.status == "failed"
+    assert end.content is not None and len(end.content) == 2
+    assert "private()" in _content_text(end.content[0])
+    assert start.raw_input == {"code": "# Check status\nprivate()"}
+    client.updates.clear()
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="private late output",
+        )
+    )
+    await bridge.flush()
+    assert client.updates == []
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_rolling_full_card_keeps_bounded_title_and_full_body(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    first = 'res = await self.shell.run("' + "command; " * 100 + '")'
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="cell", name="python_cell", arguments={"code": first + "\nprivate()"}
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="private output",
+        )
+    )
+    await bridge.flush()
+    [start, end] = [u for _, u in client.updates]
+    assert start.title == end.title == "python: " + first[:79] + "…"
+    for update in (start, end):
+        wire = update.model_dump(mode="json", by_alias=True, exclude_none=True)
+        assert "content" in wire
+        assert wire["rawInput"]["code"] == first + "\nprivate()"
+    assert "private output" in _content_text(end.content[1])
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_concise_replaces_one_full_card_and_clears_previous_output(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)
+    bridge.set_verbosity("concise")
+    for number in (1, 2, 3):
+        code = f"# Step {number}\nprint({number})"
+        agent.event_manager.add(
+            ToolCallEvent(
+                tool_call_id=f"cell-{number}", name="python_cell", arguments={"code": code}
+            )
+        )
+        agent.event_manager.add(
+            PythonOutput(
+                tool_call_id=f"cell-{number}",
+                execution_status=ResultStatus.COMPLETE,
+                execution_count=number,
+                stdout=f"output-{number}",
+                value=number,
+            )
+        )
+    await bridge.flush()
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert len(cards) == 6
+    assert sum(isinstance(u, ToolCallStart) for u in cards) == 1
+    assert len({u.tool_call_id for u in cards}) == 1
+    assert [u.status for u in cards] == ["in_progress", "completed"] * 3
+    for index, card in enumerate(cards):
+        number = index // 2 + 1
+        assert card.title == f"python: # Step {number}"
+        assert card.raw_input == {"code": f"# Step {number}\nprint({number})"}
+        if index % 2 == 0:
+            assert len(card.content) == 1  # replacement drops old output
+        else:
+            assert len(card.content) == 2
+            output = _content_text(card.content[1])
+            assert f"output-{number}" in output and f"Out[{number}]: {number}" in output
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_rolling_child_old_results_cannot_replace_latest_parent_cell(tmp_path):
+    agents = {name: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c")}
+    parent = _FakeSession(agents["p"], "parent")
+    child = _FakeSession(agents["c"], "child")
+    client = _RecordingClient()
+    bridge = ACPEventBridge(parent, client, resolve_child=lambda _: child)
+    bridge.set_verbosity("concise")
+    parent.emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child", name="helper", depth=1, retained=False
+        )
+    )
+    for name in ("c", "p"):
+        agents[name].event_manager.add(
+            ToolCallEvent(
+                tool_call_id="same-cell-id",
+                name="python_cell",
+                arguments={"code": f"# owner {name}\nprint('{name}')"},
+            )
+        )
+    agents["c"].event_manager.add(
+        PythonOutput(
+            tool_call_id="same-cell-id",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="stale child output",
+        )
+    )
+    child.emit(ClosedUpdate(session_id="child"))
+    agents["p"].event_manager.add(
+        PythonOutput(
+            tool_call_id="same-cell-id",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="current parent output",
+        )
+    )
+    await bridge.flush()
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert len(cards) == 3
+    assert [type(u) for u in cards] == [ToolCallStart, ToolCallProgress, ToolCallProgress]
+    assert len({u.tool_call_id for u in cards}) == 1
+    assert cards[0].title == "python [child]: # owner c"
+    assert cards[1].title == cards[2].title == "python: # owner p"
+    assert "current parent output" in _content_text(cards[-1].content[1])
+    assert "stale child output" not in str(cards)
+    await bridge.close()
+    for agent in agents.values():
+        await agent.aclose()
+
+
+@pytest.mark.parametrize(
+    "boundary", ["done", "waiting", "need_input", "error", "cancelled", "turn_started", "verbosity"]
+)
+async def test_rolling_slot_resets_with_fresh_ids_and_ignores_late_results(tmp_path, boundary):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="same-id", name="python_cell", arguments={"code": "# first"})
+    )
+    if boundary == "turn_started":
+        session.emit(TurnStartedUpdate(session_id=session.id))
+    elif boundary == "verbosity":
+        bridge.set_verbosity("verbose")
+        bridge.set_verbosity("concise")
+    else:
+        session.emit(
+            TurnEndedUpdate(
+                session_id=session.id,
+                outcome_kind=boundary,
+                outcome={"explanation": "Finished", "question": "Choose?"},
+            )
+        )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="same-id",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="late output",
+        )
+    )
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="new-id", name="python_cell", arguments={"code": "# second"})
+    )
+    await bridge.flush()
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert [type(u) for u in cards] == [ToolCallStart, ToolCallProgress, ToolCallStart]
+    assert cards[0].tool_call_id == cards[1].tool_call_id != cards[2].tool_call_id
+    assert cards[1].status == "failed"
+    assert "late output" not in str(cards)
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_parent_turn_end_closes_child_owned_rolling_card(tmp_path):
+    agents = {name: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for name in ("p", "c")}
+    parent = _FakeSession(agents["p"], "parent")
+    child = _FakeSession(agents["c"], "child")
+    client = _RecordingClient()
+    bridge = ACPEventBridge(parent, client, resolve_child=lambda _: child)
+    bridge.set_verbosity("concise")
+    parent.emit(
+        ChildCreatedUpdate(
+            session_id="parent", child_id="child", name="helper", depth=1, retained=False
+        )
+    )
+    agents["c"].event_manager.add(
+        ToolCallEvent(
+            tool_call_id="cell", name="python_cell", arguments={"code": "# child running"}
+        )
+    )
+    # Child turn completion must not reset the parent's display epoch.
+    child.emit(TurnEndedUpdate(session_id="child", outcome_kind="done"))
+    parent.emit(
+        TurnEndedUpdate(
+            session_id="parent",
+            outcome_kind="waiting",
+            outcome={"explanation": "Waiting for child", "on": ["delegates"]},
+        )
+    )
+    agents["c"].event_manager.add(
+        PythonOutput(
+            tool_call_id="cell",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="late child result",
+        )
+    )
+    await bridge.flush()
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert len(cards) == 2
+    assert cards[0].tool_call_id == cards[1].tool_call_id
+    assert cards[1].status == "failed"
+    assert "child" in cards[1].title
+    assert "late child result" not in str(cards)
+    await bridge.close()
+    for agent in agents.values():
+        await agent.aclose()
+
+
+async def test_reused_execution_id_cannot_pair_old_output_with_new_source(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    session = _FakeSession(agent)
+    bridge = ACPEventBridge(session, client)
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="same-id", name="python_cell", arguments={"code": "# old"})
+    )
+    session.emit(TurnStartedUpdate(session_id=session.id))
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="same-id", name="python_cell", arguments={"code": "# ambiguous new"}
+        )
+    )
+    for output in ("stale old result", "ambiguous new result"):
+        agent.event_manager.add(
+            PythonOutput(
+                tool_call_id="same-id",
+                execution_status=ResultStatus.COMPLETE,
+                execution_count=1,
+                stdout=output,
+            )
+        )
+    await bridge.flush()
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert len(cards) == 2  # reused ids are ignored rather than misattributed
+    assert "ambiguous new" not in str(cards)
+    assert "stale old result" not in str(cards)
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_failed_rolling_start_recovery_opens_fresh_card(tmp_path):
+    class FailOnceClient(_RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.fail = True
+
+        async def session_update(self, session_id, update, **kwargs):
+            if self.fail:
+                self.fail = False
+                raise ConnectionResetError("test send failure")
+            await super().session_update(session_id, update, **kwargs)
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = FailOnceClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="old", name="python_cell", arguments={"code": "# failed send"})
+    )
+    with pytest.raises(ConnectionResetError):
+        await bridge.flush()
+    # The old execution's output must not update an unconfirmed display card.
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="old",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="old output",
+        )
+    )
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="new", name="python_cell", arguments={"code": "# recovered"})
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="new",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="new output",
+        )
+    )
+    await bridge.flush()
+    [start, end] = [
+        u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))
+    ]
+    assert isinstance(start, ToolCallStart)
+    assert isinstance(end, ToolCallProgress)
+    assert start.tool_call_id == end.tool_call_id
+    assert start.title == end.title == "python: # recovered"
+    assert "new output" in _content_text(end.content[1])
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_failed_epoch_updates_queued_after_flush_are_not_delivered(tmp_path):
+    class GatedFailureClient(_RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.fail = True
+
+        async def session_update(self, session_id, update, **kwargs):
+            if self.fail:
+                self.fail = False
+                self.started.set()
+                await self.release.wait()
+                raise ConnectionResetError("failed initial start")
+            await super().session_update(session_id, update, **kwargs)
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = GatedFailureClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="a", name="python_cell", arguments={"code": "# A"})
+    )
+    await asyncio.wait_for(client.started.wait(), 5)
+    flush = asyncio.create_task(bridge.flush())
+    # Establish the marker before admitting the concurrent replacement.
+    await asyncio.sleep(0)
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="b", name="python_cell", arguments={"code": "# B"})
+    )
+    client.release.set()
+    with pytest.raises(ConnectionResetError):
+        await asyncio.wait_for(flush, 5)
+    await bridge.flush()
+    assert client.updates == []  # no stale progress after the recovery marker
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="c", name="python_cell", arguments={"code": "# C"})
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="c",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="C output",
+        )
+    )
+    await bridge.flush()
+    [start, end] = [u for _, u in client.updates]
+    assert isinstance(start, ToolCallStart) and isinstance(end, ToolCallProgress)
+    assert start.tool_call_id == end.tool_call_id
+    assert start.title == end.title == "python: # C"
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_verbose_execution_id_is_not_readmitted_as_rolling_cell(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="same", name="python_cell", arguments={"code": "# old verbose source"}
+        )
+    )
+    bridge.set_verbosity("concise")
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="same", name="python_cell", arguments={"code": "# new concise source"}
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="same",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="STALE OLD RESULT",
+        )
+    )
+    await bridge.flush()
+    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    assert len(cards) == 2
+    assert "new concise source" not in str(cards)
+    assert "STALE OLD RESULT" not in str(cards)
+    await bridge.close()
+    await agent.aclose()
