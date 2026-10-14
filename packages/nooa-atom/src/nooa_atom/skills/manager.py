@@ -144,7 +144,10 @@ class SkillManager(Skill):
         """The instructions of the text skill ``name``, as text."""
         entry = self._one(name)
         if entry.kind != "text":
-            raise ValueError(f"{entry.name} is a {entry.kind} skill; use doc({entry.name!r})")
+            raise ValueError(
+                f"{entry.name} is a {entry.kind} skill, not a text skill; "
+                f"use print(self.skills.doc({entry.name!r})) for its description"
+            )
         skill = self.registry[entry.key]
         return (type(skill).__doc__ or "").split("\n---\n", 1)[-1].strip()
 
@@ -195,9 +198,9 @@ class SkillManager(Skill):
         if rest:
             order = [label for label in _KIND_LABELS.values() if label in rest_kinds]
             lines.append(
-                f"{rest} more ({', '.join(order)}): self.skills.search('query'); "
-                "await self.skills.activate(['name']); "
-                "self.skills.read('name') for text skills"
+                f"{rest} more ({', '.join(order)}): self.skills.search('query') (sync); "
+                "await self.skills.activate(['name']) (async); "
+                "self.skills.read('name') (sync) for text skills"
             )
         return "\n".join(lines)
 

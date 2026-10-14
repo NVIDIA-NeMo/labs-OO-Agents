@@ -30,8 +30,8 @@ _PROXY_VARIABLES = (
     "all_proxy",
 )
 BLOCK_TAIL = (
-    "self.skills.search('query'); await self.skills.activate(['name']); "
-    "self.skills.read('name') for text skills"
+    "self.skills.search('query') (sync); await self.skills.activate(['name']) (async); "
+    "self.skills.read('name') (sync) for text skills"
 )
 
 
@@ -322,3 +322,12 @@ async def test_an_old_snapshot_with_mcp_state_loads_and_the_agent_is_told(
     prompt = str(llm.calls[0].messages)
     assert "not restored: mcp" in prompt
     assert "self.mcp.status()" not in prompt
+
+
+async def test_read_of_a_non_text_skill_names_the_working_doc_call(agent):
+    with pytest.raises(ValueError) as error:
+        agent.skills.read("probe")
+    message = str(error.value)
+    assert "print(self.skills.doc('probe'))" in message
+    assert "use doc('probe')" not in message
+    assert agent.skills.doc("probe").startswith("probe")
