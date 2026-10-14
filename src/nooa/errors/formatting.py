@@ -269,6 +269,22 @@ def _is_validation_error(error: Exception) -> bool:
         return type(error).__name__ in ("ValidationError", "RestrictedCodeError")
 
 
+_SYNC_AWAIT_RE = re.compile(r"^(?:object )?(\S+) can't be used in 'await' expression$")
+
+
+def _sync_await_hint(error: BaseException) -> str | None:
+    """Explain ``await`` applied to a plain (non-awaitable) value."""
+    if not isinstance(error, TypeError):
+        return None
+    match = _SYNC_AWAIT_RE.match(str(error))
+    if match is None:
+        return None
+    return (
+        f"Hint: the awaited value is a {match.group(1)}, not a coroutine. If it came from "
+        "a call, that call is synchronous and has already run; call it without `await`."
+    )
+
+
 def _wrapped_syntax_error(error: Exception) -> SyntaxError | None:
     """Return the parser ``SyntaxError`` a validation error wraps, if any."""
     if not _is_validation_error(error):
@@ -603,6 +619,9 @@ class IPythonErrorFormatter:
                 formatted = (
                     f"{formatted}\n\nThe callable you called has this signature:\n{agentdoc}"
                 )
+            await_hint = _sync_await_hint(error)
+            if await_hint:
+                formatted = f"{formatted}\n\n{await_hint}"
 
         return _bound_diagnostic(formatted, max_error, tail_chars)
 

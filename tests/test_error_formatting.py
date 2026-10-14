@@ -269,6 +269,28 @@ class TestWrappedSyntaxError:
         assert "SyntaxError" not in result
 
 
+class TestSyncAwaitHint:
+    """Awaiting a synchronous call's result explains the call already ran."""
+
+    def test_await_on_plain_value_gets_hint(self):
+        import asyncio
+
+        async def cell():
+            await "2..40"
+
+        with pytest.raises(TypeError) as exc_info:
+            asyncio.run(cell())
+        result = format_error_for_llm(exc_info.value)
+
+        assert "can't be used in 'await' expression" in result
+        assert "the awaited value is a str" in result
+        assert "call it without `await`" in result
+
+    def test_other_type_errors_have_no_await_hint(self):
+        result = format_error_for_llm(TypeError("unsupported operand"))
+        assert "without `await`" not in result
+
+
 class TestFormatRuntimeError:
     """Tests for runtime error formatting."""
 

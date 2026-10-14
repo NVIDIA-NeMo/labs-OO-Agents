@@ -236,3 +236,72 @@ def test_query_filters_execution_status_and_limit():
 
     assert len(failures) == 1
     assert failures[0].execution_count == 3
+
+
+def _agent_with_tasks(count: int = 4):
+    agent = _TestAgent()
+    tags = [agent.event_manager.add(Task(prompt=f"task {n}")) for n in range(count)]
+    return agent, tags
+
+
+@pytest.mark.parametrize("form", ['sys tag="{}"', '<sys tag="{}">', 'tag="{}"', " {} "])
+def test_collapse_accepts_copied_sys_tag_marker(form):
+    agent, tags = _agent_with_tasks()
+    start, end = form.format(tags[0]), form.format(tags[-1])
+    assert agent.events.collapse(start, end, "recap") == f"{tags[0]}..{tags[-1]}"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["python_cell:0#188d", "prefill_37e22754", 'sys tag="x"', 'sys tag="1" extra', "", "abc"],
+)
+def test_collapse_invalid_tag_explains_valid_tags_without_changing_history(bad):
+    agent, tags = _agent_with_tasks()
+    before = agent.events.keys()
+    with pytest.raises(ValueError) as error:
+        agent.events.collapse(bad, tags[-1], "must not be written")
+    message = str(error.value)
+    assert '<sys tag="N">' in message
+    assert '"2..40"' in message
+    assert "self.events.keys()" in message
+    assert agent.events.keys() == before
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"delete": True}, {"snippet_text": "x"}, {"doc": "x"}, {"last_events": 2}],
+)
+def test_collapse_unsupported_keywords_name_the_real_call(kwargs):
+    agent, tags = _agent_with_tasks()
+    before = agent.events.keys()
+    with pytest.raises(TypeError) as error:
+        agent.events.collapse(tags[0], tags[-1], "recap", **kwargs)
+    message = str(error.value)
+    assert f"{next(iter(kwargs))}=" in message
+    assert "start_tag, end_tag and summary_text" in message
+    assert "without await" in message
+    assert agent.events.keys() == before
+
+
+def test_collapse_doc_says_synchronous_and_tag_format():
+    import inspect
+
+    from nooa.runtime.events import EventsApi
+
+    doc = inspect.getdoc(EventsApi.collapse)
+    assert doc.splitlines()[0].endswith("Synchronous: do not await.")
+    assert '<sys tag="N">' in doc
+    assert not inspect.iscoroutinefunction(EventsApi.collapse)
+
+
+def test_collapse_hint_example_runs_as_written():
+    """The context_usage compaction hint must be executable verbatim."""
+    from nooa.context_blocks.models import COLLAPSE_HINT
+
+    agent = _TestAgent()
+    for n in range(45):
+        agent.event_manager.add(Task(prompt=f"task {n}"))
+    call = COLLAPSE_HINT.split("Compact history: ", 1)[1].split(" (tags", 1)[0]
+    assert call.startswith("self.events.collapse(")
+    result = eval(call, {"self": agent})  # noqa: S307 - fixed, test-owned string
+    assert result == "2..40"
