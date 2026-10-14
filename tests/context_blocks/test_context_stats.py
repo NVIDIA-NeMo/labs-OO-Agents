@@ -9,12 +9,8 @@ back after a successful call; the per-category breakdown is then attributed
 from that total by character share.
 """
 
-import pytest
-
 from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
 from nooa.context_blocks.models import (
-    COLLAPSE_HINT,
-    COLLAPSE_HINT_UTILIZATION,
     BlockMetadata,
     ContextWindowStats,
     ResolvedBlock,
@@ -387,14 +383,15 @@ class TestContextWindowStatsFormat:
             "Context: 24,000 / 120,000 usable tokens (20.0%) · output reserve: 8,000\n"
             "  Context blocks: ~6,000 tokens — 5 blocks\n"
             "  Events:         ~18,000 tokens — 12 events\n"
+            "Compact history: self.events.collapse(start_tag, end_tag, summary_text=...); "
+            "see doc(self.events).\n"
             "Add, remove, or edit context blocks: doc(self.context)."
         )
         assert stats.format() == expected
-        # 20% utilisation: no manual-compaction hint.
-        assert "self.events.collapse" not in stats.format()
+        assert "self.events.collapse" in stats.format()
         pending = stats.model_copy(update={"prompt_tokens": None})
         assert pending.format().startswith("Context: awaiting first model response\n")
-        assert "self.events.collapse" not in pending.format()
+        assert "self.events.collapse" in pending.format()
 
         full = stats.model_copy(update={"prompt_tokens": 110000})
         assert "Context is nearly full" in full.format()
@@ -411,8 +408,7 @@ class TestContextWindowStatsFormat:
         text = stats.format()
         assert "awaiting first model response" in text
         assert "%" not in text
-        assert "self.events.collapse" not in text
-        assert "doc(self.context)" in text
+        assert "self.events.collapse(start_tag, end_tag, summary_text=...)" in text
 
     def test_format_no_window(self):
         """With provider tokens but no model window, shows the total only."""
@@ -448,7 +444,7 @@ class TestContextWindowStatsFormat:
         assert text.count("%") == 1
 
     def test_format_warning_and_guidance_when_hot(self):
-        """Above 80% utilization the warning and the compaction hint appear."""
+        """Above 80% utilization the warning appears; guidance is always present."""
         stats = ContextWindowStats(
             context_blocks_count=5,
             events_count=10,
@@ -459,7 +455,7 @@ class TestContextWindowStatsFormat:
         )
         text = stats.format()
         assert "Context is nearly full" in text
-        assert COLLAPSE_HINT in text
+        assert "self.events.collapse(start_tag, end_tag, summary_text=...)" in text
 
     def test_format_shows_output_reserve_and_usable_denominator(self):
         """With a reserve, the header shows the usable window and the reserve."""
@@ -509,7 +505,7 @@ class TestContextWindowStatsFormat:
         )
         text = stats.format()
         assert "1 EVICTED" in text
-        assert COLLAPSE_HINT in text
+        assert "self.events.collapse(start_tag, end_tag, summary_text=...)" in text
 
     def test_format_dropped_counts_shown(self):
         """Dropped counts appear in the breakdown lines."""
@@ -542,43 +538,3 @@ class TestContextWindowStatsFrozen:
         ).stats
         with pytest.raises(ValidationError):
             stats.prompt_tokens = 999
-
-
-class TestCollapseHintThreshold:
-    """The manual-compaction hint appears only when the context is tight."""
-
-    def _stats(self, prompt_tokens: int | None, **extra):
-        return ContextWindowStats(
-            context_blocks_count=1,
-            events_count=1,
-            context_blocks_chars=100,
-            events_chars=100,
-            prompt_tokens=prompt_tokens,
-            model_context_window=100_000,
-            **extra,
-        )
-
-    @pytest.mark.parametrize("tokens", [2_000, 12_000, 49_000])
-    def test_hidden_below_threshold(self, tokens):
-        text = self._stats(tokens).format()
-        assert "self.events.collapse" not in text
-        assert text.endswith("Add, remove, or edit context blocks: doc(self.context).")
-
-    @pytest.mark.parametrize("tokens", [50_000, 65_000, 95_000])
-    def test_shown_at_or_above_threshold(self, tokens):
-        assert COLLAPSE_HINT_UTILIZATION == 0.5
-        text = self._stats(tokens).format()
-        assert COLLAPSE_HINT in text
-        assert "doc(self.context)" in text
-
-    def test_shown_when_events_dropped_even_if_low(self):
-        assert COLLAPSE_HINT in self._stats(1_000, events_dropped=2).format()
-
-    def test_hidden_without_known_window(self):
-        stats = ContextWindowStats(context_blocks_count=1, events_count=1, prompt_tokens=900_000)
-        assert "self.events.collapse" not in stats.format()
-
-    def test_hint_example_is_exact_and_synchronous(self):
-        assert 'self.events.collapse("2", "40", "summary of events 2-40")' in COLLAPSE_HINT
-        assert '<sys tag="N">' in COLLAPSE_HINT
-        assert "do not await" in COLLAPSE_HINT
