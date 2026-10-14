@@ -45,7 +45,12 @@ class SkillEntry:
     key: str
 
     def line(self) -> str:
-        text = f"{self.name} ({self.kind}, {self.state}): {self.description}"
+        state = self.state
+        if self.kind == "mcp" and self.state in ("active", "connected"):
+            # The call form is otherwise invisible: attached servers are hidden
+            # from doc(self).
+            state += f"; call: await self.{attr_name(self.name)}.<tool>(...)"
+        text = f"{self.name} ({self.kind}, {state}): {self.description}"
         return text if len(text) <= 160 else text[:159] + "…"
 
 
@@ -188,12 +193,12 @@ class SkillManager(Skill):
         active, rest_kinds, rest = [], [], 0
         for name, kind, key in self._index():
             if self._is_active(kind, key):
-                active.append(f"{name} (mcp)" if kind == "mcp" else name)
+                active.append(f"{name} (mcp: self.{attr_name(name)})" if kind == "mcp" else name)
             else:
                 rest += 1
                 if _KIND_LABELS[kind] not in rest_kinds:
                     rest_kinds.append(_KIND_LABELS[kind])
-        mcp_last = sorted(active, key=lambda item: (item.endswith(" (mcp)"), item))
+        mcp_last = sorted(active, key=lambda item: (" (mcp: self." in item, item))
         lines = [f"Active: {', '.join(mcp_last) or 'none'}"]
         if rest:
             order = [label for label in _KIND_LABELS.values() if label in rest_kinds]

@@ -191,7 +191,7 @@ async def test_activating_an_mcp_server_connects_it_and_its_tools_are_methods(ag
     approve(agent, "probe")
     result = await agent.skills.activate(["probe"])
     assert result == "probe: active; its tools are methods of self.probe: probe"
-    assert agent.skills.status().splitlines()[0].endswith(", probe (mcp)")
+    assert agent.skills.status().splitlines()[0].endswith(", probe (mcp: self.probe)")
     assert "async def probe(self, nonce: str)" in agent.skills.doc("probe")
     assert await agent.skills.deactivate(["probe"]) == "probe: inactive (still connected)"
     assert "probe" not in agent.skills.status().splitlines()[0]
@@ -232,7 +232,7 @@ async def test_a_server_that_needs_sign_in_sends_the_link_and_reports_back(
     finished = await control.run(["auth", "remote", pasted])
     assert finished.success, str(finished)
     assert "echo" in str(finished)
-    assert agent.skills.status().splitlines()[0].endswith(", remote (mcp)")
+    assert agent.skills.status().splitlines()[0].endswith(", remote (mcp: self.remote)")
     notices = [
         event.description
         for event in agent.event_manager.values()
@@ -250,8 +250,10 @@ async def test_a_client_supplied_mcp_server_is_an_mcp_skill(agent):
 
     agent.skills.register("mcp.remote", Remote())
     assert await agent.skills.activate(["mcp.remote"]) == "remote: active; use self.remote"
-    assert "remote (mcp, active)" in agent.skills.search("remote")
-    assert agent.skills.status().splitlines()[0].endswith(", remote (mcp)")
+    assert "remote (mcp, active; call: await self.remote.<tool>(...))" in agent.skills.search(
+        "remote"
+    )
+    assert agent.skills.status().splitlines()[0].endswith(", remote (mcp: self.remote)")
 
 
 async def test_the_skills_control_lists_every_kind(agent, tmp_path):
