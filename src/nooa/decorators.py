@@ -15,6 +15,7 @@ from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
+    from nooa.context_view import ContextView
     from nooa.strategies import GenerationStrategy as GenerationStrategyABC
     from nooa.unifiedllm import UnifiedLLM
 
@@ -28,6 +29,7 @@ def strategy(
     *,
     llm: "UnifiedLLM | str | Callable[[Any], UnifiedLLM] | None" = None,
     truncation: "TruncationConfig | None" = None,
+    context_view: "ContextView[Any] | None" = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Strategy decorator for agent methods.
 
@@ -39,7 +41,7 @@ def strategy(
         strategy_instance: Strategy to use (e.g., ReflexionStrategy())
         context: Context block overrides. Accepts either:
             - A plain dict ``{key: str | Context | DynamicContext | None}`` for context-only overrides.
-            - A ``ScopedContext`` instance when you also need event filtering.
+            - A ``ScopedContext`` instance with context-block overrides.
             Applied in _prepare_context() between strategy overrides and scoped blocks.
         llm: Optional LLM override for this method. One of:
             - a ``UnifiedLLM`` instance (fixed at import time, shared by every
@@ -54,6 +56,7 @@ def strategy(
         truncation: Optional TruncationConfig override for this method. Fields set
             here take precedence over the agent-level truncation config. Unset fields
             inherit from the agent-level config.
+        context_view: Complete context view for this method. Replaces the agent view.
 
     Examples:
         from nooa import Context
@@ -63,8 +66,8 @@ def strategy(
         @strategy(CodeActStrategy(), context={"focus": "security", "self": None})
         async def analyze(self): ...
 
-        # With event filtering (use ScopedContext):
-        @strategy(ScopedContext(context={"focus": "security"}, events=EventQuery.current_call()))
+        # With a custom view owning event selection:
+        @strategy(context_view=ResearchView())
         async def solve_with_reflection(self, problem: str): ...
 
     Returns:
@@ -80,27 +83,25 @@ def strategy(
         if hasattr(func, "_strategy_override"):
             raise ValueError(f"Cannot stack multiple @strategy decorators on {func.__name__}")
 
-        # Extract context and events from ScopedContext or plain dict
+        # Extract block overrides from ScopedContext or plain dict
         final_context = None
-        final_events = None
         if context is not None:
             if isinstance(context, dict):
                 final_context = context
             elif isinstance(context, ScopedContext):
                 final_context = context.context
-                final_events = context.events
             else:
                 raise TypeError(
                     f"@strategy context parameter must be a dict or ScopedContext, got {type(context).__name__}. "
-                    f"Use context={{...}} or ScopedContext(context={{...}}, events={{...}})"
+                    f"Use context={{...}} or ScopedContext(context={{...}})"
                 )
 
         # Attach metadata for metaclass to read (when used at class definition time)
         setattr(func, "_strategy_override", strategy_instance)  # noqa: B010
         setattr(func, "_strategy_llm", llm)  # noqa: B010
         setattr(func, "_strategy_context", final_context)  # noqa: B010
-        setattr(func, "_strategy_events", final_events)  # noqa: B010
         setattr(func, "_strategy_truncation", truncation)  # noqa: B010
+        setattr(func, "_strategy_context_view", context_view)  # noqa: B010
 
         # @strategy has a unary, single-result contract. Deterministic
         # generators need no strategy, while generated streams require a
@@ -165,8 +166,8 @@ def strategy(
         # Attach additional metadata specific to @strategy decorator
         setattr(wrapper, "_plan_llm", llm)  # noqa: B010
         setattr(wrapper, "_strategy_context", final_context)  # noqa: B010
-        setattr(wrapper, "_strategy_events", final_events)  # noqa: B010
         setattr(wrapper, "_strategy_truncation", truncation)  # noqa: B010
+        setattr(wrapper, "_strategy_context_view", context_view)  # noqa: B010
 
         # Also attach to original function (needed for _execute_task)
         setattr(func, "_agent_decorator", "auto")  # noqa: B010

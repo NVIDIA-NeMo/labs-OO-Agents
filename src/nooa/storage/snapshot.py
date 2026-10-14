@@ -80,7 +80,7 @@ class AgentSnapshot(BaseModel):
 
         context_blocks: list[StaticContextBlock | DynamicContextBlock] = []
         protected = agent.context_manager.protected_keys
-        for key, value in agent.context_manager._raw_items():
+        for key, value in agent.context_manager.declarations():
             if key in protected:
                 continue  # Framework blocks are recreated by __init__
             if isinstance(value, DynamicContext):

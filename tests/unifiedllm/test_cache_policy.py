@@ -56,7 +56,7 @@ async def test_cache_setting_is_constructor_only(client_type, nested, asynchrono
             transport.assert_not_called()
 
 
-def test_direct_anthropic_default_marks_only_leading_instructions():
+def test_direct_anthropic_default_without_boundary_adds_no_marker():
     original = [
         {"role": "system", "content": "stable"},
         {"role": "user", "content": "changing"},
@@ -64,10 +64,8 @@ def test_direct_anthropic_default_marks_only_leading_instructions():
     ]
     with CompletionClient("anthropic/claude-sonnet-4-5") as client:
         wire, _, _ = client._prepare_cache_boundary(original, responses=False)
-    assert wire[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert wire[1] is original[1]
-    assert wire[2] is original[2]
-    assert original[0]["content"] == "stable"
+    assert wire == original
+    assert all("cache_control" not in repr(message) for message in wire)
 
 
 def test_boundary_copies_only_the_marker_target_containers():
@@ -211,7 +209,11 @@ def test_projection_does_not_silently_drop_misplaced_boundaries(client_type, mes
 
 @pytest.mark.asyncio
 async def test_auto_mapping_uses_effective_model_and_none_disables_markers():
-    original = [{"role": "system", "content": "stable"}, {"role": "user", "content": "hi"}]
+    original = [
+        {"role": "system", "content": "stable"},
+        CacheBoundary(),
+        {"role": "user", "content": "hi"},
+    ]
     async with CompletionClient("openai/gpt-5.6") as client:
         with patch("litellm.acompletion", new_callable=AsyncMock) as request:
             request.return_value = litellm.ModelResponse(
@@ -222,7 +224,7 @@ async def test_auto_mapping_uses_effective_model_and_none_disables_markers():
             assert sent[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
     with CompletionClient("anthropic/claude-sonnet-4-5", cache_breakpoint=None) as client:
         wire, _, _ = client._prepare_cache_boundary(original, responses=False)
-        assert wire == original
+        assert wire == [message for message in original if not isinstance(message, CacheBoundary)]
 
 
 def _openai_marked_endpoints(messages):
@@ -309,7 +311,7 @@ def test_openai_million_token_scale_history_bounds_marking_and_shares_content():
 
 @pytest.mark.parametrize("mapping", [None, "auto", "openai"])
 @pytest.mark.parametrize("boundary", [False, True])
-def test_openai_multiple_endpoints_respect_opt_out_and_instruction_defaults(mapping, boundary):
+def test_openai_multiple_endpoints_require_boundary_and_respect_opt_out(mapping, boundary):
     leading = [
         {"role": "system", "content": [{"type": "input_text", "text": "one"}]},
         {"role": "developer", "content": [{"type": "input_text", "text": "two"}]},
@@ -318,11 +320,7 @@ def test_openai_multiple_endpoints_respect_opt_out_and_instruction_defaults(mapp
     live = {"role": "user", "content": [{"type": "input_text", "text": "live"}]}
     original = [*leading, history, *([CacheBoundary()] if boundary else []), live]
     wire, _, enabled = apply_cache_policy(original, mapping, responses=True)
-    expected = (
-        []
-        if mapping is None or (mapping == "auto" and not boundary)
-        else ([0, 1, 2] if boundary else [0, 1])
-    )
+    expected = [0, 1, 2] if mapping is not None and boundary else []
     assert _openai_marked_endpoints(wire) == expected
     assert enabled is bool(expected)
     assert wire[-1] is live

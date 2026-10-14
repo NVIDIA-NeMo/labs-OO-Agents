@@ -14,7 +14,6 @@ from nooa.context_blocks.models import (
     BlockMetadata,
     ContextWindowStats,
     ResolvedBlock,
-    Role,
 )
 from nooa.context_blocks.renderer import RenderResult, render_context
 
@@ -60,10 +59,12 @@ class TestContextWindowStatsBasic:
         assert stats.context_blocks_chars == 6  # len("AAA") + len("BBB")
 
     def test_events_counted(self):
-        """Message blocks counted in events_count; chars recorded."""
+        """Typed events are counted separately from blocks."""
+        from nooa.context_blocks.events import AssistantEvent, UserEvent
+
         blocks = [
-            ResolvedBlock(key="e1", content="hello", role=Role.USER),
-            ResolvedBlock(key="e2", content="world", role=Role.ASSISTANT),
+            UserEvent(content="hello"),
+            AssistantEvent(content="world"),
         ]
         stats = render_context(
             blocks,
@@ -71,7 +72,7 @@ class TestContextWindowStatsBasic:
             provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.events_count == 2
-        assert stats.events_chars == 10  # len("hello") + len("world")
+        assert stats.events_chars >= 10
 
     def test_empty_blocks(self):
         """Stats for empty input are all zero / None."""
@@ -214,7 +215,7 @@ class TestProviderTokenAttribution:
 
 
 class TestContextWindowStatsTruncation:
-    """Tests for dropped block/event tracking (eviction still uses count_fn)."""
+    """The renderer reports view-owned eviction but never performs it."""
 
     def test_context_blocks_dropped_on_truncation(self):
         blocks = [
@@ -228,9 +229,8 @@ class TestContextWindowStatsTruncation:
             context_limit=1000,
             count_tokens=len,
         ).stats
-        assert stats.context_blocks_dropped == 1
-        # "small" (100) survives; "large" (5000) was evicted to a short label
-        assert stats.context_blocks_chars < 1000
+        assert stats.context_blocks_dropped == 0
+        assert stats.context_blocks_chars == 5100
 
     def test_context_blocks_dropped_multiple(self):
         blocks = [
@@ -245,7 +245,7 @@ class TestContextWindowStatsTruncation:
             context_limit=500,
             count_tokens=len,
         ).stats
-        assert stats.context_blocks_dropped == 2
+        assert stats.context_blocks_dropped == 0
 
     def test_no_drops_when_under_budget(self):
         blocks = [
@@ -274,8 +274,7 @@ class TestContextWindowStatsTruncation:
             context_limit=1,
             count_tokens=len,
         ).stats
-        assert stats.context_blocks_dropped == 2
-        # Blocks are retained in-place and labeled EVICTED
+        assert stats.context_blocks_dropped == 0
         assert stats.context_blocks_count == 2
 
     def test_context_blocks_dropped_with_user_blocks(self):
@@ -295,7 +294,7 @@ class TestContextWindowStatsTruncation:
             context_limit=500,
             count_tokens=len,
         ).stats
-        assert stats.context_blocks_dropped == 1
+        assert stats.context_blocks_dropped == 0
 
 
 class TestContextWindowStatsToolCallEvents:
@@ -310,17 +309,16 @@ class TestContextWindowStatsToolCallEvents:
             arguments={"code": "1+1"},
             result=ToolResult(tool_call_id="tc_1", content="2"),
         )
-        blocks = [
-            ResolvedBlock(key="msg", content="hello", role=Role.USER),
-            ResolvedBlock(key="tc", content="", role=Role.ASSISTANT, event=event),
-        ]
+        from nooa.context_blocks.events import UserEvent
+
+        blocks = [UserEvent(content="hello"), event]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.events_count == 2
-        assert stats.events_chars == len("hello")  # ToolCallEvent contributes 0
+        assert stats.events_chars > len("hello")  # UserEvent serialized; tool call is structural
 
 
 class TestContextWindowStatsEdgeCases:

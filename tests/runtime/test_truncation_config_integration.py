@@ -935,8 +935,8 @@ class TestPerCallTruncationRendering:
         assert "[:500]='AGENT_EVENT_" in rendered
 
     @pytest.mark.asyncio
-    async def test_method_level_context_block_format_does_not_rerender_whole_context(self):
-        """Verify method-level truncation does not re-render existing context blocks."""
+    async def test_method_level_context_block_format_applies_during_view_assembly(self):
+        """The selected view materializes context with the current call's bounds."""
         from nooa import strategy
         from nooa.strategies.base import GenerationStrategy
         from nooa.strategies.current_call import CurrentCall
@@ -953,7 +953,9 @@ class TestPerCallTruncationRendering:
                 blocks = await runtime._prepare_context(
                     getattr(runtime.agent, call.method_name), call.args, call.kwargs
                 )
-                rendered_context = next(b.content for b in blocks if b.key == "payload")
+                rendered_context = next(
+                    b.content for b in blocks if getattr(b, "key", None) == "payload"
+                )
                 return rendered_context
 
         class TestAgent(
@@ -975,9 +977,9 @@ class TestPerCallTruncationRendering:
         agent = TestAgent()
         rendered_context = await agent.inspect_context()
 
-        assert "dict(len=1" not in rendered_context
-        assert "list(len=80" not in rendered_context
-        assert "79" in rendered_context
+        assert "list(len=80" in rendered_context
+        assert "[:5]=[0, 1, 2, 3, 4]" in rendered_context
+        assert "[-5:]=[75, 76, 77, 78, 79]" in rendered_context
 
     @pytest.mark.asyncio
     async def test_event_truncation_format_persists_across_session_resume(self):

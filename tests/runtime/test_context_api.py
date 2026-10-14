@@ -82,7 +82,7 @@ def test_getitem_dynamic_raises_before_resolve():
 def test_getitem_dynamic_returns_after_resolve():
     ctx = _ctx()
     ctx.set_dynamic("dyn", "'hello'")
-    ctx._context._update_resolved({"dyn": "hello"})
+    ctx._context.update_resolved({"dyn": "hello"})
     assert ctx["dyn"] == "hello"
 
 
@@ -143,7 +143,7 @@ def test_repr():
     assert "1 block" in repr(ctx)
 
 
-# ── keys / _raw_items ──────────────────────────────────────────────────────────
+# ── keys / declarations ───────────────────────────────────────────────────────
 
 
 def test_keys():

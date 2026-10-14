@@ -45,6 +45,7 @@ features. Each file is standalone and includes its exact run command.
 | 13 | [`13_multimodal.py`](quickstart/13_multimodal.py) | Image inputs with CodeAct and Predict | A vision-capable model |
 | 14 | [`14_atif_trajectory.py`](quickstart/14_atif_trajectory.py) | Exporting ATIF trajectories for evals and downstream tooling | — |
 | 15 | [`15_nemo_relay.py`](quickstart/15_nemo_relay.py) | NeMo Relay intercepts, guardrails, events, and nested generation | `uv sync --extra nemo-relay` |
+| 16 | [`16_custom_context.py`](quickstart/16_custom_context.py) | An independent context API and assembly policy in ordinary Python | — |
 
 If you are new to NOOA, run examples 1–6 in order. After that, choose by the
 capability you need rather than treating the remaining files as required steps.

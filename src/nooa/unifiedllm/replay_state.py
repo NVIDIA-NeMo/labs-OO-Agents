@@ -300,7 +300,7 @@ def prepare_chat_messages(
     scope: str | None,
     *,
     anthropic_cache_marking: bool = False,
-) -> list[dict | CacheBoundary]:
+) -> list[dict[str, Any] | CacheBoundary]:
     """Project stored turns; retain explicit fields in caller-written dictionaries.
 
     Portable reasoning demotion belongs to LLMResponse projection. A raw

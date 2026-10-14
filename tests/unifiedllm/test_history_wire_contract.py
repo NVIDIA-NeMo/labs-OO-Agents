@@ -14,6 +14,7 @@ import json
 import httpx
 import pytest
 
+from nooa import CacheBoundary
 from nooa.context_blocks.events import ToolCallEvent, ToolResult, UserEvent
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
@@ -164,7 +165,7 @@ def _render(turn, state):
         llm_response_id=turn.id,
         result=ToolResult(tool_call_id=call.id, content="1"),
     )
-    blocks = [
+    blocks: list[ResolvedBlock | CacheBoundary] = [
         ResolvedBlock(
             key="instructions",
             content="Stable instructions",
@@ -182,11 +183,12 @@ def _render(turn, state):
         )
         for event in (user, turn, result)
     ]
+    blocks.append(CacheBoundary())
     blocks.append(
         ResolvedBlock(
             key="live",
             content=f"live-state={state}",
-            role=Role.SYSTEM,
+            role=Role.USER,
             metadata=BlockMetadata(static=False, user_block=True),
         )
     )

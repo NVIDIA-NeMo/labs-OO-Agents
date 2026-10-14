@@ -251,10 +251,11 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 content=padding,
                 metadata=BlockMetadata(static=True),
             ),
+            CacheBoundary(),
             ResolvedBlock(
                 key="task",
-                # The cached formatter partitions SYSTEM context blocks and
-                # renders the dynamic half as a trailing USER message.
+                # Context assembly explicitly places this volatile task after
+                # the reusable prefix boundary.
                 #
                 # Reuses the reasoning-level puzzle rather than a trivial
                 # arithmetic task: a model with adaptive/content-dependent
@@ -266,7 +267,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 # to force genuine reasoning at any configured level. As
                 # with level checks, a wrong answer here is not graded —
                 # only whether reasoning was observed at all.
-                role=Role.SYSTEM,
+                role=Role.USER,
                 content=(
                     f"{REASONING_CHECK_PROMPT}\n\nCall probe_tool with your eight-letter "
                     "answer, or answer briefly."

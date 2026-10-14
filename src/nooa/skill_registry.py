@@ -44,7 +44,6 @@ _RESERVED_ATTRS = frozenset(
         "_llm",
         "_agent_id",
         "render_config",
-        "event_query",
     }
 )
 
@@ -221,10 +220,6 @@ class SkillRegistry(Skill):
         self._load_generation = 0
         self._discover()
         super().__init__()
-        # Self-register our own context block (we're never activated through ourselves)
-        if self.context_block and hasattr(agent, "context_manager"):
-            key, expr = self.context_block
-            agent.context_manager.set_dynamic(key, expr)
 
     # ------------------------------------------------------------------
     # Discovery
@@ -519,7 +514,8 @@ class SkillRegistry(Skill):
     def _protected_conflict(self, name: str, attr: str, skill: Any = None) -> str | None:
         """Describe why *name* may not take over *attr*, or None if it may.
 
-        Agents declare the attributes carrying their own tools via
+        Each normalized agent attribute has one registry owner. Agents also
+        declare the attributes carrying their own tools via
         ``__protected_skill_attrs__``. Those may be claimed once: a second
         claimant removes the tool while the model is still told it has one.
 
@@ -531,14 +527,14 @@ class SkillRegistry(Skill):
         itself. Both ``register()`` and ``load()`` consult this, so the explicit
         and discovered paths cannot drift apart.
         """
-        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
-        if attr not in protected:
-            return None
         owner = next(
             (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
         )
         if owner is not None:
             return None if owner == name else f"already provided by {owner!r}"
+        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
+        if attr not in protected:
+            return None
         if hasattr(self._agent, attr) and getattr(self._agent, attr, None) is not skill:
             return "assigned directly by the agent"
         return None
@@ -580,14 +576,6 @@ class SkillRegistry(Skill):
             raise ValueError(f"Cannot register skill with reserved attr name {attr!r}")
         conflict = self._protected_conflict(name, attr, skill)
         if conflict is not None:
-            # Colliding leaves are supported in general — reload disambiguates
-            # by fully-qualified name — but an agent may declare attributes that
-            # carry its own tools. Those must not be taken over: the previous
-            # check was suppressed once an attr was in _attr_map, so the second
-            # claimant silently won. That is how a repo-supplied `cmd.shell` or
-            # a client-supplied `mcp.shell` removed the agent's real shell while
-            # the model kept being told it still had one. Re-registering the
-            # same name is still fine.
             raise ValueError(f"Cannot register skill {name!r} as agent attr {attr!r}: {conflict}")
         if hasattr(self._agent, attr) and attr not in set(self._attr_map.values()):
             logger.warning("Skill %s overwrites existing agent attr '%s'", name, attr)
@@ -627,6 +615,28 @@ class SkillRegistry(Skill):
         """Currently activated (LLM-visible) skill names."""
         return sorted(self._activated)
 
+    def active_skills(self) -> tuple[Skill, ...]:
+        """Return active skill instances in stable registry order."""
+        active: list[Skill] = []
+        for name in self._load_order:
+            if name not in self._activated:
+                continue
+            attr = self._attr_map.get(name)
+            skill = getattr(self._agent, attr, None) if attr is not None else None
+            if isinstance(skill, Skill):
+                active.append(skill)
+        return tuple(active)
+
+    def _managed_skills(self) -> tuple[Skill, ...]:
+        """Return every loaded skill instance, including inactive ones."""
+        managed: list[Skill] = []
+        for name in self._load_order:
+            attr = self._attr_map.get(name)
+            skill = getattr(self._agent, attr, None) if attr is not None else None
+            if isinstance(skill, Skill):
+                managed.append(skill)
+        return tuple(managed)
+
     def activate(self, patterns: list[str]) -> None:
         """Make loaded skills matching patterns visible to the LLM.
 
@@ -648,7 +658,6 @@ class SkillRegistry(Skill):
         for name in matched:
             self._activated.add(name)
             self._unhide_skill(name)
-            self._register_context_block(name)
 
         # Refresh slash commands so the TUI picks up @slash_command methods
         if matched:
@@ -688,7 +697,6 @@ class SkillRegistry(Skill):
         for name in matched:
             self._activated.discard(name)
             self._hide_skill(name)
-            self._unregister_context_block(name)
 
     # ------------------------------------------------------------------
     # Visibility wiring
@@ -718,32 +726,6 @@ class SkillRegistry(Skill):
             spec(self._agent, attr, hidden=True)
         except Exception:
             logger.debug("Failed to hide skill %s (attr=%s)", name, attr, exc_info=True)
-
-    def _register_context_block(self, name: str) -> None:
-        """Register a dynamic context block if the skill declares one."""
-        attr = self._attr_map.get(name) or self._attr_name(name)
-        skill = getattr(self._agent, attr, None)
-        if skill is None:
-            return
-        block = getattr(skill, "context_block", None)
-        if isinstance(block, tuple) and len(block) == 2:
-            key, expr = block
-            cm = self._agent.context_manager
-            if key not in cm.protected_keys:
-                cm.set_dynamic(key, expr)
-
-    def _unregister_context_block(self, name: str) -> None:
-        """Remove a dynamic context block if the skill declares one."""
-        attr = self._attr_map.get(name) or self._attr_name(name)
-        skill = getattr(self._agent, attr, None)
-        if skill is None:
-            return
-        block = getattr(skill, "context_block", None)
-        if isinstance(block, tuple) and len(block) == 2:
-            key, _ = block
-            cm = self._agent.context_manager
-            if key in cm and key not in cm.protected_keys:
-                cm.pop(key, None)
 
     # ------------------------------------------------------------------
     # Reload
@@ -875,7 +857,9 @@ class SkillRegistry(Skill):
                 return result
 
             previous_name = source.module_name
-            previous_module = self._python_modules.pop(previous_name, None)
+            previous_module = (
+                self._python_modules.pop(previous_name, None) if previous_name is not None else None
+            )
             if previous_name is not None and sys.modules.get(previous_name) is previous_module:
                 sys.modules.pop(previous_name, None)
             self._python_modules[module_name] = sys.modules[module_name]
@@ -1163,11 +1147,7 @@ class SkillRegistry(Skill):
         except Exception as exc:
             await self._restore_old_after_reload_failure(name, old_skill, old_detached)
             return f"Reload failed for {name}: {exc}"
-        if name in self._activated:
-            self._unregister_context_block(name)
         setattr(self._agent, attr, new_skill)
-        if name in self._activated:
-            self._register_context_block(name)
         # Refresh slash commands so CommandRegistry picks up new methods
         cmd_reg = getattr(self._agent, "_command_registry", None)
         if cmd_reg is not None and hasattr(cmd_reg, "refresh_skill_commands"):
@@ -1200,8 +1180,6 @@ class SkillRegistry(Skill):
         for name in detach_order:
             attr = self._attr_map.get(name)
             skill = getattr(self._agent, attr, None) if attr is not None else None
-            if name in self._activated:
-                self._unregister_context_block(name)
             if skill is not None and hasattr(skill, "detach"):
                 try:
                     result = skill.detach()
@@ -1224,12 +1202,6 @@ class SkillRegistry(Skill):
             if sys.modules.get(module_name) is module:
                 sys.modules.pop(module_name, None)
         self._python_modules.clear()
-
-        if self.context_block and hasattr(self._agent, "context_manager"):
-            key, _ = self.context_block
-            cm = self._agent.context_manager
-            if key in cm and key not in cm.protected_keys:
-                cm.pop(key, None)
 
     def close(self) -> None:
         """Synchronous shutdown helper for registries outside an event loop."""

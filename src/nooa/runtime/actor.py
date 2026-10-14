@@ -16,23 +16,17 @@ import types
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast, get_type_hints
 from uuid import uuid4
 
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
-from nooa.context_blocks import (
-    DynamicContext,
-    ResolvedBlock,
-    render_context,
-)
-from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
+from nooa.context_blocks import render_context
+from nooa.context_blocks.scoped import _scoped_blocks_var
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
-    from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
 
 from nooa.events import (
@@ -42,7 +36,7 @@ from nooa.events import (
     LLMCallStart,
     SystemPrompt,
 )
-from nooa.llm_types import LLMUsage
+from nooa.llm_types import CacheBoundary, LLMResponse, LLMUsage
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -147,11 +141,8 @@ _TRAILING_CONTEXT_RE = _re.compile(r"^(.*?)(<context>.*?</context>)\s*\Z", _re.D
 def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
     """Pull the trailing ``<context>…</context>`` envelope from messages.
 
-    ``CachedBlockFormatter`` emits dynamic SYSTEM-role blocks as a
-    trailing ``role: "user"`` message that wraps them in a ``<context>``
-    envelope (see ``context_blocks/renderers/cached.py``). This helper
-    extracts that envelope so observability consumers can record
-    per-turn dynamic-block state on the corresponding agent step.
+    A custom context view may emit an explicit trailing ``<context>`` envelope.
+    This compatibility helper extracts it for observability consumers.
 
     Returns the envelope (including the ``<context>…</context>`` tags)
     when the last message is a user message whose content ends in such
@@ -170,17 +161,42 @@ def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
     return m.group(2) if m is not None else ""
 
 
+def _dynamic_context_trace_snapshot(items: tuple[Any, ...], messages: list[Any]) -> str:
+    """Project trailing context blocks into the existing trace field.
+
+    This is observability compatibility, not context assembly: provider messages
+    stay exactly as rendered. Block-aware messages provide the final rendered
+    bodies, including expression metadata, without consulting ContextManager.
+    """
+    if not items or not messages:
+        return ""
+
+    from nooa.context_blocks.models import BlockPart
+    from nooa.context_blocks.roles import Role
+    from nooa.context_view import Block
+
+    if not isinstance(items[-1], Block) or items[-1].role != Role.USER:
+        return ""
+    message = messages[-1]
+    if message.role != Role.USER or not message.parts:
+        return ""
+    blocks = [part.content for part in message.parts if isinstance(part, BlockPart)]
+    return f"<context>\n{'\n'.join(blocks)}\n</context>" if blocks else ""
+
+
 def _snapshot_llm_request(
-    event_manager: Any, messages: list[dict[str, Any]], generation_id: str
+    event_manager: Any,
+    messages: list[Any],
+    generation_id: str,
+    dynamic_context_snapshot: str = "",
 ) -> str:
     """Snapshot the rendered request for observability consumers (e.g. ATIF).
 
-    Emits a :class:`SystemPrompt` event carrying ``messages[0].content``
-    and returns the trailing ``<context>…</context>`` envelope from the
-    same list. Called right after ``_build_messages`` so both reflect the
-    exact bytes about to be sent to the LLM; the returned envelope is
-    stamped onto the matching :class:`LLMResponse`. ``record=False`` keeps
-    the snapshot out of the LLM-visible event timeline.
+    Emits a :class:`SystemPrompt` event carrying ``messages[0].content`` and
+    returns either an explicit trailing ``<context>…</context>`` envelope or
+    the compatibility snapshot reconstructed during rendering. The returned
+    envelope is stamped onto the matching :class:`LLMResponse`. ``record=False``
+    keeps the snapshot out of the LLM-visible event timeline.
     """
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
         content = messages[0].get("content", "")
@@ -190,7 +206,7 @@ def _snapshot_llm_request(
             SystemPrompt(content=content, generation_id=generation_id),
             record=False,
         )
-    return _extract_trailing_context_envelope(messages)
+    return _extract_trailing_context_envelope(messages) or dynamic_context_snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -408,20 +424,17 @@ _current_strategy_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "current_strategy", default=None
 )
 
+# Complete context view selected for the current generation call.
+_current_context_view_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "current_context_view", default=None
+)
+
 # Context variable for inherited decorator context.
 # Set by _execute_with_generation() so that @strategy(context={...})
 # blocks propagate to nested method calls on the same agent.
-# Read by _prepare_context() and passed explicitly to build_context().
+# Read by _prepare_context() and captured on CurrentCall for the selected view.
 _decorator_context_var: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "decorator_context", default=None
-)
-
-# Context variable for inherited decorator event query.
-# Set by _execute_with_generation() so that @strategy(ScopedContext(events=...))
-# event filtering propagates to nested method calls on the same agent.
-# Read by _prepare_context() and passed explicitly to build_context().
-_decorator_events_var: contextvars.ContextVar["EventQuery | None"] = contextvars.ContextVar(
-    "decorator_events", default=None
 )
 
 # Task-local stdout/stderr buffers for async-safe capture
@@ -612,6 +625,7 @@ class ActorRuntime:
         # isolation, read stats from the on_messages_built hook's context_stats kwarg.
         self._last_context_stats: ContextWindowStats | None = None
         self._last_prompt_tokens_actual: int | None = None
+        self._last_dynamic_context_snapshot = ""
         self._event_format_cache: dict[tuple[tuple[str, Any], ...], Any] = {}
         self._event_format_cache_max_entries = 32
         # Chars→tokens ratio, calibrated from the last provider response
@@ -619,6 +633,21 @@ class ActorRuntime:
         # chars × this ratio, anchored to the real provider count. Defaults to
         # the ~4-chars-per-token heuristic before the first response.
         self._tokens_per_char: float = _DEFAULT_TOKENS_PER_CHAR
+
+    def _select_context_view(self, method: Any, call_context_view: Any = _MISSING) -> Any:
+        """Resolve call, method, agent, and default view precedence."""
+        from nooa.context_view import resolve_context_view
+        from nooa.default_context_view import DefaultAgentView
+
+        base_method = getattr(method, "__func__", method)
+        method_context_view = getattr(base_method, "_strategy_context_view", None)
+        if call_context_view is not _MISSING:
+            if call_context_view is None:
+                raise TypeError("context_view must implement ContextView, not None")
+            return call_context_view
+        if method_context_view is not None:
+            return method_context_view
+        return resolve_context_view(self.agent, default=DefaultAgentView())
 
     def _event_format_for_event(self, event: Any) -> Any:
         """Return the FormatConfig to use when serializing an event.
@@ -793,17 +822,10 @@ class ActorRuntime:
         call-specific information.
 
         Example:
-            # In DynamicContext expressions
-            @strategy(
-                CodeActStrategy(),
-                ScopedContext(events={
-                    "history": DynamicContext(
-                        "self.runtime.event_manager.filter(call_id=self.runtime.current_call.id)"
-                    )
-                })
-            )
-            async def my_method(self):
-                ...  # Only sees events from this method's call
+            # Inside a context view's assemble(agent, call):
+            for event in agent.event_manager.values():
+                if event.metadata.get("call_id") == call.invocation_id:
+                    yield event
 
             # Or directly in code
             current_id = self.runtime.current_call.id
@@ -902,7 +924,10 @@ class ActorRuntime:
         # Snapshot system prompt + dynamic context from the rendered messages
         # (consumed by the ATIF exporter). Captured here, at render time.
         _dynamic_context = _snapshot_llm_request(
-            self.event_manager, messages, current_generation_id or ""
+            self.event_manager,
+            messages,
+            current_generation_id or "",
+            self._last_dynamic_context_snapshot,
         )
 
         # --- Middleware: llm_call -------------------------------------------
@@ -937,7 +962,10 @@ class ActorRuntime:
             if has_mw:
                 from nooa.runtime.middleware import LLMCallContext
 
-                params: dict[str, Any] = {**kwargs, "tools": tools}
+                params: dict[str, Any] = {
+                    **kwargs,
+                    "tools": tools,
+                }
                 if output_model is not None:
                     params["output_model"] = output_model
                 ctx = LLMCallContext(
@@ -946,15 +974,6 @@ class ActorRuntime:
                     agent=self.agent,
                     runtime=self,
                     client=llm_client,
-                    filtered_history=any(
-                        query is not None
-                        for query in (
-                            self.agent.event_manager.get_event_query(),
-                            _scoped_events_var.get(),
-                            _decorator_events_var.get(),
-                            self.agent.event_query,
-                        )
-                    ),
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
@@ -1024,7 +1043,10 @@ class ActorRuntime:
                             llm_client=ctx.client,
                         )
                         _dynamic_context = _snapshot_llm_request(
-                            self.event_manager, ctx.messages, current_generation_id or ""
+                            self.event_manager,
+                            ctx.messages,
+                            current_generation_id or "",
+                            self._last_dynamic_context_snapshot,
                         )
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                 except Exception as _exc:
@@ -1112,7 +1134,10 @@ class ActorRuntime:
                             request_params=_recovery_kw,
                         )
                         _dynamic_context = _snapshot_llm_request(
-                            self.event_manager, messages, current_generation_id or ""
+                            self.event_manager,
+                            messages,
+                            current_generation_id or "",
+                            self._last_dynamic_context_snapshot,
                         )
                         # Reuse _kwargs (already has the per-(agent, strategy) key set)
                         # so recovery lands on the same shard as the original attempt.
@@ -2508,14 +2533,17 @@ class ActorRuntime:
         """Execute a method that needs LLM generation."""
         base_method = getattr(method, "__func__", method)
         try:
-            has_user_llm_param = "llm" in inspect.signature(method).parameters
+            user_params = inspect.signature(method).parameters
         except (TypeError, ValueError):
-            has_user_llm_param = False
+            user_params = {}
 
         # Extract framework parameters (don't pass to generated method)
         call_strategy = kwargs.pop("_strategy", None)
-        call_llm = kwargs.pop("llm", _MISSING) if not has_user_llm_param else _MISSING
+        call_llm = kwargs.pop("llm", _MISSING) if "llm" not in user_params else _MISSING
         call_session_locals = kwargs.pop("_session_locals", None)
+        call_context_view = (
+            kwargs.pop("context_view", _MISSING) if "context_view" not in user_params else _MISSING
+        )
 
         # Get strategy with priority: call-level > decorator > default
         decorator_strategy = getattr(base_method, "_plan_strategy", None)
@@ -2537,6 +2565,8 @@ class ActorRuntime:
         from nooa.strategies import get_default_strategy
 
         strategy = call_strategy or decorator_strategy or get_default_strategy()
+
+        selected_context_view = self._select_context_view(method, call_context_view)
 
         # Resolve LLM client with priority: call-level > @strategy decorator > agent's default.
         # A call-level or @strategy(llm=...) value may be a callable resolved against
@@ -2680,6 +2710,14 @@ class ActorRuntime:
                 # call stack and runtime.current_call.id. CodeAct stores its
                 # display-only Task event tag separately on call.task_tag.
                 call_id = self._agent_call_id or str(uuid4())
+
+                # Snapshot inherited + local context before CurrentCall is built.
+                parent_ctx = _decorator_context_var.get()
+                own_ctx = getattr(getattr(method, "__func__", method), "_strategy_context", None)
+                merged_ctx: dict[str, Any] | None = None
+                if parent_ctx or own_ctx:
+                    merged_ctx = {**(parent_ctx or {}), **(own_ctx or {})}
+
                 call = CurrentCall(
                     id=call_id,
                     method_name=method_name,
@@ -2698,6 +2736,15 @@ class ActorRuntime:
                     # Authoritative ordered names from the live signature (excludes
                     # 'self') so format_parameters_as_code never re-parses the string.
                     param_names=[p for p in sig.parameters if p != "self"],
+                    agent=self.agent,
+                    strategy=strategy,
+                    model=llm_model_name or None,
+                    context_window=getattr(llm_client, "context_window", None),
+                    _context_format=resolved_truncation.context_block_format,
+                    _method=method,
+                    _decorator_context=merged_ctx,
+                    _scoped_context=_scoped_blocks_var.get(),
+                    _context_call_id=call_id,
                     # Preserve Annotated parameter overrides on top-level calls,
                     # just as the nested method wrapper does.
                     param_specs=CurrentCall.from_method(method).param_specs,
@@ -2716,27 +2763,9 @@ class ActorRuntime:
                 event_format_token = _current_event_format_var.set(
                     resolved_truncation.event_format.model_dump()
                 )
+                context_view_token = _current_context_view_var.set(selected_context_view)
 
-                # Propagate decorator context to nested calls:
-                # merge parent's inherited context with this method's @strategy(context={...})
-                parent_ctx = _decorator_context_var.get()
-                own_ctx = getattr(getattr(method, "__func__", method), "_strategy_context", None)
-                merged_ctx: dict[str, Any] | None = None
-                if parent_ctx or own_ctx:
-                    merged_ctx = {}
-                    if parent_ctx:
-                        merged_ctx.update(parent_ctx)
-                    if own_ctx:
-                        merged_ctx.update(own_ctx)
                 decorator_ctx_token = _decorator_context_var.set(merged_ctx)
-
-                # Propagate decorator events to nested calls:
-                # Use this method's EventQuery if present, otherwise inherit parent's
-                parent_evt = _decorator_events_var.get()
-                own_evt = getattr(getattr(method, "__func__", method), "_strategy_events", None)
-                # EventQuery: child overrides parent (not merged like context dicts)
-                active_evt = own_evt if own_evt is not None else parent_evt
-                decorator_evt_token = _decorator_events_var.set(active_evt)
 
                 try:
                     # Set current strategy context var (_prepare_context reads it)
@@ -2756,8 +2785,8 @@ class ActorRuntime:
                     _current_llm_selection_source_var.reset(llm_selection_source_token)
                     _current_truncation_config_var.reset(truncation_token)
                     _current_event_format_var.reset(event_format_token)
+                    _current_context_view_var.reset(context_view_token)
                     _decorator_context_var.reset(decorator_ctx_token)
-                    _decorator_events_var.reset(decorator_evt_token)
             else:
                 raise TypeError(f"Expected GenerationStrategy instance, got {type(strategy)}")
         except BaseException as e:
@@ -2847,98 +2876,79 @@ class ActorRuntime:
         method: Any,
         call_args: tuple[Any, ...] = (),
         call_kwargs: dict[str, Any] | None = None,
-    ) -> list[ResolvedBlock]:
-        """Gather all blocks, resolve DynamicContext values, return list[ResolvedBlock].
+        *,
+        context_limit: int | None = None,
+        count_tokens: Callable[[str], int] | None = None,
+    ) -> Any:
+        """Snapshot call facts, resolve the view, and collect its ordered items.
 
-        Thin wrapper around context_builder.build_context() that constructs
-        the resolve function and strategy from the current runtime state.
-
-        DynamicContext expression errors are displayed inline in the block content
-        (not raised), so a single broken expression doesn't crash the whole
-        context build.
-
-        Args:
-            method: Method being generated
-            call_args: Current call positional arguments
-            call_kwargs: Current call keyword arguments
-
-        Returns:
-            Ordered list of ResolvedBlock ready for render_context()
+        Content selection and ordering belong entirely to the selected view.
         """
-        from nooa.runtime.context_builder import build_context
+        from dataclasses import replace
 
-        tc = self.agent._truncation
-        call_kwargs = call_kwargs or {}
+        from nooa.context_view import collect_context_items, resolve_context_view
+        from nooa.default_context_view import DefaultAgentView
+        from nooa.strategies.current_call import CurrentCall
 
-        # Get current strategy
-        strategy = getattr(method, "_plan_strategy", None)
-        if strategy is None:
-            strategy = _current_strategy_var.get()
+        call = _current_call_var.get()
+        if call is None:
+            try:
+                base_call = CurrentCall.from_method(method, call_args, call_kwargs or {})
+            except (OSError, TypeError):
+                base_call = CurrentCall(
+                    id=self._agent_call_id or str(uuid4()),
+                    method_name=getattr(method, "__name__", "generate"),
+                    decorator="plan",
+                    args=call_args,
+                    kwargs=call_kwargs or {},
+                )
+        else:
+            base_call = call
 
-        # Build evaluation context for DynamicContext expressions
-        extra_context = {
-            "method": method,
-            "call_args": call_args,
-            "call_kwargs": call_kwargs,
-            "strategy": strategy,
-            "datetime": datetime,
-            "runtime": self,
-        }
+        base_method = getattr(method, "__func__", method)
+        parent_context = _decorator_context_var.get()
+        own_context = getattr(base_method, "_strategy_context", None)
+        decorator_context = base_call.decorator_context
+        if decorator_context is None and (parent_context or own_context):
+            decorator_context = {**(parent_context or {}), **(own_context or {})}
 
-        # Hoist the format kwargs out of the resolve loop — same FormatConfig for
-        # every block this turn, no need to re-dump per resolve.
-        ctx_block_kwargs = tc.context_block_format.model_dump()
+        strategy = base_call.strategy or getattr(base_method, "_plan_strategy", None)
+        strategy = strategy or _current_strategy_var.get()
+        llm_client = _current_llm_var.get() or getattr(self.agent, "_llm", None)
+        model = base_call.model or getattr(llm_client, "model", None)
+        context_window = base_call.context_window
+        if context_window is None:
+            context_window = getattr(llm_client, "context_window", None)
+        context_format = base_call.context_format
+        if context_format is None:
+            current_truncation = _current_truncation_config_var.get()
+            context_format = (
+                current_truncation.context_block_format
+                if current_truncation is not None
+                else self.agent._truncation.context_block_format
+            )
 
-        async def _resolve_value(key: str, value: str | DynamicContext) -> str:
-            """Resolve a value (static str or DynamicContext) to a string.
-
-            Errors are displayed inline as "ExceptionType: message" so the
-            LLM can see and fix the problem. Unlike codeact errors (which
-            include full tracebacks), context block errors omit tracebacks
-            because the source is a short expression, not user-written code.
-            """
-            if isinstance(value, DynamicContext):
-                try:
-                    result = await self.evaluate_expression(
-                        value.expr, extra_context=extra_context, error_mode="raise"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "DynamicContext block %r failed to resolve: %s: %s (expr: %s)",
-                        key,
-                        type(e).__name__,
-                        e,
-                        value.expr,
-                    )
-                    return f"{type(e).__name__}: {e}"
-                if result is None:
-                    return "None"
-                if isinstance(result, str):
-                    return result
-                from nooa.agentdoc import pformat as _pformat_value
-
-                return _pformat_value(result, unquote_strings=True, **ctx_block_kwargs)
-            return value
-
-        build_result = await build_context(
-            context_manager=self.agent.context_manager,
-            event_manager=self.agent.event_manager,
+        call = replace(
+            base_call,
+            agent=self.agent,
             strategy=strategy,
-            resolve_fn=_resolve_value,
-            decorator_context=_decorator_context_var.get(),
-            scoped_context=_scoped_blocks_var.get(),
-            runtime_event_query=self.agent.event_manager.get_event_query(),
-            decorator_event_query=_decorator_events_var.get(),
-            scoped_event_query=_scoped_events_var.get(),
-            agent_event_query=getattr(self.agent, "event_query", None),
-            current_call_id=self._agent_call_id,
-            context_block_format=tc.context_block_format,
+            model=model,
+            context_window=context_window,
+            context_budget=(
+                context_limit if context_limit is not None else base_call.context_budget
+            ),
+            _context_format=context_format,
+            _context_token_counter=count_tokens or base_call.context_token_counter,
+            _method=method,
+            _decorator_context=decorator_context,
+            _scoped_context=_scoped_blocks_var.get(),
+            _context_call_id=base_call._context_call_id or self._agent_call_id or base_call.id,
         )
 
-        # Apply the resolved cache (the only side effect)
-        self.agent.context_manager._update_resolved(build_result.resolved_cache)
-
-        return build_result.blocks
+        view = _current_context_view_var.get()
+        if view is None:
+            view = resolve_context_view(self.agent, default=DefaultAgentView())
+        return await collect_context_items(view, self.agent, call)
 
     def _update_context_limits(self, llm_client: Any, params: dict[str, Any]):
         """Refresh budgets before dynamic context is rendered or a call is sent."""
@@ -2966,7 +2976,7 @@ class ActorRuntime:
         max_output_tokens: int | None = None,
         request_params: dict[str, Any] | None = None,
         llm_client: Any = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any] | LLMResponse | CacheBoundary]:
         """Build messages for LLM API.
 
         Calls _prepare_context() to gather and resolve all blocks,
@@ -2990,8 +3000,6 @@ class ActorRuntime:
             params["max_tokens"] = max_output_tokens
         limits = self._update_context_limits(llm_client, params)
         hm = get_harness_metrics()
-        with hm.timer("time_prepare_context"):
-            blocks = await self._prepare_context(method, call_args, call_kwargs)
         tc = self.agent._truncation
 
         effective_context_limit = tc.max_context_tokens
@@ -3025,6 +3033,21 @@ class ActorRuntime:
             # (and spuriously evict) agents with many small context blocks.
             return round(len(text) * ratio)
 
+        with hm.timer("time_prepare_context"):
+            blocks = await self._prepare_context(
+                method,
+                call_args,
+                call_kwargs,
+                context_limit=effective_context_limit,
+                count_tokens=count_tokens,
+            )
+        from nooa.context_view import Block
+
+        context_blocks_dropped = sum(
+            isinstance(block, Block) and block.metadata is not None and block.metadata.truncated
+            for block in blocks
+        )
+
         with hm.timer("time_render_context"):
             result = render_context(
                 blocks,
@@ -3036,6 +3059,7 @@ class ActorRuntime:
                 event_format_resolver=self._event_format_for_event,
                 model_context_window=ctx_window,
                 reserved_output_tokens=reserved_output,
+                context_blocks_dropped=context_blocks_dropped,
             )
 
         # ``render_context`` is a framework-agnostic leaf and does not touch the
@@ -3062,6 +3086,9 @@ class ActorRuntime:
         # generate() writes that actual value back into _last_context_stats after
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
+        self._last_dynamic_context_snapshot = _dynamic_context_trace_snapshot(
+            tuple(blocks), result.messages
+        )
         messages = result.output
         self._last_context_stats = result.stats.model_copy(
             update={"output_reserve_is_fallback": limits.reserve_is_fallback}

@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from nooa import strategy
+from nooa import Agent, DynamicContext, strategy
 from nooa.llm_types import AssistantReasoning, AssistantText
 from nooa.runtime.event_manager import EventManager
 from nooa.strategies import PredictStrategy
@@ -263,6 +263,33 @@ class TestLLMResponseEvent:
         assert len(recorded) == 1
         ev = recorded[0]
         assert ev.usage is None
+
+    @pytest.mark.asyncio
+    async def test_dynamic_context_preserves_legacy_trace_envelope(self) -> None:
+        """Trailing view blocks remain available to ATIF without changing prompts."""
+        recorded: list[LLMResponse] = []
+        fake_llm = FakeLLMClient(scripted_responses=[_resp(content='{"v":1}')])
+
+        class TestAgent(
+            Agent,
+            llm=fake_llm,
+            context={"live": DynamicContext("'current-value'")},
+        ):
+            @strategy(PredictStrategy())
+            async def run(self) -> dict:
+                """Return one value."""
+                ...
+
+        agent = TestAgent()
+        agent.event_manager.on("LLMResponse", lambda event: recorded.append(event))
+        await agent.run()
+
+        assert len(recorded) == 1
+        assert recorded[0].dynamic_context.startswith("<context>\n<state")
+        assert "<live expr=\"'current-value'\">\ncurrent-value\n</live>" in (
+            recorded[0].dynamic_context
+        )
+        assert recorded[0].dynamic_context.endswith("\n</context>")
 
 
 class TestAtifExporterContextVar:

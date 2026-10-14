@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 # These imports are safe at module level (no circular dependencies)
-from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
+from nooa.context_blocks.scoped import _scoped_blocks_var
 from nooa.events import AfterAgentCall, BeforeAgentCall
 from nooa.runtime.context_vars import (
     _get_agent_call_stack,
@@ -158,11 +158,13 @@ def create_agent_method_wrapper(
                     if _name in kwargs
                 }
                 try:
-                    _has_user_llm_param = "llm" in inspect.signature(original_func).parameters
+                    _user_params = inspect.signature(original_func).parameters
                 except (TypeError, ValueError):
-                    _has_user_llm_param = False
-                if not _has_user_llm_param and "llm" in kwargs:
+                    _user_params = {}
+                if "llm" not in _user_params and "llm" in kwargs:
                     _fw_kwargs["llm"] = kwargs.pop("llm")
+                if "context_view" not in _user_params and "context_view" in kwargs:
+                    _fw_kwargs["context_view"] = kwargs.pop("context_view")
             try:
                 ArgumentValidator().validate(original_func, args, kwargs, _tc)
             finally:
@@ -217,12 +219,10 @@ def create_agent_method_wrapper(
             current_parent = _parent_agent_var.get()
             is_subagent_call = current_parent is not None and current_parent is not self
 
-            # Clear scoped blocks and events only when entering a different agent
+            # Clear scoped blocks only when entering a different agent
             scoped_blocks_token = None
-            scoped_events_token = None
             if is_subagent_call:
                 scoped_blocks_token = _scoped_blocks_var.set(None)
-                scoped_events_token = _scoped_events_var.set(None)
 
             # Set parent agent context for LLM inheritance by subagents
             parent_token = _parent_agent_var.set(self)
@@ -347,11 +347,9 @@ def create_agent_method_wrapper(
                     )
                 except Exception:  # noqa: BLE001
                     logger.debug("agent-call: AfterAgentCall emission failed", exc_info=True)
-                # Reset scoped blocks/events context if we cleared it
+                # Reset scoped blocks context if we cleared it
                 if scoped_blocks_token is not None:
                     _scoped_blocks_var.reset(scoped_blocks_token)
-                if scoped_events_token is not None:
-                    _scoped_events_var.reset(scoped_events_token)
                 # Reset parent agent context
                 _parent_agent_var.reset(parent_token)
                 _pop_agent_call_id()
@@ -703,10 +701,8 @@ def create_sync_agent_method_wrapper(
         # mirrors the async wrapper so a parent's ScopedContext cannot leak
         # across agent boundaries through sync method calls.
         scoped_blocks_token = None
-        scoped_events_token = None
         if is_subagent_call:
             scoped_blocks_token = _scoped_blocks_var.set(None)
-            scoped_events_token = _scoped_events_var.set(None)
 
         # Set parent agent for LLM inheritance — subagents instantiated inside
         # this sync method can inherit the parent's LLM (mirrors async wrapper).
@@ -763,12 +759,10 @@ def create_sync_agent_method_wrapper(
                 )
             except Exception:  # noqa: BLE001
                 logger.debug("agent-call: AfterAgentCall emission failed (sync)", exc_info=True)
-            # Reset scoped blocks/events if we cleared them, then the parent
+            # Reset scoped blocks if we cleared them, then the parent
             # agent context (order mirrors the async wrapper).
             if scoped_blocks_token is not None:
                 _scoped_blocks_var.reset(scoped_blocks_token)
-            if scoped_events_token is not None:
-                _scoped_events_var.reset(scoped_events_token)
             _parent_agent_var.reset(parent_token)
             _pop_agent_call_id()
             if hook_context is not None:
@@ -848,15 +842,12 @@ def _gen_resume_context(
     current_parent = _parent_agent_var.get() if set_parent_agent else None
     is_subagent_call = current_parent is not None and current_parent is not self
     scoped_blocks_token = _scoped_blocks_var.set(None) if is_subagent_call else None
-    scoped_events_token = _scoped_events_var.set(None) if is_subagent_call else None
     parent_token = _parent_agent_var.set(self) if set_parent_agent else None
     try:
         yield
     finally:
         if parent_token is not None:
             _parent_agent_var.reset(parent_token)
-        if scoped_events_token is not None:
-            _scoped_events_var.reset(scoped_events_token)
         if scoped_blocks_token is not None:
             _scoped_blocks_var.reset(scoped_blocks_token)
         _pop_agent_call_id()

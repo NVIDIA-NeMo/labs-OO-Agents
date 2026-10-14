@@ -759,6 +759,25 @@ def _is_anthropic_model(model: str) -> bool:
     return _is_bedrock_model(model) and "claude" in m
 
 
+def _validate_anthropic_message_order(
+    messages: Sequence[dict[str, Any] | CacheBoundary],
+) -> None:
+    """Reject chat layouts Anthropic would silently reorder."""
+    from nooa.context_blocks.exceptions import UnsupportedContextLayout
+
+    saw_non_system = False
+    for message in messages:
+        if isinstance(message, CacheBoundary):
+            continue
+        if message.get("role") == "system":
+            if saw_non_system:
+                raise UnsupportedContextLayout(
+                    "Anthropic requires all system context before conversation messages"
+                )
+        else:
+            saw_non_system = True
+
+
 def _sanitize_schema_for_bedrock(schema: dict[str, Any]) -> dict[str, Any]:
     """Deep-copy *schema* and strip/fix keywords unsupported by Bedrock.
 
@@ -1389,7 +1408,9 @@ class UnifiedLLM(ABC):
     async def __aexit__(self, *exc_info):
         await self.aclose()
 
-    def _resolve_cache_mapping(self, model: str | None = None, *, responses: bool) -> str | None:
+    def _resolve_cache_mapping(
+        self, model: str | None = None, *, responses: bool
+    ) -> Literal["auto", "openai", "anthropic"] | None:
         """The single source of truth for which cache_control mapping applies.
 
         Both the marking decision here and the rendering decision in
@@ -1939,12 +1960,11 @@ class CompletionClient(UnifiedLLM):
                          passes it to litellm per call. No global state and no
                          monkey-patching of httpx — two clients with different
                          http_configs are fully independent.
-            cache_breakpoint: Set to ``"anthropic"`` to map the cached
-                renderer's stable-prefix boundary to native ``cache_control``.
+            cache_breakpoint: Set to ``"anthropic"`` to map a view-emitted
+                stable-prefix boundary to native ``cache_control``.
                 Default ``"auto"`` enables this for recognized Anthropic routes;
                 other routes use provider-default caching. ``None`` disables
-                NOOA markers. Without a boundary, only leading instructions
-                are marked.
+                NOOA markers. Without a boundary, NOOA adds no cache metadata.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
@@ -1967,6 +1987,15 @@ class CompletionClient(UnifiedLLM):
                 "parameters": tool.get_parameter_schema(),
             },
         }
+
+    def _validate_provider_layout(
+        self,
+        messages: Sequence[dict[str, Any] | CacheBoundary],
+        effective_model: str,
+    ) -> None:
+        """Reject message orders the selected provider cannot preserve."""
+        if self.cache_breakpoint == "anthropic" or _is_anthropic_model(effective_model):
+            _validate_anthropic_message_order(messages)
 
     def _completion_http_client(
         self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
@@ -2007,13 +2036,14 @@ class CompletionClient(UnifiedLLM):
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
-        prepared_messages = replay_state.prepare_chat_messages(
+        projected_messages = replay_state.prepare_chat_messages(
             messages, state_scope, anthropic_cache_marking=cache_mapping == "anthropic"
         )
+        self._validate_provider_layout(projected_messages, effective_model)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
-            prepared_messages, responses=False, model=effective_model
+            projected_messages, responses=False, model=effective_model
         )
 
         api_params = {
@@ -2118,13 +2148,14 @@ class CompletionClient(UnifiedLLM):
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
-        prepared_messages = replay_state.prepare_chat_messages(
+        projected_messages = replay_state.prepare_chat_messages(
             messages, state_scope, anthropic_cache_marking=cache_mapping == "anthropic"
         )
+        self._validate_provider_layout(projected_messages, effective_model)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
-            prepared_messages, responses=False, model=effective_model
+            projected_messages, responses=False, model=effective_model
         )
 
         api_params = {

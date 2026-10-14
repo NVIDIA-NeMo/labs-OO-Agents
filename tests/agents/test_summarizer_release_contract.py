@@ -13,7 +13,7 @@ from tests.integration.test_summarizer_live import exercise_summarization
 
 
 @pytest.mark.parametrize("family", ["openai", "anthropic"])
-@pytest.mark.parametrize("broken", [None, "fork", "collapse", "facts"])
+@pytest.mark.parametrize("broken", [None, "schedule", "collapse", "facts"])
 async def test_release_scenario_detects_missing_summarization(family, broken, monkeypatch):
     """Exercise the same scenario through mocked HTTP, including negative controls."""
     calls = 0
@@ -29,14 +29,32 @@ async def test_release_scenario_detects_missing_summarization(family, broken, mo
                 "id": f"r{calls}",
                 "created_at": 0,
                 "status": "completed",
-                "output": [
-                    {
-                        "type": "function_call",
-                        "call_id": f"c{calls}",
-                        "name": "return_result",
-                        "arguments": json.dumps({"result": text}),
-                    }
-                ],
+                "output": (
+                    [
+                        {
+                            "id": f"m{calls}",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": json.dumps({"value": text}),
+                                    "annotations": [],
+                                }
+                            ],
+                        }
+                    ]
+                    if calls == 2
+                    else [
+                        {
+                            "type": "function_call",
+                            "call_id": f"c{calls}",
+                            "name": "return_result",
+                            "arguments": json.dumps({"result": text}),
+                        }
+                    ]
+                ),
                 "usage": {"input_tokens": 8000, "output_tokens": 20, "total_tokens": 8020},
             }
         else:
@@ -45,26 +63,30 @@ async def test_release_scenario_detects_missing_summarization(family, broken, mo
                 "type": "message",
                 "role": "assistant",
                 "model": "claude-test",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": f"c{calls}",
-                        "name": "return_result",
-                        "input": {"result": text},
-                    }
-                ],
-                "stop_reason": "tool_use",
+                "content": (
+                    [{"type": "text", "text": json.dumps({"value": text})}]
+                    if calls == 2
+                    else [
+                        {
+                            "type": "tool_use",
+                            "id": f"c{calls}",
+                            "name": "return_result",
+                            "input": {"result": text},
+                        }
+                    ]
+                ),
+                "stop_reason": "end_turn" if calls == 2 else "tool_use",
                 "usage": {"input_tokens": 8000, "output_tokens": 20},
             }
         return httpx.Response(200, json=data, request=request)
 
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
-    if broken == "fork":
+    if broken == "schedule":
 
-        async def no_fork(self, ctx, nxt):
+        async def no_schedule(self, ctx, nxt):
             return await nxt(ctx)
 
-        monkeypatch.setattr(TokenBudgetSummarizer, "_fork_after_call", no_fork)
+        monkeypatch.setattr(TokenBudgetSummarizer, "_compact_after_call", no_schedule)
     elif broken == "collapse":
         monkeypatch.setattr(TokenBudgetSummarizer, "_handle_before_turn", lambda *_: None)
     cls = ResponsesClient if family == "openai" else CompletionClient
@@ -75,7 +97,7 @@ async def test_release_scenario_detects_missing_summarization(family, broken, mo
     ) as client:
         if broken:
             message = {
-                "fork": "did not fork",
+                "schedule": "did not schedule",
                 "collapse": "did not apply",
                 "facts": "lost a key fact",
             }[broken]

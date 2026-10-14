@@ -9,13 +9,16 @@ The design follows "Type Names are Prompts" - the LLM sees `EventsApi` as
 a database-like interface for querying past interactions.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from nooa.events import EventBase
 from nooa.skill import Skill
 
 if TYPE_CHECKING:
-    from nooa.agent import Agent
+    from nooa.runtime.event_manager import EventManager
+
+    class _EventOwner(Protocol):
+        event_manager: "EventManager"
 
 
 class EventsApi(Skill):
@@ -74,7 +77,7 @@ class EventsApi(Skill):
         doc(self.events)
     """
 
-    def __init__(self, agent: "Agent"):
+    def __init__(self, agent: "_EventOwner"):
         self._manager = agent.event_manager
 
     def query(
