@@ -112,16 +112,26 @@ class GeneratedCodeValidator:
         return errors
 
     def _missing_await_errors(self, tree: ast.AST, agent: Any) -> list[str]:
-        async_method_names = self._collect_async_method_names(agent)
-        if not async_method_names:
-            return []
+        from nooa.runtime.code_validator import async_self_chain
 
+        async_method_names = self._collect_async_method_names(agent)
         parent_map = self._build_parent_map(tree)
 
         errors: list[str] = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
+
+            # Attribute chains on the agent: self.shell.read(...), self.repo.symbols(...)
+            chain = async_self_chain(node.func, agent)
+            if chain is not None:
+                if not self._is_in_await_or_comprehension(node, parent_map):
+                    errors.append(
+                        f"`{chain}` is async and must be called with `await`.\n"
+                        f"   Example: result = await {chain}(...)"
+                    )
+                continue
+
             if not (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
@@ -182,6 +192,8 @@ class GeneratedCodeValidator:
     def _is_in_await_or_comprehension(
         self, node: ast.AST, parent_map: dict[ast.AST, ast.AST]
     ) -> bool:
+        from nooa.runtime.code_validator import is_gather_argument
+
         current = node
         while current in parent_map:
             parent = parent_map[current]
@@ -193,6 +205,11 @@ class GeneratedCodeValidator:
             #   tasks = [self.async_method(x) for x in items]
             #   tasks = (self.async_method(x) for x in items)
             if isinstance(parent, (ast.ListComp, ast.GeneratorExp)):
+                return True
+
+            # Passed straight to asyncio.gather/create_task/wait_for/ensure_future,
+            # which await it: asyncio.create_task(self.shell.run("make"))
+            if is_gather_argument(current, parent):
                 return True
 
             current = parent

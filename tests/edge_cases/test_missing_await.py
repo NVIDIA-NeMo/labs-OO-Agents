@@ -236,3 +236,115 @@ return results
 """
     errors = validator.validate(code_with_listcomp, agent_instance)
     assert len(errors) == 0
+
+
+# --- #447: attribute chains on the agent (self.shell.read, self.repo.symbols) ---
+
+
+class _ChainShell:
+    async def read(self, path):
+        return path
+
+    async def run(self, command):
+        return command
+
+
+class _ChainSkills:
+    async def activate(self, names):
+        return names
+
+    def search(self, query):
+        return query
+
+    def read(self, name):
+        return name
+
+    def doc(self, name):
+        return name
+
+
+class _ChainTodo:
+    def add(self, title):
+        return title
+
+    def status(self):
+        return ""
+
+
+class _ChainEvents:
+    def collapse(self, start, end, summary):
+        return summary
+
+
+class _ChainAgent:
+    def __init__(self):
+        self.shell = _ChainShell()
+        self.skills = _ChainSkills()
+        self.todo = _ChainTodo()
+        self.events = _ChainEvents()
+
+    @property
+    def lazy(self):
+        raise AssertionError("validation must not run properties")
+
+
+def _chain_issues(code):
+    import ast
+
+    from nooa.runtime.code_validator import REPLPolicyValidator, ValidationContext
+    from nooa.strategies.generated_code import GeneratedCodeValidator
+
+    agent = _ChainAgent()
+    generated = GeneratedCodeValidator().validate(code, agent)
+    tree = ast.parse(
+        "async def _cell():\n" + "".join(f"    {line}\n" for line in code.splitlines())
+    )
+    e301 = [
+        issue.message
+        for issue in REPLPolicyValidator().validate(tree, ValidationContext(code=code, agent=agent))
+        if issue.code == "E301"
+    ]
+    return generated, e301
+
+
+@pytest.mark.parametrize(
+    ("code", "chain"),
+    [
+        ('x = self.shell.read("f.py")', "self.shell.read"),
+        ('print(self.shell.run("ls").stdout)', "self.shell.run"),
+        ("self.skills.activate(['web'])", "self.skills.activate"),
+    ],
+)
+def test_unawaited_async_attribute_chain_is_flagged(code, chain):
+    generated, e301 = _chain_issues(code)
+    assert generated == [
+        f"`{chain}` is async and must be called with `await`.\n"
+        f"   Example: result = await {chain}(...)"
+    ]
+    assert e301 == [
+        f"`{chain}` is async and must be called with `await`. Example: result = await {chain}(...)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'x = await self.shell.read("f.py")',
+        "self.skills.search('web')",
+        "self.skills.read('web')",
+        "self.skills.doc('web')",
+        "self.todo.add('t')",
+        "self.todo.status()",
+        "self.events.collapse('1', '9', 'summary')",
+        "rs = await asyncio.gather(*[self.shell.read(p) for p in ['a', 'b']])",
+        "tasks = [self.shell.read(p) for p in ['a']]",
+        "rs = await asyncio.gather(self.shell.read('a'), self.shell.run('ls'))",
+        "t = asyncio.create_task(self.shell.run('make'))",
+        "t = asyncio.ensure_future(self.shell.run('make'))",
+        "r = await asyncio.wait_for(self.shell.run('make'), 5)",
+        "self.lazy.read('x')",
+        "self.missing.read('x')",
+    ],
+)
+def test_awaited_sync_and_gathered_chains_are_not_flagged(code):
+    assert _chain_issues(code) == ([], [])

@@ -628,6 +628,92 @@ class _SecurityVisitor(ast.NodeVisitor):
 
 
 # =============================================================================
+# Missing-await helpers shared by REPLPolicyValidator and GeneratedCodeValidator
+# =============================================================================
+_GATHER_FUNCTIONS = frozenset({"gather", "create_task", "wait_for", "ensure_future", "shield"})
+
+
+def _self_attribute_chain(func: ast.expr) -> list[str] | None:
+    """``self.shell.read`` -> ["shell", "read"]; None unless rooted at ``self``."""
+    names: list[str] = []
+    while isinstance(func, ast.Attribute):
+        names.append(func.attr)
+        func = func.value
+    if not names or not isinstance(func, ast.Name) or func.id != "self":
+        return None
+    return list(reversed(names))
+
+
+def _unwrapped_is_coroutine_function(value: object) -> bool:
+    if isinstance(value, (staticmethod, classmethod)):
+        value = value.__func__
+    try:
+        if inspect.iscoroutinefunction(value):
+            return True
+        return inspect.iscoroutinefunction(inspect.unwrap(value))  # type: ignore[arg-type]
+    except Exception:
+        return False
+
+
+def async_self_chain(func: ast.expr, agent: Any) -> str | None:
+    """Return ``"self.shell.read"`` when *func* is an attribute chain on the agent
+    whose final attribute is a coroutine function; otherwise None.
+
+    Only chains of two or more attributes are handled here (``self.method`` is
+    covered by the agent's async-method name set). Each step is resolved on the
+    live object with ``inspect.getattr_static`` so no property or descriptor
+    runs during validation; a step that cannot be resolved statically ends the
+    check (not flagged).
+    """
+    if agent is None:
+        return None
+    chain = _self_attribute_chain(func)
+    if chain is None or len(chain) < 2:
+        return None
+    value: Any = agent
+    for name in chain:
+        try:
+            value = inspect.getattr_static(value, name)
+        except AttributeError:
+            return None
+        if isinstance(value, property):
+            return None
+    if not _unwrapped_is_coroutine_function(value):
+        return None
+    try:
+        from nooa.agentdoc.visibility import is_hidden_method
+
+        if is_hidden_method(value):
+            return None
+    except Exception:
+        pass
+    return "self." + ".".join(chain)
+
+
+def is_gather_argument(node: ast.AST, parent: ast.AST | None) -> bool:
+    """True when *node* is passed directly to asyncio.gather/create_task/wait_for/
+    ensure_future/shield (or a bare ``gather(...)`` etc.), which await it."""
+    if not isinstance(parent, ast.Call) or node not in parent.args:
+        return False
+    func = parent.func
+    if isinstance(func, ast.Attribute):
+        return func.attr in _GATHER_FUNCTIONS
+    if isinstance(func, ast.Name):
+        return func.id in _GATHER_FUNCTIONS
+    return False
+
+
+def missing_await_message(name: str, *, chain: bool) -> str:
+    """The E301 text for a call to an async method without ``await``."""
+    if chain:
+        return (
+            f"`{name}` is async and must be called with `await`. "
+            f"Example: result = await {name}(...)"
+        )
+    return f"Method `{name}` is async and must be called with `await`"
+
+
+# =============================================================================
 # REPL Policy Validator
 # =============================================================================
 class REPLPolicyValidator:
@@ -743,41 +829,33 @@ class _REPLPolicyVisitor(ast.NodeVisitor):
         return False
 
     def visit_Call(self, node: ast.Call) -> Any:
-        """Check for missing await on async method calls."""
-        if not self.async_method_names:
-            self.generic_visit(node)
-            return
-
-        # Check self.method() calls
-        if not isinstance(node.func, ast.Attribute):
-            self.generic_visit(node)
-            return
-
-        if not isinstance(node.func.value, ast.Name):
-            self.generic_visit(node)
-            return
-
-        if node.func.value.id != "self":
-            self.generic_visit(node)
-            return
-
-        method_name = node.func.attr
-        if method_name not in self.async_method_names:
-            self.generic_visit(node)
-            return
+        """Check for missing await on async method calls (``self.m()`` and
+        attribute chains such as ``self.shell.read()``)."""
+        name: str | None = None
+        fix_hint = ""
+        chain = async_self_chain(node.func, self.context.agent)
+        if chain is not None:
+            name, fix_hint = chain, f"await {chain}(...)"
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+            and node.func.attr in self.async_method_names
+        ):
+            name, fix_hint = node.func.attr, f"await self.{node.func.attr}(...)"
 
         # Check if already awaited or in a gather-friendly context
-        if not self._is_awaited_or_gathered(node):
+        if name is not None and not self._is_awaited_or_gathered(node):
             from nooa.runtime.harness_metrics import get_harness_metrics
 
-            get_harness_metrics().missing_await(method_name)
+            get_harness_metrics().missing_await(name)
             self.issues.append(
                 ValidationIssue(
                     line=node.lineno,
                     col=node.col_offset,
-                    message=f"Method `{method_name}` is async and must be called with `await`",
+                    message=missing_await_message(name, chain=chain is not None),
                     code="E301",
-                    fix_hint=f"await self.{method_name}(...)",
+                    fix_hint=fix_hint,
                 )
             )
 
@@ -827,6 +905,10 @@ class _REPLPolicyVisitor(ast.NodeVisitor):
 
             # In list/generator comprehension (for gather patterns)
             if isinstance(parent, (ast.ListComp, ast.GeneratorExp)):
+                return True
+
+            # Passed straight to asyncio.gather/create_task/wait_for/ensure_future
+            if is_gather_argument(current, parent):
                 return True
 
             current = parent
@@ -1461,7 +1543,10 @@ class UnifiedCodeValidator:
 
     By default, includes SecurityValidator and BlockingCallValidator,
     which are the checks performed by execute_code(). The REPLPolicyValidator
-    (class definitions, missing await) is used by strategies separately.
+    (missing await, infinite loops) is opt-in here: CodeActStrategy, CodeActV2
+    and PurePythonStrategy check missing awaits before each cell with
+    ``GeneratedCodeValidator`` (nooa.strategies.generated_code), which shares
+    the attribute-chain resolution (``async_self_chain``) used by E301.
     """
 
     def __init__(
@@ -1476,7 +1561,8 @@ class UnifiedCodeValidator:
         Args:
             validators: List of validators to use. If provided, overrides defaults.
             include_repl_policy: If True, include REPLPolicyValidator (class defs,
-                missing await). Default False since strategies handle this separately.
+                missing await). Default False: the CodeAct strategies run the
+                missing-await check themselves via GeneratedCodeValidator.
             restrictions: Code execution restrictions (blocked modules/calls).
                 None uses defaults from RestrictionsConfig().
         """

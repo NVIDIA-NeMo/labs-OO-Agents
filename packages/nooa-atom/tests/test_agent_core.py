@@ -583,3 +583,29 @@ def test_host_reads_record_no_span(tmp_path):
     finally:
         set_hooks(previous)
     assert recorder.methods == ["probe"]
+
+
+def test_missing_await_check_resolves_atom_tool_chains(tmp_path):
+    """#447: the static missing-await check sees self.shell/self.repo/self.skills
+    async methods and never flags their sync ones."""
+    from nooa.strategies.generated_code import GeneratedCodeValidator
+
+    agent = AtomAgent(llm=FakeLLMClient(strict_exhaustion=True), cwd=tmp_path)
+    validator = GeneratedCodeValidator()
+    for chain in ("self.shell.read", "self.repo.symbols", "self.skills.activate"):
+        errors = validator.validate(f"x = {chain}('a')", agent)
+        assert errors == [
+            f"`{chain}` is async and must be called with `await`.\n"
+            f"   Example: result = await {chain}(...)"
+        ]
+    for code in (
+        "x = await self.shell.read('a')",
+        "self.skills.search('q')",
+        "self.skills.read('q')",
+        "self.skills.doc('q')",
+        "self.todo.add('t')",
+        "self.todo.status()",
+        "self.events.collapse('1', '2', 'summary')",
+        "rs = await asyncio.gather(*[self.shell.read(p) for p in ps])",
+    ):
+        assert validator.validate(code, agent) == [], code

@@ -787,3 +787,47 @@ async def test_python_cell_state_helper_returns_complete_inventory():
     assert "Out" not in inventory["cell_locals"]
     assert "json_alias" not in inventory["cell_locals"]
     assert inventory["cell_imports"] == {"json_alias": "json"}
+
+
+class _ChainTools:
+    async def read(self, path: str) -> str:
+        return path
+
+    def search(self, query: str) -> str:
+        return query
+
+
+@pytest.mark.asyncio
+async def test_missing_await_on_an_attribute_chain_is_rejected_before_the_cell_runs():
+    """#447: CodeActV2 cells get the static missing-await check for self.x.y() chains."""
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _response('ran = True\nx = self.tools.read("f.py")', "unawaited"),
+            _response(
+                "results = await asyncio.gather(*[self.tools.read(p) for p in ['a', 'b']])\n"
+                "return_result(f\"{results} {self.tools.search('q')} {'ran' in dir()}\")",
+                "fixed",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        tools: _ChainTools
+
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> str:
+            """Answer."""
+            ...
+
+    agent = TestAgent()
+    agent.tools = _ChainTools()
+    try:
+        assert await agent.answer() == "['a', 'b'] q False"
+        outputs = [str(event) for event in agent.events.query(type="PythonOutput")]
+        assert any(
+            "`self.tools.read` is async and must be called with `await`." in text
+            and "Example: result = await self.tools.read(...)" in text
+            for text in outputs
+        ), outputs
+    finally:
+        await agent.aclose()
