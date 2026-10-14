@@ -831,3 +831,54 @@ async def test_missing_await_on_an_attribute_chain_is_rejected_before_the_cell_r
         ), outputs
     finally:
         await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_never_awaited_coroutine_warning_becomes_a_one_line_hint():
+    """#447: CPython's "coroutine ... was never awaited" + tracemalloc note is
+    rewritten to name the call and the fix; the cell output shows only the hint."""
+    llm = FakeLLMClient(
+        scripted_responses=[
+            # An alias hides the call from the static check; the coroutine is
+            # created, never awaited, and collected inside the cell.
+            _response('read = self.tools.read\nread("f.py")\nprint("done")', "alias"),
+            _response("return_result('ok')", "finish"),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        tools: _ChainTools
+
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> str:
+            """Answer."""
+            ...
+
+    import warnings
+
+    agent = TestAgent()
+    agent.tools = _ChainTools()
+    try:
+        # pytest records (and this project's config ignores) these warnings;
+        # print them to stderr as an uncaptured process does, so the warning
+        # reaches the cell's captured stderr as in production.
+        import sys
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always", RuntimeWarning)
+            warnings.showwarning = warnings._showwarning_orig  # type: ignore[attr-defined]
+            warnings._showwarnmsg_impl = lambda msg: sys.stderr.write(  # type: ignore[attr-defined]
+                warnings._formatwarnmsg(msg)  # type: ignore[attr-defined]
+            )
+            assert await agent.answer() == "ok"
+        output = next(
+            str(event) for event in agent.events.query(type="PythonOutput") if "done" in str(event)
+        )
+        assert (
+            "`_ChainTools.read(...)` was called without await and never ran; "
+            "use `await self.tools.read(...)`" in output
+        ), output
+        assert "tracemalloc" not in output
+        assert "was never awaited" not in output
+    finally:
+        await agent.aclose()

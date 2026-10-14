@@ -487,6 +487,55 @@ def _pop_generation_id() -> str | None:
     return popped
 
 
+# "Cell In[3]:3: RuntimeWarning: coroutine 'ShellTools.read' was never awaited",
+# optionally followed by its source line, then CPython's tracemalloc note.
+_NEVER_AWAITED_RE = _re.compile(
+    r"^[^\n]*RuntimeWarning: coroutine '(?P<qualname>[^'\n]+)' was never awaited\n"
+    r"(?:(?![^\n]*RuntimeWarning:)[ \t]+[^\n]*\n)?"
+    r"(?:RuntimeWarning: Enable tracemalloc to get the object allocation traceback\n"
+    r"|Object allocated at \(most recent call last\):\n(?:[ \t]+[^\n]*\n)*)?",
+    _re.MULTILINE,
+)
+
+
+def _agent_call_for(qualname: str, agent: Any) -> str | None:
+    """``"ShellTools.read"`` -> ``"self.shell.read"`` when the agent holds it."""
+    owner, _, method = qualname.rpartition(".")
+    owner = owner.rsplit(".", 1)[-1]
+    if not owner or not method.isidentifier() or agent is None:
+        return None
+    if any(cls.__name__ == owner for cls in type(agent).__mro__):
+        return f"self.{method}"
+    try:
+        attributes = vars(agent)
+    except TypeError:
+        return None
+    for name, value in attributes.items():
+        if name.startswith("_") or not name.isidentifier():
+            continue
+        if any(cls.__name__ == owner for cls in type(value).__mro__):
+            return f"self.{name}.{method}"
+    return None
+
+
+def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
+    """Turn CPython's "coroutine ... was never awaited" warning into a one-line hint.
+
+    The stock text names the coroutine but not the fix, and adds a tracemalloc
+    note that means nothing to a model. Other warnings are left unchanged.
+    """
+    if "was never awaited" not in text:
+        return text
+
+    def hint(match: _re.Match[str]) -> str:
+        qualname = match.group("qualname")
+        call = _agent_call_for(qualname, agent)
+        fix = f"use `await {call}(...)`" if call else "put `await` before the call"
+        return f"`{qualname}(...)` was called without await and never ran; {fix}\n"
+
+    return _NEVER_AWAITED_RE.sub(hint, text)
+
+
 def _make_capture_buffer(
     limit: int, tail_chars: int | None, file_backed: bool
 ) -> TruncatingStringIO:
@@ -1736,7 +1785,7 @@ class ActorRuntime:
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    stderr=_rewrite_never_awaited_warnings(stderr_buffer.getvalue(), self.agent),
                     error=None,
                     defined_methods=defined_methods,
                     returned_value=returned_value,
@@ -1756,7 +1805,7 @@ class ActorRuntime:
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    stderr=_rewrite_never_awaited_warnings(stderr_buffer.getvalue(), self.agent),
                     error=None,  # NOT an error
                     signal=sig,  # Store signal separately
                     defined_methods={},
@@ -1790,7 +1839,7 @@ class ActorRuntime:
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    stderr=_rewrite_never_awaited_warnings(stderr_buffer.getvalue(), self.agent),
                     error=wrapped,
                     defined_methods={},
                     returned_value=_NO_RETURN,
@@ -1810,7 +1859,7 @@ class ActorRuntime:
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    stderr=_rewrite_never_awaited_warnings(stderr_buffer.getvalue(), self.agent),
                     error=e,
                     defined_methods={},
                     returned_value=_NO_RETURN,
@@ -1839,7 +1888,9 @@ class ActorRuntime:
                 results.append(
                     ExecutionResult(
                         stdout=stdout_buffer.getvalue(),
-                        stderr=stderr_buffer.getvalue(),
+                        stderr=_rewrite_never_awaited_warnings(
+                            stderr_buffer.getvalue(), self.agent
+                        ),
                         cancelled=True,
                         images=media_buffer.blocks if media_buffer is not None else [],
                     )
