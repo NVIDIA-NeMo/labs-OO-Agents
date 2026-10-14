@@ -492,7 +492,7 @@ async def test_replace_contract_survives_the_default_concise_tool_context(tmp_pa
         for rendered in (tools, doc(ActivityShellTools, concise=True)):
             assert "replace(match: Match, new_text: str)" in rendered
             assert "replace(path: str, old_text: str, new_text: str)" in rendered
-            assert "real parameter names are (target, old_or_new, new)" in rendered
+            assert "params (target, old_or_new, new)" in rendered
             assert "line numbers are not handles" in rendered
             assert (
                 "A Match replaces its entire line region, not a substring within it."

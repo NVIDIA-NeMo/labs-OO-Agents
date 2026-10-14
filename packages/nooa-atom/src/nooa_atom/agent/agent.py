@@ -112,8 +112,8 @@ class AtomAgent(InteractiveAgent):
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=...)`` only when a person must answer (add
-    ``options=[...]`` only for a choice among fixed values),
+    ``NeedInput(question=...)`` only when a person must answer (``options=[...]``
+    for fixed choices),
     and ``Waiting(explanation=..., on=[...])`` only while something you started
     is still running, naming the channel or job it waits on.
     """

@@ -44,9 +44,12 @@ RESULT = (
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
+# Raised for truthful API text (2026-10-14: replace() forms and real parameter
+# names, sync/async labels in <skills>, NeedInput free-text guidance, the show()
+# line; about 290 characters): measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
-    (ATOM, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
+    (ATOM, "handle"): (14_800, 17_850),  # measured 14,495 / 17,507
+    (ATOM, "handle_batch"): (14_800, 17_400),  # measured 14,495 / 17,045
     (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
     (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
 }

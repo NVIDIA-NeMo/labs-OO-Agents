@@ -480,13 +480,13 @@ class ActivityShellTools(Skill):
         new: Annotated[
             str | None, spec(description="For path: replacement text. Leave None for Match.")
         ] = None,
-        **unsupported: Annotated[
+        **kw: Annotated[
             Any, spec(description="Not accepted; raises TypeError naming the correct call")
         ],
     ) -> FileWrite:
         path = target.path if isinstance(target, Match) else target
-        if unsupported or not isinstance(path, str):
-            return await self._shell.replace(target, old_or_new, new, **unsupported)
+        if kw or not isinstance(path, str):
+            return await self._shell.replace(target, old_or_new, new, **kw)
 
         resolved = (
             Path(target.resolved_path) if isinstance(target, Match) else self._resolve_path(path)

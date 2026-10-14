@@ -1194,12 +1194,12 @@ class ShellTools(Skill):
         new: Annotated[
             str | None, spec(description="For path: replacement text. Leave None for Match.")
         ] = None,
-        **unsupported: Annotated[
+        **kw: Annotated[
             Any, spec(description="Not accepted; raises TypeError naming the correct call")
         ],
     ) -> FileWrite:
         """
-        Edit positionally: replace(path: str, old_text: str, new_text: str) or replace(match: Match, new_text: str); real parameter names are (target, old_or_new, new); line numbers are not handles.
+        Positional: replace(path: str, old_text: str, new_text: str) or replace(match: Match, new_text: str); params (target, old_or_new, new); line numbers are not handles.
 
         Pass arguments positionally; the parameter names are target, old_or_new
         and new (there is no old=, old_text=, new_text= or path= keyword).
@@ -1226,8 +1226,8 @@ class ShellTools(Skill):
                 new text for the whole region.
             new: Path form only: the replacement text. Leave unset for a Match.
         """
-        if unsupported:
-            raise TypeError(_replace_keyword_message(target, unsupported))
+        if kw:
+            raise TypeError(_replace_keyword_message(target, kw))
         if isinstance(target, Match):
             if new is not None:
                 raise ValueError(

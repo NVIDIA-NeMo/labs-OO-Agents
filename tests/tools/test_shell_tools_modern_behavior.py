@@ -19,7 +19,7 @@ def test_replace_concise_docs_include_typed_forms_and_reject_line_handles(tool):
 
     assert "replace(match: Match, new_text: str)" in rendered
     assert "replace(path: str, old_text: str, new_text: str)" in rendered
-    assert "real parameter names are (target, old_or_new, new)" in rendered
+    assert "params (target, old_or_new, new)" in rendered
     assert "line numbers are not handles" in rendered
     # Concise rendering must not expand the rest of the docstring.
     assert "A Match replaces its entire line region, not a substring within it." not in rendered
