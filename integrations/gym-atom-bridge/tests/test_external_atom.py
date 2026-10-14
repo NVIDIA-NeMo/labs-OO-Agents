@@ -71,7 +71,7 @@ ROOT_RESULT = "return_result(Done(explanation='root', result=TaskResult(solution
     [
         ({}, "Work on one task unattended"),
         ({"turn_method": "handle_batch"}, "Work on one task unattended"),
-        ({"turn_method": "handle_orchestrate"}, "Lead one task unattended"),
+        ({"turn_method": "handle_orchestrate"}, "You work on one task on your own."),
     ],
 )
 async def test_init_kwargs_choose_the_root_turn_method(tmp_path, monkeypatch, init_kwargs, docstring):
