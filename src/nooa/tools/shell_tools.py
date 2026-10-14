@@ -365,6 +365,22 @@ def _replace_diagnostic_excerpt(
 
 
 @hidden
+def _replace_keyword_message(target: Any, unsupported: dict[str, Any]) -> str:
+    """Name the exact positional replace() call for misnamed keyword arguments."""
+    names = ", ".join(f"{name}=" for name in sorted(unsupported))
+    if isinstance(target, Match):
+        call = "replace(match, new_text)  # replaces the Match's whole line region"
+    else:
+        call = "replace(path, old_text, new_text)  # old_text must match exactly once"
+    return (
+        f"replace() does not accept keyword argument(s) {names}; no file was changed. "
+        "Pass arguments positionally (its parameters are target, old_or_new, new):\n"
+        f"    {call}\n"
+        "Forms: replace(path, old_text, new_text) or replace(match, new_text)."
+    )
+
+
+@hidden
 def _not_found_replace_message(path: str, resolved: Path, content: str, old: str, new: str) -> str:
     """Explain a zero-match path replacement; bounded, escaped, never writes.
 
@@ -1178,32 +1194,49 @@ class ShellTools(Skill):
         new: Annotated[
             str | None, spec(description="For path: replacement text. Leave None for Match.")
         ] = None,
+        **unsupported: Annotated[
+            Any, spec(description="Not accepted; raises TypeError naming the correct call")
+        ],
     ) -> FileWrite:
         """
-        Edit via replace(match: Match, new_text: str) or replace(file_path: str, old_text: str, new_text: str); line numbers are not handles.
+        Edit positionally: replace(path: str, old_text: str, new_text: str) or replace(match: Match, new_text: str); real parameter names are (target, old_or_new, new); line numbers are not handles.
 
-        1. replace(match, new_text) — replace the Match's line region.
-        2. replace(path, old, new)  — old must match exactly once. new="" deletes.
+        Pass arguments positionally; the parameter names are target, old_or_new
+        and new (there is no old=, old_text=, new_text= or path= keyword).
 
-        A Match replaces its entire line region, not a substring within it.
-        Stale or invalid anchors raise StaleMatchError without writing; re-read or
-        re-search and recompute the Match. Anchors are never relocated. This is
-        a pre-write check, not a lock against concurrent external writers.
-        Supplying new with a Match is an error; use the path form for old -> new.
+        1. replace(path, old_text, new_text) — substring edit; old_text must match
+           exactly once. new_text="" deletes it.
+        2. replace(match, new_text) — replace the Match's entire line region
+           (a Match from read() or run().matches), not a substring within it.
+
+        Examples (await the call; it is async):
+            await shell.replace("pkg/mod.py", "return 1", "return 2")
+            m = await shell.read("pkg/mod.py", (10, 12))
+            await shell.replace(m, new_lines_10_to_12)
+
+        Stale or invalid anchors raise
+        StaleMatchError without writing; re-read or re-search and recompute the
+        Match. Anchors are never relocated. This is a pre-write check, not a lock
+        against concurrent external writers. Supplying a third argument with a
+        Match is an error; use the path form for old -> new.
 
         Args:
-            target: A Match or file path string.
-            old_or_new: For Match: the new text. For path: old text to find.
-            new: Only for path form: the replacement text.
+            target: A file path string (path form) or a Match (match form).
+            old_or_new: Path form: the exact old text to find. Match form: the
+                new text for the whole region.
+            new: Path form only: the replacement text. Leave unset for a Match.
         """
+        if unsupported:
+            raise TypeError(_replace_keyword_message(target, unsupported))
         if isinstance(target, Match):
             if new is not None:
                 raise ValueError(
                     "replace(match, old, new) is ambiguous and no file was changed. "
                     "A Match takes only the full replacement text for its entire line region: "
                     "replace(match, new_text). For an old -> new substring replacement, use "
-                    "the path-string form replace(path, old, new); use match.resolved_path "
-                    "to keep the original file even if the shell directory changed. "
+                    "the path-string form replace(match.resolved_path, old_text, new_text); "
+                    "match.resolved_path keeps the original file even if the shell "
+                    "directory changed. "
                     "This guard prevents silently overwriting the whole matched region "
                     "(possibly the entire file) with the old text."
                 )
@@ -1262,8 +1295,10 @@ class ShellTools(Skill):
         elif isinstance(target, str):
             if new is None:
                 raise ValueError(
-                    "replace(path, old, new) requires 3 arguments. "
-                    "Did you mean replace(match, new_text)?"
+                    "replace(path, old_text, new_text) requires 3 positional arguments; "
+                    "no file was changed. For a substring edit call "
+                    "replace(path, old_text, new_text). To replace a Match's whole line "
+                    "region, pass the Match itself: replace(match, new_text)."
                 )
             old_text = old_or_new
             resolved = self._resolve_path(target)
@@ -1287,7 +1322,11 @@ class ShellTools(Skill):
                 new_text=new,
             )
         else:
-            raise TypeError(f"target must be a Match or file path str, got {type(target).__name__}")
+            raise TypeError(
+                f"target must be a Match or file path str, got {type(target).__name__}. "
+                "No file was changed. Use replace(path, old_text, new_text) or "
+                "replace(match, new_text)."
+            )
 
     async def write_file(
         self,

@@ -18,7 +18,8 @@ def test_replace_concise_docs_include_typed_forms_and_reject_line_handles(tool):
     rendered = doc(tool, concise=True)
 
     assert "replace(match: Match, new_text: str)" in rendered
-    assert "replace(file_path: str, old_text: str, new_text: str)" in rendered
+    assert "replace(path: str, old_text: str, new_text: str)" in rendered
+    assert "real parameter names are (target, old_or_new, new)" in rendered
     assert "line numbers are not handles" in rendered
     # Concise rendering must not expand the rest of the docstring.
     assert "A Match replaces its entire line region, not a substring within it." not in rendered
@@ -162,7 +163,7 @@ async def test_replace_match_rejects_old_new_without_modifying_file(
             await sh.replace(match, "return a * b", replacement)
     assert path.read_bytes() == original.encode()
     assert "replace(match, new_text)" in str(error.value)
-    assert "replace(path, old, new)" in str(error.value)
+    assert "replace(match.resolved_path, old_text, new_text)" in str(error.value)
     assert "no file was changed" in str(error.value)
 
 
