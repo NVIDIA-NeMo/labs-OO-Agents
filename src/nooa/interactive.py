@@ -137,8 +137,8 @@ class NeedInput(BaseModel):
     """Turn result: a question the agent cannot continue without.
 
     ``question`` is the question itself; the host shows it to the person,
-    so do not also send it with ``self.message()``. Set ``options`` for a
-    single choice, or ``answer_type`` (a pydantic model class whose fields
+    so do not also send it with ``self.message()``. Omit ``options`` for a
+    free-text answer. Set ``options`` only for a single choice among fixed values, or ``answer_type`` (a pydantic model class whose fields
     are simple values: str, int, float, bool, or a list of str) for a typed
     answer, or neither for free text. The host turns ``answer_type`` into a
     form and the answer arrives in the next notification as an instance of
@@ -159,6 +159,16 @@ class NeedInput(BaseModel):
     )
 
     _check_question = field_validator("question")(_non_blank)
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _options_not_empty(cls, value: Any) -> Any:
+        if isinstance(value, list | tuple) and not value:
+            raise ValueError(
+                "options=[] is empty: omit options for a free-text answer, e.g. "
+                'NeedInput(question="..."), or list at least one choice'
+            )
+        return value
 
     @field_validator("options")
     @classmethod

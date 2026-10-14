@@ -173,8 +173,9 @@ def test_need_input_answer_type_serialises_as_a_class_name():
 
 def test_need_input_options_must_not_be_empty():
     assert NeedInput(question="Anything else?").options is None
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as error:
         NeedInput(question="Which branch?", options=[])
+    assert "omit options for a free-text answer" in str(error.value)
 
 
 def test_need_input_options_must_not_be_blank():
