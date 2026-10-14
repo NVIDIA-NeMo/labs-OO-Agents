@@ -31,6 +31,24 @@ def test_names_the_agent_call_and_drops_the_tracemalloc_line():
     )
 
 
+def test_a_wrapper_that_copies_the_method_name_is_found():
+    import functools
+
+    class ActivityShell:
+        @functools.wraps(ShellTools.read)
+        async def read(self, path):
+            return path
+
+    class WrappedAgent:
+        def __init__(self):
+            self.shell = ActivityShell()
+
+    assert _rewrite_never_awaited_warnings(STOCK, WrappedAgent()) == (
+        "`ShellTools.read(...)` was called without await and never ran; "
+        "use `await self.shell.read(...)`\n"
+    )
+
+
 def test_source_line_and_agent_methods():
     text = (
         "Cell In[4]:1: RuntimeWarning: coroutine 'MyAgent.delegate' was never awaited\n"

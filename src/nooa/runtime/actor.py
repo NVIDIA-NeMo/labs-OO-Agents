@@ -515,6 +515,10 @@ def _agent_call_for(qualname: str, agent: Any) -> str | None:
             continue
         if any(cls.__name__ == owner for cls in type(value).__mro__):
             return f"self.{name}.{method}"
+        # A wrapper may copy the wrapped method's name: ActivityShellTools.read
+        # is @wraps(ShellTools.read), so its coroutine says 'ShellTools.read'.
+        if getattr(getattr(type(value), method, None), "__qualname__", None) == qualname:
+            return f"self.{name}.{method}"
     return None
 
 
