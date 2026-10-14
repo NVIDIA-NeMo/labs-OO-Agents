@@ -3,17 +3,20 @@
 """Stored-state summaries are independent of prompt projection."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pytest
 
-from nooa import Agent, Block
+from nooa import Agent, Block, strategy
 from nooa.agents import TokenBudgetSummarizer
 from nooa.agents.summarization import summary_fork_active
 from nooa.config.summarizer_config import TokenBudgetConfig
+from nooa.context_blocks import ScopedContext
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.events import Message
 from nooa.runtime.middleware import LLMCallContext
+from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage, ToolCall
 
 
@@ -41,6 +44,48 @@ async def dispatch(ctx, tokens=1000):
 
 async def trigger(agent, ctx):
     return await agent.event_manager.run_middleware("llm_call", ctx, dispatch)
+
+
+async def test_real_parent_overrides_do_not_leak_into_state_summary():
+    class RecordingClient(FakeLLMClient):
+        def __init__(self):
+            super().__init__(
+                [
+                    LLMResponse(content='{"value":"parent"}', usage=LLMUsage(input_tokens=1000)),
+                    LLMResponse(content='{"value":"summary"}'),
+                ]
+            )
+            self.requests = []
+
+        async def acall(self, messages, **kwargs):
+            self.requests.append(json.dumps(messages, default=lambda value: value.model_dump()))
+            return await super().acall(messages, **kwargs)
+
+    class Parent(Agent):
+        @strategy(PredictStrategy(), context={"parent_only": "PARENT_DECORATOR_MARKER"})
+        async def run(self) -> str:
+            """Return parent."""
+            ...
+
+    client = RecordingClient()
+    agent = Parent(llm=client)
+    agent.event_manager.add(Message(content="STORED_SOURCE_FACT"))
+    summarizer = TokenBudgetSummarizer.install(
+        agent, config=TokenBudgetConfig(max_tokens=1, preserve_recent=1)
+    )
+    try:
+        with ScopedContext(context={"system_prompt": "PARENT_SCOPED_MARKER"}):
+            assert await agent.run() == "parent"
+            await summarizer._pending_task
+        assert summarizer._pending_summary == "summary"
+        assert len(client.requests) == 2
+        parent, summary = client.requests
+        for marker in ("PARENT_DECORATOR_MARKER", "PARENT_SCOPED_MARKER"):
+            assert marker in parent
+            assert marker not in summary
+        assert "STORED_SOURCE_FACT" in summary
+    finally:
+        await agent.aclose()
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])

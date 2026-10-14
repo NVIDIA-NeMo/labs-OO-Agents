@@ -828,8 +828,14 @@ class TokenBudgetSummarizer(SummarizationAgent):
     @hidden
     @no_trace
     async def _run_state_summary(self, text: str, client: "UnifiedLLM") -> None:
+        from nooa.context_blocks.scoped import _scoped_blocks_var
+        from nooa.runtime.actor import _decorator_context_var
+
         token = self._summary_llm_override.set(client)
         activity_token = _in_summary_fork.set(True)
+        # This is a separate task, not a nested continuation of the parent prompt.
+        decorator_token = _decorator_context_var.set(None)
+        scoped_token = _scoped_blocks_var.set(None)
         try:
             summary = await self.summarize(text, self.config.target_chars)
             if not isinstance(summary, str) or not summary.strip():
@@ -848,6 +854,8 @@ class TokenBudgetSummarizer(SummarizationAgent):
                     "history is unchanged. Fix the reported failure before reinstalling."
                 )
         finally:
+            _scoped_blocks_var.reset(scoped_token)
+            _decorator_context_var.reset(decorator_token)
             _in_summary_fork.reset(activity_token)
             self._summary_llm_override.reset(token)
             self.event_manager.clear()
