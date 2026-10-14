@@ -532,6 +532,67 @@ class AtomAgent(InteractiveAgent):
         ...
 
     @hidden
+    @strategy(
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
+        context=_V2_CONTEXT,
+    )
+    async def handle_orchestrate(
+        self,
+        notification: Annotated[
+            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+        ],
+    ) -> Done | Waiting:
+        """Lead one task unattended: plan it, hand the work to child sessions, verify it.
+
+        The task is the text in ``notification["user_messages"]``; data sent
+        with it is in ``notification.get("context", [])``. Nobody is watching
+        and nobody can answer a question, and ``self.message()`` reaches
+        nobody: the result is the only thing the requester reads.
+
+        You plan, dispatch and verify. Do not edit files or implement the
+        fix yourself; reading files and running checks to verify is expected.
+
+        1. Plan the task. Put each piece of work in a Todo
+           (``self.todo.add(title, description=...)``): the goal, the exact
+           requirements and constraints from the task, and the acceptance
+           checks (the tests or commands to run, the files expected).
+        2. Dispatch each Todo to a child with
+           ``child = await self.spawn(description, todo, retain=True)``; keep
+           ``child`` in ``self.v``. Spawn independent pieces together and
+           dependent ones one after another. While children run, end the turn
+           with ``Waiting(explanation=..., on=["delegates"])``.
+        3. Results arrive in ``notification["delegates"]``: a ``ChildResult``
+           (the report is in ``item.done``), a ``ChildQuestion``
+           (``await item.answer(...)``) or a ``ChildFailed``. Review each
+           result critically against its Todo's acceptance checks: read the
+           diff or the files and run the checks yourself. Record what you
+           found with ``self.todo.comment(todo, ...)``.
+        4. If something is missing or wrong, send the child specific feedback
+           with ``await child.send(feedback)`` and wait again.
+        5. When the work is verified, close the children
+           (``await child.close()``) and end with::
+
+            return_result(Done(
+                explanation="fixed the parser bug",
+                result=TaskResult(
+                    solution_description="What was done, including modified paths",
+                    evidence="The checks you ran and what they showed",
+                    how_to_verify="How someone else can check it",
+                    report="The full report for the requester",
+                ),
+            ))
+
+        If something blocks you, still return ``Done`` with a ``TaskResult``
+        that says what blocked you and what was tried.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
+        """
+        ...
+
+    @hidden
     async def aclose(self) -> None:
         """Release the agent's background work, skills (MCP servers) and shell.
 
