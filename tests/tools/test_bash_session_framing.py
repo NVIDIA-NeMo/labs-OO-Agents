@@ -154,3 +154,42 @@ class TestStreamingUsesTheSameFraming:
         ]
         assert "streamed" in "".join(chunks)
         assert session.cwd == sub
+
+
+async def test_truncated_stdout_names_a_file_with_the_full_output(tmp_path):
+    """Large output stays bounded, but the full text is saved and its path named."""
+    import re
+    from pathlib import Path
+
+    from nooa.tools._bash_session import MAX_OUTPUT_CHARS, BashSession
+
+    session = BashSession(cwd=tmp_path)
+    try:
+        stdout, _err, code = await session.run("seq 1 40000")
+    finally:
+        await session.close()
+    assert code == 0
+    assert len(stdout) < MAX_OUTPUT_CHARS + 1_000
+    assert "not recoverable" not in stdout
+    match = re.search(r"The full untruncated output \(([\d,]+) chars\) is in: (\S+)", stdout)
+    assert match, stdout[:400]
+    saved = Path(match.group(2))
+    try:
+        assert saved.read_text().split() == [str(n) for n in range(1, 40001)]
+    finally:
+        saved.unlink()
+
+
+async def test_small_stdout_writes_no_file(tmp_path, monkeypatch):
+    import tempfile
+
+    from nooa.tools._bash_session import BashSession
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    session = BashSession(cwd=tmp_path)
+    try:
+        stdout, _err, _code = await session.run("echo small")
+    finally:
+        await session.close()
+    assert stdout == "small"
+    assert not list(tmp_path.glob("nooa_shell_output_*"))
