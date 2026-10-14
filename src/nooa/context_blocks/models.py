@@ -316,6 +316,18 @@ class RenderedMessage(BaseModel):
     )
 
 
+COLLAPSE_HINT_UTILIZATION = 0.5
+"""Usable-window fraction at which ``ContextWindowStats.format()`` offers collapse."""
+
+COLLAPSE_HINT = (
+    "Context is tight. Compact history: "
+    'self.events.collapse("2", "40", "summary of events 2-40") '
+    '(tags are the N in <sys tag="N">; synchronous, do not await); '
+    "see doc(self.events)."
+)
+"""Manual compaction hint; every call in it must work as written."""
+
+
 class ContextWindowStats(BaseModel):
     """Context window utilization snapshot.
 
@@ -459,12 +471,7 @@ class ContextWindowStats(BaseModel):
         The header total is the exact provider count; the per-category lines
         are attributed from it by character share (prefixed ``~``).
         """
-        guidance = (
-            "Compact history: "
-            "self.events.collapse(start_tag, end_tag, summary_text=...); "
-            "see doc(self.events).\n"
-            "Add, remove, or edit context blocks: doc(self.context)."
-        )
+        guidance = "Add, remove, or edit context blocks: doc(self.context)."
         if self.prompt_tokens is None:
             return "Context: awaiting first model response\n" + guidance
 
@@ -508,6 +515,12 @@ class ContextWindowStats(BaseModel):
             lines.append("Context is nearly full. Context blocks over budget are labeled EVICTED.")
 
         # --- Cleanup guidance ---
+        # Offer manual compaction only when the context is actually tight (or
+        # something was already evicted/dropped); at low utilisation the hint
+        # invites needless collapses.
+        tight = util is not None and util >= COLLAPSE_HINT_UTILIZATION
+        if tight or self.context_blocks_dropped or self.events_dropped:
+            lines.append(COLLAPSE_HINT)
         lines.append(guidance)
 
         return "\n".join(lines)

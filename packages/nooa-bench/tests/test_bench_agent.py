@@ -651,8 +651,8 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
         assert "<execution_context" not in rendered
         assert "<context_usage" in rendered
         assert "Context: 24,000 / 120,000 usable tokens (20.0%)" in rendered
-        assert "Compact history: self.events.collapse" in rendered
-        assert "doc(self.events)" in rendered
+        # 20% utilisation: the manual-compaction hint is not offered yet.
+        assert "self.events.collapse" not in rendered
         assert "doc(self.context)" in rendered
         assert "<strategy_prompt" not in rendered
         assert "<python_cell_tools" in system_prompt
