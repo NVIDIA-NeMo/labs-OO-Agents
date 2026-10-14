@@ -568,6 +568,10 @@ class Session:
             self._futures[item_id] = future
         return asyncio.shield(future)
 
+    def has_queued_input(self) -> bool:
+        """Whether an admitted item (or a steer) is waiting for a turn to take it."""
+        return bool(self._pending_steers) or any(self._ids.values())
+
     def _is_pending(self, item_id: str) -> bool:
         return (
             item_id in self._consumed
