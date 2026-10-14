@@ -975,10 +975,10 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
     # siblings, respect forward-MRO priority (lower index = higher priority = first).
     # This ensures Base1 fields appear before Base2 fields for Child(Base1, Base2).
     all_raw_annotations: dict[str, Any] = {}
-    mro_index = {c: i for i, c in enumerate(obj.__mro__)}
-    for _klass in sorted(
-        (c for c in obj.__mro__ if c is not object),
-        key=lambda c: (len(c.__mro__), mro_index[c]),
+    mro_items = list(enumerate(obj.__mro__))
+    for _, _klass in sorted(
+        ((index, klass) for index, klass in mro_items if klass is not object),
+        key=lambda item: (len(item[1].__mro__), item[0]),
     ):
         for name, raw_hint in inspect.get_annotations(_klass).items():
             all_raw_annotations[name] = raw_hint
@@ -1021,12 +1021,12 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
     # each name within the class MRO before the metaclass, so metaclass attributes
     # are never pulled in. The effective (leaf-resolved) value is used, so the leaf
     # class wins on name collisions.
-    # (mro_index was computed in step 1 above; reuse it for the same ordering.)
+    # Reuse the identity-safe indexed MRO from step 1 for the same ordering.
     candidate_names: list[str] = []
     seen_candidates: set[str] = set()  # O(1) dedup alongside the ordered list
-    for _klass in sorted(
-        (c for c in obj.__mro__ if c is not object),
-        key=lambda c: (len(c.__mro__), mro_index[c]),
+    for _, _klass in sorted(
+        ((index, klass) for index, klass in mro_items if klass is not object),
+        key=lambda item: (len(item[1].__mro__), item[0]),
     ):
         for name in _klass.__dict__:
             if name not in seen_candidates:
