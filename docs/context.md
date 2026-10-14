@@ -1,6 +1,6 @@
 # Context Management in NOOA
 
-A context view projects any owner state into the ordered context for one LLM turn. Agents, skills, and future components use this pattern; one agent view creates the complete context and may explicitly compose other views. The default view is a readable reference implementation. Rendering adds no context sources or placement policy.
+In NOOA, context views decide what an LLM sees on each turn. An agent's view selects and organizes instructions, agent state, conversation history, and information from skills. The default view handles this for you; a custom view can change what is included and how it is presented, using NOOA's built-in context API or your own data structures.
 
 ## Contract
 
