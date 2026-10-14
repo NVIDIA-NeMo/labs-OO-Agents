@@ -10,6 +10,22 @@ from nooa.llm_types import (
     ToolCall,
     assistant_message,
 )
+from nooa.unifiedllm.admission import (
+    AdmissionCallCapError,
+    AdmissionControlConfig,
+    AdmissionController,
+    AdmissionError,
+    AdmissionPermit,
+    AdmissionTimeoutError,
+    AdmissionUnavailableError,
+)
+from nooa.unifiedllm.broker_admission import (
+    AdmissionBroker,
+    BrokerAdmissionConfig,
+    BrokerAdmissionController,
+    BrokerAdmissionSnapshot,
+)
+from nooa.unifiedllm.controlled import AdmissionControl
 from nooa.unifiedllm.errors import EmptyContentError, ReasoningReplayError
 from nooa.unifiedllm.fake import (
     FakeLLMCall,
@@ -67,6 +83,19 @@ __all__ = [
     "AssistantText",
     "AssistantReasoning",
     "ReasoningReplayError",
+    # Admission control
+    "AdmissionBroker",
+    "AdmissionCallCapError",
+    "AdmissionControl",
+    "AdmissionControlConfig",
+    "AdmissionController",
+    "AdmissionError",
+    "AdmissionPermit",
+    "AdmissionTimeoutError",
+    "AdmissionUnavailableError",
+    "BrokerAdmissionConfig",
+    "BrokerAdmissionController",
+    "BrokerAdmissionSnapshot",
     # HTTP config
     "HttpConfig",
     # Retry utilities

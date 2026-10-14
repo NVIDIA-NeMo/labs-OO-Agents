@@ -214,7 +214,7 @@ def select_connection(state: WizardState) -> bool:
         view.step(1, "Connection")
     if state.provider and state.provider not in (*connect.PROVIDERS, "custom"):
         raise click.UsageError(
-            "Unknown provider. Choose nvidia, openai, anthropic, google, openrouter, or custom."
+            f"Unknown provider. Choose {', '.join(connect.PROVIDERS)}, or custom."
         )
     if not state.provider and not state.endpoint and not state.yes:
         state.provider = prompts.prompt(
@@ -242,10 +242,12 @@ def select_connection(state: WizardState) -> bool:
         "Model server URL", suggestions=state.server_urls, open_menu=True
     )
     state.endpoint = connect.normalize_endpoint(state.endpoint)
+    announced = False
     if not state.explicit_key_env:
         saved_names = credential_names(state.registry, state.endpoint)
         if len(saved_names) == 1:
             state.api_key_env = saved_names[0]
+            announced = True
             if not state.api_key_env:
                 view.line("Using saved key variable (no authentication) for this endpoint.")
             elif os.environ.get(state.api_key_env):
@@ -312,14 +314,42 @@ def select_connection(state: WizardState) -> bool:
         and state.api_key_env
         and not os.environ.get(state.api_key_env)
     )
+    asked = bool(state.prompt_key or needs_key)
     state.api_key = (
         prompts.prompt("API key (used only for this setup)", hide_input=True)
-        if state.prompt_key or needs_key
+        if asked
         else os.environ.get(state.api_key_env)
         if state.api_key_env
         else None
     )
+    if state.api_key and not asked and not announced:
+        # A preset's variable is used silently otherwise; a stale key there
+        # then looks like a broken provider.
+        view.line(f"Using the key in {state.api_key_env}.")
     return True
+
+
+def ask_for_rejected_key(state: WizardState) -> None:
+    """The server refused the key: say where it came from and ask for another.
+
+    The new key is used for this setup; the save step offers to store it
+    under ``state.api_key_env``, as for any key typed during setup.
+    """
+    source = (
+        f"the key in {state.api_key_env}"
+        if state.api_key_env and state.api_key == os.environ.get(state.api_key_env)
+        else "that key"
+        if state.api_key
+        else "the request without a key"
+    )
+    view.line(f"The server rejected {source}. Enter a key to try again (Ctrl-C to cancel).")
+    if not state.api_key_env:
+        state.api_key_env = prompts.prompt(
+            "Save key under variable name",
+            default="NOOA_MODEL_API_KEY",
+            suggestions=prompts.environment_names(),
+        )
+    state.api_key = prompts.prompt("API key (used only for this setup)", hide_input=True)
 
 
 def select_model(state: WizardState) -> bool:
@@ -334,7 +364,7 @@ def select_model(state: WizardState) -> bool:
 
         state.endpoint_models = read_discovery(state.discovery_file, state.endpoint)
         state.discovery_endpoint = state.endpoint
-    if not state.model:
+    while not state.model:
         click.echo("Connecting to the server and listing models...")
         try:
             found = asyncio.run(
@@ -347,9 +377,12 @@ def select_model(state: WizardState) -> bool:
             state.discovery_endpoint = state.endpoint
             click.echo(f"Could not list models: {exc}", err=True)
             if exc.status_code in {401, 403}:
-                raise click.ClickException(
-                    "Authentication failed. Check the key and try again."
-                ) from None
+                if state.yes:
+                    raise click.ClickException(
+                        "Authentication failed. Check the key and try again."
+                    ) from None
+                ask_for_rejected_key(state)
+                continue
             state.model = prompts.prompt("Exact model ID (if known; Ctrl-C to cancel)")
         else:
             state.endpoint = found.api_base

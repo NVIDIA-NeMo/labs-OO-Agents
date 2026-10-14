@@ -3,9 +3,10 @@
 """Tests for retry logic."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import httpx
+import litellm
 import pytest
 
 from nooa.unifiedllm.retry import (
@@ -13,8 +14,22 @@ from nooa.unifiedllm.retry import (
     RetryingWrapper,
     _calculate_delay,
     _is_retryable_error,
+    sync_retry,
     with_retry,
 )
+
+
+@pytest.fixture(params=["litellm", "structured"])
+def request_timeout_error(request):
+    if request.param == "litellm":
+        return litellm.Timeout(
+            message="Connection timed out", model="test-model", llm_provider="anthropic"
+        )
+
+    class RequestTimeoutError(Exception):
+        status_code = 408
+
+    return RequestTimeoutError("Request timed out")
 
 
 class TestCalculateDelay:
@@ -74,6 +89,15 @@ class TestCalculateDelay:
 
 class TestIsRetryableError:
     """Tests for error classification."""
+
+    def test_request_timeout_408_is_retryable(self, request_timeout_error):
+        assert request_timeout_error.status_code == 408
+        assert _is_retryable_error(request_timeout_error, RetryConfig()) == (True, False)
+
+    def test_request_timeout_408_respects_excluded_status(self, request_timeout_error):
+        config = RetryConfig(retryable_status_codes=frozenset({429, 500, 502, 503, 504}))
+
+        assert _is_retryable_error(request_timeout_error, config) == (False, False)
 
     def test_rate_limit_429(self):
         """Test that 429 status is detected as rate limit."""
@@ -279,6 +303,32 @@ class TestWithRetry:
     """Tests for the with_retry function."""
 
     @pytest.mark.asyncio
+    async def test_request_timeout_408_then_success_uses_normal_backoff(
+        self, request_timeout_error
+    ):
+        operation = AsyncMock(side_effect=[request_timeout_error, request_timeout_error, "success"])
+        config = RetryConfig(jitter_factor=0.0)
+
+        with patch("nooa.unifiedllm.retry.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            assert await with_retry(operation, config=config) == "success"
+
+        assert operation.call_count == 3
+        assert sleep.await_args_list == [call(1.0), call(2.0)]
+
+    @pytest.mark.asyncio
+    async def test_request_timeout_408_exhausts_normal_budget(self, request_timeout_error):
+        operation = AsyncMock(side_effect=request_timeout_error)
+        config = RetryConfig(jitter_factor=0.0)
+
+        with patch("nooa.unifiedllm.retry.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            with pytest.raises(type(request_timeout_error)) as caught:
+                await with_retry(operation, config=config)
+
+        assert caught.value is request_timeout_error
+        assert operation.call_count == 4
+        assert sleep.await_args_list == [call(1.0), call(2.0), call(4.0)]
+
+    @pytest.mark.asyncio
     async def test_success_no_retry(self):
         """Test that successful calls don't retry."""
         mock_func = AsyncMock(return_value="success")
@@ -409,6 +459,30 @@ class TestWithRetry:
         assert args[0] == 1  # attempt number
         assert isinstance(args[1], Exception)  # error
         assert args[2] > 0  # delay
+
+
+class TestSyncRetry:
+    def test_request_timeout_408_then_success_uses_normal_backoff(self, request_timeout_error):
+        operation = MagicMock(side_effect=[request_timeout_error, request_timeout_error, "success"])
+        config = RetryConfig(jitter_factor=0.0)
+
+        with patch("nooa.unifiedllm.retry.time.sleep") as sleep:
+            assert sync_retry(operation, config=config) == "success"
+
+        assert operation.call_count == 3
+        assert sleep.call_args_list == [call(1.0), call(2.0)]
+
+    def test_request_timeout_408_exhausts_normal_budget(self, request_timeout_error):
+        operation = MagicMock(side_effect=request_timeout_error)
+        config = RetryConfig(jitter_factor=0.0)
+
+        with patch("nooa.unifiedllm.retry.time.sleep") as sleep:
+            with pytest.raises(type(request_timeout_error)) as caught:
+                sync_retry(operation, config=config)
+
+        assert caught.value is request_timeout_error
+        assert operation.call_count == 4
+        assert sleep.call_args_list == [call(1.0), call(2.0), call(4.0)]
 
 
 class TestRetryingWrapper:

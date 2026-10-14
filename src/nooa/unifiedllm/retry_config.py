@@ -19,7 +19,7 @@ class RetryConfig(BaseModel):
     rate_limit_extra_retries: int = 3
     rate_limit_base_delay: float = 3.0
     rate_limit_backoff_base: float = 3.0  # was hardcoded as 3.0 in _calculate_delay()
-    retryable_status_codes: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+    retryable_status_codes: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
     retryable_exceptions: tuple[type[Exception], ...] = (
         asyncio.TimeoutError,
         TimeoutError,

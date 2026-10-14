@@ -6,6 +6,32 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `RetryConfig` is the only endpoint retry budget for `CompletionClient` on
+  OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt twice
+  more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent server
+  error instead of 3 (`max_retries + 1`; rate limits may also use
+  `rate_limit_extra_retries`). NOOA now passes `max_retries=0` to the SDK, on a
+  per-call copy of its client so concurrent calls cannot change each other's
+  setting. Passing `max_retries` to the client explicitly still enables SDK
+  retries.
+- The bench `TaskResult` gains an optional `value` field: the exact output the
+  task asks for, with no explanation. `_run_evaluation` returns a non-empty
+  `value` as `answer`, and the runner writes it to `/app/answer.txt` verbatim.
+  When `value` is empty, the answer file holds `how_to_verify`, as before.
+- LLM provider calls are bounded by an overall per-attempt deadline
+  (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
+  gap between received bytes, so a stalled stream that still trickled keepalive
+  bytes was never timed out and the attempt awaited forever. On expiry the
+  attempt is cancelled and a retryable `TimeoutError` is raised, so the retry
+  layer recovers. Set `request_timeout=None` to disable.
+- Shell commands (`ShellTools.run`, `BashSession.run`) that print more than
+  30,000 characters on stdout or stderr keep the first and last 15,000, with the
+  standard truncation notice (`TruncatingStringIO`). Before, only the first
+  30,000 were kept, so the error at the end of a failing command was lost.
+- `nooa connect` says which variable its key comes from ("Using the key in
+  NVIDIA_INFERENCE_API_KEY."). When the server rejects the key while listing models,
+  it asks for another and tries again instead of exiting; `--yes` runs still stop.
+  `--provider` help and errors list every preset, including `hub`.
 - `nooa connect` offers the NVIDIA Inference Hub (`inference-api.nvidia.com`,
   key in `NVIDIA_INFERENCE_API_KEY`) as a preset provider, after build.nvidia.com.
 - `import nooa` no longer loads the strategies, the LLM client or LiteLLM

@@ -151,6 +151,29 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     ] = 0
 
 
+class LoopGuardTriggered(EventBase):  # type: ignore[misc]
+    """The CodeAct loop guard detected a repeated tool call.
+
+    ``content`` is the fixed-template message shown to the model. The other
+    fields are structured trace data and are not rendered.
+    """
+
+    _role: ClassVar[Role] = Role.USER
+
+    content: Annotated[str, Field(description="Loop-guard message shown to the model")]
+    action: Annotated[
+        str,
+        Field(description="'blocked', 'nudged' or 'stopped'", repr=False),
+    ] = ""
+    tool_name: Annotated[str, Field(description="Repeated tool name", repr=False)] = ""
+    tool_call_id: Annotated[str, Field(description="Triggering tool call id", repr=False)] = ""
+    repeats: Annotated[
+        int, Field(description="Identical calls in the window, including this one", repr=False)
+    ] = 0
+    window: Annotated[int, Field(description="Tool calls compared", repr=False)] = 0
+    fingerprint: Annotated[str, Field(description="Hash of the normalized action", repr=False)] = ""
+
+
 _PLAIN_JSON_SCALARS = (int, float, bool)
 _PLAIN_JSON_MAX_DEPTH = 32
 _PLAIN_JSON_MAX_ITEMS = 10_000
@@ -641,6 +664,7 @@ Event = (
     | TuiSessionCleared
     | SystemPrompt
     | TextOnlyReply
+    | LoopGuardTriggered
 )
 
 

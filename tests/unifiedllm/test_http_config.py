@@ -292,7 +292,8 @@ def test_call_forwards_client_to_litellm(monkeypatch):
     try:
         with pytest.raises(RuntimeError):
             c.call([{"role": "user", "content": "hi"}])
-        assert captured["client"] is c._http.sync_client
+        # A per-call SDK client over this client's own HTTP pool.
+        assert captured["client"]._client is c._http.httpx_sync
     finally:
         c.close()
 

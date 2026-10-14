@@ -32,6 +32,11 @@ class HttpConfig(BaseModel):
     read_timeout: float = 60.0  # catches CLOSE_WAIT hangs
     write_timeout: float = 10.0
     pool_timeout: float = 10.0
+    # Overall wall-clock ceiling for one provider attempt (enforced around the
+    # call, not by httpx). read_timeout only bounds the gap between bytes, so a
+    # stalled stream that still trickles keepalive bytes never trips it. None
+    # disables the ceiling.
+    request_timeout: float | None = 600.0
 
     def to_httpx_limits(self) -> httpx.Limits:
         """Build the httpx connection-pool limits for this config."""

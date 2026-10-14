@@ -55,7 +55,8 @@ directory. For code you can run immediately, use the
 ### Scale beyond one agent
 
 1. [Multi-agent systems](concepts/multi-agent-systems.md)
-2. [Architecture](architecture.md)
+2. [LLM admission control](concepts/llm-admission-control.md)
+3. [Architecture](architecture.md)
 
 ## Concepts at a glance
 
@@ -68,6 +69,7 @@ directory. For code you can run immediately, use the
 | [Local models](local-models.md) | How do I run NOOA with local models? |
 | [Orchestration](concepts/orchestration.md) | How do I make a workflow deterministic without turning it into one giant prompt? |
 | [Multi-agent systems](concepts/multi-agent-systems.md) | When should I use another agent, and what state does it share? |
+| [LLM admission control](concepts/llm-admission-control.md) | How can one process or application bound concurrent outbound LLM calls? |
 | [Tracing](concepts/tracing.md) | How do I inspect the complete Python and LLM call tree? |
 | [Safety](concepts/safety.md) | What security boundary does NOOA provide, and what must the deployment provide? |
 

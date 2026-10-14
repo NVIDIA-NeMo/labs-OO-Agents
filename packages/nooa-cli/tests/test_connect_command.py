@@ -533,16 +533,20 @@ def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkey
         )
 
 
-def test_wizard_discovery_auth_failure_stops_before_generation_or_save(tmp_path, monkeypatch):
+def test_a_rejected_key_is_asked_for_again_and_the_listing_retried(tmp_path, monkeypatch):
+    """A stale key in the preset's variable must not end the wizard: it says so and asks."""
     import httpx
 
     sent = []
 
     def handle(request):
-        sent.append(request.method)
-        return httpx.Response(401)
+        sent.append((request.method, request.headers.get("authorization")))
+        if request.headers.get("authorization") != "Bearer fresh-private-key":
+            return httpx.Response(401)
+        return httpx.Response(200, json={"object": "list", "data": [{"id": "wire/model"}]})
 
     mock_http(monkeypatch, handle)
+    monkeypatch.setenv("CONNECT_TEST_KEY", "stale-private-key")
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         command,
@@ -550,17 +554,46 @@ def test_wizard_discovery_auth_failure_stops_before_generation_or_save(tmp_path,
             "--endpoint",
             "https://api.test/v1",
             "--api-key-env",
-            "",
+            "CONNECT_TEST_KEY",
             "--no-catalogue",
+            "--no-probe",
             "--output",
             str(path),
         ],
-        input="y\n",
+        # The new key; then input ends at the model choice, which cancels.
+        input="fresh-private-key\n",
     )
-    assert result.exit_code == 1
-    assert "Authentication failed" in result.output
-    assert sent == ["GET"]
+    assert "The server rejected the key in CONNECT_TEST_KEY" in result.output
+    assert "Server listed 1 model(s)" in result.output
+    assert [auth for _, auth in sent] == ["Bearer stale-private-key", "Bearer fresh-private-key"]
+    assert "private-key" not in result.output
     assert not path.exists()
+
+
+def test_a_rejected_key_still_stops_a_yes_run(tmp_path, monkeypatch):
+    """Without prompts there is no one to ask: --yes keeps the error."""
+    import httpx
+    from nooa_cli.commands import _connect_wizard as wizard
+
+    mock_http(monkeypatch, lambda request: httpx.Response(401))
+    state = wizard.WizardState(endpoint="https://api.test/v1", yes=True)
+    state.discovery_style, state.api_key = "chat", "stale"
+    with pytest.raises(Exception, match="Authentication failed"):
+        wizard.select_model(state)
+
+
+def test_the_wizard_names_the_variable_its_key_comes_from(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONNECT_TEST_KEY", "private-test-key")
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(command, args(path), input="n\n")
+    assert "Using the key in CONNECT_TEST_KEY." in result.output
+    assert "private-test-key" not in result.output
+
+
+def test_an_unknown_provider_lists_every_preset():
+    result = CliRunner().invoke(command, ["--provider", "nope", "--no-probe"])
+    assert result.exit_code != 0
+    assert "hub" in result.output and "openrouter" in result.output
 
 
 @pytest.mark.parametrize("show_config", [False, True])

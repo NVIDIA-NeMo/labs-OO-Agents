@@ -111,6 +111,7 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "json_double_decoded": lambda _: hm.record_json_double_decoded(),
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
         "token_usage": _handle_token_usage,
+        "llm_queue": lambda detail: hm.record_llm_queue(detail),
     }
 
     def bridge(event: str, detail: Any = None) -> None:
@@ -2744,6 +2745,9 @@ class ActorRuntime:
                     _decorator_context=merged_ctx,
                     _scoped_context=_scoped_blocks_var.get(),
                     _context_call_id=call_id,
+                    # Preserve Annotated parameter overrides on top-level calls,
+                    # just as the nested method wrapper does.
+                    param_specs=CurrentCall.from_method(method).param_specs,
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()

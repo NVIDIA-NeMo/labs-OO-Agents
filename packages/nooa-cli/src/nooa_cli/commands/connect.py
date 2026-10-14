@@ -27,7 +27,7 @@ from ._connect_stages import STAGES
 )
 @click.option(
     "--provider",
-    help="Connection preset: nvidia, openai, anthropic, google, openrouter, or custom.",
+    help="Connection preset: nvidia, hub (NVIDIA Inference Hub), openai, anthropic, google, openrouter, or custom.",
 )
 @click.option("--as", "alias", help="Local model alias to save (otherwise prompted).")
 @click.option("--endpoint", help="API base URL (otherwise prompted).")

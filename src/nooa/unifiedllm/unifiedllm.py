@@ -9,7 +9,7 @@ import math
 import re
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -27,6 +27,7 @@ from nooa.llm_types import (
     ToolCall,
 )
 from nooa.unifiedllm.cache_policy import (
+    add_session_affinity_header,
     apply_cache_policy,
     enable_openai_explicit_cache,
     reject_boundary_dict,
@@ -35,6 +36,7 @@ from nooa.unifiedllm.cache_policy import (
 )
 
 from . import replay_state, response_parts
+from .admission import _current_admission_controller
 from .errors import EmptyContentError
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
@@ -86,6 +88,19 @@ def _record_llm_metric(event: str, detail: Any = None) -> None:
             cb(event, detail)
         except Exception as e:  # noqa: BLE001
             logger.debug("Metric callback failed for event %r: %s", event, e)
+
+
+def _record_admission_observation(detail: dict[str, Any]) -> None:
+    """Record one admission outcome on the generation span and harness metrics."""
+    _record_llm_metric("llm_queue", detail)
+    try:
+        from opentelemetry import trace as otel_trace
+
+        span = otel_trace.get_current_span()
+        if span and span.is_recording():
+            span.add_event("llm.queue", attributes=detail)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not record LLM admission event: %s", e)
 
 
 @contextmanager
@@ -256,7 +271,8 @@ class _ClientHttp:
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
         api_base = config.get("api_base") or dynamic_api_base
-        common: dict[str, Any] = {"timeout": self._timeout}
+        # CompletionClient's RetryConfig owns retries; calls set their own value.
+        common: dict[str, Any] = {"timeout": self._timeout, "max_retries": 0}
         if api_key:
             common["api_key"] = api_key
         if api_base:
@@ -1203,18 +1219,15 @@ def _update_token_calibration(
     actual = usage.input_tokens
     if actual <= 0:
         return
-    calibration_messages = list(messages)
     # Responses lifts the leading system prompt out of input. It is still
     # billed input, so include it in the estimate without copying history.
+    message_list = list(messages)
     if instructions:
-        calibration_messages = [
-            {"role": "system", "content": instructions},
-            *calibration_messages,
-        ]
+        message_list = [{"role": "system", "content": instructions}, *message_list]
     # Calibration is best-effort: it must NEVER raise out of the (already paid)
     # response path. The whole estimate — primary AND fallback — is guarded.
     try:
-        counted = _token_counter_messages(calibration_messages)
+        counted = _token_counter_messages(message_list)
         try:
             estimated = litellm.token_counter(model=model, messages=counted)
             if tools:
@@ -1558,6 +1571,17 @@ def _collect_sync(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
+def _with_sdk_retries(client: Any, max_retries: int) -> Any:
+    """Return a per-call copy of an OpenAI SDK client with its own retry setting.
+
+    LiteLLM writes ``max_retries`` onto the SDK client it is given, so a shared
+    client would let concurrent calls change each other's retry budget. The
+    copy keeps the same HTTP pool. Other client types are returned unchanged.
+    """
+    with_options = getattr(client, "with_options", None)
+    return with_options(max_retries=max_retries) if callable(with_options) else client
+
+
 async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     """Consume an async streaming or non-streaming litellm response, returning ModelResponse."""
     if isinstance(raw, litellm.CustomStreamWrapper):
@@ -1573,29 +1597,76 @@ async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
-async def _litellm_acompletion(api_params: dict[str, Any]) -> Any:
-    """Await LiteLLM without cancelling its nested provider coroutine.
+async def _run_async_provider_call[T](
+    call: Callable[[], Coroutine[Any, Any, T]],
+    *,
+    request_timeout: float | None,
+) -> T:
+    """Run one provider attempt, holding admission through its actual exit.
 
-    LiteLLM runs sync ``completion()`` in an executor for async chat calls.
-    OpenAI-compatible providers return ``OpenAIChatCompletion.acompletion``
-    from that sync frame, then LiteLLM awaits it on the event loop. If a TUI
-    soft-cancel lands in that handoff window, Python can garbage-collect the
-    provider coroutine before it is awaited and print::
+    Acquisition happens before the provider task is created, so cancelling a
+    queued caller cannot dispatch abandoned work.  Once dispatched, the
+    provider task owns the permit and releases it in ``finally``.  Shielding
+    keeps that accounting correct when the caller is cancelled while remote
+    work or a stream is still active.
 
-        RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion' was never awaited
-
-    Shielding lets LiteLLM finish consuming that provider coroutine while the
-    caller still receives ``CancelledError`` immediately.
+    ``request_timeout`` bounds the whole attempt, stream included. On expiry it
+    cancels the task and raises TimeoutError. None disables it.
     """
-    task = asyncio.create_task(litellm.acompletion(**api_params))
+    admission_controller = _current_admission_controller()
+    if admission_controller is None:
+        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
+
+    permit = await admission_controller.acquire(_record_admission_observation)
+    if permit is None:
+        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
+
+    async def run_and_release() -> T:
+        try:
+            return await call()
+        finally:
+            permit.release()
+
+    try:
+        task = asyncio.create_task(run_and_release())
+    except BaseException:
+        permit.release()
+        raise
+
+    return await _await_provider_task(task, request_timeout)
+
+
+async def _await_provider_task[T](task: asyncio.Task[T], request_timeout: float | None) -> T:
+    """Await a shielded provider task, bounded by ``request_timeout`` if set.
+
+    The deadline is armed on the task, not on this await, so it still fires
+    after the caller cancels. A caller cancel raises CancelledError, even when
+    it lands with the deadline.
+    """
+    task.add_done_callback(_consume_async_provider_result)
+    if request_timeout is None:
+        return await asyncio.shield(task)
+
+    timed_out = False
+
+    def _on_deadline() -> None:
+        nonlocal timed_out
+        if not task.done():
+            timed_out = True
+            task.cancel()
+
+    handle = asyncio.get_running_loop().call_later(request_timeout, _on_deadline)
+    task.add_done_callback(lambda _done: handle.cancel())
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        task.add_done_callback(_consume_litellm_acompletion_result)
+        current = asyncio.current_task()
+        if timed_out and (current is None or not current.cancelling()):
+            raise TimeoutError from None
         raise
 
 
-def _consume_litellm_acompletion_result(task: asyncio.Task[Any]) -> None:
+def _consume_async_provider_result(task: asyncio.Task[Any]) -> None:
     try:
         task.result()
     except BaseException:
@@ -1880,7 +1951,9 @@ class CompletionClient(UnifiedLLM):
                          disconnects, and unreachable endpoints. Pass
                          RetryConfig(max_retries=0, rate_limit_extra_retries=0) to disable endpoint retries. Set
                          retry_on_empty_content=True to also retry when reasoning
-                         models return empty content.
+                         models return empty content. The OpenAI SDK's own
+                         retries are disabled unless ``max_retries`` is passed
+                         in ``**config``.
             http_config: Optional per-client HTTP connection-pool and timeout
                          settings. Applied only to THIS client's requests: the
                          client builds its own httpx client from these values and
@@ -1924,7 +1997,9 @@ class CompletionClient(UnifiedLLM):
         if self.cache_breakpoint == "anthropic" or _is_anthropic_model(effective_model):
             _validate_anthropic_message_order(messages)
 
-    def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
+    def _completion_http_client(
+        self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
+    ) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""
         routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
         if self._effective_model(call_config) != self.model or any(
@@ -1935,7 +2010,8 @@ class CompletionClient(UnifiedLLM):
             # for overrides; these calls use LiteLLM's default HTTP pool settings.
             return None
         assert self._http is not None
-        return self._http.async_client if is_async else self._http.sync_client
+        client = self._http.async_client if is_async else self._http.sync_client
+        return _with_sdk_retries(client, max_retries)
 
     def call(
         self,
@@ -2003,11 +2079,24 @@ class CompletionClient(UnifiedLLM):
             # can create conflicting tool-choice settings in compatible servers.
             api_params.pop("tool_choice")
 
+        add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        api_params.setdefault("max_retries", 0)
+
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(call_config, is_async=False)
-        if http_client is not None:
-            api_params.setdefault("client", http_client)
+        if "client" in api_params:
+            api_params["client"] = _with_sdk_retries(
+                api_params["client"], api_params["max_retries"]
+            )
+        else:
+            http_client = self._completion_http_client(
+                call_config, is_async=False, max_retries=api_params["max_retries"]
+            )
+            if http_client is not None:
+                api_params["client"] = http_client
 
         def _make_call():
             raw_response = _collect_sync(litellm.completion(**api_params))
@@ -2102,14 +2191,33 @@ class CompletionClient(UnifiedLLM):
             # can create conflicting tool-choice settings in compatible servers.
             api_params.pop("tool_choice")
 
+        add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        api_params.setdefault("max_retries", 0)
+
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(call_config, is_async=True)
-        if http_client is not None:
-            api_params.setdefault("client", http_client)
+        if "client" in api_params:
+            api_params["client"] = _with_sdk_retries(
+                api_params["client"], api_params["max_retries"]
+            )
+        else:
+            http_client = self._completion_http_client(
+                call_config, is_async=True, max_retries=api_params["max_retries"]
+            )
+            if http_client is not None:
+                api_params["client"] = http_client
 
         async def _make_call():
-            raw_response = await _collect_async(await _litellm_acompletion(api_params))
+            async def provider_call():
+                return await _collect_async(await litellm.acompletion(**api_params))
+
+            raw_response = await _run_async_provider_call(
+                provider_call,
+                request_timeout=self._http_config.request_timeout,
+            )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -2369,6 +2477,7 @@ class ResponsesClient(UnifiedLLM):
         replay_state.add_encrypted_reasoning_include(
             api_params, state_scope, native_encrypted_reasoning=native_encrypted_reasoning
         )
+        add_session_affinity_header(api_params)
 
         http_client = self._http
         assert http_client is not None
@@ -2451,6 +2560,7 @@ class ResponsesClient(UnifiedLLM):
         replay_state.add_encrypted_reasoning_include(
             api_params, state_scope, native_encrypted_reasoning=native_encrypted_reasoning
         )
+        add_session_affinity_header(api_params)
 
         http_client = self._http
         assert http_client is not None
@@ -2458,7 +2568,13 @@ class ResponsesClient(UnifiedLLM):
             api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
-            return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+            async def call_provider():
+                return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+
+            return await _run_async_provider_call(
+                call_provider,
+                request_timeout=self._http_config.request_timeout,
+            )
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
