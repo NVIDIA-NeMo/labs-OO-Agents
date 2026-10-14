@@ -404,12 +404,15 @@ async def test_mocked_dispatch_resume_and_changing_live_suffix(monkeypatch, tmp_
             {
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": [{"type": "input_text", "text": "done"}],
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "done",
+                        "prompt_cache_breakpoint": {"mode": "explicit"},
+                    }
+                ],
             }
             for call_id in ("call_1", "call_2")
-        ]
-        expected[-1]["output"] = [
-            {"type": "input_text", "text": "done", "prompt_cache_breakpoint": {"mode": "explicit"}}
         ]
         assert captured[-1][:-1] == expected
         assert "live 2" in captured[-1][-1]["content"][0]["text"]

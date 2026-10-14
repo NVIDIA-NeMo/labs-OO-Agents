@@ -104,7 +104,6 @@ probes and call that validation of a NOOA entry.
   not a test-only cache override. Other Chat routes may cache implicitly;
   Responses and recognized Anthropic routes have explicit marker mappings.
   `cache_breakpoint: null` opts out of NOOA markers, not provider implicit caching.
-  Read [stable-prefix caching](../../docs/stable-prefix-caching.md) for details.
 
 ## Interpret failures and evidence separately
 

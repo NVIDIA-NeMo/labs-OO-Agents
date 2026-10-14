@@ -99,12 +99,11 @@ def _cache_markers(value):
 
 
 def _strip_cache_markers(value):
-    """Remove transient cache-breakpoint decoration so content can compare by identity.
+    """Compare underlying content stability independently of cache checkpoints.
 
-    A provider's own cache lookup does not require an earlier breakpoint to be
-    resent -- only the underlying content has to stay byte-identical. Stripping
-    the marker keys before comparing isolates real content drift from that
-    expected, harmless difference.
+    Stripping marker keys isolates content drift, but does not prove cache
+    lookup eligibility. OpenAI explicit caching also needs a warmed checkpoint
+    present in the later request; a moving marker alone can lose prefix lookup.
     """
     if isinstance(value, dict):
         return {

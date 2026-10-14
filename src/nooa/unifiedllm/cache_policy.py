@@ -57,21 +57,30 @@ def _mark_responses_content(content: Any) -> tuple[Any, bool]:
 
 
 def _mark_responses_cache_breakpoint(messages: list[dict[str, Any]], boundary: int) -> bool:
-    """Mark the latest eligible Responses input block before ``boundary``."""
+    """Reconstruct the latest 80 eligible message endpoints before ``boundary``.
+
+    Explicit lookup considers the latest 80 breakpoints (writes use the latest
+    four). Retain recent checkpoints as history grows, not just the newest one.
+    Only marked containers are copied; content strings and all other items are
+    shared. Stop after 80 endpoints, skipping ineligible assistant/native items.
+    """
+    count = 0
     for index in range(boundary - 1, -1, -1):
         item = messages[index]
         if item.get("type") == "function_call_output":
             output, marked = _mark_responses_content(item.get("output"))
             if marked:
                 messages[index] = {**item, "output": output}
-                return True
+                count += 1
         # Assistant output uses output_text, which is not an eligible input block.
-        if item.get("role") in {"system", "developer", "user"}:
+        elif item.get("role") in {"system", "developer", "user"}:
             content, marked = _mark_responses_content(item.get("content"))
             if marked:
                 messages[index] = {**item, "content": content}
-                return True
-    return False
+                count += 1
+        if count == 80:
+            break
+    return count > 0
 
 
 def enable_openai_explicit_cache(api_params: dict[str, Any]) -> None:
