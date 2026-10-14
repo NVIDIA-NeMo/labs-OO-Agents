@@ -20,11 +20,10 @@ from nooa.interactive import (
 )
 from nooa.paths import get_project_dir
 from nooa.storage.markers import nosnapshot
-from nooa.strategies import PredictStrategy
+from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_atom.agent.activity import ActivityShellTools
-from nooa_atom.agent.completion import CompletionCheckConfig, JudgedCodeActV2
 from nooa_atom.agent.instructions import render_agent_instructions
 from nooa_atom.agent.slash_commands import SlashCommandRegistry
 
@@ -154,9 +153,6 @@ class AtomAgent(InteractiveAgent):
     # The Session port, installed by the session that runs this agent. The
     # model uses the flat delegation methods below, not the port.
     session: Annotated[SessionPort | None, hidden, nosnapshot]
-    # Which turn methods check a Done with the model before accepting it
-    # (nooa_atom.agent.completion). Default: unattended turns only.
-    completion_check: Annotated[CompletionCheckConfig, hidden, nosnapshot]
     # Tells install_port() not to document the port to the model.
     session_port_visible: ClassVar[bool] = False
 
@@ -168,16 +164,10 @@ class AtomAgent(InteractiveAgent):
         summarization: SummarizationConfig | None = None,
         skills_dirs: list[Path] | None = None,
         libs_dir: Path | None = None,
-        completion_check: CompletionCheckConfig | str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(llm=llm, **kwargs)
         self.session = None
-        # A config, a mode name ("off", "batch", "interactive", "all") or None
-        # for the default / the NOOA_ATOM_COMPLETION_CHECK environment override.
-        if isinstance(completion_check, str):
-            completion_check = CompletionCheckConfig.from_mode(completion_check)
-        self.completion_check = completion_check or CompletionCheckConfig.from_env()
         self._slash_commands_in = self.queue_manager.queue("slash_commands")
         self._system_messages_in = self.queue_manager.queue("system_messages")
         self.system_messages = self._system_messages_in.reader
@@ -457,7 +447,7 @@ class AtomAgent(InteractiveAgent):
         ...
 
     @hidden
-    @strategy(JudgedCodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
+    @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
     async def handle(
         self,
         notification: Annotated[
@@ -501,7 +491,7 @@ class AtomAgent(InteractiveAgent):
 
     @hidden
     @strategy(
-        JudgedCodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
         context=_V2_CONTEXT,
     )
     async def handle_batch(

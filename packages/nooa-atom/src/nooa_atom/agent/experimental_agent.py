@@ -13,8 +13,8 @@ from nooa import hidden, strategy
 from nooa.agentdoc import doc  # noqa: F401 — used by dynamic context expressions
 from nooa.config import CodeActConfig
 from nooa.interactive import Done, NeedInput, Waiting
+from nooa.strategies import CodeActV2
 from nooa_atom.agent.agent import AtomAgent
-from nooa_atom.agent.completion import JudgedCodeActV2
 
 with hidden:
     from nooa_atom.agent.agent import _V2_CONTEXT
@@ -70,9 +70,7 @@ class ExperimentalAtomAgent(AtomAgent):
     """
 
     @hidden
-    @strategy(
-        JudgedCodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_EXPERIMENTAL_CONTEXT
-    )
+    @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_EXPERIMENTAL_CONTEXT)
     async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
         """Handle the newest request and anything else that arrived.
 
@@ -90,7 +88,7 @@ class ExperimentalAtomAgent(AtomAgent):
 
     @hidden
     @strategy(
-        JudgedCodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
         context=_EXPERIMENTAL_CONTEXT,
     )
     async def handle_batch(self, notification: dict[str, list[Any]]) -> Done | Waiting:
