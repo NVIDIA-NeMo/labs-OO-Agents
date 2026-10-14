@@ -4,7 +4,7 @@
 
 Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
 ``RepoResult``: printable lines plus ``Match`` objects for
-``self.shell.replace(result[i], new_text)`` — the same host filesystem a wired
+``self.shell.replace_match(result[i], new)`` — the same host filesystem a wired
 ``BashSession`` also operates on. Once core ``Match`` has ``editable`` (#382),
 anchors from a non-host session are read-only (``editable=False``), and the
 tool docs say so only then.
@@ -188,9 +188,9 @@ class RepoResult(BaseModel):
     matches: list[Match] = Field(
         default_factory=list,
         description=(
-            "Match anchors; only editable=True anchors support self.shell.replace()"
+            "Match anchors; only editable=True anchors support self.shell.replace_match()"
             if _MATCH_HAS_EDITABLE
-            else "Match anchors; pass one to self.shell.replace() to edit it"
+            else "Match anchors; pass one to self.shell.replace_match() to edit it"
         ),
     )
     total_matches: int = Field(default=0, description="Total matches found")
@@ -347,7 +347,7 @@ def _anchor(
     """Build a ``Match``; read-only anchors need a core ``Match`` with ``editable``.
 
     ``Match(editable=...)`` comes with the core change that makes
-    ``ShellTools.replace()`` refuse read-only anchors (#382). Until that is
+    ``ShellTools.replace_match()`` refuse read-only anchors (#382). Until that is
     on this branch, anchors are built without the flag: they are then
     editable host anchors, which is what they are for the Atom agent,
     whose ``RepoTools`` always shares the host filesystem (a real
@@ -514,7 +514,7 @@ class RepoTools(Skill):
     Results print like search output and index/iterate as matches. Host anchors
     support replacement::
         r = await self.repo.symbols("src/", query="Handler")
-        await self.shell.replace(r[0], new_code)
+        await self.shell.replace_match(r[0], new_code)
 
     ``cwd`` is the base for relative paths: the wired session's current
     directory, so a ``cd`` through ``self.shell`` moves these tools too
@@ -579,7 +579,7 @@ class RepoTools(Skill):
 
         A non-``BashSession`` session object (e.g. a scripted session over
         its own in-memory filesystem) may not — its anchors stay read-only
-        so ``self.shell.replace()`` never writes to a same-named but
+        so ``self.shell.replace_match()`` never writes to a same-named but
         unrelated host file.
         """
         return self._session is None or isinstance(self._session, BashSession)
@@ -601,7 +601,7 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find definitions under a file or directory; ``cwd`` defaults to the shell's current directory.
 
-        Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
+        Returns printable lines plus ``Match`` anchors for ``self.shell.replace_match``.
         ``cwd`` (absolute, or relative to the shell's directory) does not move
         the shell; results are still shown relative to ``root``.
         """
@@ -687,7 +687,7 @@ class RepoTools(Skill):
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
-        Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
+        Returns printable lines plus ``Match`` anchors for ``self.shell.replace_match``.
         ``cwd`` (absolute, or relative to the shell's directory) does not move
         the shell; results are still shown relative to ``root``.
         """

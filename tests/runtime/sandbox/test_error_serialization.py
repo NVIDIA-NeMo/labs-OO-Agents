@@ -96,7 +96,7 @@ async def test_stale_match_diagnostic_survives_error_transport(tmp_path, size):
         match = await shell.read("example.txt")
         path.write_text("y" * size + "\n")
         with pytest.raises(StaleMatchError) as caught:
-            await shell.replace(match, "replacement")
+            await shell.replace_match(match, "replacement")
         message = str(caught.value)
         result = dto_to_result(_transport(result_to_dto(_result_with_error(caught.value))))
         assert isinstance(result.error, SandboxExecutionError)
@@ -123,7 +123,7 @@ async def test_stale_match_broker_error_survives_as_actionable_surrogate(tmp_pat
 
     class Target:
         async def edit(self):
-            return await shell.replace(match, "replacement")
+            return await shell.replace_match(match, "replacement")
 
     executor = object.__new__(SandboxedExecutor)
     executor._agent = Target()

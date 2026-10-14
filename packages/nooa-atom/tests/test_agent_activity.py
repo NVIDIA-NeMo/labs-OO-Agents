@@ -65,13 +65,13 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")
     try:
         match = await shell.read("example.txt", lines=(2, 2))
-        await shell.replace(match, "changed")
+        await shell.replace_match(match, "changed")
     finally:
         await shell.close()
 
     edit = next(event for event in events if isinstance(event, FileEdit))
     assert edit.old_text == "two\n"
-    # replace() re-terminates the region so the following line survives; the
+    # replace_match() re-terminates the region so the following line survives; the
     # event has to report the text that actually landed in the file.
     assert edit.new_text == "changed\n"
     assert (tmp_path / "example.txt").read_text() == "one\nchanged\nthree\n"
@@ -85,7 +85,7 @@ async def test_match_replace_at_end_of_file_keeps_the_file_terminated(tmp_path):
     (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")
     try:
         match = await shell.read("example.txt", lines=(3, 3))
-        await shell.replace(match, "changed")
+        await shell.replace_match(match, "changed")
     finally:
         await shell.close()
 
@@ -106,7 +106,7 @@ async def test_match_replace_after_cwd_change_emits_original_path(tmp_path):
     try:
         match = await shell.read("example.txt")
         await shell.run("cd other")
-        await shell.replace(match, "after")
+        await shell.replace_match(match, "after")
     finally:
         await shell.close()
 
@@ -513,3 +513,62 @@ async def test_a_large_diff_is_computed_off_the_event_loop(tmp_path, monkeypatch
     # Small texts stay on the loop; whole-file diffs of the big file do not.
     on_loop = [thread == loop_thread for thread in threads]
     assert on_loop == [True, False, False, True]
+
+
+def test_activity_shell_exposes_replace_and_replace_match_with_shell_signatures():
+    import inspect
+
+    from nooa.agentdoc import doc
+
+    for name in ("replace", "replace_match"):
+        assert inspect.iscoroutinefunction(getattr(ActivityShellTools, name))
+        assert inspect.signature(getattr(ActivityShellTools, name)) == inspect.signature(
+            getattr(ShellTools, name)
+        )
+    rendered = doc(ActivityShellTools, concise=True)
+    assert "async def replace(self, path: str, old: str, new: str)" in rendered
+    assert "async def replace_match(self, match: Match, new: str)" in rendered
+    assert "old_or_new" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("method", "make_args", "needle"),
+    [
+        ("replace", lambda m: (m, "two\n"), "replace_match(match, new)"),
+        ("replace", lambda m: (m, "two\n", "x"), "replace_match(match, new)"),
+        ("replace_match", lambda m: ("example.txt", "x"), "replace(path, old, new)"),
+        ("replace_match", lambda m: ("example.txt", "two", "x"), "replace(path, old, new)"),
+        ("replace", lambda m: ("example.txt",), "replace(path, old, new)"),
+    ],
+)
+async def test_activity_wrong_form_calls_raise_without_writing_or_events(
+    tmp_path, method, make_args, needle
+):
+    shell, events = _observed_shell(tmp_path)
+    (tmp_path / "example.txt").write_text("one\ntwo\n")
+    try:
+        match = await shell.read("example.txt", lines=(2, 2))
+        with pytest.raises(TypeError) as error:
+            await getattr(shell, method)(*make_args(match))
+    finally:
+        await shell.close()
+
+    assert needle in str(error.value)
+    assert "no file was changed" in str(error.value)
+    assert (tmp_path / "example.txt").read_text() == "one\ntwo\n"
+    assert not [event for event in events if isinstance(event, FileEdit)]
+
+
+async def test_activity_rejects_legacy_replace_keywords(tmp_path):
+    shell, events = _observed_shell(tmp_path)
+    (tmp_path / "example.txt").write_text("one\n")
+    try:
+        with pytest.raises(TypeError) as error:
+            await shell.replace(target="example.txt", old_or_new="one", new="two")
+    finally:
+        await shell.close()
+
+    assert "old_or_new=" in str(error.value)
+    assert "target=" in str(error.value)
+    assert (tmp_path / "example.txt").read_text() == "one\n"
+    assert not [event for event in events if isinstance(event, FileEdit)]

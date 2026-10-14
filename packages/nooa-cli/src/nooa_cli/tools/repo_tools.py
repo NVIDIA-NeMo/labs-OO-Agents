@@ -4,7 +4,7 @@
 
 Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
 ``RepoResult``: printable lines plus editable ``Match`` objects for
-``self.shell.replace(result[i], new_text)``.
+``self.shell.replace_match(result[i], new)``.
 """
 
 import logging
@@ -128,7 +128,7 @@ class RepoResult:
     lines: Annotated[list[str], spec(description="Display lines: file:line: context")]
     matches: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors; pass an item to self.shell.replace()"),
+        spec(description="ShellTools-compatible anchors; pass an item to self.shell.replace_match()"),
     ] = field(default_factory=list)
     total_matches: Annotated[int, spec(description="Total matches found")] = 0
     truncated: Annotated[bool, spec(description="True if results were capped")] = False
@@ -403,7 +403,7 @@ class RepoTools(Skill):
 
     Results print like search output and index/iterate as editable matches::
         r = await self.repo.symbols("src/", query="Handler")
-        await self.shell.replace(r[0], new_code)
+        await self.shell.replace_match(r[0], new_code)
     """
 
     __nosnapshot__ = True
@@ -448,7 +448,7 @@ class RepoTools(Skill):
         """Find definitions under a file or directory.
 
         Returns printable lines plus editable ``Match`` anchors; use
-        ``await self.shell.replace(result[0], new_text)`` to edit a hit.
+        ``await self.shell.replace_match(result[0], new)`` to edit a hit.
         """
         resolved = self._resolve(path)
         query_lower = query.lower()
@@ -498,7 +498,7 @@ class RepoTools(Skill):
         """Find references/usages of a symbol, excluding definitions.
 
         Returns printable lines plus editable ``Match`` anchors; use
-        ``await self.shell.replace(result[0], new_text)`` to edit a hit.
+        ``await self.shell.replace_match(result[0], new)`` to edit a hit.
         """
         result = await self._search_references(name, path=path, max_results=max_results)
         return RepoResult(

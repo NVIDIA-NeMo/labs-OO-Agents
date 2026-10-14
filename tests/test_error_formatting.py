@@ -742,7 +742,7 @@ class TestHeredocHint:
 
 
 class _ShellToolsLike:
-    def replace(self, target, old_or_new="", new=None):
+    def replace(self, path, old, new):
         """Replace at an unambiguous location."""
         ...
 
@@ -789,9 +789,9 @@ class TestBadCallAgentdoc:
             tool.replace(target="x", old="a", new="b")
 
         result = _format_bad_call(cell)
-        assert "unexpected keyword argument 'old'" in result
+        assert "unexpected keyword argument 'target'" in result
         assert "_ShellToolsLike.replace" in result
-        assert "old_or_new" in result
+        assert "path, old, new" in result
         assert "Replace at an unambiguous location" in result
 
     def test_missing_positional_appends_signature(self):

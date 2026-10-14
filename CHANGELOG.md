@@ -6,6 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `ShellTools.replace()` is split into two methods, with no backward
+  compatibility: `replace(path, old, new)` edits a file by unique substring and
+  `replace_match(match, new)` rewrites a Match's whole line region (same
+  stale-anchor and resolved-path checks as before). The `target=` and
+  `old_or_new=` keywords are gone. Passing a Match to `replace()` or a path to
+  `replace_match()` raises a `TypeError` that names the right method; no file is
+  written. `ActivityShellTools` (nooa-atom) and the nooa-cli coding shell expose
+  both methods.
+
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive

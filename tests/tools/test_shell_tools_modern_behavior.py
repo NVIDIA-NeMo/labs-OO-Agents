@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Core behavior of the DEFAULT ShellTools (run / read / write_file / replace).
+"""Core behavior of the DEFAULT ShellTools (run / read / write_file / replace / replace_match).
 
 This keeps the *default* ShellTools — the one agents actually use — covered for
 its primary file/run surface. Search-anchor behavior is covered separately in
@@ -13,22 +13,26 @@ from nooa.agentdoc import doc
 from nooa.tools.shell_tools import Match, ShellResult, ShellTools
 
 
-@pytest.mark.parametrize("tool", [ShellTools, ShellTools.replace])
-def test_replace_concise_docs_include_typed_forms_and_reject_line_handles(tool):
+@pytest.mark.parametrize("tool", [ShellTools, ShellTools.replace, ShellTools.replace_match])
+def test_replace_concise_docs_name_both_methods_and_reject_line_handles(tool):
     rendered = doc(tool, concise=True)
 
-    assert "replace(match: Match, new_text: str)" in rendered
-    assert "replace(path: str, old_text: str, new_text: str)" in rendered
-    assert "params (target, old_or_new, new)" in rendered
-    assert "line numbers are not handles" in rendered
+    if tool is not ShellTools.replace_match:
+        assert "replace(self, path: str, old: str, new: str)" in rendered
+        assert "for a Match use replace_match(match, new)" in rendered
+    if tool is not ShellTools.replace:
+        assert "replace_match(self, match: Match, new: str)" in rendered
+        assert "line numbers are not handles" in rendered
+    assert "old_or_new" not in rendered
+    assert "target" not in rendered
     # Concise rendering must not expand the rest of the docstring.
-    assert "A Match replaces its entire line region, not a substring within it." not in rendered
+    assert "Anchors are never relocated" not in rendered
 
 
 def test_shell_tools_directs_agents_to_its_file_and_command_methods():
     doc = ShellTools.__doc__
     assert doc is not None
-    assert "Always use these four methods rather than Python builtins" in doc
+    assert "Always use these five methods rather than Python builtins" in doc
     assert "For shell commands and file operations" in doc
 
 
@@ -156,14 +160,14 @@ async def test_replace_match_rejects_old_new_without_modifying_file(
     path = tmp_path / "calc.py"
     path.write_text(original)
     match = await sh.read("calc.py", lines)
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(TypeError) as error:
         if keyword:
-            await sh.replace(match, "return a * b", new=replacement)
+            await sh.replace_match(match, "return a * b", new=replacement)
         else:
-            await sh.replace(match, "return a * b", replacement)
+            await sh.replace_match(match, "return a * b", replacement)
     assert path.read_bytes() == original.encode()
-    assert "replace(match, new_text)" in str(error.value)
-    assert "replace(match.resolved_path, old_text, new_text)" in str(error.value)
+    assert "replace_match(match, new)" in str(error.value)
+    assert "replace(match.resolved_path, old, new)" in str(error.value)
     assert "no file was changed" in str(error.value)
 
 
@@ -171,7 +175,9 @@ async def test_replace_match_rejects_old_new_without_modifying_file(
 async def test_replace_match_argument_guard_runs_before_file_access(sh, tmp_path):
     """An invalid call is rejected even when its old Match points to a missing file."""
     match = Match("missing.py", 1, 1, "old", resolved_path=tmp_path / "missing.py")
-    with pytest.raises(ValueError, match="ambiguous"):
+    with pytest.raises(TypeError, match="replace_match"):
+        await sh.replace_match(match, "old", "new")
+    with pytest.raises(TypeError, match="replace_match"):
         await sh.replace(match, "old", "new")
     assert not (tmp_path / "missing.py").exists()
 
@@ -194,7 +200,7 @@ async def test_file_operations_allow_paths_outside_cwd(sh, tmp_path):
     assert (await sh.read(relative)).text == "one\ntwo\n"
 
     await sh.replace(relative, "one", "changed")
-    await sh.replace(
+    await sh.replace_match(
         Match(relative, 2, 2, "two\n", resolved_path=sibling / "relative.txt"), "replaced"
     )
     # The region reaches EOF in a file that ended with a newline, so the
@@ -216,7 +222,7 @@ async def test_match_from_read_stays_bound_after_cwd_change(sh, tmp_path):
     match = await sh.read("original.txt")
     sliced = match[1:1]
     await sh.run("cd other")
-    await sh.replace(sliced, "after")
+    await sh.replace_match(sliced, "after")
 
     # Whole-file region at EOF in a newline-terminated file keeps its final
     # newline instead of silently stripping it.
@@ -269,7 +275,7 @@ async def test_replace_match_at_eof_keeps_trailing_newline(sh, tmp_path):
     """A replacement reaching end-of-file must not strip the file's final newline."""
     await sh.write_file("f.py", "a = 1\nb = 2\n")
     match = await sh.read("f.py", (2, 2))
-    await sh.replace(match, "b = 20")  # no trailing newline in the replacement
+    await sh.replace_match(match, "b = 20")  # no trailing newline in the replacement
     assert (tmp_path / "f.py").read_text() == "a = 1\nb = 20\n"
 
 
@@ -278,7 +284,7 @@ async def test_replace_match_at_eof_preserves_missing_newline(sh, tmp_path):
     """A file that genuinely lacks a final newline must not gain one."""
     await sh.write_file("f.py", "a = 1\nb = 2")  # no trailing newline
     match = await sh.read("f.py", (2, 2))
-    await sh.replace(match, "b = 20")
+    await sh.replace_match(match, "b = 20")
     assert (tmp_path / "f.py").read_text() == "a = 1\nb = 20"
 
 

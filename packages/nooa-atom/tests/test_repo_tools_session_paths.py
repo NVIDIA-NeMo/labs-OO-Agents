@@ -186,7 +186,7 @@ async def test_session_anchors_cannot_edit_same_named_host_file(operation, tmp_p
             sliced = match[match.start : match.end]
             assert not sliced.editable
             with pytest.raises(ValueError, match="originating session"):
-                await shell.replace(sliced, "must not be written")
+                await shell.replace_match(sliced, "must not be written")
         assert target.read_text() == original
         assert fs[str(host_file)] == original
     finally:

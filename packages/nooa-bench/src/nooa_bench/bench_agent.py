@@ -8,7 +8,7 @@ access inside a container. Not tuned for any particular benchmark -- the same
 agent handles SWE-bench, Terminal-Bench, or any Harbor-compatible task.
 
 Core contract:
-- ``self.shell`` for persistent shell access (run/read/replace/write_file)
+- ``self.shell`` for persistent shell access (run/read/replace/replace_match/write_file)
 - ``self.repo`` for code navigation that returns ShellTools Match anchors
 - Structured return: the agent must declare solution_description, evidence,
   and how_to_verify when finishing -- forcing reflection before return.

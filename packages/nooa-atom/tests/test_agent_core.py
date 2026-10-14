@@ -490,14 +490,12 @@ async def test_replace_contract_survives_the_default_concise_tool_context(tmp_pa
         tools = doc(RepoTools, ActivityShellTools, TodoManager, concise=True)
         assert str(agent.context["python_cell_tools"]) == tools
         for rendered in (tools, doc(ActivityShellTools, concise=True)):
-            assert "replace(match: Match, new_text: str)" in rendered
-            assert "replace(path: str, old_text: str, new_text: str)" in rendered
-            assert "params (target, old_or_new, new)" in rendered
+            assert "replace(self, path: str, old: str, new: str)" in rendered
+            assert "for a Match use replace_match(match, new)" in rendered
+            assert "replace_match(self, match: Match, new: str)" in rendered
             assert "line numbers are not handles" in rendered
-            assert (
-                "A Match replaces its entire line region, not a substring within it."
-                not in rendered
-            )
+            assert "old_or_new" not in rendered
+            assert "Anchors are never relocated" not in rendered
     finally:
         await agent.aclose()
 
