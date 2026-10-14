@@ -327,12 +327,20 @@ def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction)
         SummarizationConfig(threshold_fraction=fraction)
 
 
-def test_web_is_not_advertised_without_a_rich_output_url(monkeypatch):
-    """doc(self) must not list self.web when the attribute does not exist."""
+def test_interactive_agent_has_no_web_attribute(monkeypatch):
+    """self.web was removed: no attribute, no doc(self) entry, no "web" context block,
+    whether or not NEMO_OO_RICH_URL is set."""
     from nooa.agentdoc import doc
     from nooa.interactive import InteractiveAgent
 
-    monkeypatch.delenv("NEMO_OO_RICH_URL", raising=False)
-    agent = InteractiveAgent()
-    assert not hasattr(agent, "web")
-    assert "web: WebPublisher" not in doc(agent)
+    for url in (None, "http://localhost:1234/rich"):
+        if url is None:
+            monkeypatch.delenv("NEMO_OO_RICH_URL", raising=False)
+        else:
+            monkeypatch.setenv("NEMO_OO_RICH_URL", url)
+        agent = InteractiveAgent()
+        assert not hasattr(agent, "web")
+        rendered = doc(agent)
+        assert "WebPublisher" not in rendered
+        assert "web:" not in rendered
+        assert "web" not in agent.context
