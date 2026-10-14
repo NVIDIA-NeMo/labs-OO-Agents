@@ -53,6 +53,9 @@ async def test_an_experimental_batch_turn_must_carry_a_task_result(tmp_path, ses
                 "solution_description='a', evidence='b', how_to_verify='c')))",
                 "c2",
             ),
+            LLMResponse(
+                raw_response=None, content="STOP: done", tool_calls=[], finish_reason="stop"
+            ),
         ],
         strict_exhaustion=True,
     )
@@ -74,7 +77,9 @@ async def test_an_experimental_batch_turn_must_carry_a_task_result(tmp_path, ses
             explanation="finished",
             result=TaskResult(solution_description="a", evidence="b", how_to_verify="c"),
         )
-        assert [tool.name for tool in llm.last_tools or []] == ["python_cell"]
+        # The last call is the tool-free completion check of the batch turn's Done.
+        assert [tool.name for tool in llm.calls[1].tools or []] == ["python_cell"]
+        assert not llm.calls[2].tools
         assert "return_result validation error" in str(llm.calls[1].messages)
     finally:
         await registry.close_all()
