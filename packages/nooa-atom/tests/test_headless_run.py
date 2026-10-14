@@ -18,15 +18,17 @@ RESULT = (
     "how_to_verify='python hello.py', report='hello.py prints hello')))"
 )
 
-# A job that delivers on its own channel shortly after the turn ends.
+# A job that delivers on its own channel shortly after the turn ends. It is
+# a running queue_manager job, so the turn may wait on its channel.
 WAIT_FOR_JOB = """\
-jobs = self.queue_manager.queue("test_jobs")
-asyncio.get_running_loop().call_later(0.05, jobs.put, "job finished")
+self.queue_manager.queue("test_jobs")
+self.queue_manager.spawn(asyncio.sleep(0.05, result="job finished"), channel="test_jobs")
 return_result(Waiting(explanation="job running", on=["test_jobs"]))
 """
 
 WAIT_FOREVER = """\
 self.queue_manager.queue("test_jobs")
+self.queue_manager.spawn(asyncio.Event().wait(), channel="test_jobs")
 return_result(Waiting(explanation="job running", on=["test_jobs"]))
 """
 

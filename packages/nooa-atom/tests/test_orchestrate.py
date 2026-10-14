@@ -19,11 +19,11 @@ TIMEOUT = 30
 
 # Phrases only the orchestrator prompt has.
 ORCHESTRATOR_TEXT = (
-    "You plan, dispatch and verify. Do not edit files or implement the",
-    "Put each piece of work in a Todo",
+    "You are the orchestrator. You decide how the work is split and who does",
+    "Write the requirements: how success will be measured.",
     "await self.spawn(description, todo, retain=True)",
-    "await child.send(feedback)",
-    "acceptance checks",
+    "Run every acceptance check yourself; a report is",
+    "Leave children open; the host closes them after grading.",
 )
 
 # The interactive and batch prompts this change must leave as they are.
@@ -44,9 +44,52 @@ def test_handle_orchestrate_has_the_orchestrator_prompt():
     from nooa.strategies import CodeActV2
 
     prompt = AtomAgent.handle_orchestrate.__doc__
+    assert prompt.startswith("You are a recursive language model agent.")
     for phrase in ORCHESTRATOR_TEXT:
         assert phrase in prompt
+    # The return contract is kept from the earlier prompt.
+    assert "result=TaskResult(" in prompt
+    assert "If something blocks you, still return ``Done`` with a ``TaskResult``" in prompt
+    assert "Python locals live for one method call" in prompt
+    # The orchestrator no longer closes its children; the host does.
+    assert "child.close()" not in prompt
+    # Nobody can answer a question, so the prompt never offers NeedInput.
+    assert "NeedInput" not in prompt
     assert isinstance(AtomAgent.handle_orchestrate._plan_strategy, CodeActV2)
+
+
+def test_handle_orchestrate_returns_only_done_or_waiting():
+    import typing
+
+    from nooa.interactive import Done, NeedInput, Waiting
+
+    def returns(method):
+        return typing.get_type_hints(getattr(AtomAgent, method))["return"]
+
+    assert returns("handle_orchestrate") == Done | Waiting
+    # handle() and handle_batch() keep their return types.
+    assert returns("handle") == Done | NeedInput | Waiting
+    assert returns("handle_batch") == Done | Waiting
+
+
+async def test_handle_orchestrate_rejects_need_input(tmp_path):
+    """Return-type validation turns a NeedInput into feedback the model sees."""
+    llm = CellLLM(
+        [
+            cell("return_result(NeedInput(question='which one?', options=['a', 'b']))"),
+            cell(RESULT),
+        ]
+    )
+    agent = AtomAgent(llm=llm, cwd=tmp_path)
+    try:
+        outcome = await agent.handle_orchestrate({"user_messages": ["fix it"]})
+        assert outcome.result.report == "VERIFIED"
+        feedback = str(llm.calls[1].messages)
+        assert "return_result validation error" in feedback
+        assert "Expected return type: nooa.interactive.Done | nooa.interactive.Waiting" in feedback
+        assert "Got: NeedInput(question=" in feedback
+    finally:
+        await agent.aclose()
 
 
 @pytest.mark.parametrize("method", list(UNCHANGED_PROMPTS))
@@ -106,14 +149,27 @@ async def test_run_task_runs_handle_batch_by_default(tmp_path, sessions_dir):
     assert ORCHESTRATOR_TEXT[0] not in prompt
 
 
-async def test_an_orchestrating_root_spawns_reviews_sends_feedback_and_closes(
-    tmp_path, sessions_dir
+async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
+    tmp_path, sessions_dir, monkeypatch
 ):
     """The flow the prompt asks for, through run_task: each delegates item starts a turn.
 
     The retained worker runs ``handle`` turns (SessionPort.delegate picks
     ``handle`` for ``retain=True``), so a follow-up can be sent after its Done.
+    The root does not close the worker before Done; run_task's registry
+    closes it at the end (close_all).
     """
+    close_all_calls = []
+    original_close_all = SessionRegistry.close_all
+
+    async def spy_close_all(registry):
+        before = [info.status for info in registry.children(run_id[0])]
+        await original_close_all(registry)
+        after = [info.status for info in registry.children(run_id[0])]
+        close_all_calls.append((before, after))
+
+    monkeypatch.setattr(SessionRegistry, "close_all", spy_close_all)
+    run_id = []
     models = AtomModels()
     models.scripts[None] = [
         cell(
@@ -132,7 +188,8 @@ async def test_an_orchestrating_root_spawns_reviews_sends_feedback_and_closes(
         cell(
             "[item] = notification['delegates']\n"
             "assert item.done.explanation == 'fixed the empty case'\n"
-            "await self.v.child.close()\n" + RESULT
+            "[ref] = self.children()\n"
+            "assert ref.status != 'closed', ref.status\n" + RESULT
         ),
     ]
     models.scripts["Fix parser"] = [
@@ -140,6 +197,15 @@ async def test_an_orchestrating_root_spawns_reviews_sends_feedback_and_closes(
         cell("return_result(Done(explanation='fixed the empty case'))"),
     ]
     options = _options(tmp_path, sessions_dir, turn_method="handle_orchestrate")
+    original_create = SessionRegistry.create
+
+    async def record_root(registry, *args, **kwargs):
+        session = await original_create(registry, *args, **kwargs)
+        if not run_id:
+            run_id.append(session.id)
+        return session
+
+    monkeypatch.setattr(SessionRegistry, "create", record_root)
 
     run = await asyncio.wait_for(
         run_task(options, "fix it", agent_factory=models, llm_factory=_no_llm), TIMEOUT
@@ -148,6 +214,9 @@ async def test_an_orchestrating_root_spawns_reviews_sends_feedback_and_closes(
     assert run.stopped is None, run.stopped
     assert run.result is not None and run.result.report == "VERIFIED"
     assert run.turns == 3
+    # The worker was still open (retained) when run_task reached close_all,
+    # and close_all closed it.
+    assert close_all_calls == [(["retained"], ["on_disk"])]
     store = SessionStore(sessions_root(options.workspace, sessions_dir))
     assert store.get(run.session_id).turn_method == "handle_orchestrate"
     [child] = [info for info in store.list(roots_only=False) if info.parent_id == run.session_id]
