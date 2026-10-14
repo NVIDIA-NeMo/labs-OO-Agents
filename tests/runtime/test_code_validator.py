@@ -1344,6 +1344,23 @@ exec('2')
         assert isinstance(error, SyntaxError)
         assert error.filename == "Cell In[7]"
 
+    def test_syntax_error_is_distinct_from_policy_rejection(
+        self,
+        validator: UnifiedCodeValidator,
+        default_context: ValidationContext,
+    ):
+        """Parser rejections use CodeSyntaxError (still a RestrictedCodeError)."""
+        from nooa.errors import CodeSyntaxError
+
+        with pytest.raises(CodeSyntaxError) as exc_info:
+            validator.validate("def incomplete(", default_context)
+        assert isinstance(exc_info.value, ValidationError)
+        assert exc_info.value.line_number == 1
+
+        with pytest.raises(ValidationError) as policy_info:
+            validator.validate("import subprocess", default_context)
+        assert not isinstance(policy_info.value, CodeSyntaxError)
+
     def test_validators_run_in_order(
         self, validator: UnifiedCodeValidator, default_context: ValidationContext
     ):

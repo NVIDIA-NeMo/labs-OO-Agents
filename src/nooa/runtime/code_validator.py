@@ -71,6 +71,7 @@ import types
 from dataclasses import dataclass, field
 from typing import Annotated, Any, ForwardRef, Literal, Protocol, get_args, get_origin
 
+from nooa.errors import CodeSyntaxError
 from nooa.errors import RestrictedCodeError as ValidationError
 from nooa.runtime.restrictions import (
     RestrictionsConfig,
@@ -1452,7 +1453,9 @@ class UnifiedCodeValidator:
         try:
             tree = ast.parse(code, filename=cell_filename)
         except SyntaxError as e:
-            raise ValidationError(f"Syntax error: {e}", original_exception=e) from e
+            # Parser rejection, not a policy rejection: keep the SyntaxError so the
+            # formatter can render source line, caret and syntax hints.
+            raise CodeSyntaxError(e) from e
 
         # Run validators
         all_issues: list[ValidationIssue] = []

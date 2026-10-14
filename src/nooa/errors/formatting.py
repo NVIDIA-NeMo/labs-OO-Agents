@@ -269,6 +269,14 @@ def _is_validation_error(error: Exception) -> bool:
         return type(error).__name__ in ("ValidationError", "RestrictedCodeError")
 
 
+def _wrapped_syntax_error(error: Exception) -> SyntaxError | None:
+    """Return the parser ``SyntaxError`` a validation error wraps, if any."""
+    if not _is_validation_error(error):
+        return None
+    original = getattr(error, "original_exception", None)
+    return original if isinstance(original, SyntaxError) else None
+
+
 def _strip_file_prefix(text: str) -> str:
     """Strip 'File "..."' wrapper to match IPython output.
 
@@ -573,8 +581,13 @@ class IPythonErrorFormatter:
                 closing="\n</truncated-output>",
             )
 
+        wrapped_syntax = _wrapped_syntax_error(error)
         if isinstance(error, SyntaxError):
             formatted = self._format_syntax_error(error, code, line_offset)
+        elif wrapped_syntax is not None:
+            # A validator wrapped the parser's SyntaxError; render it like a raw
+            # SyntaxError (cell, line, caret, hints) instead of a one-line string.
+            formatted = self._format_syntax_error(wrapped_syntax, code, line_offset)
         elif _is_validation_error(error):
             formatted = f"{type(error).__name__}: {error}"
         else:

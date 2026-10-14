@@ -221,6 +221,54 @@ class TestFormatValidationError:
         assert "Traceback" not in result
 
 
+class TestWrappedSyntaxError:
+    """A validator-wrapped SyntaxError renders like a raw SyntaxError."""
+
+    def _wrapped(self, code: str, cell: int = 4):
+        from nooa.runtime.code_validator import UnifiedCodeValidator, ValidationContext
+
+        with pytest.raises(RestrictedCodeError) as exc_info:
+            UnifiedCodeValidator().validate(code, ValidationContext(execution_count=cell))
+        return exc_info.value
+
+    def test_wrapped_syntax_error_shows_cell_line_and_caret(self):
+        from nooa.errors import CodeSyntaxError
+
+        code = "x = 1\nif x\n    pass\n"
+        error = self._wrapped(code)
+
+        assert isinstance(error, CodeSyntaxError)
+        result = format_error_for_llm(error, code)
+
+        assert "Cell In[4], line 2" in result
+        assert "if x" in result
+        assert "^" in result
+        assert "SyntaxError:" in result
+        # Labelled as a syntax error, not as a restriction.
+        assert "RestrictedCodeError" not in result
+        assert "<unknown>" not in result
+
+    def test_wrapped_syntax_error_keeps_heredoc_hint(self):
+        code = 'r = await self.shell.run("cat <<EOF\nhello\nEOF")\n'
+        result = format_error_for_llm(self._wrapped(code), code)
+
+        assert "SyntaxError:" in result
+        assert "heredoc" in result
+
+    def test_wrapped_syntax_error_is_bounded(self):
+        code = "x = (" + "1, " * 50_000 + "\n"
+        result = format_error_for_llm(self._wrapped(code), code, max_error=2_000)
+
+        assert len(result) < 4_000
+
+    def test_policy_rejection_unchanged(self):
+        code = 'exec("x = 1")\n'
+        result = format_error_for_llm(self._wrapped(code), code)
+
+        assert result.startswith("RestrictedCodeError:")
+        assert "SyntaxError" not in result
+
+
 class TestFormatRuntimeError:
     """Tests for runtime error formatting."""
 
