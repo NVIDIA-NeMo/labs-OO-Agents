@@ -294,14 +294,30 @@ def test_collapse_doc_says_synchronous_and_tag_format():
     assert not inspect.iscoroutinefunction(EventsApi.collapse)
 
 
-def test_collapse_hint_example_runs_as_written():
-    """The context_usage compaction hint must be executable verbatim."""
-    from nooa.context_blocks.models import COLLAPSE_HINT
+def test_collapse_hint_names_the_real_parameters():
+    """The context_usage compaction hint (shown on every turn) names collapse()'s
+    real parameters, and filled in with tags it runs."""
+    import inspect
+
+    from nooa.context_blocks.models import ContextWindowStats
+    from nooa.runtime.events import EventsApi
+
+    rendered = ContextWindowStats(
+        context_blocks_count=1,
+        events_count=1,
+        context_blocks_chars=1,
+        events_chars=1,
+        prompt_tokens=1_000,
+        model_context_window=100_000,
+    ).format()
+    hint = "self.events.collapse(start_tag, end_tag, summary_text=...)"
+    assert f"Compact history: {hint}" in rendered
+    params = list(inspect.signature(EventsApi.collapse).parameters)
+    assert params[1:4] == ["start_tag", "end_tag", "summary_text"]
 
     agent = _TestAgent()
     for n in range(45):
         agent.event_manager.add(Task(prompt=f"task {n}"))
-    call = COLLAPSE_HINT.split("Compact history: ", 1)[1].split(" (tags", 1)[0]
-    assert call.startswith("self.events.collapse(")
+    call = hint.replace("start_tag", '"2"').replace("end_tag", '"40"').replace("...", '"recap"')
     result = eval(call, {"self": agent})  # noqa: S307 - fixed, test-owned string
     assert result == "2..40"

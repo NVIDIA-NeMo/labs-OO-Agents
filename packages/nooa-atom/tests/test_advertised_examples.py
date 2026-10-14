@@ -16,7 +16,7 @@ import pytest
 from nooa_atom.agent import AtomAgent
 from nooa_atom.skills.manager import SkillManager
 
-from nooa.context_blocks.models import COLLAPSE_HINT, ContextWindowStats
+from nooa.context_blocks.models import ContextWindowStats
 from nooa.interactive import AgentVars
 from nooa.runtime.events import EventsApi
 from nooa.storage.snapshot_vars import SnapshotVars
@@ -123,19 +123,20 @@ async def test_todo_list_hints_run():
         await _run(call, owner, todos[1].id)
 
 
-async def test_context_usage_examples_run():
-    tight = ContextWindowStats(
+@pytest.mark.parametrize("prompt_tokens", [3_000, 90_000])
+async def test_context_usage_examples_run(prompt_tokens):
+    rendered = ContextWindowStats(
         context_blocks_count=1,
         events_count=1,
         context_blocks_chars=1,
         events_chars=1,
-        prompt_tokens=90_000,
+        prompt_tokens=prompt_tokens,
         model_context_window=100_000,
     ).format()
-    assert COLLAPSE_HINT in tight
-    calls = _calls(tight)
-    assert calls == ['self.events.collapse("2", "40", "summary of events 2-40")'], calls
+    # The compaction hint is shown at any utilisation, with placeholder tags.
+    calls = _calls(rendered)
+    assert calls == ["self.events.collapse(start_tag, end_tag, summary_text=...)"], calls
     owner = _owner()
-    for call in calls:
-        await _run(call, owner)
-    owner.events.collapse.assert_called_once_with("2", "40", "summary of events 2-40")
+    filled = calls[0].replace("start_tag", '"2"').replace("end_tag", '"40"')
+    await _run(filled.replace("...", '"summary of events 2-40"'), owner)
+    owner.events.collapse.assert_called_once_with("2", "40", summary_text="summary of events 2-40")
