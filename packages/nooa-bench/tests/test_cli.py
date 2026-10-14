@@ -18,6 +18,7 @@ RESULT = (
 
 WAIT_FOREVER = """\
 self.queue_manager.queue("test_jobs")
+self.queue_manager.spawn(asyncio.Event().wait(), channel="test_jobs")
 return_result(Waiting(explanation="job running", on=["test_jobs"]))
 """
 

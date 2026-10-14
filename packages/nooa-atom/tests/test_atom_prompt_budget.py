@@ -46,10 +46,13 @@ RESULT = (
 # (about 430 characters): measured values plus about 2% headroom.
 # Added handle_orchestrate, the unattended root that plans, delegates and
 # verifies (2026-10-14): measured values plus about 2% headroom.
+# Raised when handle_orchestrate moved to the approved v2 orchestrator prompt
+# (understand, write requirements, do the work, measure, loop; about 400
+# characters): measured values plus about 2% headroom.
 LIMITS = {
     (ATOM, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
     (ATOM, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
-    (ATOM, "handle_orchestrate"): (14_600, 18_400),  # measured 14,275 / 18,006
+    (ATOM, "handle_orchestrate"): (14_600, 18_800),  # measured 14,275 / 18,411
     (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
     (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
 }
