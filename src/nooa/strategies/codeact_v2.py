@@ -111,7 +111,7 @@ class CodeActV2(CodeActStrategy):
                 "# Runtime helpers (already available):",
                 f"# {names}",
                 "# Standard-library modules asyncio and typing are also available.",
-                "# show(obj) attaches an Image/Audio/Video/File so you can see or hear it;",
+                "# show(obj) attaches a nooa.media.Image/Audio/Video/File so you can see or hear it;",
                 "# here `Image` is nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image.",
                 "```",
             )

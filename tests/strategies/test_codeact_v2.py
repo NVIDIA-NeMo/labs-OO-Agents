@@ -464,7 +464,10 @@ async def test_python_cell_context_lists_static_module_capabilities():
     assert "import json" in rendered
     assert "return_result" in rendered
     # The injected media helpers are advertised, with the Image name clarified.
-    assert "# show(obj) attaches an Image/Audio/Video/File" in rendered
+    assert (
+        "# show(obj) attaches a nooa.media.Image/Audio/Video/File so you can see or hear it;\n"
+        "# here `Image` is nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image."
+    ) in rendered
     assert "nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image" in rendered
 
 
