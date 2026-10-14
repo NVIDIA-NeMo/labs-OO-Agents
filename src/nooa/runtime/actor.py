@@ -1605,6 +1605,13 @@ class ActorRuntime:
 
                     # Extract captured locals (filter out non-serializable/internal items)
                     captured_locals = _extract_captured_locals(exec_globals)
+                    # Same-cell names (imports, dicts, ...) were wrapper locals. Publish
+                    # them into this cell's exec_globals, which is the __globals__ of the
+                    # top-level functions re-bound below, so those functions still
+                    # resolve them when called from a later cell (and their default
+                    # arguments evaluate). Mirrors sandbox/cell_core.py, which writes the
+                    # captured locals back into its namespace before re-binding.
+                    exec_globals.update(captured_locals)
 
                     # Capture return value based on return type:
                     # - Explicit return: always capture (even None)

@@ -317,6 +317,12 @@ class HelperFunctionManager:
 
             try:
                 func = _exec_with_source_tracking(node, method_code, namespace, method_name)
+            except NameError:
+                # A default argument or decorator uses a name bound earlier in this
+                # same cell, which does not exist yet. The runtime defines the
+                # function again after the cell body runs, so skip pre-definition
+                # instead of rejecting the whole cell.
+                continue
             except Exception as e:
                 errors.append(f"Error defining `{method_name}`: {type(e).__name__}: {e}")
                 continue
