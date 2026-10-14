@@ -142,6 +142,69 @@ class Validator(Protocol):
 
 
 # =============================================================================
+# Capability-aware fix hints (wording only; never changes what is allowed)
+# =============================================================================
+_PROCESS_MODULES = frozenset({"subprocess", "pty"})
+_PROCESS_CALLS = frozenset({("os", "system"), ("os", "popen")})
+_NETWORK_MODULES = frozenset(
+    {
+        "socket",
+        "http.client",
+        "urllib.request",
+        "ftplib",
+        "smtplib",
+        "imaplib",
+        "poplib",
+        "telnetlib",
+        "xmlrpc.client",
+    }
+)
+_SHELL_RUN_HINT = (
+    'run the command with `await self.shell.run("...")` '
+    "(result has .stdout, .stderr and .returncode)"
+)
+
+
+def _has_shell(agent: Any) -> bool:
+    """True when the agent exposes an async ``self.shell.run``."""
+    if agent is None:
+        return False
+    try:
+        run = getattr(getattr(agent, "shell", None), "run", None)
+    except Exception:
+        return False
+    return run is not None and inspect.iscoroutinefunction(run)
+
+
+def _module_fix_hint(module_name: str, has_shell: bool, call: str | None = None) -> str | None:
+    """Point a blocked module/call at an alternative the agent actually has."""
+    root = match_blocked_module(module_name, _PROCESS_MODULES)
+    if root is not None or (module_name, call) in _PROCESS_CALLS:
+        return _SHELL_RUN_HINT if has_shell else None
+    if match_blocked_module(module_name, _NETWORK_MODULES) is not None:
+        if has_shell:
+            return f"for network access, {_SHELL_RUN_HINT}"
+        return None
+    if module_name == "asyncio" and call in ("run", "run_until_complete"):
+        return (
+            "cells already run inside an event loop: `await coro` directly, "
+            "or `await asyncio.gather(a(), b())` for several"
+        )
+    if module_name == "time" and call == "sleep":
+        return "`await asyncio.sleep(seconds)`"
+    return None
+
+
+def _builtin_fix_hint(name: str) -> str | None:
+    """Alternatives for forbidden builtins that have a direct, allowed equivalent."""
+    if name == "__import__":
+        return "use a normal import statement, e.g. `import json`"
+    if name in ("exec", "eval", "compile"):
+        return "write the code directly in the cell; it is already executed as Python"
+    return None
+
+
+# =============================================================================
 # Security Validator
 # =============================================================================
 
@@ -291,6 +354,7 @@ class _SecurityVisitor(ast.NodeVisitor):
                         col=node.col_offset,
                         message=f"{func_name}() is forbidden - it blocks or allows code execution",
                         code="E001",
+                        fix_hint=_builtin_fix_hint(func_name),
                     )
                 )
             # Check aliased forbidden calls
@@ -307,6 +371,7 @@ class _SecurityVisitor(ast.NodeVisitor):
                             col=node.col_offset,
                             message=f"{func_name}() is forbidden (alias for {original})",
                             code="E001",
+                            fix_hint=_builtin_fix_hint(original),
                         )
                     )
             # Check setattr/delattr/getattr with dunder names or forbidden attr calls
@@ -558,6 +623,7 @@ class _SecurityVisitor(ast.NodeVisitor):
             col=node.col_offset,
             message=msg,
             code="E002",
+            fix_hint=_module_fix_hint(module_name, _has_shell(self.context.agent)),
         )
 
 
@@ -1243,6 +1309,7 @@ class BlockingCallValidator:
         visitor = _BlockingCallVisitor(
             exec_globals=context.exec_globals,
             restrictions=self.restrictions,
+            has_shell=_has_shell(context.agent),
         )
         visitor.visit(tree)
         return visitor.issues
@@ -1255,8 +1322,10 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         self,
         exec_globals: dict[str, Any],
         restrictions: RestrictionsConfig,
+        has_shell: bool = False,
     ):
         self.exec_globals = exec_globals
+        self.has_shell = has_shell
         self.blocked_modules = restrictions.blocked_modules
         self.blocked_calls = restrictions.blocked_calls
         self.issues: list[ValidationIssue] = []
@@ -1304,6 +1373,7 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                 ),
                 code="E310",
                 severity="error",
+                fix_hint=_module_fix_hint(module_name, self.has_shell, call_name),
             )
         )
 
