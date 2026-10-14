@@ -25,7 +25,7 @@ from typing import Annotated, Any, ClassVar, Literal
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from nooa import hidden, strategy
-from nooa.agentdoc import doc
+from nooa.agentdoc import doc, spec
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
@@ -445,6 +445,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             from nooa import Context
 
             self.context["web"] = Context(doc(self.web), prefix=True)
+        else:
+            # agentdoc reads the annotation above from __init__'s source, so
+            # without this doc(self) would advertise a self.web that does not exist.
+            spec(self, "web", hidden=True)
 
     @hidden
     @no_trace

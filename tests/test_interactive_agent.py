@@ -325,3 +325,14 @@ def test_install_summarizer_attaches(agent):
 def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction):
     with pytest.raises(ValidationError):
         SummarizationConfig(threshold_fraction=fraction)
+
+
+def test_web_is_not_advertised_without_a_rich_output_url(monkeypatch):
+    """doc(self) must not list self.web when the attribute does not exist."""
+    from nooa.agentdoc import doc
+    from nooa.interactive import InteractiveAgent
+
+    monkeypatch.delenv("NEMO_OO_RICH_URL", raising=False)
+    agent = InteractiveAgent()
+    assert not hasattr(agent, "web")
+    assert "web: WebPublisher" not in doc(agent)
