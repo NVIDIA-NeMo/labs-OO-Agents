@@ -44,9 +44,12 @@ RESULT = (
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
+# Added handle_orchestrate, the unattended root that plans, delegates and
+# verifies (2026-10-14): measured values plus about 2% headroom.
 LIMITS = {
     (ATOM, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
     (ATOM, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
+    (ATOM, "handle_orchestrate"): (14_600, 18_400),  # measured 14,275 / 18,006
     (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
     (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
 }
@@ -66,7 +69,7 @@ def _no_installed_skills(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
 async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
-    code = RESULT if method == "handle_batch" else "return_result(Done(explanation='x'))"
+    code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
     response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
     workspace = tmp_path / "workspace"

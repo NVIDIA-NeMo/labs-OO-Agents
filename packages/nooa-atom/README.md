@@ -31,6 +31,12 @@ a subagent's session goes in its root's.
 `run_task(options, task)` runs one task unattended in a new tree: the root
 runs `handle_batch` turns until the agent returns `Done`, follows a turn
 that ends `Waiting` to the next one, and stops at `max_turns` or `timeout`.
+With `options.turn_method="handle_orchestrate"` the root runs
+`handle_orchestrate` turns instead: it plans the task, hands the work to
+child sessions, verifies their results and does not edit files itself.
+Its children run `handle_batch` (or `handle` when spawned with
+`retain=True`). `nooa-bench run --turn-method handle_orchestrate` picks it
+from the command line.
 It returns a `TaskRun` with the final `Done` and its `TaskResult`, the
 reason it stopped otherwise, the turn count, the usage and the root agent's
 events. `nooa-bench run` and the benchmark runner's `atom` agent type use
