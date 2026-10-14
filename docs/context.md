@@ -122,7 +122,7 @@ class DefaultAgentView(ContextView[Agent]):
             yield item
 ```
 
-The three private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints. `visible_events` selects active model-facing history and projects missing tool results as unavailable, without changing stored events or claiming an execution outcome.
+The three private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints. `visible_events` selects active model-facing history and projects recorded tool calls without results as outcome-unknown, without changing stored events or reconstructing absent records.
 
 The three built-in helpers derive content directly from the agent. Protected-key registration selects which defaults apply; disable state and stored overrides are checked before evaluation. The manager stores those controls, user declarations, and the last materialized values for compatible named reads, but does not create defaults.
 

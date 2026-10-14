@@ -6,7 +6,7 @@ import pytest
 
 from nooa import Agent, DefaultAgentView, collect_context_items
 from nooa.context_blocks import OpenAIProviderFormatter, XMLBlockFormatter, render_context
-from nooa.context_blocks.events import EventStatus, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks.events import ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.default_context_view import visible_events
 from nooa.llm_types import LLMResponse, ToolCall
@@ -68,16 +68,22 @@ def test_canonical_batch_recovers_missing_result_atomically(missing):
     if missing != "event":
         tag = agent.event_manager.add(second)
         if missing == "archived_event":
-            agent.event_manager.update(tag, status=EventStatus.ARCHIVED)
+            agent.event_manager.collapse(tag, tag, summary_text="Archived execution")
     before = [event.model_dump_json() for event in agent.event_manager.values()]
     items = visible_events(agent)
     assert items == visible_events(agent), "Projection must not generate unstable IDs/timestamps"
     messages = render(items)
-    assert [message.role.value for message in messages] == ["assistant", "tool", "tool"]
-    assert [call.id for call in messages[0].tool_calls] == ["a", "b"]
-    assert messages[0].replay_message is canonical
-    assert messages[1].content == "done"
-    assert "execution outcome is unknown" in messages[2].content
+    if missing == "result":
+        assert [message.role.value for message in messages] == ["assistant", "tool", "tool"]
+        assert [call.id for call in messages[0].tool_calls] == ["a", "b"]
+        assert messages[0].replay_message is canonical
+        assert messages[1].content == "done"
+        assert "execution outcome is unknown" in messages[2].content
+    elif missing == "event":
+        assert messages == [], "Absent sidecars must not be reconstructed"
+    else:
+        assert len(messages) == 1 and "Archived execution" in messages[0].content
+        assert not messages[0].tool_calls and not messages[0].tool_call_id
     assert [event.model_dump_json() for event in agent.event_manager.values()] == before
     assert second.result is None
 

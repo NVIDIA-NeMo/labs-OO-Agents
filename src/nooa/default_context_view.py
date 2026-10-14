@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Default context policy implemented against public framework interfaces."""
 
-import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
@@ -21,7 +20,6 @@ from nooa.context_view import (
     is_model_visible,
     resolve_context_view,
 )
-from nooa.llm_types import LLMResponse
 
 if TYPE_CHECKING:
     from nooa.agent import Agent
@@ -301,11 +299,6 @@ def partition_blocks(blocks: Sequence[Block]) -> tuple[tuple[Block, ...], tuple[
 def visible_events(agent: "Agent") -> tuple[EventBase, ...]:
     """Select active history, projecting unavailable tool results without changing state."""
     events = [event for event in agent.event_manager.values() if is_model_visible(event)]
-    executions = {
-        (event.llm_response_id, event.tool_call_id)
-        for event in events
-        if isinstance(event, ToolCallEvent)
-    }
 
     def unavailable(call_id: str) -> ToolResult:
         return ToolResult(
@@ -319,22 +312,8 @@ def visible_events(agent: "Agent") -> tuple[EventBase, ...]:
         if isinstance(event, ToolCallEvent) and event.result is None:
             event = event.model_copy(update={"result": unavailable(event.tool_call_id)})
         projected.append(event)
-        if isinstance(event, LLMResponse):
-            # A restored or interrupted batch may lack execution records entirely.
-            # Keep the canonical turn intact; the renderer still owns atomic replay.
-            for call in event.replay_tool_calls:
-                if (event.id, call.id) not in executions:
-                    projected.append(
-                        ToolCallEvent(
-                            id=f"unavailable:{event.id}:{call.id}",
-                            timestamp=event.timestamp,
-                            tool_call_id=call.id,
-                            name=call.name,
-                            arguments=json.loads(call.arguments),
-                            llm_response_id=event.id,
-                            result=unavailable(call.id),
-                        )
-                    )
+    # Do not reconstruct absent execution records: they may be deliberately
+    # archived. Incomplete canonical batches remain omitted by atomic replay.
     return tuple(projected)
 
 
