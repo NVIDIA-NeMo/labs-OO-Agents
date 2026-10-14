@@ -9,6 +9,7 @@ import pytest
 
 from nooa import Agent, Block
 from nooa.agents import TokenBudgetSummarizer
+from nooa.agents.summarization import summary_fork_active
 from nooa.config.summarizer_config import TokenBudgetConfig
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.events import Message
@@ -40,6 +41,44 @@ async def dispatch(ctx, tokens=1000):
 
 async def trigger(agent, ctx):
     return await agent.event_manager.run_middleware("llm_call", ctx, dispatch)
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+async def test_summary_activity_is_task_local_and_resets(outcome):
+    agent, summarizer, ctx = setup()
+    entered, release = asyncio.Event(), asyncio.Event()
+    after = []
+
+    async def summarize(text, target):
+        assert summary_fork_active()
+        entered.set()
+        await release.wait()
+        if outcome == "failure":
+            raise RuntimeError("summary transport failed")
+        return "summary"
+
+    async def run():
+        try:
+            await summarizer._run_state_summary("facts", ctx.client)
+        finally:
+            after.append(summary_fork_active())
+
+    summarizer.summarize = AsyncMock(side_effect=summarize)
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert not summary_fork_active(), "Concurrent parent work is not summarization"
+        if outcome == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            release.set()
+            await task
+        assert after == [False]
+    finally:
+        release.set()
+        await agent.aclose()
 
 
 async def test_source_is_independent_of_view_and_frozen_before_dispatch():

@@ -447,6 +447,8 @@ def _build_messages(
                 flush_blocks()
             pending_blocks.append(block)
             continue
+        if not projection:
+            continue
         flush_blocks()
         messages.extend(projection)
     flush_blocks()

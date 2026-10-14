@@ -189,7 +189,6 @@ class TestXMLBlockFormatter:
             Role.TOOL,
             Role.TOOL,
             Role.USER,
-            Role.USER,
         ]
         assert [call.id for call in messages[0].tool_calls] == ["call_1", "call_2"]
         assert [call.arguments for call in messages[0].tool_calls] == [
@@ -198,6 +197,8 @@ class TestXMLBlockFormatter:
         ]
         assert messages[0].content == "I will run both."
         assert [message.tool_call_id for message in messages[1:3]] == ["call_1", "call_2"]
+        assert "first output" in messages[3].content
+        assert "second output" in messages[3].content
 
     def test_incomplete_linked_call_batch_is_omitted(self):
         turn = LLMResponse(
@@ -708,3 +709,21 @@ def test_synthetic_inline_return_is_observable_but_not_replayed_to_provider():
     assert _event_block_to_messages(block, wrap_content=None) == []
     rendered = XMLBlockFormatter().format([block])
     assert all(not message.tool_calls for message in rendered)
+
+
+@pytest.mark.parametrize("formatter", [XMLBlockFormatter(), MarkdownBlockFormatter()])
+@pytest.mark.parametrize("kind", ["sidecar", "inline_return"])
+@pytest.mark.parametrize("role", [Role.SYSTEM, Role.USER])
+def test_empty_projection_does_not_split_materialized_blocks(formatter, kind, role):
+    event = ToolCallEvent(
+        tool_call_id="call",
+        name="return_result" if kind == "inline_return" else "execute_python",
+        arguments={},
+        llm_response_id="absent-response" if kind == "sidecar" else None,
+        result=ToolResult(tool_call_id="call", content="accepted"),
+        metadata={"synthetic_type": "codeact_inline_return"} if kind == "inline_return" else {},
+    )
+    first = ResolvedBlock(key="first", content="first content", role=role)
+    second = ResolvedBlock(key="second", content="second content", role=role)
+    invisible = ResolvedBlock(key="event", content="", role=Role.ASSISTANT, event=event)
+    assert formatter.format([first, invisible, second]) == formatter.format([first, second])

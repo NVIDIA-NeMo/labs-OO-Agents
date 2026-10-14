@@ -36,6 +36,19 @@ from nooa.strategies import PredictStrategy
 
 logger = logging.getLogger(__name__)
 
+_in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
+
+
+@hidden
+def summary_fork_active() -> bool:
+    """Whether this task is running best-effort compaction, not parent execution.
+
+    Shared-client integrations can distinguish contained summary failures from
+    terminal parent failures. The summary request is independent of the parent.
+    """
+    return _in_summary_fork.get()
+
+
 if TYPE_CHECKING:
     from nooa.config.summarizer_config import MethodSummarizerConfig, TokenBudgetConfig
     from nooa.events import AfterTurn, EventBase
@@ -816,6 +829,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
     @no_trace
     async def _run_state_summary(self, text: str, client: "UnifiedLLM") -> None:
         token = self._summary_llm_override.set(client)
+        activity_token = _in_summary_fork.set(True)
         try:
             summary = await self.summarize(text, self.config.target_chars)
             if not isinstance(summary, str) or not summary.strip():
@@ -834,6 +848,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
                     "history is unchanged. Fix the reported failure before reinstalling."
                 )
         finally:
+            _in_summary_fork.reset(activity_token)
             self._summary_llm_override.reset(token)
             self.event_manager.clear()
 

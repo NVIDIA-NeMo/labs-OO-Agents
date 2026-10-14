@@ -407,14 +407,13 @@ class TestL4ContextBlockEviction:
                 metadata=BlockMetadata(static=False, user_block=True),
             ),
         ]
-        result = _render_default_budget(blocks, 60)
-        assert result.stats.context_blocks_dropped >= 1, (
-            f"Expected at least one block to be evicted, got {result.stats.context_blocks_dropped}"
-        )
+        result = _render_default_budget(blocks, 150)
+        assert result.stats.context_blocks_dropped == 1
         output_str = str(result.output)
         assert "EVICTED" in output_str
         # User block should be evicted first; framework block should survive
-        assert "framework" in output_str.replace("EVICTED", "")
+        assert "framework " * 50 in output_str
+        assert "user user" not in output_str
 
     def test_boundary_block_just_under_then_second_pushes_over(self):
         """One block fits just under the budget; adding a second pushes

@@ -37,3 +37,8 @@ On Linux, timeout recovery discovers command descendants directly through
 start time before signaling to protect against PID reuse. Earlier background
 jobs and their descendants remain excluded from command-timeout cleanup.
 Other platforms retain the `ps` fallback.
+
+Integrations that track terminal model errors can use
+`nooa.agents.summarization.summary_fork_active()` to identify best-effort
+summary calls. A caught summary failure must not mark the parent rollout fatal,
+and a successful summary must not clear an unresolved parent model failure.

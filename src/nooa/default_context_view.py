@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Default context policy implemented against public framework interfaces."""
 
+import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
-from nooa.context_blocks.events import EventBase
+from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_view import (
     Block,
     CacheBoundary,
@@ -20,6 +21,7 @@ from nooa.context_view import (
     is_model_visible,
     resolve_context_view,
 )
+from nooa.llm_types import LLMResponse
 
 if TYPE_CHECKING:
     from nooa.agent import Agent
@@ -297,8 +299,43 @@ def partition_blocks(blocks: Sequence[Block]) -> tuple[tuple[Block, ...], tuple[
 
 
 def visible_events(agent: "Agent") -> tuple[EventBase, ...]:
-    """Default policy: include all active, model-visible history in order."""
-    return tuple(event for event in agent.event_manager.values() if is_model_visible(event))
+    """Select active history, projecting unavailable tool results without changing state."""
+    events = [event for event in agent.event_manager.values() if is_model_visible(event)]
+    executions = {
+        (event.llm_response_id, event.tool_call_id)
+        for event in events
+        if isinstance(event, ToolCallEvent)
+    }
+
+    def unavailable(call_id: str) -> ToolResult:
+        return ToolResult(
+            tool_call_id=call_id,
+            content="Tool result unavailable in the active history; execution outcome is unknown.",
+            result_status=ResultStatus.ERROR,
+        )
+
+    projected: list[EventBase] = []
+    for event in events:
+        if isinstance(event, ToolCallEvent) and event.result is None:
+            event = event.model_copy(update={"result": unavailable(event.tool_call_id)})
+        projected.append(event)
+        if isinstance(event, LLMResponse):
+            # A restored or interrupted batch may lack execution records entirely.
+            # Keep the canonical turn intact; the renderer still owns atomic replay.
+            for call in event.replay_tool_calls:
+                if (event.id, call.id) not in executions:
+                    projected.append(
+                        ToolCallEvent(
+                            id=f"unavailable:{event.id}:{call.id}",
+                            timestamp=event.timestamp,
+                            tool_call_id=call.id,
+                            name=call.name,
+                            arguments=json.loads(call.arguments),
+                            llm_response_id=event.id,
+                            result=unavailable(call.id),
+                        )
+                    )
+    return tuple(projected)
 
 
 class DefaultAgentView(ContextView["Agent"]):

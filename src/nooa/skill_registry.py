@@ -514,7 +514,8 @@ class SkillRegistry(Skill):
     def _protected_conflict(self, name: str, attr: str, skill: Any = None) -> str | None:
         """Describe why *name* may not take over *attr*, or None if it may.
 
-        Agents declare the attributes carrying their own tools via
+        Each normalized agent attribute has one registry owner. Agents also
+        declare the attributes carrying their own tools via
         ``__protected_skill_attrs__``. Those may be claimed once: a second
         claimant removes the tool while the model is still told it has one.
 
@@ -526,14 +527,14 @@ class SkillRegistry(Skill):
         itself. Both ``register()`` and ``load()`` consult this, so the explicit
         and discovered paths cannot drift apart.
         """
-        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
-        if attr not in protected:
-            return None
         owner = next(
             (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
         )
         if owner is not None:
             return None if owner == name else f"already provided by {owner!r}"
+        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
+        if attr not in protected:
+            return None
         if hasattr(self._agent, attr) and getattr(self._agent, attr, None) is not skill:
             return "assigned directly by the agent"
         return None
@@ -575,14 +576,6 @@ class SkillRegistry(Skill):
             raise ValueError(f"Cannot register skill with reserved attr name {attr!r}")
         conflict = self._protected_conflict(name, attr, skill)
         if conflict is not None:
-            # Colliding leaves are supported in general — reload disambiguates
-            # by fully-qualified name — but an agent may declare attributes that
-            # carry its own tools. Those must not be taken over: the previous
-            # check was suppressed once an attr was in _attr_map, so the second
-            # claimant silently won. That is how a repo-supplied `cmd.shell` or
-            # a client-supplied `mcp.shell` removed the agent's real shell while
-            # the model kept being told it still had one. Re-registering the
-            # same name is still fine.
             raise ValueError(f"Cannot register skill {name!r} as agent attr {attr!r}: {conflict}")
         if hasattr(self._agent, attr) and attr not in set(self._attr_map.values()):
             logger.warning("Skill %s overwrites existing agent attr '%s'", name, attr)
