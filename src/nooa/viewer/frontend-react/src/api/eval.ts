@@ -59,6 +59,10 @@ export interface ExperimentSummary {
   overall: {
     total: number;
     passed: number;
+    failed?: number;
+    unclassified?: number;
+    classified_count?: number;
+    scored_count?: number;
     avg_score: number;
     success_rate: number;
     run_count?: number;

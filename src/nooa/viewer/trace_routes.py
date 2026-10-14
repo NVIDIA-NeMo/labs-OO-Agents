@@ -5,6 +5,7 @@
 Uses otlp_store for trace storage/retrieval (OTLP JSON in SQLite).
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ from pydantic import BaseModel
 
 from nooa.unifiedllm.registry import resolve_api_key_from_config
 
-from . import otlp_store
+from . import otlp_store, sources
 from .trace_models import TraceGroup
 
 log = logging.getLogger(__name__)
@@ -256,7 +257,7 @@ def list_traces(
         limit = max(1, min(limit, 500))
         page = max(1, page)
 
-        sessions = otlp_store.list_sessions(experiment=experiment, batch_id=batch_id)
+        sessions = sources.list_sessions(experiment=experiment, batch_id=batch_id)
         sizes = otlp_store.get_session_sizes()
 
         groups = [
@@ -265,7 +266,7 @@ def list_traces(
                 name=s["name"],
                 modified=s["modified"],
                 size=sizes.get(s["id"], 0),
-                event_count=s["span_count"],
+                event_count=s["span_count"] or 0,
                 batch_id=s.get("batch_id"),
             )
             for s in sessions
@@ -338,17 +339,17 @@ def delete_all_traces(confirm: bool = False, batch_id: str | None = None):
 @router.get("/api/experiments")
 def list_experiments_api() -> list[str]:
     """List known experiment names."""
-    return otlp_store.list_experiments()
+    return sources.list_experiments()
 
 
 @router.get("/api/trace-count")
 def get_trace_count(session_id: str) -> dict:
     """Get span count for a specific session."""
     try:
-        sessions = otlp_store.list_sessions()
-        for s in sessions:
-            if s["id"] == session_id:
-                return {"path": session_id, "event_count": s["span_count"]}
+        sources.ensure_session(session_id)
+        summary = otlp_store.get_session_summary(session_id)
+        if summary is not None:
+            return {"path": session_id, "event_count": summary["span_count"]}
         raise FileNotFoundError(session_id)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}") from e
@@ -359,6 +360,7 @@ def get_trace(session_id: str, limit: int | None = None, offset: int = 0) -> dic
     """Load a specific session's OTLP spans."""
     overall_start = time.time()
     try:
+        sources.ensure_session(session_id)
         spans = otlp_store.get_session_spans(session_id)
         total_count = len(spans)
 
@@ -392,6 +394,7 @@ def get_trace(session_id: str, limit: int | None = None, offset: int = 0) -> dic
 async def export_trace(session_id: str):
     """Export a trace as a downloadable .jsonl file (OTLP format + annotations)."""
     try:
+        await asyncio.to_thread(sources.ensure_session, session_id)
         bodies = otlp_store.export_session_otlp(session_id)
         annotations = otlp_store.list_annotations(session_id)
     except FileNotFoundError as e:
@@ -421,6 +424,7 @@ async def export_trace(session_id: str):
 def get_trace_resource(session_id: str) -> dict:
     """Get OTLP resource attributes for a session."""
     try:
+        sources.ensure_session(session_id)
         resource = otlp_store.get_session_resource(session_id)
         return resource
     except FileNotFoundError as e:
@@ -469,7 +473,7 @@ def get_provider_status() -> dict[str, Any]:
     stats = otlp_store.get_stats()
     return {
         "provider_type": "otlp_sqlite",
-        "sources": ["otlp"],
+        "sources": ["otlp", *sources.configured_sources()],
         "db_path": str(otlp_store.DB_PATH),
         "stats": stats,
     }
