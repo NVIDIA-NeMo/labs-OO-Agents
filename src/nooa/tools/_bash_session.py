@@ -121,6 +121,8 @@ class BashSession:
         self._started = False
         self._started_on_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
@@ -217,10 +219,28 @@ class BashSession:
         return diag
 
     async def start(self) -> None:
-        """Start the bash subprocess with a dedicated control fd."""
+        """Start the bash subprocess with a dedicated control fd.
+
+        Concurrent callers (e.g. several ``run()`` calls gathered on a fresh
+        session) share one start: they used to each spawn a bash and race on
+        the control reader ("readuntil() called while another coroutine is
+        already waiting").
+        """
         if self._started:
             return
+        if self._running_init:
+            # Re-entry from a reset during the init command: the outer start()
+            # already holds the start lock.
+            await self._start_unlocked()
+            return
+        self._ensure_lock_on_current_loop()
+        async with self._start_lock:
+            if self._started:
+                return
+            await self._start_unlocked()
 
+    async def _start_unlocked(self) -> None:
+        """Start bash (caller holds ``_start_lock`` or is re-entering from init)."""
         self._start_count += 1
         env = os.environ.copy()
         env["PS1"] = ""
@@ -310,12 +330,17 @@ class BashSession:
         return f'eval "$(base64 -d <<<{blob})" </dev/null\n{protocol}'
 
     def _ensure_lock_on_current_loop(self) -> None:
-        """Recreate the lock if the event loop changed since it was created."""
-        if (
-            self._started_on_loop is not None
-            and self._started_on_loop is not asyncio.get_running_loop()
-        ):
+        """Recreate the locks if the event loop changed since they were created.
+
+        Keyed on the loop the locks belong to (not the loop bash was started
+        on), so concurrent callers on a new loop share one fresh lock instead of
+        each creating their own while a reset is in progress.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is not loop:
             self._lock = asyncio.Lock()
+            self._start_lock = asyncio.Lock()
+            self._lock_loop = loop
 
     async def run(self, command: str, timeout: float = 30.0) -> tuple[str, str, int]:
         """Run a command and return (stdout, stderr, exit_code).
@@ -818,7 +843,9 @@ class BashSession:
         self._background_pids = frozenset()
         self._started = False
         self._started_on_loop = None
-        self._lock = asyncio.Lock()
+        # Locks are not replaced here: close() runs inside run() during a reset,
+        # and a fresh lock would let a queued caller bypass the holder. A loop
+        # change is handled by _ensure_lock_on_current_loop().
 
     async def _close_keeping_background(self, proc: asyncio.subprocess.Process) -> None:
         """End bash only; its background jobs keep running with drained output."""

@@ -79,3 +79,44 @@ class TestLockSerialization:
             assert all(r[2] == 0 for r in results)
         finally:
             await session.close()
+
+
+class TestConcurrentStart:
+    """Concurrent first calls on a fresh session share a single bash start."""
+
+    async def test_gathered_runs_on_unstarted_session_all_succeed(self, tmp_path):
+        session = BashSession(cwd=tmp_path)
+        try:
+            results = await asyncio.gather(*(session.run(f"sleep 0.1; echo {n}") for n in range(4)))
+            assert [stdout for stdout, _err, _code in results] == ["0", "1", "2", "3"]
+            assert session._start_count == 1
+        finally:
+            await session.close()
+
+    async def test_gathered_starts_spawn_one_process(self, tmp_path):
+        session = BashSession(cwd=tmp_path)
+        try:
+            await asyncio.gather(*(session.start() for _ in range(3)))
+            assert session._start_count == 1
+            assert (await session.run("echo ok"))[0] == "ok"
+        finally:
+            await session.close()
+
+    async def test_shell_tools_gathered_runs_are_serialized(self, tmp_path):
+        from nooa.tools.shell_tools import ShellTools
+
+        shell = ShellTools(cwd=str(tmp_path))
+        try:
+            results = await asyncio.gather(*(shell.run(f"echo {n}") for n in range(5)))
+            assert [result.stdout.strip() for result in results] == ["0", "1", "2", "3", "4"]
+        finally:
+            await shell.close()
+
+    async def test_init_command_with_concurrent_first_calls(self, tmp_path):
+        session = BashSession(cwd=tmp_path, init_command="export NOOA_INIT=yes")
+        try:
+            results = await asyncio.gather(*(session.run("echo $NOOA_INIT") for _ in range(3)))
+            assert [stdout for stdout, _err, _code in results] == ["yes"] * 3
+            assert session._start_count == 1
+        finally:
+            await session.close()
