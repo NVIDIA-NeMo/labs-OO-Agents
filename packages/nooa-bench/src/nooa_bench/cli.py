@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 import click
-from nooa_atom.hosts.headless import DEFAULT_MAX_TURNS
+from nooa_atom.hosts.headless import DEFAULT_MAX_TURNS, UNATTENDED_TURN_METHODS
 
 
 @click.group()
@@ -52,9 +52,21 @@ def main() -> None:
     help="Stop when this many turns have ended and the agent is still waiting.",
 )
 @click.option("--timeout", type=float, default=None, help="Stop after this many seconds.")
+@click.option(
+    "--turn-method",
+    type=click.Choice(UNATTENDED_TURN_METHODS),
+    default="handle_batch",
+    show_default=True,
+    help="handle_orchestrate: the root plans, delegates and verifies instead of doing the work.",
+)
 @click.argument("task")
 def run(
-    workspace: Path, model: str | None, max_turns: int, timeout: float | None, task: str
+    workspace: Path,
+    model: str | None,
+    max_turns: int,
+    timeout: float | None,
+    turn_method: str,
+    task: str,
 ) -> None:
     """Run TASK with the Atom agent, unattended, and print the result as JSON."""
     from nooa_atom import SessionOptions, run_task
@@ -65,7 +77,9 @@ def run(
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         stream=sys.stderr,
     )
-    options = SessionOptions(workspace=workspace.resolve(), agent_spec=ATOM_AGENT, model=model)
+    options = SessionOptions(
+        workspace=workspace.resolve(), agent_spec=ATOM_AGENT, model=model, turn_method=turn_method
+    )
     # Anything else that prints goes to standard error: standard output is the result.
     with contextlib.redirect_stdout(sys.stderr):
         outcome = asyncio.run(run_task(options, task, max_turns=max_turns, timeout=timeout))
