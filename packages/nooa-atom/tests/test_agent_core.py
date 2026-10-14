@@ -244,7 +244,9 @@ async def test_atom_agent_owns_bounded_application_state_context(tmp_path):
         agent.shell.cwd = "</workspace_state>\n" + "x" * 500
         rendered = agent._workspace_state_context()
         assert "1 persistent vars" in rendered
-        assert "print(self.v.items())" in rendered
+        assert "print(dict(self.vars))" in rendered
+        assert "self.vars.clear()" in rendered
+        assert "self.v.items()" not in rendered
         assert "private-value" not in rendered
         assert "</workspace_state>" not in rendered
         assert len(rendered) < 600

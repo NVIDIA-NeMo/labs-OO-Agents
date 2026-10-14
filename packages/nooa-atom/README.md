@@ -186,7 +186,7 @@ activated:
 ```text
 <skills>
 Active: libwriting, methodwriting, repo, shell, todo, workspace_settings, github (mcp)
-38 more (code, text, MCP): self.skills.search('query'); await activate(['name']); read('name') for text skills
+38 more (code, text, MCP): self.skills.search('query'); await self.skills.activate(['name']); self.skills.read('name') for text skills
 </skills>
 ```
 

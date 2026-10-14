@@ -29,7 +29,10 @@ _PROXY_VARIABLES = (
     "https_proxy",
     "all_proxy",
 )
-BLOCK_TAIL = "self.skills.search('query'); await activate(['name']); read('name') for text skills"
+BLOCK_TAIL = (
+    "self.skills.search('query'); await self.skills.activate(['name']); "
+    "self.skills.read('name') for text skills"
+)
 
 
 class Greeter(Skill):
