@@ -559,3 +559,79 @@ def test_ordinary_terminators_in_paths_are_still_escaped(terminator):
         f"old text matched 2 times in example{escaped}.py{escaped}. No file was changed."
     )
     assert_bounded(message)
+
+
+# --- zero-match diagnostics -------------------------------------------------
+
+
+async def not_found_error(
+    shell, tmp_path, content, old, new="replacement text", filename="example.py"
+):
+    path = tmp_path / filename
+    path.write_text(content)
+    before = path.read_bytes()
+    with pytest.raises(ValueError) as error:
+        await shell.replace(filename, old, new)
+    assert path.read_bytes() == before  # Never write on zero matches.
+    return str(error.value)
+
+
+async def test_not_found_reports_resolved_path_and_first_line(shell, tmp_path):
+    message = await not_found_error(shell, tmp_path, "alpha\nbeta\n", "gamma\ndelta")
+
+    assert f"(resolved path: {tmp_path / 'example.py'})" in message
+    assert "No file was changed." in message
+    assert "First line of old text: 'gamma' (no indentation)" in message
+    assert "does not occur as a whole line" in message
+    assert "re-read it with read()" in message
+    assert "same cell" in message
+
+
+async def test_not_found_reports_tab_versus_space_indentation(shell, tmp_path):
+    content = "def f():\n\tif x:\n\t\treturn 1\n"
+    message = await not_found_error(shell, tmp_path, content, "    if x:\n        return 1")
+
+    assert "First line of old text: '    if x:' (4 space(s))" in message
+    assert "line 2 has it with 1 tab(s): '\\tif x:'" in message
+    assert "The file uses tabs; old text uses none." in message
+
+
+async def test_not_found_reports_different_space_indentation(shell, tmp_path):
+    content = "class A:\n    def f(self):\n        return 1\n"
+    message = await not_found_error(shell, tmp_path, content, "def f(self):\n    return 1")
+
+    assert "line 2 has it with 4 space(s): '    def f(self):'" in message
+
+
+async def test_not_found_when_first_line_matches_points_to_later_line(shell, tmp_path):
+    content = "if x:\n    return 1\n"
+    message = await not_found_error(shell, tmp_path, content, "if x:\n    return 2")
+
+    assert "occurs unchanged at line(s) 1; the difference is in a later line" in message
+
+
+async def test_not_found_flags_possibly_already_applied_edit(shell, tmp_path):
+    content = "value = compute_new()\n"
+    message = await not_found_error(
+        shell, tmp_path, content, "value = compute_old()", "value = compute_new()"
+    )
+
+    assert "already appears in the file (starting on line 1)" in message
+    assert "may already have been applied" in message
+
+
+async def test_not_found_ignores_short_replacement_coincidences(shell, tmp_path):
+    message = await not_found_error(shell, tmp_path, "x = 1\n", "y = 2", "x")
+
+    assert "already appears" not in message
+
+
+async def test_not_found_is_bounded_and_escaped(shell, tmp_path):
+    first = "\x1b" + "y" * 5_000
+    content = "".join(f"{' ' * n}{first}\n" for n in range(1, 50))
+    message = await not_found_error(shell, tmp_path, content, first + "\nmissing")
+
+    assert "\x1b" not in message
+    assert message.count(" has it with ") <= 3
+    assert len(message) < 2_000
+    assert all(len(line) <= 400 for line in message.splitlines())

@@ -365,6 +365,97 @@ def _replace_diagnostic_excerpt(
 
 
 @hidden
+def _not_found_replace_message(path: str, resolved: Path, content: str, old: str, new: str) -> str:
+    """Explain a zero-match path replacement; bounded, escaped, never writes.
+
+    Reports the resolved file, the first line of ``old`` and where that line
+    occurs with different leading whitespace/tabs, plus a hint that an earlier
+    edit may already have changed the file. At most three locations are listed
+    and every quoted row is limited to 160 characters.
+    """
+
+    def excerpt(text: str) -> str:
+        return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)
+
+    def line_at(position: int) -> tuple[int, int, int]:
+        start = content.rfind("\n", 0, position) + 1
+        end = content.find("\n", position)
+        end = len(content) if end == -1 else end
+        if end > start and content[end - 1] == "\r":
+            end -= 1
+        return content.count("\n", 0, start) + 1, start, end
+
+    def describe(whitespace: str) -> str:
+        if not whitespace:
+            return "no indentation"
+        tabs, spaces = whitespace.count("\t"), whitespace.count(" ")
+        parts = [f"{tabs} tab(s)"] if tabs else []
+        if spaces:
+            parts.append(f"{spaces} space(s)")
+        other = len(whitespace) - tabs - spaces
+        if other:
+            parts.append(f"{other} other whitespace char(s)")
+        return " + ".join(parts)
+
+    lines = [
+        f"old text not found in {excerpt(path)} (resolved path: {excerpt(str(resolved))}). "
+        "No file was changed.",
+        "It must match exactly once — check whitespace and indentation.",
+    ]
+    first = old.split("\n", 1)[0].rstrip("\r")
+    stripped = first.strip()
+    if stripped:
+        lines.append(
+            f"First line of old text: '{excerpt(first)}' ({describe(first[: len(first) - len(first.lstrip())])})"
+        )
+        exact: list[int] = []
+        shifted: list[str] = []
+        search = 0
+        while len(exact) + len(shifted) < 3:
+            position = content.find(stripped, search)
+            if position == -1:
+                break
+            search = position + len(stripped)
+            number, start, end = line_at(position)
+            row = content[start:end]
+            if row.strip() != stripped:
+                continue
+            indent = row[: len(row) - len(row.lstrip())]
+            wanted = first[: len(first) - len(first.lstrip())]
+            if indent == wanted and row.rstrip() == first.rstrip():
+                exact.append(number)
+            else:
+                shifted.append(f"  line {number} has it with {describe(indent)}: '{excerpt(row)}'")
+        if exact:
+            lines.append(
+                "That first line occurs unchanged at line(s) "
+                + ", ".join(str(n) for n in exact)
+                + "; the difference is in a later line of old text."
+            )
+        if shifted:
+            lines.append("That first line occurs with different leading whitespace:")
+            lines.extend(shifted)
+        if not exact and not shifted:
+            lines.append("That first line does not occur as a whole line anywhere in the file.")
+        if "\t" in old and "\t" not in content:
+            lines.append("old text contains tabs but the file has none.")
+        elif "\t" in content and "\t" not in old and shifted:
+            lines.append("The file uses tabs; old text uses none.")
+    # Short replacements (``x``, ``)``) occur by chance; only report distinctive text.
+    if len(new.strip()) >= 8 and new in content:
+        number, _, _ = line_at(content.find(new))
+        lines.append(
+            f"The replacement text already appears in the file (starting on line {number}); "
+            "this edit may already have been applied."
+        )
+    lines.append(
+        "Earlier edits (including ones in the same cell) may already have changed this file: "
+        "re-read it with read() and retry only the edits that are not yet applied."
+    )
+    return "\n".join(lines)
+
+
+@hidden
 def _ambiguous_replace_message(path: str, content: str, old: str, count: int) -> str:
     """At most five matches, 160 chars/source row, 12,000 chars/diagnostic.
 
@@ -1181,8 +1272,7 @@ class ShellTools(Skill):
             count = content.count(old_text)
             if count == 0:
                 raise ValueError(
-                    f"old text not found in {target}. "
-                    "It must match exactly once — check whitespace and indentation."
+                    _not_found_replace_message(target, resolved, content, old_text, new)
                 )
             if count > 1:
                 raise ValueError(_ambiguous_replace_message(target, content, old_text, count))
