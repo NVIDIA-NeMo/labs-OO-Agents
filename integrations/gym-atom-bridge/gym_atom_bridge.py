@@ -22,8 +22,22 @@ from nooa_atom.session.store import SessionStore, sessions_root
 from responses_api_agents.nooa_agent.task_agent import _latest_user_text
 
 
+# Root turn methods a Gym rollout may run; children always run handle_batch.
+TURN_METHODS = ("handle_batch", "handle_orchestrate")
+
+
 class GymAtomAgent(Agent):
-    """Gym construction shell; the actual task agent is Atom's native session."""
+    """Gym construction shell; the actual task agent is Atom's native session.
+
+    ``turn_method`` comes from the Gym runner's ``nooa.init_kwargs`` and picks
+    the root session's turn method.
+    """
+
+    def __init__(self, *args, turn_method: str = "handle_batch", **kwargs):
+        if turn_method not in TURN_METHODS:
+            raise ValueError(f"turn_method must be one of {TURN_METHODS}, got {turn_method!r}")
+        super().__init__(*args, **kwargs)
+        self.turn_method = turn_method
 
 
 async def invoke_atom(agent: GymAtomAgent, request: NeMoGymResponseCreateParamsNonStreaming) -> TaskResult:
@@ -56,7 +70,7 @@ async def invoke_atom(agent: GymAtomAgent, request: NeMoGymResponseCreateParamsN
         workspace=Path.cwd(),
         agent_spec=ATOM_AGENT,
         llm=agent.llm,
-        turn_method="handle_batch",
+        turn_method=agent.turn_method,
         sessions_dir=trace_dir / "sessions",
     )
     store = SessionStore(sessions_root(options.workspace, options.sessions_dir))

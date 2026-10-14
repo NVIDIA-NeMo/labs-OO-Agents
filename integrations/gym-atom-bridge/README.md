@@ -16,7 +16,11 @@ Configure the existing runner's invocation fields:
 ```yaml
 agent_class: gym_atom_bridge:GymAtomAgent
 invocation_adapter: gym_atom_bridge:invoke_atom
+init_kwargs: {}  # or {turn_method: handle_orchestrate}
 ```
+`init_kwargs.turn_method` picks the root session's turn method:
+`handle_batch` (the default) or `handle_orchestrate` (needs an Atom that has
+it). Delegated children always run `handle_batch`; other values are rejected.
 Gym supplies `nemo_gym` and `responses_api_agents.nooa_agent` in its task
 runtime archive. This package deliberately does **not** depend on full Gym.
 It declares `nooa`, `nooa-atom`, and the runner's `jsonschema` requirement;

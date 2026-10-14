@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
-from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
+from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
 from responses_api_agents.nooa_agent.sandbox_runtime import _runtime_archive
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
@@ -60,3 +60,45 @@ async def test_regular_runner_native_root_and_child(tmp_path, monkeypatch):
     assert all(call["cookies"]["session"] == "fixture" for call in calls)
     print("native result", result.return_value.model_dump(), "turns", len(result.trajectory.turns), "invocations", len(result.trajectory.invocations))
     (tmp_path / "offline-trajectory.json").write_text(result.trajectory.model_dump_json(indent=2))
+
+
+ROOT_RESULT = "return_result(Done(explanation='root', result=TaskResult(solution_description='root', evidence='root evidence', how_to_verify='offline', report='root')))"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("init_kwargs", "docstring"),
+    [
+        ({}, "Work on one task unattended"),
+        ({"turn_method": "handle_batch"}, "Work on one task unattended"),
+        ({"turn_method": "handle_orchestrate"}, "Lead one task unattended"),
+    ],
+)
+async def test_init_kwargs_choose_the_root_turn_method(tmp_path, monkeypatch, init_kwargs, docstring):
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs)
+        out = NeMoGymResponseFunctionToolCall(id="f1", call_id="c1", name="python_cell", arguments=json.dumps({"code": ROOT_RESULT}))
+        return FakeHTTPResponse(model_response(out, response_id="r1"))
+
+    invocation = NOOAInvocationConfig(
+        agent_class="gym_atom_bridge:GymAtomAgent", invocation_adapter="gym_atom_bridge:invoke_atom", init_kwargs=init_kwargs
+    )
+    validate_invocation(invocation)
+    runner = InProcessNOOARunner(
+        invocation=invocation, server_client=SimpleNamespace(post=post), model_server_name="policy", max_policy_calls=1, context_window=1048576,
+    )
+    result = await runner.run(NOOARunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="offline turn method fixture"), model_url_path="/fixture/v1/responses", model_cookies={}))
+    assert result.return_value.evidence == "root evidence"
+    assert len(calls) == 1
+    # The root's turn-method docstring is the task text the policy sees.
+    assert docstring in calls[0]["json"].model_dump_json()
+
+
+def test_unknown_turn_method_is_rejected():
+    from gym_atom_bridge import GymAtomAgent
+
+    with pytest.raises(ValueError, match="turn_method must be one of"):
+        GymAtomAgent(turn_method="handle")
