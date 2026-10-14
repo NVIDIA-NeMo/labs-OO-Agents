@@ -30,10 +30,12 @@ Typical callers should use :func:`format_error_for_llm`.  The
 formatter injection.
 """
 
+import ast
+import linecache
 import re
 import traceback
 from pathlib import Path, PurePath
-from typing import Protocol
+from typing import Any, Protocol
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
@@ -283,6 +285,168 @@ def _sync_await_hint(error: BaseException) -> str | None:
         f"Hint: the awaited value is a {match.group(1)}, not a coroutine. If it came from "
         "a call, that call is synchronous and has already run; call it without `await`."
     )
+
+
+_COROUTINE_MISUSE_RE = re.compile(
+    r"'coroutine'|\"coroutine\"|type 'coroutine'|non-iterable coroutine object"
+)
+_COROUTINE_ATTRIBUTE_RE = re.compile(r"^'coroutine' object has no attribute '(\w+)'")
+
+
+def _last_user_frame(error: BaseException) -> tuple[Any, int] | None:
+    """The deepest traceback frame in user code, with its line number."""
+    found = None
+    cursor = error.__traceback__
+    while cursor is not None:
+        if _is_user_code_frame(cursor.tb_frame.f_code.co_filename):
+            found = (cursor.tb_frame, cursor.tb_lineno)
+        cursor = cursor.tb_next
+    return found
+
+
+def _resolve_static_chain(node: ast.expr, namespace: dict[str, Any]) -> object | None:
+    """Resolve ``a.b.c`` against live objects without invoking descriptors."""
+    import inspect
+
+    names: list[str] = []
+    while isinstance(node, ast.Attribute):
+        names.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name) or node.id not in namespace:
+        return None
+    value = namespace[node.id]
+    for name in reversed(names):
+        try:
+            value = inspect.getattr_static(value, name)
+        except AttributeError:
+            return None
+    return value
+
+
+def _is_coroutine_function(value: object) -> bool:
+    import inspect
+
+    if isinstance(value, (staticmethod, classmethod)):
+        value = value.__func__
+    try:
+        return inspect.iscoroutinefunction(inspect.unwrap(value))  # type: ignore[arg-type]
+    except Exception:
+        return False
+
+
+def _unawaited_call(
+    source: str, attribute: str | None, kind: str, namespace: dict[str, Any]
+) -> ast.Call | None:
+    """Find the call on ``source`` whose un-awaited coroutine caused the error."""
+    text = source.strip()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        # A compound-statement header (``for x in f():``) needs a body to parse.
+        try:
+            tree = ast.parse(f"{text} pass")
+        except SyntaxError:
+            return None
+    awaited = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Await)}
+
+    def unawaited(node: ast.AST | None) -> ast.Call | None:
+        if isinstance(node, ast.Call) and id(node) not in awaited:
+            return node
+        return None
+
+    preferred: list[ast.Call] = []
+    calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        call = None
+        if kind == "attribute" and isinstance(node, ast.Attribute) and node.attr == attribute:
+            call = unawaited(node.value)
+        elif kind == "subscript" and isinstance(node, ast.Subscript):
+            call = unawaited(node.value)
+        elif kind == "iterable" and isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            call = unawaited(node.iter)
+        elif kind == "iterable" and isinstance(node, ast.Compare):
+            call = next(filter(None, map(unawaited, node.comparators)), None)
+        if call is not None:
+            preferred.append(call)
+        found = unawaited(node)
+        if found is not None:
+            calls.append(found)
+    for group in (preferred, calls):
+        async_calls = [
+            call
+            for call in group
+            if _is_coroutine_function(_resolve_static_chain(call.func, namespace))
+        ]
+        if len(async_calls) == 1:
+            return async_calls[0]
+        if group is preferred and len(group) == 1:
+            return group[0]
+    return None
+
+
+def _coroutine_misuse_hint(error: BaseException) -> str | None:
+    """Name the async call whose result was used without ``await``.
+
+    ``self.shell.read(p).numbered`` raises "'coroutine' object has no attribute
+    'numbered'", which says nothing about the missing ``await``. The failing
+    source line is parsed to find the un-awaited call; a coroutine held in a
+    local variable is named by its function. Best-effort: None on any miss.
+    """
+    if not isinstance(error, (AttributeError, TypeError)):
+        return None
+    try:
+        message = str(error)
+        if not _COROUTINE_MISUSE_RE.search(message):
+            return None
+        attribute_match = _COROUTINE_ATTRIBUTE_RE.match(message)
+        attribute = attribute_match.group(1) if attribute_match else None
+        if attribute is not None:
+            kind = "attribute"
+        elif "not subscriptable" in message:
+            kind = "subscript"
+        elif "iterable" in message:
+            kind = "iterable"
+        else:
+            kind = "other"
+
+        location = _last_user_frame(error)
+        call = None
+        namespace: dict[str, Any] = {}
+        source = ""
+        if location is not None:
+            frame, lineno = location
+            namespace = {**frame.f_globals, **frame.f_locals}
+            source = linecache.getline(frame.f_code.co_filename, lineno)
+            call = _unawaited_call(source, attribute, kind, namespace) if source else None
+        if call is not None:
+            text = f"{ast.unparse(call.func)}(...)"
+            fix = {
+                "attribute": f"(await {text}).{attribute}",
+                "subscript": f"(await {text})[...]",
+                "iterable": f"for item in await {text}:",
+            }.get(kind, f"result = await {text}")
+            return f"Hint: `{text}` is async: write `{fix}`."
+
+        # A coroutine stored in a variable: name the variable and its function.
+        import inspect
+
+        for name, value in namespace.items():
+            if inspect.iscoroutine(value) and re.search(rf"\b{re.escape(name)}\b", source):
+                qualname = getattr(
+                    getattr(value, "cr_code", None), "co_qualname", "an async function"
+                )
+                return (
+                    f"Hint: `{name}` holds an un-awaited coroutine from `{qualname}(...)`, "
+                    f"not its result. Await the call where `{name}` is assigned: "
+                    f"`{name} = await ...`."
+                )
+        return (
+            "Hint: this value is an un-awaited coroutine, not a result: an async call "
+            "was used without `await`. Write `(await obj.method(...)).attr` or "
+            "`result = await obj.method(...)`."
+        )
+    except BaseException:
+        return None
 
 
 def _wrapped_syntax_error(error: Exception) -> SyntaxError | None:
@@ -619,7 +783,7 @@ class IPythonErrorFormatter:
                 formatted = (
                     f"{formatted}\n\nThe callable you called has this signature:\n{agentdoc}"
                 )
-            await_hint = _sync_await_hint(error)
+            await_hint = _sync_await_hint(error) or _coroutine_misuse_hint(error)
             if await_hint:
                 formatted = f"{formatted}\n\n{await_hint}"
 

@@ -291,6 +291,93 @@ class TestSyncAwaitHint:
         assert "without `await`" not in result
 
 
+class _AsyncShell:
+    async def read(self, path):
+        return path
+
+    async def run(self, command):
+        return [command]
+
+    def sync_read(self, path):
+        return path
+
+
+class _AgentLike:
+    def __init__(self):
+        self.shell = _AsyncShell()
+
+
+def _run_cell_and_format(source: str, **namespace) -> str:
+    """Run *source* as a 'Cell In[N]' cell (async wrapper) and format its error."""
+    import asyncio
+    import linecache
+    import textwrap
+    import warnings
+
+    filename = "Cell In[91]"
+    body = "async def __repl_wrapper__():\n" + textwrap.indent(source, "    ")
+    linecache.cache[filename] = (len(body), None, body.splitlines(True), filename)
+    scope = dict(namespace)
+    exec(compile(body, filename, "exec"), scope)  # noqa: S102
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # the never-awaited warning
+        try:
+            asyncio.run(scope["__repl_wrapper__"]())
+        except Exception as error:  # noqa: BLE001
+            return format_error_for_llm(error, line_offset=1)
+    raise AssertionError("expected the cell to fail")
+
+
+class TestCoroutineMisuseHint:
+    """Using an un-awaited coroutine names the async call and the fix (#447)."""
+
+    def test_attribute_on_unawaited_call_names_the_call(self):
+        result = _run_cell_and_format(
+            'print(self.shell.read("f.py").numbered)\n', self=_AgentLike()
+        )
+        assert "'coroutine' object has no attribute 'numbered'" in result
+        assert (
+            "Hint: `self.shell.read(...)` is async: write `(await self.shell.read(...)).numbered`."
+            in result
+        )
+
+    def test_subscript_on_unawaited_call(self):
+        result = _run_cell_and_format('x = self.shell.run("ls")[0]\n', self=_AgentLike())
+        assert "'coroutine' object is not subscriptable" in result
+        assert "`self.shell.run(...)` is async: write `(await self.shell.run(...))[...]`" in result
+
+    def test_iteration_over_unawaited_call(self):
+        result = _run_cell_and_format(
+            'for line in self.shell.run("ls"):\n    print(line)\n', self=_AgentLike()
+        )
+        assert "'coroutine' object is not iterable" in result
+        assert "write `for item in await self.shell.run(...):`" in result
+
+    def test_picks_the_async_call_among_several(self):
+        result = _run_cell_and_format(
+            'n = len(self.shell.sync_read("a")) + self.shell.read("b").count\n',
+            self=_AgentLike(),
+        )
+        assert "`self.shell.read(...)` is async" in result
+        assert "sync_read" not in result.split("Hint:", 1)[1]
+
+    def test_coroutine_in_a_variable_names_its_function(self):
+        result = _run_cell_and_format(
+            'm = self.shell.read("f.py")\nprint(m.numbered)\n', self=_AgentLike()
+        )
+        assert "`m` holds an un-awaited coroutine from `_AsyncShell.read(...)`" in result
+        assert "`m = await ...`" in result
+
+    def test_unrelated_attribute_errors_have_no_hint(self):
+        result = _run_cell_and_format("x = (1).nope\n")
+        assert "Hint:" not in result
+
+    def test_hint_never_breaks_formatting_without_traceback(self):
+        result = format_error_for_llm(AttributeError("'coroutine' object has no attribute 'text'"))
+        assert "'coroutine' object has no attribute 'text'" in result
+        assert "un-awaited coroutine" in result
+
+
 class TestFormatRuntimeError:
     """Tests for runtime error formatting."""
 
