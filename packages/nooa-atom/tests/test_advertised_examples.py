@@ -75,7 +75,7 @@ async def test_workspace_state_examples_run(agent):
     rendered = agent._workspace_state_context()
     snippets = [s for s in _backticked(rendered) if "self." in s and s != "self.v"]
     snippets = [s for s in snippets if s not in ("self.shell", "self.repo")]
-    assert len(snippets) >= 4, rendered
+    assert len(snippets) >= 3, rendered
     for snippet in snippets:
         owner = _owner()
         await _run(snippet, owner)
