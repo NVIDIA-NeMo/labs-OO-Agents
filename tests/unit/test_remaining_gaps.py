@@ -960,7 +960,7 @@ class TestMediaCapture:
         from nooa.media import Image
 
         return Image(
-            data_url="data:image/png;base64,abc123",
+            data_url=f"data:{media_type};base64,abc123",
             media_type=media_type,
             vendor_metadata=vendor_metadata,
         )
@@ -968,7 +968,7 @@ class TestMediaCapture:
     def _make_audio(self, media_type="audio/wav"):
         from nooa.media import Audio
 
-        return Audio(data_url="data:audio/wav;base64,abc123", media_type=media_type)
+        return Audio(data_url=f"data:{media_type};base64,abc123", media_type=media_type)
 
     def _make_file(self):
         from nooa.media import File
@@ -991,13 +991,13 @@ class TestMediaCapture:
         block = media_to_content_block(img)
         assert block["image_url"]["format"] == "image/jpeg"
 
-    def test_image_content_block_skips_octet_stream_format(self):
-        """media_type=application/octet-stream should not add 'format' key."""
-        from nooa.runtime.media_capture import media_to_content_block
+    def test_image_content_block_rejects_octet_stream_metadata(self):
+        """Known non-image metadata cannot be shown as an image."""
+        from nooa.runtime.media_capture import MediaPermissionError, media_to_content_block
 
         img = self._make_image(media_type="application/octet-stream")
-        block = media_to_content_block(img)
-        assert "format" not in block["image_url"]
+        with pytest.raises(MediaPermissionError, match="known MIME metadata"):
+            media_to_content_block(img)
 
     def test_image_content_block_vendor_metadata_merged(self):
         """vendor_metadata is merged into image_url dict."""

@@ -484,7 +484,7 @@ class TestMethodLevelTruncationConfig:
 
         class TestAgent(
             Agent,
-            llm=_TEST_LLM,
+            llm=FakeLLMClient(media_inputs=["image"]),
             truncation=TruncationConfig(
                 media_capture=MediaCaptureConfig(max_attachments_per_execution=2)
             ),
@@ -532,7 +532,7 @@ for i in range(4):
 
         class TestAgent(
             Agent,
-            llm=_TEST_LLM,
+            llm=FakeLLMClient(media_inputs=["image"]),
             truncation=TruncationConfig(
                 media_capture=MediaCaptureConfig(max_attachments_per_execution=4)
             ),

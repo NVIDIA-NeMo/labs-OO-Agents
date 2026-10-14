@@ -500,6 +500,8 @@ def _run_one(
             request["code"],
             namespace,
             execution_count=int(request.get("execution_count", 1)),
+            media_inputs=request.get("media_inputs", ()),
+            max_attachments=int(request.get("max_attachments", 100)),
         )
     )
     return _serialize(

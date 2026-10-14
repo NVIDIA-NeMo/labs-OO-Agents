@@ -1428,8 +1428,18 @@ class ActorRuntime:
             # holds), while the middleware pipeline, before/after hooks and events
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
+            active_client = _current_llm_var.get()
+            if active_client is None:
+                active_client = getattr(self.agent, "_llm", None)
+            media_inputs = getattr(active_client, "media_inputs", ()) or ()
+            max_attachments = self.truncation_config.media_capture.max_attachments_per_execution
             if sandbox_executor is not None:
-                result = await sandbox_executor.run_cell(code, execution_count=execution_count)
+                result = await sandbox_executor.run_cell(
+                    code,
+                    execution_count=execution_count,
+                    media_inputs=media_inputs,
+                    max_attachments=max_attachments,
+                )
                 return cast(ExecutionResult, result)
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
@@ -1456,9 +1466,7 @@ class ActorRuntime:
             # Block stdin reads for this async task (prevents hangs from input(), etc.)
             stdin_token = _block_stdin_var.set(True)
             # Media capture buffer for show() calls; scoped per cell by design.
-            media_buffer = _MediaBuffer(
-                max_attachments=truncation_config.media_capture.max_attachments_per_execution
-            )
+            media_buffer = _MediaBuffer(max_attachments=max_attachments, media_inputs=media_inputs)
             media_token = _media_buffer_var.set(media_buffer)
 
             # Install stream wrappers around the CURRENT sys.stdout/sys.stderr/sys.stdin

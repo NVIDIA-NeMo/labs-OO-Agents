@@ -160,7 +160,17 @@ class InspectInputsPrefill:
             code_lines.append(f'print(f"\\n{param} ({{type({param}).__name__}}):")')
             # Auto-show Media parameters (images, audio, files) so the LLM perceives them
             if _is_media(call.kwargs.get(param)):
-                code_lines.append(f"show({param})")
+                # Recover only automatic attachment policy denial, not arbitrary
+                # errors or explicit user show() calls.
+                code_lines.extend(
+                    [
+                        "from nooa.runtime.media_capture import MediaPermissionError as _PrefillMediaPermissionError",
+                        "try:",
+                        f"    show({param})",
+                        "except _PrefillMediaPermissionError as _prefill_media_error:",
+                        '    print(f"[Attachment not inspected: {_prefill_media_error}]")',
+                    ]
+                )
             else:
                 # Honor per-parameter spec() overrides from Annotated metadata.
                 p_spec = call.param_specs.get(param, {})

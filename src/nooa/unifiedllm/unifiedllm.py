@@ -34,6 +34,12 @@ from nooa.unifiedllm.cache_policy import (
     reject_legacy_cache_config,
     wrap_responses_text,
 )
+from nooa.unifiedllm.media_inputs import (
+    MediaInput,
+    attachment_kind,
+    filter_media_messages,
+    validate_media_inputs,
+)
 
 from . import replay_state, response_parts
 from .admission import _current_admission_controller
@@ -1250,6 +1256,7 @@ class UnifiedLLM(ABC):
         reasoning_levels: dict[str, dict[str, Any]] | None = None,
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
         reject_legacy_cache_config(config)
@@ -1261,6 +1268,7 @@ class UnifiedLLM(ABC):
         if reasoning_level is not None:
             self._reasoning_config.settings(reasoning_level)
         self.reasoning_level = reasoning_level
+        self.media_inputs = validate_media_inputs(media_inputs)
         self.model = model
         self.config = config
         self._registry_config = None
@@ -1284,6 +1292,19 @@ class UnifiedLLM(ABC):
         return apply_reasoning_level(
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
         )
+
+    def _request_media_inputs(self, call_config: dict[str, Any]) -> tuple[MediaInput, ...]:
+        """A replacement route never inherits permissions from this connection."""
+        if self._effective_model(call_config) != self.model or any(
+            call_config.get(key) != self.config.get(key)
+            for key in ("api_base", "base_url", "custom_llm_provider", "client")
+        ):
+            return ()
+        return validate_media_inputs(self.media_inputs)
+
+    def _prepare_media_messages(self, messages, call_config):
+        enabled = self._request_media_inputs(call_config)
+        return filter_media_messages(messages, enabled)
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -1345,6 +1366,11 @@ class UnifiedLLM(ABC):
     def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
         """Keep provider payloads and routing on their validated top-level paths."""
         reject_legacy_cache_config(call_config)
+        if "media_inputs" in call_config or (
+            isinstance(call_config.get("extra_body"), Mapping)
+            and "media_inputs" in call_config["extra_body"]
+        ):
+            raise ValueError("media_inputs is a client setting, not a provider request parameter")
         if name in call_config:
             raise ValueError(
                 f"{name!r} is managed by UnifiedLLM; pass conversation data through "
@@ -1917,6 +1943,8 @@ class CompletionClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "anthropic"] | None = "auto",
+        *,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
         """
@@ -1945,13 +1973,15 @@ class CompletionClient(UnifiedLLM):
                 other routes use provider-default caching. ``None`` disables
                 NOOA markers. Without a boundary, only leading instructions
                 are marked.
+            media_inputs: Explicit allowed inputs: image, audio, video, pdf.
+                Absent/empty is text-only. PDF means application/pdf only.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
             raise ValueError(
                 "CompletionClient cache_breakpoint must be 'auto', 'anthropic', or None"
             )
-        super().__init__(model, **config)
+        super().__init__(model, media_inputs=media_inputs, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
@@ -2008,7 +2038,10 @@ class CompletionClient(UnifiedLLM):
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
         prepared_messages = replay_state.prepare_chat_messages(
-            messages, state_scope, anthropic_cache_marking=cache_mapping == "anthropic"
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            anthropic_cache_marking=cache_mapping == "anthropic",
+            media_inputs=self._request_media_inputs(call_config),
         )
 
         # Choose the stable-prefix breakpoint on projected provider messages.
@@ -2119,7 +2152,10 @@ class CompletionClient(UnifiedLLM):
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
         prepared_messages = replay_state.prepare_chat_messages(
-            messages, state_scope, anthropic_cache_marking=cache_mapping == "anthropic"
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            anthropic_cache_marking=cache_mapping == "anthropic",
+            media_inputs=self._request_media_inputs(call_config),
         )
 
         # Choose the stable-prefix breakpoint on projected provider messages.
@@ -2320,6 +2356,8 @@ class ResponsesClient(UnifiedLLM):
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "openai"] | None = "auto",
+        *,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
         """
@@ -2349,11 +2387,13 @@ class ResponsesClient(UnifiedLLM):
                 Anthropic cache mapping is supported by CompletionClient only.
                 With ``"openai"`` and no eligible stable block, warns and keeps
                 explicit mode without a breakpoint, avoiding all cache writes.
+            media_inputs: Explicit allowed inputs: image, audio, video, pdf.
+                Absent/empty is text-only. PDF means application/pdf only.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
             raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
-        super().__init__(model, **config)
+        super().__init__(model, media_inputs=media_inputs, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
@@ -2417,7 +2457,11 @@ class ResponsesClient(UnifiedLLM):
             call_config, state_scope
         )
         input_messages, instructions, openai_explicit = self._prepare_input(
-            messages, state_scope, effective_model, native_encrypted_reasoning
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            effective_model,
+            native_encrypted_reasoning,
+            media_inputs=self._request_media_inputs(call_config),
         )
 
         api_params = {
@@ -2500,7 +2544,11 @@ class ResponsesClient(UnifiedLLM):
             call_config, state_scope
         )
         input_messages, instructions, openai_explicit = self._prepare_input(
-            messages, state_scope, effective_model, native_encrypted_reasoning
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            effective_model,
+            native_encrypted_reasoning,
+            media_inputs=self._request_media_inputs(call_config),
         )
 
         api_params = {
@@ -2567,10 +2615,12 @@ class ResponsesClient(UnifiedLLM):
             raw_response, state_scope, usage, output_model, native_encrypted_reasoning
         )
 
-    def _prepare_input(self, messages, state_scope, model, native_encrypted_reasoning=False):
+    def _prepare_input(
+        self, messages, state_scope, model, native_encrypted_reasoning=False, *, media_inputs=None
+    ):
         """Choose cache markers only after canonical turn projection."""
         input_messages, instructions = self._transform_messages(
-            messages, state_scope, native_encrypted_reasoning
+            messages, state_scope, native_encrypted_reasoning, media_inputs=media_inputs
         )
         return self._prepare_cache_boundary(
             input_messages, responses=True, model=model, instructions=instructions
@@ -2597,11 +2647,52 @@ class ResponsesClient(UnifiedLLM):
             )
         return response
 
+    @staticmethod
+    def _transform_content_blocks(blocks, text_kind="input_text"):
+        """Project documented public slots, preserving request-owned metadata."""
+        result = copy.deepcopy(blocks)
+        for block in result:
+            if block.get("type") == "text":
+                block["type"] = text_kind
+            elif block.get("type") == "image_url":
+                image = block["image_url"]
+                if isinstance(image, dict):
+                    if not image.get("url"):
+                        raise ValueError("image_url dict has no 'url'")
+                    block["image_url"] = image["url"]
+                    if image.get("detail"):
+                        block["detail"] = image["detail"]
+                block["type"] = "input_image"
+            elif block.get("type") == "file":
+                file = block.get("file")
+                if not isinstance(file, Mapping):
+                    raise ValueError(
+                        "Responses file content requires a nested 'file' mapping; "
+                        "use {'type': 'file', 'file': {...}} or a native "
+                        "{'type': 'input_file', ...} block."
+                    )
+                if not any(file.get(key) for key in ("file_data", "file_id", "file_url")):
+                    raise ValueError(
+                        "Responses file mapping requires file_data, file_id or file_url."
+                    )
+                block.pop("file")
+                block.update(
+                    {
+                        key: value
+                        for key, value in file.items()
+                        if key in {"detail", "file_data", "file_id", "file_url", "filename"}
+                    }
+                )
+                block["type"] = "input_file"
+        return result
+
     def _transform_messages(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         state_scope: str | None = None,
         native_encrypted_reasoning: bool = False,
+        *,
+        media_inputs=None,
     ) -> tuple[list[dict[str, Any] | CacheBoundary], str | None]:
         """Expand turns at dispatch; only leading system messages become instructions."""
         instructions: list[str] = []
@@ -2618,6 +2709,7 @@ class ResponsesClient(UnifiedLLM):
                         original,
                         state_scope,
                         native_encrypted_reasoning=native_encrypted_reasoning,
+                        media_inputs=media_inputs,
                     )
                 )
                 continue
@@ -2655,13 +2747,19 @@ class ResponsesClient(UnifiedLLM):
                         (block["cache_control"] for block in content if "cache_control" in block),
                         cache_control,
                     )
-                    content = "".join(block.get("text", "") for block in content)
+                    if any(attachment_kind(block) for block in content):
+                        output = self._transform_content_blocks(content)
+                    else:
+                        output = [
+                            wrap_responses_text("".join(block.get("text", "") for block in content))
+                        ]
+                else:
+                    output = [wrap_responses_text(content)]
                 # Same stability rationale as the input_text wrapping below --
                 # a plain string here (including "") would render differently
                 # than its cache-marked list form once this tool result
                 # becomes history; apply_cache_policy's marker wraps a string
                 # unconditionally, so this must too.
-                output = [wrap_responses_text(content)]
                 item = {
                     "type": "function_call_output",
                     "call_id": msg["tool_call_id"],
@@ -2730,21 +2828,12 @@ class ResponsesClient(UnifiedLLM):
                     # wraps a string unconditionally, so this must too.
                     kind = "output_text" if item.get("role") == "assistant" else "input_text"
                     item["content"] = [wrap_responses_text(item["content"], kind)]
-                if isinstance(item.get("content"), list):
-                    for block in item["content"]:
-                        if block.get("type") == "text":
-                            block["type"] = (
-                                "output_text" if item.get("role") == "assistant" else "input_text"
-                            )
-                        elif block.get("type") == "image_url":
-                            image = block["image_url"]
-                            if isinstance(image, dict):
-                                if not image.get("url"):
-                                    raise ValueError("image_url dict has no 'url'")
-                                block["image_url"] = image["url"]
-                                if image.get("detail"):
-                                    block["detail"] = image["detail"]
-                            block["type"] = "input_image"
+                for slot in ("content", "output"):
+                    if isinstance(item.get(slot), list):
+                        item[slot] = self._transform_content_blocks(
+                            item[slot],
+                            "output_text" if item.get("role") == "assistant" else "input_text",
+                        )
                 if item.get("type") == "function_call_output" and isinstance(
                     item.get("output"), str
                 ):

@@ -42,6 +42,7 @@ from nooa.runtime.sandbox.serialization import (
     is_picklable,
 )
 from nooa.runtime.sandbox.worker import worker_main
+from nooa.unifiedllm.media_inputs import MediaInputs, validate_media_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +249,14 @@ class SandboxedExecutor:
         return self._req_id
 
     # --- running a cell ----------------------------------------------------
-    async def run_cell(self, code: str, *, execution_count: int = 1) -> ExecutionResult:
+    async def run_cell(
+        self,
+        code: str,
+        *,
+        execution_count: int = 1,
+        media_inputs: MediaInputs = (),
+        max_attachments: int = 100,
+    ) -> ExecutionResult:
         """Execute one cell in the worker and return an ``ExecutionResult``.
 
         Output is buffered in the worker and transferred with the final result.
@@ -272,7 +280,14 @@ class SandboxedExecutor:
             req_id = self._next_id()
             try:
                 self._conn.send(
-                    {"op": "run", "id": req_id, "code": code, "execution_count": execution_count}
+                    {
+                        "op": "run",
+                        "id": req_id,
+                        "code": code,
+                        "execution_count": execution_count,
+                        "media_inputs": validate_media_inputs(media_inputs),
+                        "max_attachments": max_attachments,
+                    }
                 )
             except (BrokenPipeError, OSError) as exc:
                 # The worker died between _ensure_worker and this send (e.g. an

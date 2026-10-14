@@ -13,6 +13,7 @@ from nooa._immutable_json import json_containers
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
 from nooa.unifiedllm.cache_policy import wrap_anthropic_text
 
+from .media_inputs import guard_native_media
 from .replay_state import (
     ReasoningReplayError,
     _field,
@@ -182,7 +183,11 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
 
 
 def project_chat_turn(
-    turn: LLMResponse, scope: str | None, *, anthropic_cache_marking: bool = False
+    turn: LLMResponse,
+    scope: str | None,
+    *,
+    anthropic_cache_marking: bool = False,
+    media_inputs=None,
 ) -> tuple[dict, dict[str, str]]:
     """Build request-owned Chat fields from an immutable assistant turn.
 
@@ -208,6 +213,8 @@ def project_chat_turn(
     call_ids: dict[str, str] = {}
     for part in turn.parts:
         native = json_containers(part.native) if compatible and part.native else {}
+        if isinstance(part, AssistantText) and native:
+            guard_native_media(native, media_inputs)
         if isinstance(part, ToolCall):
             call_id = part.id
             if signature := native.pop("inline_thought_signature", None):

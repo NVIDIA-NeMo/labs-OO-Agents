@@ -25,6 +25,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from nooa.events import _NO_RETURN, ExecutionResult, ExecutionSignal
+from nooa.unifiedllm.media_inputs import MediaInputs, validate_media_inputs
 
 
 class _HookedBuffer(io.StringIO):
@@ -77,19 +78,25 @@ async def run_cell_source(
     execution_count: int = 1,
     stdout_hook: Callable[[str], None] | None = None,
     stderr_hook: Callable[[str], None] | None = None,
+    media_inputs: MediaInputs = (),
+    max_attachments: int = 100,
 ) -> ExecutionResult:
     """Execute ``code`` in ``namespace`` with REPL semantics; never raises.
 
     Returns an :class:`ExecutionResult`. ``ExecutionSignal`` (``return_result``)
     is captured into ``result.signal``; every other exception into
     ``result.error``. ``namespace`` is mutated in place so definitions persist
-    across cells (the worker's long-lived REPL state).
+    across cells (the worker's long-lived REPL state). Media permission is a
+    per-cell declaration, defaulting to text-only; the parent sends the current
+    client's declaration and configured attachment cap, never a live client.
     """
     from nooa.runtime.media_capture import _media_buffer_var, _MediaBuffer
 
     stdout_buf = _HookedBuffer(stdout_hook)
     stderr_buf = _HookedBuffer(stderr_hook)
-    media_buffer = _MediaBuffer(max_attachments=100)
+    media_buffer = _MediaBuffer(
+        max_attachments=max_attachments, media_inputs=validate_media_inputs(media_inputs)
+    )
     media_token = _media_buffer_var.set(media_buffer)
 
     returned_value: Any = _NO_RETURN

@@ -29,6 +29,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
@@ -66,6 +67,23 @@ logger = logging.getLogger(__name__)
 _enabled: bool = False
 _provider: TracerProvider | None = None
 _hooks: OpenInferenceHooks | None = None  # retained so we can re-register per-Task
+_announce_trace_target: ContextVar[bool] = ContextVar("announce_trace_target", default=True)
+
+
+@contextlib.contextmanager
+def suppress_tracing_announcements():
+    """Hide setup target banners in this context without changing tracing.
+
+    Nested scopes and child asyncio tasks inherit suppression. The previous
+    announcement policy is restored on exit, including exceptional exits.
+    Nonfatal endpoint-unreachable startup notices are hidden too. Setup failures,
+    other warnings and trace export are unaffected.
+    """
+    token = _announce_trace_target.set(False)
+    try:
+        yield
+    finally:
+        _announce_trace_target.reset(token)
 
 
 class _IsolatedIdGenerator(RandomIdGenerator):
@@ -502,7 +520,7 @@ def _default_exporters() -> list[SpanExporter] | None:
 
     _probe_failed = True
 
-    if explicit_endpoint is not None:
+    if explicit_endpoint is not None and _announce_trace_target.get():
         print(
             f"OTLP_ENDPOINT ({endpoint}) is not reachable — tracing disabled.",
             file=sys.stderr,
@@ -539,7 +557,9 @@ def _describe_exporter(exp: SpanExporter) -> str:
 
 
 def _print_trace_target(exporters: list[SpanExporter], experiment: str | None) -> None:
-    """Print where traces are being sent."""
+    """Print where traces are being sent, unless this context hides announcements."""
+    if not _announce_trace_target.get():
+        return
     session_id = get_session()
     descriptions: list[str] = []
     has_file_exporter = False
@@ -596,6 +616,7 @@ __all__ = [
     "OtlpJsonFileExporter",
     "OtlpJsonHttpExporter",
     "enable_tracing",
+    "suppress_tracing_announcements",
     "end_active_spans",
     "exporters",
     "probe_otlp_endpoint",

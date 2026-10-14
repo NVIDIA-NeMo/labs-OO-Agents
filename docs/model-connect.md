@@ -13,6 +13,31 @@ Start the guided setup with no arguments:
 uv run nooa connect
 ```
 
+### Guided interaction
+
+On a terminal, finite decisions are visible labelled menus: provider, API format,
+model-settings actions, default reasoning level, reply-limit presets, and media
+setup/review. Use arrow keys and Enter; a prompt without a default starts at
+**Choose an option…** and requires a selection. Media declarations offer all
+16 combinations of the four supported formats, including **Text only**.
+
+Model IDs from a server are explicitly **search advertised model IDs** inputs
+with Tab completion. Endpoints, key-variable names, masked keys, aliases,
+numeric limits and custom reasoning-level lists remain editable. Reply-limit
+**Custom…** opens a separate numeric input. Yes/no confirmations still ask
+explicitly before checks, replacement, entry writes and optional key storage.
+Piped scripts retain their existing token answers and defaults; media mode/review
+also accept the existing numbered answers. `--yes` bypasses menus, and
+`--no-probe` keeps manual setup unverified without generation calls.
+
+Check rows use one vocabulary: **Passed**, **Not available**, **Skipped**, or
+**Failed**, followed by elapsed time when measured. Explanations appear below
+instead of extending the header. Not-available attachment access and optional
+cache misses are distinct from failed requests; retained manual permissions are
+still shown separately. Reasoning cost/opaque-state sizes remain available with
+`--show-diagnostics`, not in the normal installer flow. This is a presentation
+change, not a change to qualification criteria or permission/save policy.
+
 ## Independent stages for agents
 
 Endpoint `/models` limits take priority over public catalogue limits, with sources
@@ -56,7 +81,7 @@ available when `--stage` is absent.
 | `catalogue` | Read public model metadata; optional MODEL filters candidates. |
 | `interfaces` | Check API formats and report which worked. |
 | `plan` | Build an unsaved configuration and proposed requests; no network. |
-| `routing` | Test one basic request with the chosen interface. |
+| `routing` | Run one configured typed NOOA text baseline with the chosen interface. |
 | `tools` | Check whether the model produces the requested tool call; never execute it. |
 | `reasoning` | Check declared levels supplied by `--levels-file`. |
 | `session` | Check cache reuse and reasoning replay across turns. |
@@ -116,8 +141,10 @@ prefix is a warning, not a broken connection.
 The diagnostic prompt includes safe route/credential-variable names and outcomes,
 not key values, raw provider error bodies, or returned reasoning. It asks an
 agent to investigate, repair, and rerun the affected stage within configured
-limits. Wizard failures print the same library-generated handoff; neither
-frontend launches another agent automatically.
+limits. Wizard failures show a short explanation and point to
+`--show-diagnostics`, which prints the full library-generated handoff. Stage JSON still includes the handoff
+without an extra flag. Neither frontend launches another agent automatically.
+Rerunning checks for diagnostics can incur charges; the flag only changes display.
 
 `data` contains the full library result, including the synthetic prompts in the
 probe plan/provenance; `checks` omits those request bodies. Neither contains
@@ -147,8 +174,9 @@ handoff = connect.diagnostic_prompt("reasoning", result.entry, checks)
 `check_stage` runs selected checks afresh and leaves the input plan unchanged.
 Other public stages are `discover`, `catalogue`, `match_models`, `plan`,
 `check_interfaces`, and `write`. Use `run_steps` for progress events on an approved
-plan. The library never prints, prompts, reads stdin, or launches an agent;
-frontends decide presentation and persistence.
+plan. The library never prints, prompts, reads stdin, or launches a diagnostic/repair
+agent. The configured text baseline uses a transient NOOA agent with a typed
+Predict method (see below); frontends decide presentation and persistence.
 
 ## Interactive setup
 
@@ -287,15 +315,17 @@ context between turns without requesting stored responses. This is a compatibili
 request, not a guarantee of reasoning availability; current native OpenAI APIs may
 return that state automatically. See [OpenAI's reasoning guide](https://developers.openai.com/api/docs/guides/reasoning).
 
-A 400/422 explicitly rejecting `include` or `encrypted_content` disables the option
-and records a sanitized rejection. Authentication, rate limits, server failures,
-and invalid input-history errors do not change it. The saved `include: []` opt-out
-omits the field on the wire, including on native endpoints. A routing rejection
-can lead to one new capped check without the option, charged to the original
-budget; no unchanged request is retried. A session rejection stops the conversation
-check and leaves retention unconfirmed. Reconnecting to the same route preserves
-the recorded rejection; changing routes tests the default again. Cache settings
-are still tested without overrides.
+A 400/422 explicitly rejecting `include` or `encrypted_content` records a
+sanitized request rejection. A configured typed baseline is one-shot: it does
+not disable the option or send another candidate automatically, and wizard
+saving is blocked. To deliberately opt out, configure `include: []` and run a
+fresh approved baseline (or choose manual unverified setup). The saved opt-out
+omits the field on the wire, including on native endpoints. A session rejection
+can disable the option, stops the conversation check and leaves retention
+unconfirmed; it does not rerun the session. Authentication, rate limits, server
+failures and invalid input-history errors do not change the option. Reconnecting
+to the same route preserves a recorded opt-out; changing routes tests the default
+again. Cache settings are still tested without overrides.
 `--no-probe` disables these calls too; `--yes` explicitly approves the selected
 checks as well as saving. Library frontends opt in with `plan(..., session_checks=True)`.
 
@@ -318,6 +348,17 @@ Home/End, Backspace and Delete edit the current answer. Existing alias names in
 the target file show a warning while typing; replacement still requires confirmation.
 The terminal groups setup into four steps, with a provider menu and F1 help.
 Piped input uses plain line prompts.
+
+The initial approval warns: “Checks may incur charges. The token budget is an
+estimate, not a spending cap.” It shows the token budget and initial per-call
+limits. After approval, normal output does not repeat charge warnings or price
+estimates; it shows progress, saved reply limits and the remaining token budget.
+Budget exhaustion and skipped checks remain visible.
+Normal progress uses concise labels such as `Connection: Passed`. A failed
+answer, incomplete reply, request error or skipped check is still shown; detailed
+request evidence is available in stage JSON or with `--show-diagnostics`.
+Manual setup is labeled `Connection: Unverified (manual setup; no model checks)`
+before saving. This does not change any check criteria or retry/budget rules.
 
 Flags can prefill answers or support scripted setup:
 
@@ -358,7 +399,8 @@ explicit choice or `--no-catalogue` to leave it unknown.
 Use `--no-probe` to save without model calls, or `--probe minimal` for routing
 only (up to three interface attempts unless `--api-style` is supplied).
 The default plan also checks tools and each proposed reasoning level. The
-selected interface's successful routing request is reused, not sent twice.
+selected interface's discovery acceptance is not a configured baseline and cannot
+be reused as one. A fresh configured typed baseline is required before wizard saving.
 Initial interface discovery uses 200 output tokens and a 30-second deadline.
 Configured checks use the saved cap and a 120-second deadline;
 conversation-check calls also have 120 seconds per attempt. Only truncated
@@ -368,8 +410,14 @@ output cap plus 512 estimated input tokens. An explicit `--budget-tokens` limits
 the entire setup, including interface detection; it is never increased. Connect
 warns before the remaining checks if that limit is too small. Larger reported
 usage increases the charge. The next request is skipped if the budget would be
-exceeded, and a warning lists checks left undone before saving. These are
-estimates, not billing caps: a gateway may ignore an output limit. There are no
+exceeded, and a warning lists checks left undone. If the configured text baseline
+was skipped (including budget exhaustion), failed or incomplete, the wizard stops
+before any save/key prompt or write, even with `--yes`. Optional tools, reasoning
+or media checks needing attention do not by themselves block saving after a
+valid baseline. To deliberately save a manual **unverified** configuration, rerun
+with `--no-probe` or `--probe none`; supply an explicit model and `--no-catalogue`
+to avoid discovery/metadata requests too. See [manual setup](model-configuration.md).
+These are estimates, not billing caps: a gateway may ignore an output limit. There are no
 context-window or maximum-output capacity probes.
 
 When metadata has no levels, they remain unknown. You can supply candidates:
@@ -503,11 +551,15 @@ api_key_env, ...)`. It yields `ProbeUpdate` events named for each interface and
 then an `InterfaceResult` containing `accepted`, the per-interface `results`,
 and `tokens_charged_to_budget`. Offer only `accepted`, pass the chosen result's
 entry to `plan(existing_entry=...)`, and deduct that charge from the remaining
-budget before running additional probes. This reuses the exact accepted routing
-request; level and tool requests still need their own checks.
-There are no callbacks, terminal imports, prompts, agent instances or tool
-execution. Discovery uses HTTPX; generation checks lazily load UnifiedLLM and
-the current runtime (LiteLLM by default). No temporary registry entries or global
+budget before running additional probes. Discovery tests plain interface
+acceptance, not the typed baseline. Only identical, complete configured typed
+baseline evidence with the actual settings observed can be reused. Level and
+tool requests still need their own checks.
+There are no callbacks, terminal imports, prompts or execution of returned tools.
+The text baseline does instantiate a transient NOOA Predict agent; it does not
+launch a diagnostic/repair agent or an iterative CodeAct session. Discovery uses
+HTTPX; generation checks lazily load UnifiedLLM and the current runtime
+(LiteLLM by default). No temporary registry entries or global
 registry changes are needed. Each checked client is closed even if its call fails.
 The TUI keeps model selection, confirmation, secret persistence and switching;
 it can call these async functions directly without invoking Click or a subprocess.
@@ -515,10 +567,42 @@ Its existing Ollama-specific adapter remains separate from these three API style
 
 ## What the observations mean
 
+### Configured typed text baseline
+
+Configured `routing`, `media` and `all` checks use an actual NOOA generation
+method `compute() -> int` with `PredictStrategy`, constructed from the unsaved
+entry via the runtime client factory. It computes `17 * 19`: success requires
+validated integer **323**, an observed final answer (reasoning alone is not
+sufficient), complete `stop` finish, accepted outcome, and the configured reply
+cap/selected settings observed on the actual request. Missing or legacy evidence
+and plain discovery acceptance cannot establish this baseline.
+
+This is the runtime's native **scalar JSON value contract**: the integer return
+is represented by the object-root structured output schema `{"value": 323}`.
+Bare `323`, prose, wrong integers, invalid types, and truncated output do not
+pass. Endpoints must support the runtime's structured output request in addition
+to accepting plain text; for Anthropic the adapter may use a schema tool for that
+contract. This is distinct from the tools capability probe; returned capability
+probe tools are never executed. The independent `tools` stage remains tools-only
+and does not require or run a typed baseline.
+
+The baseline is bounded to one outbound generation request: no Predict repair
+retry, automatic alternate include candidate, reduced cap, or context-window
+recovery request. It shares the approved budget. Transient answer/reasoning/raw
+response values are not retained in agent history or exported as diagnostic
+facts. A failure reports sanitized evidence and requires fixing the endpoint or
+explicit manual unverified setup; it is not proof that plain text or optional
+media is unsupported. Wizard `run_checks` and a defensive `save_model` guard
+both prevent ordinary default-yes/`--yes` saves without this evidence when checks
+were approved. `--no-probe`/`--probe none` still permit manual unverified saves.
+Low-level `connect.write` and explicit `--stage save` are manual persistence
+operations, not an automatic wizard baseline approval gate.
+
+
 Each record distinguishes successful runtime calls and observed reasoning.
 The stored request is the planned input, not a claim that every field survived
-runtime translation unchanged. Reasoning observations come from readable response
-text or reported reasoning-token usage. A successful call alone does not establish
+runtime translation unchanged. Reasoning observations come from actual returned reasoning content/parts, not
+reported reasoning-token usage alone. A successful call alone does not establish
 that a setting had an effect.
 Reasoning-level checks use an eight-job scheduling puzzle and request only the
 final order. `answer_correct` scores that public answer independently of
@@ -570,3 +654,166 @@ This is an internal organization, not a separately installable UnifiedLLM packag
 
 Request-shape references: [OpenAI Responses](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
 and [OpenRouter model metadata](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).
+
+## Choose media inputs during setup
+
+New entries default to `media_inputs: []` (text-only). Connect never infers these
+permissions from model names or catalogue capabilities. PDF means exactly
+`application/pdf`, not every file format. See the
+[MIME mapping and migration guide](model-configuration.md#explicit-media-inputs-migration).
+
+The wizard asks for **one approval at the beginning** covering setup checks and
+optional generated-media tests within the same budget. No inference checks run
+before that approval. **How would you like to configure media inputs?** immediately
+shows **Test all media inputs (generated samples)** and **Choose media inputs manually**.
+Enter accepts the selected default: tests for new setup, manual selection when editing.
+Use arrow keys then Enter to change it; Ctrl-C cancels without saving. Piped input
+accepts Enter for that default, `1`/`test` for tests, or `2`/`manual` for manual selection.
+TEST automatically plans `image`, `audio`, `video`, and `pdf`; there is no follow-on
+format-entry prompt.
+`--no-probe`/`--probe none` never run media tests. Manual
+selection sends no media requests; it saves explicit unverified declarations.
+Editing keeps existing declarations unless explicitly changed. Retesting alone
+does not revoke existing declarations: inconclusive/skipped/rejected retests leave
+the prior explicit permission in place, labeled unverified by that test. Before saving, the wizard shows the effective enabled list. After
+testing you can keep that list or explicitly choose unverified inputs manually.
+
+Guided TEST mode makes at most one media request per format when a portable
+sample is available and the approved budget permits it, following a
+correct, complete [configured typed text baseline](#configured-typed-text-baseline).
+All tests appear in the plan and share the
+approved setup budget. Each reserves the saved reply cap (reasoning and answer
+share that cap) plus 4,096 estimated input tokens for the small generated sample.
+Checks that do not fit are skipped; no reduced caps, media retries, additional
+approval prompts or automatic budget expansion. Usage can increase the charge;
+input estimates and output caps are **not hard billing limits**. Cost depends on
+the endpoint; catalogue price estimates are shown only when available.
+
+Samples are generated locally in memory or bundled from synthetic frames; no
+user files, uploads or external fixture downloads:
+
+- **Image:** valid 32×32 red PNG, passed as a native NOOA `Image` argument.
+- **Audio (Chat only):** original mono PCM WAV with two separated tones, passed
+  as `Audio`. Responses and Anthropic have no portable native inline WAV mapping
+  here and are **not tested**; another API may support audio.
+- **PDF:** valid one-page PDF containing MAPLE, passed as `File` with
+  `application/pdf`. Image/PDF keep their Chat, Responses and Anthropic mappings.
+- **Video (compatible Chat routes only):** original bundled 1-second MP4,
+  H.264/yuv420p, 64×64, four frames, no audio, 1,675 bytes, passed as `Video`.
+  The inline `video_url` mapping is a backend extension, not a portable OpenAI
+  contract. Responses and Anthropic have no native video mapping here and are
+  **not tested**. No frame conversion, transcription or other-model substitution.
+
+All four methods ask whether the model can access and interpret the attachment,
+and instruct it to return false if it cannot. This is **model-reported access,
+not an accuracy benchmark**: no tone counting, color grading or word quiz.
+Each returns a strict boolean through the real Agent/Predict runtime using
+`PredictConfig(max_retries=1)` (one attempt), the configured client/transport,
+selected settings, saved reply cap and approved reservation. Predict's native
+collector attaches the original argument once. The object-root schema wraps
+`{"value": true}` or `{"value": false}`; the native method returns the boolean.
+Strings, integers, prose and malformed responses are not coerced or manually
+salvaged. Endpoints must support both the native schema and attachment mapping.
+
+Public stage evidence separates `request_accepted` (successful observed HTTP,
+even if parsing fails), `typed_result_validated`, optional boolean
+`access_reported`, `final_answer_observed`, `attachment_observed` and
+`output_settings_observed`. Schema failures do not imply false access. Completion
+and provider usage survive parse failures; raw replies, reasoning, provider
+error text and attachment bytes are not diagnostic evidence. Only a completed
+public final answer counts, not reasoning-only or unfinished/tool-limited replies.
+
+Validated **true**, with a successful request, complete final answer, original
+attachment and configured settings observed, is **passed** and may newly enable
+that format. Validated **false** with the same evidence is **unavailable**, an
+ordinary result: `Not available · Model cannot access this input`. It is not a
+request error or a wrong answer. Explicit provider media rejection is
+**rejected**; malformed, incomplete, missing-evidence and request failures are
+**inconclusive** and display **Failed** with their specific cause. Neither enables
+new inputs. Skipped formats display **Skipped**.
+
+Existing explicit permissions survive false or failed retests unless changed
+manually. Rows distinguish disabled inputs from retained manual choices; review
+shows enabled and unavailable formats and lets users continue with enabled
+inputs or choose manually if known supported. The review menu asks **How would
+you like to continue?** and immediately shows **Continue with text only** (or
+**Continue with image, pdf**, for example) and **Choose media inputs manually**.
+The first choice is selected: Enter continues unchanged, arrow keys then Enter
+choose an action, and Ctrl-C cancels without saving. Only the manual action opens
+the labelled format-combination menu on a terminal (comma-separated input for pipes);
+the final write confirmation remains separate.
+Piped input shows numbered, labelled choices: Enter or `1`/`keep` continues;
+`2`/`manual` opens manual selection. `--yes` skips this menu and keeps enabled inputs.
+Unavailable inputs may need another
+model or API, without initiating extra requests. `--yes` introduces no prompts
+or extra charges after the initial approval. One test is not permanent capability
+proof. Observations stay in Connect reports, separate from saved declarations.
+
+Unattended choices are explicit and mutually exclusive:
+
+```sh
+# Manual declaration; no inference (listing/metadata are also disabled here).
+uv run nooa connect your-model --as vision --endpoint https://gateway.example/v1 \
+  --api-style chat --api-key-env MODEL_KEY --media-inputs image,pdf \
+  --no-probe --no-catalogue --yes
+
+# Test chosen formats and save only those that passed; requests may incur charges.
+uv run nooa connect your-model --as vision --endpoint https://gateway.example/v1 \
+  --api-style chat --api-key-env MODEL_KEY --test-media-inputs image,audio,video,pdf \
+  --budget-tokens 100000 --max-tokens 4096 --no-catalogue --yes
+
+# Offline plan preview; no credentials/network needed.
+uv run nooa connect your-model --stage plan --endpoint https://gateway.example/v1 \
+  --api-style chat --test-media-inputs image,pdf --max-tokens 4096 \
+  --budget-tokens 100000 > plan.json
+
+# Explicit paid media stage includes a fresh text baseline, no tools/session tests.
+uv run nooa connect your-model --stage media --endpoint https://gateway.example/v1 \
+  --api-style chat --api-key-env MODEL_KEY --test-media-inputs image,pdf \
+  --max-tokens 4096 --budget-tokens 100000 > result.json
+uv run nooa connect --stage save --input result.json --output models.yaml
+```
+
+`--media-inputs ''` or `-` clears declarations. With `--yes`, omission keeps an
+existing entry's declarations or defaults a new entry to text-only. Tests require
+`--probe all`, cannot combine with `--media-inputs` or `--no-probe`, and stage
+mode accepts tests only for `plan`, `media`, `all`. `--stage save` preserves its
+input entry's list unless `--media-inputs` explicitly overrides it. Invalid
+format/flag combinations fail before requests or writes. Stage result JSON
+contains sanitized test facts; plan JSON includes the generated sample payloads.
+
+### Video fixture provenance and offline validation
+
+`src/nooa/unifiedllm/connect/_video_fixture.py` bundles synthetic bytes under
+the repository's Apache-2.0 license: no third-party/user media or download.
+Generated locally using FFmpeg 8.0.1 / libx264 from RGB24 solid frames;
+SHA-256: `dc8c43009ecf3887c4d9d4b5dd8be8adfefb0517e85d12b4aeeb3d0e59eb8c90`.
+The raw input is `bytes((255,0,0))*4096*2 + bytes((0,0,255))*4096*2`.
+Generation command (raw bytes on stdin; metadata/container timestamps are not
+used as the correctness oracle):
+
+```sh
+ffmpeg -v error -f rawvideo -pixel_format rgb24 -video_size 64x64 \
+  -framerate 4 -i pipe:0 -an -c:v libx264 -threads 1 -pix_fmt yuv420p \
+  -movflags +faststart sample.mp4
+```
+
+Connect itself requires **no FFmpeg, ffprobe or encoder package**. The offline
+container/integrity test always runs. With development FFmpeg/ffprobe on PATH,
+the independent decode test verifies one H.264 video stream (no audio), 1-second
+duration, 64×64, 4 fps and all four decoded RGB frames: red, red, blue, blue.
+It checks high dominant-channel / low other-channel values, not just the hash
+or an MP4 header. Without those tools, that development decode test explicitly
+skips; it does not claim validation passed. No inference occurs in these tests.
+
+```sh
+uv run pytest tests/unifiedllm/connect/test_connect_media.py
+# Normal paid setup: choose TEST all media formats after the initial approval,
+# or explicitly test video on a Chat backend implementing video_url:
+uv run nooa connect your-model --endpoint https://gateway.example/v1 \
+  --api-style chat --api-key-env MODEL_KEY --test-media-inputs video \
+  --max-tokens 4096 --budget-tokens 100000 --no-catalogue
+```
+
+No live inference was used to develop/validate this fixture; successful mocked
+wire tests show serialization and scoring policy, not a model's video ability.

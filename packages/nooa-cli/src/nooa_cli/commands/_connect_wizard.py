@@ -16,6 +16,7 @@ import yaml
 
 from nooa import paths
 from nooa.unifiedllm import connect
+from nooa.unifiedllm.connect._records import text_baseline_passed
 
 from . import _connect_prompts as prompts
 from . import _connect_view as view
@@ -53,6 +54,9 @@ class WizardState:
     interfaces: Any = None
     levels: Any = None
     levels_file: Any = None
+    media_inputs: Any = None
+    inherit_media_inputs: bool = False
+    test_media_inputs: Any = None
     model: Any = None
     no_catalogue: Any = None
     no_probe: Any = None
@@ -73,18 +77,30 @@ class WizardState:
     result: Any = None
     server_urls: Any = None
     show_config: Any = None
+    show_diagnostics: Any = False
     unobserved: Any = None
     working_dir: Any = None
     yes: Any = None
 
 
-async def show_checks(events, *, reasoning_levels=None, summary=True):
+async def show_checks(
+    events, *, reasoning_levels=None, summary=True, media_inputs=None, diagnostics=False
+):
     with view.quiet_provider_messages():
-        return await display_checks(events, reasoning_levels=reasoning_levels, summary=summary)
+        return await display_checks(
+            events,
+            reasoning_levels=reasoning_levels,
+            summary=summary,
+            media_inputs=media_inputs,
+            diagnostics=diagnostics,
+        )
 
 
-async def display_checks(events, *, reasoning_levels=None, summary=True):
+async def display_checks(
+    events, *, reasoning_levels=None, summary=True, media_inputs=None, diagnostics=False
+):
     progress = view.CheckProgress()
+    progress.diagnostics = diagnostics
     try:
         async with aclosing(events) as steps:
             async for event in steps:
@@ -96,7 +112,12 @@ async def display_checks(events, *, reasoning_levels=None, summary=True):
                         "provenance": {"probes": {event.name: event.outcome}},
                     }
                 )
-                progress.update(event.name, event.outcome, missing_reasoning=bool(missing))
+                progress.update(
+                    event.name,
+                    event.outcome,
+                    missing_reasoning=bool(missing),
+                    media_inputs=media_inputs,
+                )
     finally:
         progress.finish(summary=summary)
     raise click.ClickException("Checks ended without a result.")
@@ -207,8 +228,10 @@ def select_connection(state: WizardState) -> bool:
         reasoning_output_tokens=state.reasoning_output_tokens,
     )
     if state.approval != "none" and not state.yes:
-        if not prompts.confirm("Approve API checks within this budget?", default=True):
-            click.echo("No API checks approved. Run with --no-probe for manual setup.")
+        if not prompts.confirm(
+            "Approve setup and optional media checks with this token budget?", default=True
+        ):
+            click.echo("Checks not approved. Run with --no-probe for manual setup.")
             return False
     if state.editing is None:
         view.step(1, "Connection")
@@ -249,7 +272,7 @@ def select_connection(state: WizardState) -> bool:
             state.api_key_env = saved_names[0]
             announced = True
             if not state.api_key_env:
-                view.line("Using saved key variable (no authentication) for this endpoint.")
+                view.line("Using this endpoint without authentication, as saved.")
             elif os.environ.get(state.api_key_env):
                 view.line(f"Using saved key variable {state.api_key_env} for this endpoint.")
             else:
@@ -269,6 +292,7 @@ def select_connection(state: WizardState) -> bool:
             state.api_key_env = prompts.prompt(
                 "Saved key variable",
                 choices=[name or "-" for name in saved_names],
+                labels={name or "-": name or "No authentication" for name in saved_names},
                 open_menu=True,
             )
             if state.api_key_env == "-":
@@ -390,10 +414,12 @@ def select_model(state: WizardState) -> bool:
             state.discovery_endpoint = state.endpoint
             state.endpoint_models = found.models
             names = [item["id"] for item in found.models]
-            click.echo(
-                f"Server listed {len(names)} model(s). Credentials are checked next. Type part of a name to search, then Tab to select."
+            click.echo(f"Found {len(names)} models. Type part of a name, then Tab to select.")
+            state.model = prompts.prompt(
+                "Search advertised model IDs (type to search; Tab to select)",
+                choices=names,
+                searchable=True,
             )
-            state.model = prompts.prompt("Model", choices=names)
     return True
 
 
@@ -439,6 +465,7 @@ def check_interfaces(state: WizardState) -> bool:
                             ),
                         ),
                         summary=False,
+                        diagnostics=state.show_diagnostics,
                     )
                 )
                 state.interface_spent += state.interfaces.tokens_charged_to_budget
@@ -465,36 +492,41 @@ def check_interfaces(state: WizardState) -> bool:
                     else "Could not confirm a working connection. Listing models does not validate the key.",
                     fg="yellow",
                 )
-                click.echo(
-                    "Agent diagnostic prompt:\n"
-                    + connect.diagnostic_prompt(
-                        "interfaces",
-                        {
-                            "model_name": state.model,
-                            "api_base": state.endpoint,
-                            "api_key_env": state.api_key_env,
-                        },
-                        failed_checks,
-                        api_key=state.api_key,
-                        run_context=diagnostic_context(
-                            target=state.path,
-                            alias=state.alias,
-                            model=state.model,
-                            endpoint=state.endpoint,
-                            api_key_env=state.api_key_env,
+                if state.show_diagnostics:
+                    click.echo(
+                        "Agent diagnostic prompt:\n"
+                        + connect.diagnostic_prompt(
+                            "interfaces",
+                            {
+                                "model_name": state.model,
+                                "api_base": state.endpoint,
+                                "api_key_env": state.api_key_env,
+                            },
+                            failed_checks,
                             api_key=state.api_key,
-                            budget=state.budget_tokens,
-                            remaining=max(0, state.budget_tokens - state.interface_spent),
-                            output_tokens=state.output_tokens,
-                            reasoning_output_tokens=state.reasoning_output_tokens,
-                            stage="interfaces",
-                            interface_timeout_seconds=interface_timeout,
-                            discovery_succeeded=state.discovery_succeeded
-                            if state.endpoint == state.discovery_endpoint
-                            else None,
-                        ),
+                            run_context=diagnostic_context(
+                                target=state.path,
+                                alias=state.alias,
+                                model=state.model,
+                                endpoint=state.endpoint,
+                                api_key_env=state.api_key_env,
+                                api_key=state.api_key,
+                                budget=state.budget_tokens,
+                                remaining=max(0, state.budget_tokens - state.interface_spent),
+                                output_tokens=state.output_tokens,
+                                reasoning_output_tokens=state.reasoning_output_tokens,
+                                stage="interfaces",
+                                interface_timeout_seconds=interface_timeout,
+                                discovery_succeeded=state.discovery_succeeded
+                                if state.endpoint == state.discovery_endpoint
+                                else None,
+                            ),
+                        )
                     )
-                )
+                else:
+                    view.line(
+                        "For troubleshooting details, rerun with --show-diagnostics.", dim=True
+                    )
                 if state.yes:
                     raise click.ClickException(
                         "Check credentials and endpoint, or run without --yes to correct them interactively."
@@ -528,6 +560,10 @@ def check_interfaces(state: WizardState) -> bool:
                         prompts.prompt(
                             "Interface to retry",
                             choices=("chat", "responses", "anthropic"),
+                            labels={
+                                style: prompts.choice_label(style)
+                                for style in ("chat", "responses", "anthropic")
+                            },
                             default=state.default_style,
                         ),
                     )
@@ -566,27 +602,27 @@ def check_interfaces(state: WizardState) -> bool:
                     )
                     state.model = prompts.prompt("Exact model ID", default=state.model)
             click.echo(
-                "Interfaces that returned the expected response format: " + ", ".join(available)
+                "Working API formats: "
+                + ", ".join(prompts.choice_label(style) for style in available)
             )
             observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
             click.echo(
-                "Interfaces that actually returned reasoning: "
-                + (", ".join(observed) if observed else "none")
+                "API formats that returned reasoning: "
+                + (
+                    ", ".join(prompts.choice_label(style) for style in observed)
+                    if observed
+                    else "none"
+                )
             )
         if state.interfaces and len(available) == 1:
             state.api_style = available[0]
-            click.echo(f"Using {state.api_style} for {state.model}.")
+            click.echo(f"Using {prompts.choice_label(state.api_style)} for {state.model}.")
         else:
             click.echo(f"Choose the request interface for {state.model}:")
-            legend = {
-                "chat": "chat = OpenAI-compatible",
-                "responses": "responses = OpenAI Responses",
-                "anthropic": "anthropic = Anthropic Messages",
-            }
-            click.echo("; ".join(legend[style] for style in available) + ".")
             state.api_style = prompts.prompt(
                 "API format",
                 choices=available,
+                labels={style: prompts.choice_label(style) for style in available},
                 default=state.default_style if state.default_style in available else available[0],
             )
         if state.api_style == "responses":
@@ -753,8 +789,67 @@ def configure_metadata(state: WizardState) -> bool:
     return True
 
 
+def configure_media_inputs(state: WizardState) -> bool:
+    """Declaration belongs to this connection, not optional published metadata."""
+    from nooa.unifiedllm.media_inputs import validate_media_inputs
+
+    if state.media_inputs is not None:
+        state.media_inputs = prompts.parse_media_inputs(state.media_inputs)
+        return True
+    previous_entry = state.editing or (
+        (state.data or {}).get("models", {}).get(state.alias) if state.alias else None
+    )
+    previous = ()
+    if previous_entry and state.model and state.api_style:
+        route = connect.plan(
+            state.alias or "candidate",
+            state.model,
+            state.api_style,
+            state.endpoint,
+            state.api_key_env or "",
+            existing_entry=previous_entry,
+        ).entry
+        previous = validate_media_inputs(route["media_inputs"])
+    elif state.editing:
+        previous = validate_media_inputs(state.editing.get("media_inputs"))
+    if state.test_media_inputs is not None:
+        state.test_media_inputs = prompts.parse_media_inputs(state.test_media_inputs)
+    elif not state.yes and state.approval == "all":
+        mode = prompts.choose_media_mode(editing=bool(state.editing))
+        if mode == "test":
+            state.test_media_inputs = ["image", "audio", "video", "pdf"]
+        else:
+            state.media_inputs = prompts.choose_media_inputs(previous)
+            return True
+    if state.test_media_inputs:
+        # Retesting is evidence collection, not permission revocation.
+        # Resolve again after model/interface selection; this list is the menu
+        # preview, not permission to forward to a subsequently changed route.
+        state.inherit_media_inputs = True
+        state.media_inputs = list(previous)
+        view.line(
+            "Selected media tests: "
+            + ", ".join(state.test_media_inputs)
+            + ". Uses the approved token budget."
+        )
+    else:
+        state.inherit_media_inputs = bool(state.yes)
+        state.media_inputs = list(previous) if state.yes else prompts.choose_media_inputs(previous)
+    return True
+
+
 def configure_checks(state: WizardState) -> bool:
     """Configure checks; return False when the user cancels."""
+    if state.media_inputs is None or state.inherit_media_inputs:
+        previous = connect.plan(
+            state.alias or "candidate",
+            state.model,
+            state.api_style,
+            state.endpoint,
+            state.api_key_env,
+            existing_entry=state.existing,
+        ).entry
+        state.media_inputs = previous["media_inputs"]
     if state.levels_file and (state.levels or state.reasoning_template):
         raise click.UsageError("Use either --levels-file or --reasoning-template with --levels.")
     state.patches = None
@@ -786,6 +881,8 @@ def configure_checks(state: WizardState) -> bool:
         state.endpoint,
         state.api_key_env,
         catalogue=state.candidate,
+        media_inputs=state.media_inputs,
+        test_media_inputs=state.test_media_inputs,
         reasoning_levels=state.patches,
         budget_tokens=state.budget_tokens,
         output_tokens=state.output_tokens,
@@ -800,6 +897,7 @@ def configure_checks(state: WizardState) -> bool:
         # Preserve transport controls, custom parameters and exact level blocks.
         merged = deepcopy(state.editing)
         for field in (
+            "media_inputs",
             "context_window",
             "max_output_tokens",
             "reasoning_levels",
@@ -863,7 +961,7 @@ def configure_checks(state: WizardState) -> bool:
         }
     if "context_window" not in state.proposal.entry:
         click.echo(
-            "No context window selected. The runtime will use its fallback; set --context-window to supply a limit."
+            "Context limit unknown; NOOA will use its default. Set --context-window if you know the server limit."
         )
     state.configured = connect.configure_entry(
         state.proposal.entry, reply_tokens=state.reply_tokens
@@ -898,54 +996,62 @@ def configure_checks(state: WizardState) -> bool:
     state.proposal = connect.refresh_plan(replace(state.proposal, entry=state.configured))
     state.remaining_estimate = state.proposal.token_estimate
     view.line(
-        f"Saved reply budget: {state.configured['max_tokens']:,} tokens, shared by reasoning and the answer."
+        f"Saved reply limit: {state.configured['max_tokens']:,} tokens, shared by reasoning and the answer."
     )
     for label, limit in state.configured["provenance"].get("level_reply_limits", {}).items():
         view.line(
-            f"Reasoning level {label}: reply budget raised to {limit['value']:,} tokens to leave room for its thinking budget.",
+            f"Reasoning level {label}: reply limit raised to {limit['value']:,} tokens to leave room for its thinking budget.",
             fg="yellow",
         )
     return True
 
 
+def baseline_allows_save(state: WizardState) -> bool:
+    """Fail closed for approved checks; manual setup is explicitly unverified."""
+    if state.no_probe or state.approval == "none":
+        return True
+    entry = state.result.entry if state.result is not None else {}
+    record = entry.get("provenance", {}).get("probes", {}).get("routing", {})
+    if text_baseline_passed(record):
+        return True
+    reason = view.connection_detail(record)
+    # Only sanitized display facts: never echo raw provider errors or replies.
+    click.echo(
+        "Nothing was saved. Connection: " + reason.rstrip(".") + ". "
+        "Review the server URL and settings, or increase --budget-tokens if checks were skipped. "
+        "Rerun with --no-probe for manual, unverified setup. "
+        "Add --no-catalogue and an explicit model ID to avoid listing/metadata requests. "
+        "See docs/model-configuration.md. No model entry or key was written.",
+        err=True,
+    )
+    return False
+
+
 def run_checks(state: WizardState) -> bool:
     """Run checks; return False when the user cancels."""
-    price = (
-        "unknown"
-        if state.proposal.price_estimate is None
-        else f"~${state.proposal.price_estimate:.6f} at catalogue prices"
-    )
-    view.line("Check plan", fg="bright_cyan", bold=True)
-    view.line(
-        f"Connection · tools · {len(state.proposal.entry.get('reasoning_levels', {}))} reasoning settings",
-        dim=True,
-    )
+    checks = ["connection", "tools"]
+    if state.proposal.entry.get("reasoning_levels"):
+        checks.append("reasoning")
+    if any(p.name.startswith("media:") for p in state.proposal.probes):
+        checks.append("media inputs")
     if state.proposal.session_checks:
-        view.line(
-            "Then 3 conversation replies to check cache reuse and reasoning retention.",
-            dim=True,
-        )
+        checks.append("conversation")
     view.line(
-        "Configured checks send the saved reply cap, including level overrides. Insufficient budget skips the check; caps are never reduced for testing.",
-        dim=True,
-    )
-    view.line(
-        f"Estimated tokens: {state.remaining_estimate:,} · budget remaining: "
-        f"{view.format_budget(state.proposal.budget_tokens)} · estimated price: {price}",
-        dim=True,
+        "Checking " + ", ".join(checks[:-1]) + " and " + checks[-1] + "…",
+        fg="bright_cyan",
+        bold=True,
     )
     if state.remaining_estimate > state.proposal.budget_tokens:
         click.echo(
             "Warning: the approved budget is too small for all checks. Some will be skipped. Restart with a larger --budget-tokens value to run them all.",
             err=True,
         )
-    click.echo(
-        "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
-    )
     state.result = asyncio.run(
         show_checks(
             connect.run_steps(state.proposal, approved=state.approval, api_key=state.api_key),
             reasoning_levels=state.proposal.entry.get("reasoning_levels"),
+            media_inputs=state.media_inputs,
+            diagnostics=state.show_diagnostics,
         )
     )
     state.result.entry["provenance"]["tokens_charged_to_budget"] = (
@@ -963,6 +1069,13 @@ def run_checks(state: WizardState) -> bool:
             + ". These settings have not been checked.",
             err=True,
         )
+    if state.test_media_inputs:
+        facts = state.result.entry["provenance"]["probes"]
+        enabled = list(state.media_inputs)
+        for kind in state.test_media_inputs:
+            if facts.get(f"media:{kind}", {}).get("outcome") == "passed" and kind not in enabled:
+                enabled.append(kind)
+        state.result.entry["media_inputs"] = enabled
     decision = connect.verdict(state.result.entry)
     state.unobserved = decision.unobserved_levels
     checks = {
@@ -973,46 +1086,98 @@ def run_checks(state: WizardState) -> bool:
         decision.needs_attention
         or any(checks[name].get("reason") != "not approved" for name in decision.skipped)
     ):
-        click.echo(
-            "Agent diagnostic prompt:\n"
-            + connect.diagnostic_prompt(
-                "checks",
-                state.result.entry,
-                checks,
-                api_key=state.api_key,
-                run_context=diagnostic_context(
-                    target=state.path,
-                    alias=state.alias,
-                    model=state.model,
-                    endpoint=state.endpoint,
-                    api_key_env=state.api_key_env,
+        if state.show_diagnostics:
+            click.echo(
+                "Agent diagnostic prompt:\n"
+                + connect.diagnostic_prompt(
+                    "checks",
+                    state.result.entry,
+                    checks,
                     api_key=state.api_key,
-                    budget=state.budget_tokens,
-                    remaining=max(
-                        0,
-                        state.proposal.budget_tokens
-                        - state.result.entry["provenance"].get("tokens_charged_to_budget", 0),
+                    run_context=diagnostic_context(
+                        target=state.path,
+                        alias=state.alias,
+                        model=state.model,
+                        endpoint=state.endpoint,
+                        api_key_env=state.api_key_env,
+                        api_key=state.api_key,
+                        budget=state.budget_tokens,
+                        remaining=max(
+                            0,
+                            state.proposal.budget_tokens
+                            - state.result.entry["provenance"].get("tokens_charged_to_budget", 0),
+                        ),
+                        output_tokens=state.output_tokens,
+                        reasoning_output_tokens=state.reasoning_output_tokens,
                     ),
-                    output_tokens=state.output_tokens,
-                    reasoning_output_tokens=state.reasoning_output_tokens,
-                ),
+                )
             )
-        )
+        else:
+            view.line("For troubleshooting details, rerun with --show-diagnostics.", dim=True)
     if state.unobserved:
         click.echo(
             "Warning: no reasoning information was returned for: "
             + ", ".join(state.unobserved)
-            + ". These checks have not confirmed reasoning for those levels. "
-            "Try another API format or review the server's reasoning settings. "
-            "Some servers do not expose reasoning information.",
+            + ". Reasoning may still be active. Try another API format or review the server settings.",
             err=True,
         )
-    return True
+    return baseline_allows_save(state)
 
 
 def save_model(state: WizardState) -> bool:
-    """Save model; return False when the user cancels."""
+    """Save model; return False when canceled or the baseline is unverified."""
+    if not baseline_allows_save(state):
+        return False
     view.step(4, "Save model")
+    if state.no_probe or state.approval == "none":
+        view.line("Connection: Unverified (manual setup; no model checks)", fg="yellow")
+    view.line(
+        "Enabled media inputs: "
+        + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
+    )
+    if state.test_media_inputs:
+        facts = state.result.entry["provenance"]["probes"]
+        unavailable = [
+            kind
+            for kind in state.test_media_inputs
+            if facts.get(f"media:{kind}", {}).get("outcome") == "unavailable"
+        ]
+        if unavailable:
+            view.line("Not available in this test: " + ", ".join(unavailable))
+            view.line(
+                "Continue with enabled inputs. For unavailable inputs, choose another model or API; choose manually only if you know this connection supports them.",
+                dim=True,
+            )
+    tested_media_inputs = list(state.result.entry["media_inputs"])
+    if not state.yes and state.test_media_inputs:
+        action = prompts.review_media_inputs(state.result.entry["media_inputs"])
+        if action == "manual":
+            view.line("Manual choices are unverified.", fg="yellow")
+            state.result.entry["media_inputs"] = prompts.choose_media_inputs(
+                state.result.entry["media_inputs"]
+            )
+    if tested_media_inputs != state.result.entry["media_inputs"]:
+        view.line(
+            "Media inputs to save: "
+            + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
+        )
+    if state.test_media_inputs:
+        facts = state.result.entry["provenance"]["probes"]
+        for kind in state.test_media_inputs:
+            record = facts.get(f"media:{kind}", {})
+            if record.get("outcome") in {"inconclusive", "rejected", "unavailable"} and (
+                kind in tested_media_inputs
+            ) != (kind in state.result.entry["media_inputs"]):
+                headline = view.check_outcome("media:" + kind, record, "attention")
+                view.progress_result(
+                    "–" if headline == "Not available" else "!",
+                    view.check_label("media:" + kind),
+                    view.media_test_detail(
+                        kind, record, media_inputs=state.result.entry["media_inputs"]
+                    ),
+                    headline=headline,
+                )
+    # The effective declarations above are reviewed before the final save decision.
     # Checks may take a while: refresh names before offering completion or
     # asking to replace an entry added since setup started.
     state.data = {}
@@ -1039,12 +1204,12 @@ def save_model(state: WizardState) -> bool:
         if not state.yes and not prompts.confirm("Replace this model?", default=False):
             return False
     state.result = replace(state.result, alias=state.alias)
-    view.line(f"{state.alias} · {state.model} · {state.api_style}", bold=True)
+    view.line(f"{state.alias} · {state.model} · {prompts.choice_label(state.api_style)}", bold=True)
     if state.show_config:
         click.echo(yaml.safe_dump({"models": {state.alias: state.result.entry}}, sort_keys=False))
     else:
         view.line(
-            "Full configuration is saved with the model. Use --show-config to preview the YAML.",
+            "Use --show-config to preview the full YAML settings.",
             dim=True,
         )
     if shadow := shadowing_source(state.alias, state.path, extra_priority=bool(state.working_dir)):
@@ -1053,7 +1218,7 @@ def save_model(state: WizardState) -> bool:
             fg="yellow",
         )
     view.line(
-        f"Save summary: {state.result.entry['api_style']} · reply budget {state.result.entry['max_tokens']:,} tokens"
+        f"Save summary: {prompts.choice_label(state.result.entry['api_style'])} · reply limit {state.result.entry['max_tokens']:,} tokens"
     )
     view.line(
         "Reasoning levels: "
@@ -1090,7 +1255,11 @@ def save_model(state: WizardState) -> bool:
         connect.write(state.result.entry, state.path, alias=state.alias)
         click.echo(f"Saved {state.alias} to {state.path}.")
         view.line(
-            f"Interface: {state.api_style} · max_tokens: {state.result.entry['max_tokens']:,} · reasoning levels: {', '.join(state.result.entry.get('reasoning_levels', {})) or 'unknown'} · default: {state.result.entry.get('reasoning_default', 'unknown')}"
+            "Enabled media inputs: "
+            + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
+        )
+        view.line(
+            f"API format: {prompts.choice_label(state.api_style)} · reply limit: {state.result.entry['max_tokens']:,} tokens"
         )
         if state.api_key and not save_key and state.api_key != os.environ.get(state.api_key_env):
             click.echo(
@@ -1114,6 +1283,7 @@ def run_wizard(**options):
     try:
         for step in (
             select_connection,
+            configure_media_inputs,
             select_model,
             check_interfaces,
             configure_metadata,
@@ -1125,23 +1295,26 @@ def run_wizard(**options):
                 return
     except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
         detail = view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
-        click.echo(
-            "Agent diagnostic prompt:\n"
-            + connect.diagnostic_prompt(
-                "setup",
-                {},
-                {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},
-                api_key=state.api_key,
-                run_context=diagnostic_context(
-                    target=state.path,
-                    alias=state.alias,
-                    model=state.model,
-                    api_key_env=state.api_key_env,
+        if state.show_diagnostics:
+            click.echo(
+                "Agent diagnostic prompt:\n"
+                + connect.diagnostic_prompt(
+                    "setup",
+                    {},
+                    {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},
                     api_key=state.api_key,
-                    output_tokens=state.output_tokens,
-                    reasoning_output_tokens=state.reasoning_output_tokens,
+                    run_context=diagnostic_context(
+                        target=state.path,
+                        alias=state.alias,
+                        model=state.model,
+                        api_key_env=state.api_key_env,
+                        api_key=state.api_key,
+                        output_tokens=state.output_tokens,
+                        reasoning_output_tokens=state.reasoning_output_tokens,
+                    ),
                 ),
-            ),
-            err=True,
-        )
+                err=True,
+            )
+        else:
+            view.line("For troubleshooting details, rerun with --show-diagnostics.", dim=True)
         raise click.ClickException(detail) from None
