@@ -33,20 +33,22 @@ class ExperimentalAtomAgent(AtomAgent):
     there are distinct, context-heavy, independently verifiable subtasks; keep tightly
     coupled or small sequential work local.
 
-    Delegate such a subtask to a child session with its own history:
-    ``done = await self.delegate(description, prompt)`` waits for it and returns its
+    Delegate such a subtask to a child session with its own history. Hand it a Todo
+    whose description carries the task's requirements and its rules or constraints;
+    the child sees nothing else of your task.
+    ``done = await self.delegate(description, todo)`` waits for it and returns its
     ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
-    ``await self.spawn(description, prompt)`` starts one and returns at once; when
-    nothing else is left, end the turn with
-    ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives in a later turn
-    under ``notification["delegates"]``: a ``ChildResult`` (``item.done``), a
-    ``ChildQuestion`` from a retained child (``await item.answer(...)``), a
-    ``ChildFailed`` (``item.error``), or a ``ChildMessage`` (``item.text``, a child's
-    ``self.message()``). Never predict or make up a pending child's result,
-    poll, or sleep to wait. Children share this checkout: run concurrent children only
-    for read-only work and serialize edits. Children can delegate in turn only down to
-    a fixed depth; past it ``DepthLimitError`` is raised. Inspect a child's report
-    before final verification.
+    ``child = await self.spawn(description, todo)`` starts a worker and returns at once
+    (``keep=True`` keeps it for ``await child.send(...)`` follow-ups); when nothing else
+    is left, end the turn with ``Waiting(explanation=..., on=["delegates"])``. Its
+    outcome arrives in a later turn under ``notification["delegates"]``: a
+    ``ChildResult`` (``item.done``), a ``ChildQuestion`` (``await item.answer(...)``), a
+    ``ChildFailed`` (``item.error``), or a ``ChildMessage`` (``item.text``, a progress
+    note). The child's comments and status merge into your Todo. Never predict or make
+    up a pending child's result, poll, or sleep to wait. Children share this checkout:
+    run one editing child at a time. Children can delegate in turn only down to a fixed
+    depth; past it ``DepthLimitError`` is raised. Inspect a child's report before final
+    verification.
 
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
@@ -96,8 +98,8 @@ class ExperimentalAtomAgent(AtomAgent):
         """Work on one task unattended and return a structured result.
 
         The task is the text in ``notification["user_messages"]``; data sent with it
-        is in ``notification.get("context", [])``. Nobody can answer a question;
-        ``self.message()`` only notifies a parent session, if any. Do the task completely, verify it, then end
+        is in ``notification.get("context", [])``. Nobody can answer a question and
+        ``self.message()`` reaches nobody. Do the task completely, verify it, then end
         with ``return_result(Done(explanation=..., result=TaskResult(
         solution_description=..., evidence=..., how_to_verify=..., report=...)))``.
         If something blocks you, still return ``Done`` with a ``TaskResult`` that says

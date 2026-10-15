@@ -44,13 +44,19 @@ RESULT = (
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
-# Raised when spawn() took mode= and keep= in place of retain= (2026-10-15,
-# about 340 characters with the ChildMessage docs): measured values plus about 2%.
+# Raised for the child-session interface (2026-10-15): the class doc tells the
+# model to put a task's requirements and rules in the Todo it hands a child and
+# to run one editing child at a time, spawn() takes brief=, mode= and keep=, and
+# ChildRef/ChildQuestion carry todo_id, a live status and question ids (about
+# 770 characters over the 2026-10-02 values, ChildMessage docs included). The
+# handle_work rows are the new worker turn. Measured values plus about 2%.
 LIMITS = {
-    (ATOM, "handle"): (14_900, 17_850),  # measured 14,571 / 17,476
-    (ATOM, "handle_batch"): (14_900, 17_500),  # measured 14,571 / 17,130
-    (EXPERIMENTAL, "handle"): (14_700, 16_550),  # measured 14,409 / 16,179
-    (EXPERIMENTAL, "handle_batch"): (14_700, 16_900),  # measured 14,409 / 16,553
+    (ATOM, "handle"): (15_300, 18_300),  # measured 14,993 / 17,944
+    (ATOM, "handle_batch"): (15_300, 17_900),  # measured 14,993 / 17,542
+    (ATOM, "handle_work"): (15_300, 18_550),  # measured 14,993 / 18,154
+    (EXPERIMENTAL, "handle"): (15_100, 16_900),  # measured 14,786 / 16,556
+    (EXPERIMENTAL, "handle_batch"): (15_100, 17_250),  # measured 14,786 / 16,909
+    (EXPERIMENTAL, "handle_work"): (15_100, 17_550),  # measured 14,786 / 17,209
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -68,7 +74,7 @@ def _no_installed_skills(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
 async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
-    code = RESULT if method == "handle_batch" else "return_result(Done(explanation='x'))"
+    code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
     response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
     workspace = tmp_path / "workspace"

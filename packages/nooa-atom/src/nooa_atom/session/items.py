@@ -211,7 +211,9 @@ class ChildResult(BaseModel):
 
     A ``done.result`` that arrives as data (a child that returned a dict, or
     a result reloaded from the record) is rebuilt as a ``TaskResult`` when it
-    is one. ``delegate()`` gets its ``Done`` through this class too.
+    is one. A worker's ``done.result`` is always a ``TaskResult``: its turn
+    cannot end ``Done`` without one. ``delegate()`` gets its ``Done`` through
+    this class too.
     """
 
     child: ChildRef
@@ -273,8 +275,9 @@ class ChildFailed(BaseModel):
 class ChildMessage(BaseModel):
     """A child sent a message with ``self.message()``; delivered on the parent's ``delegates`` channel.
 
-    One item per message, in order, before the result of the same turn. It
-    does not resolve ``ChildRef.wait()``, which still waits for a ``Done``.
+    One item per message, in order, before the result of the same turn: a
+    progress note, not the result (a worker's result is its ``TaskResult``).
+    It does not end ``ChildRef.wait()``, which waits for a result or a question.
     """
 
     child: ChildRef

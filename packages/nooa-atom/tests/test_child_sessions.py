@@ -586,3 +586,19 @@ async def test_answering_a_stale_question_id_is_refused(atom_registry, atom_opti
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert "is not the child's pending question" in outcome.explanation
+
+
+# ---- D4/D6: model-facing guidance -------------------------------------------
+
+
+@pytest.mark.parametrize("spec", [ATOM_SPEC, "nooa_atom.agent:ExperimentalAtomAgent"])
+def test_the_parent_docs_say_what_to_put_in_the_todo_and_who_edits(spec):
+    from nooa_atom.session.loader import load_agent_class
+
+    cls = load_agent_class(spec)
+    text = " ".join((cls.__doc__ or "").split())
+    assert "requirements and its rules or constraints" in text
+    assert "one editing child at a time" in text
+    assert "retain" not in text
+    work = " ".join((cls.handle_work.__doc__ or "").split())
+    assert "remove scratch files" in work and "TaskResult" in work

@@ -93,20 +93,24 @@ class AtomAgent(InteractiveAgent):
     root bounds repo searches.
 
     Delegate bounded, context-heavy work (exploration, diagnosis, review, an
-    independently verifiable change) to a child session with its own history:
-    ``done = await self.delegate(description, prompt)`` waits for it and returns
+    independently verifiable change) to a child session with its own history.
+    Hand it a Todo whose description carries the task's requirements and its
+    rules or constraints: the child sees nothing else of your task.
+    ``done = await self.delegate(description, todo)`` waits for it and returns
     its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
-    ``await self.spawn(description, prompt)`` starts one and returns at once; when
-    nothing else is left, end the turn with
+    ``child = await self.spawn(description, todo)`` starts a worker and returns at
+    once (``keep=True`` keeps it for follow-ups with ``await child.send(...)``);
+    when nothing else is left, end the turn with
     ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives in a later
     turn under ``notification["delegates"]``: a ``ChildResult`` (``item.done``), a
-    ``ChildQuestion`` from a retained child (``await item.answer(...)``), a
-    ``ChildFailed`` (``item.error``), or a ``ChildMessage`` (``item.text``, a
-    child's ``self.message()``). Never predict or make up a pending child's
-    result, poll, or sleep to wait. Children share this checkout: run concurrent
-    children only for read-only work and serialize edits. Children can delegate
-    in turn only down to a fixed depth; past it ``DepthLimitError`` is raised.
-    Inspect and verify what a child reports before relying on it.
+    ``ChildQuestion`` (``await item.answer(...)``), a ``ChildFailed``
+    (``item.error``), or a ``ChildMessage`` (``item.text``, a progress note). The
+    child's comments and status merge into your Todo. Never predict or make up a
+    pending child's result, poll, or sleep to wait. Children share this checkout:
+    run one editing child at a time; read-only children can run in parallel.
+    Children can delegate in turn only down to a fixed depth; past it
+    ``DepthLimitError`` is raised. Inspect and verify what a child reports before
+    relying on it.
 
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
@@ -413,7 +417,12 @@ class AtomAgent(InteractiveAgent):
         self._todo_bases[child_id] = updated.model_copy(deep=True)
 
     def children(self) -> list[ChildRef]:
-        """Handles on the child sessions you started, running and closed."""
+        """Handles on the child sessions you started, running and closed.
+
+        Each ref's ``status`` is live (``running``, ``working``, ``idle``,
+        ``retained``, ``closed``) and it shows a ``pending_question`` you
+        have not answered.
+        """
         return self._port().children()
 
     @hidden
@@ -527,7 +536,8 @@ class AtomAgent(InteractiveAgent):
         """Handle one interactive turn: the newest request and anything else that arrived.
 
         ``notification`` maps a channel name to the items that arrived on it:
-        ``"user_messages"`` (text from the person), ``"system_messages"``
+        ``"user_messages"`` (text from the person, or from your parent agent if
+        you are a child), ``"system_messages"``
         (host housekeeping), ``"slash_commands"`` (command output sent to you)
         and ``"delegates"`` (results of children you spawned). Do all the work
         the request needs before ending the turn; use as many cells as it
@@ -574,8 +584,8 @@ class AtomAgent(InteractiveAgent):
 
         The task is the text in ``notification["user_messages"]``; data sent
         with it is in ``notification.get("context", [])``. Nobody is watching
-        and nobody can answer a question; ``self.message()`` only notifies a
-        parent session, if any: the result is what the requester reads.
+        and nobody can answer a question, and ``self.message()`` reaches
+        nobody: the result is the only thing the requester reads.
 
         Do the task completely, verify it, then end with::
 

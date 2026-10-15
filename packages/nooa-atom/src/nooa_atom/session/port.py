@@ -48,10 +48,14 @@ class SessionPort:
     works from, and get back a ``ChildRef``: a small handle you can keep in
     ``self.v`` across turns and sessions.
 
-    - Wait for the answer in the same cell::
+    - Wait for the outcome in the same cell::
 
           child = await self.session.delegate("Review auth", prompt)
-          done = await child.wait()          # the child's Done; done.result may be None
+          outcome = await child.wait()       # a ChildResult (outcome.done) or a ChildQuestion
+
+      ``wait()`` never hangs on a child with nothing to do: it raises
+      ``ChildIdleError`` when the child is idle with nothing queued or waits
+      for your answer.
 
     - Or let it run in the background and end your turn with
       ``Waiting(explanation=..., on=["delegates"])``. Its result arrives in
@@ -60,6 +64,9 @@ class SessionPort:
       ``await item.answer(...)``) or a ``ChildFailed`` (``item.error``).
       Each ``self.message()`` of the child arrives before them as a
       ``ChildMessage`` (``item.text``); it does not end ``child.wait()``.
+      An outcome goes to one place only: a waiting ``wait()``, else
+      ``delegates``. A question stays the child's ``pending_question``
+      until you answer it; it does not block your own ``Done``.
 
     Two separate choices shape a child. ``mode="worker"`` (the default)
     runs ``handle_work`` turns: written for a parent reader, each ``Done``

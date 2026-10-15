@@ -487,7 +487,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         """Send a Markdown message to the user.
 
         In a child session the text goes to the parent instead, as a
-        ``ChildMessage`` on its ``delegates`` channel.
+        ``ChildMessage`` on its ``delegates`` channel: a progress note, not
+        the child's result.
 
         Each call renders as an independent block — so every call must be a
         complete, self-contained Markdown document.  In particular, never split

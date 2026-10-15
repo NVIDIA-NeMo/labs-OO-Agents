@@ -6,6 +6,24 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: the child-session interface is reworked (breaking).
+  `spawn(description, prompt, *, brief=None, context=None, model=None,
+  mode="worker", keep=False)` separates a child's turn type from its
+  lifetime: `mode="worker"` (the default) runs the new `handle_work` turn,
+  written for a parent, whose `Done` must carry a `TaskResult` and which
+  may ask the parent a question; `mode="conversation"` is the interactive
+  `handle()`; `keep=True` keeps the child for follow-ups until it is closed.
+  `retain=` is removed and raises a `TypeError` naming `mode=` and `keep=`.
+  A Todo handed to a child becomes its active Todo (a copy), and its
+  comments, status and vars merge back into the parent's Todo as results
+  and questions arrive (`ChildRef.todo_id`; the Todo's `child` var).
+  `brief=` reaches the child with the Todo, after a line naming its parent.
+  `ChildRef.wait()` returns a `ChildResult` or `ChildQuestion` and raises
+  `ChildIdleError` instead of hanging on an idle child or one waiting for an
+  answer; questions have ids and stay `ChildRef.pending_question` until
+  answered; `delegate()` raises `ChildQuestionError` when its child asks. A
+  closed child stays closed (`send()` raises), `ChildRef.status` is live,
+  and a child whose turn ended `Waiting` reads `working`.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive
