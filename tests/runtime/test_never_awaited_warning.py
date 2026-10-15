@@ -80,3 +80,107 @@ def test_other_warnings_and_text_are_unchanged():
         "`ShellTools.read(...)` was called without await and never ran; "
         "use `await self.shell.read(...)`\n"
     )
+
+
+# --- #447 review finding 4: one rewrite in execute_code covers every backend ---
+
+
+def _print_warnings_to_stderr():
+    """pytest records warnings instead of printing them; print them to stderr as an
+    uncaptured process does, so they reach the cell's captured stderr."""
+    import contextlib
+    import sys
+    import warnings
+
+    @contextlib.contextmanager
+    def manager():
+        with warnings.catch_warnings():
+            warnings.simplefilter("always", RuntimeWarning)
+            warnings.showwarning = warnings._showwarning_orig  # type: ignore[attr-defined]
+            original = warnings._showwarnmsg_impl  # type: ignore[attr-defined]
+            warnings._showwarnmsg_impl = lambda msg: sys.stderr.write(  # type: ignore[attr-defined]
+                warnings._formatwarnmsg(msg)  # type: ignore[attr-defined]
+            )
+            try:
+                yield
+            finally:
+                warnings._showwarnmsg_impl = original  # type: ignore[attr-defined]
+
+    return manager()
+
+
+RAW_SANDBOX_STDERR = (
+    "Cell In[1]:6: RuntimeWarning: coroutine '__repl_wrapper__.<locals>.fetch' was never awaited\n"
+    "  fetch()\n"
+    "RuntimeWarning: Enable tracemalloc to get the object allocation traceback\n"
+)
+
+
+async def test_sandbox_backend_result_stderr_is_rewritten():
+    """execute_code(sandbox_executor=...) returns early with the worker's result;
+    its stderr gets the same one-line hint as the in-process backend."""
+    import asyncio
+
+    import pytest
+
+    from nooa import Agent
+    from nooa.events import ExecutionResult
+    from nooa.unifiedllm import FakeLLMClient
+
+    class SandboxAgent(Agent, llm=FakeLLMClient()):
+        pass
+
+    class FakeSandbox:
+        async def run_cell(self, code: str, *, execution_count: int = 1):
+            return ExecutionResult(stdout="done\n", stderr=RAW_SANDBOX_STDERR)
+
+    class CancelledSandbox:
+        async def run_cell(self, code: str, *, execution_count: int = 1):
+            raise asyncio.CancelledError
+
+    agent = SandboxAgent()
+    result = await agent.runtime.execute_code("fetch()", sandbox_executor=FakeSandbox())
+    assert result.stdout == "done\n"
+    assert result.stderr == (
+        "`__repl_wrapper__.<locals>.fetch(...)` was called without await and never ran; "
+        "put `await` before the call\n"
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await agent.runtime.execute_code("pass", sandbox_executor=CancelledSandbox())
+
+
+async def test_in_process_backend_result_stderr_is_rewritten():
+    from nooa import Agent
+    from nooa.unifiedllm import FakeLLMClient
+
+    class LocalAgent(Agent, llm=FakeLLMClient()):
+        pass
+
+    agent = LocalAgent()
+    with _print_warnings_to_stderr():
+        result = await agent.runtime.execute_code(
+            "async def fetch():\n    return 1\n\nfetch()\nprint('done')", wrap_in_function=True
+        )
+    assert result.stdout == "done\n"
+    assert "fetch(...)` was called without await and never ran" in result.stderr, result.stderr
+    assert "tracemalloc" not in result.stderr
+
+
+async def test_cancelled_cell_partial_stderr_is_rewritten():
+    import asyncio
+
+    import pytest
+
+    from nooa import Agent
+    from nooa.unifiedllm import FakeLLMClient
+
+    class LocalAgent(Agent, llm=FakeLLMClient()):
+        pass
+
+    agent = LocalAgent()
+    code = "async def fetch():\n    return 1\n\nfetch()\nraise asyncio.CancelledError()"
+    with _print_warnings_to_stderr(), pytest.raises(asyncio.CancelledError) as info:
+        await agent.runtime.execute_code(code, wrap_in_function=True)
+    partial = info.value.execution_results[-1]
+    assert "fetch(...)` was called without await and never ran" in partial.stderr, partial.stderr
+    assert "tracemalloc" not in partial.stderr

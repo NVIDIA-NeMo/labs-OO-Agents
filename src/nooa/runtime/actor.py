@@ -1789,7 +1789,7 @@ class ActorRuntime:
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
-                    stderr=_rewrite_never_awaited_warnings(stderr_buffer.getvalue(), self.agent),
+                    stderr=stderr_buffer.getvalue(),
                     error=None,
                     defined_methods=defined_methods,
                     returned_value=returned_value,
@@ -1809,7 +1809,7 @@ class ActorRuntime:
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
-                    stderr=_rewrite_never_awaited_warnings(stderr_buffer.getvalue(), self.agent),
+                    stderr=stderr_buffer.getvalue(),
                     error=None,  # NOT an error
                     signal=sig,  # Store signal separately
                     defined_methods={},
@@ -1843,7 +1843,7 @@ class ActorRuntime:
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
-                    stderr=_rewrite_never_awaited_warnings(stderr_buffer.getvalue(), self.agent),
+                    stderr=stderr_buffer.getvalue(),
                     error=wrapped,
                     defined_methods={},
                     returned_value=_NO_RETURN,
@@ -1863,7 +1863,7 @@ class ActorRuntime:
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
-                    stderr=_rewrite_never_awaited_warnings(stderr_buffer.getvalue(), self.agent),
+                    stderr=stderr_buffer.getvalue(),
                     error=e,
                     defined_methods={},
                     returned_value=_NO_RETURN,
@@ -1892,9 +1892,7 @@ class ActorRuntime:
                 results.append(
                     ExecutionResult(
                         stdout=stdout_buffer.getvalue(),
-                        stderr=_rewrite_never_awaited_warnings(
-                            stderr_buffer.getvalue(), self.agent
-                        ),
+                        stderr=stderr_buffer.getvalue(),
                         cancelled=True,
                         images=media_buffer.blocks if media_buffer is not None else [],
                     )
@@ -1927,6 +1925,13 @@ class ActorRuntime:
                 pass
             # Reset parent agent context
             _parent_agent_var.reset(parent_token)
+            # The one place a cell's stderr is finalized, for every backend
+            # (in-process and sandbox) and every outcome, including the partial
+            # result this frame appended for a cancelled cell.
+            partial_results = getattr(execution_exception, "execution_results", None) or []
+            for finished in (result, *partial_results[-1:]):
+                if finished is not None and finished.stderr:
+                    finished.stderr = _rewrite_never_awaited_warnings(finished.stderr, self.agent)
             # Call after_code_execution hook
             call_after_hook(
                 "after_code_execution",
