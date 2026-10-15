@@ -283,6 +283,33 @@ def test_collapse_unsupported_keywords_name_the_real_call(kwargs):
     assert agent.events.keys() == before
 
 
+def test_collapse_doc_does_not_advertise_arbitrary_keywords():
+    """#447 review finding 7: ``**unsupported`` only powers the friendly error;
+    the model-facing signature lists the three real parameters."""
+    import inspect
+
+    from nooa.agentdoc import doc
+    from nooa.runtime.events import EventsApi
+
+    agent, _ = _agent_with_tasks()
+    for rendered in (str(doc(agent.events)), str(doc(agent.events.collapse))):
+        assert "unsupported" not in rendered
+        signature_lines = [line for line in rendered.splitlines() if "collapse(" in line]
+        assert signature_lines, rendered
+        assert not any("**" in line for line in signature_lines if "start_tag" in line)
+    assert list(inspect.signature(EventsApi.collapse).parameters) == [
+        "self",
+        "start_tag",
+        "end_tag",
+        "summary_text",
+    ]
+    assert list(inspect.signature(agent.events.collapse).parameters) == [
+        "start_tag",
+        "end_tag",
+        "summary_text",
+    ]
+
+
 def test_collapse_doc_says_synchronous_and_tag_format():
     import inspect
 

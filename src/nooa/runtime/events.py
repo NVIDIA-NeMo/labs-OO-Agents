@@ -9,6 +9,7 @@ The design follows "Type Names are Prompts" - the LLM sees `EventsApi` as
 a database-like interface for querying past interactions.
 """
 
+import inspect
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,15 @@ def _normalize_tag(name: str, tag: str) -> str:
     if marker:
         return marker.group(1)
     raise ValueError(f"Invalid {name} {tag!r}. {_TAG_HELP}")
+
+
+def _signature_without_var_keyword(func: Any) -> inspect.Signature:
+    signature = inspect.signature(func)
+    return signature.replace(
+        parameters=[
+            p for p in signature.parameters.values() if p.kind is not inspect.Parameter.VAR_KEYWORD
+        ]
+    )
 
 
 class EventsApi(Skill):
@@ -280,6 +290,11 @@ class EventsApi(Skill):
             tags.append(tag)
 
         return self._manager.collapse(tags[0], tags[1], summary_text)
+
+    # ``**unsupported`` exists only to turn misuse such as ``summary=`` into the
+    # friendly error above; keep it out of the model-facing signature (agentdoc,
+    # inspect.signature) so the doc does not advertise arbitrary keywords.
+    collapse.__signature__ = _signature_without_var_keyword(collapse)  # type: ignore[attr-defined]
 
     def keys(self) -> list[str]:
         """Return the list of active event tags in chronological order.
