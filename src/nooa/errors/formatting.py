@@ -304,36 +304,6 @@ def _last_user_frame(error: BaseException) -> tuple[Any, int] | None:
     return found
 
 
-def _resolve_static_chain(node: ast.expr, namespace: dict[str, Any]) -> object | None:
-    """Resolve ``a.b.c`` against live objects without invoking descriptors."""
-    import inspect
-
-    names: list[str] = []
-    while isinstance(node, ast.Attribute):
-        names.append(node.attr)
-        node = node.value
-    if not isinstance(node, ast.Name) or node.id not in namespace:
-        return None
-    value = namespace[node.id]
-    for name in reversed(names):
-        try:
-            value = inspect.getattr_static(value, name)
-        except AttributeError:
-            return None
-    return value
-
-
-def _is_coroutine_function(value: object) -> bool:
-    import inspect
-
-    if isinstance(value, (staticmethod, classmethod)):
-        value = value.__func__
-    try:
-        return inspect.iscoroutinefunction(inspect.unwrap(value))  # type: ignore[arg-type]
-    except Exception:
-        return False
-
-
 def _unawaited_call(
     source: str, attribute: str | None, kind: str, namespace: dict[str, Any]
 ) -> ast.Call | None:
@@ -347,6 +317,9 @@ def _unawaited_call(
             tree = ast.parse(f"{text} pass")
         except SyntaxError:
             return None
+    # Imported lazily: nooa.runtime's package import pulls in modules that import this one.
+    from nooa.runtime.async_calls import is_coroutine_function, resolve_static_chain
+
     awaited = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Await)}
 
     def unawaited(node: ast.AST | None) -> ast.Call | None:
@@ -375,7 +348,7 @@ def _unawaited_call(
         async_calls = [
             call
             for call in group
-            if _is_coroutine_function(_resolve_static_chain(call.func, namespace))
+            if is_coroutine_function(resolve_static_chain(call.func, namespace))
         ]
         if len(async_calls) == 1:
             return async_calls[0]

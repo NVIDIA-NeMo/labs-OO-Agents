@@ -593,7 +593,7 @@ def test_missing_await_check_resolves_atom_tool_chains(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(strict_exhaustion=True), cwd=tmp_path)
     validator = GeneratedCodeValidator()
     for chain in ("self.shell.read", "self.repo.symbols", "self.skills.activate"):
-        errors = validator.validate(f"x = {chain}('a')", agent)
+        errors = validator.validate(f"x = {chain}('a').text", agent)
         assert errors == [
             f"`{chain}` is async and must be called with `await`.\n"
             f"   Example: result = await {chain}(...)"
@@ -607,5 +607,7 @@ def test_missing_await_check_resolves_atom_tool_chains(tmp_path):
         "self.todo.status()",
         "self.events.collapse('1', '2', 'summary')",
         "rs = await asyncio.gather(*[self.shell.read(p) for p in ps])",
+        "coro = self.shell.read('a')",
+        "coros.append(self.repo.symbols('a'))",
     ):
         assert validator.validate(code, agent) == [], code

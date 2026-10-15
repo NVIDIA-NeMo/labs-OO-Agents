@@ -112,109 +112,24 @@ class GeneratedCodeValidator:
         return errors
 
     def _missing_await_errors(self, tree: ast.AST, agent: Any) -> list[str]:
-        from nooa.runtime.code_validator import async_self_chain
+        from nooa.runtime.async_calls import (
+            missing_await_calls,
+            missing_await_example,
+            missing_await_message,
+        )
 
-        async_method_names = self._collect_async_method_names(agent)
-        parent_map = self._build_parent_map(tree)
-
-        errors: list[str] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-
-            # Attribute chains on the agent: self.shell.read(...), self.repo.symbols(...)
-            chain = async_self_chain(node.func, agent)
-            if chain is not None:
-                if not self._is_in_await_or_comprehension(node, parent_map):
-                    errors.append(
-                        f"`{chain}` is async and must be called with `await`.\n"
-                        f"   Example: result = await {chain}(...)"
-                    )
-                continue
-
-            if not (
-                isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "self"
-            ):
-                continue
-
-            method_name = node.func.attr
-            if method_name not in async_method_names:
-                continue
-
-            if not self._is_in_await_or_comprehension(node, parent_map):
-                errors.append(
-                    f"Method `{method_name}` is async and must be called with `await`.\n"
-                    f"   Example: result = await self.{method_name}(...)"
-                )
-
-        return errors
+        return [
+            f"{missing_await_message(name, chain=chain)}\n"
+            f"   Example: result = {missing_await_example(name, chain=chain)}"
+            for _node, name, chain in missing_await_calls(
+                tree, agent, self._collect_async_method_names(agent)
+            )
+        ]
 
     def _collect_async_method_names(self, agent: Any) -> set[str]:
-        from nooa.agentdoc.visibility import is_hidden_method
+        from nooa.runtime.async_calls import collect_async_method_names
 
-        names: set[str] = set()
-
-        # 1) Class-level async methods
-        for attr_name in dir(agent.__class__):
-            if attr_name.startswith("__"):
-                continue
-            try:
-                attr = getattr(agent.__class__, attr_name, None)
-            except Exception:
-                continue
-            if attr and inspect.iscoroutinefunction(attr):
-                if not is_hidden_method(attr):
-                    names.add(attr_name)
-
-        # 2) Instance-level async callables (important for instance-bound helpers)
-        for attr_name in dir(agent):
-            if attr_name.startswith("__"):
-                continue
-            try:
-                attr = getattr(agent, attr_name)
-            except Exception:
-                continue
-            if callable(attr) and inspect.iscoroutinefunction(attr):
-                if not is_hidden_method(attr):
-                    names.add(attr_name)
-
-        return names
-
-    def _build_parent_map(self, tree: ast.AST) -> dict[ast.AST, ast.AST]:
-        parent_map: dict[ast.AST, ast.AST] = {}
-        for parent in ast.walk(tree):
-            for child in ast.iter_child_nodes(parent):
-                parent_map[child] = parent
-        return parent_map
-
-    def _is_in_await_or_comprehension(
-        self, node: ast.AST, parent_map: dict[ast.AST, ast.AST]
-    ) -> bool:
-        from nooa.runtime.code_validator import is_gather_argument
-
-        current = node
-        while current in parent_map:
-            parent = parent_map[current]
-
-            if isinstance(parent, ast.Await) and getattr(parent, "value", None) == current:
-                return True
-
-            # Allow common gather patterns:
-            #   tasks = [self.async_method(x) for x in items]
-            #   tasks = (self.async_method(x) for x in items)
-            if isinstance(parent, (ast.ListComp, ast.GeneratorExp)):
-                return True
-
-            # Passed straight to asyncio.gather/create_task/wait_for/ensure_future,
-            # which await it: asyncio.create_task(self.shell.run("make"))
-            if is_gather_argument(current, parent):
-                return True
-
-            current = parent
-
-        return False
+        return collect_async_method_names(agent)
 
 
 def _exec_with_source_tracking(

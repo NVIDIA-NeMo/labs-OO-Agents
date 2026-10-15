@@ -310,9 +310,17 @@ def _chain_issues(code):
 @pytest.mark.parametrize(
     ("code", "chain"),
     [
-        ('x = self.shell.read("f.py")', "self.shell.read"),
-        ('print(self.shell.run("ls").stdout)', "self.shell.run"),
+        # value discarded (bare expression statement)
+        ('self.shell.read("f.py")', "self.shell.read"),
         ("self.skills.activate(['web'])", "self.skills.activate"),
+        # result used as if awaited: attribute, subscript, iteration
+        ('print(self.shell.run("ls").stdout)', "self.shell.run"),
+        ('text = self.shell.read("f.py").numbered', "self.shell.read"),
+        ('first = self.shell.run("ls")[0]', "self.shell.run"),
+        ('for line in self.shell.run("ls"):\n    print(line)', "self.shell.run"),
+        ('lines = [x for x in self.shell.run("ls")]', "self.shell.run"),
+        ('texts = [self.shell.read(p).numbered for p in ["a"]]', "self.shell.read"),
+        ('text = (await self.shell.read("f.py").numbered)', "self.shell.read"),
     ],
 )
 def test_unawaited_async_attribute_chain_is_flagged(code, chain):
@@ -344,7 +352,70 @@ def test_unawaited_async_attribute_chain_is_flagged(code, chain):
         "r = await asyncio.wait_for(self.shell.run('make'), 5)",
         "self.lazy.read('x')",
         "self.missing.read('x')",
+        # #447 review: valid ways to hold a coroutine for later must pass
+        'x = self.shell.read("f.py")',
+        "coros = []\nfor p in ['a']:\n    coros.append(self.shell.read(p))\n"
+        "rs = await asyncio.gather(*coros)",
+        "rs = await asyncio.gather(*[self.shell.run('a'), self.shell.run('b')])",
+        "cs = [self.shell.run('a'), self.shell.run('b')]",
+        "cs = (self.shell.run('a'), self.shell.run('b'))",
+        "cs = {self.shell.run('a')}",
+        "d = {'a': self.shell.read('a')}",
+        "d = {p: self.shell.read(p) for p in ['a']}",
+        "s = {self.shell.read(p) for p in ['a']}",
+        "coro = self.shell.run('x')\nr = await coro",
+        "done, pending = await asyncio.wait([self.shell.run('a'), self.shell.run('b')])",
+        "results = await asyncio.wait(self.shell.run('a') for _ in range(2))",
+        "t = asyncio.create_task(self.shell.run('make'), name='m')",
+        "q.put_nowait(self.shell.run('a'))",
     ],
 )
 def test_awaited_sync_and_gathered_chains_are_not_flagged(code):
     assert _chain_issues(code) == ([], [])
+
+
+class _DirectAgent(_ChainAgent):
+    async def fetch(self, x):
+        return x
+
+
+@pytest.mark.parametrize(
+    ("code", "flagged"),
+    [
+        # self.<async method>() keeps the pre-#447 rule: awaited, list/generator
+        # comprehension, or a gather/create_task argument; anything else is flagged.
+        ("x = self.fetch(1)", True),
+        ("self.fetch(1)", True),
+        ("cs = [self.fetch(1)]", True),
+        ("x = await self.fetch(1)", False),
+        ("cs = [self.fetch(i) for i in range(3)]", False),
+        ("rs = await asyncio.gather(self.fetch(1), self.fetch(2))", False),
+    ],
+)
+def test_direct_agent_async_method_rule_is_unchanged(code, flagged):
+    from nooa.strategies.generated_code import GeneratedCodeValidator
+
+    errors = GeneratedCodeValidator().validate(code, _DirectAgent())
+    assert bool(errors) is flagged, errors
+    if flagged:
+        assert errors[0].startswith("Method `fetch` is async and must be called with `await`")
+
+
+def test_validators_and_formatter_share_one_missing_await_rule_module():
+    """#447 review finding 8: one implementation of the chain resolution and exemptions."""
+    import nooa.errors.formatting as formatting
+    import nooa.runtime.async_calls as async_calls
+    import nooa.runtime.code_validator as code_validator
+    import nooa.strategies.generated_code as generated_code
+
+    assert code_validator.async_self_chain is async_calls.async_self_chain
+    assert code_validator.is_gather_argument is async_calls.is_gather_argument
+    for module in (code_validator, generated_code, formatting):
+        for private_copy in (
+            "_resolve_static_chain",
+            "_is_coroutine_function",
+            "_unwrapped_is_coroutine_function",
+            "_self_attribute_chain",
+        ):
+            assert not hasattr(module, private_copy), (module.__name__, private_copy)
+    assert not hasattr(generated_code.GeneratedCodeValidator, "_is_in_await_or_comprehension")

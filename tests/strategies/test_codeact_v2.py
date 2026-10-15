@@ -805,7 +805,7 @@ async def test_missing_await_on_an_attribute_chain_is_rejected_before_the_cell_r
     """#447: CodeActV2 cells get the static missing-await check for self.x.y() chains."""
     llm = FakeLLMClient(
         scripted_responses=[
-            _response('ran = True\nx = self.tools.read("f.py")', "unawaited"),
+            _response('ran = True\nx = self.tools.read("f.py").numbered', "unawaited"),
             _response(
                 "results = await asyncio.gather(*[self.tools.read(p) for p in ['a', 'b']])\n"
                 "return_result(f\"{results} {self.tools.search('q')} {'ran' in dir()}\")",
