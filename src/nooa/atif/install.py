@@ -184,6 +184,7 @@ def install_atif(
 async def atif_scope(
     agent: Any,
     *,
+    inherit_parent: bool = False,
     path: str | Path | None = None,
     session_id: str | None = None,
     agent_name: str | None = None,
@@ -192,7 +193,7 @@ async def atif_scope(
     agent_tool_definitions: list[dict[str, Any]] | None = None,
     agent_extra: dict[str, Any] | None = None,
     trajectory_id: str | None = None,
-) -> AsyncIterator[AtifExporter]:
+) -> AsyncIterator[AtifExporter | None]:
     """Async context manager: install + uninstall ATIF export around a block.
 
     All parameters are optional. With zero overrides::
@@ -203,6 +204,17 @@ async def atif_scope(
     writes the trajectory to
     ``./logs/atif/<AgentClass>/<timestamp>-<uuid8>.json`` (override the
     base dir with the ``ATIF_OUTPUT_DIR`` env var).
+
+    With ``inherit_parent=True``, subscribe to this agent while retaining the
+    active parent until an agent call starts. The existing call handlers embed
+    the child trajectory in that parent; no separate child file is written.
+    Without an active parent this mode is a no-op and yields ``None``.
+    Newly installed exporters default to the parent's path and session ID;
+    exporters already installed by ``enable_atif`` retain their metadata::
+
+        async with atif_scope(parent, path="trajectory.json"):
+            async with atif_scope(child, inherit_parent=True):
+                await child.run(...)
 
     Defaults:
         - ``path`` → ``_default_path(agent, session_id)``
@@ -218,33 +230,57 @@ async def atif_scope(
     Yields the active :class:`AtifExporter` for tests that want to
     introspect ``get_trajectory()`` after the block exits.
     """
+    parent = _atif_exporter_var.get() if inherit_parent else None
+    if inherit_parent and parent is None:
+        yield None
+        return
+
     resolved_agent_name: str = agent_name if agent_name is not None else type(agent).__name__
     resolved_agent_version: str = (
         agent_version
         if agent_version is not None
         else getattr(agent, "__version__", None) or "0.0.0"
     )
-    resolved_session_id: str = session_id if session_id is not None else _default_session_id()
+    resolved_session_id = (
+        session_id
+        if session_id is not None
+        else parent._trajectory.session_id
+        if parent is not None
+        else _default_session_id()
+    )
     resolved_path: str | Path = (
-        path if path is not None else _default_path(agent, resolved_session_id)
+        path
+        if path is not None
+        else parent.path
+        if parent is not None
+        else _default_path(agent, resolved_session_id)
     )
 
-    uninstall = install_atif(
-        agent.event_manager,
-        path=resolved_path,
-        session_id=resolved_session_id,
-        agent_name=resolved_agent_name,
-        agent_version=resolved_agent_version,
-        agent_model_name=agent_model_name,
-        agent_tool_definitions=agent_tool_definitions,
-        agent_extra=agent_extra,
-        trajectory_id=trajectory_id,
-        # atif_scope owns the lifetime of this run, so the cascade is
-        # appropriate: standalone calls inside the block should attach to
-        # this trajectory. Reset on scope exit by uninstall().
-        cascade_to_standalones=True,
-    )
-    exporter: AtifExporter = uninstall.exporter  # type: ignore[attr-defined]
+    # enable_atif already subscribed this agent. A second exporter would
+    # mistake the first for its parent and duplicate the child trajectory.
+    exporter = getattr(agent, "_atif_auto_exporter", None) if inherit_parent else None
+    if exporter is parent and parent is not None:
+        yield exporter
+        return
+    uninstall = None
+    if exporter is None:
+        uninstall = install_atif(
+            agent.event_manager,
+            path=resolved_path,
+            session_id=resolved_session_id,
+            agent_name=resolved_agent_name,
+            agent_version=resolved_agent_version,
+            agent_model_name=agent_model_name,
+            agent_tool_definitions=agent_tool_definitions,
+            agent_extra=agent_extra,
+            trajectory_id=trajectory_id,
+            # Inherited scopes leave the parent bound until the child call.
+            cascade_to_standalones=not inherit_parent,
+        )
+        exporter = uninstall.exporter  # type: ignore[attr-defined]
+    writes_to_disk = exporter._writes_to_disk
+    if inherit_parent:
+        exporter._writes_to_disk = False
     try:
         yield exporter
     except BaseException as exc:
@@ -252,7 +288,22 @@ async def atif_scope(
         exporter.finalize_on_exception(exc)
         raise
     finally:
-        uninstall()
+        if uninstall is not None:
+            uninstall()
+        else:
+            exporter.close()
+        exporter._writes_to_disk = writes_to_disk
+        if parent is not None:
+            # Call handlers already emitted the handoff. Refresh its snapshot
+            # after exception metadata and buffered dispatches have been flushed.
+            trajectory = exporter.get_trajectory()
+            with parent._lock:
+                if any(
+                    child.trajectory_id == trajectory.trajectory_id
+                    for child in parent._trajectory.subagent_trajectories or []
+                ):
+                    parent._upsert_subagent(trajectory)
+                    parent._write()
 
 
 # ---------------------------------------------------------------------------
@@ -326,13 +377,14 @@ def enable_atif(
                 / _safe_path_segment(agent_name)
                 / f"{_safe_path_segment(session_id)}.json"
             )
-            install_atif(
+            uninstall = install_atif(
                 self.event_manager,
                 path=path,
                 session_id=session_id,
                 agent_name=agent_name,
                 agent_version=_ENABLE_ATIF_CONFIG["agent_version"],
             )
+            self._atif_auto_exporter = uninstall.exporter  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             # Auto-install is best-effort; never block agent construction.
             logger.exception("atif: enable_atif auto-install failed")

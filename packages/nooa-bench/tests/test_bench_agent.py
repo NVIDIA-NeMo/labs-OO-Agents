@@ -13,6 +13,7 @@ from nooa_bench.bench_agent import BenchAgent, TaskResult
 from nooa_bench.rlm_bench_agent import RLMBenchAgent
 
 from nooa.agentdoc import doc
+from nooa.atif import Trajectory, atif_scope, enable_atif
 from nooa.runtime.event_manager import EventManager
 from nooa.unifiedllm import AssistantReasoning, AssistantText, FakeLLMClient, LLMResponse, ToolCall
 
@@ -112,6 +113,83 @@ async def test_delegate_uses_framework_value_formatting(agent_type, monkeypatch,
         assert "supplied_context" in rendered
         assert "synthetic-example" in rendered
         assert "[REDACTED]" not in rendered
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_delegate_exports_worker_to_active_atif_scope(agent_type, monkeypatch, tmp_path):
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    monkeypatch.setenv("ATIF_OUTPUT_DIR", str(tmp_path / "unexpected"))
+    code = (
+        "return_result(TaskResult(solution_description='worker-result', "
+        "evidence='checked', how_to_verify='check'))"
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="cell", name="python_cell", arguments=json.dumps({"code": code}))
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    agent = agent_type(llm=llm, working_dir=str(tmp_path))
+    path = tmp_path / "trajectory.json"
+    try:
+        async with atif_scope(agent, path=path):
+            result = await agent.delegate("inspect")
+        assert result.solution_description == "worker-result"
+        trajectory = Trajectory.model_validate_json(path.read_text())
+        children = trajectory.subagent_trajectories or []
+        assert len(children) == 1
+        assert children[0].agent.name == agent_type.__name__
+        assert any(step.source == "agent" for step in children[0].steps)
+        assert not (tmp_path / "unexpected").exists()
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_delegate_reuses_globally_enabled_atif_exporter(monkeypatch, tmp_path):
+    import nooa.atif.install as atif_install
+    from nooa import Agent
+    from nooa.standalone import _atif_exporter_var
+
+    monkeypatch.setattr(Agent, "__init__", Agent.__init__)
+    monkeypatch.setattr(atif_install, "_AGENT_INIT_PATCHED", False)
+    monkeypatch.setattr(atif_install, "_ENABLE_ATIF_CONFIG", {})
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    enable_atif(output_dir=tmp_path / "atif")
+    code = (
+        "return_result(TaskResult(solution_description='worker-result', "
+        "evidence='checked', how_to_verify='check'))"
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="cell", name="python_cell", arguments=json.dumps({"code": code}))
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    agent = BenchAgent(llm=llm, working_dir=str(tmp_path))
+    try:
+        assert (await agent.delegate("inspect")).solution_description == "worker-result"
+        assert _atif_exporter_var.get() is None
+        paths = list((tmp_path / "atif").rglob("*.json"))
+        assert len(paths) == 1
+        trajectory = Trajectory.model_validate_json(paths[0].read_text())
+        children = trajectory.subagent_trajectories or []
+        assert len(children) == 1
+        assert not children[0].subagent_trajectories
+        assert any(step.source == "agent" for step in children[0].steps)
     finally:
         await agent.aclose()
 
