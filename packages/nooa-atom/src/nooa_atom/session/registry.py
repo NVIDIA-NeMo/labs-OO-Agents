@@ -164,6 +164,7 @@ class SessionRegistry:
                 turn_method=options.turn_method,
                 mode=options.permission_mode,
                 session_id=session_id,
+                todo_id=options.todo_id,
             )
             session = await self._build(options, handle)
             if prepare is not None:
@@ -350,6 +351,7 @@ class SessionRegistry:
             depth=child.depth,
             status=_live_status(child),
             parent_id=child.parent_id,
+            todo_id=child.options.todo_id,
         )
 
     def check_owner(self, parent: Session, child_id: str) -> None:
@@ -386,6 +388,7 @@ class SessionRegistry:
         kind = update.outcome_kind
         if kind not in ("done", "need_input", "error", "cancelled"):
             return
+        self._merge_todo(parent, child)
         ref = self.child_ref(child)
         source = f"child:{child.name or child.id}"
         waiter = self._waiters.pop((parent.id, child.id), None)
@@ -435,6 +438,30 @@ class SessionRegistry:
                 task = asyncio.get_running_loop().create_task(self.close(child.id))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
+
+    def _merge_todo(self, parent: Session, child: Session) -> None:
+        """Merge the child's copy of its Todo into the parent's, as its outcome is delivered.
+
+        The parent agent decides what merges (``merge_delegated_todo``); a
+        failure is logged and never blocks the delivery.
+        """
+        todo_id = child.options.todo_id
+        merge = getattr(parent._agent, "merge_delegated_todo", None)
+        get = getattr(getattr(child._agent, "todo", None), "get", None)
+        if todo_id is None or not callable(merge) or not callable(get):
+            return
+        try:
+            updated = get(todo_id)
+            if updated is not None:
+                merge(child.id, child.name or child.id, updated)
+        except Exception:
+            logger.warning(
+                "Session %s: could not merge child %s's Todo %s",
+                parent.id,
+                child.id,
+                todo_id,
+                exc_info=True,
+            )
 
     def _deliver_message(self, child: Session, event: AgentMessage) -> None:
         """Send a child's ``self.message()`` text to its live parent as a ``ChildMessage``.
@@ -518,6 +545,7 @@ class SessionRegistry:
             depth=info.depth,
             status="closed" if closed else "on_disk",
             parent_id=info.parent_id,
+            todo_id=info.todo_id,
         )
 
     def _mark_closed(self, parent: Session, child_id: str) -> None:
@@ -656,6 +684,7 @@ class SessionRegistry:
             "turn_method": info.turn_method,
             "name": info.name,
             "keep": info.retained,
+            "todo_id": info.todo_id,
             "sessions_dir": self.store.root,
         }
         if info.parent_id is not None:

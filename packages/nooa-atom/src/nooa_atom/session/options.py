@@ -27,7 +27,8 @@ class SessionOptions(BaseModel):
     A child carries two separate choices: ``child_mode`` (its turn method:
     ``worker`` runs ``handle_work``, ``conversation`` runs ``handle``) and
     ``keep`` (its lifetime: ``False`` closes it after its first result,
-    ``True`` keeps it until it is closed or its tree ends).
+    ``True`` keeps it until it is closed or its tree ends). ``todo_id`` is the
+    parent's Todo the child works on, when it was handed one.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -41,6 +42,7 @@ class SessionOptions(BaseModel):
     max_depth: int = 2
     child_mode: ChildMode | None = None
     keep: bool = False
+    todo_id: str | None = None
     name: str | None = None
     host: str = "headless"
     sessions_dir: Path | None = None
@@ -48,7 +50,7 @@ class SessionOptions(BaseModel):
     def inherit(self, **overrides: Any) -> "SessionOptions":
         """Options for a child: same workspace, agent, model, mode and depth cap.
 
-        ``name``, ``child_mode`` and ``keep`` are not inherited. An override of ``None``
+        ``name``, ``child_mode``, ``keep`` and ``todo_id`` are not inherited. An override of ``None``
         means "inherit". A different ``model`` drops the inherited client.
         """
         values = {key: value for key, value in overrides.items() if value is not None}
@@ -56,7 +58,7 @@ class SessionOptions(BaseModel):
         if "model" in values and values["model"] != self.model:
             llm = None
         data = self.model_dump()
-        data.update(name=None, child_mode=None, keep=False)
+        data.update(name=None, child_mode=None, keep=False, todo_id=None)
         data.update(values)
         data["llm"] = values.get("llm", llm)
         return SessionOptions.model_validate(data)

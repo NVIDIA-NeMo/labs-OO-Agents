@@ -553,6 +553,27 @@ def test_with_todo_makes_open_delegated_todo_active() -> None:
     assert worker_manager.active().id == todo.id
 
 
+def test_receive_todo_adds_an_active_copy_that_merges_back() -> None:
+    parent = TodoManager()
+    todo = parent.add("delegated", description="the requirements")
+    parent.comment(todo, "parent note")
+    worker = TodoManager()
+    worker.add("worker's own")
+
+    copied = worker.receive_todo(parent.copy_todo(todo))
+
+    assert copied is not todo and copied.id == todo.id
+    assert worker.active() is copied
+    worker.comment(copied, "worker evidence")
+    worker.complete(copied)
+    assert [c.body for c in todo.comments] == ["parent note"]  # independent copy
+    merged = parent.merge_todo(copied, base=parent.copy_todo(todo))
+    assert merged.status == "done"
+    assert [c.body for c in merged.comments] == ["parent note", "worker evidence"]
+    with pytest.raises(ValueError, match="already managed"):
+        worker.receive_todo(copied)
+
+
 def test_status_bounds_framing_when_no_rows_fit() -> None:
     manager = TodoManager()
     for index in range(1_000):

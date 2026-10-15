@@ -209,7 +209,7 @@ def test_spawn_shows_mode_and_keep_not_retain_or_kwargs():
     from nooa_atom.agent.agent import AtomAgent
 
     params = inspect.signature(AtomAgent.spawn).parameters
-    assert {"mode", "keep"} <= set(params)
+    assert {"mode", "keep", "brief"} <= set(params)
     assert "retain" not in params
     assert all(p.kind is not inspect.Parameter.VAR_KEYWORD for p in params.values())
 
@@ -271,3 +271,142 @@ async def test_a_waiting_child_is_working_and_sends_no_item(
     await until(lambda: atom_registry.children(root.id)[0].status == "working", TIMEOUT)
     assert root._agent.queue_manager.get_channel("delegates").qsize() == 0
     assert atom_registry.child_status(root, info.id) == "working"
+
+
+# ---- D3/D4: the Todo as the shared contract, the brief, the parent line ----
+
+
+async def test_a_todo_and_a_brief_both_reach_the_child_with_the_parent_line(
+    atom_registry, atom_options, atom_models
+):
+    atom_models.scripts[None] = [
+        _wait_then(
+            "t = self.todo.add('Fix the parser', description='REQ: parse() keeps the last line')\n"
+            "self.todo.comment(t, 'NOTE: suspect the loop bound')\n"
+            "self.v.todo_id = t.id\n"
+            "self.v.ref = await self.spawn('Parser', t, brief='BRIEF: start from parse_header()')"
+        ),
+        done("received"),
+    ]
+    atom_models.scripts["Parser"] = [cell(CHILD_RESULT)]
+    root = await atom_registry.create(atom_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    todo_id = root._agent.v.todo_id
+    prompt = _messages(atom_models, "Parser")
+    assert (
+        f"You are working for parent root ({root.id}) on Todo {todo_id}: Fix the parser" in prompt
+    )
+    assert f"Task [{todo_id}]: Fix the parser" in prompt
+    for text in ("REQ: parse() keeps the last line", "NOTE: suspect the loop bound"):
+        assert text in prompt
+    assert "BRIEF: start from parse_header()" in prompt
+
+
+async def test_a_text_prompt_gets_the_parent_line_and_the_brief(
+    atom_registry, atom_options, atom_models
+):
+    atom_models.scripts[None] = [
+        cell(
+            "await self.delegate('W', 'TEXT-TASK', brief='TEXT-BRIEF')\n"
+            "return_result(Done(explanation='ok'))"
+        )
+    ]
+    atom_models.scripts["W"] = [cell(CHILD_RESULT)]
+    root = await atom_registry.create(atom_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    prompt = _messages(atom_models, "W")
+    assert f"You are working for parent root ({root.id})." in prompt
+    assert "TEXT-TASK" in prompt and "TEXT-BRIEF" in prompt
+
+
+async def test_the_child_works_on_a_copy_that_merges_back(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        _wait_then(
+            "t = self.todo.add('Fix the parser', description='REQ', owner='root')\n"
+            "self.todo.comment(t, 'parent note')\n"
+            "self.v.todo_id = t.id\n"
+            "self.v.ref = await self.spawn('Parser', t)"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "assert isinstance(item, ChildResult)\n"
+            "assert item.child.todo_id == self.v.todo_id == self.v.ref.todo_id\n"
+            "return_result(Done(explanation='merged'))"
+        ),
+    ]
+    atom_models.scripts["Parser"] = [
+        cell(
+            "t = self.todo.active()\n"
+            "self.v.seen = (t.id, t.title, t.description, [c.body for c in t.comments])\n"
+            "self.todo.comment(t, 'child evidence: tests pass')\n"
+            "self.todo.set_var(t, 'patch', 'parser.diff')\n"
+            "self.todo.update(t, description='child rewrote the requirements')\n"
+            "self.todo.complete(t)\n" + CHILD_RESULT
+        )
+    ]
+    root = await atom_registry.create(atom_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="merged")
+    todo_id = root._agent.v.todo_id
+    [child] = atom_registry.children(root.id)
+    assert child.todo_id == todo_id
+    # The child saw its own copy, as its active Todo.
+    kid = atom_registry.get(child.id)
+    assert kid is None or kid._agent.todo.get(todo_id) is not root._agent.todo.get(todo_id)
+    todo = root._agent.todo.get(todo_id)
+    assert [c.body for c in todo.comments] == ["parent note", "child evidence: tests pass"]
+    assert todo.status == "done"
+    assert (todo.vars["patch"], todo.vars["owner"], todo.vars["child"]) == (
+        "parser.diff",
+        "root",
+        child.id,
+    )
+    # The requirements are the parent's: the child's edit is not merged.
+    assert todo.description == "REQ"
+
+
+async def test_a_kept_childs_todo_merges_on_each_result(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        _wait_then(
+            "t = self.todo.add('Task')\n"
+            "self.v.todo_id = t.id\n"
+            "self.v.ref = await self.spawn('Kept', t, keep=True)"
+        ),
+        cell(
+            "self.todo.comment(self.v.todo_id, 'parent review: one more check')\n"
+            "await self.v.ref.send('run the last check')\n"
+            "return_result(Waiting(explanation='follow-up', on=['delegates']))"
+        ),
+        done("finished"),
+    ]
+    atom_models.scripts["Kept"] = [
+        cell("self.todo.comment(self.todo.active(), 'round 1')\n" + CHILD_RESULT),
+        cell(
+            "t = self.todo.list_todos()[0]\n"
+            "self.todo.comment(t, 'round 2')\n"
+            "self.todo.complete(t)\n" + CHILD_RESULT
+        ),
+    ]
+    root = await atom_registry.create(atom_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="finished")
+    todo = root._agent.todo.get(root._agent.v.todo_id)
+    assert [c.body for c in todo.comments] == [
+        "round 1",
+        "parent review: one more check",
+        "round 2",
+    ]
+    assert todo.status == "done"
+
+
+async def test_a_todo_not_in_the_parents_list_is_refused(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        cell(
+            "from nooa.tools.todo import Todo as _Todo\n"
+            "try:\n"
+            "    await self.spawn('X', _Todo(title='stray'))\n"
+            "except ValueError as exc:\n"
+            "    return_result(Done(explanation='refused'))"
+        )
+    ]
+    root = await atom_registry.create(atom_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="refused")
+    assert atom_registry.children(root.id) == []

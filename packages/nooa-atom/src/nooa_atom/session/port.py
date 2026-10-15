@@ -101,6 +101,7 @@ class SessionPort:
         mode: ChildMode = "worker",
         keep: bool = False,
         permission_mode: str | None = None,
+        todo: Any = None,
         **removed: Any,
     ) -> ChildRef:
         """Create a child session that works on ``prompt``; return its ``ChildRef``.
@@ -117,6 +118,9 @@ class SessionPort:
             keep: ``False``: closed after its first result. ``True``: stays
                 open for more messages until it is closed or its tree ends.
             permission_mode: Permission mode for the child; yours when omitted.
+            todo: A ``Todo`` the child works on: a copy of it becomes the
+                active Todo in the child's own list (the agent's
+                ``receive_delegated_todo``), and the ref records its id.
         """
         _reject_removed("delegate", removed)
         parent = self._session
@@ -127,15 +131,23 @@ class SessionPort:
             child_mode=mode,
             keep=keep,
             turn_method=_turn_method(self._session, mode),
+            todo_id=getattr(todo, "id", None),
         )
         items: list[tuple[str, Any]] = [("user_messages", prompt)]
         if context is not None:
             items.append(("context", as_data(context)))
+
+        async def hand_over(child: Session) -> None:
+            receive = getattr(child._agent, "receive_delegated_todo", None)
+            if callable(receive):
+                receive(todo)
+
         child = await self._registry.create(
             options,
             parent_id=parent.id,
             initial_items=items,
             initial_source=_parent_source(parent),
+            prepare=hand_over if todo is not None else None,
         )
         return self._registry.child_ref(child)
 
@@ -154,6 +166,7 @@ class SessionPort:
                 depth=info.depth,
                 status=info.status,
                 parent_id=info.parent_id,
+                todo_id=info.todo_id,
             )
             for info in self._registry.children(self._session.id)
         ]

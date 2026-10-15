@@ -89,6 +89,8 @@ class ChildRef(BaseModel):
     depth: int
     status_when_made: ChildStatus = Field(alias="status")
     parent_id: str | None = None
+    todo_id: str | None = None
+    """The parent's Todo this child works on, when it was handed one."""
 
     @classmethod
     def __restore_snapshot__(cls, data: dict[str, Any]) -> "ChildRef":
@@ -322,7 +324,10 @@ class SessionInfo(BaseModel):
     mode: str = "auto"
     status: SessionStatus = "on_disk"
     retained: bool = False
+    """Started with ``keep=True``: it stays open after its results."""
     turn_method: str = "handle"
+    todo_id: str | None = None
+    """The parent's Todo this child works on, when it was handed one."""
     created_at: float = 0.0
     last_active: float = 0.0
     turn_count: int = 0

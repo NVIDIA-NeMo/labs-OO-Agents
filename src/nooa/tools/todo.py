@@ -227,6 +227,23 @@ class TodoManager(Skill):
         return manager
 
     @hidden
+    def receive_todo(self, todo: Todo) -> Todo:
+        """Add an independent copy of a delegated todo and make it the active one.
+
+        A child session calls this with the todo its parent handed it. The
+        copy keeps the todo's id, so its comments and status can be merged
+        back into the parent's todo with ``merge_todo``.
+        """
+        copied = todo.model_copy(deep=True)
+        if copied.id in self._todos:
+            raise ValueError(f"todo {copied.id!r} is already managed by this TodoManager")
+        self._todos[copied.id] = copied
+        self._order.append(copied.id)
+        if copied.status != "done":
+            self._active_id = copied.id
+        return copied
+
+    @hidden
     def merge_todo(self, updated: Todo, *, base: Todo) -> Todo:
         """Atomically merge delegated changes without overwriting concurrent edits."""
         # Freeze the worker result so the committed parent cannot alias worker state.

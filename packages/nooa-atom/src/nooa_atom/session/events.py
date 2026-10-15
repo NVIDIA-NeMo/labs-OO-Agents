@@ -30,6 +30,7 @@ class SessionStarted(Metadata):
     name: str | None = None
     retained: bool = False
     turn_method: str = "handle"
+    todo_id: str | None = None
     mode: str = "auto"
     utc_offset: float | None = None
     """Seconds east of UTC of the writer's local time at creation.
