@@ -23,10 +23,12 @@ class _Worker(Agent, llm=FakeLLMClient()):
         ...
 
     async def fail(self) -> None:
+        """Buffer a task event before raising so exception finalization can be tested."""
         self.event_manager.add(Task(prompt="failing child", generation_id="failure"))
         raise ValueError("child failed")
 
     async def descend(self, depth: int) -> int:
+        """Build a chain of inherited child scopes ending in a scripted answer."""
         if depth == 0:
             return await self.answer()
         child = _worker()
@@ -38,10 +40,12 @@ class _Worker(Agent, llm=FakeLLMClient()):
 
 
 def _worker() -> _Worker:
+    """Create a worker with a fresh fake client that returns seven without network I/O."""
     return _Worker(llm=FakeLLMClient(scripted_responses=[LLMResponse(content='{"value": 7}')]))
 
 
 def _handoffs(trajectory: Trajectory) -> list:
+    """Extract handoff steps used to connect a parent trajectory to its children."""
     return [
         step
         for step in trajectory.steps
@@ -50,6 +54,7 @@ def _handoffs(trajectory: Trajectory) -> list:
 
 
 async def test_inherit_parent_without_active_export_is_noop(tmp_path):
+    """Without an active parent, inheriting neither subscribes nor writes a trace."""
     child = _worker()
     before = list(child.event_manager._handlers["*"])
     try:
@@ -65,6 +70,7 @@ async def test_inherit_parent_without_active_export_is_noop(tmp_path):
 
 
 async def test_unused_inherited_scope_does_not_create_child(tmp_path):
+    """Opening a child scope without calling it creates no child trajectory or handoff."""
     parent, child = _worker(), _worker()
     out = tmp_path / "parent.json"
     try:
@@ -82,6 +88,7 @@ async def test_unused_inherited_scope_does_not_create_child(tmp_path):
 
 
 async def test_inherited_scope_preserves_parent_binding_and_embeds_once(tmp_path):
+    """A child call preserves the parent binding and adds one embedded trace and handoff."""
     parent, child = _worker(), _worker()
     out = tmp_path / "parent.json"
     before = list(child.event_manager._handlers["*"])
@@ -109,6 +116,7 @@ async def test_inherited_scope_preserves_parent_binding_and_embeds_once(tmp_path
 
 
 async def test_inherited_scope_exception_preserves_child_state_and_cleans_up(tmp_path):
+    """A failed child retains buffered events and crash metadata while releasing its scope."""
     parent, child = _worker(), _worker()
     out = tmp_path / "parent.json"
     before = list(child.event_manager._handlers["*"])
@@ -135,6 +143,7 @@ async def test_inherited_scope_exception_preserves_child_state_and_cleans_up(tmp
 
 
 async def test_inherited_scope_recursive_children_preserve_tree(tmp_path):
+    """Recursive delegation preserves each parent-child link in a single exported tree."""
     parent = _worker()
     out = tmp_path / "parent.json"
     try:
@@ -154,16 +163,19 @@ async def test_inherited_scope_recursive_children_preserve_tree(tmp_path):
 
 
 async def test_inherited_scope_concurrent_children_stay_separate(tmp_path):
+    """Overlapping child calls produce sibling trajectories without nesting or duplication."""
     parent = _worker()
     out = tmp_path / "parent.json"
     barrier = asyncio.Barrier(3)
 
     class ConcurrentWorker(_Worker):
         async def run(self) -> int:
+            """Wait for sibling calls to start before generating the scripted answer."""
             await barrier.wait()
             return await self.answer()
 
     async def run_child():
+        """Run one concurrent worker in an inherited scope and close it afterwards."""
         child = ConcurrentWorker(
             llm=FakeLLMClient(scripted_responses=[LLMResponse(content='{"value": 7}')])
         )

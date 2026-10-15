@@ -366,6 +366,7 @@ def enable_atif(
     _orig_init = Agent.__init__
 
     def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        """Attach an exporter after initialization and retain it for inherited scopes."""
         _orig_init(self, *args, **kwargs)
         # Auto-install on this fresh agent's EventManager.
         try:

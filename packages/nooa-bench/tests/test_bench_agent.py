@@ -120,6 +120,7 @@ async def test_delegate_uses_framework_value_formatting(agent_type, monkeypatch,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
 async def test_delegate_exports_worker_to_active_atif_scope(agent_type, monkeypatch, tmp_path):
+    """Delegation embeds worker steps in the parent trace without writing a child file."""
     monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
     monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
     monkeypatch.setenv("ATIF_OUTPUT_DIR", str(tmp_path / "unexpected"))
@@ -155,6 +156,7 @@ async def test_delegate_exports_worker_to_active_atif_scope(agent_type, monkeypa
 
 @pytest.mark.asyncio
 async def test_delegate_reuses_globally_enabled_atif_exporter(monkeypatch, tmp_path):
+    """Global tracing and inherited scopes share one exporter per delegated worker."""
     import nooa.atif.install as atif_install
     from nooa import Agent
     from nooa.standalone import _atif_exporter_var
