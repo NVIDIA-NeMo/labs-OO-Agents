@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
@@ -47,8 +47,8 @@ from nooa_atom.tools.repo_tools import RepoTools
 with hidden:
     from nooa.agents import TokenBudgetSummarizer
     from nooa.runtime.channels import Channel, ChannelReader
-    from nooa_atom.agent.conditions import require_result
-    from nooa_atom.session.port import SessionPort
+    from nooa_atom.agent.conditions import require_result, require_task_result
+    from nooa_atom.session.port import SessionPort, _reject_removed
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
@@ -304,7 +304,7 @@ class AtomAgent(InteractiveAgent):
         todo = prompt if isinstance(prompt, Todo) else None
         text = _todo_prompt(todo) if todo is not None else str(prompt)
         child = await self._port().delegate(
-            description, text, context=context, model=model, retain=False
+            description, text, context=context, model=model, mode="worker", keep=False
         )
         done = await child.wait()
         if todo is not None:
@@ -318,7 +318,9 @@ class AtomAgent(InteractiveAgent):
         *,
         context: Any = None,
         model: str | None = None,
-        retain: bool = False,
+        mode: Literal["worker", "conversation"] = "worker",
+        keep: bool = False,
+        **removed: Any,
     ) -> ChildRef:
         """Start a child session on ``prompt`` and return its ``ChildRef`` at once.
 
@@ -336,14 +338,16 @@ class AtomAgent(InteractiveAgent):
             prompt: The full task: outcome, scope, whether edits are allowed.
             context: Optional data (a pydantic model or JSON data) sent with it.
             model: Model alias for the child; yours when omitted.
-            retain: ``False``: unattended, returns a ``TaskResult`` and closes.
-                ``True``: a conversation partner that may ask questions
-                (``ChildQuestion``) and takes more messages with
-                ``await ref.send(text)``; close it with ``await ref.close()``.
+            mode: ``"worker"``: reports with a ``TaskResult`` and may ask you a
+                question. ``"conversation"``: an interactive partner (rare).
+            keep: ``False``: closed after its first result. ``True``: stays open
+                for follow-ups (``await ref.send(text)``) until ``await ref.close()``.
         """
+        if removed:
+            _reject_removed("spawn", removed)
         text = _todo_prompt(prompt) if isinstance(prompt, Todo) else str(prompt)
         return await self._port().delegate(
-            description, text, context=context, model=model, retain=retain
+            description, text, context=context, model=model, mode=mode, keep=keep
         )
 
     def children(self) -> list[ChildRef]:
@@ -536,6 +540,61 @@ class AtomAgent(InteractiveAgent):
         ...
 
     @hidden
+    @strategy(
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_task_result])),
+        context=_V2_CONTEXT,
+    )
+    async def handle_work(
+        self,
+        notification: Annotated[
+            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+        ],
+    ) -> Done | NeedInput | Waiting:
+        """Work on a task for your parent agent and report back to it.
+
+        You are a child session. Your parent is an agent, not a person, and it
+        reads only your result. The task is in ``notification["user_messages"]``
+        (later messages there are follow-ups from your parent); data sent with
+        it is in ``notification.get("context", [])``. A Todo handed to you is
+        your active Todo: record evidence with ``self.todo.comment(...)`` and
+        mark it done with ``self.todo.complete(...)``; these go back to your
+        parent's Todo. Do not edit its title or description (they are your
+        parent's requirements); propose changes in a comment.
+
+        Assume you are the only one editing this checkout, and leave it clean:
+        remove scratch files before ``Done``.
+
+        End with exactly one ``return_result(...)``:
+
+        - ``Done`` with a ``TaskResult``, when the task is finished or blocked
+          (then say what blocked you and what you tried)::
+
+              return_result(Done(
+                  explanation="fixed the parser bug",
+                  result=TaskResult(
+                      solution_description="What was done, including modified paths",
+                      evidence="Commands run and what they showed",
+                      how_to_verify="How someone else can check it",
+                      report="The full report for your parent",
+                  ),
+              ))
+
+        - ``NeedInput(question=...)`` only when you cannot go on without your
+          parent's answer; it arrives as your next message.
+        - ``Waiting(explanation=..., on=[...])`` only while a job you started
+          is still running.
+
+        ``self.message()`` sends your parent a progress note; it does not
+        replace the result.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
+        """
+        ...
+
+    @hidden
     async def aclose(self) -> None:
         """Release the agent's background work, skills (MCP servers) and shell.
 
@@ -557,6 +616,19 @@ class AtomAgent(InteractiveAgent):
 
 # A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.
 spec(AtomAgent, "session_port_visible", hidden=True)
+
+
+def _without_removed(method: Any) -> None:
+    """Document ``method`` without its ``**removed`` catch-all (it only rejects ``retain=``)."""
+    import inspect
+
+    signature = inspect.signature(method)
+    method.__signature__ = signature.replace(
+        parameters=[p for p in signature.parameters.values() if p.kind is not p.VAR_KEYWORD]
+    )
+
+
+_without_removed(AtomAgent.spawn)
 
 
 @hidden

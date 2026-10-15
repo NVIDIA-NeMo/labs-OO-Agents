@@ -9,7 +9,7 @@ live agents never cross.
 
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, SerializeAsAny, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, ValidationError, field_validator
 
 from nooa.context_blocks import EventBase
 from nooa.interactive import Done, NeedInput
@@ -18,7 +18,11 @@ from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
 if TYPE_CHECKING:
     from nooa_atom.session.port import SessionPort
 
-SessionStatus = Literal["running", "idle", "retained", "closed", "on_disk"]
+SessionStatus = Literal["running", "working", "idle", "retained", "closed", "on_disk"]
+"""``running``: a turn is running. ``working``: its last turn ended ``Waiting``
+on a job of its own. ``idle``: live, nothing to do. ``retained``: an idle child
+started with ``keep=True``. ``closed``: closed for good. ``on_disk``: not
+loaded in this process."""
 ChildStatus = SessionStatus  # a child reports the same statuses as any session
 
 
@@ -78,11 +82,34 @@ class ChildRef(BaseModel):
     ``ChildFailedError`` in any other session.
     """
 
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
     id: str
     name: str
     depth: int
-    status: ChildStatus
+    status_when_made: ChildStatus = Field(alias="status")
     parent_id: str | None = None
+
+    @classmethod
+    def __restore_snapshot__(cls, data: dict[str, Any]) -> "ChildRef":
+        """Rebuild a ref from a snapshot: older ones stored ``status``, newer ``status_when_made``."""
+        known = {key: value for key, value in data.items() if key in cls.model_fields}
+        if "status_when_made" not in known and "status" in data:
+            known["status_when_made"] = data["status"]
+        return cls.model_validate(known)
+
+    @property
+    def status(self) -> ChildStatus:
+        """The child's live status, read from the registry in the parent's turn.
+
+        Outside the parent's turn it is the status when this ref was made.
+        """
+        port = _parent_port(self)
+        return self.status_when_made if port is None else port.child_status(self.id)
+
+    def __repr_args__(self) -> Any:
+        for name, value in super().__repr_args__():
+            yield ("status", self.status) if name == "status_when_made" else (name, value)
 
     async def wait(self) -> Done:
         """Wait for the child's next ``Done`` and return it.
@@ -107,6 +134,16 @@ class ChildRef(BaseModel):
     def info(self) -> "SessionInfo":
         """The child's current metadata."""
         return _port(self).child_info(self.id)
+
+
+def _parent_port(ref: ChildRef) -> "SessionPort | None":
+    """The running turn's port when it is ``ref``'s parent, else ``None``."""
+    from nooa_atom.session.port import current_port
+
+    port = current_port.get()
+    if port is None or (ref.parent_id is not None and ref.parent_id != port.id):
+        return None
+    return port
 
 
 def _port(ref: ChildRef) -> "SessionPort":

@@ -7,6 +7,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+ChildMode = Literal["worker", "conversation"]
+"""How a child's turns run: ``worker`` reports to its parent with a ``TaskResult``
+(``handle_work``); ``conversation`` is the interactive ``handle()``."""
+
 
 class SessionOptions(BaseModel):
     """How to build and run one session.
@@ -19,6 +23,11 @@ class SessionOptions(BaseModel):
     directory for the sessions of every workspace; ``None`` (the default)
     means ``<workspace>/.nooa/sessions`` unless ``NOOA_SESSIONS_DIR`` is set
     (see ``sessions_root``).
+
+    A child carries two separate choices: ``child_mode`` (its turn method:
+    ``worker`` runs ``handle_work``, ``conversation`` runs ``handle``) and
+    ``keep`` (its lifetime: ``False`` closes it after its first result,
+    ``True`` keeps it until it is closed or its tree ends).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -27,10 +36,11 @@ class SessionOptions(BaseModel):
     agent_spec: str
     model: str | None = None
     llm: Any | None = Field(default=None, exclude=True)
-    turn_method: Literal["handle", "handle_batch"] = "handle"
+    turn_method: Literal["handle", "handle_batch", "handle_work"] = "handle"
     permission_mode: Literal["auto", "ask"] = "auto"
     max_depth: int = 2
-    retain: bool = False
+    child_mode: ChildMode | None = None
+    keep: bool = False
     name: str | None = None
     host: str = "headless"
     sessions_dir: Path | None = None
@@ -38,7 +48,7 @@ class SessionOptions(BaseModel):
     def inherit(self, **overrides: Any) -> "SessionOptions":
         """Options for a child: same workspace, agent, model, mode and depth cap.
 
-        ``name`` and ``retain`` are not inherited. An override of ``None``
+        ``name``, ``child_mode`` and ``keep`` are not inherited. An override of ``None``
         means "inherit". A different ``model`` drops the inherited client.
         """
         values = {key: value for key, value in overrides.items() if value is not None}
@@ -46,7 +56,7 @@ class SessionOptions(BaseModel):
         if "model" in values and values["model"] != self.model:
             llm = None
         data = self.model_dump()
-        data.update(name=None, retain=False)
+        data.update(name=None, child_mode=None, keep=False)
         data.update(values)
         data["llm"] = values.get("llm", llm)
         return SessionOptions.model_validate(data)

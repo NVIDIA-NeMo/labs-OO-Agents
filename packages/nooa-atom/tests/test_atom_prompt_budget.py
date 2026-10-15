@@ -44,11 +44,13 @@ RESULT = (
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
+# Raised when spawn() took mode= and keep= in place of retain= (2026-10-15,
+# about 340 characters with the ChildMessage docs): measured values plus about 2%.
 LIMITS = {
-    (ATOM, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
-    (ATOM, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
-    (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
-    (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
+    (ATOM, "handle"): (14_900, 17_850),  # measured 14,571 / 17,476
+    (ATOM, "handle_batch"): (14_900, 17_500),  # measured 14,571 / 17,130
+    (EXPERIMENTAL, "handle"): (14_700, 16_550),  # measured 14,409 / 16,179
+    (EXPERIMENTAL, "handle_batch"): (14_700, 16_900),  # measured 14,409 / 16,553
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

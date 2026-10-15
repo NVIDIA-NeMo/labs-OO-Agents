@@ -126,7 +126,8 @@ def test_options_inherit_for_a_child(tmp_path):
         llm=llm,
         permission_mode="auto",
         max_depth=3,
-        retain=True,
+        child_mode="conversation",
+        keep=True,
         name="root",
         host="acp",
         sessions_dir=tmp_path / "s",
@@ -144,14 +145,17 @@ def test_options_inherit_for_a_child(tmp_path):
         "acp",
         tmp_path / "s",
     )
-    assert (child.name, child.retain) == ("Review auth", False)
+    assert (child.name, child.child_mode, child.keep) == ("Review auth", None, False)
 
-    other = parent.inherit(model="other-alias", retain=True, turn_method="handle_batch")
-    assert (other.model, other.llm, other.retain, other.turn_method) == (
+    other = parent.inherit(
+        model="other-alias", child_mode="worker", keep=True, turn_method="handle_work"
+    )
+    assert (other.model, other.llm, other.child_mode, other.keep, other.turn_method) == (
         "other-alias",
         None,
+        "worker",
         True,
-        "handle_batch",
+        "handle_work",
     )
     assert parent.inherit(model=None).llm is llm
     with pytest.raises(ValidationError):

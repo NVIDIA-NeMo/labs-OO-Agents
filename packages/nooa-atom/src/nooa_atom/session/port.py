@@ -9,7 +9,15 @@ from typing import TYPE_CHECKING, Any
 from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.interactive import Done, InteractiveAgent
-from nooa_atom.session.items import ChildFailedError, ChildRef, Receipt, SessionInfo, Usage
+from nooa_atom.session.items import (
+    ChildFailedError,
+    ChildRef,
+    ChildStatus,
+    Receipt,
+    SessionInfo,
+    Usage,
+)
+from nooa_atom.session.options import ChildMode
 from nooa_atom.session.session import Session, as_data
 
 if TYPE_CHECKING:
@@ -50,10 +58,13 @@ class SessionPort:
       Each ``self.message()`` of the child arrives before them as a
       ``ChildMessage`` (``item.text``); it does not end ``child.wait()``.
 
-    Children created with ``retain=False`` (the default) work unattended:
-    they cannot ask questions and are closed after their first result.
-    ``retain=True`` children may ask, keep running, and accept more
-    messages with ``await child.send(...)``.
+    Two separate choices shape a child. ``mode="worker"`` (the default)
+    runs ``handle_work`` turns: written for a parent reader, each ``Done``
+    carries a ``TaskResult``, and it may ask you a question.
+    ``mode="conversation"`` runs the interactive ``handle()``. ``keep=False``
+    (the default) closes it after its first result; ``keep=True`` keeps it
+    for more messages (``await child.send(...)``) until it is closed or its
+    tree ends. A closed child stays closed: ``send()`` raises.
 
     Never predict or make up a pending child's result: end the turn and act
     on the item when it arrives.
@@ -87,8 +98,10 @@ class SessionPort:
         *,
         context: Any = None,
         model: str | None = None,
-        mode: str | None = None,
-        retain: bool = False,
+        mode: ChildMode = "worker",
+        keep: bool = False,
+        permission_mode: str | None = None,
+        **removed: Any,
     ) -> ChildRef:
         """Create a child session that works on ``prompt``; return its ``ChildRef``.
 
@@ -98,17 +111,22 @@ class SessionPort:
             context: Optional data (a pydantic model or JSON data) the child
                 receives with the prompt on its ``context`` channel.
             model: Model alias for the child; the same as yours when omitted.
-            mode: Permission mode for the child; yours when omitted.
-            retain: ``False``: unattended, closed after its first result.
-                ``True``: may ask questions and stays open for more messages.
+            mode: ``"worker"`` (the default) runs ``handle_work`` turns that
+                report with a ``TaskResult`` and may ask you a question;
+                ``"conversation"`` runs the interactive ``handle()``.
+            keep: ``False``: closed after its first result. ``True``: stays
+                open for more messages until it is closed or its tree ends.
+            permission_mode: Permission mode for the child; yours when omitted.
         """
+        _reject_removed("delegate", removed)
         parent = self._session
         options = parent.options.inherit(
             name=description,
             model=model,
-            permission_mode=mode,
-            retain=retain,
-            turn_method="handle" if retain else "handle_batch",
+            permission_mode=permission_mode,
+            child_mode=mode,
+            keep=keep,
+            turn_method=_turn_method(self._session, mode),
         )
         items: list[tuple[str, Any]] = [("user_messages", prompt)]
         if context is not None:
@@ -120,6 +138,12 @@ class SessionPort:
             initial_source=_parent_source(parent),
         )
         return self._registry.child_ref(child)
+
+    @property
+    def name(self) -> str:
+        """This session's name, else its title, else ``"root"`` for an unnamed root."""
+        session = self._session
+        return session.name or session.info.title or ("root" if session.parent_id is None else "")
 
     def children(self) -> list[ChildRef]:
         """Handles on your children, live and closed."""
@@ -186,6 +210,11 @@ class SessionPort:
         await self._registry.close_child(self._session, child_id)
 
     @hidden
+    def child_status(self, child_id: str) -> ChildStatus:
+        """A child's live status (``ChildRef.status``)."""
+        return self._registry.child_status(self._session, child_id)
+
+    @hidden
     def info(self) -> SessionInfo:
         """This session's metadata, with its live status."""
         return self._registry.live_info(self._session)
@@ -195,6 +224,33 @@ class SessionPort:
         """A child's metadata."""
         self._registry.check_owner(self._session, child_id)
         return self._registry.info(child_id)
+
+
+def _reject_removed(method: str, removed: dict[str, Any]) -> None:
+    """Raise a clear ``TypeError`` for ``retain=`` (removed) or any unknown keyword."""
+    if "retain" in removed:
+        raise TypeError(
+            f"{method}() no longer takes retain=: choose the turn type with "
+            "mode='worker' (the default) or mode='conversation', and the lifetime with "
+            "keep=True (stays open for follow-ups) or keep=False (closed after its result)"
+        )
+    if removed:
+        raise TypeError(f"{method}() got an unexpected keyword argument {next(iter(removed))!r}")
+
+
+def _turn_method(parent: Session, mode: ChildMode) -> str:
+    """The child's turn method, from its mode only (never from its lifetime).
+
+    A worker runs ``handle_work``; an agent class without one runs workers
+    with ``handle_batch``.
+    """
+    if mode == "conversation":
+        return "handle"
+    if mode != "worker":
+        raise ValueError(f"mode must be 'worker' or 'conversation', not {mode!r}")
+    return (
+        "handle_work" if callable(getattr(parent._agent, "handle_work", None)) else "handle_batch"
+    )
 
 
 def _parent_source(session: Session) -> str:

@@ -168,6 +168,19 @@ class ChildDeleted(Metadata):
     name: str | None = None
 
 
+class ChildClosed(Metadata):
+    """Tombstone: this session closed one of its children for good.
+
+    Written when the parent closes the child (``ChildRef.close()``) or a
+    ``keep=False`` child is closed after its result. Closing a whole tree on
+    shutdown writes none, so a reloaded tree can still reach its kept children.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    child_id: str = ""
+
+
 class UsageAttributed(Metadata):
     """A child's own usage from one of its turns, added to this session's attributed totals.
 
@@ -225,6 +238,7 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     TurnStarted,
     TurnEnded,
     ChildDeleted,
+    ChildClosed,
     TurnCancelled,
     SnapshotRestoreFailed,
     UsageAttributed,

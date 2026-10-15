@@ -72,7 +72,7 @@ async def test_the_parent_is_told_about_a_new_child(registry, root_options):
     seen = []
     root.subscribe(lambda e: seen.append(e) if e.kind == "child_created" else None)
     child = await registry.create(
-        root.options.inherit(name="Review auth", retain=True), parent_id=root.id
+        root.options.inherit(name="Review auth", keep=True), parent_id=root.id
     )
     [created] = seen
     assert (created.child_id, created.name, created.depth, created.retained) == (
@@ -111,7 +111,7 @@ async def test_list_and_children_report_live_and_on_disk_status(registry, root_o
     started, block = fresh_events()
     models.scripts["busy"] = [cell(BLOCKING_CELL + "return_result(Done(explanation='x'))")]
     root = await registry.create(root_options)
-    kept = await registry.create(root.options.inherit(name="kept", retain=True), parent_id=root.id)
+    kept = await registry.create(root.options.inherit(name="kept", keep=True), parent_id=root.id)
     busy = await registry.create(root.options.inherit(name="busy"), parent_id=root.id)
     gone = await registry.create(root.options.inherit(name="gone"), parent_id=root.id)
     await registry.close(gone.id)
@@ -230,9 +230,7 @@ async def test_loading_a_parent_whose_child_is_live_elsewhere_is_refused(
     registry, root_options, sessions_dir
 ):
     root = await registry.create(root_options)
-    child = await registry.create(
-        root.options.inherit(name="child", retain=True), parent_id=root.id
-    )
+    child = await registry.create(root.options.inherit(name="child", keep=True), parent_id=root.id)
     await registry.close_all()
 
     elsewhere = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
@@ -255,9 +253,7 @@ async def test_a_child_opened_elsewhere_between_check_and_open_is_caught(
     registry, root_options, sessions_dir, monkeypatch
 ):
     root = await registry.create(root_options)
-    child = await registry.create(
-        root.options.inherit(name="child", retain=True), parent_id=root.id
-    )
+    child = await registry.create(root.options.inherit(name="child", keep=True), parent_id=root.id)
     await registry.close_all()
 
     here = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
@@ -287,11 +283,9 @@ async def test_a_child_cannot_be_loaded_while_its_parent_is_live_elsewhere(
     registry, root_options, sessions_dir
 ):
     root = await registry.create(root_options)
-    child = await registry.create(
-        root.options.inherit(name="child", retain=True), parent_id=root.id
-    )
+    child = await registry.create(root.options.inherit(name="child", keep=True), parent_id=root.id)
     grandchild = await registry.create(
-        child.options.inherit(name="grandchild", retain=True), parent_id=child.id
+        child.options.inherit(name="grandchild", keep=True), parent_id=child.id
     )
     await registry.close(child.id)  # the root stays live in `registry`
 
@@ -427,9 +421,7 @@ async def test_a_same_model_child_shares_the_parents_client(root_options, sessio
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
         [root_llm] = factory.made
-        kid = await registry.create(
-            root.options.inherit(name="kid", retain=True), parent_id=root.id
-        )
+        kid = await registry.create(root.options.inherit(name="kid", keep=True), parent_id=root.id)
         assert kid._agent.llm is root_llm and len(factory.calls) == 1
         await registry.close(kid.id)
         assert not root_llm.closed  # the child did not own it
@@ -451,9 +443,7 @@ async def test_set_model_keeps_a_client_a_child_still_uses(root_options, session
     )
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
-        kid = await registry.create(
-            root.options.inherit(name="kid", retain=True), parent_id=root.id
-        )
+        kid = await registry.create(root.options.inherit(name="kid", keep=True), parent_id=root.id)
         await root.set_model("alias-b")
         assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="on b")
         old, new = factory.made

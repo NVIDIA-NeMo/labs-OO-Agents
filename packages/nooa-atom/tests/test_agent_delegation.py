@@ -63,7 +63,7 @@ async def test_delegate_returns_the_childs_done_with_its_task_result(
     assert "CHILD-PROMPT: fix the parser" in _messages(atom_models, "Fix parser")
     # The child is a session of its own, with its own record.
     [child] = atom_registry.children(root.id)
-    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle_batch", False)
+    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle_work", False)
     assert child.agent == ATOM_SPEC
     assert atom_registry.store.load_rows(child.id, frozenset({"TurnStarted"}))
 

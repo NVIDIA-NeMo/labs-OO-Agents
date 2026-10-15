@@ -220,6 +220,8 @@ class Session:
         # True while a Done's message is sent: its parent gets it in the
         # ChildResult, so the registry does not also send a ChildMessage.
         self.sending_done_message = False
+        # How the last turn ended ("waiting" shows a child as "working").
+        self.last_outcome_kind: str | None = None
         self._close_task: asyncio.Task[None] | None = None
         self._closing = False
         self._closed = False
@@ -497,6 +499,15 @@ class Session:
             )
             self._pending_steers.pop(0)
 
+    def has_queued_input(self) -> bool:
+        """Whether an item waits on one of the agent's queue channels or as a steer."""
+        if self._pending_steers:
+            return True
+        return any(
+            channel.mode == "queue" and channel.qsize() > 0
+            for channel in self._agent.queue_manager.channels().values()
+        )
+
     def withdraw(self, receipt: Receipt) -> bool:
         """Take back an item nothing has consumed yet; return whether it was withdrawn.
 
@@ -764,6 +775,7 @@ class Session:
         error = TurnFailedError(f"{type(exc).__name__}: {exc}", exc)
         for item_id in owed:
             self._resolve(item_id, error)
+        self.last_outcome_kind = "error"
         self.info.status = "idle"
         with suppress(Exception):
             self._emit(
@@ -833,6 +845,7 @@ class Session:
         self._consumed = [i for i in self._consumed if i not in consumed]
         if kind != "cancelled":
             self._checkpoint()
+        self.last_outcome_kind = kind
         self.info.status = "idle"
         self._emit(
             TurnEndedUpdate(

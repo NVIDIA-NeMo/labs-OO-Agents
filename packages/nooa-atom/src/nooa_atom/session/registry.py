@@ -21,7 +21,7 @@ from typing import Any
 from nooa.events import TuiSessionResumed
 from nooa.interactive import AgentMessage, Done
 from nooa.storage.sqlite import SessionAlreadyActiveError
-from nooa_atom.session.events import ChildDeleted, SnapshotRestoreFailed
+from nooa_atom.session.events import ChildClosed, ChildDeleted, SnapshotRestoreFailed
 from nooa_atom.session.items import (
     AgentEventUpdate,
     ChildCreatedUpdate,
@@ -107,6 +107,8 @@ class SessionRegistry:
         # Parent-side delivery state, by (parent id, child id): only the
         # child's own parent can wait for or take its results.
         self._waiters: dict[tuple[str, str], asyncio.Future[Done]] = {}
+        # Children their parent closed for good (also tombstoned in its record).
+        self._closed_children: set[str] = set()
         self._queued: dict[tuple[str, str], list[tuple[Receipt, ChildResult | ChildFailed]]] = {}
         self._background: set[asyncio.Task[None]] = set()
 
@@ -158,7 +160,7 @@ class SessionRegistry:
                 parent_id=parent_id,
                 depth=depth,
                 name=options.name,
-                retained=options.retain,
+                retained=options.keep,
                 turn_method=options.turn_method,
                 mode=options.permission_mode,
                 session_id=session_id,
@@ -181,7 +183,7 @@ class SessionRegistry:
                     child_id=session.id,
                     name=session.name,
                     depth=session.depth,
-                    retained=options.retain,
+                    retained=options.keep,
                 )
             )
         return session
@@ -427,8 +429,9 @@ class SessionRegistry:
             delivered = True
         finally:
             # Keep a child's own durable result available if parent admission fails.
-            if delivered and kind != "need_input" and not child.options.retain:
+            if delivered and kind != "need_input" and not child.options.keep:
                 # Not from inside this callback: closing awaits the child's own loop.
+                self._mark_closed(parent, child.id)
                 task = asyncio.get_running_loop().create_task(self.close(child.id))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
@@ -508,23 +511,59 @@ class SessionRegistry:
 
     def _ref_from_disk(self, child_id: str) -> ChildRef:
         info = self.store.get(child_id)
+        closed = info.parent_id is not None and self.is_closed(info.parent_id, child_id)
         return ChildRef(
             id=info.id,
             name=info.name or "",
             depth=info.depth,
-            status="on_disk",
+            status="closed" if closed else "on_disk",
             parent_id=info.parent_id,
         )
+
+    def _mark_closed(self, parent: Session, child_id: str) -> None:
+        """Record that ``parent`` closed this child for good (a durable tombstone)."""
+        if child_id in self._closed_children:
+            return
+        self._closed_children.add(child_id)
+        with suppress(Exception):
+            parent.handle.events.add(ChildClosed(child_id=child_id))
+
+    def is_closed(self, parent_id: str, child_id: str) -> bool:
+        """Whether the parent closed this child (``close()``, or ``keep=False`` after its result)."""
+        if child_id in self._closed_children:
+            return True
+        try:
+            rows = self.store.load_rows(parent_id, frozenset({"ChildClosed"}))
+        except Exception:
+            return False
+        closed = {str(raw.get("child_id")) for _kind, raw in rows}
+        self._closed_children.update(closed)
+        return child_id in closed
+
+    def child_status(self, parent: Session, child_id: str) -> SessionStatus:
+        """A child's live status: ``closed`` once its parent closed it, ``on_disk`` if not loaded."""
+        self.check_owner(parent, child_id)
+        if self.is_closed(parent.id, child_id):
+            return "closed"
+        live = self.sessions.get(child_id)
+        return _live_status(live) if live is not None else "on_disk"
 
     async def open_child(self, parent: Session, child_id: str) -> Session:
         """A child of ``parent``: the live one, or loaded from disk with inherited options.
 
-        Raises ``ChildFailedError`` when ``child_id`` is not a child of ``parent``.
+        Raises ``ChildFailedError`` when ``child_id`` is not a child of
+        ``parent``, or when the parent closed it: closed means closed.
         """
         self.check_owner(parent, child_id)
         live = self.sessions.get(child_id)
-        if live is not None:
+        closed = self.is_closed(parent.id, child_id)
+        if live is not None and not live.closing and not closed:
             return live
+        if live is not None or closed:
+            name = live.name if live is not None else self.store.get(child_id).name
+            raise ChildFailedError(
+                f"Child {name or child_id!r} is closed; spawn a new child for more work"
+            )
         info = self.store.get(child_id)
         # The record gives the child's own options; the parent passes on
         # what it does not record (the depth cap) and a client it shares.
@@ -552,7 +591,7 @@ class SessionRegistry:
         """Attach to a live session, or open one from disk and resume it.
 
         The session's options come from its record (agent spec, turn
-        method, model, permission mode, workspace, name, retain, host; the
+        method, model, permission mode, workspace, name, keep, host; the
         latest ``set_model``/``set_mode`` win); keyword
         ``overrides`` (any ``SessionOptions`` field, e.g. ``host="acp"``
         or ``llm=...``) replace those fields and nothing else does.
@@ -616,9 +655,15 @@ class SessionRegistry:
             "model": info.model or None,
             "turn_method": info.turn_method,
             "name": info.name,
-            "retain": info.retained,
+            "keep": info.retained,
             "sessions_dir": self.store.root,
         }
+        if info.parent_id is not None:
+            values["child_mode"] = (
+                "worker"
+                if info.turn_method == "handle_work"
+                else ("conversation" if info.turn_method == "handle" else None)
+            )
         if info.host:
             values["host"] = info.host
         if info.mode in ("auto", "ask"):
@@ -730,9 +775,16 @@ class SessionRegistry:
         return session.info.model_copy(update={"status": _live_status(session)}, deep=True)
 
     def children(self, parent_id: str) -> list[SessionInfo]:
-        """Children of ``parent_id``: live ones and those only on disk, by id."""
+        """Children of ``parent_id``: live ones and those only on disk, by id.
+
+        A child its parent closed reads ``closed``; one merely not loaded, ``on_disk``.
+        """
         found = {
-            info.id: info
+            info.id: (
+                info.model_copy(update={"status": "closed"})
+                if self.is_closed(parent_id, info.id)
+                else info
+            )
             for info in self.store.list(roots_only=False)
             if info.parent_id == parent_id
         }
@@ -759,8 +811,9 @@ class SessionRegistry:
             await session.close()
 
     async def close_child(self, parent: Session, child_id: str) -> None:
-        """Close ``parent``'s child; ``ChildFailedError`` if it is not ``parent``'s."""
+        """Close ``parent``'s child for good; ``ChildFailedError`` if it is not ``parent``'s."""
         self.check_owner(parent, child_id)
+        self._mark_closed(parent, child_id)
         await self.close(child_id)
 
     async def _close_children(self, parent_id: str) -> None:
@@ -793,7 +846,9 @@ def _live_status(session: Session) -> SessionStatus:
         return "running"
     if session.info.status == "closed":
         return "closed"
-    if session.parent_id is not None and session.options.retain:
+    if session.last_outcome_kind == "waiting":
+        return "working"
+    if session.parent_id is not None and session.options.keep:
         return "retained"
     return "idle"
 

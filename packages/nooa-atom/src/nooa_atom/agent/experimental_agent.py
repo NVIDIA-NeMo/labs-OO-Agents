@@ -18,7 +18,7 @@ from nooa_atom.agent.agent import AtomAgent
 
 with hidden:
     from nooa_atom.agent.agent import _V2_CONTEXT
-    from nooa_atom.agent.conditions import require_result
+    from nooa_atom.agent.conditions import require_result, require_task_result
 
 # The stable agent's context overrides, without the context-usage block.
 _EXPERIMENTAL_CONTEXT: Annotated[dict[str, Any], hidden] = {**_V2_CONTEXT, "context_usage": None}
@@ -103,6 +103,34 @@ class ExperimentalAtomAgent(AtomAgent):
         If something blocks you, still return ``Done`` with a ``TaskResult`` that says
         what blocked you. Return ``Waiting(explanation=..., on=[...])`` only while a job
         you started is still running.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
+        """
+        ...
+
+    @hidden
+    @strategy(
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_task_result])),
+        context=_EXPERIMENTAL_CONTEXT,
+    )
+    async def handle_work(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
+        """Work on a task for your parent agent and report back to it.
+
+        You are a child session; your parent is an agent and reads only your result.
+        The task is in ``notification["user_messages"]`` (later messages are
+        follow-ups); data sent with it is in ``notification.get("context", [])``. A
+        Todo handed to you is your active Todo: comment evidence on it and complete it;
+        that goes back to your parent's Todo. Do not edit its title or description.
+        Assume you are the only editor of this checkout and remove scratch files
+        before ``Done``. End with ``return_result(Done(explanation=...,
+        result=TaskResult(solution_description=..., evidence=..., how_to_verify=...,
+        report=...)))``, also when blocked (say what blocked you);
+        ``NeedInput(question=...)`` only when you need your parent's answer; or
+        ``Waiting(explanation=..., on=[...])`` only while a job you started is still
+        running. ``self.message()`` is a progress note, not the result.
 
         Python locals live for one method call; when the call returns they
         are gone. Anything you need later goes in ``self.v`` (durable,

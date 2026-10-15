@@ -44,10 +44,11 @@ def _delegates(registry, session_id):
     return found
 
 
-async def _spawn_and_collect(registry, root_options, models, *, retain):
+async def _spawn_and_collect(registry, root_options, models, *, keep):
+    how = "mode='conversation', keep=True" if keep else "mode='worker'"
     models.scripts[None] = [
         cell(
-            f"await self.session.delegate('Kid', 'work', retain={retain})\n"
+            f"await self.session.delegate('Kid', 'work', {how})\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         collect(),
@@ -70,7 +71,7 @@ async def _spawn_and_collect(registry, root_options, models, *, retain):
 async def test_a_batch_childs_messages_arrive_in_order_before_its_result(
     registry, root_options, models
 ):
-    root, outcome = await _spawn_and_collect(registry, root_options, models, retain=False)
+    root, outcome = await _spawn_and_collect(registry, root_options, models, keep=False)
     assert outcome == Done(explanation="collected")
     assert _delegates(registry, root.id) == [
         ("ChildMessage", "first"),
@@ -85,10 +86,10 @@ async def test_a_batch_childs_messages_arrive_in_order_before_its_result(
     ]
 
 
-async def test_a_retained_childs_messages_arrive_in_order_before_its_result(
+async def test_a_kept_conversation_childs_messages_arrive_in_order_before_its_result(
     registry, root_options, models
 ):
-    root, outcome = await _spawn_and_collect(registry, root_options, models, retain=True)
+    root, outcome = await _spawn_and_collect(registry, root_options, models, keep=True)
     assert outcome == Done(explanation="collected")
     assert _delegates(registry, root.id) == [
         ("ChildMessage", "first"),
@@ -100,7 +101,7 @@ async def test_a_retained_childs_messages_arrive_in_order_before_its_result(
 
 
 async def test_the_childs_messages_stay_in_its_own_events(registry, root_options, models):
-    await _spawn_and_collect(registry, root_options, models, retain=True)
+    await _spawn_and_collect(registry, root_options, models, keep=True)
     [kid] = registry.children(next(iter(registry.sessions)))
     rows = registry.store.load_rows(kid.id, frozenset({AgentMessage.__name__}))
     assert [raw["content"] for _t, raw in rows][:2] == ["first", "second"]
@@ -109,7 +110,7 @@ async def test_the_childs_messages_stay_in_its_own_events(registry, root_options
 async def test_a_message_wakes_a_parent_waiting_on_delegates(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "await self.session.delegate('Kid', 'work', retain=True)\n"
+            "await self.session.delegate('Kid', 'work', mode='conversation', keep=True)\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         cell(
@@ -203,7 +204,7 @@ async def test_a_roots_messages_go_to_the_host_not_delegates(registry, root_opti
 async def test_a_closing_or_closed_parent_drops_messages(registry, root_options):
     root = await registry.create(root_options)
     child = await registry.create(
-        root_options.model_copy(update={"name": "Kid", "retain": True}), parent_id=root.id
+        root_options.model_copy(update={"name": "Kid", "keep": True}), parent_id=root.id
     )
     delegates = root._agent.queue_manager.get_channel("delegates")
     root._closing = True

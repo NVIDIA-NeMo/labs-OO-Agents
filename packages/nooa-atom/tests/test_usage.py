@@ -75,7 +75,7 @@ async def test_a_childs_cached_tokens_roll_up_and_survive_a_reload(
 ):
     models.scripts[None] = [
         cell(
-            "a = await self.session.delegate('A', 'a', retain=True)\n"
+            "a = await self.session.delegate('A', 'a', mode='conversation', keep=True)\n"
             "await a.wait()\n"
             "return_result(Done(explanation='ok'))"
         )
@@ -98,7 +98,7 @@ async def test_a_childs_cached_tokens_roll_up_and_survive_a_reload(
 async def test_usage_reports_this_session_then_with_its_subagents(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "a = await self.session.delegate('A', 'a', retain=True)\n"
+            "a = await self.session.delegate('A', 'a', mode='conversation', keep=True)\n"
             "await a.wait()\n"
             "return_result(Done(explanation='ok'))",
             usage=CALL,
