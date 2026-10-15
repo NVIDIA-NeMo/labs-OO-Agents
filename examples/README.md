@@ -14,8 +14,11 @@ uv run python examples/quickstart/01_first_generation_method.py
 ```
 
 Most quickstarts use the model selector in
-[`nooa.util.quickstart`](../src/nooa/util/quickstart.py), which chooses a default
-from the provider credentials in your environment. See the root README's
+[`nooa.util.quickstart`](../src/nooa/util/quickstart.py). To use your own model,
+run `uv run nooa connect` ([guide](../docs/model-connect.md)); it checks the
+model and saves it under an alias. Then set `NOOA_QUICKSTART_MODEL` to that
+alias. Without it, the selector uses `NVIDIA_API_KEY` or `OPENAI_API_KEY` from
+your environment. See the root README's
 [Choose a model](../README.md#1-choose-a-model) section when adapting an example
 to use an explicit model. For local LLM setup, see
 [Running NOOA With Local Models](../docs/local-models.md).

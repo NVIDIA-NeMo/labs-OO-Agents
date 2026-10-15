@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -758,7 +760,6 @@ def test_unmerged_candidate_requires_reduced_scope_and_never_drafts(mr, tmp_path
     args = _ci_args(mr, tmp_path)
     args.candidate_ref = "refs/pull/163/head"
     args.create_draft = False
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "disposable-test-key")
     monkeypatch.delenv("GH_TOKEN", raising=False)
 
     with pytest.raises(mr.ReleaseError, match="requires a reduced rehearsal"):
@@ -779,7 +780,6 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     args.models = "claude-haiku"
     args.runs = 1
     args.limit = 1
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "disposable-test-key")
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
@@ -790,6 +790,8 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     )
     monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "provider_preflight", lambda _wheel: None)
+    monkeypatch.setattr(mr, "provider_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
     base = mr.ArmResults("base")
     head = mr.ArmResults("head")
@@ -813,10 +815,12 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     assert manifest["unmerged_candidate"] is True
 
 
-@pytest.mark.parametrize("failure_point", ["deterministic", "infrastructure", "hard-gate"])
+@pytest.mark.parametrize(
+    "failure_point",
+    ["provider-preflight", "deterministic", "provider", "infrastructure", "hard-gate"],
+)
 def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, failure_point):
     args = _ci_args(mr, tmp_path)
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
     monkeypatch.setenv("GH_TOKEN", "masked")
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(
@@ -825,8 +829,25 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
         lambda *_args, **_kwargs: ("a" * 40, "v1.2.2", "d" * 40, None),
     )
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
-    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    builds = []
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: builds.append(True))
+
+    def provider_preflight(wheel):
+        assert wheel == args.internal_wheel.resolve()
+        if failure_point == "provider-preflight":
+            raise mr.ReleaseError("release-gate-openai: NVIDIA_INFERENCE_API_KEY is not set")
+
+    monkeypatch.setattr(mr, "provider_preflight", provider_preflight)
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
+    provider_calls = []
+
+    def providers(*_args, **_kwargs):
+        assert _kwargs["internal_wheel"] == args.internal_wheel.resolve()
+        provider_calls.append(True)
+        if failure_point == "provider":
+            raise mr.ReleaseError("provider replay failed")
+
+    monkeypatch.setattr(mr, "provider_checks", providers, raising=False)
     draft_calls = []
     monkeypatch.setattr(mr, "create_or_update_draft", lambda *_args: draft_calls.append(True))
 
@@ -855,13 +876,16 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
     with pytest.raises(mr.ReleaseError):
         mr.ci_main(args)
     assert draft_calls == []
+    if failure_point == "provider-preflight":
+        assert builds == [] and provider_calls == []
+    if failure_point == "provider":
+        assert provider_calls == [True]
     manifest = json.loads((tmp_path / "artifacts" / "release-manifest.json").read_text())
     assert manifest["status"] == "failed"
 
 
 def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monkeypatch):
     args = _ci_args(mr, tmp_path)
-    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
     monkeypatch.setenv("GH_TOKEN", "masked")
     monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
     monkeypatch.setattr(
@@ -872,6 +896,11 @@ def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monke
     monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
     monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "provider_preflight", lambda _wheel: None)
+    provider_calls = []
+    monkeypatch.setattr(
+        mr, "provider_checks", lambda *_args, **_kwargs: provider_calls.append(True)
+    )
     monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
     base = mr.ArmResults("base")
     head = mr.ArmResults("head")
@@ -886,6 +915,7 @@ def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monke
     draft_calls = []
 
     def fake_draft(*call_args):
+        assert provider_calls == [True]
         draft_calls.append(call_args)
         return "https://github.example/draft", 42
 
@@ -904,6 +934,219 @@ def test_release_runner_contains_no_publish_operation(mr):
     source = (REPO / "scripts/make_release.py").read_text()
     assert "--draft=false" not in source
     assert "def publish(" not in source
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "passed",
+        "skipped",
+        "failure",
+        "error",
+        "empty",
+        "partial",
+        "missing",
+        "malformed",
+        "exit",
+        "duplicate",
+        "wrong_name",
+        "wrong_module",
+    ],
+)
+def test_provider_gate_requires_seven_passes(mr, monkeypatch, tmp_path, outcome):
+    monkeypatch.setenv("NOOA_TEST_OMITTED_REASONING", "1")
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        assert kwargs["env"]["NOOA_RUN_OPEN_MODEL_REPLAY"] == "1"
+        assert kwargs["env"]["NOOA_RUN_CACHE_RESUME_LIVE"] == "1"
+        assert "NOOA_TEST_OMITTED_REASONING" not in kwargs["env"]
+        assert kwargs["timeout"] == 900
+        assert cmd[cmd.index("--reruns") + 1] == "0"
+        assert cmd[-2:] == [
+            "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume",
+            "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume",
+        ]
+        report = Path(cmd[cmd.index("--junitxml") + 1])
+        count = {"empty": 0, "partial": 6}.get(outcome, 7)
+        identities = sorted(mr.provider_cases())
+        if outcome == "duplicate":
+            identities[0] = identities[1]
+        elif outcome == "wrong_name":
+            identities[0] = (identities[0][0], "unrelated_test")
+        elif outcome == "wrong_module":
+            identities[0] = ("unrelated_module", identities[0][1])
+        child = f"<{outcome}/>" if outcome in {"skipped", "failure", "error"} else ""
+        if outcome != "missing":
+            report.write_text(
+                "invalid"
+                if outcome == "malformed"
+                else "<testsuites><testsuite>"
+                + "".join(
+                    f'<testcase classname="{module}" name="{name}">{child if i == 0 else ""}</testcase>'
+                    for i, (module, name) in enumerate(identities[:count])
+                )
+                + "</testsuite></testsuites>"
+            )
+        if outcome == "exit":
+            raise mr.ReleaseError("pytest failed")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "run", run)
+    manifest = mr.ReleaseManifest(tmp_path / "manifest.json", {})
+    if outcome == "passed":
+        mr.provider_checks(tmp_path, manifest)
+        assert manifest.data["provider_validation"]["outcome"] == "passed"
+    else:
+        with pytest.raises(mr.ReleaseError):
+            mr.provider_checks(tmp_path, manifest)
+        assert manifest.data["provider_validation"]["outcome"] == "failed"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("with_wheel", [False, True])
+def test_provider_preflight_checks_aliases_without_provider_calls(
+    mr, monkeypatch, tmp_path, with_wheel
+):
+    wheel = tmp_path / "model_aliases.whl" if with_wheel else None
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "run", run)
+    mr.provider_preflight(wheel)
+    assert calls == [
+        ["uv", "run", "--frozen", *(["--with", str(wheel)] if wheel else [])]
+        + ["python", "-m", "tests.integration._release_gate"]
+    ]
+
+
+def test_provider_preflight_runs_the_real_alias_check(mr):
+    """Without the alias package the check fails before any build or paid call."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "tests.integration._release_gate"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        pytest.skip("release-gate aliases are installed in this environment")
+    assert "release-gate-openai" in proc.stderr
+
+
+def test_provider_gate_reports_unwritable_evidence_directory(mr, monkeypatch, tmp_path):
+    def unwritable(*_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(mr.tempfile, "mkdtemp", unwritable)
+    monkeypatch.setattr(mr, "run", lambda *_args, **_kwargs: pytest.fail("ran pytest"))
+    manifest = mr.ReleaseManifest(tmp_path / "manifest.json", {})
+    with pytest.raises(mr.ReleaseError, match="No space left on device"):
+        mr.provider_checks(tmp_path / "artifacts", manifest)
+    assert manifest.data["provider_validation"]["outcome"] == "failed"
+
+
+def test_provider_gate_cases_match_the_collected_live_tests(mr, tmp_path):
+    """Renaming a test, module or family must change the gate's expected cases too."""
+    report = tmp_path / "collected.xml"
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"NOOA_RUN_CACHE_RESUME_LIVE", "NOOA_RUN_OPEN_MODEL_REPLAY"}
+    }
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-m",
+            "integration",
+            "-o",
+            "junit_family=xunit1",
+            "--junitxml",
+            str(report),
+            *mr.PROVIDER_TESTS,
+        ],
+        cwd=REPO,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    cases = ET.parse(report).findall(".//testcase")
+    assert all(case.find("skipped") is not None for case in cases)  # no provider calls
+    assert {(case.get("classname"), case.get("name")) for case in cases} == mr.provider_cases()
+    assert len(cases) == len(mr.provider_cases())
+
+
+@pytest.mark.parametrize("with_wheel", [False, True])
+def test_provider_gate_loads_alias_package_ephemerally(mr, monkeypatch, tmp_path, with_wheel):
+    wheel = tmp_path / "model_aliases-1.0-py3-none-any.whl" if with_wheel else None
+
+    def run(cmd, **kwargs):
+        assert cmd[:3] == ["uv", "run", "--frozen"]
+        if wheel:
+            assert cmd[3:6] == ["--with", str(wheel), "pytest"]
+        else:
+            assert cmd[3] == "pytest"
+        raise mr.ReleaseError("stop before provider calls")
+
+    monkeypatch.setattr(mr, "run", run)
+    with pytest.raises(mr.ReleaseError, match="stop before provider calls"):
+        mr.provider_checks(tmp_path, internal_wheel=wheel)
+
+
+def test_local_release_rejects_alias_wheel(mr, tmp_path):
+    """Local provider checks and capability diff both use the ambient registry."""
+    wheel = tmp_path / "model_aliases.whl"
+    args = mr._parser().parse_args(["v1.2.3", "--internal-wheel", str(wheel)])
+    with pytest.raises(mr.ReleaseError, match="require --ci"):
+        mr.local_main(args)
+
+
+def _stub_local_release(mr, monkeypatch, order):
+    monkeypatch.setattr(mr, "preflight", lambda *_args: ("a" * 40, "v1.2.2", "b" * 40, None))
+    monkeypatch.setattr(mr, "fast_checks", lambda: None)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args: order.append("build"))
+    monkeypatch.setattr(
+        mr, "provider_preflight", lambda wheel: order.append(("provider_preflight", wheel))
+    )
+    monkeypatch.setattr(
+        mr,
+        "provider_checks",
+        lambda *_args, **kwargs: order.append(("provider_checks", kwargs.get("internal_wheel"))),
+    )
+    clean = mr.Diff(markdown="clean")
+    monkeypatch.setattr(
+        mr,
+        "capability_diff",
+        lambda *_args, **_kwargs: order.append("capability") or (clean, None, None),
+    )
+
+
+def test_local_release_checks_provider_setup_before_build(mr, monkeypatch):
+    order = []
+    _stub_local_release(mr, monkeypatch, order)
+    assert mr.local_main(mr._parser().parse_args(["v1.2.3", "--checks-only"])) == 0
+    assert order == [
+        ("provider_preflight", None),
+        "build",
+        ("provider_checks", None),
+        "capability",
+    ]
+
+
+def test_skip_capability_also_skips_paid_provider_checks(mr, monkeypatch):
+    order = []
+    _stub_local_release(mr, monkeypatch, order)
+    args = mr._parser().parse_args(["v1.2.3", "--skip-capability", "--checks-only"])
+    assert mr.local_main(args) == 0
+    assert order == ["build"]
 
 
 def test_existing_publication_workflow_still_uses_published_release_trigger():

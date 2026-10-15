@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -326,6 +327,145 @@ def tool_versions(image_digest: str | None) -> dict[str, str]:
             else "unavailable"
         )
     return versions
+
+
+# Release-gate provider tests and the families each is parametrized over.
+# tests/test_make_release.py collects these tests and checks that pytest reports
+# exactly these case identities, so a renamed test or family fails offline.
+PROVIDER_TESTS = {
+    "tests/integration/test_cache_resume_live.py::test_reasoning_and_prompt_cache_survive_sqlite_resume": (
+        "openai",
+        "anthropic",
+        "gemini",
+    ),
+    "tests/integration/test_open_model_tool_reasoning_live.py::test_open_model_tool_reasoning_after_sqlite_resume": (
+        "deepseek",
+        "kimi",
+        "glm",
+        "qwen",
+    ),
+}
+
+
+def provider_cases() -> set[tuple[str, str]]:
+    """JUnit (classname, name) identities the provider gate must see pass."""
+    cases = set()
+    for node, families in PROVIDER_TESTS.items():
+        path, function = node.split("::")
+        module = path.removesuffix(".py").replace("/", ".")
+        cases |= {(module, f"{function}[{family}]") for family in families}
+    return cases
+
+
+def provider_preflight(internal_wheel: Path | None) -> None:
+    """Fail before the build if the provider gate cannot run.
+
+    Resolves every release-gate alias the way the provider tests will, and
+    checks each alias's endpoint and credential variable. No provider call is
+    made; this only turns a late setup failure into an early one.
+    """
+    step("Provider gate setup (aliases and credential variables)")
+    run(
+        [
+            "uv",
+            "run",
+            "--frozen",
+            *(["--with", str(internal_wheel)] if internal_wheel else []),
+            "python",
+            "-m",
+            "tests.integration._release_gate",
+        ]
+    )
+    ok("release-gate aliases resolved and their credential variables are set")
+
+
+def provider_checks(
+    artifact_dir: Path,
+    manifest: ReleaseManifest | None = None,
+    *,
+    internal_wheel: Path | None = None,
+) -> None:
+    """Check replay and cache behavior on the candidate before creating a draft.
+
+    Use the existing opt-in provider tests, not the much larger integration suite.
+    Their model routes and credentials come from registry aliases installed with
+    a bundled-config package, so a runner without that package fails this gate
+    (the cases skip, and skips are rejected below).
+    In CI the supplied alias wheel is loaded in uv's temporary environment, since
+    the locked project sync removes packages outside the lockfile. Local releases
+    use the aliases installed in the developer's environment, as the local
+    capability diff does.
+    Seven cases make at most 17 capped calls without retries. A fresh report
+    directory and exact case identities prevent stale or skipped evidence from
+    satisfying the gate. Session databases and reports stay in private artifacts.
+    """
+    # Each ``release-gate-<family>`` registry alias names its own credential
+    # variable, and the private controller provides it. provider_preflight()
+    # checks those variables before the build; a credential that is set but
+    # rejected fails the cases, which the check below rejects.
+    env = os.environ.copy()
+    env.update(NOOA_RUN_OPEN_MODEL_REPLAY="1", NOOA_RUN_CACHE_RESUME_LIVE="1")
+    env.pop(
+        "NOOA_TEST_OMITTED_REASONING", None
+    )  # Optional A/B calls are outside the release budget.
+    env.pop("OTLP_ENDPOINT", None)
+    evidence: dict[str, Any] = {"outcome": "running", "expected_cases": len(provider_cases())}
+    step("Provider replay and cache checks (17 capped provider requests)")
+    directory = artifact_dir
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="provider-validation-", dir=artifact_dir))
+        report = directory / "results.xml"
+        evidence["report"] = str(report)
+        if manifest:
+            manifest.update(provider_validation=evidence)
+        run(
+            [
+                "uv",
+                "run",
+                "--frozen",
+                *(["--with", str(internal_wheel)] if internal_wheel else []),
+                "pytest",
+                "-q",
+                "-m",
+                "integration",
+                "--reruns",
+                "0",
+                "--tb=no",
+                "-o",
+                "junit_family=xunit1",
+                "--junitxml",
+                str(report),
+                "--basetemp",
+                str(directory / "sessions"),
+                *PROVIDER_TESTS,
+            ],
+            env=env,
+            timeout=900,
+            capture=False,
+        )
+        cases = ET.parse(report).findall(".//testcase")
+        expected = provider_cases()
+        actual = {(case.get("classname"), case.get("name")) for case in cases}
+        if (
+            len(cases) != len(expected)
+            or actual != expected
+            or any(
+                case.find(status) is not None
+                for case in cases
+                for status in ("skipped", "failure", "error")
+            )
+        ):
+            die(
+                f"Provider validation requires the {len(expected)} expected cases to pass exactly once; no skips. If cases were skipped, check that the model-alias package is installed."
+            )
+    except (ReleaseError, OSError, ET.ParseError) as exc:
+        if manifest:
+            manifest.update(provider_validation={**evidence, "outcome": "failed"})
+        die(f"Provider validation failed; inspect private evidence in {directory}: {exc}")
+    if manifest:
+        manifest.update(provider_validation={**evidence, "outcome": "passed"})
+    ok(f"all {evidence['expected_cases']} provider cases passed")
 
 
 # ---------------------------------------------------------------------------
@@ -1423,7 +1563,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-capability",
         action="store_true",
-        help="skip the capability diff (docs-only releases; the LLM eval is the slow, costly step)",
+        help="skip the provider checks and capability diff (docs-only releases; both make paid LLM calls)",
     )
     parser.add_argument(
         "--allow-dirty", action="store_true", help="proceed with an unclean working tree"
@@ -1460,7 +1600,9 @@ def _parser() -> argparse.ArgumentParser:
         default="",
         help="canonical refs/pull/<number>/head ref authenticated by the private controller",
     )
-    parser.add_argument("--internal-wheel", type=Path, help="explicit internal model-alias wheel")
+    parser.add_argument(
+        "--internal-wheel", type=Path, help="explicit internal model-alias wheel (--ci only)"
+    )
     parser.add_argument("--controller-sha", help="exact nooa-dev commit that built the wheel")
     parser.add_argument("--artifact-dir", type=Path, help="private CI evidence output directory")
     parser.add_argument(
@@ -1509,6 +1651,7 @@ def _write_job_summary(artifact_dir: Path, manifest: ReleaseManifest) -> None:
         f"- Candidate: `{data.get('candidate_sha', '')}`",
         f"- Previous: `{data.get('previous_release_tag', '')}`",
         f"- Capability hard gate: **{cap.get('hard_gate_outcome', 'not run')}**",
+        f"- Provider replay/cache gate: **{data.get('provider_validation', {}).get('outcome', 'not run')}**",
     ]
     if data.get("github_draft_url"):
         lines.append(f"- GitHub draft: {data['github_draft_url']}")
@@ -1547,8 +1690,6 @@ def ci_main(args: argparse.Namespace) -> int:
         die("an unmerged candidate can never create a draft")
     if args.checks_only and args.create_draft:
         die("--checks-only can never be combined with --create-draft")
-    if not os.getenv("NVIDIA_INTERNAL_API_KEY"):
-        die("NVIDIA_INTERNAL_API_KEY is required for the live capability gate")
     if not unmerged_candidate and not os.getenv("GH_TOKEN"):
         die("GH_TOKEN is required in CI to inspect and reconcile release state")
     validate_https_url(args.pipeline_url, "pipeline URL")
@@ -1599,6 +1740,7 @@ def ci_main(args: argparse.Namespace) -> int:
             ci=True,
             allow_unmerged_candidate=unmerged_candidate,
         )
+        provider_preflight(internal_wheel)
         manifest.update(
             previous_release_tag=prev_tag,
             previous_release_sha=prev_sha,
@@ -1621,6 +1763,8 @@ def ci_main(args: argparse.Namespace) -> int:
         build_and_smoke(args.tag, head_sha, manifest)
         distributions = _copy_distributions(artifact_dir)
         manifest.update(distributions=distributions)
+
+        provider_checks(artifact_dir, manifest, internal_wheel=internal_wheel)
 
         manifest.update(capability={"hard_gate_outcome": "running"})
         try:
@@ -1709,9 +1853,11 @@ def local_main(args: argparse.Namespace) -> int:
         args.create_draft
         or args.candidate_sha
         or args.candidate_ref
-        or args.internal_wheel
         or args.artifact_dir
+        or args.internal_wheel
     ):
+        # Locally, the provider checks and the capability diff both resolve
+        # model aliases from the developer's environment, so they agree.
         die("CI-only arguments require --ci")
 
     models = args.models.split(",") if args.models else GATE_MODELS
@@ -1720,13 +1866,19 @@ def local_main(args: argparse.Namespace) -> int:
         die("--models/--runs/--limit reduce the gate's power; pair them with --checks-only")
 
     head_sha, prev_tag, _prev_sha, existing = preflight(args.tag, args.allow_dirty)
+    if not args.skip_capability:
+        provider_preflight(None)
     fast_checks()
     build_and_smoke(args.tag, head_sha)
 
     report = ""
     if args.skip_capability:
-        warn("capability diff SKIPPED — no evidence this release is free of regressions")
+        warn(
+            "provider checks and capability diff SKIPPED — no evidence this release "
+            "is free of regressions"
+        )
     else:
+        provider_checks(REPORT_PATH.parent)
         diff, _baseline, _candidate = capability_diff(
             prev_tag, head_sha, models, args.runs, args.limit
         )
