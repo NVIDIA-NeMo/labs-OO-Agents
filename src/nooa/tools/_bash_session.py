@@ -24,10 +24,13 @@ import base64
 import logging
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -58,7 +61,73 @@ _DRAIN_SCRIPT = (
 )
 
 
-def _bounded(text: str) -> str:
+_SPILL_MAX_FILES = 20  # Full-output files kept per session (oldest removed first)
+_SPILL_MAX_BYTES = 64 * 1024 * 1024  # Total bytes kept per session
+
+
+class _SpillDir:
+    """Session-scoped directory for the full text of truncated command output.
+
+    Created on first use, capped at ``_SPILL_MAX_FILES`` files and
+    ``_SPILL_MAX_BYTES`` bytes (oldest files are removed first), and removed
+    when the session closes or is garbage collected. A notice for a file that
+    was pruned points at a path that no longer exists.
+    """
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self._files: list[Path] = []
+        self._finalizer: weakref.finalize | None = None
+
+    def buffer(self) -> FileBackedTruncatingStringIO:
+        if self.path is None or not self.path.is_dir():
+            try:
+                self.path = Path(tempfile.mkdtemp(prefix="nooa_shell_output_"))
+                self._files = []
+                self._finalizer = weakref.finalize(
+                    self, shutil.rmtree, str(self.path), ignore_errors=True
+                )
+            except OSError:
+                self.path = None
+        return FileBackedTruncatingStringIO(
+            limit=MAX_OUTPUT_CHARS,
+            dir=str(self.path) if self.path is not None else None,
+            prefix="output_",
+            suffix=".txt",
+        )
+
+    def keep(self, buffer: FileBackedTruncatingStringIO) -> None:
+        """Record the buffer's file and prune the directory to its caps."""
+        file_path = getattr(buffer, "_file_path", None)
+        if file_path is None or self.path is None:
+            return
+        self._files.append(Path(file_path))
+        sizes = []
+        for path in self._files:
+            try:
+                sizes.append(path.stat().st_size)
+            except OSError:
+                sizes.append(0)
+        total = sum(sizes)
+        while len(self._files) > 1 and (
+            len(self._files) > _SPILL_MAX_FILES or total > _SPILL_MAX_BYTES
+        ):
+            oldest = self._files.pop(0)
+            total -= sizes.pop(0)
+            try:
+                oldest.unlink()
+            except OSError:
+                pass
+
+    def cleanup(self) -> None:
+        if self._finalizer is not None:
+            self._finalizer()  # rmtree once; later calls are no-ops
+        self._finalizer = None
+        self.path = None
+        self._files = []
+
+
+def _bounded(text: str, spill: _SpillDir | None = None) -> str:
     """``text`` cut to ``MAX_OUTPUT_CHARS``: its head and tail around the standard notice.
 
     The tail matters as much as the head: a failing command usually ends
@@ -66,12 +135,16 @@ def _bounded(text: str) -> str:
     """
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
-    # The full text is saved to a temp file named in the notice, so output that
-    # can be produced only once is still readable in ranges; if the file
-    # cannot be written the notice falls back to "not recoverable".
-    buffer = FileBackedTruncatingStringIO(
-        limit=MAX_OUTPUT_CHARS, prefix="nooa_shell_output_", suffix=".txt"
-    )
+    # The full text is saved to a file named in the notice, so output that can
+    # be produced only once is still readable in ranges; if the file cannot be
+    # written the notice falls back to "not recoverable". With a session spill
+    # directory the file is bounded and removed when the session closes.
+    if spill is not None:
+        buffer = spill.buffer()
+    else:
+        buffer = FileBackedTruncatingStringIO(
+            limit=MAX_OUTPUT_CHARS, prefix="nooa_shell_output_", suffix=".txt"
+        )
     try:
         # Feed the buffer in bounded pieces: one write of the whole stream would
         # copy everything past the head a second time before the tail is trimmed.
@@ -80,6 +153,8 @@ def _bounded(text: str) -> str:
         return buffer.getvalue()
     finally:
         buffer.close()
+        if spill is not None:
+            spill.keep(buffer)
 
 
 def _process_start_time(pid: int) -> str | None:
@@ -131,6 +206,7 @@ class BashSession:
         self._lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._lock_loop: asyncio.AbstractEventLoop | None = None
+        self._spill = _SpillDir()
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
@@ -408,7 +484,7 @@ class BashSession:
                     int(line) for line in ctrl_lines[2:] if line.strip().isdigit()
                 )
 
-        stdout, stderr = _bounded(stdout), _bounded(stderr)
+        stdout, stderr = _bounded(stdout, self._spill), _bounded(stderr, self._spill)
 
         if timed_out:
             exit_code = 124
@@ -797,12 +873,17 @@ class BashSession:
     async def reset(self) -> None:
         """Kill the current session and start a fresh one, preserving cwd."""
         cwd = self._cwd
-        await self.close()
+        await self._terminate()
         self._cwd = cwd
         await self.start()
 
     async def close(self) -> None:
-        """Terminate the bash session cleanly."""
+        """Terminate the bash session cleanly and remove its truncated-output files."""
+        await self._terminate()
+        self._spill.cleanup()
+
+    async def _terminate(self) -> None:
+        """End bash; files named in earlier truncation notices are kept (reset)."""
         if self._control_transport is not None:
             try:
                 self._control_transport.close()
