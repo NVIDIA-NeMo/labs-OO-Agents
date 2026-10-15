@@ -207,6 +207,10 @@ class BashSession:
         self._start_lock = asyncio.Lock()
         self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._spill = _SpillDir()
+        # True once start() has fully finished (bash spawned, startup drained,
+        # init command run). ``_started`` turns True earlier, mid-start.
+        self._ready = False
+        self._init_task: asyncio.Task[object] | None = None
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
@@ -310,18 +314,24 @@ class BashSession:
         the control reader ("readuntil() called while another coroutine is
         already waiting").
         """
-        if self._started:
+        if self._ready:
             return
-        if self._running_init:
+        if self._in_own_init():
             # Re-entry from a reset during the init command: the outer start()
             # already holds the start lock.
             await self._start_unlocked()
             return
         self._ensure_lock_on_current_loop()
         async with self._start_lock:
-            if self._started:
+            # Callers that arrive while another start() runs the init command
+            # wait here until it has finished, then return without a second bash.
+            if self._ready:
                 return
             await self._start_unlocked()
+
+    def _in_own_init(self) -> bool:
+        """True inside the init command's own task (a reset re-entering start)."""
+        return self._running_init and self._init_task is asyncio.current_task()
 
     async def _start_unlocked(self) -> None:
         """Start bash (caller holds ``_start_lock`` or is re-entering from init)."""
@@ -380,6 +390,7 @@ class BashSession:
         # stdout/stderr so init output never bleeds into the first user command.
         if self._init_command and not self._running_init:
             self._running_init = True
+            self._init_task = asyncio.current_task()
             try:
                 init_sentinel = f"__CTRL_{secrets.token_hex(8)}__"
                 init_script = (
@@ -393,6 +404,11 @@ class BashSession:
                     self._cwd = Path(ctrl_lines[1].strip())
             finally:
                 self._running_init = False
+                self._init_task = None
+        if not self._running_init:
+            # Only now may run() use the session: the startup drain and the init
+            # command own the control reader until here.
+            self._ready = self._started
 
     def _build_script(self, command: str, sentinel: str) -> str:
         """Compose the wire script: the command, then the control-channel protocol.
@@ -454,7 +470,7 @@ class BashSession:
 
         Returns (stdout, stderr, exit_code, timed_out).
         """
-        if not self._started:
+        if not self._ready:
             await self.start()
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
@@ -513,7 +529,7 @@ class BashSession:
         self, command: str, timeout: float
     ) -> AsyncIterator[tuple[str, str]]:
         """Actual run_stream implementation (caller must hold self._lock)."""
-        if not self._started:
+        if not self._ready:
             await self.start()
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
@@ -873,9 +889,19 @@ class BashSession:
     async def reset(self) -> None:
         """Kill the current session and start a fresh one, preserving cwd."""
         cwd = self._cwd
-        await self._terminate()
-        self._cwd = cwd
-        await self.start()
+        if self._in_own_init():
+            # Bash died during the init command; the outer start() holds the lock.
+            await self._terminate()
+            self._cwd = cwd
+            await self.start()
+            return
+        # Serialized with start(): a reset while another task runs the init
+        # command waits for it instead of spawning a second bash beside it.
+        self._ensure_lock_on_current_loop()
+        async with self._start_lock:
+            await self._terminate()
+            self._cwd = cwd
+            await self._start_unlocked()
 
     async def close(self) -> None:
         """Terminate the bash session cleanly and remove its truncated-output files."""
@@ -931,6 +957,7 @@ class BashSession:
         self._process = None
         self._background_pids = frozenset()
         self._started = False
+        self._ready = False
         self._started_on_loop = None
         # Locks are not replaced here: close() runs inside run() during a reset,
         # and a fresh lock would let a queued caller bypass the holder. A loop

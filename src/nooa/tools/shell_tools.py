@@ -831,8 +831,7 @@ class ShellTools(Skill):
         return self._session
 
     async def _get_session(self) -> BashSession:
-        if not self._session._started:
-            await self._session.start()
+        await self._session.start()  # returns at once when already started
         return self._session
 
     @hidden
