@@ -826,34 +826,28 @@ async def test_a_pool_steers_question_is_a_pool_form_inside_the_prompt(
     assert _order(client, session_id).index("ext") < _order(client, session_id).index("response")
 
 
-async def test_cancel_withdraws_pool_steers_no_turn_took_and_says_so(
-    make_adapter, workspace, client
-):
+async def test_cancel_retains_pool_steers_no_turn_took(make_adapter, workspace, client):
+    """Stop now retains admitted Pool messages; ordinary prompt withdrawal is unchanged."""
     started, _block = fresh_events()
-    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Should not run.")]})
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Pending handled.")]})
     adapter = await make_adapter(models, client_info=POOL)
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    await _pool_steer(adapter, session_id, "message a", "steer-a")
-    await _pool_steer(adapter, session_id, "message b", "steer-b")
+    a = await _pool_steer(adapter, session_id, "message a", "steer-a")
+    b = await _pool_steer(adapter, session_id, "message b", "steer-b")
     await adapter.cancel(session_id)
-    response = await asyncio.wait_for(prompt, TIMEOUT)
-    client.log.append(("response", "prompt", response))
-
-    assert response.stop_reason == "cancelled"
-    [stopped] = [
-        text
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "cancelled"
+    assert await asyncio.wait_for(a, TIMEOUT) == {"inputId": "steer-a"}
+    assert await asyncio.wait_for(b, TIMEOUT) == {"inputId": "steer-b"}
+    await client.wait_for(lambda: "Pending handled.\n\n" in _order(client, session_id))
+    assert not any(
+        text.startswith("Stopped before these messages were handled")
         for text in _order(client, session_id)
-        if text.startswith("Stopped before these messages were handled")
-    ]
-    assert "message a" in stopped and "message b" in stopped
-    order = _order(client, session_id)
-    assert order.index(stopped) < order.index("response")
-    await asyncio.sleep(0.2)  # a queued message would start a turn now
-    assert len(models.llms[None].calls) == 1
-    session = adapter.session(session_id)
-    assert session.info.status == "idle"
+    )
+    assert len(models.llms[None].calls) == 2
+    assert "message a" in str(models.llms[None].calls[1].messages)
+    assert "message b" in str(models.llms[None].calls[1].messages)
 
 
 async def test_cancel_during_a_pool_steers_turn_ends_the_prompt_cancelled(
@@ -1027,20 +1021,24 @@ async def test_pool_is_told_when_a_turn_takes_its_steered_message(make_adapter, 
     assert "Second.\n\n" in client.texts(AgentMessageChunk, session_id)
 
 
-async def test_stop_answers_a_steer_no_turn_took(make_adapter, workspace, client):
+async def test_stop_keeps_pending_steer_until_its_consumption_ack(make_adapter, workspace, client):
     started, _block = fresh_events()
-    models = ScriptedModels({None: [cell(BLOCKING_CELL)]})
+    models = ScriptedModels({None: [cell(BLOCKING_CELL), reply("Pending handled.")]})
     adapter = await make_adapter(models, client_info=POOL)
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    steer = await _pool_steer(adapter, session_id, "never mind")
+    steer = await _pool_steer(adapter, session_id, "pending message")
     await adapter.cancel(session_id)
-    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-1"}
     assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "cancelled"
-    assert not any(
-        "poolside/clientInputId" in meta for _, meta in _input_events(client, session_id)
-    )
+    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-1"}
+    assert [
+        meta["poolside/clientInputId"]
+        for _, meta in _input_events(client, session_id)
+        if "poolside/clientInputId" in meta
+    ] == ["steer-1"]
+    await client.wait_for(lambda: "Pending handled.\n\n" in _order(client, session_id))
+    assert len(models.llms[None].calls) == 2
 
 
 async def test_a_replay_to_pool_follows_each_user_message_with_its_input_event(

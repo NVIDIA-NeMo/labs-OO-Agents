@@ -96,8 +96,9 @@ what the person types during a running prompt as `_poolside/session_steer`
 with `{sessionId, inputId, prompt}` instead of keeping it in its own queue,
 where Esc drops it. The text is queued for the next turn as in item 1, not
 handed to the running turn's next model call. This is deliberate until the Pool team says
-whether the request means queue or steer. The answer is `{inputId}`, sent as
-soon as the message is admitted. A slash
+whether the request means queue or steer. The answer is `{inputId}`, sent after
+the bridge successfully sends the consumption event with the original client
+input ID, or when a never-consumed item is explicitly withdrawn or closed. A slash
 command is refused with `invalid_params`, and Pool then sends it as a normal
 prompt. The router routes the request by
 `sessionId` like any other session request, so the prompt and the message are
@@ -109,11 +110,32 @@ it returns `end_turn` only after the turns that handle them, in order, with
 their questions asked as for the prompt's own turn, except that a question is
 not asked while a later message is still waiting: that message's turn comes
 first, and the question stays as text in its context. A message the prompt's own
-turn already took resolves with that turn. Stop withdraws the messages no turn
-took (they would otherwise run with no prompt open) and lists them in one agent
-message, "Stopped before these messages were handled"; the prompt answers
-`cancelled`. A message sent this way with no prompt open is only queued.
-`_nooa/session/inject` messages never hold a prompt open.
+turn already took resolves with that turn.
+
+**Experimental Stop behavior:** the original prompt answers `cancelled`, but
+already-admitted, unconsumed Pool messages remain owned by Session. After a
+committed turn settles, the dispatcher runs the retained batch serially, in
+admission order, without a new prompt. Consumed inputs are never resubmitted.
+Ordinary unconsumed `session/prompt` receipts are still withdrawn; injected
+inputs and explicit withdrawal are unchanged. Cancellation before the first
+turn commits can intentionally pause dispatch, rather than automatically retry.
+
+The old prompt's follower list is only request-lifetime bookkeeping. Stop
+detaches it; each Pool input has an independent acknowledgement owner that
+survives cancellation of its RPC waiter and cleans up on consumption,
+withdrawal or close. The bridge remains subscribed and publishes subsequent
+turn updates even after the cancelled root prompt returns. Concurrent cancels,
+and late repeats while that cancelled prompt scope is still settling, share
+one decision. Once that scope retires, or a new normal prompt is admitted,
+a new cancel targets the then-current turn. This is not a global debounce.
+
+**Real Pool testing remains required.** Successful fake-client sends do not
+prove Pool renders these background turns, tracks activity after the cancelled
+response, or avoids retrying an admitted input. Unsent client-local queue entries
+never crossed ACP and cannot be recovered by this server. Repeating an entire
+steer request is not idempotent; acknowledgement retry is not execution retry.
+A message sent this way with no prompt open is queued and has the same Session
+and acknowledgement owners. `_nooa/session/inject` messages never hold a prompt open.
 
 ## Lifetime
 
