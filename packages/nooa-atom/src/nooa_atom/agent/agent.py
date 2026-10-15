@@ -33,6 +33,7 @@ from nooa_atom.agent.slash_commands import SlashCommandRegistry
 from nooa_atom.session.items import (
     ChildFailed,
     ChildFailedError,
+    ChildMessage,
     ChildQuestion,
     ChildRef,
     ChildResult,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ChildFailed",
     "ChildFailedError",
+    "ChildMessage",
     "ChildQuestion",
     "ChildRef",
     "ChildResult",
@@ -94,8 +96,9 @@ class AtomAgent(InteractiveAgent):
     nothing else is left, end the turn with
     ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives in a later
     turn under ``notification["delegates"]``: a ``ChildResult`` (``item.done``), a
-    ``ChildQuestion`` from a retained child (``await item.answer(...)``) or a
-    ``ChildFailed`` (``item.error``). Never predict or make up a pending child's
+    ``ChildQuestion`` from a retained child (``await item.answer(...)``), a
+    ``ChildFailed`` (``item.error``), or a ``ChildMessage`` (``item.text``, a
+    child's ``self.message()``). Never predict or make up a pending child's
     result, poll, or sleep to wait. Children share this checkout: run concurrent
     children only for read-only work and serialize edits. Children can delegate
     in turn only down to a fixed depth; past it ``DepthLimitError`` is raised.
@@ -323,7 +326,8 @@ class AtomAgent(InteractiveAgent):
         with ``Waiting(explanation=..., on=["delegates"])``. The outcome arrives
         in a later turn under ``notification["delegates"]`` as a ``ChildResult``
         (``item.done.result`` is a ``TaskResult``), a ``ChildQuestion`` or a
-        ``ChildFailed``; ``item.child.id`` matches the returned ref, which you
+        ``ChildFailed``; the child's ``self.message()`` texts arrive before it as
+        ``ChildMessage`` items. ``item.child.id`` matches the returned ref, which you
         can keep in ``self.v``. A ``Todo`` prompt is sent as text; comment on
         the Todo yourself when the result arrives.
 
@@ -504,8 +508,8 @@ class AtomAgent(InteractiveAgent):
 
         The task is the text in ``notification["user_messages"]``; data sent
         with it is in ``notification.get("context", [])``. Nobody is watching
-        and nobody can answer a question, and ``self.message()`` reaches
-        nobody: the result is the only thing the requester reads.
+        and nobody can answer a question; ``self.message()`` only notifies a
+        parent session, if any: the result is what the requester reads.
 
         Do the task completely, verify it, then end with::
 

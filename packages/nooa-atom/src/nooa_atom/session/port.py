@@ -47,6 +47,8 @@ class SessionPort:
       a later notification on the ``delegates`` channel as a
       ``ChildResult`` (``item.done``), a ``ChildQuestion`` (answer with
       ``await item.answer(...)``) or a ``ChildFailed`` (``item.error``).
+      Each ``self.message()`` of the child arrives before them as a
+      ``ChildMessage`` (``item.text``); it does not end ``child.wait()``.
 
     Children created with ``retain=False`` (the default) work unattended:
     they cannot ask questions and are closed after their first result.

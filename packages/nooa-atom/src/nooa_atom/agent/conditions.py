@@ -11,8 +11,9 @@ from nooa.strategy_validation import InvariantError
 def require_result(agent: Any, result: Any, call: Any) -> None:
     """Reject a batch ``Done`` without a ``result``.
 
-    A batch turn is unattended: its ``self.message()`` output reaches nobody,
-    and the parent that delegated it reads ``done.result``. The strategy
+    A batch turn is unattended: its ``self.message()`` output reaches at most
+    a parent as a ``ChildMessage``, and the parent that delegated it reads
+    ``done.result``. The strategy
     turns the ``InvariantError`` into feedback for the model, which then
     returns again with a ``TaskResult``.
     """
@@ -20,6 +21,6 @@ def require_result(agent: Any, result: Any, call: Any) -> None:
         raise InvariantError(
             "An unattended turn must end with Done(explanation=..., result=TaskResult(...)): "
             "set solution_description, evidence and how_to_verify, and put the full "
-            "report in report. Nobody sees self.message() here; the result is the "
-            "only thing the requester reads."
+            "report in report. self.message() is no substitute here; the result is "
+            "what the requester reads."
         )

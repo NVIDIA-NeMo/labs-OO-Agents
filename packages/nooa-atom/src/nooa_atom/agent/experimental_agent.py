@@ -40,8 +40,9 @@ class ExperimentalAtomAgent(AtomAgent):
     nothing else is left, end the turn with
     ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives in a later turn
     under ``notification["delegates"]``: a ``ChildResult`` (``item.done``), a
-    ``ChildQuestion`` from a retained child (``await item.answer(...)``) or a
-    ``ChildFailed`` (``item.error``). Never predict or make up a pending child's result,
+    ``ChildQuestion`` from a retained child (``await item.answer(...)``), a
+    ``ChildFailed`` (``item.error``), or a ``ChildMessage`` (``item.text``, a child's
+    ``self.message()``). Never predict or make up a pending child's result,
     poll, or sleep to wait. Children share this checkout: run concurrent children only
     for read-only work and serialize edits. Children can delegate in turn only down to
     a fixed depth; past it ``DepthLimitError`` is raised. Inspect a child's report
@@ -95,8 +96,8 @@ class ExperimentalAtomAgent(AtomAgent):
         """Work on one task unattended and return a structured result.
 
         The task is the text in ``notification["user_messages"]``; data sent with it
-        is in ``notification.get("context", [])``. Nobody can answer a question and
-        ``self.message()`` reaches nobody. Do the task completely, verify it, then end
+        is in ``notification.get("context", [])``. Nobody can answer a question;
+        ``self.message()`` only notifies a parent session, if any. Do the task completely, verify it, then end
         with ``return_result(Done(explanation=..., result=TaskResult(
         solution_description=..., evidence=..., how_to_verify=..., report=...)))``.
         If something blocks you, still return ``Done`` with a ``TaskResult`` that says

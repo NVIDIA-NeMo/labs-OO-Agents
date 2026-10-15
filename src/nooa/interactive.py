@@ -486,6 +486,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
 
+        In a child session the text goes to the parent instead, as a
+        ``ChildMessage`` on its ``delegates`` channel.
+
         Each call renders as an independent block — so every call must be a
         complete, self-contained Markdown document.  In particular, never split
         a table across calls: the header row and all data rows must be in the
