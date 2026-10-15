@@ -274,6 +274,45 @@ def _is_validation_error(error: Exception) -> bool:
 _SYNC_AWAIT_RE = re.compile(r"^(?:object )?(\S+) can't be used in 'await' expression$")
 
 
+_UNCALLED_TYPES = frozenset(
+    {"method", "function", "builtin_function_or_method", "functools.partial"}
+)
+
+
+def _awaited_uncalled_target(error: BaseException) -> tuple[str, bool] | None:
+    """For ``await self.shell.read`` (no call), return ``("self.shell.read", is_async)``.
+
+    Parses the failing user source line for an ``await`` whose operand is a name
+    or attribute chain (not a call) and resolves it statically. None on any miss.
+    """
+    location = _last_user_frame(error)
+    if location is None:
+        return None
+    frame, lineno = location
+    source = linecache.getline(frame.f_code.co_filename, lineno).strip()
+    if not source:
+        return None
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        try:
+            tree = ast.parse(f"{source} pass")
+        except SyntaxError:
+            return None
+    from nooa.runtime.async_calls import is_coroutine_function, resolve_static_chain
+
+    namespace = {**frame.f_globals, **frame.f_locals}
+    targets = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Await) and isinstance(node.value, (ast.Name, ast.Attribute))
+    ]
+    if len(targets) != 1:
+        return None
+    value = resolve_static_chain(targets[0], namespace)
+    return ast.unparse(targets[0]), is_coroutine_function(value)
+
+
 def _sync_await_hint(error: BaseException) -> str | None:
     """Explain ``await`` applied to a plain (non-awaitable) value."""
     if not isinstance(error, TypeError):
@@ -281,8 +320,31 @@ def _sync_await_hint(error: BaseException) -> str | None:
     match = _SYNC_AWAIT_RE.match(str(error))
     if match is None:
         return None
+    kind = match.group(1)
+    if kind in _UNCALLED_TYPES:
+        # ``await self.shell.read``: the function object itself was awaited.
+        try:
+            target = _awaited_uncalled_target(error)
+        except Exception:
+            target = None
+        if target is not None and target[1]:
+            name = target[0]
+            return (
+                f"Hint: `{name}` was awaited without being called. It is async, so call "
+                f"it and await the result: `await {name}(...)`."
+            )
+        if target is not None:
+            name = target[0]
+            return (
+                f"Hint: `{name}` was awaited without being called, and it is synchronous: "
+                f"call it without `await`, as `{name}(...)`."
+            )
+        return (
+            f"Hint: the awaited value is a {kind} that was not called. Call it: "
+            "`await f(...)` if it is async, or `f(...)` without `await` if it is synchronous."
+        )
     return (
-        f"Hint: the awaited value is a {match.group(1)}, not a coroutine. If it came from "
+        f"Hint: the awaited value is a {kind}, not a coroutine. If it came from "
         "a call, that call is synchronous and has already run; call it without `await`."
     )
 

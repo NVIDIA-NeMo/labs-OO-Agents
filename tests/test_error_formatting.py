@@ -286,6 +286,61 @@ class TestSyncAwaitHint:
         assert "the awaited value is a str" in result
         assert "call it without `await`" in result
 
+    def test_await_on_uncalled_async_method_says_to_call_it(self):
+        """#447 review finding 3: ``await self.shell.read`` must not say "drop await"."""
+        import asyncio
+
+        class Shell:
+            async def read(self, path):
+                return path
+
+        class Agent:
+            shell = Shell()
+
+        async def cell(self):
+            await self.shell.read
+
+        with pytest.raises(TypeError) as exc_info:
+            asyncio.run(cell(Agent()))
+        result = format_error_for_llm(exc_info.value)
+
+        assert "can't be used in 'await' expression" in result
+        assert "`await self.shell.read(...)`" in result
+        assert "without `await`" not in result
+
+    def test_await_on_uncalled_coroutine_function_says_to_call_it(self):
+        import asyncio
+
+        async def fetch():
+            return 1
+
+        async def cell():
+            await fetch
+
+        with pytest.raises(TypeError) as exc_info:
+            asyncio.run(cell())
+        result = format_error_for_llm(exc_info.value)
+
+        assert "`await fetch(...)`" in result
+        assert "has already run" not in result
+
+    def test_await_on_uncalled_sync_method_says_call_without_await(self):
+        import asyncio
+
+        class Tools:
+            def name(self):
+                return "x"
+
+        async def cell(tools):
+            await tools.name
+
+        with pytest.raises(TypeError) as exc_info:
+            asyncio.run(cell(Tools()))
+        result = format_error_for_llm(exc_info.value)
+
+        assert "`tools.name` was awaited without being called" in result
+        assert "call it without `await`, as `tools.name(...)`" in result
+
     def test_other_type_errors_have_no_await_hint(self):
         result = format_error_for_llm(TypeError("unsupported operand"))
         assert "without `await`" not in result
