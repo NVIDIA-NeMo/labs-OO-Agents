@@ -113,18 +113,27 @@ class GeneratedCodeValidator:
 
     def _missing_await_errors(self, tree: ast.AST, agent: Any) -> list[str]:
         from nooa.runtime.async_calls import (
+            held_coroutine_example,
+            held_coroutine_message,
+            held_coroutine_uses,
             missing_await_calls,
             missing_await_example,
             missing_await_message,
         )
 
-        return [
+        errors = [
             f"{missing_await_message(name, chain=chain)}\n"
             f"   Example: result = {missing_await_example(name, chain=chain)}"
             for _node, name, chain in missing_await_calls(
                 tree, agent, self._collect_async_method_names(agent)
             )
         ]
+        errors.extend(
+            f"{held_coroutine_message(node.id, chain)}\n"
+            f"   Example: {held_coroutine_example(node.id, chain)}"
+            for node, chain in held_coroutine_uses(tree, agent)
+        )
+        return errors
 
     def _collect_async_method_names(self, agent: Any) -> set[str]:
         from nooa.runtime.async_calls import collect_async_method_names

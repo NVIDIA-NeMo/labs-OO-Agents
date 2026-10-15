@@ -634,6 +634,9 @@ class _SecurityVisitor(ast.NodeVisitor):
 from nooa.runtime.async_calls import (  # noqa: E402, F401
     async_self_chain,
     collect_async_method_names,
+    held_coroutine_example,
+    held_coroutine_message,
+    held_coroutine_uses,
     is_gather_argument,
     missing_await_calls,
     missing_await_example,
@@ -673,6 +676,18 @@ def _missing_await_issues(tree: ast.AST, agent: Any) -> list[ValidationIssue]:
                 line=node.lineno,
                 col=node.col_offset,
                 message=f"{message} Example: result = {example}" if chain else message,
+                code="E301",
+                fix_hint=example,
+            )
+        )
+    for node, chain in held_coroutine_uses(tree, agent):
+        get_harness_metrics().missing_await(chain)
+        example = held_coroutine_example(node.id, chain)
+        issues.append(
+            ValidationIssue(
+                line=node.lineno,
+                col=node.col_offset,
+                message=f"{held_coroutine_message(node.id, chain)} Example: {example}",
                 code="E301",
                 fix_hint=example,
             )
