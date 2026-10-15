@@ -71,6 +71,7 @@ import types
 from dataclasses import dataclass, field
 from typing import Annotated, Any, ForwardRef, Literal, Protocol, get_args, get_origin
 
+from nooa.errors import CodeSyntaxError
 from nooa.errors import RestrictedCodeError as ValidationError
 from nooa.runtime.restrictions import (
     RestrictionsConfig,
@@ -138,6 +139,69 @@ class Validator(Protocol):
     def validate(self, tree: ast.AST, context: ValidationContext) -> list[ValidationIssue]:
         """Validate AST and return list of issues."""
         ...
+
+
+# =============================================================================
+# Capability-aware fix hints (wording only; never changes what is allowed)
+# =============================================================================
+_PROCESS_MODULES = frozenset({"subprocess", "pty"})
+_PROCESS_CALLS = frozenset({("os", "system"), ("os", "popen")})
+_NETWORK_MODULES = frozenset(
+    {
+        "socket",
+        "http.client",
+        "urllib.request",
+        "ftplib",
+        "smtplib",
+        "imaplib",
+        "poplib",
+        "telnetlib",
+        "xmlrpc.client",
+    }
+)
+_SHELL_RUN_HINT = (
+    'run the command with `await self.shell.run("...")` '
+    "(result has .stdout, .stderr and .returncode)"
+)
+
+
+def _has_shell(agent: Any) -> bool:
+    """True when the agent exposes an async ``self.shell.run``."""
+    if agent is None:
+        return False
+    try:
+        run = getattr(getattr(agent, "shell", None), "run", None)
+    except Exception:
+        return False
+    return run is not None and inspect.iscoroutinefunction(run)
+
+
+def _module_fix_hint(module_name: str, has_shell: bool, call: str | None = None) -> str | None:
+    """Point a blocked module/call at an alternative the agent actually has."""
+    root = match_blocked_module(module_name, _PROCESS_MODULES)
+    if root is not None or (module_name, call) in _PROCESS_CALLS:
+        return _SHELL_RUN_HINT if has_shell else None
+    if match_blocked_module(module_name, _NETWORK_MODULES) is not None:
+        if has_shell:
+            return f"for network access, {_SHELL_RUN_HINT}"
+        return None
+    if module_name == "asyncio" and call in ("run", "run_until_complete"):
+        return (
+            "cells already run inside an event loop: `await coro` directly, "
+            "or `await asyncio.gather(a(), b())` for several"
+        )
+    if module_name == "time" and call == "sleep":
+        return "`await asyncio.sleep(seconds)`"
+    return None
+
+
+def _builtin_fix_hint(name: str) -> str | None:
+    """Alternatives for forbidden builtins that have a direct, allowed equivalent."""
+    if name == "__import__":
+        return "use a normal import statement, e.g. `import json`"
+    if name in ("exec", "eval", "compile"):
+        return "write the code directly in the cell; it is already executed as Python"
+    return None
 
 
 # =============================================================================
@@ -290,6 +354,7 @@ class _SecurityVisitor(ast.NodeVisitor):
                         col=node.col_offset,
                         message=f"{func_name}() is forbidden - it blocks or allows code execution",
                         code="E001",
+                        fix_hint=_builtin_fix_hint(func_name),
                     )
                 )
             # Check aliased forbidden calls
@@ -306,6 +371,7 @@ class _SecurityVisitor(ast.NodeVisitor):
                             col=node.col_offset,
                             message=f"{func_name}() is forbidden (alias for {original})",
                             code="E001",
+                            fix_hint=_builtin_fix_hint(original),
                         )
                     )
             # Check setattr/delattr/getattr with dunder names or forbidden attr calls
@@ -557,7 +623,25 @@ class _SecurityVisitor(ast.NodeVisitor):
             col=node.col_offset,
             message=msg,
             code="E002",
+            fix_hint=_module_fix_hint(module_name, _has_shell(self.context.agent)),
         )
+
+
+# =============================================================================
+# Missing-await rules live in nooa.runtime.async_calls (shared with
+# GeneratedCodeValidator and the error formatter); re-exported here.
+# =============================================================================
+from nooa.runtime.async_calls import (  # noqa: E402, F401
+    async_self_chain,
+    collect_async_method_names,
+    held_coroutine_example,
+    held_coroutine_message,
+    held_coroutine_uses,
+    is_gather_argument,
+    missing_await_calls,
+    missing_await_example,
+    missing_await_message,
+)
 
 
 # =============================================================================
@@ -567,14 +651,48 @@ class REPLPolicyValidator:
     """Validates REPL-style coding conventions.
 
     Checks for:
-    - Missing await on async method calls
+    - Missing await on async method calls (rules: nooa.runtime.async_calls)
+    - Infinite ``while True`` loops
     """
 
     def validate(self, tree: ast.AST, context: ValidationContext) -> list[ValidationIssue]:
         """Validate REPL policy rules and return issues."""
         visitor = _REPLPolicyVisitor(context)
         visitor.visit(tree)
-        return visitor.issues
+        return _missing_await_issues(tree, context.agent) + visitor.issues
+
+
+def _missing_await_issues(tree: ast.AST, agent: Any) -> list[ValidationIssue]:
+    """E301 issues for calls that need ``await`` (rules: nooa.runtime.async_calls)."""
+    from nooa.runtime.harness_metrics import get_harness_metrics
+
+    issues: list[ValidationIssue] = []
+    for node, name, chain in missing_await_calls(tree, agent):
+        get_harness_metrics().missing_await(name)
+        message = missing_await_message(name, chain=chain)
+        example = missing_await_example(name, chain=chain)
+        issues.append(
+            ValidationIssue(
+                line=node.lineno,
+                col=node.col_offset,
+                message=f"{message} Example: result = {example}" if chain else message,
+                code="E301",
+                fix_hint=example,
+            )
+        )
+    for node, chain in held_coroutine_uses(tree, agent):
+        get_harness_metrics().missing_await(chain)
+        example = held_coroutine_example(node.id, chain)
+        issues.append(
+            ValidationIssue(
+                line=node.lineno,
+                col=node.col_offset,
+                message=f"{held_coroutine_message(node.id, chain)} Example: {example}",
+                code="E301",
+                fix_hint=example,
+            )
+        )
+    return issues
 
 
 class _REPLPolicyVisitor(ast.NodeVisitor):
@@ -583,9 +701,7 @@ class _REPLPolicyVisitor(ast.NodeVisitor):
     def __init__(self, context: ValidationContext):
         self.context = context
         self.issues: list[ValidationIssue] = []
-        self.async_method_names: set[str] = set()
         self.parent_map: dict[ast.AST, ast.AST] = {}
-        self._collect_async_methods()
 
     def visit(self, node: ast.AST) -> Any:
         """Build parent map while visiting."""
@@ -672,97 +788,6 @@ class _REPLPolicyVisitor(ast.NodeVisitor):
         for subnode in ast.iter_child_nodes(node):
             if self._has_exit_in_subtree(subnode, check_break):
                 return True
-
-        return False
-
-    def visit_Call(self, node: ast.Call) -> Any:
-        """Check for missing await on async method calls."""
-        if not self.async_method_names:
-            self.generic_visit(node)
-            return
-
-        # Check self.method() calls
-        if not isinstance(node.func, ast.Attribute):
-            self.generic_visit(node)
-            return
-
-        if not isinstance(node.func.value, ast.Name):
-            self.generic_visit(node)
-            return
-
-        if node.func.value.id != "self":
-            self.generic_visit(node)
-            return
-
-        method_name = node.func.attr
-        if method_name not in self.async_method_names:
-            self.generic_visit(node)
-            return
-
-        # Check if already awaited or in a gather-friendly context
-        if not self._is_awaited_or_gathered(node):
-            from nooa.runtime.harness_metrics import get_harness_metrics
-
-            get_harness_metrics().missing_await(method_name)
-            self.issues.append(
-                ValidationIssue(
-                    line=node.lineno,
-                    col=node.col_offset,
-                    message=f"Method `{method_name}` is async and must be called with `await`",
-                    code="E301",
-                    fix_hint=f"await self.{method_name}(...)",
-                )
-            )
-
-        self.generic_visit(node)
-
-    def _collect_async_methods(self) -> None:
-        """Collect names of async methods from agent."""
-        from nooa.agentdoc.visibility import is_hidden_method
-
-        agent = self.context.agent
-        if not agent:
-            return
-
-        # Check class-level methods
-        for attr_name in dir(agent.__class__):
-            if attr_name.startswith("__"):
-                continue
-            try:
-                attr = getattr(agent.__class__, attr_name, None)
-                if attr and inspect.iscoroutinefunction(attr):
-                    if not is_hidden_method(attr):
-                        self.async_method_names.add(attr_name)
-            except Exception:
-                continue
-
-        # Check instance-level methods
-        for attr_name in dir(agent):
-            if attr_name.startswith("__"):
-                continue
-            try:
-                attr = getattr(agent, attr_name)
-                if callable(attr) and inspect.iscoroutinefunction(attr):
-                    if not is_hidden_method(attr):
-                        self.async_method_names.add(attr_name)
-            except Exception:
-                continue
-
-    def _is_awaited_or_gathered(self, node: ast.AST) -> bool:
-        """Check if call is awaited or in a gather-friendly context."""
-        current = node
-        while current in self.parent_map:
-            parent = self.parent_map[current]
-
-            # Direct await
-            if isinstance(parent, ast.Await) and getattr(parent, "value", None) == current:
-                return True
-
-            # In list/generator comprehension (for gather patterns)
-            if isinstance(parent, (ast.ListComp, ast.GeneratorExp)):
-                return True
-
-            current = parent
 
         return False
 
@@ -1242,6 +1267,7 @@ class BlockingCallValidator:
         visitor = _BlockingCallVisitor(
             exec_globals=context.exec_globals,
             restrictions=self.restrictions,
+            has_shell=_has_shell(context.agent),
         )
         visitor.visit(tree)
         return visitor.issues
@@ -1254,8 +1280,10 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         self,
         exec_globals: dict[str, Any],
         restrictions: RestrictionsConfig,
+        has_shell: bool = False,
     ):
         self.exec_globals = exec_globals
+        self.has_shell = has_shell
         self.blocked_modules = restrictions.blocked_modules
         self.blocked_calls = restrictions.blocked_calls
         self.issues: list[ValidationIssue] = []
@@ -1303,6 +1331,7 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                 ),
                 code="E310",
                 severity="error",
+                fix_hint=_module_fix_hint(module_name, self.has_shell, call_name),
             )
         )
 
@@ -1390,7 +1419,10 @@ class UnifiedCodeValidator:
 
     By default, includes SecurityValidator and BlockingCallValidator,
     which are the checks performed by execute_code(). The REPLPolicyValidator
-    (class definitions, missing await) is used by strategies separately.
+    (missing await, infinite loops) is opt-in here: CodeActStrategy, CodeActV2
+    and PurePythonStrategy check missing awaits before each cell with
+    ``GeneratedCodeValidator`` (nooa.strategies.generated_code), which shares
+    the attribute-chain resolution (``async_self_chain``) used by E301.
     """
 
     def __init__(
@@ -1405,7 +1437,8 @@ class UnifiedCodeValidator:
         Args:
             validators: List of validators to use. If provided, overrides defaults.
             include_repl_policy: If True, include REPLPolicyValidator (class defs,
-                missing await). Default False since strategies handle this separately.
+                missing await). Default False: the CodeAct strategies run the
+                missing-await check themselves via GeneratedCodeValidator.
             restrictions: Code execution restrictions (blocked modules/calls).
                 None uses defaults from RestrictionsConfig().
         """
@@ -1452,7 +1485,9 @@ class UnifiedCodeValidator:
         try:
             tree = ast.parse(code, filename=cell_filename)
         except SyntaxError as e:
-            raise ValidationError(f"Syntax error: {e}", original_exception=e) from e
+            # Parser rejection, not a policy rejection: keep the SyntaxError so the
+            # formatter can render source line, caret and syntax hints.
+            raise CodeSyntaxError(e) from e
 
         # Run validators
         all_issues: list[ValidationIssue] = []

@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """ShellTools — persistent shell + file ops with grep that hands you editable Match objects.
 
-Identical surface to v4 (run / read / replace / write_file). The one addition:
+Surface: run / read / replace / replace_match / write_file. The one addition:
 when ``run()`` executes a *pure search* (a bare grep/rg/egrep with no
 output-mangling pipe or anchor-dropping flag), the result still prints as the
 exact bytes the agent's command produced — but it ALSO carries a parsed
-``.matches`` list of ``Match`` objects, ready to hand straight to ``replace()``.
+``.matches`` list of ``Match`` objects, ready to hand straight to ``replace_match()``.
 
 The agent sees no new method and no changed output. Under the hood we run the
 equivalent ``rg --json`` purely to harvest anchors, and attach the matches ONLY
@@ -30,7 +30,10 @@ Attach to an agent::
 from __future__ import annotations
 
 import difflib
+import functools
+import inspect
 import json
+import os
 import re
 import shlex
 from collections.abc import AsyncIterator
@@ -71,7 +74,7 @@ class FileWrite:
 class Match:
     """Editable file anchor returned by file/search tools.
 
-    Pass any ``Match`` to ``self.shell.replace(match, new_text)``. Print it to
+    Pass any ``Match`` to ``self.shell.replace_match(match, new)``. Print it to
     view numbered lines. Slice with ``match[start:end]`` (1-indexed inclusive
     line numbers) to narrow the region before replacing. ``resolved_path`` is
     required so the anchor remains bound to that file if the shell cwd changes.
@@ -365,6 +368,180 @@ def _replace_diagnostic_excerpt(
 
 
 @hidden
+def _is_path_like(value: Any) -> bool:
+    return isinstance(value, (str, os.PathLike))
+
+
+@hidden
+def _replace_form_error(method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
+    """Explain a wrong-form replace()/replace_match() call, or None if the form is right.
+
+    ``replace(path, old, new)`` edits a file by unique substring;
+    ``replace_match(match, new)`` rewrites a Match's whole line region. A call
+    that hands either method the other's first argument names the right method.
+    """
+    first = args[0] if args else kwargs.get("path" if method == "replace" else "match")
+    if method == "replace" and isinstance(first, Match):
+        return (
+            "replace() takes a file path, not a Match; no file was changed. "
+            "To rewrite the Match's whole line region call replace_match(match, new). "
+            "For an old -> new substring edit in that file call "
+            "replace(match.resolved_path, old, new); match.resolved_path keeps the "
+            "original file even if the shell directory changed."
+        )
+    if method == "replace_match" and _is_path_like(first):
+        return (
+            "replace_match() takes a Match (from read() or run().matches), not a "
+            f"{type(first).__name__} path; no file was changed. For a substring edit "
+            "in a file call replace(path, old, new); old must match exactly once."
+        )
+    return None
+
+
+@hidden
+def _replace_call_message(
+    method: str,
+    params: list[str],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    error: TypeError,
+) -> str:
+    """Name the exact call for a replace()/replace_match() call that does not bind."""
+    wrong_form = _replace_form_error(method, args, kwargs)
+    if wrong_form is not None:
+        return wrong_form
+    if method == "replace":
+        call = "replace(path, old, new)  # old must match exactly once; new='' deletes it"
+        other = "To rewrite a Match's whole line region call replace_match(match, new)."
+    else:
+        call = "replace_match(match, new)  # rewrites the Match's whole line region"
+        other = "For an old -> new substring edit call replace(match.resolved_path, old, new)."
+    unknown = sorted(name for name in kwargs if name not in params)
+    if unknown:
+        names = ", ".join(f"{name}=" for name in unknown)
+        detail = f"it has no keyword argument(s) {names}; its parameters are {', '.join(params)}"
+    else:
+        detail = str(error)
+    return (
+        f"{method}() was called with the wrong arguments ({detail}); no file was changed. "
+        f"Call it as:\n    {call}\n{other}"
+    )
+
+
+@hidden
+def replace_call_form(fn: Any) -> Any:
+    """Turn a replace()/replace_match() call that does not bind into a TypeError
+    naming the right call (no file is touched). The signature is unchanged."""
+    signature = inspect.signature(fn)
+    method = fn.__name__
+    params = [name for name in signature.parameters if name != "self"]
+
+    @functools.wraps(fn)
+    async def guarded(self: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            signature.bind(self, *args, **kwargs)
+        except TypeError as error:
+            raise TypeError(_replace_call_message(method, params, args, kwargs, error)) from None
+        wrong_form = _replace_form_error(method, args, kwargs)
+        if wrong_form is not None:
+            raise TypeError(wrong_form)
+        return await fn(self, *args, **kwargs)
+
+    return guarded
+
+
+@hidden
+def _not_found_replace_message(path: str, resolved: Path, content: str, old: str, new: str) -> str:
+    """Explain a zero-match path replacement; bounded, escaped, never writes.
+
+    Reports the resolved file, the first line of ``old`` and where that line
+    occurs with different leading whitespace/tabs, plus a hint that an earlier
+    edit may already have changed the file. At most three locations are listed
+    and every quoted row is limited to 160 characters.
+    """
+
+    def excerpt(text: str) -> str:
+        return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)
+
+    def line_at(position: int) -> tuple[int, int, int]:
+        start = content.rfind("\n", 0, position) + 1
+        end = content.find("\n", position)
+        end = len(content) if end == -1 else end
+        if end > start and content[end - 1] == "\r":
+            end -= 1
+        return content.count("\n", 0, start) + 1, start, end
+
+    def describe(whitespace: str) -> str:
+        if not whitespace:
+            return "no indentation"
+        tabs, spaces = whitespace.count("\t"), whitespace.count(" ")
+        parts = [f"{tabs} tab(s)"] if tabs else []
+        if spaces:
+            parts.append(f"{spaces} space(s)")
+        other = len(whitespace) - tabs - spaces
+        if other:
+            parts.append(f"{other} other whitespace char(s)")
+        return " + ".join(parts)
+
+    lines = [
+        f"old text not found in {excerpt(path)} (resolved path: {excerpt(str(resolved))}). "
+        "No file was changed.",
+        "It must match exactly once — check whitespace and indentation.",
+    ]
+    first = old.split("\n", 1)[0].rstrip("\r")
+    stripped = first.strip()
+    if stripped:
+        lines.append(
+            f"First line of old text: '{excerpt(first)}' ({describe(first[: len(first) - len(first.lstrip())])})"
+        )
+        exact: list[int] = []
+        shifted: list[str] = []
+        search = 0
+        while len(exact) + len(shifted) < 3:
+            position = content.find(stripped, search)
+            if position == -1:
+                break
+            search = position + len(stripped)
+            number, start, end = line_at(position)
+            row = content[start:end]
+            if row.strip() != stripped:
+                continue
+            indent = row[: len(row) - len(row.lstrip())]
+            wanted = first[: len(first) - len(first.lstrip())]
+            if indent == wanted and row.rstrip() == first.rstrip():
+                exact.append(number)
+            else:
+                shifted.append(f"  line {number} has it with {describe(indent)}: '{excerpt(row)}'")
+        if exact:
+            lines.append(
+                "That first line occurs unchanged at line(s) "
+                + ", ".join(str(n) for n in exact)
+                + "; the difference is in a later line of old text."
+            )
+        if shifted:
+            lines.append("That first line occurs with different leading whitespace:")
+            lines.extend(shifted)
+        if not exact and not shifted:
+            lines.append("That first line does not occur as a whole line anywhere in the file.")
+        if "\t" in old and "\t" not in content:
+            lines.append("old text contains tabs but the file has none.")
+        elif "\t" in content and "\t" not in old and shifted:
+            lines.append("The file uses tabs; old text uses none.")
+    # Short replacements (``x``, ``)``) occur by chance; only report distinctive text.
+    if len(new.strip()) >= 8 and new in content:
+        number, _, _ = line_at(content.find(new))
+        lines.append(
+            f"The replacement text already appears in the file (starting on line {number}); "
+            "this edit may already have been applied."
+        )
+    lines.append(
+        "Earlier edits (including ones in the same cell) may already have changed this file: "
+        "re-read it with read() and retry only the edits that are not yet applied."
+    )
+    return "\n".join(lines)
+
+
+@hidden
 def _ambiguous_replace_message(path: str, content: str, old: str, count: int) -> str:
     """At most five matches, 160 chars/source row, 12,000 chars/diagnostic.
 
@@ -586,20 +763,21 @@ class ShellTools(Skill):
     Persistent shell + file ops, with grep that hands you editable Match objects.
 
     For shell commands and file operations:
-    Always use these four methods rather than Python builtins:
+    Always use these five methods rather than Python builtins:
         run(command, stdin=, timeout=, cwd=)  — shell command (cd/env persist)
         read(path, lines=)             — view a file/region -> Match
-        replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
+        replace(path, old, new)        — edit a file by unique substring
+        replace_match(match, new)      — rewrite a Match's whole line region
         write_file(path, content)      — create/overwrite a file
 
     Grep that you can edit from directly. When run() executes a plain search
     (grep/rg/egrep), the result still prints the EXACT bytes your command
     produced — and it also carries ``.matches``, a list of Match objects you can
-    pass straight to replace(). No re-grep, no parsing the text yourself::
+    pass straight to replace_match(). No re-grep, no parsing the text yourself::
 
         r = await shell.run("grep -rn 'def foo' src/")
         print(r)                          # byte-accurate grep output, unchanged
-        await shell.replace(r.matches[0], new_code)   # edit the first hit
+        await shell.replace_match(r.matches[0], new_code)   # edit the first hit
 
     ``r.matches`` is ``None`` (not an error — just "no structured anchors") when
     the command isn't a verifiable plain search: anything piped into
@@ -614,7 +792,7 @@ class ShellTools(Skill):
 
         region = await shell.read("f.py", lines=(10, 25))  # -> Match
         print(region)                                       # numbered lines
-        await shell.replace(region, new_code)               # exact-anchor edit
+        await shell.replace_match(region, new_code)         # exact-anchor edit
 
     Running scripts — pass the payload as ``stdin=`` instead of embedding quotes
     in an inline ``python -c "..."`` (which is the #1 source of syntax errors)::
@@ -653,8 +831,7 @@ class ShellTools(Skill):
         return self._session
 
     async def _get_session(self) -> BashSession:
-        if not self._session._started:
-            await self._session.start()
+        await self._session.start()  # returns at once when already started
         return self._session
 
     @hidden
@@ -692,7 +869,7 @@ class ShellTools(Skill):
 
         If the command is a pure search (grep/rg/egrep, no mangling pipe or
         anchor-dropping flag), the result also carries .matches — a list of
-        Match objects you can pass straight to replace(). The printed output is
+        Match objects you can pass straight to replace_match(). The printed output is
         always the exact bytes your command produced.
 
         Args:
@@ -722,7 +899,7 @@ class ShellTools(Skill):
             print(
                 f"# self.shell.run({command!r:.60}) found {len(matches)} match(es).\n"
                 "# Edit directly: m = <result>.matches[0]; "
-                "await self.shell.replace(m, new_text)"
+                "await self.shell.replace_match(m, new)"
             )
 
         return ShellResult(
@@ -1049,7 +1226,7 @@ class ShellTools(Skill):
         """
         Read a file (or line range) -> Match object.
 
-        Print the Match to see numbered lines. Pass any Match to replace() for editing.
+        Print the Match to see numbered lines. Pass any Match to replace_match() for editing.
         Slice with match[start:end] to narrow the region.
 
         Args:
@@ -1073,131 +1250,140 @@ class ShellTools(Skill):
 
         return Match(str(path), 1, total, content, resolved_path=resolved)
 
+    @replace_call_form
     async def replace(
         self,
-        target: Annotated[
-            Any, spec(description="A Match (from read() or run().matches) or a file path string")
-        ],
-        old_or_new: Annotated[
-            str,
-            spec(
-                description="For Match: replacement text. For path: text to find (must be unique)"
-            ),
-        ] = "",
-        new: Annotated[
-            str | None, spec(description="For path: replacement text. Leave None for Match.")
-        ] = None,
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
+        old: Annotated[str, spec(description="Exact text to find; must occur exactly once")],
+        new: Annotated[str, spec(description="Replacement text; '' deletes old")],
     ) -> FileWrite:
         """
-        Edit via replace(match: Match, new_text: str) or replace(file_path: str, old_text: str, new_text: str); line numbers are not handles.
+        Edit a file by unique substring: replace(path, old, new); for a Match use replace_match(match, new).
 
-        1. replace(match, new_text) — replace the Match's line region.
-        2. replace(path, old, new)  — old must match exactly once. new="" deletes.
+        ``old`` must occur exactly once in the file; ``new=""`` deletes it. To
+        rewrite a Match's whole line region (a Match from read() or
+        run().matches) call replace_match(match, new) instead. Passing a Match
+        here raises TypeError and writes nothing.
 
-        A Match replaces its entire line region, not a substring within it.
-        Stale or invalid anchors raise StaleMatchError without writing; re-read or
-        re-search and recompute the Match. Anchors are never relocated. This is
-        a pre-write check, not a lock against concurrent external writers.
-        Supplying new with a Match is an error; use the path form for old -> new.
+        Example (await the call; it is async):
+            await shell.replace("pkg/mod.py", "return 1", "return 2")
 
         Args:
-            target: A Match or file path string.
-            old_or_new: For Match: the new text. For path: old text to find.
-            new: Only for path form: the replacement text.
+            path: File path (relative to cwd or absolute).
+            old: The exact text to find; it must occur exactly once.
+            new: The replacement text; "" deletes ``old``.
         """
-        if isinstance(target, Match):
-            if new is not None:
-                raise ValueError(
-                    "replace(match, old, new) is ambiguous and no file was changed. "
-                    "A Match takes only the full replacement text for its entire line region: "
-                    "replace(match, new_text). For an old -> new substring replacement, use "
-                    "the path-string form replace(path, old, new); use match.resolved_path "
-                    "to keep the original file even if the shell directory changed. "
-                    "This guard prevents silently overwriting the whole matched region "
-                    "(possibly the entire file) with the old text."
-                )
-            new_text = old_or_new
-            resolved = Path(target.resolved_path)
-            try:
-                content = resolved.read_text()
-            except FileNotFoundError:
-                raise StaleMatchError(target, None, "file no longer exists") from None
-            all_lines = content.splitlines(keepends=True)
-            # Compare at the captured range only; never find/relocate matching text.
-            # read(), search harvesting and Match slicing use this same normalized
-            # text representation, including line terminators and missing EOF newline.
-            integer_range = type(target.start) is int and type(target.end) is int
-            empty_file_anchor = (
-                integer_range
-                and target.start == 1
-                and target.end == 0
-                and target.text == ""
-                and content == ""
+        if not _is_path_like(path):
+            raise TypeError(
+                f"replace() path must be a file path str, got {type(path).__name__}. "
+                "No file was changed. Use replace(path, old, new), or "
+                "replace_match(match, new) for a Match."
             )
-            if not empty_file_anchor:
-                if not integer_range or target.start < 1 or target.end < target.start:
-                    raise StaleMatchError(target, None, "invalid captured line range")
-                current = "".join(all_lines[target.start - 1 : target.end])
-                if target.end > len(all_lines):
-                    raise StaleMatchError(target, current, "captured line range is out of bounds")
-                if current != target.text:
-                    raise StaleMatchError(target, current, "captured text no longer matches")
+        path = str(path)
+        resolved = self._resolve_path(path)
+        content = resolved.read_text()
 
-            before = all_lines[: target.start - 1]
-            after = all_lines[target.end :]
-            # Keep the file newline-terminated when the replaced region
-            # reaches end-of-file and the original content ended with a
-            # newline — otherwise the edit silently strips the final byte.
-            reaches_end = target.end >= len(all_lines)
-            ended_with_newline = content.endswith("\n")
-            if (
-                new_text
-                and not new_text.endswith("\n")
-                and (after or (reaches_end and ended_with_newline))
-            ):
-                new_text += "\n"
-            new_content = "".join(before) + new_text + "".join(after)
-            resolved.write_text(new_content)
+        count = content.count(old)
+        if count == 0:
+            raise ValueError(_not_found_replace_message(path, resolved, content, old, new))
+        if count > 1:
+            raise ValueError(_ambiguous_replace_message(path, content, old, count))
 
-            diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
-            diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"
-            return FileWrite(
-                path=target.path,
-                message=f"Edited {target.path} (replaced lines {target.start}-{target.end})",
-                diff=diff,
-                new_text=new_text,
+        new_content = content.replace(old, new, 1)
+        resolved.write_text(new_content)
+
+        return FileWrite(
+            path=path,
+            message=f"Edited {path}",
+            diff=f"--- a/{path}\n+++ b/{path}",
+            new_text=new,
+        )
+
+    @replace_call_form
+    async def replace_match(
+        self,
+        match: Annotated[Match, spec(description="A Match from read() or run().matches")],
+        new: Annotated[str, spec(description="Replacement text for the Match's whole line region")],
+    ) -> FileWrite:
+        """
+        Rewrite a Match's whole line region: replace_match(match, new); line numbers are not handles.
+
+        ``match`` comes from read() or run().matches (slice it with
+        ``match[start:end]`` to narrow the region first). The whole region is
+        replaced, not a substring within it. For a substring edit by path use
+        replace(path, old, new); passing a path string here raises TypeError
+        and writes nothing.
+
+        Example (await the call; it is async):
+            m = await shell.read("pkg/mod.py", (10, 12))
+            await shell.replace_match(m, new_lines_10_to_12)
+
+        Stale or invalid anchors raise StaleMatchError without writing; re-read
+        or re-search and recompute the Match. Anchors are never relocated. This
+        is a pre-write check, not a lock against concurrent external writers.
+
+        Args:
+            match: The Match whose line region to rewrite.
+            new: The new text for the whole region.
+        """
+        if not isinstance(match, Match):
+            raise TypeError(
+                f"replace_match() needs a Match, got {type(match).__name__}. "
+                "No file was changed. Use replace_match(match, new), or "
+                "replace(path, old, new) for a substring edit in a file."
             )
-
-        elif isinstance(target, str):
-            if new is None:
-                raise ValueError(
-                    "replace(path, old, new) requires 3 arguments. "
-                    "Did you mean replace(match, new_text)?"
-                )
-            old_text = old_or_new
-            resolved = self._resolve_path(target)
+        target = match
+        new_text = new
+        resolved = Path(target.resolved_path)
+        try:
             content = resolved.read_text()
+        except FileNotFoundError:
+            raise StaleMatchError(target, None, "file no longer exists") from None
+        all_lines = content.splitlines(keepends=True)
+        # Compare at the captured range only; never find/relocate matching text.
+        # read(), search harvesting and Match slicing use this same normalized
+        # text representation, including line terminators and missing EOF newline.
+        integer_range = type(target.start) is int and type(target.end) is int
+        empty_file_anchor = (
+            integer_range
+            and target.start == 1
+            and target.end == 0
+            and target.text == ""
+            and content == ""
+        )
+        if not empty_file_anchor:
+            if not integer_range or target.start < 1 or target.end < target.start:
+                raise StaleMatchError(target, None, "invalid captured line range")
+            current = "".join(all_lines[target.start - 1 : target.end])
+            if target.end > len(all_lines):
+                raise StaleMatchError(target, current, "captured line range is out of bounds")
+            if current != target.text:
+                raise StaleMatchError(target, current, "captured text no longer matches")
 
-            count = content.count(old_text)
-            if count == 0:
-                raise ValueError(
-                    f"old text not found in {target}. "
-                    "It must match exactly once — check whitespace and indentation."
-                )
-            if count > 1:
-                raise ValueError(_ambiguous_replace_message(target, content, old_text, count))
+        before = all_lines[: target.start - 1]
+        after = all_lines[target.end :]
+        # Keep the file newline-terminated when the replaced region
+        # reaches end-of-file and the original content ended with a
+        # newline — otherwise the edit silently strips the final byte.
+        reaches_end = target.end >= len(all_lines)
+        ended_with_newline = content.endswith("\n")
+        if (
+            new_text
+            and not new_text.endswith("\n")
+            and (after or (reaches_end and ended_with_newline))
+        ):
+            new_text += "\n"
+        new_content = "".join(before) + new_text + "".join(after)
+        resolved.write_text(new_content)
 
-            new_content = content.replace(old_text, new, 1)
-            resolved.write_text(new_content)
-
-            return FileWrite(
-                path=target,
-                message=f"Edited {target}",
-                diff=f"--- a/{target}\n+++ b/{target}",
-                new_text=new,
-            )
-        else:
-            raise TypeError(f"target must be a Match or file path str, got {type(target).__name__}")
+        diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
+        diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"
+        return FileWrite(
+            path=target.path,
+            message=f"Edited {target.path} (replaced lines {target.start}-{target.end})",
+            diff=diff,
+            new_text=new_text,
+        )
 
     async def write_file(
         self,

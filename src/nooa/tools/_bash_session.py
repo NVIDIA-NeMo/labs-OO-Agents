@@ -24,14 +24,17 @@ import base64
 import logging
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from nooa.agentdoc import TruncatingStringIO
+from nooa.agentdoc._truncating_stream import FileBackedTruncatingStringIO
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,73 @@ _DRAIN_SCRIPT = (
 )
 
 
-def _bounded(text: str) -> str:
+_SPILL_MAX_FILES = 20  # Full-output files kept per session (oldest removed first)
+_SPILL_MAX_BYTES = 64 * 1024 * 1024  # Total bytes kept per session
+
+
+class _SpillDir:
+    """Session-scoped directory for the full text of truncated command output.
+
+    Created on first use, capped at ``_SPILL_MAX_FILES`` files and
+    ``_SPILL_MAX_BYTES`` bytes (oldest files are removed first), and removed
+    when the session closes or is garbage collected. A notice for a file that
+    was pruned points at a path that no longer exists.
+    """
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self._files: list[Path] = []
+        self._finalizer: weakref.finalize | None = None
+
+    def buffer(self) -> FileBackedTruncatingStringIO:
+        if self.path is None or not self.path.is_dir():
+            try:
+                self.path = Path(tempfile.mkdtemp(prefix="nooa_shell_output_"))
+                self._files = []
+                self._finalizer = weakref.finalize(
+                    self, shutil.rmtree, str(self.path), ignore_errors=True
+                )
+            except OSError:
+                self.path = None
+        return FileBackedTruncatingStringIO(
+            limit=MAX_OUTPUT_CHARS,
+            dir=str(self.path) if self.path is not None else None,
+            prefix="output_",
+            suffix=".txt",
+        )
+
+    def keep(self, buffer: FileBackedTruncatingStringIO) -> None:
+        """Record the buffer's file and prune the directory to its caps."""
+        file_path = getattr(buffer, "_file_path", None)
+        if file_path is None or self.path is None:
+            return
+        self._files.append(Path(file_path))
+        sizes = []
+        for path in self._files:
+            try:
+                sizes.append(path.stat().st_size)
+            except OSError:
+                sizes.append(0)
+        total = sum(sizes)
+        while len(self._files) > 1 and (
+            len(self._files) > _SPILL_MAX_FILES or total > _SPILL_MAX_BYTES
+        ):
+            oldest = self._files.pop(0)
+            total -= sizes.pop(0)
+            try:
+                oldest.unlink()
+            except OSError:
+                pass
+
+    def cleanup(self) -> None:
+        if self._finalizer is not None:
+            self._finalizer()  # rmtree once; later calls are no-ops
+        self._finalizer = None
+        self.path = None
+        self._files = []
+
+
+def _bounded(text: str, spill: _SpillDir | None = None) -> str:
     """``text`` cut to ``MAX_OUTPUT_CHARS``: its head and tail around the standard notice.
 
     The tail matters as much as the head: a failing command usually ends
@@ -66,12 +135,26 @@ def _bounded(text: str) -> str:
     """
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
-    buffer = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
-    # Feed the buffer in bounded pieces: one write of the whole stream would
-    # copy everything past the head a second time before the tail is trimmed.
-    for start in range(0, len(text), _BOUNDED_CHUNK_CHARS):
-        buffer.write(text[start : start + _BOUNDED_CHUNK_CHARS])
-    return buffer.getvalue()
+    # The full text is saved to a file named in the notice, so output that can
+    # be produced only once is still readable in ranges; if the file cannot be
+    # written the notice falls back to "not recoverable". With a session spill
+    # directory the file is bounded and removed when the session closes.
+    if spill is not None:
+        buffer = spill.buffer()
+    else:
+        buffer = FileBackedTruncatingStringIO(
+            limit=MAX_OUTPUT_CHARS, prefix="nooa_shell_output_", suffix=".txt"
+        )
+    try:
+        # Feed the buffer in bounded pieces: one write of the whole stream would
+        # copy everything past the head a second time before the tail is trimmed.
+        for start in range(0, len(text), _BOUNDED_CHUNK_CHARS):
+            buffer.write(text[start : start + _BOUNDED_CHUNK_CHARS])
+        return buffer.getvalue()
+    finally:
+        buffer.close()
+        if spill is not None:
+            spill.keep(buffer)
 
 
 def _process_start_time(pid: int) -> str | None:
@@ -121,6 +204,13 @@ class BashSession:
         self._started = False
         self._started_on_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
+        self._spill = _SpillDir()
+        # True once start() has fully finished (bash spawned, startup drained,
+        # init command run). ``_started`` turns True earlier, mid-start.
+        self._ready = False
+        self._init_task: asyncio.Task[object] | None = None
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
@@ -217,10 +307,34 @@ class BashSession:
         return diag
 
     async def start(self) -> None:
-        """Start the bash subprocess with a dedicated control fd."""
-        if self._started:
-            return
+        """Start the bash subprocess with a dedicated control fd.
 
+        Concurrent callers (e.g. several ``run()`` calls gathered on a fresh
+        session) share one start: they used to each spawn a bash and race on
+        the control reader ("readuntil() called while another coroutine is
+        already waiting").
+        """
+        if self._ready:
+            return
+        if self._in_own_init():
+            # Re-entry from a reset during the init command: the outer start()
+            # already holds the start lock.
+            await self._start_unlocked()
+            return
+        self._ensure_lock_on_current_loop()
+        async with self._start_lock:
+            # Callers that arrive while another start() runs the init command
+            # wait here until it has finished, then return without a second bash.
+            if self._ready:
+                return
+            await self._start_unlocked()
+
+    def _in_own_init(self) -> bool:
+        """True inside the init command's own task (a reset re-entering start)."""
+        return self._running_init and self._init_task is asyncio.current_task()
+
+    async def _start_unlocked(self) -> None:
+        """Start bash (caller holds ``_start_lock`` or is re-entering from init)."""
         self._start_count += 1
         env = os.environ.copy()
         env["PS1"] = ""
@@ -276,6 +390,7 @@ class BashSession:
         # stdout/stderr so init output never bleeds into the first user command.
         if self._init_command and not self._running_init:
             self._running_init = True
+            self._init_task = asyncio.current_task()
             try:
                 init_sentinel = f"__CTRL_{secrets.token_hex(8)}__"
                 init_script = (
@@ -289,6 +404,11 @@ class BashSession:
                     self._cwd = Path(ctrl_lines[1].strip())
             finally:
                 self._running_init = False
+                self._init_task = None
+        if not self._running_init:
+            # Only now may run() use the session: the startup drain and the init
+            # command own the control reader until here.
+            self._ready = self._started
 
     def _build_script(self, command: str, sentinel: str) -> str:
         """Compose the wire script: the command, then the control-channel protocol.
@@ -310,12 +430,17 @@ class BashSession:
         return f'eval "$(base64 -d <<<{blob})" </dev/null\n{protocol}'
 
     def _ensure_lock_on_current_loop(self) -> None:
-        """Recreate the lock if the event loop changed since it was created."""
-        if (
-            self._started_on_loop is not None
-            and self._started_on_loop is not asyncio.get_running_loop()
-        ):
+        """Recreate the locks if the event loop changed since they were created.
+
+        Keyed on the loop the locks belong to (not the loop bash was started
+        on), so concurrent callers on a new loop share one fresh lock instead of
+        each creating their own while a reset is in progress.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is not loop:
             self._lock = asyncio.Lock()
+            self._start_lock = asyncio.Lock()
+            self._lock_loop = loop
 
     async def run(self, command: str, timeout: float = 30.0) -> tuple[str, str, int]:
         """Run a command and return (stdout, stderr, exit_code).
@@ -345,7 +470,7 @@ class BashSession:
 
         Returns (stdout, stderr, exit_code, timed_out).
         """
-        if not self._started:
+        if not self._ready:
             await self.start()
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
@@ -375,7 +500,7 @@ class BashSession:
                     int(line) for line in ctrl_lines[2:] if line.strip().isdigit()
                 )
 
-        stdout, stderr = _bounded(stdout), _bounded(stderr)
+        stdout, stderr = _bounded(stdout, self._spill), _bounded(stderr, self._spill)
 
         if timed_out:
             exit_code = 124
@@ -404,7 +529,7 @@ class BashSession:
         self, command: str, timeout: float
     ) -> AsyncIterator[tuple[str, str]]:
         """Actual run_stream implementation (caller must hold self._lock)."""
-        if not self._started:
+        if not self._ready:
             await self.start()
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
@@ -764,12 +889,27 @@ class BashSession:
     async def reset(self) -> None:
         """Kill the current session and start a fresh one, preserving cwd."""
         cwd = self._cwd
-        await self.close()
-        self._cwd = cwd
-        await self.start()
+        if self._in_own_init():
+            # Bash died during the init command; the outer start() holds the lock.
+            await self._terminate()
+            self._cwd = cwd
+            await self.start()
+            return
+        # Serialized with start(): a reset while another task runs the init
+        # command waits for it instead of spawning a second bash beside it.
+        self._ensure_lock_on_current_loop()
+        async with self._start_lock:
+            await self._terminate()
+            self._cwd = cwd
+            await self._start_unlocked()
 
     async def close(self) -> None:
-        """Terminate the bash session cleanly."""
+        """Terminate the bash session cleanly and remove its truncated-output files."""
+        await self._terminate()
+        self._spill.cleanup()
+
+    async def _terminate(self) -> None:
+        """End bash; files named in earlier truncation notices are kept (reset)."""
         if self._control_transport is not None:
             try:
                 self._control_transport.close()
@@ -817,8 +957,11 @@ class BashSession:
         self._process = None
         self._background_pids = frozenset()
         self._started = False
+        self._ready = False
         self._started_on_loop = None
-        self._lock = asyncio.Lock()
+        # Locks are not replaced here: close() runs inside run() during a reset,
+        # and a fresh lock would let a queued caller bypass the holder. A loop
+        # change is handled by _ensure_lock_on_current_loop().
 
     async def _close_keeping_background(self, proc: asyncio.subprocess.Process) -> None:
         """End bash only; its background jobs keep running with drained output."""

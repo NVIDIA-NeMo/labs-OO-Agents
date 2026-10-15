@@ -112,92 +112,33 @@ class GeneratedCodeValidator:
         return errors
 
     def _missing_await_errors(self, tree: ast.AST, agent: Any) -> list[str]:
-        async_method_names = self._collect_async_method_names(agent)
-        if not async_method_names:
-            return []
+        from nooa.runtime.async_calls import (
+            held_coroutine_example,
+            held_coroutine_message,
+            held_coroutine_uses,
+            missing_await_calls,
+            missing_await_example,
+            missing_await_message,
+        )
 
-        parent_map = self._build_parent_map(tree)
-
-        errors: list[str] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not (
-                isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "self"
-            ):
-                continue
-
-            method_name = node.func.attr
-            if method_name not in async_method_names:
-                continue
-
-            if not self._is_in_await_or_comprehension(node, parent_map):
-                errors.append(
-                    f"Method `{method_name}` is async and must be called with `await`.\n"
-                    f"   Example: result = await self.{method_name}(...)"
-                )
-
+        errors = [
+            f"{missing_await_message(name, chain=chain)}\n"
+            f"   Example: result = {missing_await_example(name, chain=chain)}"
+            for _node, name, chain in missing_await_calls(
+                tree, agent, self._collect_async_method_names(agent)
+            )
+        ]
+        errors.extend(
+            f"{held_coroutine_message(node.id, chain)}\n"
+            f"   Example: {held_coroutine_example(node.id, chain)}"
+            for node, chain in held_coroutine_uses(tree, agent)
+        )
         return errors
 
     def _collect_async_method_names(self, agent: Any) -> set[str]:
-        from nooa.agentdoc.visibility import is_hidden_method
+        from nooa.runtime.async_calls import collect_async_method_names
 
-        names: set[str] = set()
-
-        # 1) Class-level async methods
-        for attr_name in dir(agent.__class__):
-            if attr_name.startswith("__"):
-                continue
-            try:
-                attr = getattr(agent.__class__, attr_name, None)
-            except Exception:
-                continue
-            if attr and inspect.iscoroutinefunction(attr):
-                if not is_hidden_method(attr):
-                    names.add(attr_name)
-
-        # 2) Instance-level async callables (important for instance-bound helpers)
-        for attr_name in dir(agent):
-            if attr_name.startswith("__"):
-                continue
-            try:
-                attr = getattr(agent, attr_name)
-            except Exception:
-                continue
-            if callable(attr) and inspect.iscoroutinefunction(attr):
-                if not is_hidden_method(attr):
-                    names.add(attr_name)
-
-        return names
-
-    def _build_parent_map(self, tree: ast.AST) -> dict[ast.AST, ast.AST]:
-        parent_map: dict[ast.AST, ast.AST] = {}
-        for parent in ast.walk(tree):
-            for child in ast.iter_child_nodes(parent):
-                parent_map[child] = parent
-        return parent_map
-
-    def _is_in_await_or_comprehension(
-        self, node: ast.AST, parent_map: dict[ast.AST, ast.AST]
-    ) -> bool:
-        current = node
-        while current in parent_map:
-            parent = parent_map[current]
-
-            if isinstance(parent, ast.Await) and getattr(parent, "value", None) == current:
-                return True
-
-            # Allow common gather patterns:
-            #   tasks = [self.async_method(x) for x in items]
-            #   tasks = (self.async_method(x) for x in items)
-            if isinstance(parent, (ast.ListComp, ast.GeneratorExp)):
-                return True
-
-            current = parent
-
-        return False
+        return collect_async_method_names(agent)
 
 
 def _exec_with_source_tracking(
@@ -307,6 +248,7 @@ class HelperFunctionManager:
 
         installed: list[str] = []
         errors: list[str] = []
+        cell_bound = _names_bound_by(tree)
 
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -317,6 +259,16 @@ class HelperFunctionManager:
 
             try:
                 func = _exec_with_source_tracking(node, method_code, namespace, method_name)
+            except NameError as e:
+                if getattr(e, "name", None) in cell_bound:
+                    # A default argument or decorator uses a name this cell binds
+                    # (``KT = 3`` then ``def f(k=KT)``), which does not exist yet.
+                    # The runtime defines the function again after the cell body
+                    # runs, so skip pre-definition instead of rejecting the cell.
+                    continue
+                # A genuinely undefined name (a typo such as ``@stratgy``).
+                errors.append(f"Error defining `{method_name}`: {type(e).__name__}: {e}")
+                continue
             except Exception as e:
                 errors.append(f"Error defining `{method_name}`: {type(e).__name__}: {e}")
                 continue
@@ -330,6 +282,22 @@ class HelperFunctionManager:
             installed.append(method_name)
 
         return HelperApplyResult(installed=installed, errors=errors)
+
+
+def _names_bound_by(tree: ast.AST) -> set[str]:
+    """Names a cell binds anywhere: assignments, imports, loop/with targets, defs."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+    return names
 
 
 def _type_name(t: Any) -> str:

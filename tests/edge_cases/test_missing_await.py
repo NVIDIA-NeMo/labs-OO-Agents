@@ -236,3 +236,315 @@ return results
 """
     errors = validator.validate(code_with_listcomp, agent_instance)
     assert len(errors) == 0
+
+
+# --- #447: attribute chains on the agent (self.shell.read, self.repo.symbols) ---
+
+
+class _ChainShell:
+    async def read(self, path):
+        return path
+
+    async def run(self, command):
+        return command
+
+
+class _ChainSkills:
+    async def activate(self, names):
+        return names
+
+    def search(self, query):
+        return query
+
+    def read(self, name):
+        return name
+
+    def doc(self, name):
+        return name
+
+
+class _ChainTodo:
+    def add(self, title):
+        return title
+
+    def status(self):
+        return ""
+
+
+class _ChainEvents:
+    def collapse(self, start, end, summary):
+        return summary
+
+
+class _ChainAgent:
+    def __init__(self):
+        self.shell = _ChainShell()
+        self.skills = _ChainSkills()
+        self.todo = _ChainTodo()
+        self.events = _ChainEvents()
+
+    @property
+    def lazy(self):
+        raise AssertionError("validation must not run properties")
+
+
+def _chain_issues(code):
+    import ast
+
+    from nooa.runtime.code_validator import REPLPolicyValidator, ValidationContext
+    from nooa.strategies.generated_code import GeneratedCodeValidator
+
+    agent = _ChainAgent()
+    generated = GeneratedCodeValidator().validate(code, agent)
+    tree = ast.parse(
+        "async def _cell():\n" + "".join(f"    {line}\n" for line in code.splitlines())
+    )
+    e301 = [
+        issue.message
+        for issue in REPLPolicyValidator().validate(tree, ValidationContext(code=code, agent=agent))
+        if issue.code == "E301"
+    ]
+    return generated, e301
+
+
+@pytest.mark.parametrize(
+    ("code", "chain"),
+    [
+        # value discarded (bare expression statement)
+        ('self.shell.read("f.py")', "self.shell.read"),
+        ("self.skills.activate(['web'])", "self.skills.activate"),
+        # result used as if awaited: attribute, subscript, iteration
+        ('print(self.shell.run("ls").stdout)', "self.shell.run"),
+        ('text = self.shell.read("f.py").numbered', "self.shell.read"),
+        ('first = self.shell.run("ls")[0]', "self.shell.run"),
+        ('for line in self.shell.run("ls"):\n    print(line)', "self.shell.run"),
+        ('lines = [x for x in self.shell.run("ls")]', "self.shell.run"),
+        ('texts = [self.shell.read(p).numbered for p in ["a"]]', "self.shell.read"),
+        ('text = (await self.shell.read("f.py").numbered)', "self.shell.read"),
+    ],
+)
+def test_unawaited_async_attribute_chain_is_flagged(code, chain):
+    generated, e301 = _chain_issues(code)
+    assert generated == [
+        f"`{chain}` is async and must be called with `await`.\n"
+        f"   Example: result = await {chain}(...)"
+    ]
+    assert e301 == [
+        f"`{chain}` is async and must be called with `await`. Example: result = await {chain}(...)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'x = await self.shell.read("f.py")',
+        "self.skills.search('web')",
+        "self.skills.read('web')",
+        "self.skills.doc('web')",
+        "self.todo.add('t')",
+        "self.todo.status()",
+        "self.events.collapse('1', '9', 'summary')",
+        "rs = await asyncio.gather(*[self.shell.read(p) for p in ['a', 'b']])",
+        "tasks = [self.shell.read(p) for p in ['a']]",
+        "rs = await asyncio.gather(self.shell.read('a'), self.shell.run('ls'))",
+        "t = asyncio.create_task(self.shell.run('make'))",
+        "t = asyncio.ensure_future(self.shell.run('make'))",
+        "r = await asyncio.wait_for(self.shell.run('make'), 5)",
+        "self.lazy.read('x')",
+        "self.missing.read('x')",
+        # #447 review: valid ways to hold a coroutine for later must pass
+        'x = self.shell.read("f.py")',
+        "coros = []\nfor p in ['a']:\n    coros.append(self.shell.read(p))\n"
+        "rs = await asyncio.gather(*coros)",
+        "rs = await asyncio.gather(*[self.shell.run('a'), self.shell.run('b')])",
+        "cs = [self.shell.run('a'), self.shell.run('b')]",
+        "cs = (self.shell.run('a'), self.shell.run('b'))",
+        "cs = {self.shell.run('a')}",
+        "d = {'a': self.shell.read('a')}",
+        "d = {p: self.shell.read(p) for p in ['a']}",
+        "s = {self.shell.read(p) for p in ['a']}",
+        "coro = self.shell.run('x')\nr = await coro",
+        "done, pending = await asyncio.wait([self.shell.run('a'), self.shell.run('b')])",
+        "results = await asyncio.wait(self.shell.run('a') for _ in range(2))",
+        "t = asyncio.create_task(self.shell.run('make'), name='m')",
+        "q.put_nowait(self.shell.run('a'))",
+    ],
+)
+def test_awaited_sync_and_gathered_chains_are_not_flagged(code):
+    assert _chain_issues(code) == ([], [])
+
+
+class _DirectAgent(_ChainAgent):
+    async def fetch(self, x):
+        return x
+
+
+@pytest.mark.parametrize(
+    ("code", "flagged"),
+    [
+        # self.<async method>() keeps the pre-#447 rule: awaited, list/generator
+        # comprehension, or a gather/create_task argument; anything else is flagged.
+        ("x = self.fetch(1)", True),
+        ("self.fetch(1)", True),
+        ("cs = [self.fetch(1)]", True),
+        ("x = await self.fetch(1)", False),
+        ("cs = [self.fetch(i) for i in range(3)]", False),
+        ("rs = await asyncio.gather(self.fetch(1), self.fetch(2))", False),
+    ],
+)
+def test_direct_agent_async_method_rule_is_unchanged(code, flagged):
+    from nooa.strategies.generated_code import GeneratedCodeValidator
+
+    errors = GeneratedCodeValidator().validate(code, _DirectAgent())
+    assert bool(errors) is flagged, errors
+    if flagged:
+        assert errors[0].startswith("Method `fetch` is async and must be called with `await`")
+
+
+def test_validators_and_formatter_share_one_missing_await_rule_module():
+    """#447 review finding 8: one implementation of the chain resolution and exemptions."""
+    import nooa.errors.formatting as formatting
+    import nooa.runtime.async_calls as async_calls
+    import nooa.runtime.code_validator as code_validator
+    import nooa.strategies.generated_code as generated_code
+
+    assert code_validator.async_self_chain is async_calls.async_self_chain
+    assert code_validator.is_gather_argument is async_calls.is_gather_argument
+    for module in (code_validator, generated_code, formatting):
+        for private_copy in (
+            "_resolve_static_chain",
+            "_is_coroutine_function",
+            "_unwrapped_is_coroutine_function",
+            "_self_attribute_chain",
+        ):
+            assert not hasattr(module, private_copy), (module.__name__, private_copy)
+    assert not hasattr(generated_code.GeneratedCodeValidator, "_is_in_await_or_comprehension")
+
+
+# --- #447 follow-up: a name holding an un-awaited coroutine, used as the result ---
+
+
+class _RepoTools:
+    async def symbols(self, path=".", query=""):
+        return path
+
+    async def refs(self, name, path="."):
+        return name
+
+
+class _HeldAgent(_ChainAgent):
+    def __init__(self):
+        super().__init__()
+        self.repo = _RepoTools()
+
+
+def _held_issues(code):
+    import ast
+
+    from nooa.runtime.code_validator import REPLPolicyValidator, ValidationContext
+    from nooa.strategies.generated_code import GeneratedCodeValidator
+
+    agent = _HeldAgent()
+    generated = GeneratedCodeValidator().validate(code, agent)
+    tree = ast.parse(
+        "async def _cell():\n" + "".join(f"    {line}\n" for line in code.splitlines())
+    )
+    e301 = [
+        issue.message
+        for issue in REPLPolicyValidator().validate(tree, ValidationContext(code=code, agent=agent))
+        if issue.code == "E301"
+    ]
+    return generated, e301
+
+
+TUTANOTA_W2 = (
+    'r1 = self.repo.symbols("src", query="getElementId")\n'
+    'r2 = self.repo.refs("getElementId", path="src")\n'
+    "print(r1.total_matches)\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("code", "name", "chain"),
+    [
+        # the arm-C tutanota W2 trace
+        (TUTANOTA_W2, "r1", "self.repo.symbols"),
+        ('r = self.shell.run("ls")\nprint(r.stdout)', "r", "self.shell.run"),
+        ('r = self.shell.run("ls")\nfirst = r[0]', "r", "self.shell.run"),
+        ('r = self.shell.run("ls")\nfor line in r:\n    print(line)', "r", "self.shell.run"),
+        ('r = self.shell.run("ls")\nlines = [x for x in r]', "r", "self.shell.run"),
+        ('r = self.shell.run("ls")\nn = len(r)', "r", "self.shell.run"),
+        ('r = self.shell.run("ls")\na, b = r', "r", "self.shell.run"),
+        ('r = self.shell.run("ls")\nr = r.stdout', "r", "self.shell.run"),
+        ('t: object = self.shell.read("f")\nprint(t.numbered)', "t", "self.shell.read"),
+        ('a, b = self.shell.read("f"), 1\nprint(a.numbered)', "a", "self.shell.read"),
+        ('x = y = self.shell.read("f")\nprint(y.numbered)', "y", "self.shell.read"),
+        # straight line inside a branch, or a use in an if test, is still certain
+        ('r = self.shell.run("ls")\nif r.returncode:\n    pass', "r", "self.shell.run"),
+        ('r = self.shell.run("ls")\nif ok:\n    print(r.stdout)', "r", "self.shell.run"),
+        ('if ok:\n    r = self.shell.run("ls")\n    print(r.stdout)', "r", "self.shell.run"),
+    ],
+)
+def test_held_unawaited_coroutine_used_as_result_is_flagged(code, name, chain):
+    generated, e301 = _held_issues(code)
+    message = f"`{name}` holds the un-awaited `{chain}(...)`; write `{name} = await {chain}(...)`."
+    assert generated == [f"{message}\n   Example: {name} = await {chain}(...)"]
+    assert e301 == [f"{message} Example: {name} = await {chain}(...)"]
+
+
+def test_held_coroutine_tutanota_case_reports_the_line_of_the_use():
+    import ast
+
+    from nooa.runtime.async_calls import held_coroutine_uses
+
+    uses = held_coroutine_uses(ast.parse(TUTANOTA_W2), _HeldAgent())
+    assert [(n.id, n.lineno, chain) for n, chain in uses] == [("r1", 3, "self.repo.symbols")]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'r = self.shell.run("ls")\nout = await r\nprint(out.stdout)',
+        'r = self.shell.run("ls")\nr = await r\nprint(r.stdout)',
+        'r1 = self.shell.run("a")\nr2 = self.shell.run("b")\n'
+        "a, b = await asyncio.gather(r1, r2)\nprint(a.stdout)",
+        'rs = [self.shell.run(p) for p in "ab"]\nouts = await asyncio.gather(*rs)\nprint(outs[0])',
+        "coros = []\nfor p in ['a']:\n    c = self.shell.read(p)\n    coros.append(c)\n"
+        "rs = await asyncio.gather(*coros)\nprint(rs[0])",
+        'c = self.shell.run("make")\nt = asyncio.create_task(c)\nprint(t.done())',
+        'c = self.shell.run("make")\nr = await asyncio.wait_for(c, 5)\nprint(r.stdout)',
+        'c = self.shell.run("make")\nf = asyncio.ensure_future(c)',
+        'c = self.shell.run("make")\nr = await asyncio.shield(c)\nprint(r.stdout)',
+        'a = self.shell.run("a")\nb = self.shell.run("b")\n'
+        "done, pending = await asyncio.wait([a, b])\nprint(done.pop())",
+        'a = self.shell.run("a")\ncs = [a]\nd = {"a": a}\ns = {a}\nprint(cs[0], d["a"])',
+        'c = self.shell.run("a")\nhelper(c)\nq.put_nowait(c)',
+        'c = self.shell.run("a")\nc = something()\nprint(c.stdout)',
+        'c = self.shell.run("a")\ndel c',
+        'c = self.shell.run("a")\nc.close()\nprint(c.cr_frame, c.__name__)',
+        'c = self.shell.run("a")\nc.send(None)\nc.throw(ValueError)',
+        # different function scope
+        'c = self.shell.run("a")\ndef f(c):\n    return c.stdout\nawait c',
+        'c = self.shell.run("a")\nasync def g():\n    r = await c\n    return r.stdout',
+        'c = self.shell.run("a")\nf = lambda: c.stdout',
+        # comprehension variable shadows the held name
+        'c = self.shell.run("a")\nxs = [c.stdout for c in results]\nawait c',
+        # lazy generator body
+        'c = self.shell.run("a")\ng = (c.stdout for _ in range(1))\nawait c',
+        # branches and loops: conservative
+        'c = self.shell.run("a")\nif ok:\n    c = await c\nprint(c.stdout)',
+        'c = self.shell.run("a")\nfor i in range(2):\n    print(c.stdout)\n    c = await c',
+        'c = self.shell.run("a")\nwhile c is not None:\n    c = await c\nprint(c)',
+        'c = self.shell.run("a")\ntry:\n    c = await c\nexcept Exception:\n    print(c.stdout)',
+        'c = self.shell.run("a")\nwith ctx:\n    c = await c\nprint(c.stdout)',
+        # walrus / await in the same statement
+        'c = self.shell.run("a")\nprint((c := await c).stdout)',
+        'c = self.shell.run("a")\nprint((await c).stdout)',
+        # sync calls are not held
+        'h = self.skills.search("web")\nprint(h.title)',
+        # awaited at assignment
+        'r = await self.repo.symbols("src", query="x")\nprint(r.total_matches)',
+    ],
+)
+def test_held_coroutine_valid_forms_are_not_flagged(code):
+    assert _held_issues(code) == ([], [])

@@ -244,7 +244,9 @@ async def test_atom_agent_owns_bounded_application_state_context(tmp_path):
         agent.shell.cwd = "</workspace_state>\n" + "x" * 500
         rendered = agent._workspace_state_context()
         assert "1 persistent vars" in rendered
-        assert "print(self.v.items())" in rendered
+        assert "print(dict(self.vars))" in rendered
+        assert "self.vars.clear()" in rendered
+        assert "self.v.items()" not in rendered
         assert "private-value" not in rendered
         assert "</workspace_state>" not in rendered
         assert len(rendered) < 600
@@ -488,13 +490,12 @@ async def test_replace_contract_survives_the_default_concise_tool_context(tmp_pa
         tools = doc(RepoTools, ActivityShellTools, TodoManager, concise=True)
         assert str(agent.context["python_cell_tools"]) == tools
         for rendered in (tools, doc(ActivityShellTools, concise=True)):
-            assert "replace(match: Match, new_text: str)" in rendered
-            assert "replace(file_path: str, old_text: str, new_text: str)" in rendered
+            assert "replace(self, path: str, old: str, new: str)" in rendered
+            assert "for a Match use replace_match(match, new)" in rendered
+            assert "replace_match(self, match: Match, new: str)" in rendered
             assert "line numbers are not handles" in rendered
-            assert (
-                "A Match replaces its entire line region, not a substring within it."
-                not in rendered
-            )
+            assert "old_or_new" not in rendered
+            assert "Anchors are never relocated" not in rendered
     finally:
         await agent.aclose()
 
@@ -582,3 +583,31 @@ def test_host_reads_record_no_span(tmp_path):
     finally:
         set_hooks(previous)
     assert recorder.methods == ["probe"]
+
+
+def test_missing_await_check_resolves_atom_tool_chains(tmp_path):
+    """#447: the static missing-await check sees self.shell/self.repo/self.skills
+    async methods and never flags their sync ones."""
+    from nooa.strategies.generated_code import GeneratedCodeValidator
+
+    agent = AtomAgent(llm=FakeLLMClient(strict_exhaustion=True), cwd=tmp_path)
+    validator = GeneratedCodeValidator()
+    for chain in ("self.shell.read", "self.repo.symbols", "self.skills.activate"):
+        errors = validator.validate(f"x = {chain}('a').text", agent)
+        assert errors == [
+            f"`{chain}` is async and must be called with `await`.\n"
+            f"   Example: result = await {chain}(...)"
+        ]
+    for code in (
+        "x = await self.shell.read('a')",
+        "self.skills.search('q')",
+        "self.skills.read('q')",
+        "self.skills.doc('q')",
+        "self.todo.add('t')",
+        "self.todo.status()",
+        "self.events.collapse('1', '2', 'summary')",
+        "rs = await asyncio.gather(*[self.shell.read(p) for p in ps])",
+        "coro = self.shell.read('a')",
+        "coros.append(self.repo.symbols('a'))",
+    ):
+        assert validator.validate(code, agent) == [], code

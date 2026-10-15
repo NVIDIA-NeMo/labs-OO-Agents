@@ -93,6 +93,28 @@ class RestrictedCodeError(ValidationError):
         self.original_exception = original_exception
 
 
+class CodeSyntaxError(RestrictedCodeError):
+    """Generated code could not be parsed (a ``SyntaxError``), not a policy rejection.
+
+    Subclasses ``RestrictedCodeError`` so existing ``except`` clauses keep
+    working, but carries the parser's ``SyntaxError`` in ``original_exception``
+    so the formatter can show the cell, line, caret and the usual syntax hints
+    instead of a one-line "restriction" message. Nothing was executed.
+    """
+
+    def __init__(self, error: SyntaxError):
+        super().__init__(
+            f"Syntax error: {error}",
+            line_number=error.lineno,
+            original_exception=error,
+        )
+
+    def __reduce__(self):
+        # ``args`` holds the message string, but ``__init__`` takes the
+        # SyntaxError; rebuild from it so pickle and copy.deepcopy round-trip.
+        return (type(self), (self.original_exception,), self.__dict__)
+
+
 # =============================================================================
 # Runtime Errors
 # =============================================================================

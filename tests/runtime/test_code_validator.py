@@ -1344,6 +1344,23 @@ exec('2')
         assert isinstance(error, SyntaxError)
         assert error.filename == "Cell In[7]"
 
+    def test_syntax_error_is_distinct_from_policy_rejection(
+        self,
+        validator: UnifiedCodeValidator,
+        default_context: ValidationContext,
+    ):
+        """Parser rejections use CodeSyntaxError (still a RestrictedCodeError)."""
+        from nooa.errors import CodeSyntaxError
+
+        with pytest.raises(CodeSyntaxError) as exc_info:
+            validator.validate("def incomplete(", default_context)
+        assert isinstance(exc_info.value, ValidationError)
+        assert exc_info.value.line_number == 1
+
+        with pytest.raises(ValidationError) as policy_info:
+            validator.validate("import subprocess", default_context)
+        assert not isinstance(policy_info.value, CodeSyntaxError)
+
     def test_validators_run_in_order(
         self, validator: UnifiedCodeValidator, default_context: ValidationContext
     ):
@@ -2805,3 +2822,90 @@ class TestReturnTypeShadowValidator:
             assert 'getattr(current_call, "return_type"' in src, (
                 "actor.py no longer reads return_type from the current call"
             )
+
+
+# =============================================================================
+# Capability-aware fix hints (wording only)
+# =============================================================================
+class TestCapabilityAwareFixHints:
+    """Restriction errors point to alternatives the agent actually has."""
+
+    class _Shell:
+        async def run(self, command: str) -> str:
+            return command
+
+    class _WithShell:
+        def __init__(self):
+            self.shell = TestCapabilityAwareFixHints._Shell()
+
+    class _WithoutShell:
+        pass
+
+    def _error(self, code: str, agent=None) -> str:
+        import asyncio
+        import time
+
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES
+
+        context = ValidationContext(
+            agent=agent,
+            blocked_modules=DEFAULT_BLOCKED_MODULES,
+            exec_globals={"asyncio": asyncio, "time": time},
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            UnifiedCodeValidator().validate(code, context)
+        return str(exc_info.value)
+
+    @pytest.mark.parametrize("code", ["import subprocess", "from subprocess import run"])
+    def test_subprocess_import_points_to_shell_run_when_available(self, code):
+        message = self._error(code, self._WithShell())
+        assert "is blocked" in message
+        assert 'Fix: run the command with `await self.shell.run("...")`' in message
+
+    @pytest.mark.parametrize("module", ["socket", "urllib.request"])
+    def test_network_import_points_to_shell_run_when_available(self, module):
+        message = self._error(f"import {module}", self._WithShell())
+        assert "Fix: for network access, run the command with `await self.shell.run" in message
+
+    @pytest.mark.parametrize("agent", [None, _WithoutShell()])
+    @pytest.mark.parametrize("code", ["import subprocess", "import socket"])
+    def test_no_shell_hint_without_shell_capability(self, code, agent):
+        message = self._error(code, agent)
+        assert "is blocked" in message
+        assert "self.shell" not in message
+        assert "Fix:" not in message
+
+    def test_sync_shell_run_is_not_advertised_as_awaitable(self):
+        class SyncShell:
+            def run(self, command):
+                return command
+
+        agent = self._WithoutShell()
+        agent.shell = SyncShell()
+        assert "self.shell" not in self._error("import subprocess", agent)
+
+    def test_dunder_import_points_to_normal_import(self):
+        message = self._error('json = __import__("json")')
+        assert "__import__() is forbidden" in message
+        assert "Fix: use a normal import statement, e.g. `import json`" in message
+
+    @pytest.mark.parametrize("call", ['exec("x = 1")', 'eval("1 + 1")'])
+    def test_exec_eval_point_to_direct_code(self, call):
+        assert "Fix: write the code directly in the cell" in self._error(call)
+
+    def test_asyncio_run_points_to_direct_await(self):
+        message = self._error("async def f():\n    return 1\nasyncio.run(f())")
+        assert "asyncio.run() blocks the event loop" in message
+        assert "Fix: cells already run inside an event loop: `await coro` directly" in message
+
+    def test_time_sleep_points_to_asyncio_sleep(self):
+        assert "Fix: `await asyncio.sleep(seconds)`" in self._error("time.sleep(1)")
+
+    def test_hints_do_not_change_what_is_allowed(self):
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES
+
+        for agent in (None, self._WithShell()):
+            context = ValidationContext(agent=agent, blocked_modules=DEFAULT_BLOCKED_MODULES)
+            UnifiedCodeValidator().validate("import json\nx = json.dumps({})", context)
+            with pytest.raises(ValidationError):
+                UnifiedCodeValidator().validate("import subprocess", context)

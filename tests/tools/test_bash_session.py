@@ -86,16 +86,27 @@ class TestBashSession:
             assert middle * 1000 not in text
             assert len(text) <= 31000
 
-    def test_bounded_matches_one_write_and_keeps_both_ends(self):
-        """Chunked feeding gives the same text as one write, for every size around the limit."""
+    def test_bounded_matches_one_write_and_keeps_both_ends(self, tmp_path, monkeypatch):
+        """Chunked feeding gives the same text as one write, for every size around the limit.
+
+        Only the notice differs: _bounded() names the file holding the full text.
+        """
+        import re
+        import tempfile
+
         from nooa.agentdoc import TruncatingStringIO
         from nooa.tools._bash_session import MAX_OUTPUT_CHARS, _bounded
 
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        notice = re.compile(
+            r"(?m)^(The [\d,]+ chars in the middle are not recoverable\.|"
+            r"The full untruncated output .*|Read that file to see .*)\n"
+        )
         for size in (MAX_OUTPUT_CHARS, MAX_OUTPUT_CHARS + 1, 65_536, 65_537, 300_000):
             text = "".join(chr(ord("a") + i % 26) for i in range(size))
             reference = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
             reference.write(text)
-            assert _bounded(text) == reference.getvalue()
+            assert notice.sub("", _bounded(text)) == notice.sub("", reference.getvalue())
             if size > MAX_OUTPUT_CHARS:
                 assert text[: MAX_OUTPUT_CHARS // 2] in _bounded(text)
                 assert text[-(MAX_OUTPUT_CHARS // 2) :] in _bounded(text)

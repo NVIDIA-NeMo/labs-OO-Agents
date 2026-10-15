@@ -236,3 +236,115 @@ def test_query_filters_execution_status_and_limit():
 
     assert len(failures) == 1
     assert failures[0].execution_count == 3
+
+
+def _agent_with_tasks(count: int = 4):
+    agent = _TestAgent()
+    tags = [agent.event_manager.add(Task(prompt=f"task {n}")) for n in range(count)]
+    return agent, tags
+
+
+@pytest.mark.parametrize("form", ['sys tag="{}"', '<sys tag="{}">', 'tag="{}"', " {} "])
+def test_collapse_accepts_copied_sys_tag_marker(form):
+    agent, tags = _agent_with_tasks()
+    start, end = form.format(tags[0]), form.format(tags[-1])
+    assert agent.events.collapse(start, end, "recap") == f"{tags[0]}..{tags[-1]}"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["python_cell:0#188d", "prefill_37e22754", 'sys tag="x"', 'sys tag="1" extra', "", "abc"],
+)
+def test_collapse_invalid_tag_explains_valid_tags_without_changing_history(bad):
+    agent, tags = _agent_with_tasks()
+    before = agent.events.keys()
+    with pytest.raises(ValueError) as error:
+        agent.events.collapse(bad, tags[-1], "must not be written")
+    message = str(error.value)
+    assert '<sys tag="N">' in message
+    assert '"2..40"' in message
+    assert "self.events.keys()" in message
+    assert agent.events.keys() == before
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"delete": True}, {"snippet_text": "x"}, {"doc": "x"}, {"last_events": 2}],
+)
+def test_collapse_unsupported_keywords_name_the_real_call(kwargs):
+    agent, tags = _agent_with_tasks()
+    before = agent.events.keys()
+    with pytest.raises(TypeError) as error:
+        agent.events.collapse(tags[0], tags[-1], "recap", **kwargs)
+    message = str(error.value)
+    assert f"{next(iter(kwargs))}=" in message
+    assert "start_tag, end_tag and summary_text" in message
+    assert "without await" in message
+    assert agent.events.keys() == before
+
+
+def test_collapse_doc_does_not_advertise_arbitrary_keywords():
+    """#447 review finding 7: ``**unsupported`` only powers the friendly error;
+    the model-facing signature lists the three real parameters."""
+    import inspect
+
+    from nooa.agentdoc import doc
+    from nooa.runtime.events import EventsApi
+
+    agent, _ = _agent_with_tasks()
+    for rendered in (str(doc(agent.events)), str(doc(agent.events.collapse))):
+        assert "unsupported" not in rendered
+        signature_lines = [line for line in rendered.splitlines() if "collapse(" in line]
+        assert signature_lines, rendered
+        assert not any("**" in line for line in signature_lines if "start_tag" in line)
+    assert list(inspect.signature(EventsApi.collapse).parameters) == [
+        "self",
+        "start_tag",
+        "end_tag",
+        "summary_text",
+    ]
+    assert list(inspect.signature(agent.events.collapse).parameters) == [
+        "start_tag",
+        "end_tag",
+        "summary_text",
+    ]
+
+
+def test_collapse_doc_says_synchronous_and_tag_format():
+    import inspect
+
+    from nooa.runtime.events import EventsApi
+
+    doc = inspect.getdoc(EventsApi.collapse)
+    assert doc.splitlines()[0].endswith("Synchronous: do not await.")
+    assert '<sys tag="N">' in doc
+    assert not inspect.iscoroutinefunction(EventsApi.collapse)
+
+
+def test_collapse_hint_names_the_real_parameters():
+    """The context_usage compaction hint (shown on every turn) names collapse()'s
+    real parameters, and filled in with tags it runs."""
+    import inspect
+
+    from nooa.context_blocks.models import ContextWindowStats
+    from nooa.runtime.events import EventsApi
+
+    rendered = ContextWindowStats(
+        context_blocks_count=1,
+        events_count=1,
+        context_blocks_chars=1,
+        events_chars=1,
+        prompt_tokens=1_000,
+        model_context_window=100_000,
+    ).format()
+    hint = "self.events.collapse(start_tag, end_tag, summary_text=...)"
+    assert f"Compact history: {hint}" in rendered
+    params = list(inspect.signature(EventsApi.collapse).parameters)
+    assert params[1:4] == ["start_tag", "end_tag", "summary_text"]
+
+    agent = _TestAgent()
+    for n in range(45):
+        agent.event_manager.add(Task(prompt=f"task {n}"))
+    call = hint.replace("start_tag", '"2"').replace("end_tag", '"40"').replace("...", '"recap"')
+    result = eval(call, {"self": agent})  # noqa: S307 - fixed, test-owned string
+    assert result == "2..40"

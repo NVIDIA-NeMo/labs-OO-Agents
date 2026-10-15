@@ -31,6 +31,7 @@ from nooa.decorators import strategy  # noqa: E402
 
 # Export errors
 from nooa.errors import (  # noqa: E402
+    CodeSyntaxError,
     DynamicMethodAdditionError,
     GenerationError,
     NemoOOAgentsError,
@@ -194,6 +195,7 @@ __all__ = [
     "GenerationError",
     "ValidationError",
     "RestrictedCodeError",
+    "CodeSyntaxError",
     "NemoOOAgentsRuntimeError",
     "DynamicMethodAdditionError",
     "SerializationError",

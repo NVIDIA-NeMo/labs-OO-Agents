@@ -559,3 +559,235 @@ def test_ordinary_terminators_in_paths_are_still_escaped(terminator):
         f"old text matched 2 times in example{escaped}.py{escaped}. No file was changed."
     )
     assert_bounded(message)
+
+
+# --- zero-match diagnostics -------------------------------------------------
+
+
+async def not_found_error(
+    shell, tmp_path, content, old, new="replacement text", filename="example.py"
+):
+    path = tmp_path / filename
+    path.write_text(content)
+    before = path.read_bytes()
+    with pytest.raises(ValueError) as error:
+        await shell.replace(filename, old, new)
+    assert path.read_bytes() == before  # Never write on zero matches.
+    return str(error.value)
+
+
+async def test_not_found_reports_resolved_path_and_first_line(shell, tmp_path):
+    message = await not_found_error(shell, tmp_path, "alpha\nbeta\n", "gamma\ndelta")
+
+    assert f"(resolved path: {tmp_path / 'example.py'})" in message
+    assert "No file was changed." in message
+    assert "First line of old text: 'gamma' (no indentation)" in message
+    assert "does not occur as a whole line" in message
+    assert "re-read it with read()" in message
+    assert "same cell" in message
+
+
+async def test_not_found_reports_tab_versus_space_indentation(shell, tmp_path):
+    content = "def f():\n\tif x:\n\t\treturn 1\n"
+    message = await not_found_error(shell, tmp_path, content, "    if x:\n        return 1")
+
+    assert "First line of old text: '    if x:' (4 space(s))" in message
+    assert "line 2 has it with 1 tab(s): '\\tif x:'" in message
+    assert "The file uses tabs; old text uses none." in message
+
+
+async def test_not_found_reports_different_space_indentation(shell, tmp_path):
+    content = "class A:\n    def f(self):\n        return 1\n"
+    message = await not_found_error(shell, tmp_path, content, "def f(self):\n    return 1")
+
+    assert "line 2 has it with 4 space(s): '    def f(self):'" in message
+
+
+async def test_not_found_when_first_line_matches_points_to_later_line(shell, tmp_path):
+    content = "if x:\n    return 1\n"
+    message = await not_found_error(shell, tmp_path, content, "if x:\n    return 2")
+
+    assert "occurs unchanged at line(s) 1; the difference is in a later line" in message
+
+
+async def test_not_found_flags_possibly_already_applied_edit(shell, tmp_path):
+    content = "value = compute_new()\n"
+    message = await not_found_error(
+        shell, tmp_path, content, "value = compute_old()", "value = compute_new()"
+    )
+
+    assert "already appears in the file (starting on line 1)" in message
+    assert "may already have been applied" in message
+
+
+async def test_not_found_ignores_short_replacement_coincidences(shell, tmp_path):
+    message = await not_found_error(shell, tmp_path, "x = 1\n", "y = 2", "x")
+
+    assert "already appears" not in message
+
+
+async def test_not_found_is_bounded_and_escaped(shell, tmp_path):
+    first = "\x1b" + "y" * 5_000
+    content = "".join(f"{' ' * n}{first}\n" for n in range(1, 50))
+    message = await not_found_error(shell, tmp_path, content, first + "\nmissing")
+
+    assert "\x1b" not in message
+    assert message.count(" has it with ") <= 3
+    assert len(message) < 2_000
+    assert all(len(line) <= 400 for line in message.splitlines())
+
+
+# --- replace() / replace_match() call-form errors ----------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"old": "a", "new_text": "b"}, {"old_text": "a"}, {"new_text": "b"}],
+)
+async def test_misnamed_keywords_name_the_exact_path_call(shell, tmp_path, kwargs):
+    path = tmp_path / "example.py"
+    path.write_text("a\n")
+    with pytest.raises(TypeError) as error:
+        await shell.replace("example.py", **kwargs)
+    assert path.read_text() == "a\n"
+    message = str(error.value)
+    assert "no file was changed" in message
+    for name in kwargs:
+        if name != "old":
+            assert f"{name}=" in message
+    assert "replace(path, old, new)" in message
+    assert "replace_match(match, new)" in message
+
+
+@pytest.mark.parametrize(
+    ("args", "kwargs"),
+    [
+        ((), {"target": "example.py", "old_or_new": "a", "new": "b"}),
+        (("example.py",), {"old_or_new": "a", "new": "b"}),
+        (("example.py", "a"), {"old_or_new": "x", "new": "b"}),
+    ],
+)
+async def test_legacy_replace_keywords_are_rejected(shell, tmp_path, args, kwargs):
+    path = tmp_path / "example.py"
+    path.write_text("a\n")
+    with pytest.raises(TypeError) as error:
+        await shell.replace(*args, **kwargs)
+    assert path.read_text() == "a\n"
+    message = str(error.value)
+    assert "no file was changed" in message
+    for name in ("target", "old_or_new"):
+        if name in kwargs:
+            assert f"{name}=" in message
+    assert "parameters are path, old, new" in message
+    assert "replace(path, old, new)" in message
+
+
+async def test_legacy_target_keyword_is_rejected_by_replace_match(shell, tmp_path):
+    path = tmp_path / "example.py"
+    path.write_text("a\n")
+    match = await shell.read("example.py")
+    with pytest.raises(TypeError) as error:
+        await shell.replace_match(target=match, new="b\n")
+    assert path.read_text() == "a\n"
+    assert "target=" in str(error.value)
+    assert "replace_match(match, new)" in str(error.value)
+
+
+async def test_misnamed_keyword_with_match_names_the_match_call(shell, tmp_path):
+    path = tmp_path / "example.py"
+    path.write_text("a\n")
+    match = await shell.read("example.py")
+    with pytest.raises(TypeError) as error:
+        await shell.replace_match(match, new_text="b\n")
+    assert path.read_text() == "a\n"
+    assert "new_text=" in str(error.value)
+    assert "replace_match(match, new)  #" in str(error.value)
+
+
+@pytest.mark.parametrize("extra", [(), ("b\n",)])
+async def test_replace_with_a_match_names_replace_match(shell, tmp_path, extra):
+    path = tmp_path / "example.py"
+    path.write_text("a\n")
+    match = await shell.read("example.py")
+    with pytest.raises(TypeError) as error:
+        await shell.replace(match, "a\n", *extra)
+    assert path.read_text() == "a\n"
+    message = str(error.value)
+    assert "replace() takes a file path, not a Match" in message
+    assert "replace_match(match, new)" in message
+    assert "replace(match.resolved_path, old, new)" in message
+    assert "no file was changed" in message
+
+
+@pytest.mark.parametrize("path_arg", ["example.py", "PATH"])
+@pytest.mark.parametrize("extra", [(), ("b\n",)])
+async def test_replace_match_with_a_path_names_replace(shell, tmp_path, path_arg, extra):
+    path = tmp_path / "example.py"
+    path.write_text("a\n")
+    target = path if path_arg == "PATH" else path_arg
+    with pytest.raises(TypeError) as error:
+        await shell.replace_match(target, "a\n", *extra)
+    assert path.read_text() == "a\n"
+    message = str(error.value)
+    assert "replace_match() takes a Match" in message
+    assert "replace(path, old, new)" in message
+    assert "no file was changed" in message
+
+
+async def test_match_with_new_keyword_points_to_path_form(shell, tmp_path):
+    path = tmp_path / "example.py"
+    path.write_text("a\n")
+    match = await shell.read("example.py")
+    with pytest.raises(TypeError) as error:
+        await shell.replace_match(match, "a", new="b")
+    assert path.read_text() == "a\n"
+    assert "replace_match(match, new)" in str(error.value)
+    assert "replace(match.resolved_path, old, new)" in str(error.value)
+
+
+async def test_path_without_new_names_both_methods(shell, tmp_path):
+    (tmp_path / "example.py").write_text("a\n")
+    with pytest.raises(TypeError) as error:
+        await shell.replace("example.py", "a")
+    assert "replace(path, old, new)" in str(error.value)
+    assert "replace_match(match, new)" in str(error.value)
+    assert (tmp_path / "example.py").read_text() == "a\n"
+
+
+async def test_replace_accepts_a_pathlib_path(shell, tmp_path):
+    path = tmp_path / "example.py"
+    path.write_text("a\n")
+    await shell.replace(path, "a", "b")
+    assert path.read_text() == "b\n"
+
+
+def test_replace_docstrings_match_real_parameters():
+    import inspect
+
+    replace_doc = inspect.getdoc(ShellTools.replace)
+    match_doc = inspect.getdoc(ShellTools.replace_match)
+    assert list(inspect.signature(ShellTools.replace).parameters) == ["self", "path", "old", "new"]
+    assert list(inspect.signature(ShellTools.replace_match).parameters) == ["self", "match", "new"]
+    for name in ("path", "old", "new"):
+        assert f"{name}:" in replace_doc
+    for name in ("match", "new"):
+        assert f"{name}:" in match_doc
+    for text in (replace_doc, match_doc):
+        assert "old_or_new" not in text
+        assert "target" not in text
+        assert "file_path" not in text
+        assert "replace(path, old, new)" in text
+        assert "replace_match(match, new)" in text
+
+
+async def test_replace_docstring_examples_execute(shell, tmp_path):
+    (tmp_path / "pkg").mkdir()
+    target = tmp_path / "pkg" / "mod.py"
+    target.write_text(
+        "".join(f"line {n}\n" for n in range(1, 13)).replace("line 1\n", "return 1\n", 1)
+    )
+    await shell.replace("pkg/mod.py", "return 1", "return 2")
+    m = await shell.read("pkg/mod.py", (10, 12))
+    await shell.replace_match(m, "new lines 10-12\n")
+    assert target.read_text().startswith("return 2\n")
+    assert target.read_text().endswith("line 9\nnew lines 10-12\n")

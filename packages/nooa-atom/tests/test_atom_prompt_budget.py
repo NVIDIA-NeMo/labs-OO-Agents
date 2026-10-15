@@ -44,11 +44,17 @@ RESULT = (
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
+# Raised for truthful API text (2026-10-14: replace() forms and real parameter
+# names, sync/async labels in <skills>, NeedInput free-text guidance, the show()
+# line; about 290 characters): measured values plus about 2% headroom.
+# Raised for #447 review (2026-10-14: replace() split into replace() and
+# replace_match(), self.web removed, show() names nooa.media.Image; about 300
+# characters net): measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
-    (ATOM, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
-    (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
-    (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
+    (ATOM, "handle"): (14_850, 17_950),  # measured 14,548 / 17,560
+    (ATOM, "handle_batch"): (14_850, 17_450),  # measured 14,548 / 17,098
+    (EXPERIMENTAL, "handle"): (14_650, 16_450),  # measured 14,363 / 16,134
+    (EXPERIMENTAL, "handle_batch"): (14_650, 16_850),  # measured 14,363 / 16,487
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
