@@ -410,3 +410,179 @@ async def test_a_todo_not_in_the_parents_list_is_refused(atom_registry, atom_opt
     root = await atom_registry.create(atom_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="refused")
     assert atom_registry.children(root.id) == []
+
+
+# ---- D5: wait() returns an outcome and never hangs; tracked questions -------
+
+
+ASK = "return_result(NeedInput(question='Which branch?', options=['main', 'dev']))"
+
+
+def _admitted_delegates(registry, session_id):
+    rows = registry.store.load_rows(session_id, frozenset({"ItemAdmitted"}))
+    return [
+        str(raw["item_type"]).rsplit(".", 1)[-1].rsplit(":", 1)[-1]
+        for _t, raw in rows
+        if raw.get("channel") == "delegates"
+    ]
+
+
+async def test_wait_returns_a_question_then_the_result(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        cell(
+            "ref = await self.spawn('Pusher', 'push the branch')\n"
+            "q = await ref.wait()\n"
+            "assert isinstance(q, ChildQuestion) and q.options == ['main', 'dev']\n"
+            "assert ref.pending_question.id == q.id\n"
+            "assert f'pending_question=\\'[{q.id}] Which branch?' in repr(self.children()[0])\n"
+            "try:\n"
+            "    await ref.wait()\n"
+            "except ChildIdleError as exc:\n"
+            "    self.v.idle = str(exc)\n"
+            "await q.answer('main')\n"
+            "assert ref.pending_question is None\n"
+            "r = await ref.wait()\n"
+            "return_result(Done(explanation=f'{type(r).__name__}: {r.done.result.report}'))"
+        )
+    ]
+    atom_models.scripts["Pusher"] = [
+        cell(ASK),
+        cell(
+            "[a] = notification['user_messages']\n"
+            "return_result(Done(explanation='pushed', result=TaskResult("
+            "solution_description=a, evidence='e', how_to_verify='h', report='pushed ' + a)))"
+        ),
+    ]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert outcome == Done(explanation="ChildResult: pushed main")
+    assert "waits for your answer" in root._agent.v.idle
+    # Both outcomes went to wait(), none to delegates: one place only.
+    assert _admitted_delegates(atom_registry, root.id) == []
+
+
+async def test_wait_fails_fast_on_an_idle_kept_child(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        _wait_then("self.v.ref = await self.spawn('Kept', 'task', keep=True)"),
+        cell(
+            "[item] = notification['delegates']\n"
+            "try:\n"
+            "    await self.v.ref.wait()\n"
+            "except ChildIdleError as exc:\n"
+            "    return_result(Done(explanation=str(exc)))"
+        ),
+    ]
+    atom_models.scripts["Kept"] = [cell(CHILD_RESULT)]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), 10)
+    assert "is idle with nothing queued" in outcome.explanation
+
+
+async def test_wait_withdraws_a_queued_question(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        cell(
+            "ref = await self.spawn('Asker', 'ask')\n"
+            "delegates = self.queue_manager.get_channel('delegates')\n"
+            "async with asyncio.timeout(10):\n"
+            "    while delegates.qsize() == 0:\n"
+            "        await asyncio.sleep(0.01)\n"
+            "q = await ref.wait()\n"
+            "return_result(Done(explanation=f'{type(q).__name__}: {q.question}'))"
+        )
+    ]
+    atom_models.scripts["Asker"] = [cell(ASK)]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert outcome == Done(explanation="ChildQuestion: Which branch?")
+    # Withdrawn from delegates by wait(): delivered once, not twice.
+    assert root._agent.queue_manager.get_channel("delegates").qsize() == 0
+    assert len(atom_registry.store.load_rows(root.id, frozenset({"ItemWithdrawn"}))) == 1
+
+
+async def test_a_message_does_not_end_wait(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        cell(
+            "ref = await self.spawn('Chatty', 'work')\n"
+            "r = await ref.wait()\n"
+            "return_result(Done(explanation=type(r).__name__))"
+        ),
+        done("saw the message"),
+    ]
+    atom_models.scripts["Chatty"] = [cell("self.message('progress note')\n" + CHILD_RESULT)]
+    root = await atom_registry.create(atom_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ChildResult")
+    assert _admitted_delegates(atom_registry, root.id) == ["ChildMessage"]
+
+
+async def test_an_unanswered_question_is_pending_and_does_not_block_done(
+    atom_registry, atom_options, atom_models
+):
+    atom_models.scripts[None] = [
+        _wait_then(
+            "t = self.todo.add('Push')\n"
+            "self.v.todo_id = t.id\n"
+            "self.v.ref = await self.spawn('Asker', t)"
+        ),
+        cell(
+            "[q] = notification['delegates']\n"
+            "assert isinstance(q, ChildQuestion) and q.id\n"
+            "assert self.v.ref.pending_question == q\n"
+            "assert self.v.ref.status == 'idle'\n"
+            "return_result(Done(explanation=f'asked {q.id}'))"
+        ),
+    ]
+    atom_models.scripts["Asker"] = [
+        cell("self.todo.comment(self.todo.active(), 'found two branches')\n" + ASK)
+    ]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert outcome.explanation.startswith("asked ")
+    [child] = atom_registry.children(root.id)
+    question = atom_registry.pending_question(root, child.id)
+    assert outcome.explanation == f"asked {question.id}"
+    # A question is not a result: a keep=False worker stays open for the answer.
+    assert atom_registry.get(child.id) is not None
+    # The child's Todo comments merged in when the question was delivered.
+    todo = root._agent.todo.get(root._agent.v.todo_id)
+    assert [c.body for c in todo.comments] == ["found two branches"]
+
+
+async def test_delegate_raises_with_the_childs_question(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        cell(
+            "try:\n"
+            "    await self.delegate('Asker', 'push the branch')\n"
+            "except ChildQuestionError as exc:\n"
+            "    await exc.question.answer('dev')\n"
+            "    r = await exc.question.child.wait()\n"
+            "    return_result(Done(explanation=r.done.result.report))"
+        )
+    ]
+    atom_models.scripts["Asker"] = [
+        cell(ASK),
+        cell(
+            "[a] = notification['user_messages']\n"
+            "return_result(Done(explanation='pushed', result=TaskResult("
+            "solution_description=a, evidence='e', how_to_verify='h', report='pushed ' + a)))"
+        ),
+    ]
+    root = await atom_registry.create(atom_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="pushed dev")
+
+
+async def test_answering_a_stale_question_id_is_refused(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        cell(
+            "ref = await self.spawn('Asker', 'ask', keep=True)\n"
+            "q = await ref.wait()\n"
+            "stale = q.model_copy(update={'id': 'stale000'})\n"
+            "try:\n"
+            "    await stale.answer('x')\n"
+            "except ChildFailedError as exc:\n"
+            "    return_result(Done(explanation=str(exc)))"
+        )
+    ]
+    atom_models.scripts["Asker"] = [cell(ASK)]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert "is not the child's pending question" in outcome.explanation

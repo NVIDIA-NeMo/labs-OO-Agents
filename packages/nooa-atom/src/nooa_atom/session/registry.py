@@ -50,6 +50,9 @@ from nooa_atom.session.store import (
 
 logger = logging.getLogger(__name__)
 
+ChildOutcome = ChildResult | ChildQuestion | ChildFailed
+"""What a child's turn end puts on its parent's delegates channel (or hands to ``wait()``)."""
+
 Prepare = Callable[[Session], Awaitable[None]]
 """Host hook run on a built session before it starts and is published."""
 
@@ -106,7 +109,9 @@ class SessionRegistry:
         self._agent_factory: AgentFactory = agent_factory
         # Parent-side delivery state, by (parent id, child id): only the
         # child's own parent can wait for or take its results.
-        self._waiters: dict[tuple[str, str], asyncio.Future[Done]] = {}
+        self._waiters: dict[tuple[str, str], asyncio.Future[ChildResult | ChildQuestion]] = {}
+        # The question each child asked and its parent has not answered yet.
+        self._questions: dict[tuple[str, str], ChildQuestion] = {}
         # Children their parent closed for good (also tombstoned in its record).
         self._closed_children: set[str] = set()
         self._queued: dict[tuple[str, str], list[tuple[Receipt, ChildResult | ChildFailed]]] = {}
@@ -337,6 +342,7 @@ class SessionRegistry:
             del self.sessions[session.id]
         if session.parent_id is None:
             return
+        self._questions.pop((session.parent_id, session.id), None)
         waiter = self._waiters.pop((session.parent_id, session.id), None)
         if waiter is not None and not waiter.done():
             waiter.set_exception(ChildFailedError(f"Child {session.name!r} was closed"))
@@ -391,19 +397,23 @@ class SessionRegistry:
         self._merge_todo(parent, child)
         ref = self.child_ref(child)
         source = f"child:{child.name or child.id}"
-        waiter = self._waiters.pop((parent.id, child.id), None)
+        key = (parent.id, child.id)
+        waiter = self._waiters.pop(key, None)
         if waiter is not None and waiter.done():
             waiter = None
+        # One place only: a waiting wait() gets the outcome, else delegates does.
         delivered = False
         try:
             if kind == "done":
+                self._questions.pop(key, None)
                 # Built for both paths: ChildResult rebuilds a TaskResult sent as data.
                 result = ChildResult(child=ref, done=_rebuild_done(update))
                 if waiter is not None:
-                    waiter.set_result(result.done)
+                    waiter.set_result(result)
                 else:
                     self._put(parent, child.id, result, source)
             elif kind in ("error", "cancelled"):
+                self._questions.pop(key, None)
                 # A cancelled turn ends without a result: to the parent it is a failure.
                 error = (
                     f"cancelled by {update.outcome.get('by', 'unknown')}"
@@ -419,16 +429,15 @@ class SessionRegistry:
                     child=ref,
                     question=str(update.outcome.get("question", "")),
                     options=update.outcome.get("options"),
+                    reason=update.outcome.get("reason"),
                     answer_schema=update.outcome.get("answer_schema"),
                 )
+                # Pending until answered; it does not block the parent's Done.
+                self._questions[key] = question
                 if waiter is not None:
-                    waiter.set_exception(
-                        ChildFailedError(
-                            f"Child {child.name!r} asked a question; answer the ChildQuestion "
-                            "that arrives on the delegates channel"
-                        )
-                    )
-                _admit_delegate(parent, question, source)
+                    waiter.set_result(question)
+                else:
+                    self._put(parent, child.id, question, source)
             delivered = True
         finally:
             # Keep a child's own durable result available if parent admission fails.
@@ -480,14 +489,14 @@ class SessionRegistry:
         with suppress(SessionClosedError):
             _admit_delegate(parent, item, f"child:{child.name or child.id}")
 
-    def _put(
-        self, parent: Session, child_id: str, item: ChildResult | ChildFailed, source: str
-    ) -> None:
+    def _put(self, parent: Session, child_id: str, item: ChildOutcome, source: str) -> None:
         receipt = _admit_delegate(parent, item, source)
         self._queued.setdefault((parent.id, child_id), []).append((receipt, item))
 
-    def take_queued_result(self, parent: Session, child_id: str) -> Done | None:
-        """Withdraw a result of this child still queued for the parent, and return it.
+    def take_queued_result(
+        self, parent: Session, child_id: str
+    ) -> ChildResult | ChildQuestion | None:
+        """Withdraw this child's oldest outcome still queued for the parent, and return it.
 
         Raises ``ChildFailedError`` for a queued failure, or when ``child_id``
         is not a child of ``parent``.
@@ -500,11 +509,28 @@ class SessionRegistry:
             if parent.withdraw(receipt):
                 if isinstance(item, ChildFailed):
                     raise ChildFailedError(item.error)
-                return item.done
+                return item
         return None
 
-    def waiter(self, parent: Session, child_id: str) -> asyncio.Future[Done]:
-        """The future the next ``Done`` of this child of ``parent`` resolves.
+    def pending_question(self, parent: Session, child_id: str) -> ChildQuestion | None:
+        """The child's question ``parent`` has not answered yet, if any."""
+        self.check_owner(parent, child_id)
+        return self._questions.get((parent.id, child_id))
+
+    def clear_question(self, parent: Session, child_id: str) -> None:
+        """The parent answered (or sent the child a message): no question is pending."""
+        self._questions.pop((parent.id, child_id), None)
+
+    def is_idle(self, child: Session) -> bool:
+        """Live, not running, not ``working`` (its last turn did not end ``Waiting``), nothing queued."""
+        return (
+            child.info.status != "running"
+            and child.last_outcome_kind != "waiting"
+            and not child.has_queued_input()
+        )
+
+    def waiter(self, parent: Session, child_id: str) -> asyncio.Future[ChildResult | ChildQuestion]:
+        """The future the next outcome (result or question) of this child of ``parent`` resolves.
 
         It takes the place of a delegates item.
 
@@ -518,8 +544,13 @@ class SessionRegistry:
             self._waiters[key] = waiter
         return waiter
 
-    def drop_waiter(self, parent: Session, child_id: str, waiter: asyncio.Future[Done]) -> None:
-        """Forget a ``wait()`` that was cancelled; a result it already holds goes to delegates."""
+    def drop_waiter(
+        self,
+        parent: Session,
+        child_id: str,
+        waiter: asyncio.Future[ChildResult | ChildQuestion],
+    ) -> None:
+        """Forget a ``wait()`` that was cancelled; an outcome it already holds goes to delegates."""
         key = (parent.id, child_id)
         if self._waiters.get(key) is waiter:
             del self._waiters[key]
@@ -528,10 +559,8 @@ class SessionRegistry:
         child = self.sessions.get(child_id)
         ref = self.child_ref(child) if child is not None else self._ref_from_disk(child_id)
         error = waiter.exception()
-        item: ChildResult | ChildFailed = (
-            ChildResult(child=ref, done=waiter.result())
-            if error is None
-            else ChildFailed(child=ref, error=str(error))
+        item: ChildOutcome = (
+            waiter.result() if error is None else ChildFailed(child=ref, error=str(error))
         )
         with suppress(SessionClosedError):
             self._put(parent, child_id, item, f"child:{ref.name or child_id}")

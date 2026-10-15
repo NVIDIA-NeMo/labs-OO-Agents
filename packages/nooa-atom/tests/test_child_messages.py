@@ -140,7 +140,7 @@ async def test_a_message_does_not_resolve_wait(registry, root_options, models):
     models.scripts[None] = [
         cell(
             "child = await self.session.delegate('Kid', 'work')\n"
-            "done = await child.wait()\n"
+            "done = (await child.wait()).done\n"
             "return_result(Done(explanation=f'waited: {done.explanation}'))"
         ),
         collect(),
@@ -164,14 +164,14 @@ async def test_a_grandchilds_messages_go_only_to_its_parent(registry, root_optio
     models.scripts[None] = [
         cell(
             "c = await self.session.delegate('Mid', 'm')\n"
-            "d = await c.wait()\n"
+            "d = (await c.wait()).done\n"
             "return_result(Done(explanation=d.explanation))"
         )
     ]
     models.scripts["Mid"] = [
         cell(
             "g = await self.session.delegate('Leaf', 'l')\n"
-            "d = await g.wait()\n"
+            "d = (await g.wait()).done\n"
             "self.v.mid_seen = d.explanation\n"
             "return_result(Done(explanation='mid ok'))"
         ),

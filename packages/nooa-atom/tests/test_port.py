@@ -50,7 +50,7 @@ async def test_delegate_and_wait_returns_the_childs_done(registry, root_options,
     models.scripts[None] = [
         cell(
             "child = await self.session.delegate('Review auth', 'CHILD-PROMPT')\n"
-            "done = await child.wait()\n"
+            "done = (await child.wait()).done\n"
             "return_result(Done(explanation=f'{child.name}: {done.explanation}'))"
         )
     ]
@@ -75,7 +75,7 @@ async def test_a_pydantic_result_arrives_as_its_own_class(registry, root_options
     models.scripts[None] = [
         cell(
             "child = await self.session.delegate('Fix', 'fix it')\n"
-            "done = await child.wait()\n"
+            "done = (await child.wait()).done\n"
             "self.v.result = done.result\n"
             "return_result(Done(explanation=type(done.result).__name__))"
         )
@@ -97,7 +97,7 @@ async def test_a_throwaway_child_cannot_ask_and_ends_done(registry, root_options
     models.scripts[None] = [
         cell(
             "child = await self.session.delegate('Push', 'push the branch')\n"
-            "done = await child.wait()\n"
+            "done = (await child.wait()).done\n"
             "return_result(Done(explanation=done.explanation))"
         )
     ]
@@ -309,7 +309,7 @@ async def test_wait_takes_a_result_that_is_already_queued(registry, root_options
             "async with asyncio.timeout(5):\n"
             "    while delegates.qsize() == 0:\n"
             "        await asyncio.sleep(0.01)\n"
-            "done = await child.wait()\n"
+            "done = (await child.wait()).done\n"
             "return_result(Done(explanation=done.explanation))"
         )
     ]
@@ -469,7 +469,8 @@ async def test_a_wrong_owner_cannot_take_the_parents_queued_result(registry, roo
         registry.take_queued_result(other, child.id)
     assert list(registry._queued) == [(root.id, child.id)]
     assert root._agent.queue_manager.get_channel("delegates").qsize() == 1
-    assert await root._agent.session.wait_child(child.id) == Done(explanation="for root")
+    outcome = await root._agent.session.wait_child(child.id)
+    assert outcome.done == Done(explanation="for root")
 
 
 async def test_waiters_are_per_parent(registry, root_options):

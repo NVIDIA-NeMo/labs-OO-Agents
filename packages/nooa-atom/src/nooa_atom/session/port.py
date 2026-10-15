@@ -8,10 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 from nooa import hidden
 from nooa.agentdoc import spec
-from nooa.interactive import Done, InteractiveAgent
+from nooa.interactive import InteractiveAgent
 from nooa_atom.session.items import (
     ChildFailedError,
+    ChildIdleError,
+    ChildQuestion,
     ChildRef,
+    ChildResult,
     ChildStatus,
     Receipt,
     SessionInfo,
@@ -182,40 +185,77 @@ class SessionPort:
     # ---- what ChildRef methods call ----------------------------------
 
     @hidden
-    async def wait_child(self, child_id: str) -> Done:
-        """Next ``Done`` of a child; raises ``ChildFailedError`` on failure or close.
+    async def wait_child(self, child_id: str) -> ChildResult | ChildQuestion:
+        """A child's next outcome (``ChildRef.wait()``); fails fast when it could never come.
 
-        Also raises ``ChildFailedError`` when ``child_id`` is not this
-        session's child.
+        Raises ``ChildIdleError`` when the child is idle with nothing queued
+        or waits for this session's answer, and ``ChildFailedError`` when it
+        fails, is closed or is not this session's child.
         """
         registry = self._registry
         queued = registry.take_queued_result(self._session, child_id)
         if queued is not None:
             return queued
-        if registry.get(child_id) is None:
+        child = registry.get(child_id)
+        if child is None or child.closing or registry.is_closed(self._session.id, child_id):
             raise ChildFailedError(f"Child {child_id!r} is not running")
+        name = child.name or child_id
+        question = registry.pending_question(self._session, child_id)
+        if question is not None:
+            raise ChildIdleError(
+                f"Child {name!r} waits for your answer to [{question.id}] {question.question!r}; "
+                "answer it with `await ref.pending_question.answer(...)` before waiting"
+            )
+        if registry.is_idle(child):
+            raise ChildIdleError(
+                f"Child {name!r} is idle with nothing queued, so wait() would never return; "
+                "send it work with `await ref.send(...)` first"
+            )
         waiter = registry.waiter(self._session, child_id)
         try:
             return await asyncio.shield(waiter)
         except asyncio.CancelledError:
-            # The parent's turn was cancelled: the child's result must not
+            # The parent's turn was cancelled: the child's outcome must not
             # vanish into an orphaned future; it goes to delegates instead.
             registry.drop_waiter(self._session, child_id, waiter)
             raise
 
     @hidden
     async def send_child(self, child_id: str, item: Any, *, channel: str) -> Receipt:
-        """Admit ``item`` on one of a child's channels (loading the child if needed)."""
+        """Admit ``item`` on one of a child's channels (loading the child if needed).
+
+        A message on ``user_messages`` answers the child's pending question.
+        """
         child = await self._registry.open_child(self._session, child_id)
-        return await child.submit(
+        receipt = await child.submit(
             as_data(item), channel=channel, source=_parent_source(self._session)
         )
+        if channel == "user_messages":
+            self._registry.clear_question(self._session, child_id)
+        return receipt
+
+    @hidden
+    async def answer_child(self, child_id: str, question_id: str, answer: Any) -> Receipt:
+        """Answer a child's question (``ChildQuestion.answer()``); it is no longer pending."""
+        pending = self._registry.pending_question(self._session, child_id)
+        if pending is not None and pending.id != question_id:
+            raise ChildFailedError(
+                f"Question {question_id!r} is not the child's pending question {pending.id!r}"
+            )
+        return await self.send_child(child_id, answer, channel="user_messages")
+
+    @hidden
+    def pending_question(self, child_id: str) -> ChildQuestion | None:
+        """The child's unanswered question (``ChildRef.pending_question``)."""
+        return self._registry.pending_question(self._session, child_id)
 
     @hidden
     async def steer_child(self, child_id: str, text: str) -> Receipt:
         """Steer a child's running turn (a message if it is idle)."""
         child = await self._registry.open_child(self._session, child_id)
-        return await child.steer(text, source=_parent_source(self._session))
+        receipt = await child.steer(text, source=_parent_source(self._session))
+        self._registry.clear_question(self._session, child_id)
+        return receipt
 
     @hidden
     async def close_child(self, child_id: str) -> None:

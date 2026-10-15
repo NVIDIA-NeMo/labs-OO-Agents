@@ -33,8 +33,10 @@ from nooa_atom.agent.slash_commands import SlashCommandRegistry
 from nooa_atom.session.items import (
     ChildFailed,
     ChildFailedError,
+    ChildIdleError,
     ChildMessage,
     ChildQuestion,
+    ChildQuestionError,
     ChildRef,
     ChildResult,
     PlanEntry,
@@ -56,8 +58,10 @@ if TYPE_CHECKING:
 __all__ = [
     "ChildFailed",
     "ChildFailedError",
+    "ChildIdleError",
     "ChildMessage",
     "ChildQuestion",
+    "ChildQuestionError",
     "ChildRef",
     "ChildResult",
     "AtomAgent",
@@ -291,9 +295,11 @@ class AtomAgent(InteractiveAgent):
         report before continuing; otherwise use ``spawn()``. A Todo prompt
         works as in ``spawn()``, and the report is added to it as a comment.
 
-        Raises ``ChildFailedError`` when the child's turn fails or it is closed
-        first, and ``DepthLimitError`` when a child would exceed the depth
-        limit; catch them to report or recover.
+        Raises ``ChildQuestionError`` when the child asks instead of finishing
+        (answer ``exc.question``, then ``await exc.question.child.wait()``),
+        ``ChildFailedError`` when its turn fails or it is closed first, and
+        ``DepthLimitError`` when a child would exceed the depth limit; catch
+        them to report or recover.
 
         Args:
             description: Short label (2-6 words); the child's name and title.
@@ -304,7 +310,10 @@ class AtomAgent(InteractiveAgent):
             model: Model alias for the child; yours when omitted.
         """
         child = await self.spawn(description, prompt, brief=brief, context=context, model=model)
-        done = await child.wait()
+        outcome = await child.wait()
+        if isinstance(outcome, ChildQuestion):
+            raise ChildQuestionError(outcome)
+        done = outcome.done
         if isinstance(prompt, Todo):
             self.todo.comment(prompt, f"Delegated to {description!r}: {_report_text(done)}")
         return done

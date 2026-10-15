@@ -7,6 +7,7 @@ no live objects. Sessions, hosts and parent agents exchange these values;
 live agents never cross.
 """
 
+import uuid
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, ValidationError, field_validator
@@ -112,11 +113,29 @@ class ChildRef(BaseModel):
     def __repr_args__(self) -> Any:
         for name, value in super().__repr_args__():
             yield ("status", self.status) if name == "status_when_made" else (name, value)
+        question = self.pending_question
+        if question is not None:
+            yield "pending_question", f"[{question.id}] {question.question}"
 
-    async def wait(self) -> Done:
-        """Wait for the child's next ``Done`` and return it.
+    @property
+    def pending_question(self) -> "ChildQuestion | None":
+        """The child's question you have not answered yet, if any (live in the parent's turn).
 
-        Raises ``ChildFailedError`` if the child fails or is closed first.
+        It stays pending until you ``answer()`` it or send the child a message.
+        """
+        port = _parent_port(self)
+        return None if port is None else port.pending_question(self.id)
+
+    async def wait(self) -> "ChildResult | ChildQuestion":
+        """Wait for the child's next outcome and return it: a ``ChildResult`` or a ``ChildQuestion``.
+
+        It never hangs on a child with nothing to do: it raises
+        ``ChildIdleError`` at once when the child is idle with nothing queued,
+        or waits for your answer to a pending question. It raises
+        ``ChildFailedError`` when the child fails or is closed. A
+        ``ChildMessage`` does not end it. An outcome goes to exactly one
+        place: this ``wait()`` when one is waiting (or withdrawn from
+        ``delegates`` if it is already queued there), else ``delegates``.
         """
         return await _port(self).wait_child(self.id)
 
@@ -161,7 +180,30 @@ def _port(ref: ChildRef) -> "SessionPort":
 
 
 class ChildFailedError(RuntimeError):
-    """Raised by ``ChildRef.wait()`` when the child fails or is closed before a ``Done``."""
+    """Raised by ``ChildRef.wait()`` when the child fails or is closed before an outcome."""
+
+
+class ChildIdleError(ChildFailedError):
+    """Raised by ``ChildRef.wait()`` when waiting could never end.
+
+    The child is idle with nothing queued (send it work first), or it waits
+    for your answer to its pending question (answer it first).
+    """
+
+
+class ChildQuestionError(ChildFailedError):
+    """Raised by ``delegate()`` when its child asks a question instead of finishing.
+
+    ``question`` is the ``ChildQuestion``: answer it with
+    ``await exc.question.answer(...)``, then ``await exc.question.child.wait()``
+    for the result.
+    """
+
+    def __init__(self, question: "ChildQuestion") -> None:
+        super().__init__(
+            f"Child {question.child.name!r} asked [{question.id}]: {question.question}"
+        )
+        self.question = question
 
 
 class ChildResult(BaseModel):
@@ -188,26 +230,37 @@ class ChildResult(BaseModel):
 
 
 class ChildQuestion(BaseModel):
-    """A child asked a question (its ``NeedInput``); answer with ``item.answer(...)``.
+    """A child asked a question (its ``NeedInput``); answer with ``await item.answer(...)``.
 
-    ``answer_schema`` is the JSON schema of the child's ``answer_type`` when
-    it gave one; the answer is then a dict matching it.
+    ``id`` identifies it: it is the child's ``pending_question`` until you
+    answer it (or send the child a message). ``answer_schema`` is the JSON
+    schema of the child's ``answer_type`` when it gave one; the answer is then
+    a dict matching it. An unanswered question does not stop you from ending
+    your own turn with ``Done``.
     """
 
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
     child: ChildRef
     question: str
     options: list[str] | None = None
+    reason: str | None = None
     answer_schema: dict[str, Any] | None = None
 
     @classmethod
     def from_need_input(cls, child: ChildRef, need: NeedInput) -> "ChildQuestion":
         """Convert a child's ``NeedInput``; its answer class becomes a JSON schema."""
         schema = need.answer_type.model_json_schema() if need.answer_type is not None else None
-        return cls(child=child, question=need.question, options=need.options, answer_schema=schema)
+        return cls(
+            child=child,
+            question=need.question,
+            options=need.options,
+            reason=getattr(need, "reason", None),
+            answer_schema=schema,
+        )
 
     async def answer(self, answer: Any) -> "Receipt":
-        """Send the answer to the child; shorthand for ``self.child.send(answer)``."""
-        return await self.child.send(answer)
+        """Send the answer to the child; it is no longer the child's pending question."""
+        return await _port(self.child).answer_child(self.child.id, self.id, answer)
 
 
 class ChildFailed(BaseModel):
