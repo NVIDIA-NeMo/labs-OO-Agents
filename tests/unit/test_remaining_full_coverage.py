@@ -725,9 +725,9 @@ class TestSQLiteSessionLocking:
         three-digit pid produced a garbled ``999472`` that would later
         mislead diagnostics.
         """
-        import fcntl
         import socket
 
+        from nooa._file_lock import unlock_file
         from nooa.storage.sqlite import _acquire_session_lock
 
         lock_path = tmp_path / "truncation.lock"
@@ -740,7 +740,7 @@ class TestSQLiteSessionLocking:
             # sharing the directory tell the session is in use).
             assert lock_path.read_bytes() == f"{os.getpid()} {socket.gethostname()}".encode()
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock_file(fd)
             os.close(fd)
 
     def test_close_on_connect_failure(self, tmp_path):

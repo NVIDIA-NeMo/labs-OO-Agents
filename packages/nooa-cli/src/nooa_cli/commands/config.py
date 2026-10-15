@@ -52,7 +52,7 @@ def _count_aliases(path: Path) -> int | None:
     try:
         import yaml
 
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         return None
     if not isinstance(data, dict):
@@ -186,7 +186,7 @@ def _summarize_settings(path: Path) -> str:
     try:
         import yaml
 
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         return "(unreadable)"
     if not isinstance(data, dict) or not data:
@@ -204,7 +204,7 @@ def _summarize_secrets(path: Path) -> str:
     try:
         import yaml
 
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         return "(unreadable)"
     if not isinstance(data, dict):

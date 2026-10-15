@@ -16,7 +16,7 @@ def entries(extra_path=None):
         paths = [p for p in paths if p.resolve() != extra_path.resolve()] + [extra_path]
     resolved = {}
     for path in paths:
-        with Path(path).open() as source:
+        with Path(path).open(encoding="utf-8") as source:
             data = yaml.safe_load(source) or {}
         if isinstance(data, dict) and data.get("models") is None:
             data["models"] = {}

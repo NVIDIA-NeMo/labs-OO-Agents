@@ -99,6 +99,12 @@ class SandboxedExecutor:
         max_error: int | None = None,
         error_tail: int | None = None,
     ):
+        if config.start_method not in mp.get_all_start_methods():
+            raise SandboxUnavailable(
+                f"Sandbox execution requires the {config.start_method!r} process start method, "
+                "which is unavailable on this platform. Run the agent in a supported "
+                "Linux environment to use the sandbox backend."
+            )
         self._agent = agent
         self._config = config
         self._cell_timeout = cell_timeout

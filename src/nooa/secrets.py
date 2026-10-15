@@ -81,14 +81,16 @@ def write_secret_env(path, name: str, value: str) -> None:
 
     import yaml
 
+    from nooa._file_permissions import make_owner_only
+
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
         raise ValueError("Secret variable must be a valid environment variable name")
     if not isinstance(value, str) or not value:
         raise ValueError("Secret value cannot be empty")
     path = Path(path).resolve()
-    original = path.read_text() if path.exists() else None
+    original = path.read_text(encoding="utf-8") if path.exists() else None
     try:
-        with path.open() as source:
+        with path.open(encoding="utf-8") as source:
             data = yaml.safe_load(source) or {}
     except FileNotFoundError:
         data = {}
@@ -106,11 +108,11 @@ def write_secret_env(path, name: str, value: str) -> None:
             mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
         ) as stream:
             temporary = Path(stream.name)
-            os.chmod(temporary, 0o600)
+            make_owner_only(temporary)
             yaml.safe_dump(data, stream, sort_keys=False)
             stream.flush()
             os.fsync(stream.fileno())
-        if (path.read_text() if path.exists() else None) != original:
+        if (path.read_text(encoding="utf-8") if path.exists() else None) != original:
             raise ValueError(f"Secrets file {path} changed during write; retry after reloading")
         os.replace(temporary, path)
     finally:

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """SQLiteStorageManager public options: save_snapshot_json, must_exist, journal_mode."""
 
-import fcntl
 import json
 import os
 import socket
@@ -12,6 +11,7 @@ from unittest import mock
 
 import pytest
 
+from nooa._file_lock import unlock_file
 from nooa.storage import SQLiteStorageManager
 from nooa.storage import sqlite as sqlite_module
 
@@ -169,7 +169,7 @@ def test_read_lock_owner_is_public_and_reads_the_owner_record(tmp_path):
     try:
         assert read_lock_owner(lock_path) == (os.getpid(), socket.gethostname())
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock_file(fd)
         os.close(fd)
 
 

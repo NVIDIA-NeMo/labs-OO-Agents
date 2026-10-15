@@ -57,3 +57,11 @@ def test_restore_latest_returns_most_recent():
     agent2 = _SimpleAgent(storage=storage)
     storage.restore_latest_snapshot(agent2)
     assert agent2.value == 99
+
+
+def test_latest_snapshot_uses_insertion_order_when_timestamps_are_equal():
+    with _make_storage() as storage:
+        timestamp = "2026-10-14T00:00:00+00:00"
+        storage.save_snapshot_json("{}", snapshot_id="first", created_at=timestamp)
+        storage.save_snapshot_json("{}", snapshot_id="second", created_at=timestamp)
+        assert storage.get_latest_snapshot_id() == "second"

@@ -17,6 +17,8 @@ Usage::
 import asyncio
 import os
 import signal
+import sys
+from contextlib import aclosing
 
 
 async def after(delay: float) -> None:
@@ -66,17 +68,23 @@ async def run_job(coro, job_id: str):
 
 
 async def monitor(cmd: str):
-    """Stream stdout lines from a shell command as they appear.
+    """Stream stdout/stderr lines from a shell command as they appear.
 
-    Yields each line (stripped) as it's written to stdout.
+    Uses PowerShell on Windows and the system shell on Unix.
     Output is decoded as UTF-8 with undecodable bytes replaced, so a
     command that emits non-UTF-8 output does not terminate the stream.
-    stderr is merged into stdout.  Uses ``start_new_session=True``
-    for process-group isolation so multiple concurrent monitors
-    (and the agent itself) don't contend for ptys or interfere
-    with each other.  On cancellation the entire process group
-    is killed to prevent orphaned children.
+    Each monitor owns an isolated process tree, cleaned up on cancellation
+    or early ``aclose()``. Unix uses process groups; Windows uses Job Objects.
+
+    Windows removes CRLF line endings and merges complete lines from both
+    output pipes; concurrent writes have no guaranteed cross-stream order.
     """
+    if sys.platform == "win32":
+        async with aclosing(_monitor_windows(cmd)) as stream:
+            async for line in stream:
+                yield line
+        return
+
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -98,3 +106,27 @@ async def monitor(cmd: str):
                 except ProcessLookupError:
                     pass
             await proc.wait()
+
+
+async def _monitor_windows(cmd: str):
+    from nooa.tools._shell_session import create_shell_session
+
+    session = create_shell_session()
+    pending = {"stdout": "", "stderr": ""}
+    try:
+        # A monitor can run indefinitely. Closing the stream first releases
+        # the session lock and interrupts unfinished work before close().
+        async with aclosing(session.run_stream(cmd, timeout=float("inf"))) as stream:
+            async for name, chunk in stream:
+                if name == "__done__":
+                    break  # Exit status is control metadata, not command output.
+                lines = (pending[name] + chunk).split("\n")
+                pending[name] = lines.pop()
+                for line in lines:
+                    yield line.removesuffix("\r")
+        for remaining in pending.values():
+            if remaining:
+                yield remaining
+    finally:
+        # Even a successful command may leave background descendants.
+        await session.close()

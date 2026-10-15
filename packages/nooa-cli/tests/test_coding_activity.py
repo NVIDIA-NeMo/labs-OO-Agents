@@ -28,6 +28,18 @@ def _observed_shell(tmp_path):
     return ActivityShellTools(shell=shell, event_manager=manager), events
 
 
+def _echo_stdin_command(shell):
+    if shell.shell == "powershell":
+        return "[Console]::Out.Write([Console]::In.ReadToEnd())"
+    return "cat"
+
+
+def _hello_command(shell):
+    if shell.shell == "powershell":
+        return '[Console]::Out.Write("hello`n")'
+    return "printf 'hello\\n'"
+
+
 def test_activity_is_an_explicit_shell_tools_substitute(tmp_path):
     manager = EventManager()
     base_shell = ShellTools(cwd=str(tmp_path))
@@ -35,6 +47,7 @@ def test_activity_is_an_explicit_shell_tools_substitute(tmp_path):
 
     assert not isinstance(shell, ShellTools)
     assert shell.session is base_shell.session
+    assert shell.shell == base_shell.shell
     assert shell.cwd == base_shell.cwd
     assert "event_manager" not in ShellTools.__init__.__annotations__
 
@@ -79,6 +92,37 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     assert (edit.start_line, edit.end_line) == (2, 2)
     # difflib omits the count for a single-line hunk; the offset is what matters.
     assert "@@ -2 +2 @@" in edit.diff
+
+
+@pytest.mark.parametrize("operation", ["match", "text", "overwrite"])
+async def test_utf8_edits_report_readable_content_and_diffs(tmp_path, operation):
+    shell, events = _observed_shell(tmp_path)
+    filename = "中文 café.py"
+    path = tmp_path / filename
+    original = "# café\nmessage = '初始 🐍'\n"
+    replacement = "message = '修改 ✅'\n"
+    path.write_bytes(original.encode("utf-8"))
+    try:
+        if operation == "match":
+            match = await shell.read(filename, lines=(2, 2))
+            await shell.replace(match, replacement)
+        elif operation == "text":
+            await shell.replace(filename, "message = '初始 🐍'\n", replacement)
+        else:
+            await shell.write_file(filename, "# café\n" + replacement)
+    finally:
+        await shell.close()
+
+    edit = next(event for event in events if isinstance(event, FileEdit))
+    assert edit.path == str(path)
+    assert "初始 🐍" in edit.old_text
+    assert "修改 ✅" in edit.new_text
+    assert "-message = '初始 🐍'" in edit.diff
+    assert "+message = '修改 ✅'" in edit.diff
+    assert edit.content_complete and edit.diff_complete
+    if operation != "overwrite":
+        assert (edit.start_line, edit.end_line) == (2, 2)
+    assert path.read_bytes().decode("utf-8").replace("\r\n", "\n") == ("# café\n" + replacement)
 
 
 async def test_stale_match_rejection_emits_no_successful_file_edit(tmp_path):
@@ -191,15 +235,16 @@ async def test_diff_generation_has_a_separate_input_safety_limit(tmp_path, monke
 
 async def test_run_emits_correlated_start_and_finish(tmp_path):
     shell, events = _observed_shell(tmp_path)
+    command = _echo_stdin_command(shell)
     try:
-        result = await shell.run("cat", stdin="hello")
+        result = await shell.run(command, stdin="hello")
     finally:
         await shell.close()
 
     started = next(event for event in events if isinstance(event, TerminalCommandStarted))
     finished = next(event for event in events if isinstance(event, TerminalCommandFinished))
     output = next(event for event in events if isinstance(event, TerminalCommandOutput))
-    assert started.command == "cat"
+    assert started.command == command
     assert started.stdin == "hello"
     assert started.working_directory == str(tmp_path)
     assert finished.command_id == started.command_id
@@ -209,10 +254,41 @@ async def test_run_emits_correlated_start_and_finish(tmp_path):
     assert result.stdout == "hello"
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("absolute_cwd", [False, True])
+async def test_command_cwd_is_forwarded_and_recorded_without_changing_file_cwd(
+    tmp_path, streaming, absolute_cwd
+):
+    shell, events = _observed_shell(tmp_path)
+    command_dir = tmp_path / "command directory"
+    command_dir.mkdir()
+    cwd = command_dir if absolute_cwd else command_dir.name
+    command = "(Get-Location).Path" if shell.shell == "powershell" else "pwd"
+    try:
+        if streaming:
+            items = [item async for item in shell.run_stream(command, cwd=cwd)]
+            stdout = "".join(item.text for item in items if item.kind == "stdout")
+            assert items[-1].returncode == 0
+        else:
+            result = await shell.run(command, cwd=cwd)
+            stdout = result.stdout
+            assert result.returncode == 0
+        assert Path(stdout.strip()) == command_dir
+        assert shell.cwd == tmp_path
+        await shell.write_file("after.txt", "still in the original directory")
+        assert (tmp_path / "after.txt").exists()
+        assert not (command_dir / "after.txt").exists()
+    finally:
+        await shell.close()
+
+    started = next(event for event in events if isinstance(event, TerminalCommandStarted))
+    assert started.working_directory == str(command_dir)
+
+
 async def test_run_stream_emits_output_chunks_and_finish(tmp_path):
     shell, events = _observed_shell(tmp_path)
     try:
-        streamed = [event async for event in shell.run_stream("printf 'hello\\n'")]
+        streamed = [event async for event in shell.run_stream(_hello_command(shell))]
     finally:
         await shell.close()
 
@@ -231,7 +307,12 @@ async def test_run_stream_forwards_and_records_bounded_stdin(tmp_path):
     shell, events = _observed_shell(tmp_path)
     payload = "line\n" * 10_000
     try:
-        streamed = [event async for event in shell.run_stream("cat", stdin=payload, timeout=5.0)]
+        streamed = [
+            event
+            async for event in shell.run_stream(
+                _echo_stdin_command(shell), stdin=payload, timeout=5.0
+            )
+        ]
     finally:
         await shell.close()
     assert "".join(event.text for event in streamed if event.kind == "stdout") == payload
@@ -246,7 +327,7 @@ async def test_run_stream_forwards_and_records_bounded_stdin(tmp_path):
 
 async def test_closing_stream_after_done_does_not_emit_a_second_finish(tmp_path):
     shell, events = _observed_shell(tmp_path)
-    stream = shell.run_stream("printf 'hello\\n'")
+    stream = shell.run_stream(_hello_command(shell))
     try:
         async for item in stream:
             if item.kind == "done":
@@ -263,10 +344,15 @@ async def test_closing_stream_after_done_does_not_emit_a_second_finish(tmp_path)
 async def test_activity_payloads_are_bounded(tmp_path):
     shell, events = _observed_shell(tmp_path)
     large = "x" * 50_000
+    command = (
+        "[Console]::Out.WriteLine('y' * 50000)"
+        if shell.shell == "powershell"
+        else "python3 -c \"print('y' * 50000)\""
+    )
     try:
         await shell.write_file("large.txt", large)
-        await shell.run("cat", stdin=large)
-        streamed = [item async for item in shell.run_stream("python3 -c \"print('y' * 50000)\"")]
+        await shell.run(_echo_stdin_command(shell), stdin=large)
+        streamed = [item async for item in shell.run_stream(command)]
     finally:
         await shell.close()
 
@@ -306,7 +392,8 @@ async def test_cancelling_a_command_is_not_reported_as_an_error(tmp_path):
     """
     shell, events = _observed_shell(tmp_path)
     try:
-        running = asyncio.create_task(shell.run("sleep 30"))
+        command = "Start-Sleep -Seconds 30" if shell.shell == "powershell" else "sleep 30"
+        running = asyncio.create_task(shell.run(command))
         started = None
         while started is None:
             await asyncio.sleep(0.05)

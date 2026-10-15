@@ -259,6 +259,12 @@ def local_failure(exc, *, api_key=None, api_key_env=None):
             if mark is not None
             else "Invalid YAML configuration."
         )
+    elif isinstance(exc, OSError) and exc.filename is not None:
+        # OSError.__str__ uses repr(filename), which doubles Windows path
+        # separators. Show a copyable path while retaining credential scrubbing.
+        detail = f"{exc.strerror or type(exc).__name__}: {exc.filename}"
+        if exc.filename2 is not None:
+            detail += f" -> {exc.filename2}"
     elif isinstance(exc, (OSError, ValueError)):
         detail = str(exc)
     else:

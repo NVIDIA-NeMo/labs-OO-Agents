@@ -71,6 +71,7 @@ from nooa_acp._runtime import (
     SessionRuntimeClosedError,
     SessionRuntimePool,
 )
+from nooa_acp._stdio import protocol_stdio
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
 from nooa_acp.event_bridge import ACPEventBridge
 
@@ -609,16 +610,22 @@ class CodingACPAdapter:
 
 
 async def serve(llm_factory: Callable[[], UnifiedLLM]) -> None:
-    adapter = CodingACPAdapter(llm_factory)
-    try:
-        # session/close is registered by the router as unstable. initialize()
-        # advertises the close capability, so without this flag the agent
-        # promises a method that answers "method not found", and a client can
-        # never release a session. session/list is stable and unaffected.
-        await run_agent(cast(Agent, adapter), use_unstable_protocol=True)
-    finally:
-        with suppress(Exception):
-            await adapter.close()
+    async with protocol_stdio() as (reader, writer):
+        adapter = CodingACPAdapter(llm_factory)
+        try:
+            # session/close is registered by the router as unstable. initialize()
+            # advertises the close capability, so without this flag the agent
+            # promises a method that answers "method not found", and a client can
+            # never release a session. session/list is stable and unaffected.
+            await run_agent(
+                cast(Agent, adapter),
+                input_stream=writer,
+                output_stream=reader,
+                use_unstable_protocol=True,
+            )
+        finally:
+            with suppress(Exception):
+                await adapter.close()
 
 
 def _available_commands_update(commands: tuple[CodingSlashCommand, ...]):

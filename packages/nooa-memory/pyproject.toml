@@ -2,7 +2,7 @@
 name = "nooa-memory"
 # Version is derived from git tags at build time by uv-dynamic-versioning.
 dynamic = ["version"]
-description = "Long-term memory system for NOOA agents — persistent recall backed by vector search"
+description = "Long-term memory system for NOOA agents: persistent recall backed by vector search"
 license = {text = "Apache-2.0"}
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

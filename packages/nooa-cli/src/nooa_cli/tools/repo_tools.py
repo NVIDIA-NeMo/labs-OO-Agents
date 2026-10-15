@@ -17,7 +17,7 @@ from typing import Annotated
 
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
-from nooa.tools._bash_session import BashSession
+from nooa.tools._shell_session import ShellSession
 from nooa.tools.shell_tools import Match
 
 logger = logging.getLogger(__name__)
@@ -262,7 +262,7 @@ def _tree_sitter_available() -> bool:
 
 def _line_match(path: Path, line_no: int) -> Match | None:
     try:
-        lines = path.read_text(errors="replace").splitlines(keepends=True)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except OSError:
         return None
     if not (1 <= line_no <= len(lines)):
@@ -272,7 +272,7 @@ def _line_match(path: Path, line_no: int) -> Match | None:
 
 def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Match]]:
     try:
-        lines = path.read_text(errors="replace").splitlines(keepends=True)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except OSError:
         return []
     pairs: list[tuple[str, Match]] = []
@@ -305,17 +305,23 @@ def _symbol_anchors(path: Path, symbols: list[str]) -> list[Match]:
     return [anchor for _, anchor in _symbol_anchor_pairs(path, symbols)]
 
 
+def _parse_match_line(line: str) -> tuple[str, int, str] | None:
+    """Parse rg or symbol output without treating a Windows drive as a line separator."""
+    match = re.match(r"^(.+?):\s*(\d+)(?::|\s+|$)(.*)$", line)
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2)), match.group(3)
+
+
 def _anchor_from_match_line(line: str, root: Path) -> Match | None:
-    path_text, sep, rest = line.partition(":")
-    if not sep:
+    parsed = _parse_match_line(line)
+    if parsed is None:
         return None
-    m = re.match(r"\s*(\d+)\b", rest)
-    if not m:
-        return None
+    path_text, line_no, _ = parsed
     fpath = Path(path_text)
     if not fpath.is_absolute():
         fpath = root / fpath
-    return _line_match(fpath, int(m.group(1)))
+    return _line_match(fpath, line_no)
 
 
 def _format_match(anchor: Match, root: Path) -> str:
@@ -370,7 +376,7 @@ def _extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[str]
         return []
 
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except (OSError, PermissionError):
         return []
 
@@ -411,7 +417,7 @@ class RepoTools(Skill):
     def __init__(
         self,
         root: str | Path = ".",
-        session: BashSession | None = None,
+        session: ShellSession | None = None,
         require_tree_sitter: bool = False,
     ) -> None:
         self._root = Path(root).resolve()
@@ -435,8 +441,8 @@ class RepoTools(Skill):
 
     @property
     @hidden
-    def session(self) -> BashSession | None:
-        """The shared bash session, if one was wired in (else None)."""
+    def session(self) -> ShellSession | None:
+        """The shared shell session, if one was wired in (else None)."""
         return self._session
 
     async def symbols(
@@ -510,9 +516,11 @@ class RepoTools(Skill):
         )
 
     async def _check_rg(self) -> bool:
-        """Check if rg (ripgrep) is available, caching the result."""
+        """Check availability of the Bash rg fast path, caching the result."""
         if self._has_rg is None:
-            if self._session:
+            if self._session and self._session.shell_name != "bash":
+                self._has_rg = False
+            elif self._session:
                 _, _, code = await self._session.run("command -v rg", timeout=5)
                 self._has_rg = code == 0
             else:
@@ -613,13 +621,11 @@ class RepoTools(Skill):
                     p = Path(line.strip())
                     if p.is_file() and _detect_lang(p) != "unknown":
                         all_files.append(p)
-                # Sort by mtime (newest first) — rg --sort requires v14+
-                all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
             else:
-                # Fallback: walk directory (rg not available or no session)
-                for ext in _LANG_MAP:
-                    for p in sorted(resolved.rglob(f"*{ext}"))[:max_files]:
-                        all_files.append(p)
+                all_files.extend(self._iter_source_files(resolved, max_files=max_files * 3))
+
+        # Sort by mtime (newest first) — rg --sort requires v14+.
+        all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
 
         # Deduplicate and limit
         seen: set[str] = set()
@@ -709,19 +715,16 @@ class RepoTools(Skill):
         else:
             # Fallback: walk files and check symbols (rg not available or no session)
             name_lower = name.lower()
-            for ext in _LANG_MAP:
-                for fpath in resolved.rglob(f"*{ext}"):
-                    lang = _detect_lang(fpath)
-                    symbols = _extract_symbols(fpath, lang, max_symbols=200)
-                    for sym in symbols:
-                        if name_lower in sym.lower():
-                            try:
-                                rel = fpath.relative_to(self._root)
-                            except ValueError:
-                                rel = fpath
-                            matches.append(f"{rel}:{sym.strip()}")
-                            if len(matches) >= max_results:
-                                break
+            for fpath in self._iter_source_files(resolved, max_files=None):
+                lang = _detect_lang(fpath)
+                symbols = _extract_symbols(fpath, lang, max_symbols=200)
+                for sym in symbols:
+                    if name_lower in sym.lower():
+                        try:
+                            rel = fpath.relative_to(self._root)
+                        except ValueError:
+                            rel = fpath
+                        matches.append(f"{rel}:{sym.strip()}")
                     if len(matches) >= max_results:
                         break
                 if len(matches) >= max_results:
@@ -832,8 +835,8 @@ class RepoTools(Skill):
         search_name = re.escape(name)
         pattern = f"\\b{search_name}\\b"
 
-        if self._session:
-            cmd = f"rg -n --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
+        if self._session and await self._check_rg():
+            cmd = f"rg -n -H --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
             stdout, _, code = await self._session.run(cmd, timeout=30)
             if code != 0 or not stdout:
                 return ReferenceSearchResult(query=name, matches=[], total_matches=0)
@@ -842,10 +845,13 @@ class RepoTools(Skill):
             raw_lines = []
             for fpath in self._iter_source_files(resolved, max_files=200):
                 try:
-                    text = fpath.read_text(errors="replace")
+                    text = fpath.read_text(encoding="utf-8", errors="replace")
                     for i, line in enumerate(text.splitlines(), 1):
                         if re.search(rf"\b{re.escape(name)}\b", line):
-                            rel = fpath.relative_to(self._root)
+                            try:
+                                rel = fpath.relative_to(self._root)
+                            except ValueError:
+                                rel = fpath
                             raw_lines.append(f"{rel}:{i}:{line}")
                 except OSError:
                     continue
@@ -857,10 +863,11 @@ class RepoTools(Skill):
             if len(matches) >= max_results:
                 break
             # Parse file:line:content
-            parts = raw.split(":", 2)
-            if len(parts) < 3:
+            parsed = _parse_match_line(raw)
+            if parsed is None:
                 continue
-            content = parts[2].strip()
+            path_text, line_no, content = parsed
+            content = content.strip()
             # Skip definitions
             if _is_definition_line(content, name.split(".")[-1]):
                 continue
@@ -871,7 +878,7 @@ class RepoTools(Skill):
             anchor = _anchor_from_match_line(raw, self._root)
             if anchor is None:
                 continue
-            matches.append(f"{parts[0]}:{parts[1]}: {content}")
+            matches.append(f"{path_text}:{line_no}: {content}")
             anchors.append(anchor)
 
         truncated = len(matches) >= max_results
@@ -886,26 +893,28 @@ class RepoTools(Skill):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _iter_source_files(self, root: Path, max_files: int = 500):
-        """Yield source files under *root*, skipping non-source and common build dirs."""
+    def _iter_source_files(self, root: Path, max_files: int | None = 500) -> Iterator[Path]:
+        """Yield source files, pruning ignored directories below the requested root."""
+        if max_files is not None and max_files <= 0:
+            return
+        if root.is_file():
+            if _detect_lang(root) != "unknown":
+                yield root
+            return
+        ignored_dirs = {"node_modules", "__pycache__", "venv", "build", "dist"}
         count = 0
-        for fpath in sorted(root.rglob("*")):
-            if count >= max_files:
-                break
-            if not fpath.is_file():
-                continue
-            if _detect_lang(fpath) == "unknown":
-                continue
-            # Skip common non-source dirs
-            parts = fpath.parts
-            if any(
-                p.startswith(".")
-                or p in ("node_modules", "__pycache__", "venv", ".venv", "build", "dist")
-                for p in parts
-            ):
-                continue
-            yield fpath
-            count += 1
+        for directory, subdirs, filenames in root.walk():
+            subdirs[:] = sorted(
+                name for name in subdirs if not name.startswith(".") and name not in ignored_dirs
+            )
+            for name in sorted(filenames):
+                fpath = directory / name
+                if name.startswith(".") or _detect_lang(fpath) == "unknown" or not fpath.is_file():
+                    continue
+                yield fpath
+                count += 1
+                if max_files is not None and count >= max_files:
+                    return
 
     def _resolve(self, path: str) -> Path:
         """Resolve a path relative to the repo root."""

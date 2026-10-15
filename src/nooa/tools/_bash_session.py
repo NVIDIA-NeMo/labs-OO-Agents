@@ -24,12 +24,14 @@ import base64
 import logging
 import os
 import secrets
+import shlex
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
+from typing import Literal
 
 from nooa.agentdoc import TruncatingStringIO
 
@@ -98,6 +100,8 @@ class BashSession:
         stdout, stderr, code = await session.run("cd src && pwd")  # cd persists!
         await session.close()
     """
+
+    shell_name: Literal["bash"] = "bash"
 
     def __init__(
         self,
@@ -220,6 +224,8 @@ class BashSession:
         """Start the bash subprocess with a dedicated control fd."""
         if self._started:
             return
+        if sys.platform == "win32":
+            raise RuntimeError("BashSession requires Unix; use PowerShellSession on native Windows")
 
         self._start_count += 1
         env = os.environ.copy()
@@ -317,7 +323,14 @@ class BashSession:
         ):
             self._lock = asyncio.Lock()
 
-    async def run(self, command: str, timeout: float = 30.0) -> tuple[str, str, int]:
+    async def run(
+        self,
+        command: str,
+        timeout: float = 30.0,
+        *,
+        stdin: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> tuple[str, str, int]:
         """Run a command and return (stdout, stderr, exit_code).
 
         The session persists state: cd, export, etc. carry over.
@@ -329,16 +342,42 @@ class BashSession:
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:
-            stdout, stderr, code, _ = await self._run_unlocked(command, timeout)
+            stdout, stderr, code, _ = await self._run_unlocked(
+                self._prepare_command(command, stdin, cwd), timeout
+            )
             return stdout, stderr, code
 
     async def run_with_timeout_flag(
-        self, command: str, timeout: float = 30.0
+        self,
+        command: str,
+        timeout: float = 30.0,
+        *,
+        stdin: str | None = None,
+        cwd: str | Path | None = None,
     ) -> tuple[str, str, int, bool]:
         """Like run(), but returns a 4th element: whether the command timed out."""
         self._ensure_lock_on_current_loop()
         async with self._lock:
-            return await self._run_unlocked(command, timeout)
+            return await self._run_unlocked(self._prepare_command(command, stdin, cwd), timeout)
+
+    @staticmethod
+    def _prepare_command(command: str, stdin: str | None, cwd: str | Path | None) -> str:
+        """Apply temporary cwd and byte-exact stdin in this shell's own scope."""
+        if cwd is not None:
+            command = (
+                "__nooa_back=$PWD; "
+                f"if CDPATH= cd -- {shlex.quote(str(cwd))}; then {{ {command}\n}}; "
+                '__nooa_rc=$?; cd -- "$__nooa_back"; else __nooa_rc=$?; fi; '
+                "( exit $__nooa_rc )"
+            )
+        if stdin is not None:
+            blob = base64.b64encode(stdin.encode()).decode()
+            command = (
+                f"__nemo_in=$(mktemp); base64 -d <<<'{blob}' > $__nemo_in; "
+                f"{{ {command}\n}} < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
+                "( exit $__nemo_rc )"
+            )
+        return command
 
     async def _run_unlocked(self, command: str, timeout: float) -> tuple[str, str, int, bool]:
         """Actual run implementation (caller must hold self._lock).
@@ -385,8 +424,13 @@ class BashSession:
         return stdout.strip(), stderr.strip(), exit_code, timed_out
 
     async def run_stream(
-        self, command: str, timeout: float = 30.0
-    ) -> AsyncIterator[tuple[str, str]]:
+        self,
+        command: str,
+        timeout: float = 30.0,
+        *,
+        stdin: str | None = None,
+        cwd: str | Path | None = None,
+    ) -> AsyncGenerator[tuple[str, str]]:
         """Run a command and yield (stream_name, chunk) pairs as output arrives.
 
         stream_name is 'stdout' or 'stderr'. After the command finishes,
@@ -397,7 +441,9 @@ class BashSession:
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:
-            async for item in self._run_stream_unlocked(command, timeout):
+            async for item in self._run_stream_unlocked(
+                self._prepare_command(command, stdin, cwd), timeout
+            ):
                 yield item
 
     async def _run_stream_unlocked(

@@ -11,6 +11,8 @@ from nooa.unifiedllm import FakeLLMClient
 
 
 def llm_factory() -> FakeLLMClient:
+    if "--noisy" in sys.argv:
+        print("MODEL_DIAGNOSTIC: ordinary client output", flush=True)
     if "--shell" in sys.argv:
         # Blocks inside a real shell command, so cancellation exercises
         # ActivityShellTools.run rather than a bare asyncio wait.

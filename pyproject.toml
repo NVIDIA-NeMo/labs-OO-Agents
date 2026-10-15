@@ -1,3 +1,4 @@
+# Keep this file ASCII: uv-dynamic-versioning reads it using the platform encoding.
 [project]
 name = "nooa"
 # Version is derived from git tags at build time by uv-dynamic-versioning
@@ -24,7 +25,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.5.0",
     # context_blocks + unifiedllm now ship as nooa.context_blocks /
-    # nooa.unifiedllm subpackages — pull their formerly-external deps in.
+    # nooa.unifiedllm subpackages: pull their formerly-external deps in.
     # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
     # also stays past CVE-2026-49468 and the yanked 1.82.7/1.82.8 backdoor.
     "litellm>=1.97.0",
@@ -126,13 +127,13 @@ mcp = [
 #
 # Floor is 0.6: LLM request intercepts must return `LLMRequestInterceptOutcome`
 # (0.5+) rather than a `(request, annotated)` tuple, and that type does not
-# exist in 0.4 — so there is no single callback shape that spans 0.4 and 0.6.
+# exist in 0.4, so there is no single callback shape that spans 0.4 and 0.6.
 #
 # Ceiling is <0.7: 0.7 changes the LLM sanitizer contract to the two-argument
 # form `(payload, directional_context) -> payload | None` with no compatibility
 # shim, and makes an implicit `return` mean "omit the payload" (fail-closed).
 # Our library code (nemo_relay_middleware.py) registers no sanitizers and is
-# unaffected, but tests/test_nemo_relay_middleware.py does — see the sanitizer
+# unaffected, but tests/test_nemo_relay_middleware.py does; see the sanitizer
 # registrations there before lifting this bound.
 nemo-relay = [
     "nemo-relay>=0.6,<0.7",
@@ -152,7 +153,7 @@ source = "uv-dynamic-versioning"
 vcs = "git"
 style = "pep440"
 # bump = true: between tags, produce `X.Y.(Z+1).dev<distance>` rather than
-# `X.Y.Z.post<distance>` — these sort ABOVE the latest stable, so `--pre`
+# `X.Y.Z.post<distance>`; these sort ABOVE the latest stable, so `--pre`
 # consumers get the freshest dev rather than something that sorts below a
 # release that has already shipped.
 bump = true
@@ -170,6 +171,13 @@ packages = ["src/nooa"]
 "THIRD_PARTY_NOTICES.md" = "THIRD_PARTY_NOTICES.md"
 
 [dependency-groups]
+test = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-rerunfailures>=14.0",
+    "pytest-timeout>=2.3.0",
+    "pytest-cov>=7.1.0",
+]
 trace-viewer = [
     "uvicorn>=0.38.0",
     "python-dotenv>=1.0.0",
@@ -180,23 +188,19 @@ trace-viewer = [
 ]
 dev = [
     {include-group = "trace-viewer"},
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-rerunfailures>=14.0",
-    "pytest-timeout>=2.3.0",
+    {include-group = "test"},
     "mypy>=1.7.0",
     "ruff>=0.14.14",
     "httpx[socks]>=0.28.1",
     "opentelemetry-exporter-otlp-proto-http>=1.39.1",
     "eval_pipeline",
-    # Workspace packages — keep acp + bench + cli + memory installed/editable in dev sync
+    # Workspace packages: keep acp + bench + cli + memory installed/editable in dev sync
     "nooa-cli",
     "nooa-acp",
     "nooa-memory",
     "nooa-bench",
     "pre-commit>=4.5.0",
     "pyright>=1.1.408",
-    "pytest-cov>=7.1.0",
     # Data-science libs exercised by core tests (REPL scoping, return-type
     # adapters, doc adapters). Previously installed transitively via the
     # benchmarks package, which moved to nooa-dev.
@@ -206,8 +210,8 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-# A hang is a failure, not a pending result. Without this a test that wedges —
-# a lock that never releases, a subprocess prompt that never answers — stalls
+# A hang is a failure, not a pending result. Without this a test that wedges
+# (a lock that never releases, a subprocess prompt that never answers) stalls
 # CI instead of reporting, and a stalled job reads as "still running" rather
 # than "broken". Deliberately far above any real test: the slowest here is a
 # few seconds, so this only ever fires on a genuine hang.

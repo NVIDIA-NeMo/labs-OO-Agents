@@ -3,9 +3,24 @@
 """Keep protocol subprocesses on the checkout and configuration under test."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_acp_configuration(tmp_path, monkeypatch):
+    """Keep user skills, configuration, and session files inside each test."""
+    user_root = tmp_path / "isolated-user"
+    user_root.mkdir()
+    monkeypatch.setenv("HOME", str(user_root))
+    monkeypatch.setenv("USERPROFILE", str(user_root))
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_root / "config"))
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / ".nooa"))
+    monkeypatch.setenv("NOOA_SESSIONS_DIR", str(tmp_path / "sessions"))
+    for name in ("NEMO_OO_SETTINGS", "NEMO_OO_SECRETS", "NEMO_OO_LLM_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +38,10 @@ def _protocol_subprocess_environment(monkeypatch):
     def environment():
         values = original()
         values["PYTHONPATH"] = os.pathsep.join(str(path) for path in sources)
+        values["PYTHONUTF8"] = str(sys.flags.utf8_mode)
         for name in (
+            "HOME",
+            "USERPROFILE",
             "NEMO_OO_USER_DIR",
             "NEMO_OO_PROJECT_DIR",
             "NEMO_OO_SETTINGS",

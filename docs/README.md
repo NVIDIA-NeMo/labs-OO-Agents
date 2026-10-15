@@ -57,6 +57,9 @@ First [connect a model](model-connect.md), or configure one offline. Then:
    copy-paste programs.
 3. Return here for focused explanations when a design question arises.
 
+For native Windows installation, persistent PowerShell sessions, and the
+supported test suite, see [Windows support](windows.md).
+
 ### Build a reliable workflow
 
 1. [Orchestration](concepts/orchestration.md)

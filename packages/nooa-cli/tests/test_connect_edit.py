@@ -9,6 +9,8 @@ import yaml
 from click.testing import CliRunner
 from nooa_cli.commands.connect import command
 
+from tests.helpers.file_permissions import assert_owner_only
+
 
 @pytest.fixture
 def registry(tmp_path, monkeypatch):
@@ -179,7 +181,7 @@ def test_pasted_key_is_saved_only_with_separate_consent(registry, monkeypatch, c
     assert secret.exists() == (choice == "y")
     if choice == "y":
         assert yaml.safe_load(secret.read_text()) == {"env": {"NEW_TEST_KEY": "private-value"}}
-        assert secret.stat().st_mode & 0o777 == 0o600
+        assert_owner_only(secret)
     assert "private-value" not in result.output + path.read_text()
     assert "NEW_TEST_KEY" not in os.environ
 

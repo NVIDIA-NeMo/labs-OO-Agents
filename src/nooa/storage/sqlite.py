@@ -7,7 +7,6 @@ Provides persistent storage using stdlib sqlite3 — no new dependencies.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -25,6 +24,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import ValidationError as PydanticValidationError
 
+from nooa._file_lock import lock_file, unlock_file
 from nooa.context_blocks import Event, EventBase, EventStatus, Metadata
 from nooa.context_blocks.events import _EVENT_REGISTRY
 from nooa.events import (
@@ -670,34 +670,32 @@ def _blank_lock_if_ours(lock_path: str) -> None:
 
 
 def _acquire_session_lock(lock_path: str) -> int:
-    """Acquire an exclusive flock on *lock_path*, returning the held fd.
+    """Acquire an exclusive file lock on *lock_path*, returning the held fd.
 
     Raises SessionAlreadyActiveError, annotated with the recorded owner PID
     so the caller can tell the user exactly which process is holding the
-    session. On Linux/macOS flock is released by the kernel when the owning
-    process dies, so a genuine crash doesn't wedge the next run — no
-    stale-file cleanup needed here.
+    session. The OS releases the lock when its owning descriptor is closed,
+    including on process exit, so a crash does not require stale-file cleanup.
 
     Lock file contents: ``<pid> <hostname>`` of the current owner (read it
     with ``read_lock_owner``). We truncate before writing so a shorter
     record can't leave trailing bytes from a longer predecessor.
 
-    The caller releases the lock with ``fcntl.flock(fd, fcntl.LOCK_UN)``
+    The caller releases the lock with ``unlock_file(fd)``
     and ``os.close(fd)``. Taking the lock only to test whether a session is
     free still rewrites the record with this process's pid and host.
     """
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+        lock_file(fd, blocking=False)
+    except BlockingIOError:
         os.close(fd)
         owner_pid = _read_lock_pid(lock_path)
         session_id = Path(lock_path).stem
         if owner_pid is not None:
             msg = (
                 f"Session {session_id!r} is already active in another process "
-                f"(pid {owner_pid}). If that process is gone, remove "
-                f"{lock_path!r} to reclaim the session."
+                f"(pid {owner_pid}). Close the owning session before retrying."
             )
         else:
             msg = (
@@ -705,11 +703,18 @@ def _acquire_session_lock(lock_path: str) -> int:
                 f"(owner pid unavailable — lock file {lock_path!r} is empty or unreadable)."
             )
         raise SessionAlreadyActiveError(msg, session_id=session_id, owner_pid=owner_pid) from None
+    except BaseException:
+        os.close(fd)
+        raise
 
     # Holder now; replace any stale predecessor record with ours.
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.ftruncate(fd, 0)
-    os.write(fd, _lock_owner_record())
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, _lock_owner_record())
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 
@@ -746,8 +751,10 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
         # Blank the record before releasing, as a clean close does, so the
         # retained lock file does not name this process as a live owner.
         _blank_lock_if_ours(lock_path)
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        try:
+            unlock_file(lock_fd)
+        finally:
+            os.close(lock_fd)
 
 
 class SQLiteStorageManager:
@@ -952,10 +959,10 @@ class SQLiteStorageManager:
         snapshot.restore(agent)
 
     def get_latest_snapshot_id(self) -> str | None:
-        """Return the snapshot_id of the most recently saved snapshot, or None."""
+        """Return the newest snapshot, breaking timestamp ties by insertion order."""
         with self._db_lock:
             row = self._conn.execute(
-                "SELECT snapshot_id FROM snapshots ORDER BY created_at DESC LIMIT 1"
+                "SELECT snapshot_id FROM snapshots ORDER BY created_at DESC, rowid DESC LIMIT 1"
             ).fetchone()
             return row[0] if row is not None else None
 
@@ -999,9 +1006,11 @@ class SQLiteStorageManager:
                 # the kernel lock reads "free" and not a stale owner.
                 if self._db_path != ":memory:":
                     _blank_lock_if_ours(str(Path(self._db_path).with_suffix(".lock")))
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
-                self._lock_fd = None
+                try:
+                    unlock_file(self._lock_fd)
+                finally:
+                    os.close(self._lock_fd)
+                    self._lock_fd = None
 
     def __enter__(self) -> Self:
         return self

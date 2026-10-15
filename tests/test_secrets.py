@@ -15,6 +15,7 @@ import os
 import pytest
 
 from nooa.secrets import load_secrets_into_env, write_secret_env
+from tests.helpers.file_permissions import assert_owner_only
 
 _KEY = "NEMO_TEST_SECRET_KEY"
 _KEY2 = "NEMO_TEST_SECRET_KEY2"
@@ -31,7 +32,7 @@ def test_write_secret_preserves_values_and_does_not_export(tmp_path, monkeypatch
         "env": {"OTHER": "old-value", _KEY: "new-value"},
         "metadata": "keep",
     }
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert_owner_only(path)
     assert _KEY not in os.environ
 
 
@@ -43,6 +44,23 @@ def test_invalid_secret_yaml_is_not_disclosed_or_replaced(tmp_path):
         write_secret_env(path, _KEY, "PRIVATE-NEW-KEY")
     assert "PRIVATE" not in str(caught.value)
     assert path.read_text() == original
+
+
+def test_permission_failure_does_not_publish_or_leave_a_staging_file(tmp_path, monkeypatch):
+    from nooa import _file_permissions
+
+    path = tmp_path / "secrets.yaml"
+    original = b"env: {}\n"
+    path.write_bytes(original)
+
+    def deny(path):
+        raise PermissionError("Test permission setup failure")
+
+    monkeypatch.setattr(_file_permissions, "make_owner_only", deny)
+    with pytest.raises(PermissionError):
+        write_secret_env(path, _KEY, "test-only-value")
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
 
 
 @pytest.fixture

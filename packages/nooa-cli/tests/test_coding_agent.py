@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared coding-agent construction and repository instructions."""
 
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ import pytest
 from nooa_cli.coding import CodingAgent, discover_agent_instruction_files
 
 from nooa.skill import Skill, get_slash_commands, slash_command
+from nooa.tools import ShellTools
 from nooa.unifiedllm import FakeLLMClient
 
 
@@ -47,6 +49,35 @@ async def test_coding_agent_uses_observed_shell_and_instruction_context(tmp_path
         assert "run the focused tests" in str(agent.context["repository_instructions"])
         assert "nemo.shell" in agent.skills.activated()
         assert "nemo.repo" in agent.skills.activated()
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize("shell_name", ["bash", "powershell"])
+async def test_initial_prompt_identifies_the_selected_shell(tmp_path, monkeypatch, shell_name):
+    from nooa.interactive import Done, SummarizationConfig
+
+    # Select the backend without starting a process. This also covers a shell
+    # selection that differs from the host platform's default.
+    monkeypatch.setattr("nooa_cli.coding.agent.ShellTools", partial(ShellTools, shell=shell_name))
+    llm = FakeLLMClient.with_tool_call(
+        "execute_python",
+        {"code": "return_result(Done(explanation='inspected shell context'))"},
+        strict_exhaustion=True,
+    )
+    agent = CodingAgent(
+        llm=llm,
+        cwd=tmp_path,
+        libs_dir=tmp_path / "libs",
+        summarization=SummarizationConfig(policy="none"),
+    )
+    try:
+        result = await agent.handle({"user_messages": ["Inspect the shell environment"]})
+        assert isinstance(result, Done)
+        prompt = "\n".join(str(message.get("content", "")) for message in llm.calls[0].messages)
+        assert f"Shell command language: {shell_name}." in prompt
+        assert "CodeAct execution cells use Python" in prompt
+        assert llm.call_count == 1
     finally:
         await agent.close()
 

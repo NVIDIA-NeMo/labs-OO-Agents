@@ -19,9 +19,11 @@ class ProducersSkill(Skill):
     """
 
     def monitor(self, cmd: str):
-        """Stream stdout lines from a shell command.
+        """Stream output lines from a shell command.
 
-        Yields each line as it appears. stderr merged into stdout.
+        Use PowerShell syntax on Windows, system-shell syntax on Unix.
+        Yields stdout and stderr lines as they appear. Concurrent writes
+        to separate streams have no guaranteed order on Windows.
         """
         return _mod.monitor(cmd)
 

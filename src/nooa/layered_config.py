@@ -195,7 +195,7 @@ def load_layered_yaml(
         project_dir=project_dir,
     ):
         try:
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
         # UnicodeError too: a non-UTF-8 settings file otherwise aborts every
         # caller of this loader rather than degrading to the other layers.
         except (OSError, UnicodeError, yaml.YAMLError) as e:

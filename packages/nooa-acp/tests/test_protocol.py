@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
+from acp import PROTOCOL_VERSION, RequestError, spawn_agent_process, text_block
 from acp.connection import StreamDirection
 from acp.schema import (
     AgentMessageChunk,
@@ -50,6 +50,34 @@ def test_protocol_subprocess_imports_this_checkout(tmp_path):
     ]
 
 
+def test_protocol_subprocess_keeps_configuration_and_encoding_isolated(tmp_path):
+    import json
+    import subprocess
+
+    from acp.transports import default_environment
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, os, sys; from pathlib import Path; "
+            "from nooa.paths import get_user_dir, get_project_dir; "
+            "print(json.dumps({'home': str(Path.home()), 'user': str(get_user_dir()), "
+            "'project': str(get_project_dir()), 'sessions': os.environ['NOOA_SESSIONS_DIR'], "
+            "'utf8_mode': sys.flags.utf8_mode}))",
+        ],
+        cwd=tmp_path,
+        env=default_environment(),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    settings = json.loads(result.stdout)
+    assert settings.pop("utf8_mode") == sys.flags.utf8_mode
+    assert all(Path(value).is_relative_to(tmp_path) for value in settings.values())
+
+
 class _RecordingClient:
     def __init__(self) -> None:
         self.updates: list[tuple[str, object]] = []
@@ -71,7 +99,8 @@ def _write_protocol_skill(workspace: Path) -> None:
     (package / "pyproject.toml").write_text(
         '[project]\nname = "protocol-skill"\n\n'
         '[project.entry-points."nooa.skills"]\n'
-        '"test.protocol" = "protocol_skill:ProtocolSkill"\n'
+        '"test.protocol" = "protocol_skill:ProtocolSkill"\n',
+        encoding="utf-8",
     )
     (package / "__init__.py").write_text(
         "from nooa.skill import Skill, slash_command\n\n"
@@ -81,28 +110,32 @@ def _write_protocol_skill(workspace: Path) -> None:
         "    )\n"
         "    def check(self, args: str) -> str:\n"
         '        """Check ACP command dispatch."""\n'
-        "        return f'Check {args}.'\n"
+        "        return f'Check {args}.'\n",
+        encoding="utf-8",
     )
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_text(
-        f"coding:\n  additional_skills_dirs:\n    - {skills_root}\n"
+        f"coding:\n  additional_skills_dirs:\n    - {skills_root}\n",
+        encoding="utf-8",
     )
 
 
 async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
     client = _RecordingClient()
     fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    workspace = tmp_path / "中文 workspace's [literal]"
+    workspace.mkdir()
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
-    _write_protocol_skill(tmp_path)
+    _write_protocol_skill(workspace)
     incoming: list[dict[str, object]] = []
 
     async with spawn_agent_process(
         client,  # type: ignore[arg-type]
         sys.executable,
         str(fixture),
-        cwd=tmp_path,
+        cwd=workspace,
     ) as (connection, _process):
         connection._conn.add_observer(  # type: ignore[attr-defined]
             lambda event: (
@@ -112,7 +145,7 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
             )
         )
         initialized = await connection.initialize(PROTOCOL_VERSION)
-        session = await connection.new_session(str(tmp_path))
+        session = await connection.new_session(str(workspace))
         await asyncio.wait_for(client.commands_updated.wait(), timeout=5)
         response = await asyncio.wait_for(
             connection.prompt(session.session_id, [text_block("run smoke test")]),
@@ -188,14 +221,14 @@ async def test_acp_subprocess_dispatches_advertised_slash_command(tmp_path, monk
         response = await asyncio.wait_for(
             connection.prompt(
                 session.session_id,
-                [text_block("/protocol-check ready")],
+                [text_block("/protocol-check 准备好了 café")],
             ),
             timeout=_HANG_TIMEOUT,
         )
 
     assert response.stop_reason == "end_turn"
     assert any(
-        isinstance(update, AgentMessageChunk) and update.content.text == "Check ready."
+        isinstance(update, AgentMessageChunk) and update.content.text == "Check 准备好了 café."
         for _, update in client.updates
     )
     assert not any(isinstance(update, ToolCallStart) for _, update in client.updates)
@@ -320,3 +353,57 @@ async def test_cancelling_a_shell_command_reports_it_as_cancellation(tmp_path):
     rendered = "".join(str(update) for _, update in client.updates)
     assert "Cancelled by user." in rendered
     assert "CancelledError" not in rendered
+
+
+async def test_ordinary_client_prints_go_to_stderr_without_polluting_protocol(tmp_path, caplog):
+    client = _RecordingClient()
+    fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
+    async with spawn_agent_process(
+        client,  # type: ignore[arg-type]
+        sys.executable,
+        str(fixture),
+        "--noisy",
+        cwd=tmp_path,
+    ) as (connection, process):
+        assert process.stderr is not None
+        stderr_task = asyncio.create_task(process.stderr.read())
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        response = await asyncio.wait_for(
+            connection.prompt(session.session_id, [text_block("run smoke test")]),
+            timeout=_HANG_TIMEOUT,
+        )
+        assert response.stop_reason == "end_turn"
+
+    stderr = (await stderr_task).decode("utf-8", errors="replace")
+    assert "MODEL_DIAGNOSTIC: ordinary client output" in stderr
+    assert not any("Error parsing JSON-RPC" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="installed native Windows ACP entry point")
+async def test_model_http_error_keeps_protocol_valid_and_connection_usable(tmp_path):
+    from ._native_harness import launch_native_acp
+
+    client = _RecordingClient()
+    workspace = tmp_path / "http-error-workspace"
+    rejection = (
+        400,
+        {"error": {"message": "scripted model rejection", "type": "invalid_request_error"}},
+    )
+    async with launch_native_acp(client, workspace, [rejection] * 3) as (
+        connection,
+        process,
+        model,
+    ):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(workspace))
+        with pytest.raises(RequestError, match="scripted model rejection"):
+            await asyncio.wait_for(
+                connection.prompt(session.session_id, [text_block("return a model error")]),
+                timeout=45,
+            )
+        listed = await connection.list_sessions(cwd=str(workspace))
+        assert any(item.session_id == session.session_id for item in listed.sessions)
+        assert process.returncode is None
+        assert model.requests
+        assert not model.protocol_errors

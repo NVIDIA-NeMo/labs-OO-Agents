@@ -162,7 +162,7 @@ def resolve_api_key_from_config(
 def _load_models_from_yaml(path: Path) -> dict[str, dict[str, Any] | None]:
     """Load the 'models' section from a YAML config file."""
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         logger.exception("Failed to load config file: %s", path)
         return {}

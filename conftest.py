@@ -10,6 +10,21 @@ from nooa.storage.sqlite import _ensure_schema
 
 
 @pytest.fixture
+def symlink_file():
+    """Create a file symlink, skipping only an unavailable Windows privilege."""
+
+    def create(link, target):
+        try:
+            link.symlink_to(target)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                pytest.skip("Windows file symlinks require Developer Mode or symlink privilege")
+            raise
+
+    return create
+
+
+@pytest.fixture
 def sqlite_conn():
     """In-memory SQLite connection with schema initialized."""
     conn = sqlite3.connect(":memory:")

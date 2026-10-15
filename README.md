@@ -82,6 +82,11 @@ uv add nooa
 
 Or with pip: `pip install nooa`.
 
+The core SDK and shared coding tools run natively on Windows, using persistent
+PowerShell sessions for commands and Python/Tree-sitter for repository navigation.
+For setup, supported features, and tests, see
+[Windows support](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/windows.md).
+
 <details>
 <summary><b>Optional sub-packages</b> — CLI, ACP, memory, benchmarks, evaluation pipeline</summary>
 
@@ -276,7 +281,10 @@ for a complete example, CodeAct `show()`, audio/video/PDF inputs, and limits.
 
 ## Contributing
 
-For a local editable install, clone the repo and sync the development environment with `uv`:
+On native Windows, follow the [Windows setup](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/windows.md#work-from-this-repository)
+for the supported dependency set and test selection.
+
+For a local editable install on Unix, clone the repo and sync the development environment with `uv`:
 
 ```bash
 git clone https://github.com/NVIDIA-NeMo/labs-OO-Agents.git

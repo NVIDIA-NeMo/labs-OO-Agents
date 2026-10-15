@@ -5,6 +5,7 @@
 import os
 import shutil
 import subprocess
+import sys
 
 import click.testing
 import pytest
@@ -82,6 +83,7 @@ def _console_script() -> str:
 def _clean_env() -> dict[str, str]:
     env = dict(os.environ)
     env.pop("NOOA_MODEL", None)
+    env["PYTHONUTF8"] = str(sys.flags.utf8_mode)
     return env
 
 

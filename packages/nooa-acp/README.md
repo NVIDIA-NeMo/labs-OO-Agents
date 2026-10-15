@@ -23,6 +23,25 @@ uv add nooa-acp                 # or: uv add "nooa[acp]"
 There is no default model. Set `NOOA_MODEL` or pass `--model`, or the command
 exits with a usage error.
 
+## Native Windows
+
+Python 3.12 and 3.13 are supported with PowerShell 7 or Windows PowerShell 5.1.
+Both `nooa-acp` and the `nooa acp` plugin command use the shared native coding
+tools, including repository navigation, UTF-8 edits, and PowerShell commands.
+They communicate over stdin/stdout and are launched by an ACP client.
+
+From a repository checkout, in PowerShell:
+
+```powershell
+uv sync --frozen --no-dev --group test --extra acp
+$env:NOOA_MODEL = "my-model-alias"
+uv run --no-sync nooa-acp
+```
+
+Use a model alias configured through NOOA or pass a provider model name.
+The [Windows guide](../../docs/windows.md#acp-clients-and-editors) covers setup,
+supported scope, and an optional real-model acceptance command.
+
 ## Quick start: Zed
 
 Zed launches ACP agents as "external agents". Add NOOA to `settings.json`
@@ -120,7 +139,9 @@ or start a separate server per workspace with credentials scoped to that task.
 ## How it behaves
 
 ACP uses standard input and output for JSON-RPC. Diagnostics are written to
-standard error. The agent can execute generated Python and shell commands, so
+standard error, including ordinary Python output from model clients and host
+setup; it must not enter the protocol stream. The agent can execute generated
+Python and shell commands, so
 use an OS-level sandbox for untrusted tasks. Generated code shares the agent's
 process environment, including model credentials; launch it with only the
 credentials and network access that the session may use.
@@ -183,3 +204,17 @@ additional workspace directories, images, and embedded resources are not
 advertised yet. An unavailable, duplicate, or unsupported MCP server is skipped
 with a session warning so it cannot prevent a new or restored NOOA session from
 opening.
+
+## Verification
+
+```powershell
+uv run --no-sync python -m pytest -q packages/nooa-acp/tests
+```
+
+Windows CI exercises the installed commands with a local scripted HTTP model
+endpoint and real PowerShell 7/5.1 tools. It checks search and edits, file diffs,
+stdout/stderr and exit codes, cancellation after native children start,
+continuation in the same session, and durable reload across ACP process
+restarts. Test users, settings, model configuration, and sessions are isolated
+from the developer's real configuration. These are protocol acceptance tests;
+editor-specific UI behavior requires separate verification.

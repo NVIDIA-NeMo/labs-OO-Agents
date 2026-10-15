@@ -501,7 +501,7 @@ def test_library_source_has_no_ui_or_provider_imports():
 
     imported = []
     for source in Path(connect.__file__).parent.rglob("*.py"):
-        for node in ast.walk(ast.parse(source.read_text())):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Import):
                 imported.extend(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom):

@@ -21,8 +21,8 @@ from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
 from nooa.skill import Skill
-from nooa.tools._bash_session import BashSession
 from nooa.tools._results import StreamDone, StreamEvent
+from nooa.tools._shell_session import ShellName, ShellSession
 from nooa.tools.shell_tools import FileWrite, Match, ShellResult, ShellTools
 
 logger = logging.getLogger(__name__)
@@ -207,6 +207,7 @@ class ActivityShellTools(Skill):
 
     Interactive agents opt into this class explicitly. The underlying
     ``ShellTools`` remains independent of event management and host UX.
+    ``shell`` identifies the command language: PowerShell on Windows, Bash on Unix.
     """
 
     def __init__(
@@ -217,6 +218,7 @@ class ActivityShellTools(Skill):
         super().__init__()
         self._shell = shell
         self._event_manager = event_manager
+        self.shell: ShellName = shell.shell
 
     def __repr__(self) -> str:
         return f"ActivityShellTools(cwd={self.cwd!s})"
@@ -233,8 +235,8 @@ class ActivityShellTools(Skill):
 
     @property
     @hidden
-    def session(self) -> BashSession:
-        """The wrapped shell's persistent bash session."""
+    def session(self) -> ShellSession:
+        """The wrapped shell's persistent shell session."""
         return self._shell.session
 
     @hidden
@@ -266,6 +268,10 @@ class ActivityShellTools(Skill):
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
         timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        cwd: Annotated[
+            str | Path | None,
+            spec(description="Directory for this command only, relative to the shell or absolute"),
+        ] = None,
     ) -> ShellResult:
         command_id = str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -279,14 +285,14 @@ class ActivityShellTools(Skill):
             TerminalCommandStarted(
                 command_id=command_id,
                 command=bounded_command,
-                working_directory=str(self.cwd),
+                working_directory=str(self.cwd if cwd is None else self._resolve_path(str(cwd))),
                 stdin=bounded_stdin,
                 command_truncated=command_truncated,
                 stdin_truncated=stdin_truncated,
             )
         )
         try:
-            result = await self._shell.run(command, stdin=stdin, timeout=timeout)
+            result = await self._shell.run(command, stdin=stdin, timeout=timeout, cwd=cwd)
         except BaseException as error:
             cancelled = isinstance(error, asyncio.CancelledError)
             self._emit(
@@ -331,6 +337,10 @@ class ActivityShellTools(Skill):
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
         timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        cwd: Annotated[
+            str | Path | None,
+            spec(description="Directory for this command only, relative to the shell or absolute"),
+        ] = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         command_id = str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -339,7 +349,7 @@ class ActivityShellTools(Skill):
             TerminalCommandStarted(
                 command_id=command_id,
                 command=bounded_command,
-                working_directory=str(self.cwd),
+                working_directory=str(self.cwd if cwd is None else self._resolve_path(str(cwd))),
                 command_truncated=command_truncated,
                 stdin=(
                     pformat(stdin, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -352,7 +362,7 @@ class ActivityShellTools(Skill):
         finished = False
         stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
         stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS // 2)
-        stream = self._shell.run_stream(command, stdin=stdin, timeout=timeout)
+        stream = self._shell.run_stream(command, stdin=stdin, timeout=timeout, cwd=cwd)
         try:
             async for item in stream:
                 if isinstance(item, StreamDone):
@@ -447,7 +457,7 @@ class ActivityShellTools(Skill):
             start_line = None
             end_line = None
             try:
-                with resolved.open("r") as stream:
+                with resolved.open("r", encoding="utf-8") as stream:
                     content = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
                 if len(content) <= _MAX_EVENT_TEXT_CHARS:
                     offset = content.index(old_text)
@@ -497,7 +507,7 @@ class ActivityShellTools(Skill):
         old_content_complete = not existed
         if existed:
             try:
-                with resolved.open("r") as stream:
+                with resolved.open("r", encoding="utf-8") as stream:
                     old_diff_text = stream.read(_MAX_DIFF_INPUT_CHARS + 1)
                 old_content_complete = len(old_diff_text) <= _MAX_EVENT_TEXT_CHARS
             except (OSError, UnicodeError):

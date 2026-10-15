@@ -141,11 +141,11 @@ class TestDedup:
         # 'a' appears twice; only its last occurrence is kept.
         assert chain == [b.resolve(), a.resolve()]
 
-    def test_symlink_dedup(self, user_dir, project_dir, tmp_path, monkeypatch):
+    def test_symlink_dedup(self, user_dir, project_dir, tmp_path, monkeypatch, symlink_file):
         target = tmp_path / "target.yaml"
         _write_yaml(target)
         link = user_dir / "llm_config.yaml"
-        link.symlink_to(target)
+        symlink_file(link, target)
         monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(target))
         chain = llm_config_chain()
         # Symlinked user-dir entry resolves to the same real path as

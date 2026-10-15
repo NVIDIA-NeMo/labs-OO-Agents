@@ -53,6 +53,75 @@ jobs:
       - name: Sandbox containment tests
         run: uv run pytest -q -m sandbox
 
+  windows-core:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      # Exercise the native Windows locale; config and source files use UTF-8.
+      PYTHONUTF8: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the core, CLI, ACP, AST navigation, viewer, and test tools
+        run: uv sync --frozen --package nooa --package nooa-cli --package nooa-acp --no-dev --group test --extra cli --extra acp --extra viewer --extra tracing --extra ast
+      - name: Native Windows core regression tests
+        shell: pwsh
+        run: |
+          $testPaths = @(
+            "tests/test_platform_core.py",
+            "tests/tools/test_powershell_session.py",
+            "tests/tools/test_shell_session_platform.py",
+            "tests/test_metaclass.py",
+            "tests/test_ellipsis_detection_exec.py",
+            "tests/test_event_backend_roundtrip.py",
+            "tests/storage",
+            "tests/test_sqlite_close_commit.py",
+            "tests/test_sqlite_storage_latest.py",
+            "tests/test_sqlite_specific.py",
+            "tests/test_sqlite_reconnect.py",
+            "tests/test_sqlite_corruption_resilience.py",
+            "tests/test_layered_config.py",
+            "tests/test_secrets.py",
+            "tests/test_llm_config_chain.py",
+            "tests/unifiedllm/connect",
+            "tests/runtime/test_generator_method_span_tree.py",
+            "tests/runtime/test_producers.py",
+            "src/nooa/runtime/tests/test_producers.py",
+            "tests/tracing/test_context_isolation.py",
+            "tests/viewer/test_main.py",
+            "packages/nooa-cli/tests/test_cli_smoke.py",
+            "packages/nooa-cli/tests/test_coding_activity.py",
+            "packages/nooa-cli/tests/test_coding_agent.py",
+            "packages/nooa-cli/tests/test_coding_workflow.py",
+            "packages/nooa-cli/tests/test_repo_tools.py",
+            "packages/nooa-cli/tests/test_tree_sitter_backend.py",
+            "packages/nooa-cli/tests/test_sessions.py",
+            "packages/nooa-cli/tests/test_connect_edit.py",
+            "packages/nooa-cli/tests/test_connect_command.py",
+            "packages/nooa-cli/tests/test_connect_view.py",
+            "packages/nooa-acp/tests"
+          )
+          uv run --no-sync python -m pytest -q --timeout=60 @testPaths
+      - name: CLI entry points
+        run: |
+          uv run --no-sync nooa --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-sync nooa --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-sync nooa config --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-sync nooa start-dev --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-sync nooa-acp --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-sync nooa acp --help
+
   python-313-error-compat:
     runs-on: ubuntu-latest
     permissions:

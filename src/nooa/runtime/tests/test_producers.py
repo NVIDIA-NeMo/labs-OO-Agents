@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -141,7 +142,7 @@ async def test_run_job_with_spawn():
 
 @pytest.mark.asyncio
 async def test_monitor_streams_stdout_lines():
-    gen = monitor('echo "hello" && echo "world"')
+    gen = monitor('echo "hello"; echo "world"')
     lines = []
     async for line in gen:
         lines.append(line)
@@ -154,16 +155,26 @@ async def test_monitor_with_spawn_and_buffer():
     qm = QueueManager(event_manager=em)
     ch = qm.queue("ci")
 
+    command = (
+        '1..3 | ForEach-Object { "step $_" }'
+        if sys.platform == "win32"
+        else 'for i in 1 2 3; do echo "step $i"; done'
+    )
     h = qm.spawn(
-        monitor('for i in 1 2 3; do echo "step $i"; done'),
+        monitor(command),
         channel="ci",
         buffer=10,
     )
 
     lines = []
-    for _ in range(3):
-        lines.append(await asyncio.wait_for(ch.get(), timeout=2.0))
-    await asyncio.sleep(0.1)
+    try:
+        for _ in range(3):
+            lines.append(await asyncio.wait_for(ch.get(), timeout=10.0))
+        async with asyncio.timeout(5):
+            while h.state == "running":
+                await asyncio.sleep(0.01)
+    finally:
+        await h.cancel()
 
     assert lines == ["step 1", "step 2", "step 3"]
     assert h.state == "done"
@@ -176,11 +187,18 @@ async def test_monitor_cancel_kills_subprocess():
     qm = QueueManager()
     ch = qm.queue("long")
 
+    command = (
+        "while ($true) { 'tick'; Start-Sleep -Milliseconds 10 }"
+        if sys.platform == "win32"
+        else "while true; do echo tick; sleep 0.01; done"
+    )
     h = qm.spawn(
-        monitor("while true; do echo tick; sleep 0.01; done"),
+        monitor(command),
         channel="long",
         buffer=5,
     )
-    await asyncio.wait_for(ch.get(), timeout=1.0)
-    await h.cancel()
+    try:
+        await asyncio.wait_for(ch.get(), timeout=10.0)
+    finally:
+        await h.cancel()
     assert h.state == "cancelled"

@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 
 import pytest
 
 
 def _missing_prereqs() -> list[str]:
+    if sys.platform == "win32":
+        # The native Windows job runs PowerShell contracts, not Bash searches.
+        return []
     return [tool for tool in ("rg", "grep") if shutil.which(tool) is None]
 
 

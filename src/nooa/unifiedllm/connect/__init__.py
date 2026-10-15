@@ -33,6 +33,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import yaml
 
+from nooa._file_lock import lock_file, unlock_file
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 
 from ._records import (
@@ -2434,11 +2435,12 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Lock a stable sidecar inode, not the registry inode replaced atomically.
     # Keep the lock file: unlinking it would let a third writer bypass waiters.
-    import fcntl
-
-    with path.with_name(f".{path.name}.lock").open("a") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        _write_entry(entry, path, alias=alias)
+    with path.with_name(f".{path.name}.lock").open("a+b") as lock:
+        lock_file(lock.fileno())
+        try:
+            _write_entry(entry, path, alias=alias)
+        finally:
+            unlock_file(lock.fileno())
 
 
 def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
@@ -2517,7 +2519,12 @@ def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", delete=False
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=path.parent,
+            prefix=path.name + ".",
+            delete=False,
         ) as temporary:
             temporary_path = Path(temporary.name)
             temporary.write(text.replace("\n", newline))

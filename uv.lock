@@ -1468,6 +1468,13 @@ dev = [
     { name = "uvicorn" },
     { name = "watchfiles" },
 ]
+test = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pytest-rerunfailures" },
+    { name = "pytest-timeout" },
+]
 trace-viewer = [
     { name = "fastapi" },
     { name = "python-dotenv" },
@@ -1533,6 +1540,13 @@ dev = [
     { name = "ruff", specifier = ">=0.14.14" },
     { name = "uvicorn", specifier = ">=0.38.0" },
     { name = "watchfiles", specifier = ">=1.0.0" },
+]
+test = [
+    { name = "pytest", specifier = ">=7.4.0" },
+    { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-rerunfailures", specifier = ">=14.0" },
+    { name = "pytest-timeout", specifier = ">=2.3.0" },
 ]
 trace-viewer = [
     { name = "fastapi", specifier = ">=0.123.4" },

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from nooa.tools._bash_session import BashSession
+    from nooa.tools._shell_session import ShellSession
 
 logger = logging.getLogger(__name__)
 _current_scope: ContextVar[BackgroundServiceScope | None] = ContextVar(
@@ -29,10 +29,10 @@ class BackgroundServiceScope:
     """
 
     def __init__(self) -> None:
-        self._sessions: dict[int, BashSession] = {}
+        self._sessions: dict[int, ShellSession] = {}
         self._closed = False
 
-    def adopt(self, session: BashSession) -> None:
+    def adopt(self, session: ShellSession) -> None:
         """Include a shell constructed before entering the invocation scope."""
         if self._closed:
             raise RuntimeError("Background service scope has already closed")

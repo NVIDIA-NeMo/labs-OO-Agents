@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -15,12 +16,14 @@ PER_PROBE = DISCOVERY_OUTPUT_TOKENS + 512
 
 
 @pytest.fixture(autouse=True)
-def sdk_credentials(monkeypatch):
+def sdk_credentials(monkeypatch, tmp_path):
     from nooa_cli.commands import _connect_prompts as _connect_prompts
 
     from nooa import llm_config
 
     monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [])
+    # Windows expanduser() uses USERPROFILE, including the literal-tilde tests.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     # Reply-budget interaction has its own contract tests.
     monkeypatch.setattr(
         _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
@@ -974,7 +977,10 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     assert context["remaining_budget_tokens"] == connect.DEFAULT_CHECK_BUDGET - 3 * PER_PROBE
     assert context["interface_timeout_seconds"] == 30
     assert "--stage interfaces" in context["rerun_command"]
-    assert "skills/nooa-model-configuration/SKILL.md" in handoff
+    assert any(
+        Path(path).as_posix().endswith("skills/nooa-model-configuration/SKILL.md")
+        for path in context["reference_paths"]
+    )
     assert "git clone" not in handoff
     assert litellm.suppress_debug_info is False
     # check_interfaces now also probes reasoning by default for the one

@@ -128,6 +128,12 @@ class CodingAgent(InteractiveAgent):
             doc(RepoTools, ActivityShellTools),
             prefix=True,
         )
+        self.context["shell_environment"] = Context(
+            f"Shell command language: {self.shell.shell}.\n"
+            "CodeAct execution cells use Python. Commands passed to self.shell.run() "
+            "or self.shell.run_stream() use the selected shell's syntax and quoting.",
+            prefix=True,
+        )
         self.context["todo_status"] = Context(expr="self.todo.status()")
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"

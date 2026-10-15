@@ -53,6 +53,10 @@ Provider compatibility checks across model backends and API shapes.
 ### `runtime/` - Runtime internals
 Context building, event manager, code execution, hooks, pure Python executor/REPL, structured output executor, async deadlock prevention, span relationships, truncation behavior, and runtime evaluation.
 
+Producer tests cover native shell command monitoring, streaming, cancellation,
+and isolated child-process cleanup on Windows and Unix. QueueManager integration
+is also covered in `src/nooa/runtime/tests/test_producers.py`.
+
 ### `runtime/sandbox/` - Sandbox executor
 Sandbox executor behavior, broker deadlines, CodeAct sandbox integration, guard enforcement, sandbox config, nested async proxies, read-only module state, teardown behavior, and implicit return handling.
 
@@ -66,7 +70,9 @@ In-memory storage, snapshot markers, serialization, snapshot variables, and snap
 MCP client, tool calls, OAuth discovery, browser detection, exception descriptions, and timeout refresh behavior.
 
 ### `tools/` - Built-in tools
-Bash tool and file tool tests.
+Persistent Bash and native PowerShell sessions, shell selection, process ownership,
+streaming, and file tools. The PowerShell contracts exercise both PowerShell 7 and
+Windows PowerShell 5.1 when installed.
 
 ### `trace_explorer/` - Trace explorer storage and queries
 Trace explorer cache, client, database queries, filtered loading, OTLP span conversion, fast path loading, and OpenInference backcompat.
@@ -92,11 +98,14 @@ Viewer main routes, journal and OTLP stores, OTLP ingest, stress coverage, image
 
 ### Prerequisites
 
-- `ripgrep` (`rg`) and `grep` must be on `PATH`. The 145 tests in
-  `tests/tools/test_shell_tools_modern.py` skipif-away without them, and a
-  clean skip is indistinguishable from a pass in the summary line. Install
-  with `apt install ripgrep` on Debian/Ubuntu or `brew install ripgrep` on
-  macOS.
+- On Unix, `ripgrep` (`rg`) and `grep` must be on `PATH` for the Bash search
+  tests in `tests/tools/test_shell_tools_modern.py`. Missing tools skip those
+  tests locally and fail the tools prerequisite check in CI. Install ripgrep
+  with `apt install ripgrep` on Debian/Ubuntu or `brew install ripgrep` on macOS.
+- Native Windows shell tests require PowerShell 7 (`pwsh`) or Windows
+  PowerShell 5.1 (`powershell`). They do not require `rg`, `grep`, or Git Bash.
+  See [Windows support](../docs/windows.md) for the supported dependency set
+  and CI test selection; the full suite includes Unix-only workflows.
 
 ```bash
 uv run pytest                          # all tests
@@ -105,3 +114,29 @@ uv run pytest tests/runtime/sandbox/   # nested runtime area
 uv run pytest tests/test_metaclass.py  # single file
 uv run pytest -k "test_codeact" -v     # by name pattern
 ```
+
+After the Windows setup, run the native shell and caller contracts with:
+
+```powershell
+uv run --no-sync python -m pytest -q --timeout=60 tests/tools/test_powershell_session.py tests/tools/test_shell_session_platform.py packages/nooa-cli/tests/test_coding_activity.py
+uv run --no-sync python -m pytest -q --timeout=60 packages/nooa-cli/tests/test_repo_tools.py packages/nooa-cli/tests/test_coding_workflow.py tests/runtime/test_producers.py src/nooa/runtime/tests/test_producers.py
+```
+
+The coding workflow tests use scripted model responses with real CodeAct,
+repository search, UTF-8 file edits, local test commands, and activity events.
+They exercise both installed PowerShell versions on Windows, without model
+credentials or Git Bash. The Windows CI job installs the optional AST grammars
+and also tests the regex fallback explicitly.
+
+After installing the ACP extra, run:
+
+```powershell
+uv run --no-sync python -m pytest -q packages/nooa-acp/tests
+```
+
+Native ACP tests launch the installed `nooa-acp` and
+`nooa acp` commands against a scripted loopback HTTP model, with isolated user
+configuration. They verify protocol output, actual file and terminal activity,
+process-tree cancellation, and session reload across process restarts. Real
+model acceptance is opt-in through `scripts/smoke_acp_coding.py`; it is not part
+of credential-free CI.

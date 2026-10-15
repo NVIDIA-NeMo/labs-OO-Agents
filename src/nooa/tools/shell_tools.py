@@ -34,13 +34,14 @@ import json
 import re
 import shlex
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
-from nooa.tools._bash_session import BashSession
 from nooa.tools._results import StreamDone, StreamEvent
+from nooa.tools._shell_session import ShellName, ShellSession, create_shell_session
 
 
 class FileWrite:
@@ -242,11 +243,11 @@ class ShellResult(str):
 
     String operations (``"x" in r``, ``r.splitlines()``, ``r.strip()``) act on
     stdout, so existing code keeps working. But ``repr(r)`` / ``print(r)`` show
-    a structured ``BashOutput(...)`` view that surfaces stderr and a non-zero
-    return code as named fields — so failures can't be missed (a crashing
+    a structured ``BashOutput(...)`` or ``PowerShellOutput(...)`` view with stderr
+    and a non-zero return code as named fields — so failures can't be missed (a crashing
     command with empty stdout no longer prints as blank).
 
-    ``.matches`` is a ``list[Match]`` when the command was a pure search and the
+    ``.matches`` is a ``list[Match]`` when a Bash command was a pure search and the
     anchors are trustworthy; otherwise ``None``.
     """
 
@@ -256,6 +257,7 @@ class ShellResult(str):
     timed_out: bool
     success: bool
     matches: list[Match] | None
+    shell: ShellName
 
     def __new__(
         cls,
@@ -264,6 +266,8 @@ class ShellResult(str):
         returncode: int = 0,
         matches: list[Match] | None = None,
         timed_out: bool = False,
+        *,
+        shell: ShellName = "bash",
     ):
         obj = super().__new__(cls, stdout)
         obj.stdout = stdout
@@ -272,6 +276,7 @@ class ShellResult(str):
         obj.timed_out = timed_out
         obj.success = returncode == 0
         obj.matches = matches
+        obj.shell = shell
         return obj
 
     def __repr__(self) -> str:
@@ -280,7 +285,8 @@ class ShellResult(str):
             parts.append(f"stderr={self.stderr!r}")
         if self.returncode != 0:
             parts.append(f"return_code={self.returncode}")
-        return f"BashOutput({', '.join(parts)})"
+        label = "PowerShellOutput" if self.shell == "powershell" else "BashOutput"
+        return f"{label}({', '.join(parts)})"
 
     def __str__(self) -> str:
         return self.__repr__()
@@ -388,6 +394,10 @@ class ShellTools(Skill):
     """
     Persistent shell + file ops, with grep that hands you editable Match objects.
 
+    ``shell`` identifies the command language: PowerShell on native Windows,
+    Bash on Unix. Use that language's quoting and commands. In PowerShell,
+    searches return text; use read() to obtain editable Match anchors.
+
     For shell commands and file operations:
     Always use these four methods rather than Python builtins:
         run(command, stdin=, timeout=, cwd=)  — shell command (cd/env persist)
@@ -395,10 +405,10 @@ class ShellTools(Skill):
         replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
         write_file(path, content)      — create/overwrite a file
 
-    Grep that you can edit from directly. When run() executes a plain search
-    (grep/rg/egrep), the result still prints the EXACT bytes your command
-    produced — and it also carries ``.matches``, a list of Match objects you can
-    pass straight to replace(). No re-grep, no parsing the text yourself::
+    In Bash, when run() executes a plain search (grep/rg/egrep), the result
+    preserves the displayed command output and also carries ``.matches``, a list
+    of Match objects you can pass straight to replace(). No re-grep, no parsing
+    the text yourself::
 
         r = await shell.run("grep -rn 'def foo' src/")
         print(r)                          # byte-accurate grep output, unchanged
@@ -430,39 +440,40 @@ class ShellTools(Skill):
         init_command: str | None = None,
         *,
         keep_background_on_close: bool = False,
+        shell: Literal["auto", "bash", "powershell"] = "auto",
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
         self.cwd = Path(cwd).resolve()
         # Construct the session eagerly (it starts lazily on first run) so a
         # consumer wired at construction time — e.g. RepoTools(session=shell.session)
-        # in the TUI — shares this shell's bash session instead of capturing None.
+        # in the TUI — shares this shell's session instead of capturing None.
         # ``init_command`` (if given) runs once on session start, before any user
         # command, to set up the environment (e.g. activate a conda env).
         # ``keep_background_on_close`` lets background jobs outlive close().
-        self._session: BashSession = BashSession(
+        self._session = create_shell_session(
             cwd=str(self.cwd),
             init_command=init_command,
             keep_background_on_close=keep_background_on_close,
+            shell=shell,
         )
+        self.shell: ShellName = self._session.shell_name
 
     def __repr__(self) -> str:
-        return f"ShellTools(cwd={self.cwd!s})"
+        return f"ShellTools(cwd={self.cwd!s}, shell={self.shell!r})"
 
     @property
     @hidden
-    def session(self) -> BashSession:
-        """The underlying persistent bash session (shared with e.g. RepoTools)."""
+    def session(self) -> ShellSession:
+        """The underlying persistent shell session (shared with e.g. RepoTools)."""
         return self._session
 
-    async def _get_session(self) -> BashSession:
-        if not self._session._started:
-            await self._session.start()
+    async def _get_session(self) -> ShellSession:
         return self._session
 
     @hidden
     async def close(self) -> None:
-        """Terminate the underlying bash session owned by this shell."""
+        """Terminate the underlying shell session owned by this shell."""
         await self._session.close()
 
     def _resolve_path(self, path: str) -> Path:
@@ -505,19 +516,22 @@ class ShellTools(Skill):
             cwd: Directory for this command only; the shell returns to its own.
         """
         session = await self._get_session()
-        run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
         stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
-            run_cmd, timeout=timeout
+            command, timeout=timeout, stdin=stdin, cwd=cwd
         )
         # Track cwd changes for read/replace/write_file path resolution
-        pwd_out, _, _, _ = await session.run_with_timeout_flag("pwd", timeout=5.0)
-        if pwd_out.strip():
-            self.cwd = Path(pwd_out.strip())
+        self.cwd = session.cwd
 
         matches: list[Match] | None = None
         # Match anchors are harvested from the shell's directory, so a search run
         # elsewhere gets none rather than anchors that could point at wrong files.
-        _is_search = stdin is None and cwd is None and is_pure_search_command(command)
+        # The anchor parser understands Bash quoting, not PowerShell expansion.
+        _is_search = (
+            self.shell == "bash"
+            and stdin is None
+            and cwd is None
+            and is_pure_search_command(command)
+        )
         if _is_search:
             matches = await self._harvest_matches(command, stdout)
 
@@ -534,6 +548,7 @@ class ShellTools(Skill):
             returncode=code,
             timed_out=timed_out,
             matches=matches,
+            shell=self.shell,
         )
 
     async def run_stream(
@@ -576,58 +591,23 @@ class ShellTools(Skill):
             cwd: As for run().
         """
         session = await self._get_session()
-        run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
         timed_out = False
         exit_code = 0
-        async for stream_name, chunk in session.run_stream(run_cmd, timeout=timeout):
-            if stream_name == "__done__":
-                parts = chunk.split(",")
-                exit_code = int(parts[0])
-                timed_out = bool(int(parts[1])) if len(parts) > 1 else False
-                break
-            yield StreamEvent(kind=stream_name, text=chunk)
+        try:
+            async with aclosing(
+                session.run_stream(command, timeout=timeout, stdin=stdin, cwd=cwd)
+            ) as stream:
+                async for stream_name, chunk in stream:
+                    if stream_name == "__done__":
+                        parts = chunk.split(",")
+                        exit_code = int(parts[0])
+                        timed_out = bool(int(parts[1])) if len(parts) > 1 else False
+                    else:
+                        assert stream_name in ("stdout", "stderr")
+                        yield StreamEvent(kind=stream_name, text=chunk)
+        finally:
+            self.cwd = session.cwd
         yield StreamDone(kind="done", returncode=exit_code, timed_out=timed_out)
-
-    @staticmethod
-    def _in_directory(command: str, cwd: str | Path | None) -> str:
-        """Run ``command`` in ``cwd`` in the session's own shell, then return.
-
-        Not a subshell, so exported variables and other shell state persist as
-        for any command; only the directory goes back to where it was. ``CDPATH``
-        is cleared for the ``cd`` so a relative ``cwd`` is the shell directory's
-        child. If the ``cd`` fails, its error text and status are the result and
-        the command does not run. The newline before ``}`` keeps a trailing
-        comment in ``command`` from swallowing the closing brace.
-        """
-        if cwd is None:
-            return command
-        return (
-            "__nooa_back=$PWD; "
-            f"if CDPATH= cd -- {shlex.quote(str(cwd))}; then {{ {command}\n}}; "
-            '__nooa_rc=$?; cd -- "$__nooa_back"; else __nooa_rc=$?; fi; '
-            "( exit $__nooa_rc )"
-        )
-
-    @staticmethod
-    def _with_stdin(command: str, stdin: str | None) -> str:
-        """Wrap a command so ``stdin`` is fed via a base64'd tempfile (no quoting).
-
-        The command runs in a ``{ ...; }`` group, not a subshell, so ``cd``,
-        exports and other shell state persist as for any command. The
-        redirection lasts for the group only; the session then reads its own
-        commands again. The newline before ``}`` keeps a trailing comment in
-        ``command`` from swallowing the closing brace.
-        """
-        if stdin is None:
-            return command
-        import base64
-
-        b64 = base64.b64encode(stdin.encode()).decode()
-        return (
-            f"__nemo_in=$(mktemp); base64 -d <<<'{b64}' > $__nemo_in; "
-            f"{{ {command}\n}} < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
-            f"( exit $__nemo_rc )"
-        )
 
     async def _harvest_matches(self, command: str, displayed_stdout: str) -> list[Match] | None:
         """Run the rg --json equivalent and parse anchors — fail-closed.
@@ -737,7 +717,7 @@ class ShellTools(Skill):
             if mpath not in file_cache:
                 try:
                     resolved = self._resolve_path(mpath)
-                    lines = resolved.read_text().splitlines(keepends=True)
+                    lines = resolved.read_text(encoding="utf-8").splitlines(keepends=True)
                     file_cache[mpath] = (resolved, lines)
                 except (OSError, ValueError):
                     return None
@@ -850,7 +830,7 @@ class ShellTools(Skill):
         ] = None,
     ) -> Match:
         """
-        Read a file (or line range) -> Match object.
+        Read a UTF-8 file (or line range) -> Match object.
 
         Print the Match to see numbered lines. Pass any Match to replace() for editing.
         Slice with match[start:end] to narrow the region.
@@ -863,7 +843,7 @@ class ShellTools(Skill):
             Match with .text, .numbered, .path, .start, .end.
         """
         resolved = self._resolve_path(path)
-        content = resolved.read_text()
+        content = resolved.read_text(encoding="utf-8")
         all_lines = content.splitlines(keepends=True)
         total = len(all_lines)
 
@@ -892,7 +872,7 @@ class ShellTools(Skill):
         ] = None,
     ) -> FileWrite:
         """
-        Edit a file — two forms:
+        Edit a UTF-8 file — two forms:
 
         1. replace(match, new_text) — replace the Match's line region.
         2. replace(path, old, new)  — old must match exactly once. new="" deletes.
@@ -922,7 +902,7 @@ class ShellTools(Skill):
             new_text = old_or_new
             resolved = Path(target.resolved_path)
             try:
-                content = resolved.read_text()
+                content = resolved.read_text(encoding="utf-8")
             except FileNotFoundError:
                 raise StaleMatchError(target, None, "file no longer exists") from None
             all_lines = content.splitlines(keepends=True)
@@ -960,7 +940,7 @@ class ShellTools(Skill):
             ):
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding="utf-8")
 
             diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
             diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"
@@ -979,7 +959,7 @@ class ShellTools(Skill):
                 )
             old_text = old_or_new
             resolved = self._resolve_path(target)
-            content = resolved.read_text()
+            content = resolved.read_text(encoding="utf-8")
 
             count = content.count(old_text)
             if count == 0:
@@ -994,7 +974,7 @@ class ShellTools(Skill):
                 )
 
             new_content = content.replace(old_text, new, 1)
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding="utf-8")
 
             return FileWrite(
                 path=target,
@@ -1011,7 +991,7 @@ class ShellTools(Skill):
         content: Annotated[str, spec(description="Full file content")],
     ) -> FileWrite:
         """
-        Create or overwrite a file with content (no shell quoting needed).
+        Create or overwrite a UTF-8 file with content (no shell quoting needed).
 
         Args:
             path: File path (relative to cwd or absolute).
@@ -1019,7 +999,7 @@ class ShellTools(Skill):
         """
         resolved = self._resolve_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content)
+        resolved.write_text(content, encoding="utf-8")
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return FileWrite(
             path=path,

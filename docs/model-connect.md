@@ -215,6 +215,9 @@ Add `--show-diagnostics` in the wizard to see full details.
 - The entry stores the key's variable name (`api_key_env`), never the key.
 - A key saved in `secrets.yaml` is overridden by an exported environment
   variable with the same name.
+- `secrets.yaml` is plain text with owner-only permissions: mode `0600` on
+  Unix, a protected owner-only ACL on Windows. It is written atomically, so an
+  interrupted save leaves the previous file intact.
 - To edit a saved model, run `uv run nooa connect --edit-model NAME`. Omit NAME
   to pick from a list. Edits normally go back into the file that defines the
   model. Use `--output FILE` to choose another file.
