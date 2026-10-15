@@ -299,6 +299,9 @@ class AtomACPAgent:
         # the prompt stays open until they are handled (see ``_finish``).
         self._open: dict[str, int] = {}
         self._followers: dict[str, list[tuple[Receipt, str]]] = {}
+        # A repeated cancel while its old prompt scope is still settling
+        # joins that decision, rather than stopping the retained next turn.
+        self._cancels: dict[str, asyncio.Future[None]] = {}
         # Receipts of injected messages, by session and item id, for revoke.
         self._injects: dict[str, dict[str, Receipt]] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
@@ -595,10 +598,11 @@ class AtomACPAgent:
         command is refused, and Pool then sends it as a normal prompt after
         the turn.
 
-        Pool keeps its turn open until the messages it handed over are
-        handled, so the open prompt follows this one: it returns only after
-        the turn that handles it (``_finish``), and Stop withdraws it if no
-        turn took it yet (``cancel``).
+        Normally the open prompt follows these messages until they are
+        handled (``_finish``). Stop ends that prompt with ``cancelled``, but
+        Session owns already-admitted pending work and runs it after settlement.
+        The bridge continues publishing those turns without an open prompt;
+        actual Pool rendering of that background lifecycle needs local testing.
 
         Pool shows the message in the conversation when it sees the steer's
         ``inputId`` in an input event (``pool_input_event``), which the bridge
@@ -628,21 +632,23 @@ class AtomACPAgent:
         shown = bridge.client_input_taken(receipt.item_id, input_id)
         if self._open.get(session_id):
             self._followers.setdefault(session_id, []).append((receipt, text))
-        request_cancelled = False
-        try:
-            await _taken_or_settled(
-                session,
-                receipt.item_id,
-                shown,
-                was_taken=lambda: bridge.client_input_was_taken(receipt.item_id),
-            )
-        except asyncio.CancelledError:
-            request_cancelled = True
-            raise
-        finally:
-            # Request cancellation does not withdraw its admitted input; it may
-            # be consumed later and still needs its original client-ID event.
-            bridge.release_client_input_waiter(receipt.item_id, keep_pending=request_cancelled)
+
+        async def acknowledge() -> None:
+            try:
+                await _taken_or_settled(
+                    session,
+                    receipt.item_id,
+                    shown,
+                    was_taken=lambda: bridge.client_input_was_taken(receipt.item_id),
+                )
+            finally:
+                bridge.release_client_input_waiter(receipt.item_id)
+
+        # Admission belongs to Session, not the RPC's lifetime. This owner
+        # survives a cancelled RPC waiter and releases the ID association on
+        # consumption, explicit withdrawal or close. Never submit it again.
+        owner = self._spawn(acknowledge(), name="nooa-acp-pool-input")
+        await asyncio.shield(owner)
         return {"inputId": input_id}
 
     def _revoke_inject(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -708,6 +714,8 @@ class AtomACPAgent:
             receipt = await session.submit(text, source=SOURCE)
             if self._pool_client:
                 bridge.publish(pool_input_event(receipt.item_id))
+            # A newly admitted normal prompt starts a new cancel scope.
+            self._cancels.pop(session_id, None)
             self._prompts.setdefault(session_id, []).append(receipt)
             try:
                 return await self._finish(session, bridge, receipt.item_id)
@@ -756,8 +764,9 @@ class AtomACPAgent:
         has the question in context.
         """
         self._open[session.id] = self._open.get(session.id, 0) + 1
-        # Taken now: Stop pops the list but leaves in it the followers a
-        # turn took, whose outcome is then the cancelled turn's.
+        # This list only extends the normal prompt's lifetime. Admission and
+        # acknowledgement have independent Session/bridge owners; cancellation
+        # may end this scope without waiting for its retained followers.
         followers = self._followers.setdefault(session.id, [])
         asked: list[NeedInput] = []
         try:
@@ -777,9 +786,12 @@ class AtomACPAgent:
         finally:
             self._open[session.id] -= 1
             if not self._open[session.id]:
-                # Left over only when the prompt failed: they stay queued.
+                # Left over on cancel/failure: Session still owns the queue.
                 del self._open[session.id]
                 self._followers.pop(session.id, None)
+                cancelled = self._cancels.get(session.id)
+                if cancelled is not None and cancelled.done():
+                    self._cancels.pop(session.id, None)
 
     async def _finish_item(
         self,
@@ -1158,33 +1170,42 @@ class AtomACPAgent:
         return PromptResponse(stop_reason="end_turn")
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
-        """Stop the running turn. The bridge closes its cards when the Session reports it."""
+        """Stop the current turn, preserving admitted Pool followers.
+
+        Concurrent cancels, and late repeats while the cancelled prompt scope
+        is still open, join one settlement. Once that scope ends (or a new
+        normal prompt is admitted), a new cancel intentionally targets the
+        then-current turn. No global debounce or client protocol is implied.
+        """
         del kwargs
         session = self.session(session_id)
         if session is None or session_id not in self._bridges:
-            return  # a notification: nothing to answer
+            return
+        decision = self._cancels.get(session_id)
+        if decision is not None:
+            await asyncio.shield(decision)
+            return
+        decision = asyncio.get_running_loop().create_future()
+        self._cancels[session_id] = decision
         self._cancel_client_calls(session_id)
-        # A prompt request must be answered: a prompt whose message no turn
-        # took is withdrawn and returns "cancelled"; the one the running turn
-        # took returns "cancelled" with it. Injected messages stay queued.
+        # Detach only prompt-lifetime bookkeeping, not admission or the
+        # acknowledgement owners. A new prompt must not follow this old list.
+        self._followers.pop(session_id, None)
+        # Capture this request scope before yielding, so a subsequently
+        # admitted normal prompt is not withdrawn by this old decision.
         for receipt in self._prompts.pop(session_id, []):
             session.withdraw(receipt)
-        # Messages Pool handed over during the prompt go with it: the ones
-        # no turn took are withdrawn, so they do not run with no prompt
-        # open, and listed, so none is lost silently.
-        stopped = [
-            text
-            for receipt, text in self._followers.pop(session_id, [])
-            if session.withdraw(receipt)
-        ]
-        if stopped:
-            listed = "\n".join(f"- {text}" for text in stopped)
-            self._bridges[session_id].publish(
-                update_agent_message(
-                    text_block(f"Stopped before these messages were handled:\n\n{listed}")
-                )
-            )
-        await session.cancel(by="user")
+        try:
+            # Run in this caller up to the settlement wait: scheduling a new
+            # task first could let the dispatcher start a different turn.
+            await session.cancel(by="user")
+        finally:
+            # Cancelling the notification waiter cannot retract the turn's
+            # cancellation. Its prompt still owns settlement; repeats while
+            # that scope is open must not target a new pending turn.
+            decision.set_result(None)
+            if not self._open.get(session_id) and self._cancels.get(session_id) is decision:
+                self._cancels.pop(session_id, None)
 
     # ---- modes and models ----------------------------------------------
 
@@ -1488,7 +1509,7 @@ class AtomACPAgent:
 
         self._spawn(publish(), name="nooa-acp-bootstrap")
 
-    def _spawn(self, coroutine: Any, *, name: str) -> None:
+    def _spawn(self, coroutine: Any, *, name: str) -> asyncio.Task[None]:
         task = asyncio.ensure_future(coroutine)
         task.set_name(name)
         self._background.add(task)
@@ -1499,6 +1520,7 @@ class AtomACPAgent:
                 logger.debug("%s failed", name, exc_info=done.exception())
 
         task.add_done_callback(finished)
+        return task
 
     @staticmethod
     def _replay(bridge: ACPEventBridge, session: Session, *, pool: bool = False) -> None:

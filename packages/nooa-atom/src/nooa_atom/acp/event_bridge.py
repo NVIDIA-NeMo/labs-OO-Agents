@@ -1188,6 +1188,7 @@ class ACPEventBridge:
             await self.flush()
         self._closed = True
         self._fail_client_inputs(RuntimeError("closed"))
+        self._client_inputs.clear()
         self._queue.put_nowait(_STOP)
         with suppress(BaseException):
             await self._pump_task

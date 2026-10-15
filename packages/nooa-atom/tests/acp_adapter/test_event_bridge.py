@@ -1478,12 +1478,8 @@ async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, ph
     session = SessionWithInput(agent)
     client = GatedClient()
     bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
-    adapter = SimpleNamespace(
-        _followed=lambda _id: (session, bridge),
-        _open={},
-        _followers={},
-        _prompt_text=AtomACPAgent._prompt_text,
-    )
+    adapter = AtomACPAgent(lambda _store: None)
+    adapter._followed = lambda _id: (session, bridge)
     try:
         if phase == "queued":
             bridge.publish(update_agent_message(text_block("gated preceding update")))
@@ -1509,7 +1505,10 @@ async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, ph
         with pytest.raises(asyncio.CancelledError):
             await request
         assert not outcome.cancelled()
-        outcome.set_result(None)
+        # A still-admitted item has not settled. The independent owner must
+        # retain its association until actual consumption or withdrawal.
+        if phase != "never-taken":
+            outcome.set_result(None)
         client.release.set()
         if phase != "never-taken" and send_failure:
             with pytest.raises(ConnectionResetError, match="synthetic cancelled waiter"):
@@ -1536,8 +1535,11 @@ async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, ph
             await bridge.flush()
             acks = [u for _, u in client.updates if isinstance(u, SessionInfoUpdate)]
             assert acks == [pool_input_event("owed", "client-owed")]
+            outcome.set_result(None)
+        await asyncio.gather(*adapter._background, return_exceptions=True)
         assert bridge._client_inputs == {}
     finally:
+        await adapter.close()
         await bridge.close()
         await agent.aclose()
 
