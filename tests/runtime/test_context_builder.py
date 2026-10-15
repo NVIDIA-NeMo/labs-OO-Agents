@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nooa.context_blocks import DynamicContext, ResolvedBlock, Role
+from nooa.context_blocks import DynamicContext, ExpressionContextBlock, ResolvedBlock, Role
 from nooa.context_blocks.events import ToolCallEvent, ToolResult, UserEvent
 
 # ---------------------------------------------------------------------------
@@ -242,6 +242,25 @@ class TestPhasePersistentBlocks:
         assert blocks[0].key == "status"
         assert "resolved:" in blocks[0].content
         assert blocks[0].metadata.expr == "self.get_status()"
+
+    @pytest.mark.asyncio
+    async def test_expression_uses_display_expr_only_for_rendered_metadata(self):
+        from nooa.runtime.context_builder import _phase_persistent_blocks
+        from nooa.runtime.context_manager import ContextManager
+
+        cm = ContextManager()
+        cm.restore_block(
+            ExpressionContextBlock(
+                key="status",
+                expr="self.get_status()",
+                display_expr="self.context['status']",
+            )
+        )
+
+        blocks, _ = await _phase_persistent_blocks([], cm, _identity_resolve)
+
+        assert blocks[0].content == "<resolved:self.get_status()>"
+        assert blocks[0].metadata.expr == "self.context['status']"
 
     @pytest.mark.asyncio
     async def test_pprints_non_string_values(self):

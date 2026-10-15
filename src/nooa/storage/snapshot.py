@@ -7,34 +7,24 @@ Pydantic models provide validation and JSON serialization out of the box.
 """
 
 import logging
-from typing import Any, Final, Literal
+from collections.abc import Mapping
+from typing import Any, Final
 
-from pydantic import BaseModel, field_serializer, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
-from nooa.context_blocks import DynamicContext
+from nooa.context_blocks import (
+    ContextBlock,
+    ExpressionContextBlock,
+    LiteralContextBlock,
+)
 from nooa.errors.storage import SerializationError
 from nooa.storage.markers import is_nosnapshot_field, is_nosnapshot_value
 from nooa.storage.serialization import SKIP, deserialize, serialize
 
-SNAPSHOT_VERSION: Final = 2
+SNAPSHOT_VERSION: Final = 3
+LEGACY_SNAPSHOT_VERSION: Final = 2
 
 logger = logging.getLogger(__name__)
-
-
-class StaticContextBlock(BaseModel):
-    """A static context block with a JSON-serializable value."""
-
-    key: str
-    type: Literal["static"] = "static"
-    value: Any = None
-
-
-class DynamicContextBlock(BaseModel):
-    """A dynamic context block with a Python expression string."""
-
-    key: str
-    type: Literal["dynamic"] = "dynamic"
-    expr: str
 
 
 class AgentSnapshot(BaseModel):
@@ -45,10 +35,42 @@ class AgentSnapshot(BaseModel):
     """
 
     version: int = SNAPSHOT_VERSION
-    context: list[StaticContextBlock | DynamicContextBlock] = []
-    disabled_context: list[str] = []
-    attributes: dict[str, Any] = {}
-    type_allowlist: set[str] = set()
+    context: list[ContextBlock] = Field(default_factory=list)
+    disabled_context: list[str] = Field(default_factory=list)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    type_allowlist: set[str] = Field(default_factory=set)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_v2(cls, value: Any) -> Any:
+        """Upgrade legacy v2 block tags to the canonical v3 schema."""
+        if not isinstance(value, Mapping) or value.get("version") != LEGACY_SNAPSHOT_VERSION:
+            return value
+
+        migrated = dict(value)
+        blocks: list[Any] = []
+        for raw_block in value.get("context", []):
+            if isinstance(raw_block, BaseModel):
+                raw_block = raw_block.model_dump()
+            if not isinstance(raw_block, Mapping):
+                blocks.append(raw_block)
+                continue
+
+            block = dict(raw_block)
+            block_type = block.get("type")
+            if block_type == "static":
+                block["type"] = "literal"
+            elif block_type == "dynamic":
+                block["type"] = "expression"
+
+            block.setdefault("prefix", False)
+            if block.get("type") == "expression":
+                block.setdefault("display_expr", None)
+            blocks.append(block)
+
+        migrated["context"] = blocks
+        migrated["version"] = SNAPSHOT_VERSION
+        return migrated
 
     @field_serializer("type_allowlist")
     @classmethod
@@ -78,22 +100,22 @@ class AgentSnapshot(BaseModel):
         """
         all_allowlist: set[str] = set()
 
-        context_blocks: list[StaticContextBlock | DynamicContextBlock] = []
+        context_blocks: list[ContextBlock] = []
         protected = agent.context_manager.protected_keys
-        for key, value in agent.context_manager._raw_items():
+        for key, block in agent.context_manager._raw_items():
             if key in protected:
                 continue  # Framework blocks are recreated by __init__
-            if isinstance(value, DynamicContext):
-                context_blocks.append(DynamicContextBlock(key=key, expr=value.expr))
-            else:
+            if isinstance(block, LiteralContextBlock):
                 try:
-                    serialized, allowlist = serialize(value)
+                    serialized, allowlist = serialize(block.value)
                     all_allowlist |= allowlist
                 except SerializationError as exc:
                     raise SerializationError(
                         f"Context block {key!r} is not serializable: {exc}"
                     ) from exc
-                context_blocks.append(StaticContextBlock(key=key, value=serialized))
+                context_blocks.append(block.model_copy(update={"value": serialized}))
+            else:
+                context_blocks.append(block)
 
         attributes: dict[str, Any] = {}
         agent_cls = type(agent)
@@ -153,25 +175,13 @@ class AgentSnapshot(BaseModel):
             )
 
         for block in self.context:
-            # ``from_agent`` skips protected (framework) keys, so snapshots
-            # produced by this codebase never carry them and the
-            # ``is_protected`` branches below are unreachable for round-tripped
-            # data. They are kept deliberately as defensive handling for
-            # externally-supplied snapshot JSON — hand-edited or legacy
-            # payloads that may still contain protected keys — so such keys are
-            # restored via the protected setters rather than corrupting state.
-            is_protected = block.key in agent.context_manager.protected_keys
-            if isinstance(block, DynamicContextBlock):
-                if is_protected:
-                    agent.context_manager.set_dynamic_protected(block.key, block.expr)
-                else:
-                    agent.context_manager.set_dynamic(block.key, block.expr)
+            if isinstance(block, LiteralContextBlock):
+                block = block.model_copy(
+                    update={"value": deserialize(block.value, self.type_allowlist)}
+                )
             else:
-                value = deserialize(block.value, self.type_allowlist)
-                if is_protected:
-                    agent.context_manager.set_static_protected(block.key, value)
-                else:
-                    agent.context_manager[block.key] = value
+                assert isinstance(block, ExpressionContextBlock)
+            agent.context_manager.restore_block(block)
 
         if self.disabled_context:
             agent.context_manager.disable(*self.disabled_context)

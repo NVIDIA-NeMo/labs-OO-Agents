@@ -10,7 +10,7 @@ This test verifies that the LLM can:
 
 from nooa import Agent
 from nooa.agentdoc import spec
-from nooa.context_blocks import DynamicContext
+from nooa.context_blocks import ExpressionContextBlock
 
 
 class Notes:
@@ -97,7 +97,7 @@ class NoteTakingTestWrapper(Agent):
         dynamic_blocks = {
             k: v.expr
             for k, v in self._inner_agent.context_manager._raw_items()
-            if isinstance(v, DynamicContext)
+            if isinstance(v, ExpressionContextBlock)
         }
 
         return {
