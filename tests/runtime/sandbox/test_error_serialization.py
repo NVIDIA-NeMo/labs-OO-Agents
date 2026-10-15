@@ -627,3 +627,38 @@ def test_synthetic_boundary_errors_are_concise_and_do_not_fabricate_source(
     assert "Cell In[" not in diagnostic
     assert "Traceback" not in diagnostic
     assert "^" not in diagnostic
+
+
+def _code_syntax_error():
+    from nooa.errors import CodeSyntaxError
+
+    try:
+        compile("x = (\n", "Cell In[1]", "exec")
+    except SyntaxError as error:
+        return CodeSyntaxError(error)
+    raise AssertionError("expected a SyntaxError")
+
+
+@pytest.mark.parametrize("round_trip", ["pickle", "deepcopy"])
+def test_code_syntax_error_round_trips(round_trip):
+    """#447 review finding 5: args holds the message, __init__ takes the SyntaxError."""
+    import copy
+    import pickle
+
+    from nooa.errors import CodeSyntaxError
+
+    error = _code_syntax_error()
+    copied = pickle.loads(pickle.dumps(error)) if round_trip == "pickle" else copy.deepcopy(error)
+    assert type(copied) is CodeSyntaxError
+    assert str(copied) == str(error)
+    assert copied.line_number == error.line_number == 1
+    assert isinstance(copied.original_exception, SyntaxError)
+    assert copied.original_exception.msg == error.original_exception.msg
+
+
+def test_code_syntax_error_survives_error_transport():
+    error = _code_syntax_error()
+    result = dto_to_result(_transport(result_to_dto(_result_with_error(error))))
+    assert isinstance(result.error, SandboxExecutionError)
+    assert result.error.original_type == "CodeSyntaxError"
+    assert "was never closed" in str(result.error)

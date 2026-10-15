@@ -109,6 +109,11 @@ class CodeSyntaxError(RestrictedCodeError):
             original_exception=error,
         )
 
+    def __reduce__(self):
+        # ``args`` holds the message string, but ``__init__`` takes the
+        # SyntaxError; rebuild from it so pickle and copy.deepcopy round-trip.
+        return (type(self), (self.original_exception,), self.__dict__)
+
 
 # =============================================================================
 # Runtime Errors
