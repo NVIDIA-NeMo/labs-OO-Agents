@@ -173,15 +173,34 @@ async def launch_native_acp(
                 problems.append(f"ACP process exited with {process.returncode}")
             diagnostic = "\n".join([*problems, model.stderr]).strip()
             if active_error is not None:
-                if model.requests:
-                    failed_cells = [
-                        str(message.get("content", ""))
-                        for message in model.requests[-1].get("messages", [])
-                        if message.get("role") != "system"
-                        and "Traceback (most recent call last)" in str(message.get("content", ""))
-                    ]
-                    if failed_cells:
-                        active_error.add_note("CodeAct output:\n" + "\n".join(failed_cells[-3:]))
+                # Later context may have dropped the first error. Inspect all snapshots,
+                # deduplicating repeated cells before selecting the first and latest two.
+                failed_cells: dict[str, int] = {}
+                for request_number, request in enumerate(model.requests, start=1):
+                    for message in request.get("messages", []):
+                        if message.get("role") not in {"user", "tool"}:
+                            continue
+                        content = str(message.get("content", ""))
+                        if "Traceback (most recent call last)" in content or (
+                            "PythonOutput(" in content
+                            and "execution_status=<ResultStatus.ERROR:" in content
+                        ):
+                            failed_cells.setdefault(content, request_number)
+                if failed_cells:
+                    selected = list(failed_cells)
+                    if len(selected) > 3:
+                        selected = [selected[0], *selected[-2:]]
+                    details = []
+                    for content in selected:
+                        request_number = failed_cells[content]
+                        if len(content) > 4000:
+                            content = content[:2000] + "\n... [truncated] ...\n" + content[-2000:]
+                        details.append(f"Request {request_number}:\n{content}")
+                    active_error.add_note(
+                        f"CodeAct output ({len(model.requests)} model requests, "
+                        f"{model.remaining} responses remaining; first and latest errors):\n"
+                        + "\n\n".join(details)
+                    )
                 if diagnostic:
                     active_error.add_note(diagnostic)
             elif problems:

@@ -107,6 +107,8 @@ def test_clean_environment_excludes_parent_sources_and_credentials(
     monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(tmp_path / "parent-config.yaml"))
     monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path / "ambient-cache"))
     monkeypatch.setenv("CUSTOM_TIKTOKEN_CACHE_DIR", str(tmp_path / "ambient-cache"))
+    module_cache = str(tmp_path / "machine-cache" / "ModuleAnalysisCache")
+    monkeypatch.setenv("PSModuleAnalysisCachePath", module_cache)
     cache = tmp_path / "prepared-cache" if explicit_cache else None
     environment = support.child_environment(
         tmp_path / "中文 repo's [literal]",
@@ -118,6 +120,7 @@ def test_clean_environment_excludes_parent_sources_and_credentials(
     assert "PYTHONPATH" not in environment
     assert "PYTHONHOME" not in environment
     assert "OPENAI_API_KEY" not in environment
+    assert environment["PSModuleAnalysisCachePath"] == module_cache
     assert environment["NEMO_OO_LLM_CONFIG"] == str(tmp_path / "config" / "llm_config.yaml")
     assert environment["NOOA_NATIVE_TEST_KEY"] == support._TEST_KEY
     assert environment["PYTHONUTF8"] == "0"

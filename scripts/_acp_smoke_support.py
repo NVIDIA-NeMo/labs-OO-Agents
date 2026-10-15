@@ -193,9 +193,21 @@ def child_environment(
     )
     for name in ("settings.yaml", "secrets.yaml"):
         (user_dir / name).write_text("{}\n", encoding="utf-8")
+    # Windows runners prewarm this machine-level module cache. Keep its path
+    # independently of the isolated home to avoid a cold scan in every ACP
+    # process, which can exhaust PowerShell 5.1's startup deadline.
     environment = {
         name: os.environ[name]
-        for name in ("SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "TEMP", "TMP", "PATHEXT")
+        for name in (
+            "SYSTEMROOT",
+            "WINDIR",
+            "SYSTEMDRIVE",
+            "COMSPEC",
+            "TEMP",
+            "TMP",
+            "PATHEXT",
+            "PSModuleAnalysisCachePath",
+        )
         if name in os.environ
     }
     # Selecting one native shell prevents a 5.1 run from discovering pwsh.

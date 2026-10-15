@@ -107,7 +107,7 @@ jobs:
             "packages/nooa-cli/tests/test_connect_view.py",
             "packages/nooa-acp/tests"
           )
-          uv run --no-sync python -m pytest -q --timeout=60 @testPaths
+          uv run --no-sync python -m pytest -q --timeout=60 --durations=20 @testPaths
       - name: CLI entry points
         run: |
           uv run --no-sync nooa --version

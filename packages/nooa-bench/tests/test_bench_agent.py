@@ -470,7 +470,7 @@ def test_tool_repr_shows_state():
 
     agent = BenchAgent(llm=FakeLLMClient())
 
-    assert repr(agent.shell) == f"ShellTools(cwd={agent.shell.cwd!s})"
+    assert repr(agent.shell) == f"ShellTools(cwd={agent.shell.cwd!s}, shell={agent.shell.shell!r})"
     assert repr(agent.repo) == (
         f"RepoTools(root={str(agent.repo.root)!r}, session=shared, has_rg=None)"
     )
