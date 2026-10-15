@@ -41,6 +41,8 @@ uv run --no-sync nooa-acp
 Use a model alias configured through NOOA or pass a provider model name.
 The [Windows guide](../../docs/windows.md#acp-clients-and-editors) covers setup,
 supported scope, and an optional real-model acceptance command.
+To install and verify build artifacts without a source checkout, use the
+[Windows wheel bundle guide](../../docs/windows-wheel-installation.md).
 
 ## Quick start: Zed
 
@@ -137,6 +139,13 @@ consent prompt on these paths.
 or start a separate server per workspace with credentials scoped to that task.
 
 ## How it behaves
+
+Commands run in the agent's persistent shell and appear as expandable tool
+cards. Their standard ACP content includes the command, stdout, stderr, and
+exit status; timeouts, cancellation, and truncated output are labeled there
+too. These cards use the generic `other` kind because the agent owns the shell
+instead of creating a terminal through the client. Machine-readable results
+remain available in `rawOutput`.
 
 ACP uses standard input and output for JSON-RPC. Diagnostics are written to
 standard error, including ordinary Python output from model clients and host

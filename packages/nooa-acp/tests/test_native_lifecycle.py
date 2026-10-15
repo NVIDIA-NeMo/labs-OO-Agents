@@ -190,7 +190,8 @@ async def test_cancel_running_process_tree_then_prompt_same_session(tmp_path, sh
             await asyncio.gather(*(handle.wait_dead() for handle in handles))
             assert process.returncode is None, "cancel must leave the ACP server running"
             cards = [update for _, update in client.updates if isinstance(update, ToolCallStart)]
-            assert {card.kind for card in cards} >= {"other", "execute"}
+            assert {card.kind for card in cards} == {"other"}
+            assert any(card.raw_input is None for card in cards), "the Python card must be present"
             for card in cards:
                 changes = [
                     update
@@ -202,9 +203,14 @@ async def test_cancel_running_process_tree_then_prompt_same_session(tmp_path, sh
                 assert all(update.status != "completed" for update in changes)
                 assert "Cancelled by user." in _card_text(changes[-1])
                 assert "CancelledError" not in _card_text(changes[-1])
-                if card.kind == "other":
+                if card.raw_input is None:
                     assert changes[-1].title == "Cancelled"
-            terminal = next(card for card in cards if card.kind == "execute")
+            terminal = next(
+                card
+                for card in cards
+                if isinstance(card.raw_input, dict) and "command" in card.raw_input
+            )
+            assert terminal.kind == "other"
             terminal_end = next(
                 update
                 for _, update in reversed(client.updates)

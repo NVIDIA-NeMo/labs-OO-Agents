@@ -66,6 +66,27 @@ def _python_content(code: str, output: str | None = None) -> list[ContentToolCal
     return content
 
 
+@dataclass(slots=True)
+class _TerminalCard:
+    command: str
+    language: str
+    stdout: str = ""
+    stderr: str = ""
+    output_truncated: bool = False
+
+    def content(self, outcome: str = "") -> list[ContentToolCallContent]:
+        """Send a complete, literal transcript on every ACP content replacement."""
+        parts = [_fenced_code(self.command, self.language)] if self.command else []
+        for label, output in (("Stdout", self.stdout), ("Stderr", self.stderr)):
+            if output:
+                parts.append(f"{label}:\n{_fenced_code(output, 'text')}")
+        if outcome:
+            parts.append(outcome)
+        if self.output_truncated:
+            parts.append("Output truncated.")
+        return [tool_content(text_block("\n\n".join(parts)))]
+
+
 class ACPEventBridge:
     def __init__(self, agent: CodingAgent, client: Client, session_id: str) -> None:
         self.agent = agent
@@ -79,7 +100,7 @@ class ACPEventBridge:
         self._closed = False
         self._open_tools: set[str] = set()
         self._python_source: dict[str, str] = {}
-        self._terminal_output: dict[str, str] = {}
+        self._terminals: dict[str, _TerminalCard] = {}
         # Partial stdout/stderr of a cancelled cell, shown on its card when
         # fail_open_tools closes it.
         self._cancelled_output: dict[str, str] = {}
@@ -208,13 +229,19 @@ class ACPEventBridge:
         if not isinstance(event, TerminalCommandStarted):
             return
         self._open_tools.add(event.command_id)
-        self._terminal_output[event.command_id] = ""
+        terminal = _TerminalCard(event.command, self.agent.shell.shell)
+        self._terminals[event.command_id] = terminal
         self._enqueue(
             start_tool_call(
                 event.command_id,
-                f"$ {event.command}",
-                kind="execute",
+                "Running command",
+                # This persistent shell belongs to the agent, so there is no
+                # client-created ACP terminal to reference. Generic content
+                # remains inspectable in clients whose execute view requires
+                # a terminal ID, as it does for our Python tool cards.
+                kind="other",
                 status="in_progress",
+                content=terminal.content(),
                 raw_input={
                     "command": event.command,
                     "working_directory": event.working_directory,
@@ -225,16 +252,15 @@ class ACPEventBridge:
     def _on_terminal_output(self, event: EventBase) -> None:
         if not isinstance(event, TerminalCommandOutput) or event.command_id not in self._open_tools:
             return
-        chunk = event.stdout
-        if event.stderr:
-            chunk += ("\n" if chunk and not chunk.endswith("\n") else "") + event.stderr
-        output = self._terminal_output.get(event.command_id, "") + chunk
-        self._terminal_output[event.command_id] = output
+        terminal = self._terminals[event.command_id]
+        terminal.stdout += event.stdout
+        terminal.stderr += event.stderr
+        terminal.output_truncated |= event.truncated
         self._enqueue(
             update_tool_call(
                 event.command_id,
                 status="in_progress",
-                content=[tool_content(text_block(output))],
+                content=terminal.content(),
             )
         )
 
@@ -242,27 +268,41 @@ class ACPEventBridge:
         if not isinstance(event, TerminalCommandFinished):
             return
         self._open_tools.discard(event.command_id)
-        output = self._terminal_output.pop(event.command_id, "")
-        # ACP has no cancelled status, so a stopped command is still "failed" —
-        # but it must read as the user's own action, not as a crash.
-        reason = "Cancelled by user." if event.cancelled else event.error
-        if reason:
-            output += ("\n" if output and not output.endswith("\n") else "") + reason
+        terminal = self._terminals.pop(event.command_id, _TerminalCard("", "text"))
+        terminal.output_truncated |= event.output_truncated
         failed = (
             event.timed_out
             or event.cancelled
             or bool(event.error)
             or (event.exit_code is not None and event.exit_code != 0)
         )
+        title = "Command failed" if failed else "Ran command"
+        notes = []
+        # ACP has no cancelled status. Preserve "failed" on the wire while
+        # making the user's action, and other outcomes, readable in content.
+        if event.cancelled:
+            title = "Command cancelled"
+            notes.append("Cancelled by user.")
+        elif event.timed_out:
+            title = "Command timed out"
+            notes.append("Timed out.")
+        elif event.error:
+            notes.append(f"Error:\n{_fenced_code(event.error, 'text')}")
+        if event.exit_code is None:
+            notes.append("Exit code: unavailable")
+        else:
+            notes.append(f"Exit code: {event.exit_code}")
+            title += f" (exit {event.exit_code})"
         self._enqueue(
             update_tool_call(
                 event.command_id,
+                title=title,
                 status="failed" if failed else "completed",
-                content=[tool_content(text_block(output or "Completed."))],
+                content=terminal.content("\n\n".join(notes)),
                 raw_output={
                     "exit_code": event.exit_code,
                     "timed_out": event.timed_out,
-                    "output_truncated": event.output_truncated,
+                    "output_truncated": terminal.output_truncated,
                 },
             )
         )
@@ -380,17 +420,15 @@ class ACPEventBridge:
         """
         for tool_call_id in tuple(self._open_tools):
             code = self._python_source.pop(tool_call_id, None)
-            # Output shown before the close: a cancelled cell's partial output, or
-            # what a terminal command streamed so far.
+            terminal = self._terminals.pop(tool_call_id, None)
             partial = self._cancelled_output.pop(tool_call_id, None)
-            if partial is None:
-                partial = self._terminal_output.pop(tool_call_id, "").rstrip("\n")
-            output = f"{partial}\n\n{reason}" if partial else reason
-            content = (
-                _python_content(code, output)
-                if code is not None
-                else [tool_content(text_block(output))]
-            )
+            if code is not None:
+                output = f"{partial}\n\n{reason}" if partial else reason
+                content = _python_content(code, output)
+            elif terminal is not None:
+                content = terminal.content(f"{reason}\n\nExit code: unavailable")
+            else:
+                content = [tool_content(text_block(reason))]
             self._enqueue(
                 update_tool_call(
                     tool_call_id,
@@ -401,7 +439,7 @@ class ACPEventBridge:
             )
         self._open_tools.clear()
         self._python_source.clear()
-        self._terminal_output.clear()
+        self._terminals.clear()
         self._cancelled_output.clear()
 
     async def close(self) -> None:

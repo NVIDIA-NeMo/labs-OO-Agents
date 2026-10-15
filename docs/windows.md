@@ -144,6 +144,11 @@ credentials.
 
 ## ACP clients and editors
 
+For a source-free installation using built wheels, see
+[Windows wheel bundles](windows-wheel-installation.md). That guide covers
+clean installation, standalone acceptance checks, and pointing Zed at the
+installed executable.
+
 Install the ACP extra to expose both `nooa-acp` and `nooa acp`. From this
 checkout, in PowerShell:
 

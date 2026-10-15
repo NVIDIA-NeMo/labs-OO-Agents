@@ -122,6 +122,121 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --no-sync nooa acp --help
 
+  windows-wheels:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "0"
+      PYTHONPATH: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags needed for uv-dynamic-versioning
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.4"  # match the release build toolchain
+          python-version: ${{ matrix.python-version }}
+      # Build the sdist and then its wheel, exactly as in publish.yml. A fresh
+      # output directory and --no-sources prevent stale or workspace artifacts
+      # from hiding packaging errors.
+      - name: Build Windows delivery artifacts
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nooa-wheel-smoke"
+          if (Test-Path -LiteralPath $smokeRoot) {
+            throw "Expected a fresh wheel acceptance directory: $smokeRoot"
+          }
+          $wheelDir = Join-Path $smokeRoot "dist"
+          foreach ($package in @("nooa", "nooa-cli", "nooa-acp")) {
+            uv build --no-sources --package $package --out-dir $wheelDir
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      # Export only third-party version constraints. Installing the exported
+      # graph with -r would mask dependencies missing from wheel metadata;
+      # emitting workspace members would also pull source/editable packages in.
+      - name: Export frozen dependency constraints
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nooa-wheel-smoke"
+          $constraints = Join-Path $smokeRoot "frozen-dependencies.txt"
+          uv export --frozen --package nooa-acp --no-dev --no-emit-workspace --no-hashes --no-annotate --output-file $constraints | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install only built packages in a fresh environment
+        working-directory: ${{ runner.temp }}
+        env:
+          WHEEL_PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nooa-wheel-smoke"
+          $wheelDir = Join-Path $smokeRoot "dist"
+          $venv = Join-Path $smokeRoot "venv"
+          $wheelPython = Join-Path $venv "Scripts/python.exe"
+          $constraints = Join-Path $smokeRoot "frozen-dependencies.txt"
+          $wheelPaths = @()
+          foreach ($package in @("nooa", "nooa_cli", "nooa_acp")) {
+            $wheels = @(Get-ChildItem -LiteralPath $wheelDir -Filter "$package-*.whl" -File)
+            if ($wheels.Count -ne 1) {
+              throw "Expected exactly one wheel for $package, found $($wheels.Count)"
+            }
+            $wheelPaths += $wheels[0].FullName
+          }
+          uv venv --no-config --no-project --python $env:WHEEL_PYTHON_VERSION $venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip install --no-config --python $wheelPython --constraint $constraints --strict @wheelPaths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip freeze --no-config --python $wheelPython | Out-File -LiteralPath (Join-Path $smokeRoot "installed-requirements.txt") -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # LiteLLM initializes cl100k_base during import. Prepare its public,
+      # hash-verified vocabulary during installation; acceptance itself keeps
+      # outbound model/discovery traffic blocked and uses this explicit cache.
+      - name: Prepare tokenizer resources for offline acceptance
+        working-directory: ${{ runner.temp }}
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nooa-wheel-smoke"
+          $wheelPython = Join-Path $smokeRoot "venv/Scripts/python.exe"
+          $tokenizerCache = Join-Path $smokeRoot "tokenizer-cache"
+          New-Item -ItemType Directory -Path $tokenizerCache | Out-Null
+          $env:TIKTOKEN_CACHE_DIR = $tokenizerCache
+          $env:CUSTOM_TIKTOKEN_CACHE_DIR = $tokenizerCache
+          uv run --no-config --no-project --no-sync --python $wheelPython python -I -X utf8=0 -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Accept installed wheels outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "nooa-wheel-smoke"
+          $acceptanceDir = Join-Path $smokeRoot "acceptance"
+          $wheelPython = Join-Path $smokeRoot "venv/Scripts/python.exe"
+          $tokenizerCache = Join-Path $smokeRoot "tokenizer-cache"
+          $report = Join-Path $smokeRoot "wheel-smoke.json"
+          New-Item -ItemType Directory -Path $acceptanceDir | Out-Null
+          foreach ($script in @("smoke_installed_wheels.py", "smoke_acp_coding.py", "_acp_smoke_support.py")) {
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "scripts/$script") -Destination $acceptanceDir
+          }
+          Set-Location -LiteralPath $acceptanceDir
+          # -I excludes ambient Python paths; -X preserves the native locale
+          # because isolated mode ignores the PYTHONUTF8 environment variable.
+          uv run --no-config --no-project --no-sync --python $wheelPython python -I -X utf8=0 smoke_installed_wheels.py --tokenizer-cache $tokenizerCache --report $report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload Windows wheels and acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-wheels-${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/nooa-wheel-smoke/dist/
+            ${{ runner.temp }}/nooa-wheel-smoke/acceptance/*.py
+            ${{ runner.temp }}/nooa-wheel-smoke/tokenizer-cache/
+            ${{ runner.temp }}/nooa-wheel-smoke/frozen-dependencies.txt
+            ${{ runner.temp }}/nooa-wheel-smoke/installed-requirements.txt
+            ${{ runner.temp }}/nooa-wheel-smoke/wheel-smoke.json
+          retention-days: 7
+
   python-313-error-compat:
     runs-on: ubuntu-latest
     permissions:

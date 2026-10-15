@@ -299,12 +299,17 @@ async def test_bridge_emits_terminal_lifecycle(tmp_path):
         ToolCallProgress,
     ]
     started = cast(ToolCallStart, updates[0])
-    assert started.kind == "execute"
-    assert started.title == "$ pytest -q"
+    assert started.kind == "other"
+    assert started.title == "Running command"
+    assert started.content is not None
+    source = _content_text(cast(ContentToolCallContent, started.content[0]))
+    assert "pytest -q" in source
     progress = cast(ToolCallProgress, updates[1])
     assert progress.content is not None
     content = cast(ContentToolCallContent, progress.content[0])
-    assert content.content.text == "2 passed\n"
+    assert "pytest -q" in content.content.text
+    assert "Stdout:" in content.content.text
+    assert "2 passed\n" in content.content.text
     finished = cast(ToolCallProgress, updates[2])
     assert finished.status == "completed"
     assert finished.raw_output == {
@@ -314,6 +319,87 @@ async def test_bridge_emits_terminal_lifecycle(tmp_path):
     }
     await bridge.close()
     await agent.close()
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_command_content_shows_output_and_exit_status_without_raw_metadata(
+    tmp_path, exit_code
+):
+    """Clients rendering standard content must show the real command outcome."""
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    try:
+        agent.event_manager.add(
+            TerminalCommandStarted(
+                command_id="command-1",
+                command="python verify.py",
+                working_directory=str(tmp_path),
+            )
+        )
+        agent.event_manager.add(
+            TerminalCommandOutput(
+                command_id="command-1",
+                stdout="标准输出：你好 世界\n",
+                stderr="标准错误：测试已运行\n",
+            )
+        )
+        agent.event_manager.add(
+            TerminalCommandFinished(command_id="command-1", exit_code=exit_code)
+        )
+        await bridge.flush()
+        started = cast(ToolCallStart, client.updates[0][1])
+        assert started.kind == "other"
+        assert started.content is not None
+        assert "python verify.py" in _content_text(cast(ContentToolCallContent, started.content[0]))
+        finished = cast(ToolCallProgress, client.updates[-1][1])
+        assert finished.content is not None
+        visible = "\n".join(
+            _content_text(content)
+            for content in finished.content
+            if isinstance(content, ContentToolCallContent)
+        )
+        assert "标准输出：你好 世界" in visible
+        assert "标准错误：测试已运行" in visible
+        assert f"Exit code: {exit_code}" in visible, finished.model_dump(
+            mode="json", by_alias=True, exclude_none=True
+        )
+    finally:
+        await bridge.close()
+        await agent.close()
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"exit_code": 0, "output_truncated": True}, "Output truncated."),
+        ({"timed_out": True}, "Timed out."),
+        ({"error": "synthetic launch failure"}, "synthetic launch failure"),
+        ({"cancelled": True}, "Cancelled by user."),
+    ],
+    ids=["truncated", "timeout", "launch-error", "cancelled"],
+)
+async def test_command_content_explains_nonstandard_completion(tmp_path, fields, message):
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(agent, client, "session-1")  # type: ignore[arg-type]
+    try:
+        agent.event_manager.add(
+            TerminalCommandStarted(
+                command_id="command-1", command="some-command", working_directory=str(tmp_path)
+            )
+        )
+        agent.event_manager.add(TerminalCommandFinished(command_id="command-1", **fields))
+        await bridge.flush()
+        finished = cast(ToolCallProgress, client.updates[-1][1])
+        assert finished.content is not None
+        visible = _content_text(cast(ContentToolCallContent, finished.content[0]))
+        assert message in visible
+        assert "Exit code:" in visible
+        assert finished.title is not None
+    finally:
+        await bridge.close()
+        await agent.close()
 
 
 class _BlockingClient(_RecordingClient):
@@ -613,6 +699,9 @@ async def test_bridge_keeps_streamed_terminal_output_on_force_closed_card(tmp_pa
     assert closed.status == "failed"
     assert closed.content is not None
     text = cast(ContentToolCallContent, closed.content[0]).content.text
-    assert text == "step 1 of 3\n\nStopped at your request."
+    assert "make build" in text
+    assert "step 1 of 3" in text
+    assert "Stopped at your request." in text
+    assert "Exit code: unavailable" in text
     await bridge.close()
     await agent.close()

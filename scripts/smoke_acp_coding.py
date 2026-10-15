@@ -19,6 +19,7 @@ import socket
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -256,8 +257,18 @@ async def _finish_transport(connection, writer, process, output_task, stderr_tas
         raise RuntimeError(f"ACP did not exit cleanly after EOF: {process.returncode}")
 
 
-async def run_smoke(model: str, entrypoint: str, timeout: float) -> dict[str, object]:
-    executable = shutil.which(entrypoint)
+async def run_smoke(
+    model: str,
+    entrypoint: str,
+    timeout: float,
+    *,
+    environment_factory: Callable[[Path, Path, str], tuple[dict[str, str], tuple[str, ...]]]
+    | None = None,
+    workspace_name: str = "中文 coding workspace",
+    executable: str | None = None,
+    updates_observer: Callable[[list[object]], None] | None = None,
+) -> dict[str, object]:
+    executable = executable or shutil.which(entrypoint)
     if executable is None:
         raise RuntimeError(f"{entrypoint} is not installed; install the nooa-acp workspace package")
     arguments = ["acp"] if entrypoint == "nooa" else []
@@ -277,7 +288,7 @@ async def run_smoke(model: str, entrypoint: str, timeout: float) -> dict[str, ob
     temporary = tempfile.TemporaryDirectory(prefix="nooa-acp-live-")
     try:
         root = Path(temporary.name).resolve()
-        workspace = root / "中文 coding workspace"
+        workspace = root / workspace_name
         state = root / "state"
         workspace.mkdir()
         state.mkdir()
@@ -305,7 +316,7 @@ async def run_smoke(model: str, entrypoint: str, timeout: float) -> dict[str, ob
             f"测试命令是：{test_command}。完成后用中文说明修复和测试结果。"
         )
         client = RecordingClient()
-        environment, secrets = _environment(workspace, state, model)
+        environment, secrets = (environment_factory or _environment)(workspace, state, model)
         monitor = ProtocolMonitor(secrets)
         async with spawn_stdio_transport(
             executable, *arguments, cwd=workspace, env=environment, shutdown_timeout=15
@@ -344,6 +355,8 @@ async def run_smoke(model: str, entrypoint: str, timeout: float) -> dict[str, ob
                     if monitor.samples:
                         report["invalid_protocol_samples"] = "\n".join(monitor.samples)
 
+        if updates_observer is not None:
+            updates_observer(client.updates)
         if monitor.invalid:
             raise RuntimeError("ACP stdout contained invalid JSON-RPC messages")
         _check_workspace(workspace)

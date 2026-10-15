@@ -87,8 +87,11 @@ async def test_cleanup_failure_preserves_the_original_error(smoke, tmp_path, mon
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="installed Windows ACP entry point")
-@pytest.mark.parametrize("protocol_noise", [False, True], ids=["clean", "json-log"])
-async def test_smoke_uses_real_acp_and_rejects_json_log_output(smoke, monkeypatch, protocol_noise):
+@pytest.mark.parametrize(
+    "failure", [None, "json-log", "observer"], ids=["clean", "json-log", "observer-error"]
+)
+async def test_smoke_uses_real_acp_and_rejects_json_log_output(smoke, monkeypatch, failure):
+    protocol_noise = failure == "json-log"
     executable = "'" + sys.executable.replace("'", "''") + "'"
     command = f"& {executable} -X utf8 -B verify.py"
     cell = (
@@ -118,15 +121,36 @@ async def test_smoke_uses_real_acp_and_rejects_json_log_output(smoke, monkeypatc
             return env, (env["NOOA_NATIVE_TEST_KEY"],)
 
         monkeypatch.setattr(smoke, "_environment", environment)
-        report = await smoke.run_smoke("native-acp-loopback", "nooa-acp", 45)
+        observer_calls = []
+        eof_complete = False
+        finish_transport = smoke._finish_transport
+
+        async def finish(*args):
+            nonlocal eof_complete
+            await finish_transport(*args)
+            eof_complete = True
+
+        def observe(updates):
+            assert eof_complete, "Update observation must run after the complete ACP transport"
+            observer_calls.append(list(updates))
+            if failure == "observer":
+                raise RuntimeError("synthetic update observer failure")
+
+        monkeypatch.setattr(smoke, "_finish_transport", finish)
+        report = await smoke.run_smoke(
+            "native-acp-loopback", "nooa-acp", 45, updates_observer=observe
+        )
         assert not server.errors, report
         assert len(server.requests) == 1 and server.remaining == 0, report
-    assert report["passed"] is not protocol_noise, json.dumps(report, ensure_ascii=True)
+    assert len(observer_calls) == 1 and observer_calls[0]
+    assert report["passed"] is (failure is None), json.dumps(report, ensure_ascii=True)
     assert report["server_exit_code"] == 0 and not report["forced_shutdown"], report
     assert "cleanup_error" not in report, json.dumps(report, ensure_ascii=True)
     assert report["invalid_protocol_messages"] == int(protocol_noise), report
     if protocol_noise:
         assert "invalid JSON-RPC" in report["error"]
+    elif failure == "observer":
+        assert report["error"] == "synthetic update observer failure"
     else:
         assert report["verification_exit_code"] == 0
         assert report["terminal_exit_codes"] == [1, 0]

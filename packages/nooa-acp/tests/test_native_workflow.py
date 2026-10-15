@@ -145,8 +145,11 @@ async def test_installed_entrypoint_reports_real_native_edits_and_checks(
         terminals = [
             update
             for update in updates
-            if isinstance(update, ToolCallStart) and update.kind == "execute"
+            if isinstance(update, ToolCallStart)
+            and isinstance(update.raw_input, dict)
+            and "command" in update.raw_input
         ]
+        assert all(update.kind == "other" for update in terminals)
         terminal_ids = [update.tool_call_id for update in terminals]
         assert len(terminal_ids) == len(set(terminal_ids)) == 4
         assert all(update.raw_input["working_directory"] == str(workspace) for update in terminals)
