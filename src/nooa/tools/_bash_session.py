@@ -673,11 +673,13 @@ class BashSession:
         if timed_out:
             proc = self._process
             if proc is not None:
-                recovered = await self._interrupt_and_recover(proc, sentinel, timeout)
+                recovered = await self._interrupt_and_recover(proc, sentinel, lines)
                 if not recovered:
                     self._diagnose_death("timeout_recovery_failed")
                     logger.warning("Timeout recovery failed — resetting session")
                     await self.reset()
+                    # Partial metadata belongs to the retired process.
+                    lines.clear()
 
         return lines, timed_out
 
@@ -685,7 +687,7 @@ class BashSession:
         self,
         proc: asyncio.subprocess.Process,
         sentinel: str,
-        original_timeout: float,
+        control_lines: list[str],
     ) -> bool:
         """Kill the current command tree and wait for its control sentinel.
 
@@ -703,8 +705,12 @@ class BashSession:
                     return False
                 if not raw:
                     return False
-                if sentinel in raw.decode("utf-8", errors="replace"):
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if sentinel in line:
                     return True
+                # Recovery still completes the command's control response;
+                # callers need its cwd before performing relative file I/O.
+                control_lines.append(line)
 
         async def snapshot_children() -> dict[int, str | None]:
             try:

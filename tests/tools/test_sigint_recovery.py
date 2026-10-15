@@ -11,6 +11,43 @@ import time
 import pytest
 
 from nooa.tools._bash_session import BashSession
+from nooa.tools.shell_tools import ShellTools
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("temporary_cwd", [False, True])
+async def test_timeout_syncs_directory_for_relative_file_operations(
+    tmp_path, streaming, temporary_cwd
+):
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+    (tmp_path / "file.txt").write_text("parent\n", encoding="utf-8")
+    (subdir / "file.txt").write_text("nested\n", encoding="utf-8")
+    command = "sleep 60" if temporary_cwd else "cd sub; sleep 60"
+    cwd = "sub" if temporary_cwd else None
+    expected_dir = tmp_path if temporary_cwd else subdir
+    other_dir = subdir if temporary_cwd else tmp_path
+    shell = ShellTools(cwd=str(tmp_path), shell="bash")
+    try:
+        if streaming:
+            events = [event async for event in shell.run_stream(command, timeout=0.2, cwd=cwd)]
+            assert events[-1].timed_out and events[-1].returncode == 124
+        else:
+            result = await shell.run(command, timeout=0.2, cwd=cwd)
+            assert result.timed_out and result.returncode == 124
+
+        view = await shell.read("file.txt")
+        assert view.text == ("parent\n" if temporary_cwd else "nested\n")
+        await shell.replace(view, "updated\n")
+        await shell.write_file("new.txt", "new\n")
+        assert (expected_dir / "file.txt").read_text(encoding="utf-8") == "updated\n"
+        assert (expected_dir / "new.txt").read_text(encoding="utf-8") == "new\n"
+        assert (other_dir / "file.txt").read_text(encoding="utf-8") == (
+            "nested\n" if temporary_cwd else "parent\n"
+        )
+        assert not (other_dir / "new.txt").exists()
+    finally:
+        await shell.close()
 
 
 @pytest.fixture

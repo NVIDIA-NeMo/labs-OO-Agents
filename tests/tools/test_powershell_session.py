@@ -155,6 +155,27 @@ async def test_native_exit_codes_are_not_stale(session):
     assert (await session.run(native_warning + "; Write-Error problem"))[2] != 0
 
 
+@pytest.mark.parametrize("error_action", ["Continue", "Stop"])
+async def test_native_stderr_preserves_exit_status_with_error_preferences(
+    tmp_path, executable, error_action
+):
+    init_command = f"$ErrorActionPreference = '{error_action}'; Set-StrictMode -Version Latest"
+    async with PowerShellSession(tmp_path, init_command, executable=executable) as shell:
+        for exit_code in (0, 7):
+            command = _python(
+                "import sys;print('OK');print('warning 中文',file=sys.stderr);"
+                f"sys.exit({exit_code})"
+            )
+            assert await shell.run(command) == ("OK", "warning 中文", exit_code)
+        assert await shell.run("$ErrorActionPreference") == (error_action, "", 0)
+        command = _python("import sys;print('warning',file=sys.stderr)")
+        assert await shell.run(command + "; Write-Output after") == ("after", "warning", 0)
+        stdout, stderr, code = await shell.run("Write-Error 'problem 中文'; Write-Output after")
+        assert "problem 中文" in stderr
+        assert stdout == ("" if error_action == "Stop" else "after")
+        assert code == (1 if error_action == "Stop" else 0)
+
+
 async def test_stream_is_live_and_preserves_both_streams(session, tmp_path):
     marker = tmp_path / "completed"
     command = _python(
@@ -531,6 +552,34 @@ def test_session_survives_event_loop_recreation(tmp_path, executable):
     # cannot hide a leak from the event loops we closed above.
     del shell
     gc.collect()
+
+
+@pytest.mark.parametrize("close_before_reuse", [False, True])
+def test_concurrent_calls_survive_event_loop_recreation(tmp_path, executable, close_before_reuse):
+    shell = PowerShellSession(tmp_path, "$counter = 0", executable=executable)
+
+    async def run_concurrent():
+        return await asyncio.wait_for(
+            asyncio.gather(
+                *(
+                    shell.run("$counter += 1; Start-Sleep -Milliseconds 15; $counter")
+                    for _ in range(3)
+                ),
+                return_exceptions=True,
+            ),
+            timeout=15,
+        )
+
+    async def first_loop():
+        assert await run_concurrent() == [(str(i), "", 0) for i in range(1, 4)]
+        if close_before_reuse:
+            await shell.close()
+
+    try:
+        asyncio.run(first_loop())
+        assert asyncio.run(run_concurrent()) == [(str(i), "", 0) for i in range(1, 4)]
+    finally:
+        asyncio.run(shell.close())
 
 
 async def test_failed_init_is_reported_and_cleaned_up(tmp_path, executable):

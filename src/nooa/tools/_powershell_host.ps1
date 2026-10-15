@@ -84,15 +84,10 @@ while ($null -ne ($__nooa_line = $__nooa_reader.ReadLine())) {
         $__nooa_block = [scriptblock]::Create(
             "try {`n" + $__nooa_request.command + "`n} finally {`n" +
             '$script:__nooa_success = $?; $script:__nooa_native_exit = $global:LASTEXITCODE; $script:__nooa_last_error = if ($Error.Count -gt 0) { $Error[0] } else { $null }' + "`n}")
-        . $__nooa_block 2>&1 | ForEach-Object {
-            if ($_ -is [System.Management.Automation.ErrorRecord]) {
-                # The Windows PowerShell 5.1 host otherwise formats errors with
-                # the original ANSI encoding, even with UTF-8 Console.Out.
-                [Console]::Error.WriteLine($_.ToString())
-            } else {
-                $_
-            }
-        } | Out-Default
+        # Leave stderr on its own handle. In Windows PowerShell 5.1, 2>&1
+        # converts native diagnostics into terminating NativeCommandError
+        # records when ErrorActionPreference is Stop, even for exit code 0.
+        . $__nooa_block | Out-Default
         if (-not $__nooa_success) {
             $__nooa_code = 1
             if ($__nooa_native_exit -ne 0) { $__nooa_code = $__nooa_native_exit }

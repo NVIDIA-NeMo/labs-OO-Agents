@@ -206,6 +206,7 @@ class PowerShellSession:
         self._started = False
         self._started_on_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         from nooa.tools.shell_lifecycle import _current_scope
 
         if scope := _current_scope.get():
@@ -216,11 +217,12 @@ class PowerShellSession:
         return self._cwd
 
     def _ensure_lock(self) -> None:
-        if (
-            self._started_on_loop is not None
-            and self._started_on_loop is not asyncio.get_running_loop()
-        ):
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is not loop:
             self._lock = asyncio.Lock()
+            # Record ownership before startup can yield or close clears the
+            # process's loop. Every caller on this loop must share this lock.
+            self._lock_loop = loop
 
     async def __aenter__(self) -> PowerShellSession:
         await self.start()

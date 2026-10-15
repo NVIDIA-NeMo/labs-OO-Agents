@@ -170,6 +170,41 @@ async def test_explicit_search_root_is_not_excluded_by_its_own_name(tmp_path, re
     assert Path(result[0].resolved_path) == source
 
 
+async def test_python_references_reaches_nested_sources_after_many_nonmatches(
+    tmp_path, regex_backend
+):
+    for index in range(200):
+        (tmp_path / f"z_{index:03}.py").write_text("value = 1\n", encoding="utf-8")
+    source = _source(tmp_path / "a")
+
+    result = await RepoTools(root=tmp_path).refs("target")
+
+    assert len(result) == 1
+    assert Path(result[0].resolved_path) == source
+    assert result[0].start == 4
+    assert not result.truncated
+
+
+async def test_ast_references_reaches_nested_sources_after_many_nonmatches(tmp_path, monkeypatch):
+    first = tmp_path / "000_use.py"
+    first.write_text("target()\n", encoding="utf-8")
+    for index in range(500):
+        (tmp_path / f"z_{index:03}.py").write_text("value = 1\n", encoding="utf-8")
+    source = _source(tmp_path / "a")
+    references = {first: [(1, "target()")], source: [(4, "result = target()  # 调用: 结果")]}
+    monkeypatch.setattr(backend, "TREE_SITTER_AVAILABLE", True)
+    monkeypatch.setattr(
+        backend,
+        "ts_find_references",
+        lambda path, *args, **kwargs: references.get(path, []),
+    )
+
+    result = await RepoTools(root=tmp_path).refs("target")
+
+    assert [Path(anchor.resolved_path) for anchor in result] == [first, source]
+    assert not result.truncated
+
+
 @pytest.mark.parametrize("lookup", ["overview", "query", "refs"])
 async def test_python_navigation_obeys_result_limit(tmp_path, regex_backend, lookup):
     for index in range(3):

@@ -10,7 +10,7 @@ Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
 import logging
 import re
 import shlex
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
@@ -795,7 +795,7 @@ class RepoTools(Skill):
 
             if TREE_SITTER_AVAILABLE:
                 all_matches: list[str] = []
-                for fpath in self._iter_source_files(resolved, max_files=500):
+                for fpath in self._iter_source_files(resolved, max_files=None):
                     lang = _detect_lang(fpath)
                     if lang == "unknown":
                         continue
@@ -835,6 +835,7 @@ class RepoTools(Skill):
         search_name = re.escape(name)
         pattern = f"\\b{search_name}\\b"
 
+        raw_lines: Iterable[str]
         if self._session and await self._check_rg():
             cmd = f"rg -n -H --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
             stdout, _, code = await self._session.run(cmd, timeout=30)
@@ -842,19 +843,7 @@ class RepoTools(Skill):
                 return ReferenceSearchResult(query=name, matches=[], total_matches=0)
             raw_lines = stdout.strip().splitlines()
         else:
-            raw_lines = []
-            for fpath in self._iter_source_files(resolved, max_files=200):
-                try:
-                    text = fpath.read_text(encoding="utf-8", errors="replace")
-                    for i, line in enumerate(text.splitlines(), 1):
-                        if re.search(rf"\b{re.escape(name)}\b", line):
-                            try:
-                                rel = fpath.relative_to(self._root)
-                            except ValueError:
-                                rel = fpath
-                            raw_lines.append(f"{rel}:{i}:{line}")
-                except OSError:
-                    continue
+            raw_lines = self._iter_reference_lines(resolved, pattern)
 
         # Filter out definitions, comments, and string-only lines.
         matches: list[str] = []
@@ -880,6 +869,8 @@ class RepoTools(Skill):
                 continue
             matches.append(f"{path_text}:{line_no}: {content}")
             anchors.append(anchor)
+            if len(matches) >= max_results:
+                break
 
         truncated = len(matches) >= max_results
         return ReferenceSearchResult(
@@ -893,6 +884,23 @@ class RepoTools(Skill):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _iter_reference_lines(self, root: Path, pattern: str) -> Iterator[str]:
+        """Search until the caller has enough references, regardless of file count."""
+        regex = re.compile(pattern)
+        for fpath in self._iter_source_files(root, max_files=None):
+            try:
+                rel = fpath.relative_to(self._root)
+            except ValueError:
+                rel = fpath
+            try:
+                with fpath.open(encoding="utf-8", errors="replace") as source:
+                    for line_no, line in enumerate(source, 1):
+                        if regex.search(line):
+                            content = line.rstrip("\r\n")
+                            yield f"{rel}:{line_no}:{content}"
+            except OSError:
+                continue
+
     def _iter_source_files(self, root: Path, max_files: int | None = 500) -> Iterator[Path]:
         """Yield source files, pruning ignored directories below the requested root."""
         if max_files is not None and max_files <= 0:
