@@ -178,6 +178,17 @@ class ChildFailed(BaseModel):
     error: str
 
 
+class ChildMessage(BaseModel):
+    """A child sent a message with ``self.message()``; delivered on the parent's ``delegates`` channel.
+
+    One item per message, in order, before the result of the same turn. It
+    does not resolve ``ChildRef.wait()``, which still waits for a ``Done``.
+    """
+
+    child: ChildRef
+    text: str
+
+
 class TurnCancelledOutcome(BaseModel):
     """What ``prompt()`` returns when the turn it waited for was cancelled."""
 

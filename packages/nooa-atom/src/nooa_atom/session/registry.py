@@ -19,13 +19,15 @@ from pathlib import Path
 from typing import Any
 
 from nooa.events import TuiSessionResumed
-from nooa.interactive import Done
+from nooa.interactive import AgentMessage, Done
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa_atom.session.events import ChildDeleted, SnapshotRestoreFailed
 from nooa_atom.session.items import (
+    AgentEventUpdate,
     ChildCreatedUpdate,
     ChildFailed,
     ChildFailedError,
+    ChildMessage,
     ChildQuestion,
     ChildRef,
     ChildResult,
@@ -366,7 +368,10 @@ class SessionRegistry:
             raise ChildFailedError(f"Session {child_id!r} is not a child of {parent.id!r}")
 
     def _deliver(self, child: Session, update: SessionEvent) -> None:
-        """Route a child's turn result to its live parent (a detached child keeps its own)."""
+        """Route a child's messages and turn result to its live parent (a detached child keeps its own)."""
+        if isinstance(update, AgentEventUpdate) and isinstance(update.event, AgentMessage):
+            self._deliver_message(child, update.event)
+            return
         if not isinstance(update, TurnEndedUpdate):
             return
         ancestor = self.sessions.get(child.parent_id) if child.parent_id else None
@@ -427,6 +432,23 @@ class SessionRegistry:
                 task = asyncio.get_running_loop().create_task(self.close(child.id))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
+
+    def _deliver_message(self, child: Session, event: AgentMessage) -> None:
+        """Send a child's ``self.message()`` text to its live parent as a ``ChildMessage``.
+
+        Listeners run in the order the child emits, so its messages reach the
+        parent before the result of the same turn. The message stays in the
+        child's own events too. A ``Done``'s message is not sent: it arrives
+        with the ``ChildResult``. A closing or closed parent drops it.
+        """
+        if child.sending_done_message:
+            return
+        parent = self.sessions.get(child.parent_id) if child.parent_id else None
+        if parent is None or parent.closing:
+            return
+        item = ChildMessage(child=self.child_ref(child), text=str(event.content))
+        with suppress(SessionClosedError):
+            _admit_delegate(parent, item, f"child:{child.name or child.id}")
 
     def _put(
         self, parent: Session, child_id: str, item: ChildResult | ChildFailed, source: str

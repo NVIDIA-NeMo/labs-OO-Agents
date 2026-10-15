@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from nooa_atom.session.items import (
         ChildFailed,
         ChildFailedError,
+        ChildMessage,
         ChildQuestion,
         ChildRef,
         ChildResult,
@@ -49,7 +50,7 @@ _EXPORT_MODULES = {
     **dict.fromkeys(("TaskRun", "Tree", "open_tree", "run_task"), "hosts.headless"),
     **dict.fromkeys(
         (
-            "ChildFailed ChildFailedError ChildQuestion ChildRef ChildResult CommandInfo "
+            "ChildFailed ChildFailedError ChildMessage ChildQuestion ChildRef ChildResult CommandInfo "
             "CommandResult Receipt SessionEvent SessionInfo TaskResult TranscriptEntry "
             "TurnCancelled TurnCancelledOutcome Usage"
         ).split(),
@@ -89,6 +90,7 @@ __all__ = [
     "ChildActiveElsewhereError",
     "ChildFailed",
     "ChildFailedError",
+    "ChildMessage",
     "ChildQuestion",
     "ChildRef",
     "ChildResult",
