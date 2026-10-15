@@ -455,9 +455,8 @@ class ActivityShellTools(Skill):
         match: Annotated[Match, spec(description="A Match from read() or run().matches")],
         new: Annotated[str, spec(description="Replacement text for the Match's whole line region")],
     ) -> FileWrite:
-        if not isinstance(match, Match):
-            # Let ShellTools raise its wrong-argument TypeError.
-            return await self._shell.replace_match(match, new)
+        # ShellTools raises its wrong-argument TypeError for a non-Match, before
+        # anything is reported.
         result = await self._shell.replace_match(match, new)
         return await self._report_edit(
             Path(match.resolved_path), match.text, result, match.start, match.end

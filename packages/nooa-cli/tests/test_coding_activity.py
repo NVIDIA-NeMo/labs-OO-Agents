@@ -440,3 +440,16 @@ async def test_overwrite_reads_the_previous_content_boundedly(tmp_path):
     # "<= limit" assertion.
     assert reads, "the previous content was never read"
     assert all(0 < size <= activity._MAX_DIFF_INPUT_CHARS + 1 for size in reads), reads
+
+
+async def test_replace_match_with_a_path_raises_and_reports_nothing(tmp_path):
+    """#447 review finding 9: no wrapper branch; ShellTools' TypeError surfaces."""
+    shell, events = _observed_shell(tmp_path)
+    (tmp_path / "example.txt").write_text("one\n")
+    try:
+        with pytest.raises(TypeError, match="replace"):
+            await shell.replace_match("example.txt", "two")
+    finally:
+        await shell.close()
+    assert (tmp_path / "example.txt").read_text() == "one\n"
+    assert not any(isinstance(event, FileEdit) for event in events)
