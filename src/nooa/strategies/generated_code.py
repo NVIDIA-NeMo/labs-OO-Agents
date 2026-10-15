@@ -239,6 +239,7 @@ class HelperFunctionManager:
 
         installed: list[str] = []
         errors: list[str] = []
+        cell_bound = _names_bound_by(tree)
 
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -249,11 +250,15 @@ class HelperFunctionManager:
 
             try:
                 func = _exec_with_source_tracking(node, method_code, namespace, method_name)
-            except NameError:
-                # A default argument or decorator uses a name bound earlier in this
-                # same cell, which does not exist yet. The runtime defines the
-                # function again after the cell body runs, so skip pre-definition
-                # instead of rejecting the whole cell.
+            except NameError as e:
+                if getattr(e, "name", None) in cell_bound:
+                    # A default argument or decorator uses a name this cell binds
+                    # (``KT = 3`` then ``def f(k=KT)``), which does not exist yet.
+                    # The runtime defines the function again after the cell body
+                    # runs, so skip pre-definition instead of rejecting the cell.
+                    continue
+                # A genuinely undefined name (a typo such as ``@stratgy``).
+                errors.append(f"Error defining `{method_name}`: {type(e).__name__}: {e}")
                 continue
             except Exception as e:
                 errors.append(f"Error defining `{method_name}`: {type(e).__name__}: {e}")
@@ -268,6 +273,22 @@ class HelperFunctionManager:
             installed.append(method_name)
 
         return HelperApplyResult(installed=installed, errors=errors)
+
+
+def _names_bound_by(tree: ast.AST) -> set[str]:
+    """Names a cell binds anywhere: assignments, imports, loop/with targets, defs."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+    return names
 
 
 def _type_name(t: Any) -> str:

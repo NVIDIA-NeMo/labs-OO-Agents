@@ -55,3 +55,44 @@ def test_helper_predefinition_defers_names_from_the_same_cell():
     code = "KT = 3\ndef scale(x, k=KT):\n    return x * k\n"
     result = HelperFunctionManager().apply(code, _CellAgent(), {}, namespace={})
     assert result.errors == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "@stratgy(PredictStrategy())\nasync def f(x: int) -> int:\n    ...\n",
+        "def g(x, k=undefined_name):\n    return x\n",
+    ],
+    ids=["decorator-typo", "default-typo"],
+)
+def test_helper_predefinition_still_reports_real_name_errors(code):
+    """#447 review finding 6: only names the cell binds are deferred; a typo is
+    still reported as "Error defining ..." before the cell runs."""
+    from nooa.strategies.generated_code import ExecutionNamespaceBuilder, HelperFunctionManager
+
+    agent = _CellAgent()
+    result = HelperFunctionManager().apply(
+        code, agent, {}, namespace=ExecutionNamespaceBuilder.build(agent)
+    )
+    assert len(result.errors) == 1
+    assert result.errors[0].startswith("Error defining `")
+    assert "NameError" in result.errors[0]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "cfg = 1\n@strategy(model=cfg)\nasync def h() -> int:\n    ...\n",
+        "import json as j\ndef load(s, loads=j.loads):\n    return loads(s)\n",
+        "for KT in [3]:\n    pass\ndef scale(x, k=KT):\n    return x * k\n",
+    ],
+    ids=["decorator-arg", "import-alias", "loop-target"],
+)
+def test_helper_predefinition_defers_other_same_cell_bindings(code):
+    from nooa.strategies.generated_code import ExecutionNamespaceBuilder, HelperFunctionManager
+
+    agent = _CellAgent()
+    result = HelperFunctionManager().apply(
+        code, agent, {}, namespace=ExecutionNamespaceBuilder.build(agent)
+    )
+    assert result.errors == []
