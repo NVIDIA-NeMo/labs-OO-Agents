@@ -693,6 +693,7 @@ class AtomAgent(InteractiveAgent):
 spec(AtomAgent, "session_port_visible", hidden=True)
 
 
+@hidden
 def _without_removed(method: Any) -> None:
     """Document ``method`` without its ``**removed`` catch-all (it rejects ``retain=``, ``mode=``, ``keep=``)."""
     import inspect

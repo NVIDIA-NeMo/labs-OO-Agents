@@ -57,13 +57,17 @@ RESULT = (
 # Re-measured when InteractiveAgent gained the base handle_work and TaskResult
 # moved to nooa.interactive (2026-10-16): unchanged for every row (the Atom
 # agents override handle_work), so the limits stay.
+# Lowered when agent.py's internal _without_removed helper was hidden from the
+# execution-context stub (2026-10-16): 168 characters less for every row (its
+# signature and docstring, which named the removed retain=/mode=/keep=
+# options). Measured values plus about 2%.
 LIMITS = {
-    (ATOM, "handle"): (15_150, 18_150),  # measured 14,837 / 17,788
-    (ATOM, "handle_batch"): (15_150, 17_750),  # measured 14,837 / 17,386
-    (ATOM, "handle_work"): (15_150, 18_350),  # measured 14,837 / 17,993
-    (EXPERIMENTAL, "handle"): (14_950, 16_750),  # measured 14,635 / 16,405
-    (EXPERIMENTAL, "handle_batch"): (14_950, 17_100),  # measured 14,635 / 16,758
-    (EXPERIMENTAL, "handle_work"): (14_950, 17_450),  # measured 14,635 / 17,070
+    (ATOM, "handle"): (15_000, 18_000),  # measured 14,669 / 17,620
+    (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,669 / 17,218
+    (ATOM, "handle_work"): (15_000, 18_200),  # measured 14,669 / 17,825
+    (EXPERIMENTAL, "handle"): (14_800, 16_600),  # measured 14,467 / 16,237
+    (EXPERIMENTAL, "handle_batch"): (14_800, 16_950),  # measured 14,467 / 16,590
+    (EXPERIMENTAL, "handle_work"): (14_800, 17_250),  # measured 14,467 / 16,902
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -79,8 +83,8 @@ def _no_installed_skills(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
 
 
-@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
-async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
+async def _first_call(spec, method, tmp_path, sessions_dir):
+    """Run one turn of ``method`` and return the first call's messages and workspace."""
     code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
     response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
@@ -100,7 +104,12 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
         await asyncio.wait_for(root.prompt("hello"), 30)
     finally:
         await registry.close_all()
-    messages = llm.calls[0].messages
+    return llm.calls[0].messages, workspace
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
+    messages, workspace = await _first_call(spec, method, tmp_path, sessions_dir)
     system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     # The workspace path appears in the prompt; count it as a fixed token.
@@ -110,6 +119,21 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     assert len(system) <= system_limit
     assert len(rendered) <= total_limit
     assert len(system) < BENCH_SYSTEM_LIMIT
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_execution_context_hides_internal_helpers(spec, method, tmp_path, sessions_dir):
+    """agent.py's internal helpers stay out of the ``<python_cell_context>`` stub.
+
+    ``_without_removed`` once leaked there with a docstring naming the removed
+    ``retain=``/``mode=``/``keep=`` options, putting them in front of the model.
+    """
+    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = "\n".join(str(m.get("content", "")) for m in messages)
+    start = rendered.index("<python_cell_context>")
+    stub = rendered[start : rendered.index("</python_cell_context>", start)]
+    for leaked in ("_without_removed", "retain=", "keep=", "mode="):
+        assert leaked not in stub
 
 
 class _InstalledSkill:
