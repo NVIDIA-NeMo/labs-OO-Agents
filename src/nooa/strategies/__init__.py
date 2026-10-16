@@ -18,6 +18,7 @@ from nooa.strategies.codeact import (
     return_text_as_result,
 )
 from nooa.strategies.codeact_v2 import CodeActV2
+from nooa.strategies.codeact_v3 import CodeActV3
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.current_call import CurrentCall
 from nooa.strategies.decide import DecideStrategy
@@ -105,6 +106,7 @@ __all__ = [
     "retry_text_only_response",
     "return_text_as_result",
     "CodeActV2",
+    "CodeActV3",  # Experimental: named markdown snippets + run_snippet
     "ReflexionStrategy",
     "PredictStrategy",
     "DecideStrategy",

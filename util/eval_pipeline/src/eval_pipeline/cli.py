@@ -25,6 +25,7 @@ VALID_STRATEGIES = [
     "pure_python",
     "codeact",
     "codeact_v2",
+    "codeact_v3",
     "reflexion",
     "predict",
     "structured_output",
@@ -101,7 +102,8 @@ def get_strategy_instance(strategy_name: str):
     """Create a strategy instance from a strategy name.
 
     Args:
-        strategy_name: One of VALID_STRATEGIES, including "codeact" and "codeact_v2".
+        strategy_name: One of VALID_STRATEGIES, including "codeact", "codeact_v2",
+            and the experimental "codeact_v3".
 
     Returns:
         GenerationStrategy instance
@@ -115,12 +117,14 @@ def get_strategy_instance(strategy_name: str):
         PredictStrategy,
         ReflexionStrategy,
     )
+    from nooa.strategies import CodeActV3
     from nooa.strategies.pure_python import PurePythonStrategy
 
     strategies = {
         "pure_python": PurePythonStrategy,
         "codeact": CodeActStrategy,
         "codeact_v2": CodeActV2,
+        "codeact_v3": CodeActV3,
         "reflexion": ReflexionStrategy,
         "predict": PredictStrategy,
         "structured_output": PredictStrategy,  # Backward-compatible alias

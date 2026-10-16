@@ -91,12 +91,14 @@ class CodeActV2(CodeActStrategy):
             self.config.restrictions.blocked_modules,
         )
 
+    _CONTEXT_SCOPE_LINE = "# Already in scope inside python_cell(); state persists across cells."
+
     def _format_execution_context_stub(self, code: list[str], in_scope_only: list[str]) -> str:
         """Keep guidance and runtime names inside the same Python-style block."""
         lines = [
             "```python",
             "# Python cell context",
-            "# Already in scope inside python_cell(); state persists across cells.",
+            self._CONTEXT_SCOPE_LINE,
             "# Use these names directly; do not re-import or re-define them.",
             "# Use doc(name) for details about any type or function.",
             "",

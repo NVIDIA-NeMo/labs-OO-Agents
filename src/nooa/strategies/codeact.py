@@ -715,6 +715,19 @@ Standard Python builtins and agent instance (`self`) are available."""
         """Return the model-facing name of the Python cell tool."""
         return "execute_python"
 
+    def _python_cell_reference(self) -> str:
+        """Return how model-facing hints name the place where code runs."""
+        return f"{self._python_tool_name()}()"
+
+    def _tool_arguments_hint(self) -> str:
+        """Return the model-facing example of valid Python-tool arguments."""
+        return f'call {self._python_tool_name()} with arguments like {{"code": "print(1)"}}.'
+
+    def _prefill_tool_arguments(self, code: str, prefill_type: str) -> dict[str, Any]:
+        """Return the provider-visible arguments recorded for a prefill cell."""
+        del prefill_type
+        return {"code": code}
+
     def _build_tools(self, return_type: Any, method_name: str) -> list[Tool]:
         """Build the model-facing tools for a generation turn."""
         return [
@@ -1617,8 +1630,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             runtime.event_manager.add(
                 Error(
                     content=f"Invalid arguments for tool `{tool_call.name}`: {e}. "
-                    f"Tool arguments must be a JSON object; call {self._python_tool_name()} "
-                    f'with arguments like {{"code": "print(1)"}}.'
+                    f"Tool arguments must be a JSON object; {self._tool_arguments_hint()}"
                 )
             )
             # Stop processing remaining tool calls - let LLM fix this first
@@ -2260,8 +2272,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     raise TypeError(
                         f"Expected an instance of {type_name}, "
                         f"but got {type(validated).__name__}.\n"
-                        f"Hint: Use {self._python_tool_name()}() to construct the {type_name} object, "
-                        f"then call return_result(variable) from within the code."
+                        f"Hint: Use {self._python_cell_reference()} to construct the {type_name} "
+                        f"object, then call return_result(variable) from within the code."
                     )
 
             # Method-local postconditions: deterministic invariants declared on
@@ -3011,7 +3023,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             ToolCallEvent(
                 tool_call_id=prefill_id,
                 name=self._python_tool_name(),
-                arguments={"code": code},
+                arguments=self._prefill_tool_arguments(code, prefill_type),
                 result=None,  # Will be updated after execution
                 metadata={"prefill": True, "prefill_type": prefill_type},
             )

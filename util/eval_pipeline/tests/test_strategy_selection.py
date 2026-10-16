@@ -6,7 +6,7 @@ import pytest
 
 from eval_pipeline.cli import VALID_STRATEGIES, get_strategy_instance
 from nooa import CodeActStrategy, CodeActV2
-from nooa.strategies import get_default_strategy
+from nooa.strategies import CodeActV3, get_default_strategy
 
 
 def test_v2_replaces_lite_without_changing_the_default():
@@ -17,3 +17,9 @@ def test_v2_replaces_lite_without_changing_the_default():
     assert type(get_default_strategy()) is CodeActStrategy
     with pytest.raises(ValueError, match="Unknown strategy"):
         get_strategy_instance("codeact_lite")
+
+
+def test_experimental_v3_is_selectable_without_changing_the_default():
+    assert "codeact_v3" in VALID_STRATEGIES
+    assert isinstance(get_strategy_instance("codeact_v3"), CodeActV3)
+    assert type(get_default_strategy()) is CodeActStrategy

@@ -6,6 +6,19 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Experimental `CodeActV3` strategy (`from nooa.strategies import CodeActV3`;
+  `codeact_v3` in the eval pipeline). The model writes Python in its reply as
+  fenced blocks whose header names them (```` ```python scan-files ````) and
+  runs one with the single provider tool `run_snippet(name)`. Code no longer
+  travels as a JSON-escaped tool argument, and only snippets that are named and
+  explicitly run execute; unnamed blocks and other languages stay plain text.
+  `run_snippet` resolves names only within the same reply. Common naming
+  conventions (`title="…"`, `[…]`, `python:…`, Pandoc `{.python #…}`, knitr
+  `{python …}`) are accepted. Session state, `return_result` inside code, and
+  context blocks match `CodeActV2`. New harness metrics `snippet_error`,
+  `snippet_header_variant`, and `snippets_not_run` record resolution failures,
+  non-canonical headers, and text-only replies that wrote snippets without
+  running them. `CodeActStrategy` and `CodeActV2` behaviour is unchanged.
 - `RetryConfig` is the only endpoint retry budget for `CompletionClient` on
   OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt twice
   more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent server

@@ -135,6 +135,11 @@ class HarnessMetrics(BaseModel):
     # ── Tool Call Translation ──
     tool_calls_translated: list[str] = Field(default_factory=list)
 
+    # ── Named Snippets (CodeActV3) ──
+    snippet_errors: list[str] = Field(default_factory=list)
+    snippet_header_variants: list[str] = Field(default_factory=list)
+    snippets_not_run_count: int = 0
+
     # ── Return Value Handling ──
     explicit_return_auto_completed: int = 0
     implicit_return_transformed: int = 0
@@ -282,6 +287,16 @@ class HarnessMetrics(BaseModel):
     # Tool Call Translation
     def tool_call_translated(self, tool_name: str) -> None:
         self._append(self.tool_calls_translated, tool_name)
+
+    # Named Snippets (CodeActV3)
+    def snippet_error(self, detail: str) -> None:
+        self._append(self.snippet_errors, detail)
+
+    def snippet_header_variant(self, variant: str) -> None:
+        self._append(self.snippet_header_variants, variant)
+
+    def snippets_not_run(self) -> None:
+        self.snippets_not_run_count += 1
 
     # Return Value Handling
     def explicit_return_completed(self) -> None:
@@ -722,6 +737,39 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Tool Call Translation",
         lambda m: m.tool_calls_translated,
         True,
+    ),
+    # Named Snippets (CodeActV3)
+    SchemaEntry(
+        "harness.snippet_error.count",
+        "Snippet resolution errors",
+        "Named Snippets",
+        lambda m: len(m.snippet_errors),
+    ),
+    SchemaEntry(
+        "harness.snippet_error.details",
+        "Snippet resolution error details",
+        "Named Snippets",
+        lambda m: m.snippet_errors,
+        True,
+    ),
+    SchemaEntry(
+        "harness.snippet_header_variant.count",
+        "Non-canonical snippet headers accepted",
+        "Named Snippets",
+        lambda m: len(m.snippet_header_variants),
+    ),
+    SchemaEntry(
+        "harness.snippet_header_variant.details",
+        "Non-canonical snippet header details",
+        "Named Snippets",
+        lambda m: m.snippet_header_variants,
+        True,
+    ),
+    SchemaEntry(
+        "harness.snippets_not_run.count",
+        "Text-only replies with unexecuted snippets",
+        "Named Snippets",
+        lambda m: m.snippets_not_run_count,
     ),
     # Return Value Handling
     SchemaEntry(
