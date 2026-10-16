@@ -95,6 +95,18 @@ class ChildBroker:
             or response.get("tool_call_id") != call_id
         ):
             raise ParentToolError("sandbox broker got an unexpected response")
+        images = response.get("images")
+        if images:
+            from nooa.runtime.media_capture import _media_buffer_var
+
+            buf = _media_buffer_var.get()
+            if buf is not None:
+                for block in images:
+                    if not buf.append(block):
+                        print(
+                            f"[show() limit reached ({buf.max_attachments}), attachment not added]"
+                        )
+                        break
         if not response.get("ok"):
             _raise_broker_error(response)
         return response
@@ -471,6 +483,7 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
                     request,
                     max_error=init.get("max_error"),
                     tail_chars=init.get("error_tail"),
+                    max_media=init.get("max_media"),
                 )
                 wire.send(
                     conn,
@@ -494,12 +507,14 @@ def _run_one(
     *,
     max_error: int | None = None,
     tail_chars: int | None = None,
+    max_media: int | None = None,
 ) -> ResultDTO:
     result = loop.run_until_complete(
         run_cell_source(
             request["code"],
             namespace,
             execution_count=int(request.get("execution_count", 1)),
+            max_attachments=max_media if max_media is not None else 100,
         )
     )
     return _serialize(

@@ -77,6 +77,7 @@ async def run_cell_source(
     execution_count: int = 1,
     stdout_hook: Callable[[str], None] | None = None,
     stderr_hook: Callable[[str], None] | None = None,
+    max_attachments: int = 100,
 ) -> ExecutionResult:
     """Execute ``code`` in ``namespace`` with REPL semantics; never raises.
 
@@ -89,7 +90,7 @@ async def run_cell_source(
 
     stdout_buf = _HookedBuffer(stdout_hook)
     stderr_buf = _HookedBuffer(stderr_hook)
-    media_buffer = _MediaBuffer(max_attachments=100)
+    media_buffer = _MediaBuffer(max_attachments=max_attachments)
     media_token = _media_buffer_var.set(media_buffer)
 
     returned_value: Any = _NO_RETURN

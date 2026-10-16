@@ -27,12 +27,14 @@ from typing import Any
 import msgpack
 from pydantic import BaseModel
 
+from nooa.media import Audio, File, Image, Media, Video
 from nooa.runtime.sandbox.errors import CellSerializationError
 
 HINT = (
     "Only JSON-like values (numbers, str, bytes, bool, None, list, tuple, set, dict), "
-    "datetime/date/timedelta, Decimal, Path, UUID, numpy arrays, and the agent's declared "
-    "data types (pydantic models, dataclasses, enums) can cross the sandbox boundary."
+    "datetime/date/timedelta, Decimal, Path, UUID, numpy arrays, Media objects (Image, "
+    "Audio, Video, File), and the agent's declared data types (pydantic models, "
+    "dataclasses, enums) can cross the sandbox boundary."
 )
 
 (
@@ -50,7 +52,16 @@ HINT = (
     _MODEL,
     _DATACLASS,
     _NAMEDTUPLE,
-) = range(14)
+    _MEDIA,
+) = range(15)
+
+_MEDIA_CLASSES: dict[str, type[Media]] = {
+    "Image": Image,
+    "Audio": Audio,
+    "Video": Video,
+    "File": File,
+    "Media": Media,
+}
 
 
 def type_key(cls: type) -> str:
@@ -114,6 +125,20 @@ class Codec:
             descr = np.lib.format.dtype_to_descr(obj.dtype)
             body = list(obj.ravel()) if obj.dtype.hasobject else obj.tobytes()
             return self._ext(_NDARRAY, [descr, list(obj.shape), body])
+        if isinstance(obj, Media):
+            cls_name = type(obj).__name__
+            if cls_name not in _MEDIA_CLASSES:
+                if isinstance(obj, Image):
+                    cls_name = "Image"
+                elif isinstance(obj, Audio):
+                    cls_name = "Audio"
+                elif isinstance(obj, Video):
+                    cls_name = "Video"
+                elif isinstance(obj, File):
+                    cls_name = "File"
+                else:
+                    cls_name = "Media"
+            return self._ext(_MEDIA, [cls_name, obj.data_url, obj.media_type, obj.vendor_metadata])
         raise TypeError(f"cannot serialize {type(obj).__name__!r}")
 
     def _decode(self, code: int, data: bytes) -> Any:
@@ -138,6 +163,18 @@ class Codec:
             return uuid.UUID(bytes=p)
         if code == _NDARRAY:
             return _ndarray(*p)
+        if code == _MEDIA:
+            if not isinstance(p, list | tuple) or len(p) != 4:
+                raise CellSerializationError("malformed media record in sandbox message")
+            cls_name, data_url, media_type, vendor_metadata = p
+            cls = _MEDIA_CLASSES.get(cls_name)
+            if cls is None:
+                raise CellSerializationError(f"unsupported media type {cls_name!r}")
+            if not isinstance(data_url, str) or not isinstance(media_type, str):
+                raise CellSerializationError("malformed media object in sandbox message")
+            if vendor_metadata is not None and not isinstance(vendor_metadata, dict):
+                raise CellSerializationError("malformed media vendor_metadata in sandbox message")
+            return cls(data_url=data_url, media_type=media_type, vendor_metadata=vendor_metadata)
         key, body = p
         cls = self.types.get(key)
         if cls is None:
