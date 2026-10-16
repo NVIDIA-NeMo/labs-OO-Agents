@@ -16,6 +16,11 @@ to follow semantic versioning.
   of its tree. Both run the new `handle_work` turn, written for a parent,
   whose `Done` must carry a `TaskResult`; a one-shot worker that returns
   `NeedInput` gets turn feedback to decide and state its assumptions.
+  `InteractiveAgent` defines a generic `handle_work` (with the
+  `require_task_result` postcondition and `TaskResult`, now in
+  `nooa.interactive` and re-exported from `nooa_atom.session.items`), so every
+  child runs it: the fallback to `handle_batch`/`handle` for a class without
+  one is removed, and such a class raises a `TypeError` at delegate time.
   `retain=`, `mode=` and `keep=` raise a `TypeError`; `context=` is removed.
   `ChildRef` has `wait()`, `send()` (steers a running child, or queues and
   starts a turn) and `close()` only: `steer()`, `info` and
@@ -25,7 +30,9 @@ to follow semantic versioning.
   waiting for an answer. A Todo handed to a child becomes its active Todo (a
   copy), and its comments, status and vars merge back into the parent's Todo
   against a recorded base (`ChildTodoBase`, durable across a reload); a
-  conflicting field is noted and retried, never blocking the rest.
+  conflicting field is noted and retried, never blocking the rest. Each
+  distinct conflict (child, field, values) is noted once, derived from the
+  Todo's comments so it holds across a reload; a repeated merge adds no note.
   `brief=` reaches the child with the Todo, after a line naming its parent
   and saying whether it may ask. A closed child stays closed (`send()`
   raises), `ChildRef.status` is live, a child whose turn ended `Waiting`
