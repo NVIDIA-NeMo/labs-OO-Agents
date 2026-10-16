@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prompt-size guards for the Atom agents' first model call.
+"""Prompt-size guards for the Atom agent's first model call.
 
 Installed ``nooa.skills`` entry points are loaded into the agent, and the
 user's skill directories under the home directory are discovered, so both
@@ -17,16 +17,15 @@ prompt must raise a limit here on purpose.
 import asyncio
 
 import pytest
+from atom_test_agents import python_cell
 from nooa_atom.agent.factory import create_session_agent
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
-from test_experimental_agent import python_cell
 
 from nooa.unifiedllm import FakeLLMClient
 
 ATOM = "nooa_atom.agent:AtomAgent"
-EXPERIMENTAL = "nooa_atom.agent:ExperimentalAtomAgent"
 RESULT = (
     "return_result(Done(explanation='x', result=TaskResult("
     "solution_description='a', evidence='b', how_to_verify='c')))"
@@ -47,8 +46,6 @@ RESULT = (
 LIMITS = {
     (ATOM, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
     (ATOM, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
-    (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
-    (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

@@ -3,8 +3,8 @@
 """Notification metadata must reach the executed CodeAct input prefill."""
 
 import pytest
+from atom_test_agents import python_cell
 from nooa_atom.agent import AtomAgent
-from test_experimental_agent import python_cell
 
 from nooa import strategy
 from nooa.config import CodeActConfig
