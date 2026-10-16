@@ -46,17 +46,21 @@ RESULT = (
 # (about 430 characters): measured values plus about 2% headroom.
 # Raised for the child-session interface (2026-10-15): the class doc tells the
 # model to put a task's requirements and rules in the Todo it hands a child and
-# to run one editing child at a time, spawn() takes brief=, mode= and keep=, and
+# to run one editing child at a time, spawn() takes brief=, and
 # ChildRef/ChildQuestion carry todo_id, a live status and question ids (about
 # 770 characters over the 2026-10-02 values, ChildMessage docs included). The
 # handle_work rows are the new worker turn. Measured values plus about 2%.
+# Lowered when the child API was trimmed (2026-10-16): delegate() is one-shot and
+# spawn() kept, with no mode=/keep=/context= parameters and no
+# ChildRef.steer()/info/pending_question (about 150 characters less than at
+# 5b84477a7). Measured values plus about 2%.
 LIMITS = {
-    (ATOM, "handle"): (15_300, 18_300),  # measured 14,993 / 17,944
-    (ATOM, "handle_batch"): (15_300, 17_900),  # measured 14,993 / 17,542
-    (ATOM, "handle_work"): (15_300, 18_550),  # measured 14,993 / 18,154
-    (EXPERIMENTAL, "handle"): (15_100, 16_900),  # measured 14,786 / 16,556
-    (EXPERIMENTAL, "handle_batch"): (15_100, 17_250),  # measured 14,786 / 16,909
-    (EXPERIMENTAL, "handle_work"): (15_100, 17_550),  # measured 14,786 / 17,209
+    (ATOM, "handle"): (15_150, 18_150),  # measured 14,837 / 17,788
+    (ATOM, "handle_batch"): (15_150, 17_750),  # measured 14,837 / 17,386
+    (ATOM, "handle_work"): (15_150, 18_350),  # measured 14,837 / 17,993
+    (EXPERIMENTAL, "handle"): (14_950, 16_750),  # measured 14,635 / 16,405
+    (EXPERIMENTAL, "handle_batch"): (14_950, 17_100),  # measured 14,635 / 16,758
+    (EXPERIMENTAL, "handle_work"): (14_950, 17_450),  # measured 14,635 / 17,070
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
