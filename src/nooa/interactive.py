@@ -212,6 +212,12 @@ class AgentMessage(Metadata):
     _role: ClassVar[Role] = Role.METADATA
 
     content: str = ""
+    is_result_text: bool = False
+    """The text of the turn's ``Done``/``Waiting`` message, not a progress message.
+
+    A session hands it to a parent with the turn's result, so a relay of
+    progress messages skips it.
+    """
 
 
 class SummarizationConfig(BaseModel):
@@ -503,15 +509,20 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
                 ``echo=True`` when you need to reference the sent content in
                 subsequent cells.
         """
-        event = AgentMessage(content=str(text))
+        self._send_message(text)
+        if echo:
+            print(text)
+
+    @hidden
+    def _send_message(self, text: str, *, is_result_text: bool = False) -> None:
+        """Record and render one message; ``is_result_text`` marks a turn result's message."""
+        event = AgentMessage(content=str(text), is_result_text=is_result_text)
         tag = self.event_manager.add(event)
         if self._render_message is not None:
             try:
                 self._render_message(text, event_id=str(event.id), tags={str(tag)})
             except TypeError:
                 self._render_message(text)
-        if echo:
-            print(text)
 
     @hidden
     @strategy(CodeActStrategy())
