@@ -26,22 +26,25 @@ AgentFactory = Callable[[SessionOptions, StorageManager], InteractiveAgent]
 
 
 ATOM_AGENT = "nooa_atom.agent:AtomAgent"
-EXPERIMENTAL_ATOM_AGENT = "nooa_atom.agent:ExperimentalAtomAgent"
 LEGACY_AGENT_SPECS = {
     "nooa_cli.tui.agent:TUIAgent": ATOM_AGENT,
     "nooa_cli.coding.legacy_agent:TUIAgent": ATOM_AGENT,
-    "nooa_cli.tui.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
-    "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
+    "nooa_cli.tui.experimental_agent:ExperimentalTUIAgent": ATOM_AGENT,
+    "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent": ATOM_AGENT,
     # What nooa-coder, the package before nooa-atom, recorded.
     "nooa_coder.coding.agent:CodingAgent": ATOM_AGENT,
-    "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_ATOM_AGENT,
+    "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent": ATOM_AGENT,
     # Spellings from before the agent moved out of nooa-cli.
     "nooa_cli.coding.agent:CodingAgent": ATOM_AGENT,
-    "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": EXPERIMENTAL_ATOM_AGENT,
+    "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": ATOM_AGENT,
     # What the nooa-acp server and the old TUI record as a session's agent.
     "CodingAgent": ATOM_AGENT,
     "TUIAgent": ATOM_AGENT,
-    "ExperimentalTUIAgent": EXPERIMENTAL_ATOM_AGENT,
+    "ExperimentalTUIAgent": ATOM_AGENT,
+    # ExperimentalAtomAgent was removed; it differed from AtomAgent only in its
+    # prompt wording and the missing context-usage block, so its saved sessions
+    # (and those of the experimental agents before it) load as AtomAgent.
+    "nooa_atom.agent:ExperimentalAtomAgent": ATOM_AGENT,
 }
 """Agent specs older hosts saved, and the spec that loads the class that replaced each."""
 
@@ -83,7 +86,8 @@ def load_agent_class(spec: str, *, base: str | Path | None = None) -> type[Inter
     to its resolved path and cached until the file changes, so two agent
     files never share a ``sys.modules`` entry and an unchanged file gives
     the same class every time. Spellings saved by older hosts (the
-    ``nooa_cli.*`` coding agents) load the classes that replaced them.
+    ``nooa_cli.*`` coding agents) and removed agents (the experimental
+    coding agents) load the classes that replaced them.
 
     Raises ``AgentSpecError`` for a malformed spec, a module or file that
     cannot be imported, a missing class, or a class that is not an

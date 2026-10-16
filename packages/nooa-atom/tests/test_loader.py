@@ -120,3 +120,62 @@ def test_bad_file_specs_are_rejected(tmp_path, body):
         path.write_text(body)
     with pytest.raises(AgentSpecError):
         load_agent_class(f"{path}:Plain")
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "nooa_atom.agent:ExperimentalAtomAgent",
+        "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent",
+    ],
+)
+def test_removed_experimental_agent_specs_load_the_atom_agent(spec):
+    """ExperimentalAtomAgent and the experimental agents before it are gone; AtomAgent loads."""
+    from nooa_atom.agent.agent import AtomAgent
+
+    assert load_agent_class(spec) is AtomAgent
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "nooa_atom.agent:ExperimentalAtomAgent",
+        "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent",
+    ],
+)
+async def test_a_saved_experimental_session_loads_as_an_atom_agent(spec, tmp_path, sessions_dir):
+    """A session saved under a removed experimental agent spec resumes with its state."""
+    import asyncio
+
+    from atom_test_agents import python_cell
+    from nooa_atom.agent.agent import AtomAgent
+    from nooa_atom.session.registry import SessionRegistry
+    from nooa_atom.session.store import SessionStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    code = "self.todo.add('carry the plan over'); self.v.note = 'kept'\n" + (
+        "return_result(Done(explanation='saved'))"
+    )
+    llm = FakeLLMClient([python_cell(code, "c1")], strict_exhaustion=True)
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    try:
+        session = await registry.create(
+            SessionOptions(workspace=workspace, agent_spec=spec, llm=llm, sessions_dir=sessions_dir)
+        )
+        await asyncio.wait_for(session.prompt("remember this"), 30)
+        session_id = session.id
+    finally:
+        await registry.close_all()
+
+    store = SessionStore(sessions_dir)
+    [info] = store.list(workspace=workspace)
+    assert info.agent == spec
+    registry = SessionRegistry(store, agent_factory=create_session_agent)
+    try:
+        session = await registry.load(session_id, llm=FakeLLMClient([]))
+        assert type(session._agent) is AtomAgent
+        assert session._agent.v.note == "kept"
+        assert "carry the plan over" in session._agent.todo.status()
+    finally:
+        await registry.close_all()
