@@ -172,6 +172,43 @@ async def test_waiting_on_a_buffered_result_is_accepted(tmp_path, sessions_dir):
     assert not _rejected(calls[1])
 
 
+
+async def test_waiting_on_a_working_child_is_accepted(tmp_path, sessions_dir):
+    """A kept child whose turn ended Waiting on its own job reads ``working``: it will deliver."""
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "for _ in range(500):\n"
+                "    if self.children()[0].status == 'working':\n"
+                "        break\n"
+                "    await asyncio.sleep(0.01)\n"
+                "assert self.children()[0].status == 'working', self.children()[0].status\n"
+                "return_result(Waiting(explanation='w', on=['delegates', 'Worker']))"
+            ),
+            cell("[item] = notification['delegates']\n" + RESULT),
+        ],
+        {
+            "Worker": [
+                cell(
+                    "self.queue_manager.queue('ci')\n"
+                    "self.queue_manager.spawn(asyncio.sleep(0.5, result='green'), "
+                    "channel='ci', label='ci-1')\n"
+                    "return_result(Waiting(explanation='ci running', on=['ci']))"
+                ),
+                cell(
+                    "assert notification['ci'] == ['green']\n"
+                    "return_result(Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                ),
+            ]
+        },
+    )
+    assert len(calls) == 2
+    assert not _rejected(calls[1])
+
 @pytest.mark.parametrize("target", ["delegates", "Worker"])
 async def test_waiting_right_after_sending_to_an_idle_retained_child_is_accepted(
     tmp_path, sessions_dir, target

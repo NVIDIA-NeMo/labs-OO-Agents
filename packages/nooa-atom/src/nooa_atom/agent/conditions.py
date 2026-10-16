@@ -82,7 +82,8 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
       input, or an item is already buffered on ``delegates`` (a child that
       just finished, or a follow-up sent with ``child.send()`` that has not
       started yet, both count);
-    - a child's name or id: that child is running or has queued input.
+    - a child's name or id: that child is running, ``working`` (its last
+      turn ended Waiting on its own job) or has queued input.
 
     The person (``"user_messages"``) is never a valid target. Anything else
     raises ``WaitingTargetNotRunning``, which the strategy shows the model
@@ -127,8 +128,8 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
 def _running_names(agent: Any) -> dict[str, Any]:
     """What can deliver right now, from the session registry and the job registry.
 
-    ``children`` maps every child's name and id to whether it is running or
-    has queued input; ``jobs`` holds every running job's channel name and
+    ``children`` maps every child's name and id to whether it is running,
+    working or has queued input; ``jobs`` holds every running job's channel name and
     label; ``known_jobs`` every job's, running or not; ``now`` the names
     that are accepted.
     """
@@ -138,7 +139,9 @@ def _running_names(agent: Any) -> dict[str, Any]:
         registry = port._registry
         for info in registry.children(port.id):
             live = registry.get(info.id)
-            active = info.status == "running" or (
+            # ``working``: the child's last turn ended Waiting on its own job,
+            # so it will run again and deliver (#451 live status).
+            active = info.status in ("running", "working") or (
                 live is not None and not live.closing and live.has_queued_input()
             )
             for key in (info.id, info.name):
