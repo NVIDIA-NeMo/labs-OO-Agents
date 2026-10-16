@@ -6,24 +6,33 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- `nooa-atom`: the child-session interface is reworked (breaking).
-  `spawn(description, prompt, *, brief=None, context=None, model=None,
-  mode="worker", keep=False)` separates a child's turn type from its
-  lifetime: `mode="worker"` (the default) runs the new `handle_work` turn,
-  written for a parent, whose `Done` must carry a `TaskResult` and which
-  may ask the parent a question; `mode="conversation"` is the interactive
-  `handle()`; `keep=True` keeps the child for follow-ups until it is closed.
-  `retain=` is removed and raises a `TypeError` naming `mode=` and `keep=`.
-  A Todo handed to a child becomes its active Todo (a copy), and its
-  comments, status and vars merge back into the parent's Todo as results
-  and questions arrive (`ChildRef.todo_id`; the Todo's `child` var).
-  `brief=` reaches the child with the Todo, after a line naming its parent.
-  `ChildRef.wait()` returns a `ChildResult` or `ChildQuestion` and raises
-  `ChildIdleError` instead of hanging on an idle child or one waiting for an
-  answer; questions have ids and stay `ChildRef.pending_question` until
-  answered; `delegate()` raises `ChildQuestionError` when its child asks. A
-  closed child stays closed (`send()` raises), `ChildRef.status` is live,
-  and a child whose turn ended `Waiting` reads `working`.
+- `nooa-atom`: the child-session interface is reworked (breaking). The two
+  verbs carry the difference: `delegate(description, prompt, *, brief=None,
+  model=None) -> Done` runs a one-shot worker that may not ask questions and
+  is closed after its result; `spawn(description, prompt, *, brief=None,
+  model=None) -> ChildRef` starts a kept child that may ask its parent
+  questions (`ChildQuestion` with an id, answered with `question.answer()`),
+  takes follow-ups with `send()` and stays open until `close()` or the end
+  of its tree. Both run the new `handle_work` turn, written for a parent,
+  whose `Done` must carry a `TaskResult`; a one-shot worker that returns
+  `NeedInput` gets turn feedback to decide and state its assumptions.
+  `retain=`, `mode=` and `keep=` raise a `TypeError`; `context=` is removed.
+  `ChildRef` has `wait()`, `send()` (steers a running child, or queues and
+  starts a turn) and `close()` only: `steer()`, `info` and
+  `pending_question` are removed (a pending question shows in the ref's
+  repr). `ChildRef.wait()` returns a `ChildResult` or `ChildQuestion` and
+  raises `ChildFailedError` instead of hanging on an idle child or one
+  waiting for an answer. A Todo handed to a child becomes its active Todo (a
+  copy), and its comments, status and vars merge back into the parent's Todo
+  against a recorded base (`ChildTodoBase`, durable across a reload); a
+  conflicting field is noted and retried, never blocking the rest.
+  `brief=` reaches the child with the Todo, after a line naming its parent
+  and saying whether it may ask. A closed child stays closed (`send()`
+  raises), `ChildRef.status` is live, a child whose turn ended `Waiting`
+  reads `working`, and pending questions and queued outcomes are rebuilt
+  from the record after a reload. `SessionOptions` refuses unknown fields
+  and carries one child flag, `kept`. `AgentMessage.is_result_text` marks a
+  turn result's message.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive
