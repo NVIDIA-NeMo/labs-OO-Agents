@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
@@ -23,6 +23,7 @@ from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
+from nooa.tools.todo import TodoComment
 from nooa_atom.agent.activity import ActivityShellTools
 from nooa_atom.agent.instructions import render_agent_instructions
 from nooa_atom.agent.slash_commands import SlashCommandRegistry
@@ -33,10 +34,8 @@ from nooa_atom.agent.slash_commands import SlashCommandRegistry
 from nooa_atom.session.items import (
     ChildFailed,
     ChildFailedError,
-    ChildIdleError,
     ChildMessage,
     ChildQuestion,
-    ChildQuestionError,
     ChildRef,
     ChildResult,
     PlanEntry,
@@ -58,10 +57,8 @@ if TYPE_CHECKING:
 __all__ = [
     "ChildFailed",
     "ChildFailedError",
-    "ChildIdleError",
     "ChildMessage",
     "ChildQuestion",
-    "ChildQuestionError",
     "ChildRef",
     "ChildResult",
     "AtomAgent",
@@ -96,21 +93,20 @@ class AtomAgent(InteractiveAgent):
     independently verifiable change) to a child session with its own history.
     Hand it a Todo whose description carries the task's requirements and its
     rules or constraints: the child sees nothing else of your task.
-    ``done = await self.delegate(description, todo)`` waits for it and returns
-    its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
-    ``child = await self.spawn(description, todo)`` starts a worker and returns at
-    once (``keep=True`` keeps it for follow-ups with ``await child.send(...)``);
-    when nothing else is left, end the turn with
-    ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives in a later
-    turn under ``notification["delegates"]``: a ``ChildResult`` (``item.done``), a
-    ``ChildQuestion`` (``await item.answer(...)``), a ``ChildFailed``
-    (``item.error``), or a ``ChildMessage`` (``item.text``, a progress note). The
-    child's comments and status merge into your Todo. Never predict or make up a
-    pending child's result, poll, or sleep to wait. Children share this checkout:
-    run one editing child at a time; read-only children can run in parallel.
-    Children can delegate in turn only down to a fixed depth; past it
-    ``DepthLimitError`` is raised. Inspect and verify what a child reports before
-    relying on it.
+    ``done = await self.delegate(description, todo)`` runs a one-shot worker and
+    returns its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
+    ``child = await self.spawn(description, todo)`` starts a kept child and returns
+    at once; it may ask you questions and takes ``await child.send(...)`` follow-ups
+    until ``await child.close()``. When nothing else is left, end the turn with
+    ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
+    ``notification["delegates"]``: ``ChildResult`` (``item.done``), ``ChildQuestion``
+    (``await item.answer(...)``), ``ChildFailed`` (``item.error``) or
+    ``ChildMessage`` (``item.text``, a progress note). The child's comments and
+    status merge into your Todo. Never predict or make up a pending child's
+    result, poll, or sleep to wait. Children share this checkout: run one editing
+    child at a time; read-only children can run in parallel. Children can delegate
+    in turn only down to a fixed depth; past it ``DepthLimitError`` is raised.
+    Inspect and verify what a child reports before relying on it.
 
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
@@ -166,8 +162,6 @@ class AtomAgent(InteractiveAgent):
     session: Annotated[SessionPort | None, hidden, nosnapshot]
     # Tells install_port() not to document the port to the model.
     session_port_visible: ClassVar[bool] = False
-    # What each child started from, by child id: the base for merging its Todo back.
-    _todo_bases: Annotated[dict[str, Todo], hidden, nosnapshot]
 
     def __init__(
         self,
@@ -192,7 +186,6 @@ class AtomAgent(InteractiveAgent):
         self._delegates_in = self.queue_manager.queue("delegates")
         self.delegates = self._delegates_in.reader
         self.todo = TodoManager()
-        self._todo_bases = {}
         # Libraries live at <project>/.nooa/libs. get_project_dir() resolves
         # that per process, which is what a one-workspace host like the TUI
         # wants. A host serving several workspaces at once must say which
@@ -287,36 +280,33 @@ class AtomAgent(InteractiveAgent):
         prompt: str | Todo,
         *,
         brief: str | None = None,
-        context: Any = None,
         model: str | None = None,
+        **removed: Any,
     ) -> Done:
-        """Run a worker child on ``prompt``, wait for it, and return its ``Done``.
+        """Run a one-shot worker child on ``prompt``, wait for it, and return its ``Done``.
 
-        This is ``spawn(description, prompt, ...)`` (a worker, closed after its
-        result) followed by waiting for that result in this cell. The child
-        works in this checkout with its own history, and ``done.result`` is its
-        ``TaskResult`` (read ``result.report``). Use it only when you need the
-        report before continuing; otherwise use ``spawn()``. A Todo prompt
-        works as in ``spawn()``, and the report is added to it as a comment.
+        The child works in this checkout with its own history, cannot ask you
+        questions (it decides and states its assumptions), and is closed after
+        its result. ``done.result`` is its ``TaskResult`` (read
+        ``result.report``). Use it only when you need the report before
+        continuing; otherwise use ``spawn()``. A Todo prompt works as in
+        ``spawn()``, and the report is added to it as a comment.
 
-        Raises ``ChildQuestionError`` when the child asks instead of finishing
-        (answer ``exc.question``, then ``await exc.question.child.wait()``),
-        ``ChildFailedError`` when its turn fails or it is closed first, and
-        ``DepthLimitError`` when a child would exceed the depth limit; catch
-        them to report or recover.
+        Raises ``ChildFailedError`` when the child's turn fails, and
+        ``DepthLimitError`` when a child would exceed the depth limit.
 
         Args:
             description: Short label (2-6 words); the child's name and title.
             prompt: A ``Todo`` carrying the task's requirements, rules and
                 acceptance checks, or the full task as text.
             brief: Extra instructions sent with the prompt.
-            context: Optional data (a pydantic model or JSON data) sent with it.
             model: Model alias for the child; yours when omitted.
         """
-        child = await self.spawn(description, prompt, brief=brief, context=context, model=model)
+        _reject_removed("delegate", removed)
+        child = await _start_child(self, description, prompt, brief, model, kept=False)
         outcome = await child.wait()
-        if isinstance(outcome, ChildQuestion):
-            raise ChildQuestionError(outcome)
+        if not isinstance(outcome, ChildResult):  # a one-shot worker's question is a failure
+            raise ChildFailedError(f"Child {description!r} did not return a result")
         done = outcome.done
         if isinstance(prompt, Todo):
             self.todo.comment(prompt, f"Delegated to {description!r}: {_report_text(done)}")
@@ -328,54 +318,32 @@ class AtomAgent(InteractiveAgent):
         prompt: str | Todo,
         *,
         brief: str | None = None,
-        context: Any = None,
         model: str | None = None,
-        mode: Literal["worker", "conversation"] = "worker",
-        keep: bool = False,
         **removed: Any,
     ) -> ChildRef:
-        """Start a child session on ``prompt`` and return its ``ChildRef`` at once.
+        """Start a kept child on ``prompt`` and return its ``ChildRef`` at once.
 
-        Keep working, and when only the child's outcome is left end the turn
-        with ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives
-        in a later turn under ``notification["delegates"]``: a ``ChildResult``
-        (``item.done.result`` is a ``TaskResult``), a ``ChildQuestion`` or a
-        ``ChildFailed``, after any ``ChildMessage`` progress notes.
-        ``item.child.id`` matches the returned ref; keep it in ``self.v``.
+        Its outcomes arrive under ``notification["delegates"]``: a
+        ``ChildResult`` (``item.done.result`` is a ``TaskResult``), a
+        ``ChildQuestion`` (answer with ``await item.answer(...)``) or a
+        ``ChildFailed``, after any ``ChildMessage`` progress notes;
+        ``item.child.id`` matches the returned ref (keep it in ``self.v``).
+        Send follow-ups with ``await ref.send(text)``; it stays open until
+        ``await ref.close()``.
 
-        Hand over a ``Todo`` (one in ``self.todo``) whose description holds the
-        task's requirements and its rules or constraints: the child sees
-        nothing else of your task. The child works on a copy as its own active
-        Todo; its comments, status and vars merge into yours as each result or
-        question arrives, ``ref.todo_id`` names it and the Todo's ``child`` var
-        names the child. Run one editing child at a time.
+        A ``Todo`` prompt (one in ``self.todo``) is handed over: the child works
+        on a copy as its active Todo, and its comments, status and vars merge
+        into yours with each outcome.
 
         Args:
             description: Short label (2-6 words); the child's name and title.
             prompt: A ``Todo`` carrying the task's requirements, rules and
                 acceptance checks, or the full task as text.
-            brief: Extra instructions sent with the prompt (a Todo and a brief
-                both reach the child).
-            context: Optional data (a pydantic model or JSON data) sent with it.
+            brief: Extra instructions sent with the prompt.
             model: Model alias for the child; yours when omitted.
-            mode: ``"worker"``: reports with a ``TaskResult`` and may ask you a
-                question. ``"conversation"``: an interactive partner (rare).
-            keep: ``False``: closed after its first result. ``True``: stays open
-                for follow-ups (``await ref.send(text)``) until ``await ref.close()``.
         """
-        if removed:
-            _reject_removed("spawn", removed)
-        port = self._port()
-        todo = prompt if isinstance(prompt, Todo) else None
-        handed = self.todo.copy_todo(todo) if todo is not None else None
-        text = _child_prompt(port.name, port.id, prompt, handed, brief)
-        ref = await port.delegate(
-            description, text, context=context, model=model, mode=mode, keep=keep, todo=handed
-        )
-        if todo is not None and handed is not None:
-            self._todo_bases[ref.id] = handed
-            self.todo.set_var(todo, "child", ref.id)
-        return ref
+        _reject_removed("spawn", removed)
+        return await _start_child(self, description, prompt, brief, model, kept=True)
 
     @hidden
     def receive_delegated_todo(self, todo: Todo) -> None:
@@ -383,46 +351,78 @@ class AtomAgent(InteractiveAgent):
         self.todo.receive_todo(todo)
 
     @hidden
-    def merge_delegated_todo(self, child_id: str, child_name: str, updated: Todo) -> None:
-        """Merge a child's copy of a Todo into this agent's Todo (the registry calls it).
+    def merge_delegated_todo(
+        self, child_name: str, updated: Todo, base: Todo | None
+    ) -> Todo | None:
+        """Merge a child's copy of a Todo into this agent's Todo; return the new base.
 
-        Comments (new ones, by id), status and vars merge with ``merge_todo``.
-        The title, description and dependencies are the parent's
-        requirements: a child's edits to them are not merged. A conflict
-        (both sides changed the same field) is noted as a comment instead.
+        The registry calls it with the base it recorded for the child.
+
+        - The child's new comments are always appended (by id).
+        - The title, description and dependencies are the parent's
+          requirements: a child's edits to them are never merged.
+        - Status and vars the child changed since ``base`` are applied unless
+          the parent changed the same field differently; ``done`` applies
+          unless the parent changed the status itself. Conflicting fields are
+          noted in one comment and stay unmerged.
+        - The returned base advances only for what merged (and comments), so
+          an unmerged change is tried again on the next merge.
+
+        Without a base (none was recorded), only comments merge, plus
+        ``done`` when this Todo is still open, and a comment says so.
         """
         current = self.todo.get(updated.id)
         if current is None:
-            return
-        base = self._todo_bases.get(child_id)
+            return None
+        merged = current.model_copy(deep=True)
+        known = {comment.id for comment in merged.comments}
+        merged.comments += [
+            comment.model_copy(deep=True) for comment in updated.comments if comment.id not in known
+        ]
         if base is None:
-            # No record of what the child started from (a reload): count only
-            # what the child itself carries.
-            base = current.model_copy(deep=True)
-            base.vars = type(current.vars)(
-                {key: value for key, value in current.vars.items() if key in updated.vars}
+            notes = ["only its comments merged"]
+            if updated.status == "done" and merged.status != "done":
+                merged.status = "done"
+                notes = ["only its comments and its done status merged"]
+            merged.comments.append(
+                _merge_note(child_name, f"no merge base was recorded, so {notes[0]}")
             )
-        base = base.model_copy(deep=True)
-        base.comments = []  # comments merge by id, so the parent's own never conflict
-        proposal = updated.model_copy(deep=True)
-        proposal.title, proposal.description, proposal.deps = (
-            base.title,
-            base.description,
-            list(base.deps),
-        )
-        try:
-            self.todo.merge_todo(proposal, base=base)
-        except ValueError as exc:
-            self.todo.comment(current, f"Not merged from child {child_name!r}: {exc}")
-        self._todo_bases[child_id] = updated.model_copy(deep=True)
+            _commit_merge(self.todo, current, merged)
+            return None
+        new_base = base.model_copy(deep=True)
+        new_base.comments = [comment.model_copy(deep=True) for comment in updated.comments]
+        conflicts: list[str] = []
+        if updated.status != base.status:
+            if current.status in (base.status, updated.status):
+                merged.status = updated.status
+                new_base.status = updated.status
+            else:
+                conflicts.append(f"status (child: {updated.status!r}, yours: {current.status!r})")
+        missing = object()
+        for key in sorted(set(base.vars) | set(updated.vars)):
+            before = base.vars.get(key, missing)
+            after = updated.vars.get(key, missing)
+            if after == before:
+                continue
+            existing = current.vars.get(key, missing)
+            if existing is not before and existing != before and existing != after:
+                conflicts.append(f"var {key!r} (child: {after!r}, yours: {existing!r})")
+                continue
+            if after is missing:
+                merged.vars.pop(key, None)
+                new_base.vars.pop(key, None)
+            else:
+                merged.vars[key] = after
+                new_base.vars[key] = after
+        if conflicts:
+            merged.comments.append(
+                _merge_note(child_name, "not merged, you changed them too: " + "; ".join(conflicts))
+            )
+        _commit_merge(self.todo, current, merged)
+        return new_base
 
     def children(self) -> list[ChildRef]:
-        """Handles on the child sessions you started, running and closed.
-
-        Each ref's ``status`` is live (``running``, ``working``, ``idle``,
-        ``retained``, ``closed``) and it shows a ``pending_question`` you
-        have not answered.
-        """
+        """Handles on the child sessions you started, with live status and any unanswered question."""
         return self._port().children()
 
     @hidden
@@ -625,13 +625,13 @@ class AtomAgent(InteractiveAgent):
         """Work on a task for your parent agent and report back to it.
 
         You are a child session. Your parent is an agent, not a person, and it
-        reads only your result. The task is in ``notification["user_messages"]``
-        (later messages there are follow-ups from your parent); data sent with
-        it is in ``notification.get("context", [])``. A Todo handed to you is
-        your active Todo: record evidence with ``self.todo.comment(...)`` and
-        mark it done with ``self.todo.complete(...)``; these go back to your
-        parent's Todo. Do not edit its title or description (they are your
-        parent's requirements); propose changes in a comment.
+        reads only your result. The task is in ``notification["user_messages"]``;
+        its first line says whether you can ask your parent questions (later
+        messages there are follow-ups). A Todo handed to you is your active
+        Todo: record evidence with ``self.todo.comment(...)`` and mark it done
+        with ``self.todo.complete(...)``; these go back to your parent's Todo.
+        Do not edit its title or description (they are your parent's
+        requirements); propose changes in a comment.
 
         Assume you are the only one editing this checkout, and leave it clean:
         remove scratch files before ``Done``.
@@ -651,8 +651,8 @@ class AtomAgent(InteractiveAgent):
                   ),
               ))
 
-        - ``NeedInput(question=...)`` only when you cannot go on without your
-          parent's answer; it arrives as your next message.
+        - ``NeedInput(question=...)`` only if you can ask and cannot go on
+          without your parent's answer; it arrives as your next message.
         - ``Waiting(explanation=..., on=[...])`` only while a job you started
           is still running.
 
@@ -691,7 +691,7 @@ spec(AtomAgent, "session_port_visible", hidden=True)
 
 
 def _without_removed(method: Any) -> None:
-    """Document ``method`` without its ``**removed`` catch-all (it only rejects ``retain=``)."""
+    """Document ``method`` without its ``**removed`` catch-all (it rejects ``retain=``, ``mode=``, ``keep=``)."""
     import inspect
 
     signature = inspect.signature(method)
@@ -701,6 +701,7 @@ def _without_removed(method: Any) -> None:
 
 
 _without_removed(AtomAgent.spawn)
+_without_removed(AtomAgent.delegate)
 
 
 @hidden
@@ -726,19 +727,67 @@ def session_title_request(opening_message: str) -> str:
 
 
 @hidden
-def _child_prompt(
-    parent_name: str, parent_id: str, prompt: Any, todo: Todo | None, brief: str | None
-) -> str:
-    """A child's first message: who its parent is, the task (a Todo or text), and the brief."""
-    parent = f"parent {parent_name} ({parent_id})"
+async def _start_child(
+    agent: AtomAgent,
+    description: str,
+    prompt: Any,
+    brief: str | None,
+    model: str | None,
+    *,
+    kept: bool,
+) -> ChildRef:
+    """Start a child for ``spawn()``/``delegate()`` (a plain function: no agent-method wrapper).
+
+    A Todo prompt is handed over as a copy; the session port records that
+    copy as the merge base.
+    """
+    port = agent._port()
+    todo = prompt if isinstance(prompt, Todo) else None
+    handed = agent.todo.copy_todo(todo) if todo is not None else None
+    text = _child_prompt(port.name, port.id, prompt, handed, brief, kept=kept)
+    ref = await port.delegate(description, text, model=model, kept=kept, todo=handed)
     if todo is not None:
-        lines = [f"You are working for {parent} on Todo {todo.id}: {todo.title}", ""]
-        lines.append(_todo_prompt(todo))
-    else:
-        lines = [f"You are working for {parent}.", "", str(prompt)]
+        agent.todo.set_var(todo, "child", ref.id)
+    return ref
+
+
+@hidden
+def _child_prompt(
+    parent_name: str,
+    parent_id: str,
+    prompt: Any,
+    todo: Todo | None,
+    brief: str | None,
+    *,
+    kept: bool,
+) -> str:
+    """A child's first message: who its parent is, what kind of child it is, the task and the brief."""
+    parent = f"parent {parent_name} ({parent_id})"
+    task = f" on Todo {todo.id}: {todo.title}" if todo is not None else ""
+    kind = (
+        "You can ask your parent questions and may get follow-ups."
+        if kept
+        else "One-shot task: you can't ask questions; decide, and state your assumptions in "
+        "the report."
+    )
+    lines = [f"You are working for {parent}{task}. {kind}", ""]
+    lines.append(_todo_prompt(todo) if todo is not None else str(prompt))
     if brief:
         lines += ["", "Brief:", str(brief)]
     return "\n".join(lines)
+
+
+@hidden
+def _commit_merge(todos: TodoManager, current: Todo, merged: Todo) -> None:
+    """Write a merge into the managed Todo object itself, which callers may hold."""
+    for field in ("status", "vars", "comments"):
+        setattr(current, field, getattr(merged, field))
+    todos.active()  # a Todo that is now done is no longer the active one
+
+
+@hidden
+def _merge_note(child_name: str, text: str) -> TodoComment:
+    return TodoComment(body=f"Merge from child {child_name!r}: {text}")
 
 
 @hidden

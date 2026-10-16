@@ -217,9 +217,6 @@ class Session:
         self._started = False
         self._usage_before: Usage = self.info.usage.model_copy()
         self._turn_messages: set[str] = set()
-        # True while a Done's message is sent: its parent gets it in the
-        # ChildResult, so the registry does not also send a ChildMessage.
-        self.sending_done_message = False
         # How the last turn ended ("waiting" shows a child as "working").
         self.last_outcome_kind: str | None = None
         self._close_task: asyncio.Task[None] | None = None
@@ -794,15 +791,15 @@ class Session:
         text = getattr(outcome, "message", None) if isinstance(outcome, Done | Waiting) else None
         if not text or text in self._turn_messages:
             return False
-        send = getattr(self._agent, "message", None)
-        self.sending_done_message = isinstance(outcome, Done)
-        try:
-            if callable(send):
-                send(text)
-            else:
-                self._agent.event_manager.add(AgentMessage(content=text))
-        finally:
-            self.sending_done_message = False
+        # A Done's message is marked on the event itself: a parent gets it
+        # in the ChildResult, so the registry must not also send it as a
+        # ChildMessage, however late the event is handled.
+        is_result_text = isinstance(outcome, Done)
+        send = getattr(self._agent, "_send_message", None)
+        if callable(send):
+            send(text, is_result_text=is_result_text)
+        else:
+            self._agent.event_manager.add(AgentMessage(content=text, is_result_text=is_result_text))
         return True
 
     def _settle(self, event: TurnSettled) -> None:

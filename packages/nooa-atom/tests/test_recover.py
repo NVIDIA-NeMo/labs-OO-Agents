@@ -194,7 +194,7 @@ async def test_the_agent_is_told_which_subagent_sessions_were_not_carried_over(
     registry, root_options, sessions_dir
 ):
     root = await registry.create(root_options)
-    await registry.create(root.options.inherit(name="Review auth", keep=True), parent_id=root.id)
+    await registry.create(root.options.inherit(name="Review auth", kept=True), parent_id=root.id)
     await registry.close_all()
     store = SessionStore(sessions_dir)
     _mark_foreign(store, root.id)

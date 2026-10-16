@@ -36,19 +36,19 @@ class ExperimentalAtomAgent(AtomAgent):
     Delegate such a subtask to a child session with its own history. Hand it a Todo
     whose description carries the task's requirements and its rules or constraints;
     the child sees nothing else of your task.
-    ``done = await self.delegate(description, todo)`` waits for it and returns its
-    ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
-    ``child = await self.spawn(description, todo)`` starts a worker and returns at once
-    (``keep=True`` keeps it for ``await child.send(...)`` follow-ups); when nothing else
-    is left, end the turn with ``Waiting(explanation=..., on=["delegates"])``. Its
-    outcome arrives in a later turn under ``notification["delegates"]``: a
-    ``ChildResult`` (``item.done``), a ``ChildQuestion`` (``await item.answer(...)``), a
-    ``ChildFailed`` (``item.error``), or a ``ChildMessage`` (``item.text``, a progress
-    note). The child's comments and status merge into your Todo. Never predict or make
-    up a pending child's result, poll, or sleep to wait. Children share this checkout:
-    run one editing child at a time. Children can delegate in turn only down to a fixed
-    depth; past it ``DepthLimitError`` is raised. Inspect a child's report before final
-    verification.
+    ``done = await self.delegate(description, todo)`` runs a one-shot worker and returns
+    its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
+    ``child = await self.spawn(description, todo)`` starts a kept child and returns at
+    once; it may ask you questions and takes ``await child.send(...)`` follow-ups until
+    ``await child.close()``. When nothing else is left, end the turn with
+    ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
+    ``notification["delegates"]``: ``ChildResult`` (``item.done``), ``ChildQuestion``
+    (``await item.answer(...)``), ``ChildFailed`` (``item.error``) or ``ChildMessage``
+    (``item.text``, a progress note). The child's comments and status merge into your
+    Todo. Never predict or make up a pending child's result, poll, or sleep to wait.
+    Children share this checkout: run one editing child at a time. Children can
+    delegate in turn only down to a fixed depth; past it ``DepthLimitError`` is
+    raised. Inspect a child's report before final verification.
 
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
@@ -122,16 +122,16 @@ class ExperimentalAtomAgent(AtomAgent):
         """Work on a task for your parent agent and report back to it.
 
         You are a child session; your parent is an agent and reads only your result.
-        The task is in ``notification["user_messages"]`` (later messages are
-        follow-ups); data sent with it is in ``notification.get("context", [])``. A
-        Todo handed to you is your active Todo: comment evidence on it and complete it;
+        The task is in ``notification["user_messages"]``; its first line says whether
+        you can ask your parent questions (later messages are follow-ups). A Todo
+        handed to you is your active Todo: comment evidence on it and complete it;
         that goes back to your parent's Todo. Do not edit its title or description.
         Assume you are the only editor of this checkout and remove scratch files
         before ``Done``. End with ``return_result(Done(explanation=...,
         result=TaskResult(solution_description=..., evidence=..., how_to_verify=...,
         report=...)))``, also when blocked (say what blocked you);
-        ``NeedInput(question=...)`` only when you need your parent's answer; or
-        ``Waiting(explanation=..., on=[...])`` only while a job you started is still
+        ``NeedInput(question=...)`` only if you can ask and need your parent's answer;
+        or ``Waiting(explanation=..., on=[...])`` only while a job you started is still
         running. ``self.message()`` is a progress note, not the result.
 
         Python locals live for one method call; when the call returns they

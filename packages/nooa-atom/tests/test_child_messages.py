@@ -45,10 +45,10 @@ def _delegates(registry, session_id):
 
 
 async def _spawn_and_collect(registry, root_options, models, *, keep):
-    how = "mode='conversation', keep=True" if keep else "mode='worker'"
+    how = ", kept=True" if keep else ""
     models.scripts[None] = [
         cell(
-            f"await self.session.delegate('Kid', 'work', {how})\n"
+            f"await self.session.delegate('Kid', 'work'{how})\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         collect(),
@@ -86,7 +86,7 @@ async def test_a_batch_childs_messages_arrive_in_order_before_its_result(
     ]
 
 
-async def test_a_kept_conversation_childs_messages_arrive_in_order_before_its_result(
+async def test_a_kept_childs_messages_arrive_in_order_before_its_result(
     registry, root_options, models
 ):
     root, outcome = await _spawn_and_collect(registry, root_options, models, keep=True)
@@ -110,7 +110,7 @@ async def test_the_childs_messages_stay_in_its_own_events(registry, root_options
 async def test_a_message_wakes_a_parent_waiting_on_delegates(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "await self.session.delegate('Kid', 'work', mode='conversation', keep=True)\n"
+            "await self.session.delegate('Kid', 'work', kept=True)\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         cell(
@@ -204,7 +204,7 @@ async def test_a_roots_messages_go_to_the_host_not_delegates(registry, root_opti
 async def test_a_closing_or_closed_parent_drops_messages(registry, root_options):
     root = await registry.create(root_options)
     child = await registry.create(
-        root_options.model_copy(update={"name": "Kid", "keep": True}), parent_id=root.id
+        root_options.model_copy(update={"name": "Kid", "kept": True}), parent_id=root.id
     )
     delegates = root._agent.queue_manager.get_channel("delegates")
     root._closing = True
