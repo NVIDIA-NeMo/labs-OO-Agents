@@ -117,8 +117,14 @@ async def test_waiting_when_every_child_is_idle_with_nothing_pending_is_rejected
             cell("return_result(Waiting(explanation='w', on=['Worker']))"),
             cell(RESULT),
         ],
-        {"Worker": [cell("return_result(Done(explanation='did it', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='did it')))")]},
+        {
+            "Worker": [
+                cell(
+                    "return_result(Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                )
+            ]
+        },
     )
     assert len(calls) == 3
     assert "Waiting on 'delegates', but no child is running" in calls[1]
@@ -141,8 +147,14 @@ async def test_waiting_while_a_child_is_running_is_accepted(tmp_path, sessions_d
             ),
             cell("assert notification['delegates']\n" + RESULT),
         ],
-        {"Worker": [cell("await asyncio.sleep(0.3)\nreturn_result(Done(explanation='did it', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='did it')))")]},
+        {
+            "Worker": [
+                cell(
+                    "await asyncio.sleep(0.3)\nreturn_result(Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                )
+            ]
+        },
     )
     assert len(calls) == 2
     assert not _rejected(calls[1])
@@ -165,12 +177,17 @@ async def test_waiting_on_a_buffered_result_is_accepted(tmp_path, sessions_dir):
             ),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
-        {"Worker": [cell("return_result(Done(explanation='did it', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='did it')))")]},
+        {
+            "Worker": [
+                cell(
+                    "return_result(Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                )
+            ]
+        },
     )
     assert len(calls) == 2
     assert not _rejected(calls[1])
-
 
 
 async def test_waiting_on_a_working_child_is_accepted(tmp_path, sessions_dir):
@@ -209,6 +226,7 @@ async def test_waiting_on_a_working_child_is_accepted(tmp_path, sessions_dir):
     assert len(calls) == 2
     assert not _rejected(calls[1])
 
+
 @pytest.mark.parametrize("target", ["delegates", "Worker"])
 async def test_waiting_right_after_sending_to_an_idle_retained_child_is_accepted(
     tmp_path, sessions_dir, target
@@ -228,10 +246,14 @@ async def test_waiting_right_after_sending_to_an_idle_retained_child_is_accepted
         ],
         {
             "Worker": [
-                cell("return_result(Done(explanation='did it', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"),
-                cell("return_result(Done(explanation='did the case', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='did the case')))"),
+                cell(
+                    "return_result(Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                ),
+                cell(
+                    "return_result(Done(explanation='did the case', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did the case')))"
+                ),
             ]
         },
     )
@@ -258,10 +280,14 @@ async def test_waiting_on_a_child_by_id_is_checked(tmp_path, sessions_dir):
         ],
         {
             "Worker": [
-                cell("return_result(Done(explanation='did it', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"),
-                cell("return_result(Done(explanation='did more', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='did more')))"),
+                cell(
+                    "return_result(Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                ),
+                cell(
+                    "return_result(Done(explanation='did more', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did more')))"
+                ),
             ]
         },
     )
@@ -306,8 +332,14 @@ async def test_waiting_on_an_unknown_name_is_rejected_and_lists_what_is_running(
             cell("return_result(Waiting(explanation='w', on=['delegates']))"),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
-        {"Worker": [cell("await asyncio.sleep(0.3)\nreturn_result(Done(explanation='did it', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='did it')))")]},
+        {
+            "Worker": [
+                cell(
+                    "await asyncio.sleep(0.3)\nreturn_result(Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                )
+            ]
+        },
     )
     assert len(calls) == 3
     assert "Waiting on 'user_messages', but the person is not a job." in calls[1]

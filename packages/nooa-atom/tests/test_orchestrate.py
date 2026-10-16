@@ -200,10 +200,14 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
         ),
     ]
     models.scripts["Fix parser"] = [
-        cell("return_result(Done(explanation='first try', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='first try')))"),
-        cell("return_result(Done(explanation='fixed the empty case', result=TaskResult("
-                "solution_description='s', evidence='e', how_to_verify='h', report='fixed the empty case')))"),
+        cell(
+            "return_result(Done(explanation='first try', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='h', report='first try')))"
+        ),
+        cell(
+            "return_result(Done(explanation='fixed the empty case', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='h', report='fixed the empty case')))"
+        ),
     ]
     options = _options(tmp_path, sessions_dir, turn_method="handle_orchestrate")
     original_create = SessionRegistry.create
