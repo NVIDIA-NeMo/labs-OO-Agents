@@ -5,7 +5,7 @@
 import asyncio
 import json
 
-from atom_test_agents import cell, done, until
+from atom_test_agents import cell, until, work_done
 from nooa_atom.session.items import ChildMessage, ChildRef
 
 from nooa.interactive import AgentMessage, Done
@@ -60,7 +60,7 @@ async def _spawn_and_collect(registry, root_options, models, *, keep):
         cell(
             "self.message('first')\n"
             "self.message('second')\n"
-            "return_result(Done(explanation='kid done', message='final words'))"
+            "return_result(Done(explanation='kid done', message='final words', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
         )
     ]
     root = await registry.create(root_options)
@@ -97,7 +97,7 @@ async def test_a_kept_childs_messages_arrive_in_order_before_its_result(
         ("ChildResult", "kid done"),
     ]
     [child_options] = [o for o in models.built if o.name == "Kid"]
-    assert child_options.turn_method == "handle"
+    assert child_options.turn_method == "handle_work"
 
 
 async def test_the_childs_messages_stay_in_its_own_events(registry, root_options, models):
@@ -146,7 +146,9 @@ async def test_a_message_does_not_resolve_wait(registry, root_options, models):
         collect(),
     ]
     models.scripts["Kid"] = [
-        cell("self.message('note')\nreturn_result(Done(explanation='kid done'))")
+        cell(
+            "self.message('note')\nreturn_result(Done(explanation='kid done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+        )
     ]
     root = await registry.create(root_options)
     ended = []
@@ -173,13 +175,15 @@ async def test_a_grandchilds_messages_go_only_to_its_parent(registry, root_optio
             "g = await self.session.delegate('Leaf', 'l')\n"
             "d = (await g.wait()).done\n"
             "self.v.mid_seen = d.explanation\n"
-            "return_result(Done(explanation='mid ok'))"
+            "return_result(Done(explanation='mid ok', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
         ),
         # Mid's later turn for the leaf's message.
-        done("mid saw the leaf's message"),
+        work_done("mid saw the leaf's message"),
     ]
     models.scripts["Leaf"] = [
-        cell("self.message('leaf note')\nreturn_result(Done(explanation='leaf ok'))")
+        cell(
+            "self.message('leaf note')\nreturn_result(Done(explanation='leaf ok', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+        )
     ]
     root = await registry.create(root_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="mid ok")

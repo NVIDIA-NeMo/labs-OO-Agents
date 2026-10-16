@@ -5,7 +5,7 @@
 import asyncio
 
 import pytest
-from atom_test_agents import ScriptedModels, cell, done
+from atom_test_agents import ScriptedModels, cell, done, work_done
 from nooa_atom.session.items import Usage
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
@@ -80,7 +80,7 @@ async def test_a_childs_cached_tokens_roll_up_and_survive_a_reload(
             "return_result(Done(explanation='ok'))"
         )
     ]
-    models.scripts["A"] = [done("a done", usage=CALL)]
+    models.scripts["A"] = [work_done("a done", usage=CALL)]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     totals = root._agent.session.usage()
@@ -104,7 +104,7 @@ async def test_usage_reports_this_session_then_with_its_subagents(registry, root
             usage=CALL,
         )
     ]
-    models.scripts["A"] = [done("a done", usage=CALL)]
+    models.scripts["A"] = [work_done("a done", usage=CALL)]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
 

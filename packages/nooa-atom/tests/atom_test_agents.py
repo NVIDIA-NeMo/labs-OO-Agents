@@ -132,6 +132,19 @@ def done(explanation: str = "done", **kwargs: Any) -> LLMResponse:
     return cell(f"return_result(Done(explanation={explanation!r}))", **kwargs)
 
 
+def work_done(explanation: str = "done", report: str = "", **kwargs: Any) -> LLMResponse:
+    """A cell that ends a child's worker turn (``handle_work``): ``Done`` with a ``TaskResult``."""
+    return cell(work_result(explanation, report), **kwargs)
+
+
+def work_result(explanation: str = "done", report: str = "") -> str:
+    """The ``return_result(...)`` line of a worker turn: ``Done`` with a ``TaskResult``."""
+    return (
+        f"return_result(Done(explanation={explanation!r}, result=TaskResult("
+        f"solution_description='s', evidence='e', how_to_verify='v', report={report!r})))"
+    )
+
+
 def ask(question: str, **kwargs: Any) -> LLMResponse:
     """A cell that ends the turn with a ``NeedInput`` question."""
     return cell(f"return_result(NeedInput(question={question!r}))", **kwargs)

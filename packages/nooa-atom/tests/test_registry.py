@@ -16,6 +16,7 @@ from atom_test_agents import (
     done,
     fresh_events,
     until,
+    work_done,
 )
 from nooa_atom.agent.factory import create_session_agent
 from nooa_atom.session.events import TurnEnded
@@ -84,7 +85,7 @@ async def test_the_parent_is_told_about_a_new_child(registry, root_options):
 
 
 async def test_initial_items_are_in_the_first_notification(registry, root_options, models):
-    models.scripts["child"] = [done("got both")]
+    models.scripts["child"] = [work_done("got both")]
     root = await registry.create(root_options)
     root._agent.queue_manager.queue("context")
     child_options = root.options.inherit(name="child")
@@ -109,7 +110,12 @@ async def test_initial_items_are_in_the_first_notification(registry, root_option
 
 async def test_list_and_children_report_live_and_on_disk_status(registry, root_options, models):
     started, block = fresh_events()
-    models.scripts["busy"] = [cell(BLOCKING_CELL + "return_result(Done(explanation='x'))")]
+    models.scripts["busy"] = [
+        cell(
+            BLOCKING_CELL
+            + "return_result(Done(explanation='x', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+        )
+    ]
     root = await registry.create(root_options)
     kept = await registry.create(root.options.inherit(name="kept", kept=True), parent_id=root.id)
     busy = await registry.create(root.options.inherit(name="busy"), parent_id=root.id)
@@ -330,7 +336,7 @@ async def test_the_llm_factory_builds_owned_clients(root_options, sessions_dir):
                     )
                 ]
             ],
-            "alias-b": [[done("child ok")]],
+            "alias-b": [[work_done("child ok")]],
         }
     )
     registry = SessionRegistry(
@@ -531,7 +537,7 @@ async def test_set_model_needs_an_llm_factory(registry, root_options):
 
 
 async def test_prepare_runs_before_publish_and_start(registry, root_options, models, sessions_dir):
-    models.scripts["child"] = [done("first turn")]
+    models.scripts["child"] = [work_done("first turn")]
     root = await registry.create(root_options)
     seen = []
 
@@ -645,11 +651,11 @@ async def test_a_throwaway_childs_turn_method_is_recorded(registry, root_options
             "return_result(Done(explanation='ok'))"
         )
     ]
-    models.scripts["T"] = [done("t")]
+    models.scripts["T"] = [work_done("t")]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     [child] = registry.children(root.id)
-    assert child.turn_method == "handle_batch"
+    assert child.turn_method == "handle_work"
     assert registry.store.get(root.id).turn_method == "handle"
 
 
@@ -803,7 +809,7 @@ async def test_paused_parent_durably_receives_child_finish_and_consumes_on_resum
     registry, root_options, models, monkeypatch
 ):
     models.scripts[None] = [done("parent resumed")]
-    models.scripts["child"] = [done("child finished")]
+    models.scripts["child"] = [work_done("child finished")]
     parent = await registry.create(root_options)
     original = parent.handle.events.record_batch
 
@@ -847,7 +853,7 @@ async def test_failed_parent_delivery_does_not_auto_close_child(
 ):
     from nooa_atom.session.events import ItemAdmitted
 
-    models.scripts["child"] = [done("durable child result")]
+    models.scripts["child"] = [work_done("durable child result")]
     parent = await registry.create(root_options)
     parent._agent.turns.pause()
     original = parent.handle.events.add

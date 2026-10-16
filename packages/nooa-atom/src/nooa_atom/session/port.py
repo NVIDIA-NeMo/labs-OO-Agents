@@ -131,7 +131,7 @@ class SessionPort:
             model=model,
             permission_mode=permission_mode,
             kept=kept,
-            turn_method=_worker_turn_method(parent, kept),
+            turn_method=_worker_turn_method(parent),
             todo_id=getattr(todo, "id", None),
         )
         registry = self._registry
@@ -288,15 +288,20 @@ def _reject_removed(method: str, removed: dict[str, Any]) -> None:
     raise TypeError(f"{method}() got an unexpected keyword argument {next(iter(removed))!r}")
 
 
-def _worker_turn_method(parent: Session, kept: bool) -> str:
-    """A child's turn method: the worker turn ``handle_work``.
+def _worker_turn_method(parent: Session) -> str:
+    """A child's turn method: always the worker turn ``handle_work``.
 
-    An agent class without one runs a one-shot worker with ``handle_batch``
-    and a kept child, which may ask, with ``handle``.
+    ``InteractiveAgent`` defines it, so every agent class has one. A class
+    without it (not an ``InteractiveAgent``) cannot run a child, and that is
+    an error here rather than a quiet fallback to ``handle``/``handle_batch``,
+    whose ``Done`` may carry no ``TaskResult``.
     """
-    if callable(getattr(parent._agent, "handle_work", None)):
-        return "handle_work"
-    return "handle" if kept else "handle_batch"
+    if not callable(getattr(parent._agent, "handle_work", None)):
+        raise TypeError(
+            f"{type(parent._agent).__name__} has no handle_work() worker turn, so it cannot "
+            "run a child session; subclass nooa.interactive.InteractiveAgent"
+        )
+    return "handle_work"
 
 
 def _parent_source(session: Session) -> str:

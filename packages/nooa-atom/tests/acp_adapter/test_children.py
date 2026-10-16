@@ -21,7 +21,11 @@ def _models() -> ScriptedModels:
                 ),
                 done("noted the child's result"),
             ],
-            "helper": [cell("print('child work')\nreturn_result(Done(explanation='child done'))")],
+            "helper": [
+                cell(
+                    "print('child work')\nreturn_result(Done(explanation='child done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+                )
+            ],
         }
     )
 

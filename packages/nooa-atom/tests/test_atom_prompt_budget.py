@@ -54,6 +54,9 @@ RESULT = (
 # spawn() kept, with no mode=/keep=/context= parameters and no
 # ChildRef.steer()/info/pending_question (about 150 characters less than at
 # 5b84477a7). Measured values plus about 2%.
+# Re-measured when InteractiveAgent gained the base handle_work and TaskResult
+# moved to nooa.interactive (2026-10-16): unchanged for every row (the Atom
+# agents override handle_work), so the limits stay.
 LIMITS = {
     (ATOM, "handle"): (15_150, 18_150),  # measured 14,837 / 17,788
     (ATOM, "handle_batch"): (15_150, 17_750),  # measured 14,837 / 17,386
