@@ -103,7 +103,9 @@ class AtomAgent(InteractiveAgent):
 
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
-    decisions, completed steps, and verification—not routine narration.
+    decisions, completed steps, and verification—not routine narration. Keep durable
+    facts on ``self.v``, task-specific plans and findings on the Todo's ``v``, and
+    scratch in cell locals; neither store is a dump.
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
