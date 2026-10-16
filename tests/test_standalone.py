@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import linecache
 from typing import Any
 
 import pytest
@@ -206,6 +207,38 @@ class TestStandaloneErrors:
             async def fn(x: str) -> str:
                 """Represent an implemented standalone function, not a generation stub."""
                 return f"static: {x}"
+
+    @pytest.mark.parametrize("body", ["return 1", "return None", "pass", '"Doc only."', "..."])
+    def test_raw_exec_requires_source_verifiable_ellipsis(self, body: str) -> None:
+        """Reject unknown source instead of silently guessing generation from bytecode."""
+        code = f"@strategy()\nasync def fn():\n    {body}\n"
+        with pytest.raises(TypeError, match="source-verifiable"):
+            exec(compile(code, "<standalone-no-source>", "exec"), {"strategy": strategy})
+
+    @pytest.mark.asyncio
+    async def test_exec_with_registered_source_still_generates(self, monkeypatch) -> None:
+        """A source-backed dynamic standalone function still reaches its configured LLM."""
+        fake = FakeLLMClient(scripted_responses=[_resp('{"value": "dynamic"}')])
+        code = '''\
+@strategy(PredictStrategy(), llm=fake)
+async def classify(text: str) -> str:
+    """Classify the supplied text."""
+    ...
+'''
+        filename = "<standalone-with-registered-source>"
+        monkeypatch.setitem(
+            linecache.cache, filename, (len(code), None, code.splitlines(True), filename)
+        )
+        namespace = {
+            "__name__": __name__,
+            "strategy": strategy,
+            "PredictStrategy": PredictStrategy,
+            "fake": fake,
+        }
+        exec(compile(code, filename, "exec"), namespace)
+
+        assert await namespace["classify"]("input") == "dynamic"
+        assert fake.call_count == 1
 
     def test_non_async_raises_typeerror(self) -> None:
         with pytest.raises(TypeError, match="must be async"):
