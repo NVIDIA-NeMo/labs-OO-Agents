@@ -363,8 +363,9 @@ class AtomAgent(InteractiveAgent):
           requirements: a child's edits to them are never merged.
         - Status and vars the child changed since ``base`` are applied unless
           the parent changed the same field differently; ``done`` applies
-          unless the parent changed the status itself. Conflicting fields are
-          noted in one comment and stay unmerged.
+          unless the parent changed the status itself. Conflicting fields stay
+          unmerged and get one note each, written once per distinct conflict
+          (a later merge with the same values adds none).
         - The returned base advances only for what merged (and comments), so
           an unmerged change is tried again on the next merge.
 
@@ -391,13 +392,15 @@ class AtomAgent(InteractiveAgent):
             return None
         new_base = base.model_copy(deep=True)
         new_base.comments = [comment.model_copy(deep=True) for comment in updated.comments]
-        conflicts: list[str] = []
+        conflicts: list[tuple[str, str]] = []  # (field, the values that conflict)
         if updated.status != base.status:
             if current.status in (base.status, updated.status):
                 merged.status = updated.status
                 new_base.status = updated.status
             else:
-                conflicts.append(f"status (child: {updated.status!r}, yours: {current.status!r})")
+                conflicts.append(
+                    ("status", f"(child: {updated.status!r}, yours: {current.status!r})")
+                )
         missing = object()
         for key in sorted(set(base.vars) | set(updated.vars)):
             before = base.vars.get(key, missing)
@@ -406,7 +409,7 @@ class AtomAgent(InteractiveAgent):
                 continue
             existing = current.vars.get(key, missing)
             if existing is not before and existing != before and existing != after:
-                conflicts.append(f"var {key!r} (child: {after!r}, yours: {existing!r})")
+                conflicts.append((f"var {key!r}", f"(child: {after!r}, yours: {existing!r})"))
                 continue
             if after is missing:
                 merged.vars.pop(key, None)
@@ -414,10 +417,10 @@ class AtomAgent(InteractiveAgent):
             else:
                 merged.vars[key] = after
                 new_base.vars[key] = after
-        if conflicts:
-            merged.comments.append(
-                _merge_note(child_name, "not merged, you changed them too: " + "; ".join(conflicts))
-            )
+        for field, values in conflicts:
+            note = _conflict_note(child_name, field, values)
+            if note is not None and not _already_noted(merged.comments, child_name, field, note):
+                merged.comments.append(note)
         _commit_merge(self.todo, current, merged)
         return new_base
 
@@ -788,6 +791,30 @@ def _commit_merge(todos: TodoManager, current: Todo, merged: Todo) -> None:
 @hidden
 def _merge_note(child_name: str, text: str) -> TodoComment:
     return TodoComment(body=f"Merge from child {child_name!r}: {text}")
+
+
+_CONFLICT_NOTE = "not merged, you changed it too: "
+
+
+@hidden
+def _conflict_note(child_name: str, field: str, values: str) -> TodoComment:
+    return _merge_note(child_name, f"{_CONFLICT_NOTE}{field} {values}")
+
+
+@hidden
+def _already_noted(
+    comments: list[TodoComment], child_name: str, field: str, note: TodoComment
+) -> bool:
+    """Whether the latest conflict note from ``child_name`` on ``field`` already says ``note``.
+
+    Derived from the Todo's comments, so it survives a reload: a conflict that
+    persists across merges is noted once, and again only when its values change.
+    """
+    prefix = _merge_note(child_name, f"{_CONFLICT_NOTE}{field} (").body
+    for comment in reversed(comments):
+        if comment.body.startswith(prefix):
+            return comment.body == note.body
+    return False
 
 
 @hidden

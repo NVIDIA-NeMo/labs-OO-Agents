@@ -913,6 +913,43 @@ def test_a_conflict_merges_the_rest_and_is_retried():
     assert [c.body for c in todo.comments][-1] == "evidence B"
 
 
+def test_a_repeated_conflict_is_noted_once_and_again_when_its_values_change():
+    """Each distinct conflict (child, field, values) gets one note, across merges and a reload."""
+    parent, todo, base, child, copy = _handed()
+    child.set_var(copy, "x", "child")
+    parent.todo.set_var(todo, "x", "parent")
+
+    def notes(t):
+        return [c.body for c in t.comments if "not merged" in c.body]
+
+    new_base = _merge(parent, copy, base)
+    new_base = _merge(parent, copy, new_base)
+    new_base = _merge(parent, copy, new_base)
+    [note] = notes(todo)
+    assert "var 'x'" in note and "'child'" in note and "'parent'" in note
+    # The child changes its value: the conflict is a new one and gets a second note.
+    child.set_var(copy, "x", "child 2")
+    new_base = _merge(parent, copy, new_base)
+    new_base = _merge(parent, copy, new_base)
+    assert len(notes(todo)) == 2 and "'child 2'" in notes(todo)[1]
+    # After a reload (the Todo and base rebuilt from their saved data), the same conflict adds none.
+    from nooa.storage.serialization import deserialize, serialize
+
+    def saved(value):
+        blob, allowlist = serialize(value)
+        return deserialize(blob, allowlist)
+
+    reloaded = SimpleNamespace(todo=TodoManager())
+    restored = reloaded.todo.receive_todo(saved(todo))
+    _merge(reloaded, copy, saved(new_base))
+    assert notes(restored) == notes(todo)
+    # Another child's identical conflict is its own.
+    from nooa_atom.agent.agent import AtomAgent
+
+    AtomAgent.merge_delegated_todo(reloaded, "other", copy, new_base)
+    assert len(notes(restored)) == 3
+
+
 def test_done_does_not_override_a_status_the_parent_changed():
     parent, todo, base, child, copy = _handed()
     parent.todo.complete(todo)
