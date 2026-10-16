@@ -694,13 +694,19 @@ class AtomAgent(InteractiveAgent):
            example a failing test), decide who writes it, and confirm it fails
            before the work starts.
         3. Do the work: hand each Todo to a child with
-           ``child = await self.spawn(description, todo, retain=True)`` and keep
-           ``child`` in ``self.v``. Children share one checkout: one child edits
-           at a time; read-only work can run in parallel. While children run, end
-           the turn with ``Waiting(explanation=..., on=["delegates"])``.
+           ``child = await self.spawn(description, todo)`` and keep ``child`` in
+           ``self.v``. The Todo is all the child sees of the task: put the
+           task's requirements and its rules or constraints in it. Children
+           share one checkout: run one editing child at a time; read-only work
+           can run in parallel. While children run, end the turn with
+           ``Waiting(explanation=..., on=["delegates"])``.
         4. Measure: results arrive in ``notification["delegates"]`` (a
-           ``ChildResult``, a ``ChildQuestion``: ``await item.answer(...)``, or
-           a ``ChildFailed``). Run every acceptance check yourself; a report is
+           ``ChildResult`` whose ``item.done.result`` is the child's
+           ``TaskResult``, a ``ChildQuestion``: ``await item.answer(...)``, or
+           a ``ChildFailed``; a ``ChildMessage`` (``item.text``) is a progress
+           note). The child's Todo comments and status merge back into your
+           Todo; review it with ``self.todo.get(todo)``.
+           Run every acceptance check yourself; a report is
            not proof. Record each result with ``self.todo.comment(todo, ...)``.
         5. Loop: if a requirement is not met, send the child the failing check
            and its output with ``await child.send(...)`` and wait again. Decide
@@ -708,6 +714,7 @@ class AtomAgent(InteractiveAgent):
 
         Finish with ``Done`` and a ``TaskResult`` whose ``evidence`` is what you
         measured in step 4; if requirements are still unmet, say which.
+        Before ``Done``, leave the tree clean: no scratch files.
         Leave children open; the host closes them after grading.
 
             return_result(Done(

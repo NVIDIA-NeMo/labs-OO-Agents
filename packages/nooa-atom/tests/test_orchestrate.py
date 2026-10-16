@@ -21,7 +21,12 @@ TIMEOUT = 30
 ORCHESTRATOR_TEXT = (
     "You are the orchestrator. You decide how the work is split and who does",
     "Write the requirements: how success will be measured.",
-    "await self.spawn(description, todo, retain=True)",
+    "await self.spawn(description, todo)",
+    "task's requirements and its rules or constraints in it.",
+    "run one editing child at a time",
+    "a ``ChildMessage`` (``item.text``) is a progress",
+    "The child's Todo comments and status merge back into your",
+    "Before ``Done``, leave the tree clean: no scratch files.",
     "Run every acceptance check yourself; a report is",
     "Leave children open; the host closes them after grading.",
 )
@@ -29,7 +34,9 @@ ORCHESTRATOR_TEXT = (
 # The interactive and batch prompts this change must leave as they are.
 # Changing either prompt on purpose means updating its digest here.
 UNCHANGED_PROMPTS = {
-    "handle": "080869ff86083cf63ef079eecf34c48d13a696050dfc2cb8048b97c9e1ee176b",
+    # On the eval branch, handle() carries #447's NeedInput wording and #451's
+    # "or from your parent agent if you are a child" line.
+    "handle": "ce9800990421efdd718c60f4fe8eee4908eec54437fc0161d60f04f1ab57a1ae",
     "handle_batch": "9124c2874abd30f61a26f313abacbdc925f02a20efac8b4d7e3319a22ab545f0",
 }
 
@@ -154,8 +161,8 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
 ):
     """The flow the prompt asks for, through run_task: each delegates item starts a turn.
 
-    The retained worker runs ``handle`` turns (SessionPort.delegate picks
-    ``handle`` for ``retain=True``), so a follow-up can be sent after its Done.
+    The kept worker (``spawn()``) runs ``handle_work`` turns and stays open
+    after its Done, so a follow-up can be sent with ``send()``.
     The root does not close the worker before Done; run_task's registry
     closes it at the end (close_all).
     """
@@ -175,7 +182,7 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
         cell(
             "todo = self.todo.add('Fix parse()', description='Goal: fix it. Check: pytest')\n"
             "self.v.todo_id = todo.id\n"
-            "self.v.child = await self.spawn('Fix parser', todo, retain=True)\n"
+            "self.v.child = await self.spawn('Fix parser', todo)\n"
             "return_result(Waiting(explanation='worker running', on=['delegates']))"
         ),
         cell(
@@ -193,8 +200,10 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
         ),
     ]
     models.scripts["Fix parser"] = [
-        cell("return_result(Done(explanation='first try'))"),
-        cell("return_result(Done(explanation='fixed the empty case'))"),
+        cell("return_result(Done(explanation='first try', result=TaskResult("
+                "solution_description='s', evidence='e', how_to_verify='h', report='first try')))"),
+        cell("return_result(Done(explanation='fixed the empty case', result=TaskResult("
+                "solution_description='s', evidence='e', how_to_verify='h', report='fixed the empty case')))"),
     ]
     options = _options(tmp_path, sessions_dir, turn_method="handle_orchestrate")
     original_create = SessionRegistry.create
@@ -220,7 +229,7 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
     store = SessionStore(sessions_root(options.workspace, sessions_dir))
     assert store.get(run.session_id).turn_method == "handle_orchestrate"
     [child] = [info for info in store.list(roots_only=False) if info.parent_id == run.session_id]
-    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle", True)
+    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle_work", True)
     root_prompt = str(models.llms[None].calls[0].messages)
     child_prompts = str([call.messages for call in models.llms["Fix parser"].calls])
     assert ORCHESTRATOR_TEXT[0] in root_prompt
@@ -230,8 +239,8 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
     assert "FEEDBACK: the empty-input case still fails" in child_prompts
 
 
-async def test_an_orchestrating_roots_unretained_children_run_handle_batch(tmp_path, sessions_dir):
-    """delegate()/spawn() without retain still give children handle_batch: no recursion."""
+async def test_an_orchestrating_roots_one_shot_children_run_handle_work(tmp_path, sessions_dir):
+    """A delegate() worker runs handle_work, not handle_orchestrate: no recursion."""
     child_result = (
         "return_result(Done(explanation='fixed', result=TaskResult("
         "solution_description='s', evidence='e', how_to_verify='h', report='CHILD')))"
@@ -248,7 +257,7 @@ async def test_an_orchestrating_roots_unretained_children_run_handle_batch(tmp_p
         )
         await asyncio.wait_for(root.prompt("fix it"), TIMEOUT)
         [child] = registry.children(root.id)
-        assert child.turn_method == "handle_batch"
+        assert child.turn_method == "handle_work"
         assert ORCHESTRATOR_TEXT[0] not in str(models.llms["Worker"].calls[0].messages)
     finally:
         await registry.close_all()
