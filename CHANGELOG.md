@@ -6,6 +6,17 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: `AtomAgent.handle_orchestrate()` (from #446), an unattended
+  root that plans a task, hands the work to child sessions (they run
+  `handle_work`) and verifies it without editing files itself. It is opt-in:
+  `SessionOptions(turn_method="handle_orchestrate")`, which `run_task` keeps
+  (any other turn method still means `handle_batch`), or
+  `nooa-bench run --turn-method handle_orchestrate`. A Waiting-target check
+  now rejects a `Waiting` whose `on` names nothing that can deliver (a child
+  that is running, `working` or has queued input, a buffered `delegates`
+  item, or a running job); the person is never a valid target. `handle`
+  points the model at `Done`/`NeedInput`, the unattended turns at sending or
+  spawning a child or finishing with `Done`.
 - `nooa-atom`: the child-session interface is reworked (breaking). The two
   verbs carry the difference: `delegate(description, prompt, *, brief=None,
   model=None) -> Done` runs a one-shot worker that may not ask questions and

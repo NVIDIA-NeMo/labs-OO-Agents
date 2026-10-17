@@ -138,7 +138,7 @@ async def run_task(
     The root session runs ``handle_batch`` turns, so it never asks a
     question. With ``options.turn_method="handle_orchestrate"`` it runs
     ``handle_orchestrate`` turns instead: it plans, delegates the work to
-    children (which run ``handle_batch``) and verifies it. Any other
+    children (which run ``handle_work``) and verifies it. Any other
     ``turn_method`` (the default ``"handle"`` included) means ``handle_batch``. A turn that ends ``Waiting`` is followed by the turn its
     job's delivery starts. The run stops early when ``max_turns`` turns
     have ended and the last one is waiting, or after ``timeout`` seconds;
