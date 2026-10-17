@@ -53,6 +53,29 @@ jobs:
       - name: Sandbox containment tests
         run: uv run pytest -q -m sandbox
 
+  linux-sandbox-spawn:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Sync
+        run: uv sync --all-extras --no-extra sandbox
+      # The spawn backend inherits nothing: the worker imports the agent class
+      # and rebuilds its namespace from a blueprint, brokering every self.*
+      # access. On Linux the guardrails are still enforced, so this run checks
+      # that the rebuild path composes with Landlock/seccomp/rlimits. It is also
+      # the only start method Windows has, which is why it runs separately from
+      # the fork-based containment job above.
+      - name: Sandbox spawn backend (no fork inheritance)
+        run: uv run pytest -q -m sandbox tests/runtime/sandbox/test_spawn_backend.py
+
   windows-core:
     runs-on: windows-latest
     strategy:

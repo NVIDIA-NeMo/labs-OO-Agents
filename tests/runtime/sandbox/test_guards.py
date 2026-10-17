@@ -20,7 +20,7 @@ import tempfile
 import pytest
 
 from nooa.runtime.sandbox import guards
-from nooa.runtime.sandbox.config import LandlockRule
+from nooa.runtime.sandbox.config import PathGrant
 from nooa.runtime.sandbox.guards import (
     apply_landlock,
     apply_rlimits,
@@ -34,7 +34,7 @@ CAPS = probe_capabilities()
 
 # A minimal read-only system set so the forked child can still import/run Python.
 _SYSTEM_READ = [
-    LandlockRule(p, write=False)
+    PathGrant(p, write=False)
     for p in ("/usr", "/lib", "/lib64", "/etc", "/proc", "/dev", os.path.dirname(os.__file__))
 ]
 
@@ -66,7 +66,7 @@ def run_child(fn) -> tuple[str, int]:
 
 # --- guardrail 2a: memory ---------------------------------------------------
 @pytest.mark.skipif(
-    sys.platform != "linux" or not CAPS.rlimit, reason="Linux RLIMIT_AS unavailable"
+    sys.platform != "linux" or CAPS.memory != "rlimit", reason="Linux RLIMIT_AS unavailable"
 )
 def test_memory_leak_without_cap():
     msg, _ = run_child(lambda: bytearray(400 * 1024 * 1024))
@@ -74,7 +74,7 @@ def test_memory_leak_without_cap():
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux" or not CAPS.rlimit, reason="Linux RLIMIT_AS unavailable"
+    sys.platform != "linux" or CAPS.memory != "rlimit", reason="Linux RLIMIT_AS unavailable"
 )
 def test_memory_closed_with_cap():
     def child():
@@ -86,7 +86,7 @@ def test_memory_closed_with_cap():
 
 
 # --- guardrail 2b: cpu ------------------------------------------------------
-@pytest.mark.skipif(not CAPS.rlimit, reason="RLIMIT unavailable")
+@pytest.mark.skipif(CAPS.memory != "rlimit", reason="RLIMIT unavailable")
 def test_cpu_closed_with_cap():
     def child():
         apply_rlimits(max_cpu_seconds=1)
@@ -100,7 +100,7 @@ def test_cpu_closed_with_cap():
 
 
 # --- guardrail 3a: file read ------------------------------------------------
-@pytest.mark.skipif(CAPS.landlock_abi < 1, reason="Landlock unavailable")
+@pytest.mark.skipif(CAPS.filesystem != "landlock", reason="Landlock unavailable")
 def test_file_read_leak_without_sandbox():
     with tempfile.TemporaryDirectory() as secret:
         path = os.path.join(secret, "s.txt")
@@ -110,7 +110,7 @@ def test_file_read_leak_without_sandbox():
         assert msg == "OK"
 
 
-@pytest.mark.skipif(CAPS.landlock_abi < 1, reason="Landlock unavailable")
+@pytest.mark.skipif(CAPS.filesystem != "landlock", reason="Landlock unavailable")
 def test_file_read_closed_with_sandbox():
     with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as secret:
         secret_path = os.path.join(secret, "s.txt")
@@ -118,7 +118,7 @@ def test_file_read_closed_with_sandbox():
             fh.write("TOPSECRET")
 
         def child():
-            apply_landlock(_SYSTEM_READ + [LandlockRule(ws, write=True)])
+            apply_landlock(_SYSTEM_READ + [PathGrant(ws, write=True)])
             open(secret_path).read()
 
         msg, _ = run_child(child)
@@ -126,17 +126,17 @@ def test_file_read_closed_with_sandbox():
 
 
 # --- guardrail 3b: file write -----------------------------------------------
-@pytest.mark.skipif(CAPS.landlock_abi < 1, reason="Landlock unavailable")
+@pytest.mark.skipif(CAPS.filesystem != "landlock", reason="Landlock unavailable")
 def test_file_write_closed_but_workspace_allowed():
     with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as outside:
         outside_path = os.path.join(outside, "evil.txt")
 
         def write_outside():
-            apply_landlock(_SYSTEM_READ + [LandlockRule(ws, write=True)])
+            apply_landlock(_SYSTEM_READ + [PathGrant(ws, write=True)])
             open(outside_path, "w").write("x")
 
         def write_inside():
-            apply_landlock(_SYSTEM_READ + [LandlockRule(ws, write=True)])
+            apply_landlock(_SYSTEM_READ + [PathGrant(ws, write=True)])
             open(os.path.join(ws, "ok.txt"), "w").write("x")
 
         outside_msg, _ = run_child(write_outside)
@@ -146,7 +146,7 @@ def test_file_write_closed_but_workspace_allowed():
 
 
 # --- guardrail 4: network ---------------------------------------------------
-@pytest.mark.skipif(not CAPS.seccomp, reason="seccomp unavailable")
+@pytest.mark.skipif(CAPS.network != "seccomp", reason="seccomp unavailable")
 def test_network_leak_without_sandbox():
     def child():
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -156,7 +156,7 @@ def test_network_leak_without_sandbox():
     assert msg == "OK"
 
 
-@pytest.mark.skipif(not CAPS.seccomp, reason="seccomp unavailable")
+@pytest.mark.skipif(CAPS.network != "seccomp", reason="seccomp unavailable")
 def test_network_closed_with_sandbox():
     def child():
         apply_seccomp_no_inet()
@@ -170,7 +170,16 @@ def test_network_closed_with_sandbox():
 
 
 def test_probe_capabilities_reports_mechanisms():
+    """Each guardrail names its mechanism, or None — never a platform boolean."""
     caps = guards.probe_capabilities()
     assert isinstance(caps.landlock_abi, int)
-    assert isinstance(caps.seccomp, bool)
-    assert isinstance(caps.rlimit, bool)
+    for field_name in ("filesystem", "network", "memory", "cpu", "hard_kill"):
+        value = getattr(caps, field_name)
+        assert value is None or isinstance(value, str), field_name
+    assert isinstance(caps.detail, dict)
+    if caps.filesystem is not None:
+        assert caps.filesystem in ("landlock", "appcontainer")
+    if caps.network is not None:
+        assert caps.network in ("seccomp", "appcontainer")
+    if caps.memory is not None:
+        assert caps.memory in ("rlimit", "job")

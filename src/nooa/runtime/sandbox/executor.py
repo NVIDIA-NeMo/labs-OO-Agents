@@ -71,17 +71,32 @@ def _capabilities() -> Capabilities:
 
 
 def check_enforceable(config: SandboxConfig, caps: Capabilities | None = None) -> list[str]:
-    """Return the list of requested-but-unenforceable guardrails on this host."""
+    """Return the list of requested-but-unenforceable guardrails on this host.
+
+    Each guardrail is reported independently: naming only the mechanism this
+    host lacks makes the diagnosis actionable instead of a blanket "not Linux".
+    A config that requests nothing returns an empty list even if the host could
+    enforce nothing.
+    """
     caps = caps or _capabilities()
     missing: list[str] = []
-    if not caps.linux:
-        return ["sandbox requires Linux"]
-    if config.filesystem and not caps.filesystem:
-        missing.append("filesystem (Landlock unavailable)")
-    if not config.network and not caps.network:
-        missing.append("network isolation (seccomp unavailable)")
-    if (config.max_memory_mb or config.max_cpu_seconds) and not caps.rlimit:
-        missing.append("memory/cpu caps (rlimit unavailable)")
+
+    if config.backend == "landlock" and caps.filesystem != "landlock":
+        missing.append("filesystem (landlock requested but unavailable)")
+    if config.backend == "appcontainer":
+        if caps.filesystem != "appcontainer":
+            missing.append("filesystem (appcontainer requested but unavailable)")
+        if not config.network and caps.network != "appcontainer":
+            missing.append("network isolation (appcontainer requested but unavailable)")
+
+    if config.filesystem and caps.filesystem is None:
+        missing.append("filesystem (no enforcement mechanism available)")
+    if not config.network and caps.network is None:
+        missing.append("network isolation (no enforcement mechanism available)")
+    if (config.max_memory_mb or config.max_cpu_seconds) and (
+        caps.memory is None or caps.cpu is None
+    ):
+        missing.append("memory/cpu caps (no enforcement mechanism available)")
     return missing
 
 
@@ -114,6 +129,21 @@ class SandboxedExecutor:
         self._error_tail = error_tail
         self._spec: ResolvedSpec = resolve_spec(config)
         self._codec = wire.Codec(wire.agent_types(agent))
+
+        # A spawn worker cannot inherit anything, so its blueprint is built here:
+        # an unimportable agent class or a non-picklable parameter is a
+        # configuration error, and surfacing it at construction is far more
+        # actionable than failing on the first cell.
+        self._blueprint: Any = None
+        if config.start_method == "spawn":
+            from nooa.runtime.sandbox.blueprint import BlueprintError, WorkerBlueprint
+
+            try:
+                self._blueprint = WorkerBlueprint.from_agent(
+                    agent, self._framework_builtins
+                )
+            except BlueprintError as exc:
+                raise SandboxUnavailable(str(exc)) from exc
 
         caps = _capabilities()
         missing = check_enforceable(config, caps)
@@ -158,13 +188,14 @@ class SandboxedExecutor:
         """Drop guards the host can't enforce (used only on the require=False path)."""
         from dataclasses import replace
 
+        resource_ok = caps.memory is not None and caps.cpu is not None
         return replace(
             spec,
-            filesystem=spec.filesystem and caps.filesystem,
-            landlock_rules=spec.landlock_rules if caps.filesystem else (),
-            block_network=spec.block_network and caps.network,
-            max_memory_mb=spec.max_memory_mb if caps.rlimit else 0,
-            max_cpu_seconds=spec.max_cpu_seconds if caps.rlimit else 0,
+            filesystem=spec.filesystem and caps.filesystem is not None,
+            path_grants=spec.path_grants if caps.filesystem is not None else (),
+            block_network=spec.block_network and caps.network is not None,
+            max_memory_mb=spec.max_memory_mb if resource_ok else 0,
+            max_cpu_seconds=spec.max_cpu_seconds if resource_ok else 0,
         )
 
     @property
@@ -175,14 +206,25 @@ class SandboxedExecutor:
     # --- worker lifecycle --------------------------------------------------
     def _start_worker(self) -> None:
         parent_conn, child_conn = self._ctx.Pipe(duplex=True)
-        init = {
-            "agent": self._agent,
-            "framework_builtins": self._framework_builtins,
+        init: dict[str, Any] = {
             "restrictions": self._restrictions,
             "spec": self._spec,
             "max_error": self._max_error,
             "error_tail": self._error_tail,
         }
+        if self._config.start_method == "spawn":
+            # Nothing can be inherited: the child imports the agent class and
+            # rebuilds the namespace, brokering every self.* access.
+            #
+            # ``framework_builtins`` is deliberately NOT sent — it holds the
+            # return_result closure (and _call, a CurrentCall), which cannot be
+            # pickled. The blueprint carries the picklable equivalent instead.
+            init["mode"] = "blueprint"
+            init["blueprint"] = self._blueprint
+        else:
+            init["mode"] = "fork"
+            init["agent"] = self._agent
+            init["framework_builtins"] = self._framework_builtins
         proc = self._ctx.Process(
             target=worker_main, args=(child_conn, init), daemon=True, name="nooa-sandbox-worker"
         )
@@ -405,14 +447,23 @@ class SandboxedExecutor:
         did not declare) or a malformed request.
         """
         kind, path = msg.get("kind"), msg.get("path") or []
-        if kind not in ("call", "attr", "setattr", "iter"):
+        if kind not in ("call", "attr", "setattr", "iter", "introspect"):
             raise CellSerializationError(f"malformed sandbox broker request: kind {kind!r}")
         if not isinstance(path, list) or not all(isinstance(p, str) for p in path):
             raise CellSerializationError("malformed sandbox broker request: bad path")
         call: dict[str, Any] = {"kind": kind, "path": path}
-        if kind not in ("call", "setattr"):
+        if kind == "introspect":
+            name = msg.get("name")
+            if not isinstance(name, str):
+                raise CellSerializationError("malformed sandbox broker request: bad introspect name")
+            call["name"] = name
+        if kind not in ("call", "setattr", "introspect"):
             return call
-        what = f"self.{'.'.join(path)}" + ("" if kind == "setattr" else "(...)")
+        what = (
+            f"{call.get('name', '?')}(self)"
+            if kind == "introspect"
+            else f"self.{'.'.join(path)}" + ("" if kind == "setattr" else "(...)")
+        )
         payload = msg.get("payload")
         if not isinstance(payload, bytes):
             raise CellSerializationError(f"malformed sandbox broker request for {what}")
@@ -456,6 +507,24 @@ class SandboxedExecutor:
                 obj = self._walk_path(path[:-1])
                 setattr(obj, path[-1], msg.get("value"))
                 return {"ok": True, "result": None}
+            if kind == "introspect":
+                # Spawned workers have no local instance, so doc(self) /
+                # methods(self) / variables(self) render here against the live
+                # agent and cross back as a string.
+                from nooa.agentdoc import doc
+                from nooa.agentdoc.introspect import methods, variables
+
+                fn = {"doc": doc, "methods": methods, "variables": variables}.get(
+                    msg.get("name", "")
+                )
+                if fn is None:
+                    return {
+                        "ok": False,
+                        "error_type": "AttributeError",
+                        "error": f"unknown introspection function {msg.get('name')!r}",
+                    }
+                result = fn(self._agent, *msg.get("args", ()), **msg.get("kwargs", {}))
+                return {"ok": True, "result": result}
             if kind == "iter":
                 # Materialize list(obj) on the parent (the iterator isn't picklable).
                 items = list(self._walk_path(path))
@@ -471,10 +540,17 @@ class SandboxedExecutor:
                 return {"ok": True, "result": items}
             target = self._walk_path(path)
             if kind == "attr":
+                # A spawned worker has no local agent, so it cannot tell a method
+                # from a value; report that classification with the value itself.
+                is_callable = callable(target) and not isinstance(target, type)
+                flags = {
+                    "callable": is_callable,
+                    "is_async": is_callable and asyncio.iscoroutinefunction(target),
+                }
                 # Picklable state crosses; a live object becomes a nested proxy.
                 if is_picklable(target):
-                    return {"ok": True, "result": target}
-                return {"ok": True, "result": None, "proxy": True}
+                    return {"ok": True, "result": target, **flags}
+                return {"ok": True, "result": None, "proxy": True, **flags}
             value = target(*msg.get("args", ()), **msg.get("kwargs", {}))
             # Record whether the call was async so the worker can re-wrap the
             # (already-resolved) result in an awaitable — otherwise a cell doing
@@ -534,9 +610,13 @@ class SandboxedExecutor:
     def _classify_worker_death(self, exc: WorkerDiedError) -> Exception:
         proc = self._proc
         code = getattr(proc, "exitcode", None)
-        if code == -signal.SIGXCPU:
+        # Neither SIGXCPU nor SIGKILL exists on Windows; a missing constant must
+        # not turn a worker death into an AttributeError here.
+        sig_xcpu = getattr(signal, "SIGXCPU", None)
+        sig_kill = getattr(signal, "SIGKILL", None)
+        if sig_xcpu is not None and code == -sig_xcpu:
             return CellTimeoutError("cell exceeded its CPU-time limit and was killed")
-        if code == -signal.SIGKILL:
+        if sig_kill is not None and code == -sig_kill:
             return CellMemoryError(
                 "worker was killed (out-of-memory or resource limit). "
                 "Reduce the cell's memory use or raise max_memory_mb."

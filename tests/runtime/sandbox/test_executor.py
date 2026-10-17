@@ -695,7 +695,7 @@ async def test_workspace_is_created_if_missing():
 
 # --- guardrails enforced inside a real cell ---------------------------------
 @pytest.mark.skipif(
-    sys.platform != "linux" or not CAPS.rlimit, reason="Linux RLIMIT_AS unavailable"
+    sys.platform != "linux" or CAPS.memory != "rlimit", reason="Linux RLIMIT_AS unavailable"
 )
 async def test_memory_guard_inside_cell():
     ex = _executor(SandboxConfig(require=False, network=True, filesystem=False, max_memory_mb=128))
@@ -707,7 +707,7 @@ async def test_memory_guard_inside_cell():
         await ex.aclose()
 
 
-@pytest.mark.skipif(not CAPS.seccomp, reason="seccomp unavailable")
+@pytest.mark.skipif(CAPS.network != "seccomp", reason="seccomp unavailable")
 async def test_network_guard_inside_cell():
     ex = _executor(SandboxConfig(require=False, network=False, filesystem=False))
     try:
@@ -721,7 +721,7 @@ async def test_network_guard_inside_cell():
         await ex.aclose()
 
 
-@pytest.mark.skipif(CAPS.landlock_abi < 1, reason="Landlock unavailable")
+@pytest.mark.skipif(CAPS.filesystem != "landlock", reason="Landlock unavailable")
 async def test_filesystem_guard_inside_cell():
     with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as secret:
         secret_path = os.path.join(secret, "s.txt")
@@ -752,7 +752,7 @@ async def test_filesystem_guard_inside_cell():
             await ex2.aclose()
 
 
-@pytest.mark.skipif(not CAPS.rlimit, reason="RLIMIT unavailable")
+@pytest.mark.skipif(CAPS.memory != "rlimit", reason="RLIMIT unavailable")
 async def test_cpu_guard_kills_spin_loop():
     ex = _executor(
         SandboxConfig(require=False, network=True, filesystem=False, max_cpu_seconds=1),
@@ -819,14 +819,29 @@ async def test_require_true_raises_when_unavailable(monkeypatch):
     from nooa.runtime.sandbox import executor as ex_mod
     from nooa.runtime.sandbox.guards import Capabilities
 
-    fake = Capabilities(linux=True, landlock_abi=0, seccomp=False, rlimit=True)
+    # Filesystem/network unenforceable here; resource caps are available. The
+    # config requests both filesystem and network isolation, so fail-closed must
+    # trigger on those two regardless of the resource mechanisms.
+    fake = Capabilities(
+        filesystem=None,
+        network=None,
+        memory="rlimit",
+        cpu="rlimit",
+        hard_kill="sigkill",
+    )
     monkeypatch.setattr(ex_mod, "_CAPS_CACHE", fake)
+    # The constructor validates the start method before the guardrails. Without
+    # this the test would stop at the platform check on Windows and never reach
+    # check_enforceable, so the assertions below would be untested there.
+    monkeypatch.setattr(ex_mod.mp, "get_all_start_methods", lambda: ["fork", "spawn"])
     from nooa.runtime.sandbox.errors import SandboxUnavailable
 
-    with pytest.raises(SandboxUnavailable):
+    with pytest.raises(SandboxUnavailable) as excinfo:
         SandboxedExecutor(
             _ToolAgent(),
             SandboxConfig(require=True, filesystem=True, network=False),
             cell_timeout=5.0,
         )
+    assert "filesystem" in str(excinfo.value)
+    assert "network isolation" in str(excinfo.value)
     ex_mod._CAPS_CACHE = None

@@ -107,15 +107,20 @@ def test_debug_handler_is_optional_when_sigusr2_is_unavailable(monkeypatch):
     assert not debug_handler._handler_installed
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows has no resource module")
+@pytest.mark.skipif(os.name != "nt", reason="Windows has no Unix sandbox mechanisms")
 def test_windows_sandbox_capabilities_can_be_queried():
     from nooa.runtime.sandbox.guards import probe_capabilities
 
     capabilities = probe_capabilities()
-    assert not capabilities.linux
-    assert not capabilities.filesystem
-    assert not capabilities.network
-    assert not capabilities.rlimit
+    # No mechanism is available on Windows yet. Each guardrail reports None so
+    # the executor fails closed instead of running cells unconfined; the
+    # AppContainer backend is validated in experiments/windows-sandbox-probe.
+    assert capabilities.filesystem is None
+    assert capabilities.network is None
+    assert capabilities.memory is None
+    assert capabilities.cpu is None
+    assert capabilities.landlock_abi == 0
+    assert "reason" in capabilities.detail
 
 
 @pytest.mark.parametrize("require", [False, True])

@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Irrevocable, OS-enforced sandbox guardrails (Linux, unprivileged).
+"""Irrevocable, OS-enforced sandbox guardrails.
 
-Each primitive is a self-imposed kernel restriction the *child* installs on
-itself after fork and before running any cell. Once installed none can be
-lifted by subsequent code — that is the "no leakage by design" guarantee:
+Each guardrail is a self-imposed kernel restriction the *child* installs on
+itself before running any cell. Once installed, none can be lifted by
+subsequent code — that is the "no leakage by design" guarantee:
 
 * ``apply_rlimits``       -> ``RLIMIT_AS`` / ``RLIMIT_CPU`` with ``soft == hard``
 * ``apply_landlock``      -> Landlock path-beneath rules (default-deny filesystem)
 * ``apply_seccomp_no_inet`` -> seccomp-BPF denying ``socket(AF_INET/AF_INET6)``
 
-All are implemented with raw ``ctypes`` syscalls — no third-party dependency.
-They target Linux; on other platforms the probes report the mechanism as
-unavailable and the executor fails closed (see ``capabilities.py``).
+These three are the Linux mechanisms. :class:`Capabilities` names the mechanism
+actually available per guardrail, so a platform without one reports ``None``
+rather than pretending. The Windows mechanisms (AppContainer ACLs, Job Object
+limits) are not implemented here yet; see ``experiments/windows-sandbox-probe``
+for the feasibility evidence behind that design.
 """
 
 from __future__ import annotations
@@ -23,9 +25,10 @@ import platform
 import socket
 import stat
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
-from nooa.runtime.sandbox.config import LandlockRule, ResolvedSpec
+from nooa.runtime.sandbox.config import PathGrant, ResolvedSpec
 
 # --- syscall numbers (Linux) ------------------------------------------------
 # Landlock syscall numbers are identical across x86_64 and aarch64.
@@ -160,24 +163,36 @@ def seccomp_supported() -> bool:
 
 @dataclass(frozen=True)
 class Capabilities:
-    """What the running host can actually enforce."""
+    """Which mechanism, if any, can enforce each guardrail on this host.
 
-    linux: bool
-    landlock_abi: int
-    seccomp: bool
-    rlimit: bool
+    ``None`` means the guardrail cannot be enforced here. Callers decide whether
+    that is fatal (``SandboxConfig.require=True``) or a documented degradation.
+    Naming the mechanism instead of a boolean keeps the difference between two
+    platforms visible in diagnostics without branching on ``sys.platform`` at
+    every call site.
+    """
 
-    @property
-    def filesystem(self) -> bool:
-        return self.landlock_abi >= 1
-
-    @property
-    def network(self) -> bool:
-        return self.seccomp
+    filesystem: Literal["landlock", "appcontainer"] | None = None
+    network: Literal["seccomp", "appcontainer"] | None = None
+    memory: Literal["rlimit", "job"] | None = None
+    cpu: Literal["rlimit", "job"] | None = None
+    hard_kill: Literal["sigkill", "terminate_job"] | None = None
+    # Diagnostic detail: Landlock ABI version, why a probe failed, and so on.
+    landlock_abi: int = 0
+    detail: dict[str, str] = field(default_factory=dict)
 
 
 def probe_capabilities() -> Capabilities:
-    """Probe the host once for every enforcement mechanism the sandbox uses."""
+    """Probe this host once for every enforcement mechanism the sandbox uses."""
+    system = platform.system()
+    if system == "Linux":
+        return _probe_linux()
+    if system == "Windows":
+        return _probe_windows()
+    return Capabilities(detail={"reason": f"unsupported platform: {system}"})
+
+
+def _probe_linux() -> Capabilities:
     try:
         import resource
     except ImportError:
@@ -185,12 +200,41 @@ def probe_capabilities() -> Capabilities:
     else:
         rlimit = hasattr(resource, "RLIMIT_AS") and hasattr(resource, "RLIMIT_CPU")
 
-    is_linux = platform.system() == "Linux"
+    abi = landlock_abi()
+    seccomp = seccomp_supported()
+    detail: dict[str, str] = {}
+    if not abi:
+        detail["filesystem"] = "Landlock unavailable (kernel too old or unsupported arch)"
+    if not seccomp:
+        detail["network"] = "seccomp unavailable (unsupported arch or filter refused)"
+    if not rlimit:
+        detail["resource"] = "resource module or RLIMIT_* missing"
     return Capabilities(
-        linux=is_linux,
-        landlock_abi=landlock_abi() if is_linux else 0,
-        seccomp=seccomp_supported() if is_linux else False,
-        rlimit=rlimit,
+        filesystem="landlock" if abi >= 1 else None,
+        network="seccomp" if seccomp else None,
+        memory="rlimit" if rlimit else None,
+        cpu="rlimit" if rlimit else None,
+        hard_kill="sigkill",
+        landlock_abi=abi,
+        detail=detail,
+    )
+
+
+def _probe_windows() -> Capabilities:
+    """Windows enforcement exists in design, not in this package yet.
+
+    The AppContainer + Job Object backend is validated in
+    ``experiments/windows-sandbox-probe``; until it ships, every mechanism
+    reports ``None`` so the executor fails closed instead of quietly running
+    cells with the application's full permissions.
+    """
+    return Capabilities(
+        detail={
+            "reason": (
+                "AppContainer/Job Object sandbox backend is not implemented in this "
+                "package yet; it must run in a Linux environment for now"
+            )
+        }
     )
 
 
@@ -216,8 +260,15 @@ def apply_rlimits(*, max_memory_mb: int = 0, max_cpu_seconds: int = 0) -> None:
     virtual size*: the forked worker already maps the interpreter and libraries,
     so an absolute cap below that baseline would break it instantly. The cap is
     ``current VmSize + max_memory_mb`` — i.e. how much more the cell may allocate.
+
+    A no-op where the ``resource`` module does not exist (Windows): there is no
+    rlimit to set, and the caller prunes these caps when the probe reports no
+    mechanism.
     """
-    import resource
+    try:
+        import resource
+    except ImportError:
+        return
 
     if max_memory_mb and max_memory_mb > 0:
         baseline = _self_vmsize_bytes()
@@ -250,7 +301,7 @@ def _is_dir(fd: int) -> bool:
         return False
 
 
-def apply_landlock(rules: list[LandlockRule]) -> None:
+def apply_landlock(rules: list[PathGrant]) -> None:
     """Confine the filesystem to ``rules`` (default-deny) via Landlock.
 
     Any access to a path not covered by a rule granting that access is denied.
@@ -369,6 +420,6 @@ def install_guards(spec: ResolvedSpec) -> None:
     """
     apply_rlimits(max_memory_mb=spec.max_memory_mb, max_cpu_seconds=spec.max_cpu_seconds)
     if spec.filesystem:
-        apply_landlock(list(spec.landlock_rules))
+        apply_landlock(list(spec.path_grants))
     if spec.block_network:
         apply_seccomp_no_inet()

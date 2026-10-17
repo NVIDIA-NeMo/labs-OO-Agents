@@ -28,6 +28,12 @@ def test_sandbox_config_defaults_are_safe():
     assert sb.network is False  # internet off by default
     assert sb.require is True  # fail closed by default
     assert sb.max_memory_mb == 0 and sb.max_cpu_seconds == 0
+    assert sb.backend == "auto"  # platform chooses the mechanism
+
+
+def test_resolve_spec_carries_backend_choice():
+    spec = resolve_spec(SandboxConfig(backend="landlock"))
+    assert spec.backend == "landlock"
 
 
 def test_sandbox_config_is_frozen():
@@ -45,7 +51,7 @@ def test_negative_caps_rejected():
 
 def test_resolve_spec_workspace_is_read_write():
     spec = resolve_spec(SandboxConfig(workspace="/work", system_paths=False))
-    rw = [r for r in spec.landlock_rules if r.path == "/work"]
+    rw = [r for r in spec.path_grants if r.path == "/work"]
     assert len(rw) == 1 and rw[0].write is True
     assert spec.block_network is True  # network False -> block
 
@@ -57,7 +63,7 @@ def test_resolve_spec_read_only_allow_rule():
             allow=(FileRule(path="/data", access="read"),),
         )
     )
-    r = [x for x in spec.landlock_rules if x.path == "/data"]
+    r = [x for x in spec.path_grants if x.path == "/data"]
     assert len(r) == 1 and r[0].write is False
 
 
@@ -69,7 +75,7 @@ def test_resolve_spec_read_write_upgrades_read():
             allow=(FileRule(path="/shared", access="read"),),
         )
     )
-    r = [x for x in spec.landlock_rules if x.path == "/shared"]
+    r = [x for x in spec.path_grants if x.path == "/shared"]
     assert len(r) == 1 and r[0].write is True  # read_write wins over read
 
 
@@ -81,7 +87,7 @@ def test_resolve_spec_network_allowed_does_not_block():
 def test_resolve_spec_filesystem_disabled_has_no_rules():
     spec = resolve_spec(SandboxConfig(filesystem=False))
     assert spec.filesystem is False
-    assert spec.landlock_rules == ()
+    assert spec.path_grants == ()
 
 
 def test_context_block_lists_only_active_guards():

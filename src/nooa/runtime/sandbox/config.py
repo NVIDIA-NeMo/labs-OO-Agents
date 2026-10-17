@@ -4,17 +4,17 @@
 
 ``SandboxConfig`` declares *intent* — which guardrails to enforce and how. The
 parent resolves it into a concrete :class:`ResolvedSpec` (expanding the
-workspace and system paths into Landlock rules, deciding the seccomp/rlimit
-values) which the worker applies to itself after fork, before any cell runs.
+workspace and system paths into path grants, deciding the network/rlimit
+values) which the worker applies to itself before any cell runs.
 
-Every guardrail is independently configurable and each maps to an irrevocable
-kernel mechanism (see ``guards.py``):
+Every guardrail is independently configurable. Each maps to a kernel mechanism
+chosen per platform (see ``guards.py``):
 
 * timeout  -> parent hard-kill (reuses ``CodeActConfig.cell_timeout``)
-* memory   -> ``RLIMIT_AS``          (``max_memory_mb``)
-* cpu      -> ``RLIMIT_CPU``         (``max_cpu_seconds``)
-* files    -> Landlock path rules    (``filesystem``/``workspace``/``allow``/``deny``)
-* network  -> seccomp ``socket()``   (``network``)
+* memory   -> ``RLIMIT_AS`` (Linux) / Job Object limit (Windows)
+* cpu      -> ``RLIMIT_CPU`` (Linux) / Job Object limit (Windows)
+* files    -> Landlock path rules (Linux) / AppContainer ACL (Windows)
+* network  -> seccomp ``socket()`` (Linux) / capability omission (Windows)
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 FileAccess = Literal["read", "read_write"]
+SandboxBackend = Literal["auto", "landlock", "appcontainer"]
 
 
 class FileRule(BaseModel):
@@ -50,7 +51,7 @@ class SandboxConfig(BaseModel):
     # --- guardrail 3: filesystem ------------------------------------------
     filesystem: bool = Field(
         default=True,
-        description="Enforce Landlock filesystem confinement (default-deny).",
+        description="Confine the filesystem (Landlock on Linux, AppContainer on Windows).",
     )
     workspace: str | None = Field(
         default=None,
@@ -103,10 +104,23 @@ class SandboxConfig(BaseModel):
     )
 
     # --- process / lifecycle ----------------------------------------------
-    # Only "fork" is supported: the worker init inherits the live agent, the
-    # CurrentCall and the return_result closure, none of which pickle for "spawn".
-    start_method: Literal["fork"] = Field(
-        default="fork", description="multiprocessing start method for the worker (fork only)."
+    # "fork" inherits the live agent, the CurrentCall and the return_result
+    # closure directly. "spawn" cannot inherit anything, so it rebuilds the
+    # worker namespace from a WorkerBlueprint (see ``blueprint.py``) and brokers
+    # every ``self.*`` access, including introspection.
+    start_method: Literal["fork", "spawn"] = Field(
+        default="fork",
+        description=(
+            "Process start method for the worker. 'fork' requires a Unix process "
+            "model; 'spawn' rebuilds state from a blueprint and works on Windows."
+        ),
+    )
+    backend: SandboxBackend = Field(
+        default="auto",
+        description=(
+            "Enforcement backend. 'auto' picks the platform's mechanism; naming one "
+            "explicitly fails closed if this host cannot provide it."
+        ),
     )
     recovery: Literal["restart_empty", "disabled"] = Field(
         default="restart_empty",
@@ -130,8 +144,11 @@ class SandboxConfig(BaseModel):
 # Access-right bundles are computed in guards.py from the live Landlock ABI;
 # here we only carry the resolved, ABI-agnostic intent.
 @dataclass(frozen=True)
-class LandlockRule:
-    """A resolved Landlock path rule: grant ``read``/``write`` beneath ``path``.
+class PathGrant:
+    """A resolved path rule: grant ``read``/``write`` beneath ``path``.
+
+    Platform-neutral by design: the Linux backend turns this into a Landlock
+    rule, the Windows backend into an AppContainer ACL grant.
 
     ``required`` rules (the user's explicit workspace / allow paths) must exist at
     apply time — a missing one is an error, not a silent skip — whereas the
@@ -143,19 +160,25 @@ class LandlockRule:
     required: bool = False
 
 
+# Backwards-compatible alias for the name this type had while only Landlock
+# existed. Remove once external callers have migrated.
+LandlockRule = PathGrant
+
+
 @dataclass(frozen=True)
 class ResolvedSpec:
-    """Concrete, host-independent guard spec applied by the worker after fork.
+    """Concrete, host-independent guard spec applied to the worker.
 
     Produced by ``resolve_spec()`` from a :class:`SandboxConfig`. Everything here
-    is plain data so it pickles cleanly across the ``spawn`` boundary.
+    is plain data so it pickles cleanly across a process boundary.
     """
 
     filesystem: bool = False
-    landlock_rules: tuple[LandlockRule, ...] = ()
+    path_grants: tuple[PathGrant, ...] = ()
     block_network: bool = False
     max_memory_mb: int = 0
     max_cpu_seconds: int = 0
+    backend: SandboxBackend = "auto"
 
     def requests_anything(self) -> bool:
         return bool(
@@ -206,8 +229,8 @@ def _interpreter_read_paths() -> list[str]:
 def resolve_spec(config: SandboxConfig) -> ResolvedSpec:
     """Turn declarative :class:`SandboxConfig` into a concrete :class:`ResolvedSpec`.
 
-    Deduplicates and normalizes Landlock rules (read vs read-write), folds in the
-    interpreter/system read paths, and records the network/rlimit intent.
+    Deduplicates and normalizes path grants (read vs read-write), folds in the
+    interpreter/system read paths, and records the network/resource intent.
     """
     paths: dict[str, tuple[bool, bool]] = {}  # path -> (write, required)
 
@@ -216,7 +239,7 @@ def resolve_spec(config: SandboxConfig) -> ResolvedSpec:
         w, r = paths.get(path, (False, False))
         paths[path] = (w or write, r or required)
 
-    rules: tuple[LandlockRule, ...] = ()
+    grants: tuple[PathGrant, ...] = ()
     if config.filesystem:
         if config.system_paths:
             for p in DEFAULT_SYSTEM_READ_PATHS:
@@ -230,14 +253,15 @@ def resolve_spec(config: SandboxConfig) -> ResolvedSpec:
             add(config.workspace, True, required=True)
         for rule in config.allow:
             add(rule.path, rule.access == "read_write", required=True)
-        rules = tuple(
-            LandlockRule(path=p, write=w, required=r) for p, (w, r) in sorted(paths.items())
+        grants = tuple(
+            PathGrant(path=p, write=w, required=r) for p, (w, r) in sorted(paths.items())
         )
 
     return ResolvedSpec(
         filesystem=config.filesystem,
-        landlock_rules=rules,
+        path_grants=grants,
         block_network=not config.network,
         max_memory_mb=config.max_memory_mb,
         max_cpu_seconds=config.max_cpu_seconds,
+        backend=config.backend,
     )

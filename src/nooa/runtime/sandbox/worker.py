@@ -112,10 +112,29 @@ class ChildBroker:
         resp = self._rpc({"type": "tool_call", "kind": "call", "path": path}, (args, kwargs))
         return resp.get("result"), bool(resp.get("was_async"))
 
-    def get_attr(self, path: list[str]) -> tuple[Any, bool]:
-        """Return ``(value, is_proxy)``: the picklable value, or a nested-proxy marker."""
+    def get_attr(self, path: list[str]) -> tuple[Any, bool, bool, bool]:
+        """Return ``(value, is_proxy, is_callable, is_async)``.
+
+        The callable/async flags let a spawned worker — which has no local agent
+        to classify against — decide whether to hand back a broker callable or a
+        plain value. They come from the parent's live object, so they are also
+        correct for attributes the forked copy never saw.
+        """
         resp = self._rpc({"type": "tool_call", "kind": "attr", "path": path})
-        return resp.get("result"), bool(resp.get("proxy"))
+        return (
+            resp.get("result"),
+            bool(resp.get("proxy")),
+            bool(resp.get("callable")),
+            bool(resp.get("is_async")),
+        )
+
+    def introspect(self, name: str, args: tuple, kwargs: dict) -> str:
+        """Run ``doc`` / ``methods`` / ``variables`` against the parent's agent."""
+        resp = self._rpc(
+            {"type": "tool_call", "kind": "introspect", "path": [], "name": name},
+            (args, kwargs),
+        )
+        return str(resp.get("result") or "")
 
     def set_attr(self, path: list[str], value: Any) -> None:
         """Assign ``value`` at ``path`` on the parent's live agent (``self.x = value``)."""
@@ -214,16 +233,27 @@ def _resolve_child_attr(broker: ChildBroker, local_obj: Any, path: list[str], na
     agent itself). Callables become broker callables; picklable values are fetched
     fresh from the parent; non-picklable live objects become a nested proxy so
     ``self.a.b(...)`` keeps working without ``a`` ever crossing the boundary.
+
+    ``local_obj`` is ``None`` in a spawned worker, which has no inherited agent.
+    The callable/async classification then comes from the parent's response
+    instead of a local ``getattr``.
     """
     new_path = [*path, name]
+    if local_obj is None:
+        value, is_proxy, is_callable, is_async = broker.get_attr(new_path)
+        if is_proxy:
+            return _NestedProxy(broker, new_path, None)
+        if is_callable:
+            return _BrokerCallable(broker, new_path, is_async)
+        return value
     try:
         local_attr = getattr(local_obj, name)
     except AttributeError:
-        value, is_proxy = broker.get_attr(new_path)
+        value, is_proxy, _callable, _async = broker.get_attr(new_path)
         return _NestedProxy(broker, new_path, None) if is_proxy else value
     if callable(local_attr) and not isinstance(local_attr, type):
         return _BrokerCallable(broker, new_path, _is_async_callable(local_attr))
-    value, is_proxy = broker.get_attr(new_path)
+    value, is_proxy, _callable, _async = broker.get_attr(new_path)
     return _NestedProxy(broker, new_path, local_attr) if is_proxy else value
 
 
@@ -243,8 +273,11 @@ class _NestedProxy:
             raise AttributeError(name)
         broker, path, local = _PROXY_STATE[self]
         if local is None:
-            # Unknown local shape: assume callable-or-value, resolved by the parent.
-            value, is_proxy = broker.get_attr([*path, name])
+            # Unknown local shape (spawned worker, or a non-picklable parent
+            # object): let the parent classify callable vs value.
+            value, is_proxy, is_callable, is_async = broker.get_attr([*path, name])
+            if is_callable:
+                return _BrokerCallable(broker, [*path, name], is_async)
             return _NestedProxy(broker, [*path, name], None) if is_proxy else value
         return _resolve_child_attr(broker, local, path, name)
 
@@ -314,15 +347,18 @@ class ParentAgentProxy:
     Method access returns a broker callable (the call runs on the parent's live
     agent); non-callable attribute access fetches a fresh picklable snapshot from
     the parent, so agent state the parent mutates between turns stays authoritative;
-    a non-picklable live attribute becomes a nested proxy. The forked-local agent is
-    used only for the (turn-invariant) callable/value classification.
+    a non-picklable live attribute becomes a nested proxy.
+
+    ``local_agent`` is the forked copy when the start method can inherit one, and
+    ``None`` in a spawned worker. Without it, callable/value classification is
+    delegated to the parent rather than guessed locally.
 
     The broker and forked agent live in :data:`_PROXY_STATE`, not in instance
     attributes, so ``self._broker`` resolves against the agent (no such attribute)
     and fails instead of exposing the parent pipe.
     """
 
-    def __init__(self, broker: ChildBroker, local_agent: Any):
+    def __init__(self, broker: ChildBroker, local_agent: Any | None):
         _PROXY_STATE[self] = (broker, local_agent)
 
     def __getattr__(self, name: str) -> Any:
@@ -342,14 +378,29 @@ class ParentAgentProxy:
         broker.set_attr([name], value)
 
     def __repr__(self) -> str:
-        return f"<sandbox self-proxy for {type(_PROXY_STATE[self][1]).__name__}>"
+        local = _PROXY_STATE[self][1]
+        kind = type(local).__name__ if local is not None else "spawned"
+        return f"<sandbox self-proxy for {kind}>"
 
 
 def _introspect_wrapper(fn: Any, proxy: ParentAgentProxy, agent: Any) -> Any:
-    """Wrap ``doc``/``methods``/``variables`` so ``doc(self)`` works on the proxy."""
+    """Wrap ``doc``/``methods``/``variables`` so ``doc(self)`` works on the proxy.
+
+    With a forked agent the call runs locally against that copy. In a spawned
+    worker there is no local instance, so the call is brokered to the parent,
+    which renders against the live agent and returns the string.
+    """
 
     def wrapper(obj: Any = proxy, *args: Any, **kwargs: Any) -> Any:
-        return fn(agent if obj is proxy else obj, *args, **kwargs)
+        if obj is not proxy:
+            return fn(obj, *args, **kwargs)
+        if agent is None:
+            broker = _PROXY_STATE[proxy][0]
+            # The proxy itself must not cross the boundary; the parent renders
+            # against its own live agent.
+            rest = tuple(a for a in args if a is not proxy)
+            return broker.introspect(fn.__name__, rest, kwargs)
+        return fn(agent, *args, **kwargs)
 
     return wrapper
 
@@ -359,8 +410,15 @@ def build_namespace(
     framework_builtins: dict[str, Any],
     proxy: ParentAgentProxy,
     restrictions: Any,
+    *,
+    agent_class: type | None = None,
 ) -> dict[str, Any]:
-    """Build the worker's persistent cell namespace, mirroring actor exec_globals."""
+    """Build the worker's persistent cell namespace, mirroring actor exec_globals.
+
+    ``agent`` is the inherited instance under ``fork``. A spawned worker passes
+    ``agent=None`` plus the imported ``agent_class``: module-level globals only
+    depend on the class MRO, so the namespace is identical either way.
+    """
     import typing as _typing
 
     from nooa.agentdoc import doc
@@ -371,6 +429,8 @@ def build_namespace(
     from nooa.runtime.media_capture import show
     from nooa.runtime.pprint import pprint
     from nooa.runtime.restrictions import RestrictionsConfig
+
+    cls = agent_class if agent_class is not None else type(agent)
 
     # Only ``self.*`` brokers to the live parent; module-level state is a private
     # copy in this worker, so a cell mutating it would silently diverge from the
@@ -387,7 +447,7 @@ def build_namespace(
     )
     from nooa.strategies.pure_python import PurePythonStrategy
 
-    ns: dict[str, Any] = freeze_module_state(filter_mro_module_globals(type(agent)))
+    ns: dict[str, Any] = freeze_module_state(filter_mro_module_globals(cls))
     ns.update(
         {
             "self": proxy,
@@ -429,16 +489,40 @@ def build_namespace(
 
 
 def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no cover - child
-    """Child entrypoint: build namespace, install guards, serve requests."""
+    """Child entrypoint: build namespace, install guards, serve requests.
+
+    ``init`` has one of two shapes:
+
+    * ``{"mode": "fork", ...}`` — inherited live agent and framework builtins;
+    * ``{"mode": "blueprint", "blueprint": WorkerBlueprint, ...}`` — the spawned
+      path, where everything is rebuilt from picklable data.
+    """
     from nooa.runtime.sandbox.guards import install_guards
 
     send_lock = threading.RLock()
     try:
         broker = ChildBroker(conn, send_lock)
-        proxy = ParentAgentProxy(broker, init["agent"])
-        namespace = build_namespace(
-            init["agent"], init.get("framework_builtins") or {}, proxy, init.get("restrictions")
-        )
+        if init.get("mode") == "blueprint":
+            blueprint = init["blueprint"]
+            agent = None
+            agent_class = blueprint.import_agent_class()
+            framework_builtins = blueprint.rebuild_builtins()
+            proxy = ParentAgentProxy(broker, None)
+            namespace = build_namespace(
+                agent,
+                framework_builtins,
+                proxy,
+                init.get("restrictions"),
+                agent_class=agent_class,
+            )
+        else:
+            proxy = ParentAgentProxy(broker, init["agent"])
+            namespace = build_namespace(
+                init["agent"],
+                init.get("framework_builtins") or {},
+                proxy,
+                init.get("restrictions"),
+            )
         # Guards go on AFTER the (trusted) namespace build and BEFORE the op loop,
         # so every cell — and nothing else — runs under the full lock-down.
         install_guards(init["spec"])
