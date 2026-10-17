@@ -1,0 +1,407 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Start the CodeAct worker inside an AppContainer.
+
+Why this cannot reuse ``multiprocessing.Process``: on Windows, ``Popen`` calls
+``_winapi.CreateProcess`` with no attribute list, and ``SECURITY_CAPABILITIES``
+is a creation-time attribute. There is no way to enter an AppContainer after
+the process exists, so the launcher has to create the process itself.
+
+Everything *around* process creation is reused unchanged. The broker still
+speaks ``multiprocessing.connection``: the parent creates a duplex pipe and
+hands the child a duplicated, inheritable handle. ``DuplicateHandle`` does not
+consult the pipe's DACL, so the container can use it without any grant — this
+was measured (probe scenario 8), not assumed.
+
+Guards map onto the two Windows mechanisms:
+
+===============  ===================================================
+guardrail        mechanism
+===============  ===================================================
+filesystem       AppContainer DACL grants written before creation
+network          omission of capability SIDs (TCP; UDP unproven)
+memory           Job Object ``ProcessMemoryLimit``
+cpu              Job Object ``PerJobUserTimeLimit``
+timeout / kill   ``TerminateJobObject``
+===============  ===================================================
+
+Memory keeps the Linux meaning: ``max_memory_mb`` is *headroom above the
+worker's baseline*, not an absolute ceiling. The baseline is measured from the
+job's peak usage after the worker reports ready, then the limit is set to
+``baseline + headroom``.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import multiprocessing as mp
+import os
+import time
+from dataclasses import dataclass
+from typing import Any
+
+from nooa.runtime.sandbox import wire
+from nooa.runtime.sandbox.config import ResolvedSpec
+from nooa.runtime.sandbox.errors import SandboxUnavailable
+from nooa.runtime.sandbox.win_api import (
+    FILE_ALL_ACCESS,
+    HANDLE_FLAG_INHERIT,
+    READ_EXECUTE,
+    STILL_ACTIVE,
+    WAIT_TIMEOUT,
+    Child,
+    Job,
+    _k32,
+    container_sid,
+    grant,
+    revoke,
+)
+from nooa.runtime.sandbox.win_runtime import AclJournal, RuntimeRoot
+
+__all__ = ["ContainerProcess", "start_container_worker"]
+
+# 0xC000013A (STATUS_CONTROL_C_EXIT) is what a Job Object returns when it
+# terminates a process for exceeding its time limit. The M0 probe measured it.
+EXIT_JOB_TIME_LIMIT = 0xC000013A
+
+_READY_TIMEOUT_S = 180.0
+# The startup handshake is worker -> parent control traffic, not agent data:
+# decode it with the default codec, never the agent-typed one.
+_READY_CODEC = wire.Codec()
+
+
+def _agent_import_roots(init: dict[str, Any]) -> list[str]:
+    """Directories that must be importable for the agent class to resolve.
+
+    Linux ``spawn`` imports the agent module *before* installing guards, so the
+    agent's directory only needs to be on the parent's ``sys.path``. An
+    AppContainer is confined from process creation, which means the import
+    happens inside the sandbox and every directory on that import chain needs a
+    read grant.
+
+    The grants stay as narrow as the blueprint allows: the package directory (or
+    the single module's directory) for the agent's module, never its ancestors.
+    """
+    blueprint = init.get("blueprint")
+    module_name = getattr(blueprint, "agent_module", None)
+    if not module_name:
+        return []
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except (ImportError, ValueError):
+        return []
+    if spec is None:
+        return []
+    roots: list[str] = []
+    if spec.submodule_search_locations:
+        # A package: import it from the parent of its directory.
+        for location in spec.submodule_search_locations:
+            roots.append(os.path.dirname(os.path.abspath(location)))
+    elif spec.origin and spec.origin not in ("built-in", "frozen"):
+        roots.append(os.path.dirname(os.path.abspath(spec.origin)))
+    return roots
+
+
+def _crash_log_path(workspace: str) -> str:
+    """Where the container worker appends a startup traceback.
+
+    Must live under a granted path (the runtime root is read-only), and a fresh
+    name per launch is not needed: the launcher truncates it before spawning, so
+    a stale traceback cannot be mistaken for the current failure.
+    """
+    return os.path.join(workspace, "nooa-worker-crash.txt")
+
+
+def _wait(handle: int, timeout_ms: int) -> int:
+    return _k32.WaitForSingleObject(handle, timeout_ms)
+
+
+class ContainerProcess:
+    """The subset of ``multiprocessing.Process`` the executor actually uses.
+
+    Deliberately not a ``BaseProcess`` subclass: inheritance would drag in
+    ``mp``'s own creation path, which cannot enter a container.
+    """
+
+    def __init__(
+        self,
+        child: Child,
+        job: Job,
+        journal: AclJournal,
+        granted: list[str],
+        container_name: str,
+    ):
+        self._child = child
+        self._job = job
+        self._journal = journal
+        self._granted = granted
+        # Revoking with the wrong SID silently leaves the grants in place, so
+        # the name this process was created under has to be carried, not assumed.
+        self._container_name = container_name
+        self.pid = child.pid
+        self._released = False
+
+    # --- liveness ----------------------------------------------------------
+    def is_alive(self) -> bool:
+        if self._released:
+            return False
+        return _wait(self._child.pi.hProcess, 0) == WAIT_TIMEOUT
+
+    @property
+    def exitcode(self) -> int | None:
+        if self._child.pi.hProcess is None:
+            return None
+        code = ctypes.c_uint32()
+        if not _k32.GetExitCodeProcess(self._child.pi.hProcess, ctypes.byref(code)):
+            return None
+        return None if code.value == STILL_ACTIVE else int(code.value)
+
+    # --- termination -------------------------------------------------------
+    def terminate(self) -> None:
+        """Stop the worker process. Descendants survive this one."""
+        if self._child.pi.hProcess is not None:
+            _k32.TerminateProcess(self._child.pi.hProcess, 1)
+
+    def kill(self) -> None:
+        """Kill the whole job, including any subprocess the cell started."""
+        self._job.terminate(1)
+
+    def join(self, timeout: float | None = None) -> None:
+        ms = 0xFFFFFFFF if timeout is None else int(max(0.0, timeout) * 1000)
+        _wait(self._child.pi.hProcess, ms)
+
+    # --- teardown ----------------------------------------------------------
+    def release(self) -> None:
+        """Revoke the ACLs and close every handle this launcher owns.
+
+        ``REVOKE_ACCESS`` is the teardown path, not SDDL replay: a second
+        ``GRANT_ACCESS`` merges into the existing ACE for the same SID, and an
+        inheriting directory recomputes its ``AI`` bit on every write.
+        """
+        if self._released:
+            return
+        self._released = True
+        try:
+            sid = container_sid_quiet(self._container_name)
+            if sid is not None:
+                for path in reversed(self._granted):
+                    try:
+                        revoke(path, sid)
+                    except OSError:
+                        pass
+                _k32.LocalFree(sid)
+        finally:
+            self._granted = []
+            self._journal.clear()
+            self._job.close()
+            self._child.close()
+
+
+def container_sid_quiet(name: str | None = None) -> Any | None:
+    """A container's SID, or None if its profile is gone."""
+    from nooa.runtime.sandbox.win_runtime import DEFAULT_CONTAINER_NAME
+
+    try:
+        return container_sid(name or DEFAULT_CONTAINER_NAME)
+    except OSError:
+        return None
+
+
+@dataclass
+class ContainerHandles:
+    proc: ContainerProcess
+    conn: Any
+
+
+def start_container_worker(
+    init: dict[str, Any],
+    spec: ResolvedSpec,
+    root: RuntimeRoot,
+    *,
+    container_name: str | None = None,
+    workspace: str | None = None,
+    ready_timeout_s: float = _READY_TIMEOUT_S,
+) -> ContainerHandles:
+    """Create the container, grant, launch suspended, assign, resume, handshake.
+
+    ``init`` is sent as the first pipe message rather than a file: the pipe is
+    the only channel the container is guaranteed to have, and the payload is
+    already picklable by construction.
+    """
+    from nooa.runtime.sandbox.win_api import create_profile
+    from nooa.runtime.sandbox.win_runtime import DEFAULT_CONTAINER_NAME
+
+    name = container_name or DEFAULT_CONTAINER_NAME
+    root.check()
+    create_profile(name)
+    app_sid = container_sid(name)
+
+    journal = AclJournal(root.journal)
+    granted: list[str] = []
+
+    def grant_path(path: str, access: int) -> None:
+        if not os.path.exists(path):
+            return
+        grant(path, app_sid, access)
+        granted.append(path)
+        journal.record(path, _sid_text(app_sid))
+
+    try:
+        # 1. The runtime root: read+execute, never write. The worker may import
+        #    from it but must not be able to rewrite its own interpreter's code.
+        grant_path(str(root.root), READ_EXECUTE)
+        # 2. User-requested paths. The interpreter/venv paths in the spec are
+        #    deliberately ignored: on Windows "system paths" means the private
+        #    runtime root granted above, not the parent's interpreter.
+        for rule in spec.path_grants:
+            if not rule.required:
+                continue
+            if not os.path.exists(rule.path):
+                raise SandboxUnavailable(f"sandbox allow path does not exist: {rule.path}")
+            grant_path(rule.path, FILE_ALL_ACCESS if rule.write else READ_EXECUTE)
+        # 3. The agent's own module. The worker imports it by name inside the
+        #    container, which is confined from creation — unlike Linux spawn,
+        #    where that import happens before the guards go on. Without this the
+        #    blueprint fails with "cannot resolve X in 'mymodule'".
+        import_roots = _agent_import_roots(init)
+        for import_root in import_roots:
+            grant_path(import_root, READ_EXECUTE)
+        # 4. The workspace last, so it is revoked first on teardown.
+        if workspace:
+            grant_path(str(workspace), FILE_ALL_ACCESS)
+
+        # The child runs with ``-I``, which keeps cwd off sys.path and ignores
+        # PYTHONPATH, so the granted roots have to be named explicitly.
+        if import_roots:
+            init = {**init, "import_roots": import_roots}
+
+        parent_conn, child_conn = mp.Pipe(duplex=True)
+        handle = child_conn.fileno()
+        # HANDLE_LIST accepts inheritable handles only; a non-inheritable one
+        # makes CreateProcessW fail with ERROR_INVALID_PARAMETER (87).
+        if not _k32.SetHandleInformation(
+            ctypes.c_void_p(handle), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT
+        ):
+            raise SandboxUnavailable("could not mark the broker pipe inheritable")
+
+        argv = [
+            str(root.python),
+            "-I",  # isolated: no cwd on sys.path, no PYTHON* env, no user site
+            "-m",
+            "nooa.runtime.sandbox.win_worker",
+            str(handle),
+            name,
+        ]
+        # A startup crash writes nothing to stderr: the process is created with
+        # no inherited std handles. The only writable path the container has is
+        # the workspace, so the crash log goes there.
+        if workspace:
+            argv.append(str(_crash_log_path(workspace)))
+        job = Job()
+        try:
+            if workspace:
+                try:
+                    os.remove(_crash_log_path(workspace))
+                except OSError:
+                    pass
+            child = _spawn(argv, name, handle, workspace or str(root.root))
+        except BaseException:
+            parent_conn.close()
+            child_conn.close()
+            job.close()
+            raise
+        job.assign(child.pi.hProcess)
+        child.resume()
+        child_conn.close()
+
+        proc = ContainerProcess(child, job, journal, granted, name)
+        try:
+            _handshake(parent_conn, init, proc, spec, ready_timeout_s)
+        except BaseException:
+            proc.terminate()
+            proc.join(timeout=2.0)
+            proc.release()
+            parent_conn.close()
+            raise
+        return ContainerHandles(proc=proc, conn=parent_conn)
+    except BaseException:
+        # Any failure before the process is handed to the caller must not leak
+        # ACEs: they are persistent, and a retry would otherwise stack them.
+        for path in reversed(granted):
+            try:
+                revoke(path, app_sid)
+            except OSError:
+                pass
+        journal.clear()
+        raise
+    finally:
+        # ``container_sid`` returns a LocalAlloc'd SID; both the success and the
+        # failure path must free it. ``ContainerProcess.release`` re-derives its
+        # own copy, so nothing downstream depends on this handle staying alive.
+        _k32.LocalFree(app_sid)
+
+
+def _spawn(argv: list[str], container_name: str, handle: int, cwd: str) -> Child:
+    from nooa.runtime.sandbox.win_api import spawn_in_container
+
+    return spawn_in_container(
+        argv,
+        container_name=container_name,
+        inherit_handles=(handle,),
+        cwd=cwd,
+    )
+
+
+def _handshake(
+    conn: Any,
+    init: dict[str, Any],
+    proc: ContainerProcess,
+    spec: ResolvedSpec,
+    timeout_s: float,
+) -> None:
+    """Send init, wait for ``ready``, then apply the memory limit.
+
+    The memory ceiling must be set *after* the baseline is known, otherwise a
+    cap expressed as headroom would be read as an absolute ceiling and kill a
+    worker that has not even imported the agent module yet.
+    """
+    conn.send(init)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SandboxUnavailable(f"sandbox worker did not report ready within {timeout_s:.0f}s")
+        if not conn.poll(min(remaining, 1.0)):
+            if not proc.is_alive():
+                raise SandboxUnavailable(
+                    f"sandbox worker exited during startup (exit code {proc.exitcode})"
+                )
+            continue
+        try:
+            # Never ``conn.recv()``: that unpickles worker bytes. The ready
+            # message carries only a string and an int, so the default codec
+            # (no agent types) is the right one here.
+            message = _READY_CODEC.loads(conn.recv_bytes())
+            if not isinstance(message, dict):
+                raise SandboxUnavailable("sandbox worker sent a malformed ready message")
+        except (EOFError, OSError) as exc:
+            raise SandboxUnavailable(f"sandbox worker pipe closed during startup: {exc}") from exc
+        kind = message.get("type")
+        if kind == "ready":
+            baseline = int(message.get("baseline_bytes") or 0)
+            memory_mb = 0
+            if spec.max_memory_mb:
+                overhead = int(baseline / (1024 * 1024))
+                memory_mb = overhead + int(spec.max_memory_mb)
+            proc._job.set_limits(memory_mb=memory_mb, cpu_seconds=spec.max_cpu_seconds)
+            return
+        if kind == "fatal":
+            raise SandboxUnavailable(f"sandbox worker failed to start: {message.get('error')}")
+
+
+def _sid_text(sid: ctypes.c_void_p) -> str:
+    from nooa.runtime.sandbox.win_api import sid_string
+
+    return sid_string(sid)

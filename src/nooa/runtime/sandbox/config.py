@@ -122,6 +122,14 @@ class SandboxConfig(BaseModel):
             "explicitly fails closed if this host cannot provide it."
         ),
     )
+    runtime_root: str | None = Field(
+        default=None,
+        description=(
+            "Windows only: private interpreter root the AppContainer runs from. "
+            "None -> $NOOA_SANDBOX_RUNTIME, else a per-user cache. Built once with "
+            "experiments/windows-sandbox-probe/_mkroot.py."
+        ),
+    )
     recovery: Literal["restart_empty", "disabled"] = Field(
         default="restart_empty",
         description="After a kill: restart the worker fresh (empty namespace) or disable it.",

@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Container-side entrypoint, launched by ``win_launcher`` as ``python -I -m``.
+
+It exists as a separate module for one reason: the container process is created
+by ``CreateProcessW``, not by ``multiprocessing``, so there is no pickle-based
+``target`` to call. Everything after the handle is reconstructed is exactly the
+same code the fork path uses — ``worker_main`` builds the namespace, installs
+whatever guards remain, and serves the op loop.
+
+Ordering inside the container matters:
+
+1. reconstruct the pipe connection from the inherited handle;
+2. verify we really are in a container (a launch outside one means the
+   launcher's confinement silently did not apply — refuse to run);
+3. tell the parent the baseline memory, so it can translate the configured
+   headroom into an absolute Job Object ceiling;
+4. build the namespace and serve.
+
+Step 3 happens before the namespace build on purpose: the baseline must describe
+the *bare interpreter*, so that importing the agent module and its dependencies
+counts against the cell's budget rather than against the baseline.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+
+def _current_rss_bytes() -> int:
+    """Private working set of this process, via psapi (no psutil dependency)."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    except OSError:
+        return 0
+
+    class _Counters(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("PageFaultCount", ctypes.c_ulong),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+            ("PrivateUsage", ctypes.c_size_t),
+        ]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    # Without explicit argtypes ctypes marshals the handle as a C int, and a
+    # 64-bit process handle overflows it (ArgumentError: int too long).
+    psapi.GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_Counters),
+        wintypes.DWORD,
+    ]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    counters = _Counters()
+    counters.cb = ctypes.sizeof(counters)
+    if not psapi.GetProcessMemoryInfo(
+        k32.GetCurrentProcess(), ctypes.byref(counters), ctypes.sizeof(counters)
+    ):
+        return 0
+    return int(counters.WorkingSetSize)
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        _crash_log("usage: python -m nooa.runtime.sandbox.win_worker <pipe-handle> [name] [log]")
+        return 2
+    handle = int(sys.argv[1])
+    expected_container = sys.argv[2] if len(sys.argv) > 2 else None
+    # The launcher creates this process with no inherited std handles, so a
+    # traceback printed to stderr goes nowhere. A crash log in the (granted)
+    # workspace is the only channel that survives a startup failure.
+    crash_path = sys.argv[3] if len(sys.argv) > 3 else None
+    try:
+        return _run(handle, expected_container)
+    except BaseException:  # noqa: BLE001 - the report is the whole point
+        import traceback
+
+        _crash_log(traceback.format_exc(), crash_path)
+        return 9
+
+
+def _crash_log(message: str, path: str | None = None) -> None:
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+            return
+        except OSError:
+            pass
+    try:
+        print(message, file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _run(handle: int, expected_container: str | None) -> int:
+    from multiprocessing.connection import PipeConnection
+
+    from nooa.runtime.sandbox import wire
+    from nooa.runtime.sandbox.win_api import app_container_sid, is_app_container
+
+    try:
+        conn = PipeConnection(handle, readable=True, writable=True)
+    except OSError as exc:
+        _crash_log(f"win_worker: cannot adopt pipe handle {handle}: {exc}")
+        return 3
+
+    # Refuse to run unconfined. If the launcher's SECURITY_CAPABILITIES was
+    # dropped (a test harness, a copy-pasted argv), every cell would execute
+    # with the parent's full permissions while the caller believes otherwise —
+    # fail loudly instead of being quietly wrong.
+    try:
+        if not is_app_container():
+            _send_fatal(conn, wire, "process is not in an AppContainer")
+            return 4
+        actual = app_container_sid()
+        if expected_container and actual is None:
+            _send_fatal(conn, wire, "container SID is unreadable")
+            return 4
+    except OSError as exc:
+        _send_fatal(conn, wire, f"token query failed: {exc}")
+        return 4
+
+    from nooa.runtime.sandbox.worker import worker_main
+
+    try:
+        init = conn.recv()  # parent -> worker: the parent is trusted
+    except (EOFError, OSError) as exc:
+        _crash_log(f"win_worker: no init message: {exc}")
+        return 5
+
+    # ``-I`` strips cwd and PYTHONPATH, and the container is confined from
+    # creation, so the launcher must grant and name the agent's import roots
+    # explicitly. Inserting them here — before the blueprint imports the agent
+    # class — is the only point where both are true.
+    for root in reversed(list(init.get("import_roots") or [])):
+        if root not in sys.path:
+            sys.path.insert(0, root)
+
+    # ``ready`` is sent from the callback, not here: the parent's first-cell
+    # deadline must not include this process's cold import cost. The memory
+    # baseline is likewise taken *after* the namespace build, because the
+    # configured headroom is relative to a worker that is ready to run cells —
+    # the same baseline the Linux backend inherits through ``fork``.
+    def _on_ready() -> None:
+        wire.send(
+            conn,
+            {
+                "type": "ready",
+                "baseline_bytes": _current_rss_bytes(),
+                "container_sid": actual,
+                "pid": os.getpid(),
+            },
+        )
+
+    worker_main(conn, init, on_ready=_on_ready)
+    return 0
+
+
+def _send_fatal(conn, wire, message: str) -> None:
+    try:
+        wire.send(conn, {"type": "fatal", "error": message})
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

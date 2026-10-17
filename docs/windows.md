@@ -19,14 +19,80 @@ use native Python and `uv`; they do not require WSL, Docker, or Rust.
 | `nooa-acp` / `nooa acp` protocol entry points | Supported; native commands, activity updates, cancellation, and durable session reload |
 | Persistent Bash sessions | Require a Unix environment |
 | Shell-based producer `monitor()` | Supported; each monitor owns its PowerShell session and child processes |
-| The `sandbox` execution backend | Requires a supported Unix process model; enforced guards require Linux |
+| The `sandbox` execution backend | Supported natively via AppContainer + Job Object; see [Sandbox execution](#sandbox-execution) |
 | Coding/benchmark workflows that depend on Bash or Linux isolation | Outside this Windows support scope |
 
 In-process CodeAct executes Python with the application's permissions. It does
-not provide OS isolation. Requesting the sandbox backend on native Windows
-raises `SandboxUnavailable`, including when `sandbox.require=False`: disabling
-guards cannot supply the missing `fork` process model. For sandbox execution,
-run the agent and its dependencies in a suitable Linux environment.
+not provide OS isolation. The `sandbox` backend does, and on Windows it uses
+`AppContainer` for filesystem and network confinement plus a `Job Object` for
+memory, CPU, and hard-kill limits — no WSL, Docker, Hyper-V, or administrator
+rights.
+
+## Sandbox execution
+
+The Windows backend requires `start_method="spawn"` and a **private runtime
+root**: a user-owned copy of the interpreter, stdlib, and site-packages. A copy
+is mandatory rather than an optimisation — the system interpreter's directory
+denies DACL writes to a non-admin user, so the container cannot be granted
+access to it in place.
+
+Build the runtime root once (≈4.5 min, ~420 MB), then point the backend at it:
+
+```powershell
+python experiments\windows-sandbox-probe\_mkroot.py
+$env:NOOA_SANDBOX_RUNTIME = "$PWD\experiments\windows-sandbox-probe\.rt"
+```
+
+After editing framework source, refresh the package copy inside the root
+(sub-second; the launcher also does this on every start):
+
+```powershell
+python experiments\windows-sandbox-probe\_mkroot.py --sync-nooa
+```
+
+```python
+from nooa.runtime.sandbox.config import SandboxConfig
+
+sandbox = SandboxConfig(
+    filesystem=True,
+    network=False,
+    workspace=r"C:\work\sandbox-ws",
+    max_memory_mb=512,
+    max_cpu_seconds=30,
+    start_method="spawn",
+    backend="appcontainer",
+)
+```
+
+What each guardrail maps to:
+
+| Guardrail | Windows mechanism |
+| --- | --- |
+| Filesystem | AppContainer DACL grants, written before the process is created |
+| Network (`network=False`) | Omission of capability SIDs; blocks TCP egress |
+| Memory | Job Object `ProcessMemoryLimit` = worker baseline + `max_memory_mb` |
+| CPU | Job Object `PerJobUserTimeLimit` |
+| Timeout / hard kill | `TerminateJobObject` |
+
+Two behaviours differ from Linux and are worth knowing:
+
+- **The agent module's directory must be readable.** An AppContainer is
+  confined from process creation, so the worker imports the agent class *inside*
+  the sandbox. The launcher grants read on the module's own directory (not its
+  ancestors) and adds it to the child's `sys.path`. Linux `spawn` imports the
+  agent before installing guards, so it has no such requirement.
+- **UDP egress is not proven blocked.** Omitting capability SIDs blocks TCP, but
+  `sendto` succeeds either way and datagram arrival could not be attributed on
+  the reference machine. Treat `network=False` as TCP-only until a WFP filter
+  backs it.
+
+Verify containment — these tests fail when isolation leaks, not when a feature
+breaks:
+
+```powershell
+$env:NOOA_SANDBOX_RUNTIME = "$PWD\experiments\windows-sandbox-probe\.rt"
+uv run pytest -m sandbox tests\runtime\sandbox\test_windows_appcontainer.py
+```
 
 ## Work from this repository
 

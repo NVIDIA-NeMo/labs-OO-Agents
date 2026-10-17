@@ -19,6 +19,7 @@ import asyncio
 import os
 import threading
 import weakref
+from collections.abc import Callable
 from multiprocessing.connection import Connection
 from typing import Any, cast
 
@@ -488,7 +489,12 @@ def build_namespace(
     return ns
 
 
-def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no cover - child
+def worker_main(  # pragma: no cover - child
+    conn: Connection,
+    init: dict[str, Any],
+    *,
+    on_ready: Callable[[], None] | None = None,
+) -> None:
     """Child entrypoint: build namespace, install guards, serve requests.
 
     ``init`` has one of two shapes:
@@ -496,6 +502,12 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
     * ``{"mode": "fork", ...}`` — inherited live agent and framework builtins;
     * ``{"mode": "blueprint", "blueprint": WorkerBlueprint, ...}`` — the spawned
       path, where everything is rebuilt from picklable data.
+
+    ``on_ready`` runs once the namespace exists and guards are installed, just
+    before the op loop. Callers that create the process themselves (the Windows
+    AppContainer launcher) use it to tell the parent the worker is usable — the
+    handshake must not be sent earlier, or the parent's first cell would be
+    charged for the child's import cost.
     """
     from nooa.runtime.sandbox.guards import install_guards
 
@@ -526,6 +538,8 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
         # Guards go on AFTER the (trusted) namespace build and BEFORE the op loop,
         # so every cell — and nothing else — runs under the full lock-down.
         install_guards(init["spec"])
+        if on_ready is not None:
+            on_ready()
     except BaseException as exc:  # noqa: BLE001 - report and exit; parent fails closed
         try:
             wire.send(conn, {"type": "fatal", "error": f"{type(exc).__name__}: {exc}"})

@@ -221,20 +221,51 @@ def _probe_linux() -> Capabilities:
 
 
 def _probe_windows() -> Capabilities:
-    """Windows enforcement exists in design, not in this package yet.
+    """Windows enforcement: AppContainer ACLs plus Job Object limits.
 
-    The AppContainer + Job Object backend is validated in
-    ``experiments/windows-sandbox-probe``; until it ships, every mechanism
-    reports ``None`` so the executor fails closed instead of quietly running
-    cells with the application's full permissions.
+    Unlike the Linux mechanisms, none of these are applied by the *child*. An
+    AppContainer can only be entered at process creation, so the launcher
+    (``win_launcher``) writes the ACLs and creates the job before the worker's
+    first instruction. ``install_guards`` is therefore a no-op there — the
+    guards are already in place when the worker starts.
+
+    Network is reported as ``appcontainer`` because TCP egress is blocked by
+    omitting capability SIDs, which the M0 probe confirmed with a two-way
+    control (blocked without ``internetClient``, allowed with it). UDP is *not*
+    covered by that mechanism: ``sendto`` succeeds either way, so capability
+    omission proves nothing for datagrams. The detail string records that
+    rather than letting the capability name imply more than was measured.
     """
+    from nooa.runtime.sandbox.errors import SandboxUnavailable
+    from nooa.runtime.sandbox.win_runtime import prepare_root, resolve_root
+
+    detail: dict[str, str] = {}
+    try:
+        from nooa.runtime.sandbox import win_api  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - import failure means no backend
+        return Capabilities(detail={"reason": f"Win32 bindings unavailable: {exc}"})
+
+    try:
+        root = resolve_root()
+        prepare_root(root, sync=False)
+    except SandboxUnavailable as exc:
+        return Capabilities(detail={"reason": str(exc)})
+    except Exception as exc:  # noqa: BLE001 - any probe failure is "unavailable"
+        return Capabilities(detail={"reason": f"runtime root unusable: {exc}"})
+
+    detail["runtime_root"] = str(root.root)
+    detail["network"] = (
+        "capability omission blocks TCP; UDP egress is not attributable and needs "
+        "a WFP filter before network=False can claim datagram isolation"
+    )
+    detail["memory"] = "job ProcessMemoryLimit = worker baseline + max_memory_mb"
     return Capabilities(
-        detail={
-            "reason": (
-                "AppContainer/Job Object sandbox backend is not implemented in this "
-                "package yet; it must run in a Linux environment for now"
-            )
-        }
+        filesystem="appcontainer",
+        network="appcontainer",
+        memory="job",
+        cpu="job",
+        hard_kill="terminate_job",
+        detail=detail,
     )
 
 
@@ -417,7 +448,17 @@ def install_guards(spec: ResolvedSpec) -> None:
     Order matters: rlimits first (no dependency), then Landlock (needs to
     ``open()`` rule paths — must precede filesystem lock-down), then seccomp
     (does not affect ``open()``). All three are irrevocable once set.
+
+    On Windows this is intentionally a no-op. There is nothing to install from
+    inside: ``SECURITY_CAPABILITIES`` only exists at process creation, and Job
+    Object limits are set on the parent's handle. By the time the worker runs
+    this function, ``win_launcher`` has already confined it; re-applying
+    anything here would either fail or be meaningless. The guardrails are
+    therefore enforced *before* the first instruction rather than before the
+    first cell.
     """
+    if os.name == "nt":
+        return
     apply_rlimits(max_memory_mb=spec.max_memory_mb, max_cpu_seconds=spec.max_cpu_seconds)
     if spec.filesystem:
         apply_landlock(list(spec.path_grants))
