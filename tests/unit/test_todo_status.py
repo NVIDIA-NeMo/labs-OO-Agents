@@ -616,3 +616,70 @@ def test_status_keeps_open_rows_and_caps_done_rows() -> None:
         row.split("] ", 1)[1].split(" ·")[0].split(" [needs")[0] for row in rows
     ]
     assert "… +3 not shown (3 done)" in output
+
+
+def _long_active_workspace(description_chars: int = 5_000) -> tuple[TodoManager, object]:
+    manager = TodoManager()
+    finished = manager.add("finished elsewhere")
+    manager.complete(finished)
+    manager.add("unrelated open")
+    dep = manager.add("dependency")
+    root = manager.add("active root", deps=[dep], description="word " * (description_chars // 5))
+    manager.activate(root)
+    return manager, root
+
+
+def test_a_long_description_keeps_the_hint_and_other_todos_and_points_to_the_full_text():
+    manager, root = _long_active_workspace()
+
+    output = manager.status()
+
+    assert "… status truncated" not in output
+    assert f"… (full text: self.todo.get('{root.id}').description)" in output
+    assert "Other Todos: 1 open · 1 done" in output
+    assert output.splitlines()[-1].startswith("Hint: clear active: self.todo.deactivate()")
+    assert f'self.todo.comment("{root.id}", "what changed or was learned")' in output
+    assert "  ○ [" in output  # the dependency row still fits
+    description = next(line for line in output.splitlines() if line.startswith("Description: "))
+    assert len(description) < 700
+
+
+def test_a_tight_bound_drops_description_text_before_the_hint_and_other_todos():
+    manager, root = _long_active_workspace()
+    manager.comment(root, "latest " * 400)
+
+    for max_chars in (2_000, 600, 400):
+        output = manager.status(max_chars=max_chars)
+        assert len(output) <= max_chars
+        assert "… status truncated" not in output
+        assert f"Active [{root.id}] active root" in output
+        assert "Status: blocked · 1 dependency · 1 comment" in output
+        assert "Recent activity: latest" in output
+        assert "Other Todos: 1 open · 1 done" in output
+        assert output.splitlines()[-1].startswith("Hint: clear active:")
+        assert f"self.todo.get('{root.id}').description" in output
+
+
+def test_a_short_description_renders_exactly_as_before():
+    manager = TodoManager()
+    manager.add("unrelated open")
+    dep = manager.add("dependency")
+    root = manager.add("active root", deps=[dep], description="Fix   the\nparser bug.")
+    manager.activate(root)
+
+    assert manager.status() == (
+        f"Active [{root.id}] active root\n"
+        "Status: blocked · 1 dependency\n"
+        "Description: Fix the parser bug.\n"
+        "\n"
+        "Dependencies:\n"
+        f"  ○ [{dep.id}] dependency\n"
+        "\n"
+        "Other Todos: 1 open\n"
+        "Hint: clear active: self.todo.deactivate() · "
+        f'record progress: self.todo.comment("{root.id}", "what changed or was learned") · '
+        "show all: self.todo.list_todos()"
+    )
+    exact = manager.add("exactly at the cap", description="x" * 600)
+    manager.activate(exact)
+    assert "Description: " + "x" * 600 + "\n" in manager.status()
