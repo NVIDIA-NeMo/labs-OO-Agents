@@ -333,7 +333,8 @@ class AtomAgent(InteractiveAgent):
 
         A ``Todo`` prompt is handed over (a new one is added to ``self.todo``): the child works
         on a copy as its active Todo, and its comments, status and vars merge
-        into yours with each outcome.
+        into yours with each outcome. ``await ref.send(todo)`` with that Todo
+        updates the child's copy to yours and tells the child what changed.
 
         Args:
             description: Short label (2-6 words); the child's name and title.
@@ -349,6 +350,33 @@ class AtomAgent(InteractiveAgent):
     def receive_delegated_todo(self, todo: Todo) -> None:
         """Called on a child before its first turn: the parent's Todo becomes its active one."""
         self.todo.receive_todo(todo)
+
+    @hidden
+    def update_delegated_todo(self, todo: Todo) -> str:
+        """Called on a child when its parent sends the handed Todo again; return a note for it.
+
+        The parent owns the title, description, deps, status and vars, so the
+        child's copy takes the parent's values. The child's own comments are
+        kept, and the parent's comments it lacks are added (by id).
+        """
+        current = self.todo.get(todo.id)
+        if current is None:
+            self.todo.receive_todo(todo)
+            return f"Your parent handed you Todo {todo.id} again: {todo.title}"
+        changes = _todo_changes(current, todo)
+        for field in ("title", "description", "deps", "status"):
+            setattr(current, field, getattr(todo, field))
+        current.vars = dict(todo.vars)  # validated into a fresh SnapshotVars
+        known = {comment.id for comment in current.comments}
+        current.comments = [
+            *current.comments,
+            *(c.model_copy(deep=True) for c in todo.comments if c.id not in known),
+        ]
+        if current.status != "done" and self.todo.active() is None:
+            self.todo.activate(current)
+        self.todo.active()  # a Todo that is now done is no longer the active one
+        what = "; ".join(changes) if changes else "no changes"
+        return f"Your parent updated Todo {todo.id}: {what}."
 
     @hidden
     def merge_delegated_todo(
@@ -780,6 +808,24 @@ def _child_prompt(
     if brief:
         lines += ["", "Brief:", str(brief)]
     return "\n".join(lines)
+
+
+@hidden
+def _todo_changes(mine: Todo, parents: Todo) -> list[str]:
+    """What the parent's version of a Todo changes in the child's copy, as short phrases."""
+    changes = []
+    if parents.status != mine.status:
+        changes.append(f"status {parents.status}")
+    for field in ("title", "description", "deps"):
+        if getattr(parents, field) != getattr(mine, field):
+            changes.append(f"{field} changed")
+    if dict(parents.vars) != dict(mine.vars):
+        changes.append("vars changed")
+    known = {comment.id for comment in mine.comments}
+    added = sum(1 for comment in parents.comments if comment.id not in known)
+    if added:
+        changes.append(f"{added} new comment{'s' if added != 1 else ''}")
+    return changes
 
 
 @hidden

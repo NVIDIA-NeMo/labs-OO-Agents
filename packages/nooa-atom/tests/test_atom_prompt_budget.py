@@ -62,8 +62,10 @@ RESULT = (
 # signature and docstring, which named the removed retain=/mode=/keep=
 # options). Measured values plus about 2%.
 # Re-measured after the #451 review fixes (2026-10-17): SnapshotVars got a
-# pydantic schema, spawn()/delegate() adopt a hand-built Todo, and
-# TodoManager.status() caps the active Todo's description at 600 characters.
+# pydantic schema, spawn()/delegate() adopt a hand-built Todo,
+# TodoManager.status() caps the active Todo's description at 600 characters,
+# and send() of the handed Todo updates the child's copy (one sentence in the
+# spawn() and ChildRef.send() docs, past the summary line the prompt shows).
 # Unchanged for every row (the first call has no active Todo), so the limits
 # stay. A worker's todo_status block for a 5,000-character description falls
 # from 2,000 characters (cut before Other Todos and Hint) to 870, all kept.

@@ -495,7 +495,9 @@ async def test_a_hand_built_todo_is_adopted_and_its_merge_back_reaches_the_calle
         )
     ]
     root = await atom_registry.create(atom_options)
-    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="done child evidence")
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(
+        explanation="done child evidence"
+    )
     [child] = atom_registry.children(root.id)
     todo = root._agent.todo.get(root._agent.v.todo_id)
     assert child.todo_id == todo.id and todo.vars["child"] == child.id
@@ -1206,3 +1208,177 @@ async def test_send_hands_a_todo_to_a_kept_child(atom_registry, atom_options, at
     assert outcome == Done(
         explanation="Todo Empty vars []; Todo With vars [('n', 3), ('owner', 'root')]"
     )
+
+
+# ---- send(todo) with the handed Todo: the parent-to-child merge ------------
+
+
+async def test_a_reopened_todo_sent_again_is_completed_and_merged_once_more(
+    atom_registry, atom_options, atom_models
+):
+    """vuls-7e91: the parent reopens a merged Todo and sends it; the child's re-completion counts."""
+    atom_models.scripts[None] = [
+        _wait_then(
+            "t = self.todo.add('Fix scanner')\n"
+            "self.v.todo_id = t.id\n"
+            "self.v.ref = await self.spawn('Kept', t)"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "assert self.todo.get(self.v.todo_id).status == 'done'\n"
+            "self.todo.update(self.v.todo_id, status='open')\n"
+            "await self.v.ref.send(self.todo.get(self.v.todo_id))\n"
+            "return_result(Waiting(explanation='reopened', on=['delegates']))"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "return_result(Done(explanation=self.todo.get(self.v.todo_id).status))"
+        ),
+    ]
+    atom_models.scripts["Kept"] = [
+        cell(
+            "self.todo.comment(self.todo.active(), 'round 1')\nself.todo.complete(self.todo.active())\n"
+            + CHILD_RESULT
+        ),
+        cell(
+            "[line] = notification['user_messages']\n"
+            "t = self.todo.list_todos()[0]\n"
+            "assert self.todo.active() is t and t.status == 'open', (line, t)\n"
+            "self.todo.comment(t, 'round 2: ' + line)\n"
+            "self.todo.complete(t)\n" + CHILD_RESULT
+        ),
+    ]
+    root = await atom_registry.create(atom_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="done")
+    todo = root._agent.todo.get(root._agent.v.todo_id)
+    assert [c.body for c in todo.comments] == [
+        "round 1",
+        # ``vars``: the parent's Todo records the child's id after the hand-over.
+        f"round 2: Your parent updated Todo {todo.id}: status open; vars changed.",
+    ]
+    assert "Your parent updated Todo" in _messages(atom_models, "Kept", 1)
+
+
+async def test_a_sent_todo_carries_the_parents_changes_and_keeps_both_sides_comments(
+    atom_registry, atom_options, atom_models
+):
+    atom_models.scripts[None] = [
+        _wait_then(
+            "t = self.todo.add('Task', description='REQ v1')\n"
+            "self.v.todo_id = t.id\n"
+            "self.v.ref = await self.spawn('Kept', t)"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "t = self.todo.get(self.v.todo_id)\n"
+            "self.todo.update(t, description='REQ v2')\n"
+            "self.todo.comment(t, 'parent: also cover the CLI')\n"
+            "self.todo.set_var(t, 'scope', 'cli')\n"
+            "await self.v.ref.send(t)\n"
+            "return_result(Waiting(explanation='updated', on=['delegates']))"
+        ),
+        cell("return_result(Done(explanation='finished'))"),
+    ]
+    atom_models.scripts["Kept"] = [
+        cell("self.todo.comment(self.todo.active(), 'child: round 1')\n" + CHILD_RESULT),
+        cell(
+            "[line] = notification['user_messages']\n"
+            "t = self.todo.list_todos()[0]\n"
+            "self.v.seen = (line, t.description, [c.body for c in t.comments], t.vars.get('scope'))\n"
+            "self.todo.comment(t, 'child: round 2')\n" + CHILD_RESULT
+        ),
+    ]
+    root = await atom_registry.create(atom_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="finished")
+    todo = root._agent.todo.get(root._agent.v.todo_id)
+    [child] = atom_registry.children(root.id)
+    kid = (
+        await atom_registry.open_child(root, child.id)
+        if atom_registry.get(child.id) is None
+        else atom_registry.get(child.id)
+    )
+    line, description, comments, scope = kid._agent.v.seen
+    assert line == (
+        f"Your parent updated Todo {todo.id}: description changed; vars changed; 1 new comment."
+    )
+    assert (description, scope) == ("REQ v2", "cli")
+    assert comments == ["child: round 1", "parent: also cover the CLI"]
+    assert [c.body for c in todo.comments] == [
+        "child: round 1",
+        "parent: also cover the CLI",
+        "child: round 2",
+    ]
+    assert todo.description == "REQ v2"
+
+
+async def test_the_base_a_sent_todo_records_survives_a_parent_reload(
+    atom_options, atom_models, sessions_dir
+):
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
+    atom_models.scripts[None] = [
+        _wait_then(
+            "t = self.todo.add('Task')\n"
+            "self.v.todo_id = t.id\n"
+            "self.v.ref = await self.spawn('Kept', t)"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "self.todo.update(self.v.todo_id, status='open', description='again')\n"
+            "await self.v.ref.send(self.todo.get(self.v.todo_id))\n"
+            "return_result(Done(explanation='sent'))"
+        ),
+    ]
+    atom_models.scripts["Kept"] = [
+        cell("self.todo.complete(self.todo.active())\n" + CHILD_RESULT),
+        cell("return_result(Waiting(explanation='parked', on=['jobs']))"),
+    ]
+    try:
+        root = await registry.create(atom_options)
+        assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="sent")
+        [child] = registry.children(root.id)
+        root_id, child_id = root.id, child.id
+        todo_id = root._agent.v.todo_id
+    finally:
+        await registry.close_all()
+    reloaded = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
+    try:
+        base = reloaded._todo_bases_of(root_id)[child_id]
+        assert (base.id, base.status, base.description) == (todo_id, "open", "again")
+    finally:
+        await reloaded.close_all()
+
+
+async def test_a_todo_with_another_id_and_a_string_stay_ordinary_items(
+    atom_registry, atom_options, atom_models
+):
+    atom_models.scripts[None] = [
+        _wait_then(
+            "t = self.todo.add('Task')\n"
+            "self.v.todo_id = t.id\n"
+            "self.v.ref = await self.spawn('Kept', t)"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "self.todo.update(self.v.todo_id, status='open')\n"
+            "await self.v.ref.send(self.todo.add('Unrelated'))\n"
+            "await self.v.ref.send('just text')\n"
+            "return_result(Waiting(explanation='sent', on=['delegates']))"
+        ),
+        cell(
+            "[item] = notification['delegates']\nreturn_result(Done(explanation=item.done.result.report))"
+        ),
+    ]
+    atom_models.scripts["Kept"] = [
+        cell("self.todo.complete(self.todo.active())\n" + CHILD_RESULT),
+        cell(
+            "items = notification['user_messages']\n"
+            "mine = [t for t in self.todo.list_todos()]\n"
+            "report = f'{[type(i).__name__ for i in items]} {[t.status for t in mine]}'\n"
+            "return_result(Done(explanation='ok', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='h', report=report)))"
+        ),
+    ]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    # The child's copy is untouched (still done) and both items arrive as sent.
+    assert outcome == Done(explanation="['Todo', 'str'] ['done']")
