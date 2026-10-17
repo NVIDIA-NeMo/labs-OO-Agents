@@ -212,6 +212,30 @@ class TodoManager(Skill):
             raise ValueError(f"todo {todo_id!r} is not managed by this TodoManager")
         return current.model_copy(deep=True)
 
+    @hidden
+    def adopt(self, todo: Todo) -> Todo:
+        """Register a hand-built Todo object itself and return it.
+
+        A Todo that is already managed is returned as-is. An unmanaged Todo
+        whose id is free is added, keeping the caller's object, so later
+        changes (a child's merge-back) reach the object the caller holds.
+        Unknown deps are allowed, as with ``add()``. A different object that
+        reuses a managed id raises ``ValueError``.
+        """
+        if not isinstance(todo, Todo):
+            raise TypeError(f"expected Todo, got {type(todo).__name__}")
+        current = self._todos.get(todo.id)
+        if current is todo:
+            return todo
+        if current is not None:
+            raise ValueError(
+                f"a different Todo with id {todo.id!r} is already managed; "
+                f"pass self.todo.get({todo.id!r}) or drop id="
+            )
+        self._todos[todo.id] = todo
+        self._order.append(todo.id)
+        return todo
+
     @classmethod
     @hidden
     def with_todo(cls, todo: Todo) -> "TodoManager":

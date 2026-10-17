@@ -331,7 +331,7 @@ class AtomAgent(InteractiveAgent):
         Send follow-ups with ``await ref.send(text)``; it stays open until
         ``await ref.close()``.
 
-        A ``Todo`` prompt (one in ``self.todo``) is handed over: the child works
+        A ``Todo`` prompt is handed over (a new one is added to ``self.todo``): the child works
         on a copy as its active Todo, and its comments, status and vars merge
         into yours with each outcome.
 
@@ -743,10 +743,11 @@ async def _start_child(
     """Start a child for ``spawn()``/``delegate()`` (a plain function: no agent-method wrapper).
 
     A Todo prompt is handed over as a copy; the session port records that
-    copy as the merge base.
+    copy as the merge base. A hand-built Todo that the parent's TodoManager
+    does not hold yet is adopted first, so the merge-back reaches it.
     """
     port = agent._port()
-    todo = prompt if isinstance(prompt, Todo) else None
+    todo = agent.todo.adopt(prompt) if isinstance(prompt, Todo) else None
     handed = agent.todo.copy_todo(todo) if todo is not None else None
     text = _child_prompt(port.name, port.id, prompt, handed, brief, kept=kept)
     ref = await port.delegate(description, text, model=model, kept=kept, todo=handed)

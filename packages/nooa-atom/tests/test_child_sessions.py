@@ -466,19 +466,81 @@ async def test_a_kept_childs_todo_merges_on_each_result(atom_registry, atom_opti
     assert todo.status == "done"
 
 
-async def test_a_todo_not_in_the_parents_list_is_refused(atom_registry, atom_options, atom_models):
+async def test_a_hand_built_todo_is_adopted_and_its_merge_back_reaches_the_callers_object(
+    atom_registry, atom_options, atom_models
+):
     atom_models.scripts[None] = [
-        cell(
+        _wait_then(
             "from nooa.tools.todo import Todo as _Todo\n"
-            "try:\n"
-            "    await self.spawn('X', _Todo(title='stray'))\n"
-            "except ValueError as exc:\n"
-            "    return_result(Done(explanation='refused'))"
+            "t = _Todo(title='stray', description='REQ', deps=['not-yet'])\n"
+            "self.v.todo_id = t.id\n"
+            "import atom_test_agents as _t\n"
+            "_t.HELD = t\n"
+            "self.v.ref = await self.spawn('X', t)\n"
+            "assert self.todo.get(t.id) is t"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "import atom_test_agents as _t\n"
+            "assert self.todo.get(self.v.todo_id) is _t.HELD\n"
+            "return_result(Done(explanation=_t.HELD.status + ' ' + _t.HELD.comments[-1].body))"
+        ),
+    ]
+    atom_models.scripts["X"] = [
+        cell(
+            "t = self.todo.active()\n"
+            "assert t.description == 'REQ'\n"
+            "self.todo.comment(t, 'child evidence')\n"
+            "self.todo.complete(t)\n" + CHILD_RESULT
         )
     ]
     root = await atom_registry.create(atom_options)
-    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="refused")
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="done child evidence")
+    [child] = atom_registry.children(root.id)
+    todo = root._agent.todo.get(root._agent.v.todo_id)
+    assert child.todo_id == todo.id and todo.vars["child"] == child.id
+    assert todo.deps == ["not-yet"]
+
+
+async def test_a_different_todo_reusing_a_managed_id_is_refused(
+    atom_registry, atom_options, atom_models
+):
+    atom_models.scripts[None] = [
+        cell(
+            "from nooa.tools.todo import Todo as _Todo\n"
+            "self.todo.add('first').id\n"
+            "kept = self.todo.add('recon task')\n"
+            "self.todo.update(kept, description='keep me')\n"
+            "kept_id = kept.id\n"
+            "try:\n"
+            "    await self.spawn('X', _Todo(id=kept_id, title='other'))\n"
+            "except ValueError as exc:\n"
+            "    assert self.todo.get(kept_id) is kept and kept.description == 'keep me'\n"
+            "    return_result(Done(explanation=str(exc).replace(kept_id, 'ID')))"
+        )
+    ]
+    root = await atom_registry.create(atom_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(
+        explanation="a different Todo with id 'ID' is already managed; "
+        "pass self.todo.get('ID') or drop id="
+    )
     assert atom_registry.children(root.id) == []
+
+
+def test_adopt_keeps_the_object_and_refuses_only_a_different_one():
+    from nooa.tools.todo import Todo
+
+    todos = TodoManager()
+    managed = todos.add("managed")
+    assert todos.adopt(managed) is managed
+    loose = Todo(id="recon", title="loose", deps=["unknown"])
+    assert todos.adopt(loose) is loose and todos.get("recon") is loose
+    assert [t.id for t in todos.list_todos()] == [managed.id, "recon"]
+    with pytest.raises(ValueError, match="a different Todo with id 'recon' is already managed"):
+        todos.adopt(Todo(id="recon", title="again"))
+    assert todos.get("recon") is loose
+    copy = todos.copy_todo(loose)
+    assert copy == loose and copy is not loose
 
 
 # ---- wait() returns an outcome and never hangs; questions -------------------
