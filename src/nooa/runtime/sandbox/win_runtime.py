@@ -63,6 +63,18 @@ class RuntimeRoot:
     def journal(self) -> Path:
         return self.root / "acl-journal.jsonl"
 
+    @property
+    def tokenizer_cache(self) -> Path:
+        """Writable cache for tokenizer data (``TIKTOKEN_CACHE_DIR``).
+
+        The container has no network and its interpreter tree is read-only, so
+        anything an import chain fetches at runtime must be pre-populated here
+        by the parent. ``tiktoken`` is the concrete case: importing the LLM
+        stack pulls it in, and it otherwise downloads ``cl100k_base`` on first
+        use — which fails inside the sandbox. See :func:`warm_tokenizer_cache`.
+        """
+        return self.root / "tokenizer-cache"
+
     def check(self, *, require_package: bool = True) -> None:
         """Raise ``SandboxUnavailable``-shaped errors for an unusable root.
 
@@ -368,6 +380,44 @@ class AclJournal:
         return out
 
 
+def warm_tokenizer_cache(root: RuntimeRoot) -> str:
+    """Populate the tokenizer cache the container will read.
+
+    ``tiktoken`` fetches ``cl100k_base.tiktoken`` over HTTPS on first use and
+    caches it under ``TIKTOKEN_CACHE_DIR`` (or the temp directory). The
+    container has no network and cannot read the temp directory, so the parent
+    downloads it once into a granted location. Without this, importing an agent
+    module that pulls in the LLM stack fails inside the sandbox with a DNS
+    error — which is what CI caught.
+
+    Best-effort: a backend that never imports ``tiktoken`` must not fail to
+    start because a tokenizer could not be fetched. The directory is created
+    either way so the child's environment points somewhere valid.
+    """
+    cache = root.tokenizer_cache
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"tokenizer cache unavailable ({exc})"
+
+    previous = os.environ.get("TIKTOKEN_CACHE_DIR")
+    os.environ["TIKTOKEN_CACHE_DIR"] = str(cache)
+    try:
+        import tiktoken
+
+        tiktoken.get_encoding("cl100k_base")
+    except ImportError:
+        return "no tiktoken installed; nothing to warm"
+    except Exception as exc:  # noqa: BLE001 - offline host, proxy, etc.
+        return f"tokenizer warm-up failed ({type(exc).__name__}: {exc})"
+    finally:
+        if previous is None:
+            os.environ.pop("TIKTOKEN_CACHE_DIR", None)
+        else:
+            os.environ["TIKTOKEN_CACHE_DIR"] = previous
+    return f"tokenizer cache ready at {cache}"
+
+
 def prepare_root(
     root: RuntimeRoot,
     *,
@@ -383,6 +433,9 @@ def prepare_root(
     recovered = AclJournal(root.journal).recover()
     if recovered:
         summary += f"; revoked {len(recovered)} stale grant(s)"
+    # The child has no network, so anything its import chain would fetch has to
+    # exist before it starts. This is cheap when already warm.
+    summary += f"; {warm_tokenizer_cache(root)}"
     return summary
 
 

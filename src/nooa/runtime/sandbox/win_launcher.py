@@ -261,14 +261,19 @@ def start_container_worker(
             if not os.path.exists(rule.path):
                 raise SandboxUnavailable(f"sandbox allow path does not exist: {rule.path}")
             grant_path(rule.path, FILE_ALL_ACCESS if rule.write else READ_EXECUTE)
-        # 3. The agent's own module. The worker imports it by name inside the
+        # 3. Tokenizer data. The container has no network; importing the LLM
+        #    stack makes tiktoken look for cl100k_base and download it when the
+        #    cache is missing. The parent warmed this directory in prepare_root.
+        tokenizer_cache = root.tokenizer_cache
+        grant_path(str(tokenizer_cache), READ_EXECUTE)
+        # 4. The agent's own module. The worker imports it by name inside the
         #    container, which is confined from creation — unlike Linux spawn,
         #    where that import happens before the guards go on. Without this the
         #    blueprint fails with "cannot resolve X in 'mymodule'".
         import_roots = _agent_import_roots(init)
         for import_root in import_roots:
             grant_path(import_root, READ_EXECUTE)
-        # 4. The workspace last, so it is revoked first on teardown.
+        # 5. The workspace last, so it is revoked first on teardown.
         if workspace:
             grant_path(str(workspace), FILE_ALL_ACCESS)
 
@@ -276,6 +281,12 @@ def start_container_worker(
         # PYTHONPATH, so the granted roots have to be named explicitly.
         if import_roots:
             init = {**init, "import_roots": import_roots}
+        # ``-I`` implies ``-E``, so ``PYTHON*`` variables would be ignored; a
+        # non-``PYTHON`` name like this one is still read by the library.
+        child_env = {
+            **os.environ,
+            "TIKTOKEN_CACHE_DIR": str(tokenizer_cache),
+        }
 
         parent_conn, child_conn = mp.Pipe(duplex=True)
         handle = child_conn.fileno()
@@ -306,7 +317,7 @@ def start_container_worker(
                     os.remove(_crash_log_path(workspace))
                 except OSError:
                     pass
-            child = _spawn(argv, name, handle, workspace or str(root.root))
+            child = _spawn(argv, name, handle, workspace or str(root.root), env=child_env)
         except BaseException:
             parent_conn.close()
             child_conn.close()
@@ -343,7 +354,13 @@ def start_container_worker(
         _k32.LocalFree(app_sid)
 
 
-def _spawn(argv: list[str], container_name: str, handle: int, cwd: str) -> Child:
+def _spawn(
+    argv: list[str],
+    container_name: str,
+    handle: int,
+    cwd: str,
+    env: dict[str, str] | None = None,
+) -> Child:
     from nooa.runtime.sandbox.win_api import spawn_in_container
 
     return spawn_in_container(
@@ -351,6 +368,7 @@ def _spawn(argv: list[str], container_name: str, handle: int, cwd: str) -> Child
         container_name=container_name,
         inherit_handles=(handle,),
         cwd=cwd,
+        env=env,
     )
 
 
