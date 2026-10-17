@@ -1,0 +1,274 @@
+{
+  "_meta": {
+    "date": "2026-10-17",
+    "python": "3.13.12",
+    "windows_build": "sys.getwindowsversion(major=10, minor=0, build=26300, platform=2, service_pack='')",
+    "runtime_root_mb": 419.3,
+    "admin": false,
+    "container_sid_handle": 2193686401744,
+    "profile_deleted": true
+  },
+  "reachable": {
+    "grant_runtime root": "ok",
+    "grant_site-packages": "ok",
+    "grant_probe script": "ok",
+    "grant_work dir": "ok",
+    "exit_code": 0,
+    "wall_clock_s": 0.301,
+    "is_app_container": true,
+    "container_sid": "S-1-15-2-606662641-3925652526-1492479246-3038711736-1790286020-728567492-4016704499",
+    "sys_prefix": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt",
+    "child_pid": 29184,
+    "restore_calls_ok": true
+  },
+  "_reachable_report": {
+    "pid": 29184,
+    "identity": {
+      "is_app_container": true,
+      "container_sid": "S-1-15-2-606662641-3925652526-1492479246-3038711736-1790286020-728567492-4016704499",
+      "username": "QinGu",
+      "cwd": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.work",
+      "prefix": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt",
+      "executable": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt\\python.exe"
+    },
+    "reads": {
+      "C:\\Windows\\System32\\config\\SAM": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Windows\\System32\\config\\SYSTEM": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Users\\QinGu\\.ssh": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Users\\QinGu\\.claude\\CLAUDE.md": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "E:\\labs-OO-Agents\\AGENTS.md": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      }
+    },
+    "writes": {
+      "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.work\\granted_probe.txt": {
+        "ok": true
+      },
+      "C:\\Windows\\System32\\nooa_probe.txt": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Windows\\Temp\\nooa_probe.txt": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Users\\QinGu\\nooa_probe.txt": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\_outside_grant.txt": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      }
+    },
+    "network": {
+      "tcp_public": {
+        "ok": false,
+        "errno": 13,
+        "winerror": 10013,
+        "msg": "\u4ee5\u4e00\u79cd\u8bbf\u95ee\u6743\u9650\u4e0d\u5141\u8bb8\u7684\u65b9\u5f0f\u505a\u4e86\u4e00\u4e2a\u8bbf\u95ee\u5957\u63a5\u5b57\u7684\u5c1d\u8bd5\u3002"
+      },
+      "tcp_dns": {
+        "ok": false,
+        "errno": 13,
+        "winerror": 10013,
+        "msg": "\u4ee5\u4e00\u79cd\u8bbf\u95ee\u6743\u9650\u4e0d\u5141\u8bb8\u7684\u65b9\u5f0f\u505a\u4e86\u4e00\u4e2a\u8bbf\u95ee\u5957\u63a5\u5b57\u7684\u5c1d\u8bd5\u3002"
+      },
+      "udp_dns": {
+        "ok": true,
+        "note": "sendto returned (may be async)"
+      },
+      "loopback_listen": {
+        "ok": true
+      }
+    }
+  },
+  "reversibility": {
+    "sddl_changed_by_grant": true,
+    "sddl_string_equal_after_restore": true,
+    "ace_set_equal_after_restore": true,
+    "grant_added_aces": 1,
+    "residual_aces": [],
+    "lost_aces": [],
+    "aces_added_by_two_grants": 1,
+    "merged_ace": [
+      "A;OICI;0x12019f;;;S-1-15-2-606662641-3925652526-1492479246-3038711736-1790286020-728567492-4016704499"
+    ],
+    "revoke_restores": true,
+    "revoke_sddl_equal": true
+  },
+  "denied": {
+    "exit_code": 0,
+    "read[C:\\Windows\\System32\\config\\SAM]": "DENIED",
+    "read[C:\\Windows\\System32\\config\\SYSTEM]": "DENIED",
+    "read[C:\\Users\\QinGu\\.ssh]": "DENIED",
+    "read[C:\\Users\\QinGu\\.claude\\CLAUDE.md]": "DENIED",
+    "read[E:\\labs-OO-Agents\\AGENTS.md]": "DENIED",
+    "write[E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.work\\granted_probe.txt]": "ALLOWED (expect=ALLOWED)",
+    "write[C:\\Windows\\System32\\nooa_probe.txt]": "DENIED (expect=DENIED)",
+    "write[C:\\Windows\\Temp\\nooa_probe.txt]": "DENIED (expect=DENIED)",
+    "write[C:\\Users\\QinGu\\nooa_probe.txt]": "DENIED (expect=DENIED)",
+    "write[E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\_outside_grant.txt]": "DENIED (expect=DENIED)"
+  },
+  "_denied_report": {
+    "pid": 29292,
+    "identity": {
+      "is_app_container": true,
+      "container_sid": "S-1-15-2-606662641-3925652526-1492479246-3038711736-1790286020-728567492-4016704499",
+      "username": "QinGu",
+      "cwd": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.work",
+      "prefix": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt",
+      "executable": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt\\python.exe"
+    },
+    "reads": {
+      "C:\\Windows\\System32\\config\\SAM": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Windows\\System32\\config\\SYSTEM": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Users\\QinGu\\.ssh": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Users\\QinGu\\.claude\\CLAUDE.md": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "E:\\labs-OO-Agents\\AGENTS.md": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      }
+    },
+    "writes": {
+      "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.work\\granted_probe.txt": {
+        "ok": true
+      },
+      "C:\\Windows\\System32\\nooa_probe.txt": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Windows\\Temp\\nooa_probe.txt": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "C:\\Users\\QinGu\\nooa_probe.txt": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      },
+      "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\_outside_grant.txt": {
+        "ok": false,
+        "errno": 13,
+        "winerror": null,
+        "msg": "Permission denied"
+      }
+    },
+    "network": {
+      "tcp_public": {
+        "ok": false,
+        "errno": 13,
+        "winerror": 10013,
+        "msg": "\u4ee5\u4e00\u79cd\u8bbf\u95ee\u6743\u9650\u4e0d\u5141\u8bb8\u7684\u65b9\u5f0f\u505a\u4e86\u4e00\u4e2a\u8bbf\u95ee\u5957\u63a5\u5b57\u7684\u5c1d\u8bd5\u3002"
+      },
+      "tcp_dns": {
+        "ok": false,
+        "errno": 13,
+        "winerror": 10013,
+        "msg": "\u4ee5\u4e00\u79cd\u8bbf\u95ee\u6743\u9650\u4e0d\u5141\u8bb8\u7684\u65b9\u5f0f\u505a\u4e86\u4e00\u4e2a\u8bbf\u95ee\u5957\u63a5\u5b57\u7684\u5c1d\u8bd5\u3002"
+      },
+      "udp_dns": {
+        "ok": true,
+        "note": "sendto returned (may be async)"
+      },
+      "loopback_listen": {
+        "ok": true
+      }
+    }
+  },
+  "network": {
+    "no_capabilities_exit_code": 0,
+    "nocap_tcp_public": "BLOCKED",
+    "nocap_tcp_public_winerror": 10013,
+    "nocap_tcp_dns": "BLOCKED",
+    "nocap_tcp_dns_winerror": 10013,
+    "nocap_udp_dns": "ALLOWED",
+    "nocap_loopback_listen": "ALLOWED",
+    "with_capability_exit_code": 0,
+    "withcap_tcp_public": "ALLOWED",
+    "nocap_udp_egress_arrived": false,
+    "nocap_udp_egress_bytes": 0,
+    "nocap_udp_egress_child_exit": 0,
+    "withcap_udp_egress_arrived": false,
+    "withcap_udp_egress_bytes": 0,
+    "withcap_udp_egress_child_exit": 0
+  },
+  "job_limits": {
+    "baseline_exit_code": 0,
+    "baseline_wall_clock_s": 0.263,
+    "mem_capped_exit_code": 0,
+    "mem_capped_wall_clock_s": 0.298,
+    "mem_probe_kind": "MemoryError",
+    "mem_allocated_mb": 48,
+    "mem_probe_note": null,
+    "cpu_capped_exit_code": 3221225540,
+    "cpu_capped_wall_clock_s": 5.89,
+    "cpu_capped_report": "MISSING -> killed by the job time limit, as intended",
+    "hardkill_reap_s": 0.003,
+    "hardkill_exit_code": 1
+  },
+  "pipe": {
+    "child_exit_code": 0,
+    "wall_clock_s": 0.19,
+    "child_to_parent_bytes": "HELLO",
+    "bidirectional_ok": true
+  }
+}
