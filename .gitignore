@@ -402,5 +402,8 @@ examples/memory_bench/data/
 # Local scratch/working files (never commit)
 .scratch/
 
+# Sandbox runtime root: a private interpreter copy built per machine (~443 MB)
+.sandbox-rt/
+
 # Claude Code local session dir (never commit)
 .claude/

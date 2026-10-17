@@ -51,7 +51,29 @@ def _runtime_root() -> Path | None:
 
 
 ROOT = _runtime_root()
-pytestmark.append(pytest.mark.skipif(ROOT is None, reason="no sandbox runtime root available"))
+
+
+def _require_root() -> bool:
+    """CI sets this: a missing root must fail, not skip.
+
+    Without it, a broken runtime-root build in CI would skip every test here
+    and report a green job — the same silent gap these tests exist to close.
+    """
+    return os.environ.get("NOOA_SANDBOX_REQUIRE_ROOT") == "1"
+
+
+if ROOT is None and _require_root():
+    raise RuntimeError(
+        "NOOA_SANDBOX_REQUIRE_ROOT=1 but no runtime root was found at "
+        f"{os.environ.get('NOOA_SANDBOX_RUNTIME')!r}. Build it before running "
+        "the acceptance tests; skipping here would hide a containment gap."
+    )
+
+pytestmark.append(
+    pytest.mark.skipif(
+        ROOT is None and not _require_root(), reason="no sandbox runtime root available"
+    )
+)
 
 
 def _config(workspace: Path, **overrides):

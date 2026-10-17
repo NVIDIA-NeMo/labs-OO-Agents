@@ -145,6 +145,55 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --no-sync nooa acp --help
 
+  windows-sandbox-acceptance:
+    # Proves the AppContainer backend *refuses*, not merely that it runs. These
+    # tests are the only automated check that a change has not silently opened
+    # a containment hole, and they are excluded from the default test run
+    # (they need a 443 MB private runtime root and take minutes).
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Sync
+        run: uv sync --frozen --package nooa --no-dev --group test
+      - name: Cache the private runtime root
+        uses: actions/cache@v4
+        with:
+          # Keyed on the lockfile: the root is a copy of the resolved
+          # interpreter and site-packages, so a dependency change invalidates it.
+          path: .sandbox-rt
+          key: sandbox-rt-${{ runner.os }}-3.13-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            sandbox-rt-${{ runner.os }}-3.13-
+      - name: Build or refresh the runtime root
+        shell: pwsh
+        run: |
+          # Rebuilding unconditionally would cost ~4.5 min on every run and
+          # make the cache useless. The package copy is always refreshed:
+          # it is sub-second, and a stale copy would test the previous commit.
+          if (-not (Test-Path ".sandbox-rt/python.exe")) {
+            uv run --no-sync python -m nooa.runtime.sandbox.win_runtime --build --root .sandbox-rt
+          } else {
+            uv run --no-sync python -m nooa.runtime.sandbox.win_runtime --sync --root .sandbox-rt
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: AppContainer acceptance tests
+        shell: pwsh
+        run: |
+          $env:NOOA_SANDBOX_RUNTIME = "$PWD\.sandbox-rt"
+          # Fail, do not skip, when the root is missing: a silent skip here
+          # would report a green job while testing nothing at all.
+          $env:NOOA_SANDBOX_REQUIRE_ROOT = "1"
+          uv run --no-sync python -m pytest -q -m sandbox `
+            tests/runtime/sandbox/test_windows_appcontainer.py --timeout=900
+
   windows-wheels:
     runs-on: windows-latest
     timeout-minutes: 20
