@@ -126,7 +126,7 @@ def test_options_inherit_for_a_child(tmp_path):
         llm=llm,
         permission_mode="auto",
         max_depth=3,
-        retain=True,
+        kept=True,
         name="root",
         host="acp",
         sessions_dir=tmp_path / "s",
@@ -144,16 +144,34 @@ def test_options_inherit_for_a_child(tmp_path):
         "acp",
         tmp_path / "s",
     )
-    assert (child.name, child.retain) == ("Review auth", False)
+    assert (child.name, child.kept) == ("Review auth", False)
 
-    other = parent.inherit(model="other-alias", retain=True, turn_method="handle_batch")
-    assert (other.model, other.llm, other.retain, other.turn_method) == (
+    other = parent.inherit(model="other-alias", kept=True, turn_method="handle_work")
+    assert (other.model, other.llm, other.kept, other.turn_method) == (
         "other-alias",
         None,
         True,
-        "handle_batch",
+        "handle_work",
     )
     assert parent.inherit(model=None).llm is llm
+
+
+@pytest.mark.parametrize("removed", ["retain", "keep", "mode", "child_mode"])
+def test_a_removed_child_option_raises_instead_of_being_ignored(tmp_path, removed):
+    """Finding 7: ``retain=`` (and the short-lived ``keep=``/``mode=``) must not vanish silently."""
+    parent = SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent")
+    with pytest.raises(TypeError, match=f"{removed}=, which was removed"):
+        parent.inherit(name="kid", **{removed: True})
+    with pytest.raises(TypeError, match=f"{removed}=, which was removed"):
+        SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent", **{removed: True})
+
+
+def test_session_options_refuse_unknown_fields(tmp_path):
+    from pydantic import ValidationError
+
+    parent = SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent")
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent", kep=True)
     with pytest.raises(ValidationError):
         parent.inherit(turn_method="run")
 

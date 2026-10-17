@@ -23,6 +23,9 @@ _STATUS_MAX_ITEMS = 10
 _STATUS_MAX_CHARS = 2_000
 _STATUS_TITLE_CHARS = 120
 _STATUS_MAX_DEPS = 3
+# Characters of the active Todo's description shown by status(); the rest is
+# reached through self.todo.get(id).description.
+_STATUS_DESCRIPTION_CHARS = 600
 # Completed rows shown when no todo is active; the rest are counted.
 _STATUS_MAX_DONE = 2
 
@@ -95,12 +98,9 @@ class Todo(BaseModel):
     @field_validator("vars", mode="before")
     @classmethod
     def _coerce_vars(cls, value: Any) -> "SnapshotVars":
-        if isinstance(value, SnapshotVars):
-            return value
-        if value is None:
-            return SnapshotVars()
-        if isinstance(value, dict):
-            return SnapshotVars(value)
+        if isinstance(value, (SnapshotVars, dict)) or value is None:
+            # Also restores the tagged JSON form of non-JSON vars.
+            return SnapshotVars.from_data(value)
         raise TypeError(f"Todo.vars must be a dict or SnapshotVars, got {type(value).__name__}")
 
     @property
@@ -215,6 +215,30 @@ class TodoManager(Skill):
             raise ValueError(f"todo {todo_id!r} is not managed by this TodoManager")
         return current.model_copy(deep=True)
 
+    @hidden
+    def adopt(self, todo: Todo) -> Todo:
+        """Register a hand-built Todo object itself and return it.
+
+        A Todo that is already managed is returned as-is. An unmanaged Todo
+        whose id is free is added, keeping the caller's object, so later
+        changes (a child's merge-back) reach the object the caller holds.
+        Unknown deps are allowed, as with ``add()``. A different object that
+        reuses a managed id raises ``ValueError``.
+        """
+        if not isinstance(todo, Todo):
+            raise TypeError(f"expected Todo, got {type(todo).__name__}")
+        current = self._todos.get(todo.id)
+        if current is todo:
+            return todo
+        if current is not None:
+            raise ValueError(
+                f"a different Todo with id {todo.id!r} is already managed; "
+                f"pass self.todo.get({todo.id!r}) or drop id="
+            )
+        self._todos[todo.id] = todo
+        self._order.append(todo.id)
+        return todo
+
     @classmethod
     @hidden
     def with_todo(cls, todo: Todo) -> "TodoManager":
@@ -225,6 +249,23 @@ class TodoManager(Skill):
         manager._order.append(copied.id)
         manager._active_id = copied.id if copied.status != "done" else None
         return manager
+
+    @hidden
+    def receive_todo(self, todo: Todo) -> Todo:
+        """Add an independent copy of a delegated todo and make it the active one.
+
+        A child session calls this with the todo its parent handed it. The
+        copy keeps the todo's id, so its comments and status can be merged
+        back into the parent's todo with ``merge_todo``.
+        """
+        copied = todo.model_copy(deep=True)
+        if copied.id in self._todos:
+            raise ValueError(f"todo {copied.id!r} is already managed by this TodoManager")
+        self._todos[copied.id] = copied
+        self._order.append(copied.id)
+        if copied.status != "done":
+            self._active_id = copied.id
+        return copied
 
     @hidden
     def merge_todo(self, updated: Todo, *, base: Todo) -> Todo:
@@ -644,7 +685,21 @@ class TodoManager(Skill):
             # limits the additional dependency rows.
             selected = dependencies[:max_items]
 
-            def render_active(rows: list[Todo]) -> str:
+            note = " ".join(active.description.split())
+            recent = " ".join(active.comments[-1].body.split()) if active.comments else ""
+            pointer = f" … (full text: self.todo.get('{active.id}').description)"
+
+            def clip(text: str, limit: int | None, suffix: str) -> str:
+                if limit is None or len(text) <= limit:
+                    return text
+                return text[:limit].rstrip() + suffix
+
+            def render_active(
+                rows: list[Todo],
+                note_chars: int | None = _STATUS_DESCRIPTION_CHARS,
+                recent_chars: int | None = None,
+            ) -> str:
+                """Render without the final bound; the caller trims to fit."""
                 omitted_count = len(dependencies) - len(rows)
                 active_title = self._status_title(active.title)
                 effective = self._effective_status(active)
@@ -661,11 +716,10 @@ class TodoManager(Skill):
                         f"{len(active.comments)} comment{'s' if len(active.comments) != 1 else ''}"
                     )
                 lines = [f"Active [{active.id}] {active_title}", f"Status: {' · '.join(details)}"]
-                note = " ".join(active.description.split())
-                lines.append(f"Description: {note or '(none)'}")
+                shown_note = clip(note, note_chars, pointer).lstrip()
+                lines.append(f"Description: {shown_note or '(none)'}")
                 if active.comments:
-                    recent = " ".join(active.comments[-1].body.split())
-                    lines.append(f"Recent activity: {recent}")
+                    lines.append(f"Recent activity: {clip(recent, recent_chars, ' …')}")
                 if rows or omitted_count or missing:
                     lines.append("")
                     lines.append("Dependencies:")
@@ -708,13 +762,24 @@ class TodoManager(Skill):
                     hints.append("record material progress with self.todo.comment(id, ...)")
                 hints.append("show all: self.todo.list_todos()")
                 lines.append("Hint: " + " · ".join(hints))
-                return self._bounded_status("\n".join(lines), max_chars)
+                return "\n".join(lines)
 
-            output = render_active(selected)
-            while selected and output.endswith("… status truncated"):
+            # The description is capped so the status, comment, Other Todos and
+            # Hint lines fit. When the card is still too long, shorten the
+            # description, then drop dependency rows, then shorten the latest
+            # comment; the final bound applies only after all of those.
+            note_chars = min(_STATUS_DESCRIPTION_CHARS, len(note))
+            output = render_active(selected, note_chars)
+            while len(output) > max_chars and note_chars > 0:
+                note_chars = max(0, note_chars - (len(output) - max_chars))
+                output = render_active(selected, note_chars)
+            while selected and len(output) > max_chars:
                 selected.pop()
-                output = render_active(selected)
-            return output
+                output = render_active(selected, note_chars)
+            if len(output) > max_chars and recent:
+                recent_chars = max(0, len(recent) - (len(output) - max_chars) - 2)
+                output = render_active(selected, note_chars, recent_chars)
+            return self._bounded_status(output, max_chars)
 
         by_status: dict[str, list[Todo]] = {"open": [], "blocked": [], "done": []}
         for todo in todos:

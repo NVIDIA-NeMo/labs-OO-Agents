@@ -34,6 +34,8 @@ from nooa_atom.session.session import Session, TurnFailedError
 from nooa_atom.session.store import SessionStore, sessions_root
 
 DEFAULT_MAX_TURNS = 10
+# The turn methods an unattended root can run; run_task picks one of these.
+UNATTENDED_TURN_METHODS = ("handle_batch", "handle_orchestrate")
 
 
 @dataclass(frozen=True)
@@ -134,7 +136,10 @@ async def run_task(
     """Run ``task`` unattended in a new session tree until the agent is done.
 
     The root session runs ``handle_batch`` turns, so it never asks a
-    question. A turn that ends ``Waiting`` is followed by the turn its
+    question. With ``options.turn_method="handle_orchestrate"`` it runs
+    ``handle_orchestrate`` turns instead: it plans, delegates the work to
+    children (which run ``handle_work``) and verifies it. Any other
+    ``turn_method`` (the default ``"handle"`` included) means ``handle_batch``. A turn that ends ``Waiting`` is followed by the turn its
     job's delivery starts. The run stops early when ``max_turns`` turns
     have ended and the last one is waiting, or after ``timeout`` seconds;
     the running turn is then cancelled. The session is stored like any
@@ -146,7 +151,10 @@ async def run_task(
         from nooa_atom.agent.factory import default_llm_factory
 
         llm_factory = default_llm_factory()
-    options = options.model_copy(update={"turn_method": "handle_batch"})
+    turn_method = (
+        options.turn_method if options.turn_method in UNATTENDED_TURN_METHODS else "handle_batch"
+    )
+    options = options.model_copy(update={"turn_method": turn_method})
     events: list[Any] = []
     turns = 0
     waiting_on: list[str] = []

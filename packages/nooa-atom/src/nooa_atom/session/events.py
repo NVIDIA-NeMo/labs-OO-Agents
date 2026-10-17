@@ -30,6 +30,7 @@ class SessionStarted(Metadata):
     name: str | None = None
     retained: bool = False
     turn_method: str = "handle"
+    todo_id: str | None = None
     mode: str = "auto"
     utc_offset: float | None = None
     """Seconds east of UTC of the writer's local time at creation.
@@ -168,6 +169,35 @@ class ChildDeleted(Metadata):
     name: str | None = None
 
 
+class ChildClosed(Metadata):
+    """Tombstone: this session closed one of its children for good.
+
+    Written when the parent closes the child (``ChildRef.close()``) or a
+    one-shot worker is closed after its result. Closing a whole tree on
+    shutdown writes none, so a reloaded tree can still reach its kept children.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    child_id: str = ""
+
+
+class ChildTodoBase(Metadata):
+    """The base a child's copy of a Todo merges back against, in the parent's record.
+
+    Written when the parent hands the child a Todo (the copy it starts
+    from) and again after each merge, for the fields that merged. The
+    latest one per child wins, so a reloaded parent still merges against
+    what the child started from instead of its own current Todo.
+    ``todo_json`` is the Todo as JSON.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    child_id: str = ""
+    todo_json: str = ""
+
+
 class UsageAttributed(Metadata):
     """A child's own usage from one of its turns, added to this session's attributed totals.
 
@@ -225,6 +255,8 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     TurnStarted,
     TurnEnded,
     ChildDeleted,
+    ChildClosed,
+    ChildTodoBase,
     TurnCancelled,
     SnapshotRestoreFailed,
     UsageAttributed,

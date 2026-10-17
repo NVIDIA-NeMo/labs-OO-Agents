@@ -44,11 +44,42 @@ RESULT = (
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
+# Raised for the child-session interface (2026-10-15): the class doc tells the
+# model to put a task's requirements and rules in the Todo it hands a child and
+# to run one editing child at a time, spawn() takes brief=, and
+# ChildRef/ChildQuestion carry todo_id, a live status and question ids (about
+# 770 characters over the 2026-10-02 values, ChildMessage docs included). The
+# handle_work rows are the new worker turn. Measured values plus about 2%.
+# Lowered when the child API was trimmed (2026-10-16): delegate() is one-shot and
+# spawn() kept, with no mode=/keep=/context= parameters and no
+# ChildRef.steer()/info/pending_question (about 150 characters less than at
+# 5b84477a7). Measured values plus about 2%.
+# Re-measured when InteractiveAgent gained the base handle_work and TaskResult
+# moved to nooa.interactive (2026-10-16): unchanged for every row (the Atom
+# agents override handle_work), so the limits stay.
+# Lowered when agent.py's internal _without_removed helper was hidden from the
+# execution-context stub (2026-10-16): 168 characters less for every row (its
+# signature and docstring, which named the removed retain=/mode=/keep=
+# options). Measured values plus about 2%.
+# Re-measured after the #451 review fixes (2026-10-17): SnapshotVars got a
+# pydantic schema, spawn()/delegate() adopt a hand-built Todo,
+# TodoManager.status() caps the active Todo's description at 600 characters,
+# and send() of the handed Todo updates the child's copy (one sentence in the
+# spawn() and ChildRef.send() docs, past the summary line the prompt shows).
+# Unchanged for every row (the first call has no active Todo), so the limits
+# stay. A worker's todo_status block for a 5,000-character description falls
+# from 2,000 characters (cut before Other Todos and Hint) to 870, all kept.
+# Added handle_orchestrate (#446, the v2 orchestrator prompt as arm D
+# evaluated it, on the #451 child API with the D4/D6 guidance) (2026-10-17):
+# the other rows are unchanged; measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (14_500, 17_450),  # measured 14,227 / 17,107
-    (ATOM, "handle_batch"): (14_500, 17_100),  # measured 14,227 / 16,751
-    (EXPERIMENTAL, "handle"): (14_350, 16_150),  # measured 14,065 / 15,810
-    (EXPERIMENTAL, "handle_batch"): (14_350, 16_500),  # measured 14,065 / 16,163
+    (ATOM, "handle"): (15_000, 18_000),  # measured 14,669 / 17,620
+    (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,669 / 17,218
+    (ATOM, "handle_work"): (15_000, 18_200),  # measured 14,669 / 17,825
+    (ATOM, "handle_orchestrate"): (15_000, 19_600),  # measured 14,669 / 19,197
+    (EXPERIMENTAL, "handle"): (14_800, 16_600),  # measured 14,467 / 16,237
+    (EXPERIMENTAL, "handle_batch"): (14_800, 16_950),  # measured 14,467 / 16,590
+    (EXPERIMENTAL, "handle_work"): (14_800, 17_250),  # measured 14,467 / 16,902
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -64,9 +95,9 @@ def _no_installed_skills(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
 
 
-@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
-async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
-    code = RESULT if method == "handle_batch" else "return_result(Done(explanation='x'))"
+async def _first_call(spec, method, tmp_path, sessions_dir):
+    """Run one turn of ``method`` and return the first call's messages and workspace."""
+    code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
     response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
     workspace = tmp_path / "workspace"
@@ -85,7 +116,12 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
         await asyncio.wait_for(root.prompt("hello"), 30)
     finally:
         await registry.close_all()
-    messages = llm.calls[0].messages
+    return llm.calls[0].messages, workspace
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
+    messages, workspace = await _first_call(spec, method, tmp_path, sessions_dir)
     system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     # The workspace path appears in the prompt; count it as a fixed token.
@@ -95,6 +131,21 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     assert len(system) <= system_limit
     assert len(rendered) <= total_limit
     assert len(system) < BENCH_SYSTEM_LIMIT
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_execution_context_hides_internal_helpers(spec, method, tmp_path, sessions_dir):
+    """agent.py's internal helpers stay out of the ``<python_cell_context>`` stub.
+
+    ``_without_removed`` once leaked there with a docstring naming the removed
+    ``retain=``/``mode=``/``keep=`` options, putting them in front of the model.
+    """
+    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = "\n".join(str(m.get("content", "")) for m in messages)
+    start = rendered.index("<python_cell_context>")
+    stub = rendered[start : rendered.index("</python_cell_context>", start)]
+    for leaked in ("_without_removed", "retain=", "keep=", "mode="):
+        assert leaked not in stub
 
 
 class _InstalledSkill:

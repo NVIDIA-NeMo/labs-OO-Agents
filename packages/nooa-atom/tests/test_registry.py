@@ -16,6 +16,7 @@ from atom_test_agents import (
     done,
     fresh_events,
     until,
+    work_done,
 )
 from nooa_atom.agent.factory import create_session_agent
 from nooa_atom.session.events import TurnEnded
@@ -72,7 +73,7 @@ async def test_the_parent_is_told_about_a_new_child(registry, root_options):
     seen = []
     root.subscribe(lambda e: seen.append(e) if e.kind == "child_created" else None)
     child = await registry.create(
-        root.options.inherit(name="Review auth", retain=True), parent_id=root.id
+        root.options.inherit(name="Review auth", kept=True), parent_id=root.id
     )
     [created] = seen
     assert (created.child_id, created.name, created.depth, created.retained) == (
@@ -84,7 +85,7 @@ async def test_the_parent_is_told_about_a_new_child(registry, root_options):
 
 
 async def test_initial_items_are_in_the_first_notification(registry, root_options, models):
-    models.scripts["child"] = [done("got both")]
+    models.scripts["child"] = [work_done("got both")]
     root = await registry.create(root_options)
     root._agent.queue_manager.queue("context")
     child_options = root.options.inherit(name="child")
@@ -109,9 +110,14 @@ async def test_initial_items_are_in_the_first_notification(registry, root_option
 
 async def test_list_and_children_report_live_and_on_disk_status(registry, root_options, models):
     started, block = fresh_events()
-    models.scripts["busy"] = [cell(BLOCKING_CELL + "return_result(Done(explanation='x'))")]
+    models.scripts["busy"] = [
+        cell(
+            BLOCKING_CELL
+            + "return_result(Done(explanation='x', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+        )
+    ]
     root = await registry.create(root_options)
-    kept = await registry.create(root.options.inherit(name="kept", retain=True), parent_id=root.id)
+    kept = await registry.create(root.options.inherit(name="kept", kept=True), parent_id=root.id)
     busy = await registry.create(root.options.inherit(name="busy"), parent_id=root.id)
     gone = await registry.create(root.options.inherit(name="gone"), parent_id=root.id)
     await registry.close(gone.id)
@@ -230,9 +236,7 @@ async def test_loading_a_parent_whose_child_is_live_elsewhere_is_refused(
     registry, root_options, sessions_dir
 ):
     root = await registry.create(root_options)
-    child = await registry.create(
-        root.options.inherit(name="child", retain=True), parent_id=root.id
-    )
+    child = await registry.create(root.options.inherit(name="child", kept=True), parent_id=root.id)
     await registry.close_all()
 
     elsewhere = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
@@ -255,9 +259,7 @@ async def test_a_child_opened_elsewhere_between_check_and_open_is_caught(
     registry, root_options, sessions_dir, monkeypatch
 ):
     root = await registry.create(root_options)
-    child = await registry.create(
-        root.options.inherit(name="child", retain=True), parent_id=root.id
-    )
+    child = await registry.create(root.options.inherit(name="child", kept=True), parent_id=root.id)
     await registry.close_all()
 
     here = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
@@ -287,11 +289,9 @@ async def test_a_child_cannot_be_loaded_while_its_parent_is_live_elsewhere(
     registry, root_options, sessions_dir
 ):
     root = await registry.create(root_options)
-    child = await registry.create(
-        root.options.inherit(name="child", retain=True), parent_id=root.id
-    )
+    child = await registry.create(root.options.inherit(name="child", kept=True), parent_id=root.id)
     grandchild = await registry.create(
-        child.options.inherit(name="grandchild", retain=True), parent_id=child.id
+        child.options.inherit(name="grandchild", kept=True), parent_id=child.id
     )
     await registry.close(child.id)  # the root stays live in `registry`
 
@@ -336,7 +336,7 @@ async def test_the_llm_factory_builds_owned_clients(root_options, sessions_dir):
                     )
                 ]
             ],
-            "alias-b": [[done("child ok")]],
+            "alias-b": [[work_done("child ok")]],
         }
     )
     registry = SessionRegistry(
@@ -427,9 +427,7 @@ async def test_a_same_model_child_shares_the_parents_client(root_options, sessio
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
         [root_llm] = factory.made
-        kid = await registry.create(
-            root.options.inherit(name="kid", retain=True), parent_id=root.id
-        )
+        kid = await registry.create(root.options.inherit(name="kid", kept=True), parent_id=root.id)
         assert kid._agent.llm is root_llm and len(factory.calls) == 1
         await registry.close(kid.id)
         assert not root_llm.closed  # the child did not own it
@@ -451,9 +449,7 @@ async def test_set_model_keeps_a_client_a_child_still_uses(root_options, session
     )
     try:
         root = await registry.create(root_options.model_copy(update={"model": "alias-a"}))
-        kid = await registry.create(
-            root.options.inherit(name="kid", retain=True), parent_id=root.id
-        )
+        kid = await registry.create(root.options.inherit(name="kid", kept=True), parent_id=root.id)
         await root.set_model("alias-b")
         assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="on b")
         old, new = factory.made
@@ -541,7 +537,7 @@ async def test_set_model_needs_an_llm_factory(registry, root_options):
 
 
 async def test_prepare_runs_before_publish_and_start(registry, root_options, models, sessions_dir):
-    models.scripts["child"] = [done("first turn")]
+    models.scripts["child"] = [work_done("first turn")]
     root = await registry.create(root_options)
     seen = []
 
@@ -655,11 +651,11 @@ async def test_a_throwaway_childs_turn_method_is_recorded(registry, root_options
             "return_result(Done(explanation='ok'))"
         )
     ]
-    models.scripts["T"] = [done("t")]
+    models.scripts["T"] = [work_done("t")]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     [child] = registry.children(root.id)
-    assert child.turn_method == "handle_batch"
+    assert child.turn_method == "handle_work"
     assert registry.store.get(root.id).turn_method == "handle"
 
 
@@ -813,7 +809,7 @@ async def test_paused_parent_durably_receives_child_finish_and_consumes_on_resum
     registry, root_options, models, monkeypatch
 ):
     models.scripts[None] = [done("parent resumed")]
-    models.scripts["child"] = [done("child finished")]
+    models.scripts["child"] = [work_done("child finished")]
     parent = await registry.create(root_options)
     original = parent.handle.events.record_batch
 
@@ -857,7 +853,7 @@ async def test_failed_parent_delivery_does_not_auto_close_child(
 ):
     from nooa_atom.session.events import ItemAdmitted
 
-    models.scripts["child"] = [done("durable child result")]
+    models.scripts["child"] = [work_done("durable child result")]
     parent = await registry.create(root_options)
     parent._agent.turns.pause()
     original = parent.handle.events.add

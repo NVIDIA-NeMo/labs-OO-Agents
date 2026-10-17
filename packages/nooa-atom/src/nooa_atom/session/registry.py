@@ -11,6 +11,8 @@ never by an agent; an agent reaches the registry only through its port.
 import asyncio
 import contextlib
 import contextvars
+import hashlib
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
@@ -19,13 +21,21 @@ from pathlib import Path
 from typing import Any
 
 from nooa.events import TuiSessionResumed
-from nooa.interactive import Done
+from nooa.interactive import AgentMessage, Done
+from nooa.storage.serialization import deserialize, serialize
 from nooa.storage.sqlite import SessionAlreadyActiveError
-from nooa_atom.session.events import ChildDeleted, SnapshotRestoreFailed
+from nooa_atom.session.events import (
+    ChildClosed,
+    ChildDeleted,
+    ChildTodoBase,
+    SnapshotRestoreFailed,
+)
 from nooa_atom.session.items import (
+    AgentEventUpdate,
     ChildCreatedUpdate,
     ChildFailed,
     ChildFailedError,
+    ChildMessage,
     ChildQuestion,
     ChildRef,
     ChildResult,
@@ -34,6 +44,7 @@ from nooa_atom.session.items import (
     SessionInfo,
     SessionStatus,
     TurnEndedUpdate,
+    TurnStartedUpdate,
 )
 from nooa_atom.session.loader import AgentFactory, load_typed
 from nooa_atom.session.options import SessionOptions
@@ -47,6 +58,9 @@ from nooa_atom.session.store import (
 )
 
 logger = logging.getLogger(__name__)
+
+ChildOutcome = ChildResult | ChildQuestion | ChildFailed
+"""What a child's turn end puts on its parent's delegates channel (or hands to ``wait()``)."""
 
 Prepare = Callable[[Session], Awaitable[None]]
 """Host hook run on a built session before it starts and is published."""
@@ -104,8 +118,18 @@ class SessionRegistry:
         self._agent_factory: AgentFactory = agent_factory
         # Parent-side delivery state, by (parent id, child id): only the
         # child's own parent can wait for or take its results.
-        self._waiters: dict[tuple[str, str], asyncio.Future[Done]] = {}
-        self._queued: dict[tuple[str, str], list[tuple[Receipt, ChildResult | ChildFailed]]] = {}
+        self._waiters: dict[tuple[str, str], asyncio.Future[ChildResult | ChildQuestion]] = {}
+        # The question each child asked and its parent has not answered yet;
+        # None once known to have none. A key that is missing is derived from
+        # the child's record (``pending_question``), so it survives a reload.
+        self._questions: dict[tuple[str, str], ChildQuestion | None] = {}
+        # Children each parent closed for good, read once per parent from its
+        # tombstones (``ChildClosed``) and kept current by ``_mark_closed``.
+        self._closed_children: dict[str, set[str]] = {}
+        self._queued: dict[tuple[str, str], list[tuple[Receipt, ChildOutcome]]] = {}
+        # The base each child's Todo merges against, by (parent id, child id);
+        # read once per parent from its ``ChildTodoBase`` records.
+        self._todo_bases: dict[str, dict[str, Any]] = {}
         self._background: set[asyncio.Task[None]] = set()
 
     # ---- create ------------------------------------------------------
@@ -156,10 +180,11 @@ class SessionRegistry:
                 parent_id=parent_id,
                 depth=depth,
                 name=options.name,
-                retained=options.retain,
+                retained=options.kept,
                 turn_method=options.turn_method,
                 mode=options.permission_mode,
                 session_id=session_id,
+                todo_id=options.todo_id,
             )
             session = await self._build(options, handle)
             if prepare is not None:
@@ -179,7 +204,7 @@ class SessionRegistry:
                     child_id=session.id,
                     name=session.name,
                     depth=session.depth,
-                    retained=options.retain,
+                    retained=options.kept,
                 )
             )
         return session
@@ -332,6 +357,7 @@ class SessionRegistry:
             del self.sessions[session.id]
         if session.parent_id is None:
             return
+        self._questions[(session.parent_id, session.id)] = None
         waiter = self._waiters.pop((session.parent_id, session.id), None)
         if waiter is not None and not waiter.done():
             waiter.set_exception(ChildFailedError(f"Child {session.name!r} was closed"))
@@ -346,6 +372,7 @@ class SessionRegistry:
             depth=child.depth,
             status=_live_status(child),
             parent_id=child.parent_id,
+            todo_id=child.options.todo_id,
         )
 
     def check_owner(self, parent: Session, child_id: str) -> None:
@@ -366,7 +393,16 @@ class SessionRegistry:
             raise ChildFailedError(f"Session {child_id!r} is not a child of {parent.id!r}")
 
     def _deliver(self, child: Session, update: SessionEvent) -> None:
-        """Route a child's turn result to its live parent (a detached child keeps its own)."""
+        """Route a child's messages and turn result to its live parent (a detached child keeps its own)."""
+        if isinstance(update, AgentEventUpdate) and isinstance(update.event, AgentMessage):
+            self._deliver_message(child, update.event)
+            return
+        if isinstance(update, TurnStartedUpdate):
+            # A new turn, by any route (the parent's send or answer, a host
+            # submit), ends the child's pending question.
+            if child.parent_id is not None:
+                self._questions[(child.parent_id, child.id)] = None
+            return
         if not isinstance(update, TurnEndedUpdate):
             return
         ancestor = self.sessions.get(child.parent_id) if child.parent_id else None
@@ -379,63 +415,154 @@ class SessionRegistry:
         kind = update.outcome_kind
         if kind not in ("done", "need_input", "error", "cancelled"):
             return
+        self._merge_todo(parent, child)
         ref = self.child_ref(child)
         source = f"child:{child.name or child.id}"
-        waiter = self._waiters.pop((parent.id, child.id), None)
+        key = (parent.id, child.id)
+        waiter = self._waiters.pop(key, None)
         if waiter is not None and waiter.done():
             waiter = None
+        # One place only: a waiting wait() gets the outcome, else delegates does.
         delivered = False
         try:
             if kind == "done":
+                self._questions[key] = None
                 # Built for both paths: ChildResult rebuilds a TaskResult sent as data.
                 result = ChildResult(child=ref, done=_rebuild_done(update))
                 if waiter is not None:
-                    waiter.set_result(result.done)
+                    waiter.set_result(result)
                 else:
                     self._put(parent, child.id, result, source)
-            elif kind in ("error", "cancelled"):
-                # A cancelled turn ends without a result: to the parent it is a failure.
-                error = (
-                    f"cancelled by {update.outcome.get('by', 'unknown')}"
-                    if kind == "cancelled"
-                    else str(update.outcome.get("error", "the child's turn failed"))
-                )
+            elif kind in ("error", "cancelled") or not child.options.kept:
+                self._questions[key] = None
+                # A cancelled turn ends without a result: to the parent it is a
+                # failure. So is a one-shot worker's question, which nobody
+                # would answer (its turn prompt forbids one; this is the
+                # backstop for an agent class without that check).
+                if kind == "cancelled":
+                    error = f"cancelled by {update.outcome.get('by', 'unknown')}"
+                elif kind == "error":
+                    error = str(update.outcome.get("error", "the child's turn failed"))
+                else:
+                    error = (
+                        "a one-shot worker cannot ask questions, but it asked: "
+                        f"{update.outcome.get('question', '')!r}"
+                    )
                 if waiter is not None:
                     waiter.set_exception(ChildFailedError(error))
                 else:
                     self._put(parent, child.id, ChildFailed(child=ref, error=error), source)
             else:
-                question = ChildQuestion(
-                    child=ref,
-                    question=str(update.outcome.get("question", "")),
-                    options=update.outcome.get("options"),
-                    answer_schema=update.outcome.get("answer_schema"),
-                )
+                question = _question_from_outcome(ref, update.outcome, child.info.reply_count)
+                # Pending until answered; it does not block the parent's Done.
+                self._questions[key] = question
                 if waiter is not None:
-                    waiter.set_exception(
-                        ChildFailedError(
-                            f"Child {child.name!r} asked a question; answer the ChildQuestion "
-                            "that arrives on the delegates channel"
-                        )
-                    )
-                _admit_delegate(parent, question, source)
+                    waiter.set_result(question)
+                else:
+                    self._put(parent, child.id, question, source)
             delivered = True
         finally:
             # Keep a child's own durable result available if parent admission fails.
-            if delivered and kind != "need_input" and not child.options.retain:
+            if delivered and not child.options.kept:
                 # Not from inside this callback: closing awaits the child's own loop.
+                self._mark_closed(parent, child.id)
                 task = asyncio.get_running_loop().create_task(self.close(child.id))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
 
-    def _put(
-        self, parent: Session, child_id: str, item: ChildResult | ChildFailed, source: str
-    ) -> None:
+    # ---- the Todo a child works on --------------------------------------
+
+    def record_todo_base(self, parent: Session, child_id: str, todo: Any) -> None:
+        """Record the copy of a Todo ``child_id`` starts from: the base its changes merge against.
+
+        Durable (a ``ChildTodoBase`` in the parent's record), so a reloaded
+        parent merges against it too. Every path that hands a child a Todo
+        records it (``SessionPort.delegate(todo=...)``).
+        """
+        base = todo.model_copy(deep=True)
+        self._todo_bases_of(parent.id)[child_id] = base
+        blob, allowlist = serialize(base)
+        parent.handle.events.add(
+            ChildTodoBase(
+                child_id=child_id,
+                todo_json=json.dumps({"blob": blob, "allowlist": sorted(allowlist)}),
+            )
+        )
+
+    def _todo_bases_of(self, parent_id: str) -> dict[str, Any]:
+        """The recorded base of each child's Todo, read once per parent (the latest per child)."""
+        bases = self._todo_bases.get(parent_id)
+        if bases is None:
+            bases = {}
+            with suppress(Exception):
+                for _kind, raw in self.store.load_rows(parent_id, frozenset({"ChildTodoBase"})):
+                    try:
+                        data = json.loads(str(raw.get("todo_json")))
+                        bases[str(raw.get("child_id"))] = deserialize(
+                            data["blob"], set(data["allowlist"])
+                        )
+                    except Exception:
+                        logger.warning("Session %s: unreadable ChildTodoBase", parent_id)
+            self._todo_bases[parent_id] = bases
+        return bases
+
+    def _merge_todo(self, parent: Session, child: Session) -> None:
+        """Merge the child's copy of its Todo into the parent's, as its outcome is delivered.
+
+        The parent agent decides what merges (``merge_delegated_todo``,
+        given the recorded base, or ``None`` when none was recorded) and
+        returns the new base, which is recorded. A failure is logged and
+        never blocks the delivery.
+        """
+        todo_id = child.options.todo_id
+        merge = getattr(parent._agent, "merge_delegated_todo", None)
+        get = getattr(getattr(child._agent, "todo", None), "get", None)
+        if todo_id is None or not callable(merge) or not callable(get):
+            return
+        try:
+            updated = get(todo_id)
+            if updated is None:
+                return
+            base = self._todo_bases_of(parent.id).get(child.id)
+            base = base.model_copy(deep=True) if base is not None else None
+            new_base = merge(child.name or child.id, updated, base)
+            if new_base is not None:
+                self.record_todo_base(parent, child.id, new_base)
+        except Exception:
+            logger.warning(
+                "Session %s: could not merge child %s's Todo %s",
+                parent.id,
+                child.id,
+                todo_id,
+                exc_info=True,
+            )
+
+    def _deliver_message(self, child: Session, event: AgentMessage) -> None:
+        """Send a child's ``self.message()`` text to its live parent as a ``ChildMessage``.
+
+        Listeners run in the order the child emits, so its messages reach the
+        parent before the result of the same turn. The message stays in the
+        child's own events too. A ``Done``'s message (marked
+        ``is_result_text``) is not sent: it arrives with the ``ChildResult``.
+        A closing or closed parent drops it.
+        """
+        if getattr(event, "is_result_text", False):
+            return
+        parent = self.sessions.get(child.parent_id) if child.parent_id else None
+        if parent is None or parent.closing:
+            return
+        item = ChildMessage(child=self.child_ref(child), text=str(event.content))
+        with suppress(SessionClosedError):
+            _admit_delegate(parent, item, f"child:{child.name or child.id}")
+
+    def _put(self, parent: Session, child_id: str, item: ChildOutcome, source: str) -> None:
         receipt = _admit_delegate(parent, item, source)
         self._queued.setdefault((parent.id, child_id), []).append((receipt, item))
 
-    def take_queued_result(self, parent: Session, child_id: str) -> Done | None:
-        """Withdraw a result of this child still queued for the parent, and return it.
+    def take_queued_result(
+        self, parent: Session, child_id: str
+    ) -> ChildResult | ChildQuestion | None:
+        """Withdraw this child's oldest outcome still queued for the parent, and return it.
 
         Raises ``ChildFailedError`` for a queued failure, or when ``child_id``
         is not a child of ``parent``.
@@ -448,11 +575,67 @@ class SessionRegistry:
             if parent.withdraw(receipt):
                 if isinstance(item, ChildFailed):
                     raise ChildFailedError(item.error)
-                return item.done
+                return item
         return None
 
-    def waiter(self, parent: Session, child_id: str) -> asyncio.Future[Done]:
-        """The future the next ``Done`` of this child of ``parent`` resolves.
+    def pending_question(self, parent: Session, child_id: str) -> ChildQuestion | None:
+        """The child's question ``parent`` has not answered yet, if any.
+
+        Known in memory once the child asked or started a turn here; else
+        read from the child's record (after a reload): its last turn ended
+        with a question and nothing was sent to it since.
+        """
+        self.check_owner(parent, child_id)
+        key = (parent.id, child_id)
+        if key not in self._questions:
+            self._questions[key] = self._question_from_record(parent, child_id)
+        return self._questions[key]
+
+    def _question_from_record(self, parent: Session, child_id: str) -> ChildQuestion | None:
+        live = self.sessions.get(child_id)
+        if live is not None and live.info.status == "running":
+            return None
+        try:
+            rows = self.store.load_rows(
+                child_id, frozenset({"TurnStarted", "TurnEnded", "ItemAdmitted"})
+            )
+        except Exception:
+            return None
+        asked: dict[str, Any] | None = None
+        replies = 0
+        for event_type, raw in rows:
+            if event_type == "TurnEnded":
+                replies += 1
+                asked = None
+                if raw.get("outcome_kind") == "need_input":
+                    with suppress(ValueError):
+                        asked = json.loads(str(raw.get("result_json") or "{}"))
+            elif event_type == "TurnStarted":
+                asked = None
+            elif raw.get("channel") in ("user_messages", "steer"):
+                asked = None  # something was sent to it after it asked
+        if asked is None:
+            return None
+        kept = live.options.kept if live is not None else self.store.get(child_id).retained
+        if not kept:
+            return None  # a one-shot worker's question was delivered as a failure
+        ref = self.child_ref(live) if live is not None else self._ref_from_disk(child_id)
+        return _question_from_outcome(ref, asked, replies)
+
+    def clear_question(self, parent: Session, child_id: str) -> None:
+        """The parent answered (or sent the child a message): no question is pending."""
+        self._questions[(parent.id, child_id)] = None
+
+    def is_idle(self, child: Session) -> bool:
+        """Live, not running, not ``working`` (its last turn did not end ``Waiting``), nothing queued."""
+        return (
+            child.info.status != "running"
+            and child.last_outcome_kind != "waiting"
+            and not child.has_queued_input()
+        )
+
+    def waiter(self, parent: Session, child_id: str) -> asyncio.Future[ChildResult | ChildQuestion]:
+        """The future the next outcome (result or question) of this child of ``parent`` resolves.
 
         It takes the place of a delegates item.
 
@@ -466,8 +649,13 @@ class SessionRegistry:
             self._waiters[key] = waiter
         return waiter
 
-    def drop_waiter(self, parent: Session, child_id: str, waiter: asyncio.Future[Done]) -> None:
-        """Forget a ``wait()`` that was cancelled; a result it already holds goes to delegates."""
+    def drop_waiter(
+        self,
+        parent: Session,
+        child_id: str,
+        waiter: asyncio.Future[ChildResult | ChildQuestion],
+    ) -> None:
+        """Forget a ``wait()`` that was cancelled; an outcome it already holds goes to delegates."""
         key = (parent.id, child_id)
         if self._waiters.get(key) is waiter:
             del self._waiters[key]
@@ -476,33 +664,72 @@ class SessionRegistry:
         child = self.sessions.get(child_id)
         ref = self.child_ref(child) if child is not None else self._ref_from_disk(child_id)
         error = waiter.exception()
-        item: ChildResult | ChildFailed = (
-            ChildResult(child=ref, done=waiter.result())
-            if error is None
-            else ChildFailed(child=ref, error=str(error))
+        item: ChildOutcome = (
+            waiter.result() if error is None else ChildFailed(child=ref, error=str(error))
         )
         with suppress(SessionClosedError):
             self._put(parent, child_id, item, f"child:{ref.name or child_id}")
 
     def _ref_from_disk(self, child_id: str) -> ChildRef:
         info = self.store.get(child_id)
+        closed = info.parent_id is not None and self.is_closed(info.parent_id, child_id)
         return ChildRef(
             id=info.id,
             name=info.name or "",
             depth=info.depth,
-            status="on_disk",
+            status="closed" if closed else "on_disk",
             parent_id=info.parent_id,
+            todo_id=info.todo_id,
         )
+
+    def _closed_of(self, parent_id: str) -> set[str]:
+        """The children ``parent_id`` closed for good: its tombstones, read once."""
+        closed = self._closed_children.get(parent_id)
+        if closed is None:
+            closed = set()
+            with suppress(Exception):
+                rows = self.store.load_rows(parent_id, frozenset({"ChildClosed"}))
+                closed.update(str(raw.get("child_id")) for _kind, raw in rows)
+            self._closed_children[parent_id] = closed
+        return closed
+
+    def _mark_closed(self, parent: Session, child_id: str) -> None:
+        """Record that ``parent`` closed this child for good (a durable tombstone)."""
+        closed = self._closed_of(parent.id)
+        if child_id in closed:
+            return
+        closed.add(child_id)
+        with suppress(Exception):
+            parent.handle.events.add(ChildClosed(child_id=child_id))
+
+    def is_closed(self, parent_id: str, child_id: str) -> bool:
+        """Whether the parent closed this child (``close()``, or a one-shot worker after its result)."""
+        return child_id in self._closed_of(parent_id)
+
+    def child_status(self, parent: Session, child_id: str) -> SessionStatus:
+        """A child's live status: ``closed`` once its parent closed it, ``on_disk`` if not loaded."""
+        self.check_owner(parent, child_id)
+        if self.is_closed(parent.id, child_id):
+            return "closed"
+        live = self.sessions.get(child_id)
+        return _live_status(live) if live is not None else "on_disk"
 
     async def open_child(self, parent: Session, child_id: str) -> Session:
         """A child of ``parent``: the live one, or loaded from disk with inherited options.
 
-        Raises ``ChildFailedError`` when ``child_id`` is not a child of ``parent``.
+        Raises ``ChildFailedError`` when ``child_id`` is not a child of
+        ``parent``, or when the parent closed it: closed means closed.
         """
         self.check_owner(parent, child_id)
         live = self.sessions.get(child_id)
-        if live is not None:
+        closed = self.is_closed(parent.id, child_id)
+        if live is not None and not live.closing and not closed:
             return live
+        if live is not None or closed:
+            name = live.name if live is not None else self.store.get(child_id).name
+            raise ChildFailedError(
+                f"Child {name or child_id!r} is closed; spawn a new child for more work"
+            )
         info = self.store.get(child_id)
         # The record gives the child's own options; the parent passes on
         # what it does not record (the depth cap) and a client it shares.
@@ -530,7 +757,7 @@ class SessionRegistry:
         """Attach to a live session, or open one from disk and resume it.
 
         The session's options come from its record (agent spec, turn
-        method, model, permission mode, workspace, name, retain, host; the
+        method, model, permission mode, workspace, name, kept, host; the
         latest ``set_model``/``set_mode`` win); keyword
         ``overrides`` (any ``SessionOptions`` field, e.g. ``host="acp"``
         or ``llm=...``) replace those fields and nothing else does.
@@ -574,6 +801,7 @@ class SessionRegistry:
             )
             if prepare is not None:
                 await prepare(session)
+            session.last_outcome_kind = self._last_outcome_kind(session_id)
             self._requeue(session)
             session.start()
         except BaseException:
@@ -594,7 +822,8 @@ class SessionRegistry:
             "model": info.model or None,
             "turn_method": info.turn_method,
             "name": info.name,
-            "retain": info.retained,
+            "kept": info.retained,
+            "todo_id": info.todo_id,
             "sessions_dir": self.store.root,
         }
         if info.host:
@@ -636,6 +865,14 @@ class SessionRegistry:
                     )
                 pending.append(info.id)
 
+    def _last_outcome_kind(self, session_id: str) -> str | None:
+        """How the session's last recorded turn ended (``waiting`` reads as ``working``)."""
+        kind: str | None = None
+        with suppress(Exception):
+            for _type, raw in self.store.load_rows(session_id, frozenset({"TurnEnded"})):
+                kind = str(raw.get("outcome_kind") or "") or None
+        return kind
+
     def _requeue(self, session: Session) -> None:
         """Put back items admitted before the last close that no turn consumed.
 
@@ -673,12 +910,16 @@ class SessionRegistry:
                 )
                 continue
             item = load_typed(str(raw.get("item_type", "")), str(raw.get("item_json", "null")))
-            session.requeue(
+            receipt = session.requeue(
                 item,
                 channel=channel,
                 source=str(raw.get("source", "")),
                 item_id=item_id,
             )
+            if channel == "delegates" and isinstance(item, ChildOutcome):
+                # A child's outcome still queued: wait() can withdraw it again.
+                child_id = item.child.id
+                self._queued.setdefault((session.id, child_id), []).append((receipt, item))
 
     # ---- delete ------------------------------------------------------
 
@@ -708,9 +949,16 @@ class SessionRegistry:
         return session.info.model_copy(update={"status": _live_status(session)}, deep=True)
 
     def children(self, parent_id: str) -> list[SessionInfo]:
-        """Children of ``parent_id``: live ones and those only on disk, by id."""
+        """Children of ``parent_id``: live ones and those only on disk, by id.
+
+        A child its parent closed reads ``closed``; one merely not loaded, ``on_disk``.
+        """
         found = {
-            info.id: info
+            info.id: (
+                info.model_copy(update={"status": "closed"})
+                if self.is_closed(parent_id, info.id)
+                else info
+            )
             for info in self.store.list(roots_only=False)
             if info.parent_id == parent_id
         }
@@ -737,8 +985,9 @@ class SessionRegistry:
             await session.close()
 
     async def close_child(self, parent: Session, child_id: str) -> None:
-        """Close ``parent``'s child; ``ChildFailedError`` if it is not ``parent``'s."""
+        """Close ``parent``'s child for good; ``ChildFailedError`` if it is not ``parent``'s."""
         self.check_owner(parent, child_id)
+        self._mark_closed(parent, child_id)
         await self.close(child_id)
 
     async def _close_children(self, parent_id: str) -> None:
@@ -771,7 +1020,9 @@ def _live_status(session: Session) -> SessionStatus:
         return "running"
     if session.info.status == "closed":
         return "closed"
-    if session.parent_id is not None and session.options.retain:
+    if session.last_outcome_kind == "waiting":
+        return "working"
+    if session.parent_id is not None and session.options.kept:
         return "retained"
     return "idle"
 
@@ -782,3 +1033,20 @@ def _rebuild_done(update: TurnEndedUpdate) -> Done:
     if update.result_type is not None and done.result is not None:
         done.result = load_typed(update.result_type, done.result)
     return done
+
+
+def _question_from_outcome(ref: ChildRef, outcome: dict[str, Any], reply: int) -> ChildQuestion:
+    """A child's ``need_input`` outcome as a ``ChildQuestion``.
+
+    The id comes from the child and the number of its turn that asked, so
+    the question read back from the record after a reload has the same id.
+    """
+    digest = hashlib.sha1(f"{ref.id}:{reply}".encode()).hexdigest()[:8]
+    return ChildQuestion(
+        id=digest,
+        child=ref,
+        question=str(outcome.get("question", "")),
+        options=outcome.get("options"),
+        reason=outcome.get("reason"),
+        answer_schema=outcome.get("answer_schema"),
+    )

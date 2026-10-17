@@ -6,6 +6,66 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: `AtomAgent.handle_orchestrate()` (from #446), an unattended
+  root that plans a task, hands the work to child sessions (they run
+  `handle_work`) and verifies it without editing files itself. It is opt-in:
+  `SessionOptions(turn_method="handle_orchestrate")`, which `run_task` keeps
+  (any other turn method still means `handle_batch`), or
+  `nooa-bench run --turn-method handle_orchestrate`. A Waiting-target check
+  now rejects a `Waiting` whose `on` names nothing that can deliver (a child
+  that is running, `working` or has queued input, a buffered `delegates`
+  item, or a running job); the person is never a valid target. `handle`
+  points the model at `Done`/`NeedInput`, the unattended turns at sending or
+  spawning a child or finishing with `Done`.
+- `nooa-atom`: the child-session interface is reworked (breaking). The two
+  verbs carry the difference: `delegate(description, prompt, *, brief=None,
+  model=None) -> Done` runs a one-shot worker that may not ask questions and
+  is closed after its result; `spawn(description, prompt, *, brief=None,
+  model=None) -> ChildRef` starts a kept child that may ask its parent
+  questions (`ChildQuestion` with an id, answered with `question.answer()`),
+  takes follow-ups with `send()` and stays open until `close()` or the end
+  of its tree. Both run the new `handle_work` turn, written for a parent,
+  whose `Done` must carry a `TaskResult`; a one-shot worker that returns
+  `NeedInput` gets turn feedback to decide and state its assumptions.
+  `InteractiveAgent` defines a generic `handle_work` (with the
+  `require_task_result` postcondition and `TaskResult`, now in
+  `nooa.interactive` and re-exported from `nooa_atom.session.items`), so every
+  child runs it: the fallback to `handle_batch`/`handle` for a class without
+  one is removed, and such a class raises a `TypeError` at delegate time.
+  `retain=`, `mode=` and `keep=` raise a `TypeError`; `context=` is removed.
+  `ChildRef` has `wait()`, `send()` (steers a running child, or queues and
+  starts a turn) and `close()` only: `steer()`, `info` and
+  `pending_question` are removed (a pending question shows in the ref's
+  repr). `ChildRef.wait()` returns a `ChildResult` or `ChildQuestion` and
+  raises `ChildFailedError` instead of hanging on an idle child or one
+  waiting for an answer. A Todo handed to a child becomes its active Todo (a
+  copy), and its comments, status and vars merge back into the parent's Todo
+  against a recorded base (`ChildTodoBase`, durable across a reload); a
+  conflicting field is noted and retried, never blocking the rest. Each
+  distinct conflict (child, field, values) is noted once, derived from the
+  Todo's comments so it holds across a reload; a repeated merge adds no note.
+  `brief=` reaches the child with the Todo, after a line naming its parent
+  and saying whether it may ask. A closed child stays closed (`send()`
+  raises), `ChildRef.status` is live, a child whose turn ended `Waiting`
+  reads `working`, and pending questions and queued outcomes are rebuilt
+  from the record after a reload. `SessionOptions` refuses unknown fields
+  and carries one child flag, `kept`. `AgentMessage.is_result_text` marks a
+  turn result's message.
+- `send()` of a Todo (or any model embedding `SnapshotVars`) no longer fails
+  with `PydanticSerializationError`: `SnapshotVars` has a pydantic schema.
+  JSON mode writes the plain vars, or a tagged snapshot blob restored through
+  the snapshot allowlist when a value is not plain JSON (a model, a tuple).
+  `spawn()`/`delegate()` adopt a hand-built `Todo(...)` into `self.todo`
+  (`TodoManager.adopt`) instead of raising, so the merge-back reaches the
+  caller's object; a different Todo reusing a managed id still raises.
+  `TodoManager.status()` caps the active Todo's description at 600 characters,
+  with a pointer to `self.todo.get(id).description`, so the Other Todos and
+  Hint lines are no longer cut. `await ref.send(todo)` with the Todo a child
+  was handed is the parent-to-child merge: the child's copy takes the
+  parent's title, description, deps, status and vars (comments from both
+  sides are kept), the parent's version becomes the new merge base, and the
+  child gets a line such as "Your parent updated Todo <id>: status open."
+  instead of the raw object. Another Todo or a string is an ordinary item.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive

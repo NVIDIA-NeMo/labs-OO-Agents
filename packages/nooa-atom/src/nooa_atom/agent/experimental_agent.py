@@ -18,7 +18,7 @@ from nooa_atom.agent.agent import AtomAgent
 
 with hidden:
     from nooa_atom.agent.agent import _V2_CONTEXT
-    from nooa_atom.agent.conditions import require_result
+    from nooa_atom.agent.conditions import require_result, require_task_result
 
 # The stable agent's context overrides, without the context-usage block.
 _EXPERIMENTAL_CONTEXT: Annotated[dict[str, Any], hidden] = {**_V2_CONTEXT, "context_usage": None}
@@ -33,19 +33,22 @@ class ExperimentalAtomAgent(AtomAgent):
     there are distinct, context-heavy, independently verifiable subtasks; keep tightly
     coupled or small sequential work local.
 
-    Delegate such a subtask to a child session with its own history:
-    ``done = await self.delegate(description, prompt)`` waits for it and returns its
-    ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
-    ``await self.spawn(description, prompt)`` starts one and returns at once; when
-    nothing else is left, end the turn with
-    ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives in a later turn
-    under ``notification["delegates"]``: a ``ChildResult`` (``item.done``), a
-    ``ChildQuestion`` from a retained child (``await item.answer(...)``) or a
-    ``ChildFailed`` (``item.error``). Never predict or make up a pending child's result,
-    poll, or sleep to wait. Children share this checkout: run concurrent children only
-    for read-only work and serialize edits. Children can delegate in turn only down to
-    a fixed depth; past it ``DepthLimitError`` is raised. Inspect a child's report
-    before final verification.
+    Delegate such a subtask to a child session with its own history. Hand it a Todo
+    whose description carries the task's requirements and its rules or constraints;
+    the child sees nothing else of your task.
+    ``done = await self.delegate(description, todo)`` runs a one-shot worker and returns
+    its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
+    ``child = await self.spawn(description, todo)`` starts a kept child and returns at
+    once; it may ask you questions and takes ``await child.send(...)`` follow-ups until
+    ``await child.close()``. When nothing else is left, end the turn with
+    ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
+    ``notification["delegates"]``: ``ChildResult`` (``item.done``), ``ChildQuestion``
+    (``await item.answer(...)``), ``ChildFailed`` (``item.error``) or ``ChildMessage``
+    (``item.text``, a progress note). The child's comments and status merge into your
+    Todo. Never predict or make up a pending child's result, poll, or sleep to wait.
+    Children share this checkout: run one editing child at a time. Children can
+    delegate in turn only down to a fixed depth; past it ``DepthLimitError`` is
+    raised. Inspect a child's report before final verification.
 
     For multi-step work, activate the current Todo. Keep its title and description
     aligned with the current understanding, and append comments for material findings,
@@ -102,6 +105,34 @@ class ExperimentalAtomAgent(AtomAgent):
         If something blocks you, still return ``Done`` with a ``TaskResult`` that says
         what blocked you. Return ``Waiting(explanation=..., on=[...])`` only while a job
         you started is still running.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
+        """
+        ...
+
+    @hidden
+    @strategy(
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_task_result])),
+        context=_EXPERIMENTAL_CONTEXT,
+    )
+    async def handle_work(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
+        """Work on a task for your parent agent and report back to it.
+
+        You are a child session; your parent is an agent and reads only your result.
+        The task is in ``notification["user_messages"]``; its first line says whether
+        you can ask your parent questions (later messages are follow-ups). A Todo
+        handed to you is your active Todo: comment evidence on it and complete it;
+        that goes back to your parent's Todo. Do not edit its title or description.
+        Assume you are the only editor of this checkout and remove scratch files
+        before ``Done``. End with ``return_result(Done(explanation=...,
+        result=TaskResult(solution_description=..., evidence=..., how_to_verify=...,
+        report=...)))``, also when blocked (say what blocked you);
+        ``NeedInput(question=...)`` only if you can ask and need your parent's answer;
+        or ``Waiting(explanation=..., on=[...])`` only while a job you started is still
+        running. ``self.message()`` is a progress note, not the result.
 
         Python locals live for one method call; when the call returns they
         are gone. Anything you need later goes in ``self.v`` (durable,
