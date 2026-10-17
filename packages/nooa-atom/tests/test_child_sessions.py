@@ -1087,3 +1087,60 @@ def test_the_parent_docs_say_what_to_put_in_the_todo_and_who_edits(spec):
     work = " ".join((cls.handle_work.__doc__ or "").split())
     assert "remove scratch files" in work and "TaskResult" in work
     assert "context" not in work
+
+
+# ---- send(todo): a Todo crosses sessions as data ------------------------------
+
+
+def test_a_todo_survives_the_session_record_and_the_send_copy():
+    from nooa_atom.session.session import as_data, item_to_json
+
+    from nooa.tools.todo import Todo
+
+    todos = TodoManager()
+    empty = todos.add("no vars")
+    withvars = todos.add("with vars", description="D")
+    todos.set_var(withvars, "child", "abc123")
+    todos.set_var(withvars, "n", 3)
+    todos.comment(withvars, "note")
+    for todo in (empty, withvars):
+        record = json.loads(item_to_json(todo))
+        assert record["vars"] == dict(todo.vars)
+        copy = as_data(todo)
+        assert isinstance(copy, Todo) and copy is not todo and copy.vars is not todo.vars
+        assert copy.model_dump(mode="json") == todo.model_dump(mode="json")
+        assert type(copy.vars).__name__ == "SnapshotVars"
+        assert Todo.model_validate_json(item_to_json(todo)) == copy
+
+
+async def test_send_hands_a_todo_to_a_kept_child(atom_registry, atom_options, atom_models):
+    atom_models.scripts[None] = [
+        _wait_then("self.v.ref = await self.spawn('Kept', 'first task')"),
+        cell(
+            "a = self.todo.add('Empty vars')\n"
+            "b = self.todo.add('With vars', description='REQ', owner='root')\n"
+            "self.todo.set_var(b, 'n', 3)\n"
+            "await self.v.ref.send(a)\n"
+            "await self.v.ref.send(b)\n"
+            "return_result(Waiting(explanation='sent', on=['delegates']))"
+        ),
+        cell(
+            "[item] = notification['delegates']\n"
+            "return_result(Done(explanation=item.done.result.report))"
+        ),
+    ]
+    atom_models.scripts["Kept"] = [
+        cell(CHILD_RESULT),
+        cell(
+            "items = notification['user_messages']\n"
+            "seen = '; '.join(f'{type(t).__name__} {t.title} {sorted(t.vars.items())}' "
+            "for t in items)\n"
+            "return_result(Done(explanation='got', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='h', report=seen)))"
+        ),
+    ]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert outcome == Done(
+        explanation="Todo Empty vars []; Todo With vars [('n', 3), ('owner', 'root')]"
+    )

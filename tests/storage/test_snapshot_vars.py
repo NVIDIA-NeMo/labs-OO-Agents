@@ -143,3 +143,66 @@ class TestSnapshotVarsMappingHelpers:
         assert "bad" not in v
         v.setdefault("good", 7)
         assert v["good"] == 7
+
+
+class TestSnapshotVarsPydantic:
+    """A pydantic model embedding SnapshotVars dumps and validates in both modes."""
+
+    @staticmethod
+    def _model():
+        from typing import Annotated
+
+        from pydantic import BaseModel, Field
+
+        from nooa import hidden
+
+        class Holder(BaseModel):
+            vars: Annotated[SnapshotVars, hidden] = Field(default_factory=SnapshotVars)
+
+        return Holder
+
+    def test_json_mode_writes_plain_data_for_json_values(self):
+        holder = self._model()(vars={"a": 1, "b": ["x", {"c": None}]})
+        assert holder.model_dump(mode="json") == {"vars": {"a": 1, "b": ["x", {"c": None}]}}
+        back = type(holder).model_validate_json(holder.model_dump_json())
+        assert isinstance(back.vars, SnapshotVars)
+        assert dict(back.vars) == {"a": 1, "b": ["x", {"c": None}]}
+
+    def test_python_mode_and_deep_copy_keep_snapshot_vars(self):
+        holder = self._model()(vars={"a": 1})
+        assert isinstance(holder.model_dump()["vars"], SnapshotVars)
+        copied = holder.model_copy(deep=True)
+        assert isinstance(copied.vars, SnapshotVars) and copied.vars is not holder.vars
+        assert dict(copied.vars) == {"a": 1}
+
+    def test_non_json_values_round_trip_as_a_tagged_snapshot_blob(self):
+        from nooa.tools.todo import TodoComment
+
+        comment = TodoComment(body="hi")
+        holder = self._model()(vars={"pair": (1, 2), "comment": comment, "n": 3})
+        dumped = holder.model_dump(mode="json")["vars"]
+        assert set(dumped) == {"__snapshot_vars__"}
+        assert dumped["__snapshot_vars__"]["allowlist"] == ["nooa.tools.todo.TodoComment"]
+        back = type(holder).model_validate_json(holder.model_dump_json())
+        assert dict(back.vars) == {"pair": (1, 2), "comment": comment, "n": 3}
+
+    def test_a_tagged_blob_naming_a_class_outside_its_allowlist_is_refused(self):
+        import pytest
+
+        from nooa.errors.storage import DeserializationError
+
+        blob = {
+            "__snapshot_vars__": {
+                "blob": {"x": {"__type__": "pydantic", "__class__": "os.Evil", "data": {}}},
+                "allowlist": [],
+            }
+        }
+        with pytest.raises(DeserializationError):
+            self._model().model_validate({"vars": blob})
+
+    def test_validation_wraps_a_plain_dict_and_keeps_the_write_filter(self):
+        holder = self._model().model_validate({"vars": {"ok": 1, "bad": _Unserializable()}})
+        assert isinstance(holder.vars, SnapshotVars)
+        assert dict(holder.vars) == {"ok": 1}
+        same = SnapshotVars({"k": "v"})
+        assert self._model()(vars=same).vars is same
