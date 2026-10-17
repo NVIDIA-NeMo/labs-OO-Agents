@@ -49,7 +49,12 @@ to follow semantic versioning.
   caller's object; a different Todo reusing a managed id still raises.
   `TodoManager.status()` caps the active Todo's description at 600 characters,
   with a pointer to `self.todo.get(id).description`, so the Other Todos and
-  Hint lines are no longer cut.
+  Hint lines are no longer cut. `await ref.send(todo)` with the Todo a child
+  was handed is the parent-to-child merge: the child's copy takes the
+  parent's title, description, deps, status and vars (comments from both
+  sides are kept), the parent's version becomes the new merge base, and the
+  child gets a line such as "Your parent updated Todo <id>: status open."
+  instead of the raw object. Another Todo or a string is an ordinary item.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive
