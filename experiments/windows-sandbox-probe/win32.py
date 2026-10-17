@@ -157,10 +157,17 @@ class _BasicLimit(ctypes.Structure):
 
 
 class _IoCounters(ctypes.Structure):
-    _fields_ = [(name, ctypes.c_uint64) for name in (
-        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-    )]
+    _fields_ = [
+        (name, ctypes.c_uint64)
+        for name in (
+            "ReadOperationCount",
+            "WriteOperationCount",
+            "OtherOperationCount",
+            "ReadTransferCount",
+            "WriteTransferCount",
+            "OtherTransferCount",
+        )
+    ]
 
 
 class _ExtendedLimit(ctypes.Structure):
@@ -202,22 +209,43 @@ _k32.GetCurrentProcess.restype = wintypes.HANDLE
 _k32.GetCurrentProcessId.restype = wintypes.DWORD
 _k32.SetHandleInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
 _k32.SetHandleInformation.restype = wintypes.BOOL
-_k32.CreatePipe.argtypes = [ctypes.POINTER(wintypes.HANDLE), ctypes.POINTER(wintypes.HANDLE),
-                            ctypes.POINTER(_SecurityAttributes), wintypes.DWORD]
+_k32.CreatePipe.argtypes = [
+    ctypes.POINTER(wintypes.HANDLE),
+    ctypes.POINTER(wintypes.HANDLE),
+    ctypes.POINTER(_SecurityAttributes),
+    wintypes.DWORD,
+]
 _k32.CreatePipe.restype = wintypes.BOOL
-_k32.InitializeProcThreadAttributeList.argtypes = [ctypes.c_void_p, wintypes.DWORD,
-                                                   wintypes.DWORD, ctypes.POINTER(ctypes.c_size_t)]
+_k32.InitializeProcThreadAttributeList.argtypes = [
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.POINTER(ctypes.c_size_t),
+]
 _k32.InitializeProcThreadAttributeList.restype = wintypes.BOOL
-_k32.UpdateProcThreadAttribute.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.c_size_t,
-                                           ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p,
-                                           ctypes.c_void_p]
+_k32.UpdateProcThreadAttribute.argtypes = [
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+]
 _k32.UpdateProcThreadAttribute.restype = wintypes.BOOL
 _k32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
-_k32.CreateProcessW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p,
-                                ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD,
-                                ctypes.c_void_p, wintypes.LPCWSTR,
-                                ctypes.POINTER(_StartupInfoExW),
-                                ctypes.POINTER(_ProcessInformation)]
+_k32.CreateProcessW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    wintypes.BOOL,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.LPCWSTR,
+    ctypes.POINTER(_StartupInfoExW),
+    ctypes.POINTER(_ProcessInformation),
+]
 _k32.CreateProcessW.restype = wintypes.BOOL
 _k32.ResumeThread.argtypes = [wintypes.HANDLE]
 _k32.ResumeThread.restype = wintypes.DWORD
@@ -231,8 +259,12 @@ _k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 _k32.OpenProcess.restype = wintypes.HANDLE
 _k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
 _k32.CreateJobObjectW.restype = wintypes.HANDLE
-_k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
-                                         wintypes.DWORD]
+_k32.SetInformationJobObject.argtypes = [
+    wintypes.HANDLE,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+]
 _k32.SetInformationJobObject.restype = wintypes.BOOL
 _k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
 _k32.AssignProcessToJobObject.restype = wintypes.BOOL
@@ -241,31 +273,56 @@ _k32.TerminateJobObject.restype = wintypes.BOOL
 
 _adv.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
 _adv.ConvertStringSidToSidW.restype = wintypes.BOOL
-_adv.SetEntriesInAclW.argtypes = [wintypes.ULONG, ctypes.POINTER(_ExplicitAccessW),
-                                  ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+_adv.SetEntriesInAclW.argtypes = [
+    wintypes.ULONG,
+    ctypes.POINTER(_ExplicitAccessW),
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_void_p),
+]
 _adv.SetEntriesInAclW.restype = wintypes.DWORD
-_adv.SetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
-                                       ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-                                       ctypes.c_void_p]
+_adv.SetNamedSecurityInfoW.argtypes = [
+    wintypes.LPWSTR,
+    ctypes.c_int,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+]
 _adv.SetNamedSecurityInfoW.restype = wintypes.DWORD
-_adv.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
-                                       ctypes.POINTER(ctypes.c_void_p),
-                                       ctypes.POINTER(ctypes.c_void_p),
-                                       ctypes.POINTER(ctypes.c_void_p),
-                                       ctypes.POINTER(ctypes.c_void_p),
-                                       ctypes.POINTER(ctypes.c_void_p)]
+_adv.GetNamedSecurityInfoW.argtypes = [
+    wintypes.LPWSTR,
+    ctypes.c_int,
+    wintypes.DWORD,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_void_p),
+]
 _adv.GetNamedSecurityInfoW.restype = wintypes.DWORD
 _adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
-    ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.LPWSTR),
-    ctypes.POINTER(wintypes.DWORD)]
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.LPWSTR),
+    ctypes.POINTER(wintypes.DWORD),
+]
 _adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
 
-_user.CreateAppContainerProfile.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
-                                            ctypes.c_void_p, wintypes.DWORD,
-                                            ctypes.POINTER(ctypes.c_void_p)]
+_user.CreateAppContainerProfile.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.LPCWSTR,
+    wintypes.LPCWSTR,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.POINTER(ctypes.c_void_p),
+]
 _user.CreateAppContainerProfile.restype = ctypes.c_long
-_user.DeriveAppContainerSidFromAppContainerName.argtypes = [wintypes.LPCWSTR,
-                                                            ctypes.POINTER(ctypes.c_void_p)]
+_user.DeriveAppContainerSidFromAppContainerName.argtypes = [
+    wintypes.LPCWSTR,
+    ctypes.POINTER(ctypes.c_void_p),
+]
 _user.DeriveAppContainerSidFromAppContainerName.restype = ctypes.c_long
 _user.DeleteAppContainerProfile.argtypes = [wintypes.LPCWSTR]
 _user.DeleteAppContainerProfile.restype = ctypes.c_long
@@ -313,9 +370,7 @@ def capability_sid(name: str) -> ctypes.c_void_p:
     """Capability SIDs come from a fixed well-known set."""
     text = WELL_KNOWN_CAPABILITIES.get(name)
     if text is None:
-        raise ValueError(
-            f"unknown capability {name!r}; known: {sorted(WELL_KNOWN_CAPABILITIES)}"
-        )
+        raise ValueError(f"unknown capability {name!r}; known: {sorted(WELL_KNOWN_CAPABILITIES)}")
     sid = ctypes.c_void_p()
     if not _adv.ConvertStringSidToSidW(text, ctypes.byref(sid)):
         raise _err()
@@ -341,8 +396,14 @@ def read_dacl_sddl(path: str) -> str:
     sd = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     rc = _adv.GetNamedSecurityInfoW(
-        path, _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
-        None, None, ctypes.byref(dacl), None, ctypes.byref(sd),
+        path,
+        _SE_FILE_OBJECT,
+        _DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(sd),
     )
     if rc != 0:
         raise OSError(rc, f"GetNamedSecurityInfoW failed for {path}")
@@ -382,8 +443,14 @@ def _set_entry(path: str, sid: ctypes.c_void_p, access: int, mode: int, inherita
     sd = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     rc = _adv.GetNamedSecurityInfoW(
-        path, _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
-        None, None, ctypes.byref(dacl), None, ctypes.byref(sd),
+        path,
+        _SE_FILE_OBJECT,
+        _DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(sd),
     )
     if rc != 0:
         raise OSError(rc, f"GetNamedSecurityInfoW failed for {path}")
@@ -401,8 +468,13 @@ def _set_entry(path: str, sid: ctypes.c_void_p, access: int, mode: int, inherita
             raise OSError(rc, f"SetEntriesInAclW failed for {path}")
         try:
             rc = _adv.SetNamedSecurityInfoW(
-                path, _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
-                None, None, new_dacl, None,
+                path,
+                _SE_FILE_OBJECT,
+                _DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                new_dacl,
+                None,
             )
             if rc != 0:
                 raise OSError(rc, f"SetNamedSecurityInfoW failed for {path}")
@@ -415,19 +487,26 @@ def _set_entry(path: str, sid: ctypes.c_void_p, access: int, mode: int, inherita
 def set_dacl_sddl(path: str, sddl: str) -> None:
     """Restore a DACL from SDDL text (the rollback path)."""
     sd = ctypes.c_void_p()
-    if not _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1,
-                                                                   ctypes.byref(sd), None):
+    if not _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, ctypes.byref(sd), None
+    ):
         raise _err()
     try:
         dacl = ctypes.c_void_p()
         present = wintypes.BOOL()
         defaulted = wintypes.BOOL()
-        if not _adv.GetSecurityDescriptorDacl(sd, ctypes.byref(present),
-                                              ctypes.byref(dacl), ctypes.byref(defaulted)):
+        if not _adv.GetSecurityDescriptorDacl(
+            sd, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+        ):
             raise _err()
         rc = _adv.SetNamedSecurityInfoW(
-            path, _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
-            None, None, dacl if present.value else None, None,
+            path,
+            _SE_FILE_OBJECT,
+            _DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            dacl if present.value else None,
+            None,
         )
         if rc != 0:
             raise OSError(rc, f"SetNamedSecurityInfoW(restore) failed for {path}")
@@ -436,11 +515,18 @@ def set_dacl_sddl(path: str, sddl: str) -> None:
 
 
 _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
-    wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.ULONG)]
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(wintypes.ULONG),
+]
 _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
-_adv.GetSecurityDescriptorDacl.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
-                                           ctypes.POINTER(ctypes.c_void_p),
-                                           ctypes.POINTER(wintypes.BOOL)]
+_adv.GetSecurityDescriptorDacl.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(wintypes.BOOL),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(wintypes.BOOL),
+]
 _adv.GetSecurityDescriptorDacl.restype = wintypes.BOOL
 
 
@@ -462,8 +548,8 @@ def make_pipe(read_inheritable: bool) -> tuple[int, int]:
     w = wintypes.HANDLE()
     if not _k32.CreatePipe(ctypes.byref(r), ctypes.byref(w), ctypes.byref(sa), 0):
         raise _err()
-    # Clear the inherit flag on the end the child must NOT receive.
-    keep = r if read_inheritable else w
+    # Clear the inherit flag on the end the child must NOT receive: with
+    # read_inheritable the child gets ``r``, so the parent keeps ``w``.
     drop = w if read_inheritable else r
     _k32.SetHandleInformation(drop, 0x00000001, 0)  # HANDLE_FLAG_INHERIT -> 0
     if read_inheritable:
@@ -471,9 +557,10 @@ def make_pipe(read_inheritable: bool) -> tuple[int, int]:
     return (r.value, w.value)
 
 
-def to_socket(handle: int) -> "object":
+def to_socket(handle: int) -> object:
     """Wrap a pipe handle as a socket-like object usable by mp Connection."""
     import socket as _socket
+
     return _socket.socket(fileno=msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY))
 
 
@@ -550,8 +637,13 @@ def spawn_in_container(
 
     try:
         if not _k32.UpdateProcThreadAttribute(
-            buffer, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-            ctypes.byref(caps), ctypes.sizeof(caps), None, None,
+            buffer,
+            0,
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+            ctypes.byref(caps),
+            ctypes.sizeof(caps),
+            None,
+            None,
         ):
             raise _err()
 
@@ -560,8 +652,13 @@ def spawn_in_container(
             n = len(inherit_handles)
             handle_array = (wintypes.HANDLE * n)(*inherit_handles)
             if not _k32.UpdateProcThreadAttribute(
-                buffer, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                handle_array, ctypes.sizeof(handle_array), None, None,
+                buffer,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                handle_array,
+                ctypes.sizeof(handle_array),
+                None,
+                None,
             ):
                 raise _err()
 
@@ -575,13 +672,29 @@ def spawn_in_container(
         if env is not None:
             block = _environment_block(env)
             ok = _k32.CreateProcessW(
-                None, cmd, None, None, bool(inherit_handles), flags,
-                ctypes.cast(block, ctypes.c_void_p), cwd, ctypes.byref(si), ctypes.byref(pi),
+                None,
+                cmd,
+                None,
+                None,
+                bool(inherit_handles),
+                flags,
+                ctypes.cast(block, ctypes.c_void_p),
+                cwd,
+                ctypes.byref(si),
+                ctypes.byref(pi),
             )
         else:
             ok = _k32.CreateProcessW(
-                None, cmd, None, None, bool(inherit_handles), flags,
-                None, cwd, ctypes.byref(si), ctypes.byref(pi),
+                None,
+                cmd,
+                None,
+                None,
+                bool(inherit_handles),
+                flags,
+                None,
+                cwd,
+                ctypes.byref(si),
+                ctypes.byref(pi),
             )
         if not ok:
             raise _err()
@@ -606,8 +719,12 @@ class Job:
         if kill_on_close:
             info = _ExtendedLimit()
             info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            if not _k32.SetInformationJobObject(self._h, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                                                ctypes.byref(info), ctypes.sizeof(info)):
+            if not _k32.SetInformationJobObject(
+                self._h,
+                _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            ):
                 raise _err()
 
     def set_limits(self, *, memory_mb: int = 0, cpu_seconds: int = 0) -> None:
@@ -619,8 +736,9 @@ class Job:
             info.ProcessMemoryLimit = memory_mb * 1024 * 1024
             info.BasicLimitInformation.LimitFlags |= _JOB_OBJECT_LIMIT_PROCESS_MEMORY
             info.BasicLimitInformation.LimitFlags |= _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not _k32.SetInformationJobObject(self._h, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                                            ctypes.byref(info), ctypes.sizeof(info)):
+        if not _k32.SetInformationJobObject(
+            self._h, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info)
+        ):
             raise _err()
 
     def assign(self, process_handle: int) -> None:

@@ -23,7 +23,6 @@ import json
 import os
 import shutil
 import struct
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -47,8 +46,7 @@ DENY_READS = [
     r"C:\Windows\System32\config\SAM",
     r"C:\Windows\System32\config\SYSTEM",
     os.path.join(os.environ.get("USERPROFILE", r"C:\Users\default"), ".ssh"),
-    os.path.join(os.environ.get("USERPROFILE", r"C:\Users\default"),
-                 ".claude", "CLAUDE.md"),
+    os.path.join(os.environ.get("USERPROFILE", r"C:\Users\default"), ".claude", "CLAUDE.md"),
     # A real file in the repository, outside the granted work directory: the
     # checkout must not be reachable just because the interpreter copy is.
     str(HERE.parents[1] / "AGENTS.md"),
@@ -93,9 +91,13 @@ def run_child(
         str(RUNTIME_ROOT / "python.exe"),
         "-I",  # isolated: ignore PYTHON* env, no user site-packages
         str(HERE / "child_probe.py"),
-        "--out", str(out),
-        "--reads", *DENY_READS,
-        "--writes", str(WORKDIR / "granted_probe.txt"), *DENY_WRITES,
+        "--out",
+        str(out),
+        "--reads",
+        *DENY_READS,
+        "--writes",
+        str(WORKDIR / "granted_probe.txt"),
+        *DENY_WRITES,
     ]
     if memory_mb:
         argv += ["--memory-mb", str(memory_mb)]
@@ -144,8 +146,11 @@ def scenario_reachable() -> None:
 
     grants = [
         (str(RUNTIME_ROOT), w.FILE_GENERIC_READ | w.FILE_GENERIC_EXECUTE, "runtime root"),
-        (str(RUNTIME_ROOT / "Lib" / "site-packages"),
-         w.FILE_GENERIC_READ | w.FILE_GENERIC_EXECUTE, "site-packages"),
+        (
+            str(RUNTIME_ROOT / "Lib" / "site-packages"),
+            w.FILE_GENERIC_READ | w.FILE_GENERIC_EXECUTE,
+            "site-packages",
+        ),
         # The probe script is a single read-only grant. The surrounding repo
         # directory stays denied — granting the directory would hand the
         # container the whole checkout, which is the leak this test exists to
@@ -191,7 +196,7 @@ def scenario_reachable() -> None:
 
 # --- scenario 2: reversibility ---------------------------------------------
 ISO = HERE / ".iso"
-_PROTECTED_DACL = 0x80000000 | 0x00000004   # PROTECTED_DACL_SECURITY_INFORMATION
+_PROTECTED_DACL = 0x80000000 | 0x00000004  # PROTECTED_DACL_SECURITY_INFORMATION
 
 
 def _set_dacl_with_flags(path: str, sddl: str, *, protect: bool) -> None:
@@ -240,10 +245,11 @@ def scenario_reversibility() -> None:
     # Start from a self-owned DACL with inheritance broken, so what we write is
     # what stays. Without this the AI bit is recomputed from the parent every
     # time and no restore can be byte-equal by construction.
-    _set_dacl_with_flags(target, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
-                         protect=True)
+    _set_dacl_with_flags(
+        target, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", protect=True
+    )
 
-    before_sddl = w.read_dacl_sddl(target)   # snapshot BEFORE any grant
+    before_sddl = w.read_dacl_sddl(target)  # snapshot BEFORE any grant
     before_aces = _ace_set(target)
     w.grant(target, app_sid, w.FILE_GENERIC_READ)
     granted_sddl = w.read_dacl_sddl(target)
@@ -374,7 +380,6 @@ def scenario_network() -> None:
 def _udp_egress(app_sid, *, capabilities: tuple[str, ...]) -> None:
     """Send one datagram from the container to a host-side socket and observe it."""
     import socket as _socket
-    import threading
 
     lan_ip = _host_lan_ip()
     if lan_ip is None:
@@ -426,6 +431,7 @@ def _udp_egress(app_sid, *, capabilities: tuple[str, ...]) -> None:
 
 def _host_lan_ip() -> str | None:
     import socket as _socket
+
     try:
         s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -458,8 +464,11 @@ def scenario_job_limits() -> None:
         note("job_limits", "mem_allocated_mb", mem.get("allocated_mb"))
         note("job_limits", "mem_probe_note", mem.get("note"))
     else:
-        note("job_limits", "mem_capped_report",
-             "MISSING -> process died before reporting (consistent with a cap kill)")
+        note(
+            "job_limits",
+            "mem_capped_report",
+            "MISSING -> process died before reporting (consistent with a cap kill)",
+        )
 
     # CPU: burn until the per-job time limit terminates the process.
     code, report, elapsed = run_child([], cpu_seconds=2, timeout_s=60)
@@ -468,8 +477,11 @@ def scenario_job_limits() -> None:
     if report:
         note("job_limits", "cpu_probe_note", (report.get("cpu") or {}).get("note"))
     else:
-        note("job_limits", "cpu_capped_report",
-             "MISSING -> killed by the job time limit, as intended")
+        note(
+            "job_limits",
+            "cpu_capped_report",
+            "MISSING -> killed by the job time limit, as intended",
+        )
 
     # Hard kill control: a long sleeper must die at TerminateJobObject.
     print("    (control) hard-kill a long-running child ...")
@@ -512,9 +524,12 @@ def scenario_pipe() -> None:
         str(RUNTIME_ROOT / "python.exe"),
         "-I",
         str(HERE / "pipe_probe.py"),
-        "--in", str(to_child_child_r),
-        "--out", str(from_child_child_w),
-        "--payload", "HELLO",
+        "--in",
+        str(to_child_child_r),
+        "--out",
+        str(from_child_child_w),
+        "--payload",
+        "HELLO",
     ]
     job = w.Job()
     t0 = time.perf_counter()
@@ -568,12 +583,14 @@ def scenario_pipe() -> None:
 
 def _fd(handle: int) -> int:
     import msvcrt
+
     return msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
 
 
 # --- helpers ----------------------------------------------------------------
-def _grant_interpreter(app_sid, *, include_script: bool = True,
-                       scripts: tuple[str, ...] = ("child_probe.py",)) -> None:
+def _grant_interpreter(
+    app_sid, *, include_script: bool = True, scripts: tuple[str, ...] = ("child_probe.py",)
+) -> None:
     """Grant the minimum the container needs to start Python and read its script.
 
     Only these paths — never the repo directory. A denial for anything else is
@@ -581,8 +598,7 @@ def _grant_interpreter(app_sid, *, include_script: bool = True,
     """
     paths = [
         (str(RUNTIME_ROOT), w.FILE_GENERIC_READ | w.FILE_GENERIC_EXECUTE),
-        (str(RUNTIME_ROOT / "Lib" / "site-packages"),
-         w.FILE_GENERIC_READ | w.FILE_GENERIC_EXECUTE),
+        (str(RUNTIME_ROOT / "Lib" / "site-packages"), w.FILE_GENERIC_READ | w.FILE_GENERIC_EXECUTE),
     ]
     if include_script:
         for name in scripts:
@@ -666,7 +682,7 @@ def _dir_size(path: Path) -> int:
 def _is_admin() -> bool:
     try:
         import ctypes
-        from ctypes import wintypes
+
         return bool(ctypes.WinDLL("shell32", use_last_error=True).IsUserAnAdmin())
     except Exception:
         return False

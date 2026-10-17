@@ -26,11 +26,19 @@ def _probe_identity() -> dict:
     out: dict = {}
     adv = ctypes.WinDLL("advapi32", use_last_error=True)
     token = wintypes.HANDLE()
-    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
-                                     ctypes.POINTER(wintypes.HANDLE)]
+    adv.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
     adv.OpenProcessToken.restype = wintypes.BOOL
-    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
-                                        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    adv.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
     adv.GetTokenInformation.restype = wintypes.BOOL
 
     TOKEN_QUERY = 0x0008
@@ -51,14 +59,16 @@ def _probe_identity() -> dict:
     try:
         val = wintypes.DWORD()
         need = wintypes.DWORD()
-        if adv.GetTokenInformation(token, TokenIsAppContainer, ctypes.byref(val),
-                                   ctypes.sizeof(val), ctypes.byref(need)):
+        if adv.GetTokenInformation(
+            token, TokenIsAppContainer, ctypes.byref(val), ctypes.sizeof(val), ctypes.byref(need)
+        ):
             out["is_app_container"] = bool(val.value)
         # TokenAppContainerSid copies the SID itself into the buffer (48 bytes
         # for a typical container SID), not just a pointer to one.
         buf = ctypes.create_string_buffer(256)
-        if adv.GetTokenInformation(token, TokenAppContainerSid, buf,
-                                   ctypes.sizeof(buf), ctypes.byref(need)):
+        if adv.GetTokenInformation(
+            token, TokenAppContainerSid, buf, ctypes.sizeof(buf), ctypes.byref(need)
+        ):
             psid = ctypes.c_void_p.from_buffer(buf).value
             text = wintypes.LPWSTR()
             if psid and adv.ConvertSidToStringSidW(psid, ctypes.byref(text)):
@@ -79,8 +89,12 @@ def _probe_read(path: str) -> dict:
             fh.read(64)
         return {"ok": True}
     except OSError as exc:
-        return {"ok": False, "errno": exc.errno, "winerror": getattr(exc, "winerror", None),
-                "msg": exc.strerror}
+        return {
+            "ok": False,
+            "errno": exc.errno,
+            "winerror": getattr(exc, "winerror", None),
+            "msg": exc.strerror,
+        }
 
 
 def _probe_write(path: str) -> dict:
@@ -90,16 +104,22 @@ def _probe_write(path: str) -> dict:
         os.remove(path)
         return {"ok": True}
     except OSError as exc:
-        return {"ok": False, "errno": exc.errno, "winerror": getattr(exc, "winerror", None),
-                "msg": exc.strerror}
+        return {
+            "ok": False,
+            "errno": exc.errno,
+            "winerror": getattr(exc, "winerror", None),
+            "msg": exc.strerror,
+        }
 
 
 def _probe_network() -> dict:
     """Outbound TCP must fail when no capability SIDs are granted."""
     result: dict = {}
-    for label, addr in (("tcp_public", ("1.1.1.1", 443)),
-                        ("tcp_dns", ("8.8.8.8", 53)),
-                        ("udp_dns", None)):
+    for label, addr in (
+        ("tcp_public", ("1.1.1.1", 443)),
+        ("tcp_dns", ("8.8.8.8", 53)),
+        ("udp_dns", None),
+    ):
         if label == "udp_dns":
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -108,9 +128,12 @@ def _probe_network() -> dict:
                 s.close()
                 result[label] = {"ok": True, "note": "sendto returned (may be async)"}
             except OSError as exc:
-                result[label] = {"ok": False, "errno": exc.errno,
-                                 "winerror": getattr(exc, "winerror", None),
-                                 "msg": exc.strerror}
+                result[label] = {
+                    "ok": False,
+                    "errno": exc.errno,
+                    "winerror": getattr(exc, "winerror", None),
+                    "msg": exc.strerror,
+                }
             continue
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -119,9 +142,12 @@ def _probe_network() -> dict:
             s.close()
             result[label] = {"ok": True, "note": "outbound connection established"}
         except OSError as exc:
-            result[label] = {"ok": False, "errno": exc.errno,
-                             "winerror": getattr(exc, "winerror", None),
-                             "msg": exc.strerror}
+            result[label] = {
+                "ok": False,
+                "errno": exc.errno,
+                "winerror": getattr(exc, "winerror", None),
+                "msg": exc.strerror,
+            }
     # A loopback listener is the control: the broker channel must keep working.
     try:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -130,9 +156,12 @@ def _probe_network() -> dict:
         srv.close()
         result["loopback_listen"] = {"ok": True}
     except OSError as exc:
-        result["loopback_listen"] = {"ok": False, "errno": exc.errno,
-                                     "winerror": getattr(exc, "winerror", None),
-                                     "msg": exc.strerror}
+        result["loopback_listen"] = {
+            "ok": False,
+            "errno": exc.errno,
+            "winerror": getattr(exc, "winerror", None),
+            "msg": exc.strerror,
+        }
     return result
 
 
@@ -145,14 +174,25 @@ def _probe_memory_cap(target_mb: int) -> dict:
             blocks.append(bytearray(chunk))
             if i * 16 >= target_mb * 2:
                 break
-        return {"ok": True, "allocated_mb": len(blocks) * 16,
-                "note": "allocation succeeded past expectation"}
+        return {
+            "ok": True,
+            "allocated_mb": len(blocks) * 16,
+            "note": "allocation succeeded past expectation",
+        }
     except MemoryError as exc:
-        return {"ok": False, "allocated_mb": len(blocks) * 16, "kind": "MemoryError",
-                "msg": str(exc)}
+        return {
+            "ok": False,
+            "allocated_mb": len(blocks) * 16,
+            "kind": "MemoryError",
+            "msg": str(exc),
+        }
     except OSError as exc:
-        return {"ok": False, "allocated_mb": len(blocks) * 16, "kind": type(exc).__name__,
-                "msg": str(exc)}
+        return {
+            "ok": False,
+            "allocated_mb": len(blocks) * 16,
+            "kind": type(exc).__name__,
+            "msg": str(exc),
+        }
 
 
 def _probe_cpu_burn(seconds: int) -> dict:
@@ -162,8 +202,11 @@ def _probe_cpu_burn(seconds: int) -> dict:
     while True:
         total += sum(range(1000))
         if time.monotonic() - start > seconds * 4:
-            return {"ok": True, "note": "survived past 4x the job time limit",
-                    "elapsed_s": time.monotonic() - start}
+            return {
+                "ok": True,
+                "note": "survived past 4x the job time limit",
+                "elapsed_s": time.monotonic() - start,
+            }
 
 
 def main() -> int:

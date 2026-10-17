@@ -125,9 +125,7 @@ class WorkerBlueprint:
                     f"in {self.agent_module!r}: {exc}"
                 ) from exc
         if not isinstance(obj, type):
-            raise BlueprintError(
-                f"{self.agent_module}.{self.agent_qualname} is not a class"
-            )
+            raise BlueprintError(f"{self.agent_module}.{self.agent_qualname} is not a class")
         return obj
 
     def rebuild_builtins(self) -> dict[str, Any]:

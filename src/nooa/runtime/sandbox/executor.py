@@ -139,9 +139,7 @@ class SandboxedExecutor:
             from nooa.runtime.sandbox.blueprint import BlueprintError, WorkerBlueprint
 
             try:
-                self._blueprint = WorkerBlueprint.from_agent(
-                    agent, self._framework_builtins
-                )
+                self._blueprint = WorkerBlueprint.from_agent(agent, self._framework_builtins)
             except BlueprintError as exc:
                 raise SandboxUnavailable(str(exc)) from exc
 
@@ -455,7 +453,9 @@ class SandboxedExecutor:
         if kind == "introspect":
             name = msg.get("name")
             if not isinstance(name, str):
-                raise CellSerializationError("malformed sandbox broker request: bad introspect name")
+                raise CellSerializationError(
+                    "malformed sandbox broker request: bad introspect name"
+                )
             call["name"] = name
         if kind not in ("call", "setattr", "introspect"):
             return call
