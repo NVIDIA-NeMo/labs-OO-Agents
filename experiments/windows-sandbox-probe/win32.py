@@ -270,6 +270,16 @@ _k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
 _k32.AssignProcessToJobObject.restype = wintypes.BOOL
 _k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
 _k32.TerminateJobObject.restype = wintypes.BOOL
+_k32.DuplicateHandle.argtypes = [
+    wintypes.HANDLE,
+    wintypes.HANDLE,
+    wintypes.HANDLE,
+    ctypes.POINTER(wintypes.HANDLE),
+    wintypes.DWORD,
+    wintypes.BOOL,
+    wintypes.DWORD,
+]
+_k32.DuplicateHandle.restype = wintypes.BOOL
 
 _adv.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
 _adv.ConvertStringSidToSidW.restype = wintypes.BOOL

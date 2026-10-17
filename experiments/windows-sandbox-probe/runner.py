@@ -11,6 +11,9 @@ decides whether the AppContainer backend is worth building.
   3. denied     — are reads/writes outside the grants actually refused?
   4. no-network — is outbound blocked without capability SIDs?
   5. job-limits — do memory/CPU caps and hard kill work?
+  6. broker     — can an inherited pipe carry the broker protocol?
+  7. nooa-import— does the package resolve inside the root, not the checkout?
+  8. mp-pipe    — does the broker's real transport cross the boundary?
 
 Run:  python runner.py            (all scenarios)
       python runner.py --only 1   (one scenario)
@@ -587,6 +590,160 @@ def _fd(handle: int) -> int:
     return msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
 
 
+# --- scenario 7: importing the package from inside ---------------------------
+def scenario_nooa_import() -> None:
+    """Does ``import nooa`` resolve to the runtime-root copy, with the checkout denied?
+
+    The runtime root's site-packages ships ``_editable_impl_nooa.pth`` pointing
+    at the checkout. If that hook survives, a successful import would be reading
+    the exact path the sandbox exists to deny, so the probe treats importability
+    *and* checkout denial as one verdict: either alone is not evidence.
+
+    Grants are deliberately minimal — runtime root, the probe script, the work
+    directory. No grant on the checkout, the venv, or ``src``.
+    """
+    print("\n[7] nooa-import — does nooa resolve inside the root, not the checkout?")
+    app_sid = w.container_sid(CONTAINER_NAME)
+    _clean(WORKDIR)
+    if not (RUNTIME_ROOT / "Lib" / "site-packages" / "nooa" / "__init__.py").exists():
+        note("nooa_import", "package_present", "MISSING -> run _mkroot.py --sync-nooa")
+        return
+    note("nooa_import", "package_present", "yes")
+    note(
+        "nooa_import",
+        "editable_hooks_remaining",
+        len(list((RUNTIME_ROOT / "Lib" / "site-packages").glob("_editable_impl_*.pth"))),
+    )
+
+    _grant_interpreter(app_sid, scripts=("nooa_probe.py",))
+    w.grant(str(WORKDIR), app_sid, w.FILE_ALL_ACCESS)
+
+    out = WORKDIR / "nooa_report.json"
+    if out.exists():
+        out.unlink()
+
+    argv = [
+        str(RUNTIME_ROOT / "python.exe"),
+        "-I",
+        str(HERE / "nooa_probe.py"),
+        str(out),
+    ]
+    job = w.Job()
+    t0 = time.perf_counter()
+    child = w.spawn_in_container(argv, container_name=CONTAINER_NAME, cwd=str(WORKDIR))
+    job.assign(child.pi.hProcess)
+    child.resume()
+    code = child.wait(timeout_ms=120_000)
+    elapsed = time.perf_counter() - t0
+    child.close()
+    job.terminate(0)
+    job.close()
+
+    note("nooa_import", "exit_code", code)
+    note("nooa_import", "wall_clock_s", round(elapsed, 3))
+    if not out.exists():
+        note("nooa_import", "report", "MISSING (import chain or interpreter failed)")
+        return
+    try:
+        report = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        note("nooa_import", "report", f"unparseable: {exc}")
+        return
+
+    for name, res in (report.get("imports") or {}).items():
+        if res.get("ok"):
+            note(
+                "nooa_import", f"import[{name}]", f"OK inside_root={res.get('inside_runtime_root')}"
+            )
+        else:
+            note("nooa_import", f"import[{name}]", f"FAILED {res.get('error')}")
+    note("nooa_import", "version", report.get("version"))
+    checkout = report.get("checkout") or {}
+    note("nooa_import", "checkout_read_denied", checkout.get("denied"))
+    if not checkout.get("denied"):
+        note("nooa_import", "checkout_leak", checkout.get("error"))
+    note("nooa_import", "sys_path", report.get("sys_path"))
+    results["_nooa_import_report"] = report
+
+
+# --- scenario 8: multiprocessing transport across the boundary ---------------
+def scenario_mp_pipe() -> None:
+    """Does a ``multiprocessing`` Connection survive into the container?
+
+    The broker transport is ``multiprocessing.connection.Connection``. On
+    Windows that is a named pipe whose security descriptor denies the container
+    SID; the parent hands the child a *duplicated handle* instead of letting it
+    open the name. Duplication does not consult the DACL, so this should work —
+    but "should" is not a design input. If it fails, M3 needs an anonymous-pipe
+    replacement for ``wire.py``/``worker.py``, which is a different project
+    size, so the answer has to be measured before any of that code is written.
+    """
+    print("\n[8] mp-pipe — does multiprocessing's Connection cross the boundary?")
+    app_sid = w.container_sid(CONTAINER_NAME)
+    _clean(WORKDIR)
+    _grant_interpreter(app_sid, scripts=("mp_pipe_probe.py",))
+
+    import multiprocessing as mp
+
+    parent_conn, child_conn = mp.Pipe(duplex=True)
+    handle = child_conn.fileno()
+    # PROC_THREAD_ATTRIBUTE_HANDLE_LIST accepts inheritable handles only; the
+    # duplicated pipe end is not inheritable by default.
+    w._k32.SetHandleInformation(wintypes_handle(handle), 0x00000001, 0x00000001)
+
+    argv = [
+        str(RUNTIME_ROOT / "python.exe"),
+        "-I",
+        str(HERE / "mp_pipe_probe.py"),
+        str(handle),
+        "hello",
+    ]
+    job = w.Job()
+    t0 = time.perf_counter()
+    try:
+        child = w.spawn_in_container(
+            argv,
+            container_name=CONTAINER_NAME,
+            inherit_handles=(handle,),
+            cwd=str(WORKDIR),
+        )
+    except OSError as exc:
+        note("mp_pipe", "spawn", f"FAILED {exc}")
+        parent_conn.close()
+        child_conn.close()
+        job.close()
+        return
+    job.assign(child.pi.hProcess)
+    child.resume()
+
+    reply = None
+    try:
+        parent_conn.poll(60)
+        if parent_conn.poll(0):
+            reply = parent_conn.recv()
+    except (EOFError, OSError) as exc:
+        note("mp_pipe", "recv_error", f"{type(exc).__name__}: {exc}")
+    code = child.wait(timeout_ms=90_000)
+    elapsed = time.perf_counter() - t0
+
+    note("mp_pipe", "child_exit_code", code)
+    note("mp_pipe", "wall_clock_s", round(elapsed, 3))
+    note("mp_pipe", "reply", reply)
+    note("mp_pipe", "works", isinstance(reply, dict) and reply.get("reply") == "HELLO")
+
+    child.close()
+    job.terminate(0)
+    job.close()
+    parent_conn.close()
+    child_conn.close()
+
+
+def wintypes_handle(handle: int):
+    from ctypes import wintypes
+
+    return wintypes.HANDLE(handle)
+
+
 # --- helpers ----------------------------------------------------------------
 def _grant_interpreter(
     app_sid, *, include_script: bool = True, scripts: tuple[str, ...] = ("child_probe.py",)
@@ -642,7 +799,7 @@ def main() -> int:
     _adv_sid = sid.value
     results["_meta"]["container_sid_handle"] = _adv_sid
 
-    selected = args.only or [1, 2, 3, 4, 5, 6]
+    selected = args.only or [1, 2, 3, 4, 5, 6, 7, 8]
     try:
         if 1 in selected:
             scenario_reachable()
@@ -656,6 +813,10 @@ def main() -> int:
             scenario_job_limits()
         if 6 in selected:
             scenario_pipe()
+        if 7 in selected:
+            scenario_nooa_import()
+        if 8 in selected:
+            scenario_mp_pipe()
     finally:
         try:
             w.delete_profile(CONTAINER_NAME)

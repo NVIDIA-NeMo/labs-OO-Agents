@@ -26,6 +26,8 @@ non-admin user.
 | 4 | no-network | Is TCP blocked without a capability, and allowed with one? Is UDP egress observable? |
 | 5 | job-limits | Do memory/CPU caps and hard kill work? |
 | 6 | broker pipe | Can an inherited anonymous pipe carry a bidirectional round trip? |
+| 7 | nooa-import | Does `import nooa` resolve to the runtime-root copy, with the checkout still denied? |
+| 8 | mp-pipe | Does the broker's actual `multiprocessing` connection cross the boundary? |
 
 Process creation uses `CreateProcessW` with
 `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` (the only way into an
@@ -52,7 +54,10 @@ non-admin user.
 # Build the private interpreter root (≈4.5 min, ~420 MB)
 python _mkroot.py
 
-# All six scenarios
+# Refresh the nooa package in an existing root (<2 s); run after source edits
+python _mkroot.py --sync-nooa
+
+# All seven scenarios
 python runner.py
 
 # One scenario
@@ -171,17 +176,126 @@ sufficient — Windows CPython has **no `AF_UNIX`** (`socket.AF_UNIX` does not
 exist), so a socketpair design is not portable; anonymous pipes are the right
 primitive.
 
+### 7. nooa-import — works, and the checkout stays denied
+
+Lets the container import the framework from the runtime root alone. Grants:
+runtime root, the probe script, the work directory. Nothing on the checkout,
+the venv, or `src`.
+
+| Metric | Value |
+|---|---|
+| `_editable_impl_*.pth` remaining in root | 0 (all six deleted) |
+| `import nooa` | OK, `__file__` inside the runtime root |
+| `nooa.runtime.sandbox{,.config,.worker,.executor}` | all import |
+| `nooa.strategies` | imports |
+| `importlib.metadata.version("nooa")` | `0.0.11.dev415` (dist-info found, no fallback) |
+| read `<repo>\src\nooa\__init__.py` | **DENIED** |
+| Wall clock (create → exit) | 19.7 s (first run: cold bytecode cache) |
+| Package sync | 307 files / 4.4 MB / 0.65–1.25 s |
+
+Both halves are required for the verdict. An import that *works* while the
+checkout stays readable would have proven nothing — it would mean the editable
+hook survived and the "isolation" was a path alias. The probe asserts
+`__file__` starts with `sys.prefix` and separately attempts a read of the
+source package; one success without the other is a failure.
+
+The 19.7 s figure is first-run only: it includes compiling 307 modules with no
+`__pycache__` (the sync strips them deliberately, so stale bytecode cannot
+shadow new source). A warm run should be materially faster; that is not yet
+measured.
+
+### 8. mp-pipe — the broker's real transport crosses the boundary
+
+Scenario 6 used a hand-rolled anonymous pipe. The backend does not: its broker
+speaks `multiprocessing.connection.Connection`, which on Windows is a **named
+pipe** created with a default security descriptor. If the container had to open
+that name, the DACL would refuse it.
+
+It does not have to. `Popen.duplicate_for_child` hands the child a duplicated
+handle, and `DuplicateHandle` does not consult the pipe's DACL.
+
+| Metric | Value |
+|---|---|
+| `mp.Pipe(duplex=True)` round trip | `{'reply': 'HELLO', 'ok': True}` |
+| Child exit code | 0 |
+| Wall clock (create → reply → exit) | 0.30 s |
+| Handle requirement | `SetHandleInformation(HANDLE_FLAG_INHERIT)` first |
+
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` rejects non-inheritable handles (87), so
+the pipe end must be flagged inheritable before it appears in the list.
+
+**Consequence:** the broker transport needs no replacement. `wire.py` and
+`worker.py` can be reused verbatim; the Windows work is a process launcher, an
+ACL layer, and a job object, not a new IPC protocol.
+
+## Backend verification (M3)
+
+The probe above established feasibility. The backend built on it
+(`nooa/runtime/sandbox/win_api.py`, `win_runtime.py`, `win_launcher.py`,
+`win_worker.py`) is verified by `m3_smoke.py`, which drives the shipped
+`SandboxedExecutor` end to end — config → capability probe → ACL grants →
+suspended `CreateProcessW` → job assignment → resume → ready handshake →
+blueprint rebuild → cell execution → teardown.
+
+| Stage | Result |
+|---|---|
+| construct | ok |
+| cell (`value = self.answer(); value`) | returned `42` |
+| broker cell (`self.echo('hi')`) | returned `'probe:hi'` |
+| read `<repo>\src\nooa\__init__.py` | **DENIED** (`PermissionError`, errno 13) |
+| close | ok |
+
+```powershell
+$env:NOOA_SANDBOX_RUNTIME = "$PWD\experiments\windows-sandbox-probe\.rt"
+python experiments\windows-sandbox-probe\m3_smoke.py
+```
+
+Four defects were found and fixed by this run; each one would have been
+invisible in code review:
+
+1. **`psapi.GetProcessMemoryInfo` crashed on the 64-bit handle.** No
+   `argtypes`, so ctypes marshalled the handle as a C `int` and raised
+   `OverflowError`. The worker died before its ready message, with no output:
+   the process is created without inherited std handles.
+2. **A startup crash had no channel.** `CREATE_NO_WINDOW` plus no inherited
+   std handles means stderr goes nowhere. The worker now appends a traceback to
+   a file in the granted workspace, which is what surfaced defect 1.
+3. **The agent's import root was granted but not on `sys.path`.** `-I` strips
+   cwd and `PYTHONPATH`; the launcher now descends the blueprint's
+   `module:qualname` to the module's own directory, grants read on it (never its
+   ancestors), and passes it in `init["import_roots"]`.
+4. **The ready handshake preceded the namespace build.** The first cell was
+   charged for the child's cold import (≈20 s measured in scenario 7) and hit
+   its 30 s deadline. `worker_main` now takes an `on_ready` callback fired after
+   the namespace exists. The memory baseline is taken there too, so
+   `max_memory_mb` is headroom above a worker that is ready to run cells —
+   matching the `fork` baseline, which inherits the parent's mapped image.
+
+### A semantic difference from Linux
+
+Linux `spawn` imports the agent module *before* installing guards. An
+AppContainer is confined from process creation, so the import happens **inside**
+the sandbox and the module's directory must be granted. The consequence is that
+the container can read the directory holding the agent module — for the probe,
+`experiments/windows-sandbox-probe/` — while the checkout stays denied. A user
+who keeps an agent module inside a sensitive tree should move it or accept that
+one directory of it is readable by cell code.
+
 ## Consequences for the backend
 
 1. **A private runtime root is mandatory, not an optimisation.** 22,598 files /
    419 MB / 274 s to build. Reuse it across processes; rebuilding per worker is
    not viable.
-2. **The repo cannot be a dependency of the container by accident.** The
+2. **The package is copied into the root; the checkout is never granted.** The
    editable installs in `.venv` are `.pth` files pointing at
-   `E:\labs-OO-Agents\src`, so importing `nooa` inside the container would
-   require granting the checkout. A Windows backend must either install the
-   package non-editable into the runtime root or grant read on the source tree
-   explicitly (and document that choice).
+   `E:\labs-OO-Agents\src`. Deleting those six hooks and copying `src/nooa`
+   into the root (307 files, 4.4 MB, <2 s) gives the isolation of a non-editable
+   install without an installer, a wheel build, or dependency resolution. The
+   alternative — granting read on `src` — was rejected on two measured grounds:
+   it hands over the whole checkout, and `src` is an inheriting directory where
+   byte-exact DACL rollback is impossible (scenario 2), so a killed parent
+   leaves a permanent ACE on the user's working tree. Every ACL write must stay
+   inside the runtime root, which the root needs a grant on anyway.
 3. **Teardown uses `revoke`, not SDDL replay.** Plus a journal for crash
    recovery: a killed parent leaves ACEs behind, and they are persistent.
 4. **`network=False` needs a non-AppContainer enforcement path** until UDP is
@@ -194,8 +308,9 @@ primitive.
 
 ## Not measured
 
-- Full `import nooa` inside the container (the runtime root carries
-  site-packages, but the editable `.pth` targets are outside the grants).
+- Warm-start cost after the bytecode cache is populated (19.7 s is cold).
 - Long-running stability and startup cost under repeated worker restarts.
 - Behaviour on a machine with a real LAN adapter (UDP attribution).
 - Low-integrity / LPAC variants, and network enforcement via WFP.
+- Whether a worker can import an agent module that lives outside the granted
+  workspace (the blueprint path needs `module:qualname` to be importable).
