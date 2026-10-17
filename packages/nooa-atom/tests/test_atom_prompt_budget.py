@@ -69,10 +69,13 @@ RESULT = (
 # Unchanged for every row (the first call has no active Todo), so the limits
 # stay. A worker's todo_status block for a 5,000-character description falls
 # from 2,000 characters (cut before Other Todos and Hint) to 870, all kept.
+# Added handle_orchestrate (#446, the v2 orchestrator prompt) (2026-10-17):
+# measured values plus about 2% headroom.
 LIMITS = {
     (ATOM, "handle"): (15_000, 18_000),  # measured 14,669 / 17,620
     (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,669 / 17,218
     (ATOM, "handle_work"): (15_000, 18_200),  # measured 14,669 / 17,825
+    (ATOM, "handle_orchestrate"): (15_000, 19_200),  # measured 14,669 / 18,805
     (EXPERIMENTAL, "handle"): (14_800, 16_600),  # measured 14,467 / 16,237
     (EXPERIMENTAL, "handle_batch"): (14_800, 16_950),  # measured 14,467 / 16,590
     (EXPERIMENTAL, "handle_work"): (14_800, 17_250),  # measured 14,467 / 16,902

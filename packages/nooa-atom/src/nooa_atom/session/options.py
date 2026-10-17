@@ -48,7 +48,9 @@ class SessionOptions(BaseModel):
     agent_spec: str
     model: str | None = None
     llm: Any | None = Field(default=None, exclude=True)
-    turn_method: Literal["handle", "handle_batch", "handle_work"] = "handle"
+    # ``handle_orchestrate`` is an unattended root that plans, delegates and
+    # verifies; its children run ``handle_work`` (SessionPort.delegate/spawn).
+    turn_method: Literal["handle", "handle_batch", "handle_work", "handle_orchestrate"] = "handle"
     permission_mode: Literal["auto", "ask"] = "auto"
     max_depth: int = 2
     kept: bool = False

@@ -504,7 +504,7 @@ def test_context_block_helpers_are_not_traced():
     assert getattr(AtomAgent._workspace_state_context, "_no_trace", False) is True
 
 
-@pytest.mark.parametrize("method", ["handle", "handle_batch"])
+@pytest.mark.parametrize("method", ["handle", "handle_batch", "handle_orchestrate"])
 def test_the_turn_methods_run_on_the_single_tool_strategy(method):
     from nooa.strategies import CodeActV2
 

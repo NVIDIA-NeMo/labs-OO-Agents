@@ -48,7 +48,12 @@ from nooa_atom.tools.repo_tools import RepoTools
 with hidden:
     from nooa.agents import TokenBudgetSummarizer
     from nooa.runtime.channels import Channel, ChannelReader
-    from nooa_atom.agent.conditions import require_result, require_task_result
+    from nooa_atom.agent.conditions import (
+        require_result,
+        require_running_wait,
+        require_running_wait_unattended,
+        require_task_result,
+    )
     from nooa_atom.session.port import SessionPort, _reject_removed
 
 if TYPE_CHECKING:
@@ -557,7 +562,10 @@ class AtomAgent(InteractiveAgent):
         ...
 
     @hidden
-    @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
+    @strategy(
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_running_wait])),
+        context=_V2_CONTEXT,
+    )
     async def handle(
         self,
         notification: Annotated[
@@ -602,7 +610,12 @@ class AtomAgent(InteractiveAgent):
 
     @hidden
     @strategy(
-        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
+        CodeActV2(
+            config=CodeActConfig(
+                cell_timeout=1800.0,
+                postconditions=[require_result, require_running_wait_unattended],
+            )
+        ),
         context=_V2_CONTEXT,
     )
     async def handle_batch(
@@ -634,6 +647,81 @@ class AtomAgent(InteractiveAgent):
         that says what blocked you and what you tried. Return
         ``Waiting(explanation=..., on=[...])`` only while a job you started
         is still running.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
+        """
+        ...
+
+    @hidden
+    @strategy(
+        CodeActV2(
+            config=CodeActConfig(
+                cell_timeout=1800.0,
+                postconditions=[require_result, require_running_wait_unattended],
+            )
+        ),
+        context=_V2_CONTEXT,
+    )
+    async def handle_orchestrate(
+        self,
+        notification: Annotated[
+            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+        ],
+    ) -> Done | Waiting:
+        """You are a recursive language model agent.
+
+        You work on one task on your own. Nobody is watching and nobody can
+        answer a question; the result you return is the only thing the
+        requester reads.
+
+        The task is the text in ``notification["user_messages"]``; data sent
+        with it is in ``notification.get("context", [])``.
+
+        You are the orchestrator. You decide how the work is split and who does
+        each part, and you are responsible for the result. Do not implement the
+        work yourself; understanding, writing requirements and measuring are yours.
+
+        Work in this loop:
+        1. Understand the request. Read what you need, or have a read-only child
+           explore.
+        2. Write the requirements: how success will be measured. Put them in a
+           Todo (``self.todo.add(title, description=...)``): the goal, the exact
+           requirements and constraints from the task, and acceptance checks
+           that can be run. When a requirement is best written as code (for
+           example a failing test), decide who writes it, and confirm it fails
+           before the work starts.
+        3. Do the work: hand each Todo to a child with
+           ``child = await self.spawn(description, todo, retain=True)`` and keep
+           ``child`` in ``self.v``. Children share one checkout: one child edits
+           at a time; read-only work can run in parallel. While children run, end
+           the turn with ``Waiting(explanation=..., on=["delegates"])``.
+        4. Measure: results arrive in ``notification["delegates"]`` (a
+           ``ChildResult``, a ``ChildQuestion``: ``await item.answer(...)``, or
+           a ``ChildFailed``). Run every acceptance check yourself; a report is
+           not proof. Record each result with ``self.todo.comment(todo, ...)``.
+        5. Loop: if a requirement is not met, send the child the failing check
+           and its output with ``await child.send(...)`` and wait again. Decide
+           when another round is not worth it given the time left.
+
+        Finish with ``Done`` and a ``TaskResult`` whose ``evidence`` is what you
+        measured in step 4; if requirements are still unmet, say which.
+        Leave children open; the host closes them after grading.
+
+            return_result(Done(
+                explanation="fixed the parser bug",
+                result=TaskResult(
+                    solution_description="What was done, including modified paths",
+                    evidence="The checks you ran and what they showed",
+                    how_to_verify="How someone else can check it",
+                    report="The full report for the requester",
+                ),
+            ))
+
+        If something blocks you, still return ``Done`` with a ``TaskResult``
+        that says what blocked you and what was tried.
 
         Python locals live for one method call; when the call returns they
         are gone. Anything you need later goes in ``self.v`` (durable,
