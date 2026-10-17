@@ -40,6 +40,16 @@ to follow semantic versioning.
   from the record after a reload. `SessionOptions` refuses unknown fields
   and carries one child flag, `kept`. `AgentMessage.is_result_text` marks a
   turn result's message.
+- `send()` of a Todo (or any model embedding `SnapshotVars`) no longer fails
+  with `PydanticSerializationError`: `SnapshotVars` has a pydantic schema.
+  JSON mode writes the plain vars, or a tagged snapshot blob restored through
+  the snapshot allowlist when a value is not plain JSON (a model, a tuple).
+  `spawn()`/`delegate()` adopt a hand-built `Todo(...)` into `self.todo`
+  (`TodoManager.adopt`) instead of raising, so the merge-back reaches the
+  caller's object; a different Todo reusing a managed id still raises.
+  `TodoManager.status()` caps the active Todo's description at 600 characters,
+  with a pointer to `self.todo.get(id).description`, so the Other Todos and
+  Hint lines are no longer cut.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive
