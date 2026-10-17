@@ -63,8 +63,14 @@ class RuntimeRoot:
     def journal(self) -> Path:
         return self.root / "acl-journal.jsonl"
 
-    def check(self) -> None:
-        """Raise ``SandboxUnavailable``-shaped errors for an unusable root."""
+    def check(self, *, require_package: bool = True) -> None:
+        """Raise ``SandboxUnavailable``-shaped errors for an unusable root.
+
+        ``require_package=False`` checks only the interpreter. The package check
+        must be skippable: ``--sync`` exists to *install* the package, so
+        demanding it first would make the command refuse to fix exactly the
+        state it was written for.
+        """
         from nooa.runtime.sandbox.errors import SandboxUnavailable
 
         if os.name != "nt":
@@ -72,13 +78,17 @@ class RuntimeRoot:
         if not self.python.exists():
             raise SandboxUnavailable(
                 f"sandbox runtime root {self.root} has no python.exe. "
-                "Build it once with `python experiments/windows-sandbox-probe/_mkroot.py`, "
+                "Build it once with "
+                f"`python -m nooa.runtime.sandbox.win_runtime --build --root {self.root}`, "
                 f"or point {_RUNTIME_ENV} at an existing root."
             )
+        if not require_package:
+            return
         if not (self.package / "__init__.py").exists():
             raise SandboxUnavailable(
                 f"sandbox runtime root {self.root} does not contain the nooa package. "
-                "Run `python experiments/windows-sandbox-probe/_mkroot.py --sync-nooa`."
+                "Run `python -m nooa.runtime.sandbox.win_runtime --sync "
+                f"--root {self.root}`."
             )
         editable = list(self.site_packages.glob("_editable_impl_*.pth"))
         if editable:
@@ -86,7 +96,9 @@ class RuntimeRoot:
             raise SandboxUnavailable(
                 f"sandbox runtime root {self.root} still carries editable install hooks "
                 f"({names}); those resolve imports to the project checkout, which the "
-                "container is not granted. Remove them (see `_mkroot.py --sync-nooa`)."
+                "container is not granted. Remove them by refreshing the package: "
+                "`python -m nooa.runtime.sandbox.win_runtime --sync "
+                f"--root {self.root}`."
             )
 
 
@@ -106,6 +118,106 @@ def _installed_package_dir() -> Path:
     import nooa
 
     return Path(nooa.__file__).resolve().parent
+
+
+def _source_layout() -> tuple[Path, Path]:
+    """``(interpreter prefix, site-packages)`` of the *current* environment.
+
+    Derived from the running interpreter rather than hardcoded: ``sys.base_prefix``
+    is the CPython install even inside a venv, and ``sysconfig`` resolves the
+    venv's site-packages. A checkout-relative ``.venv`` path would be wrong for
+    an installed package and for any other environment layout.
+    """
+    import site
+    import sys
+    import sysconfig
+
+    base = Path(sys.base_prefix)
+    candidates: list[Path] = []
+    for key in ("purelib", "platlib"):
+        try:
+            candidates.append(Path(sysconfig.get_path(key)))
+        except (KeyError, OSError):
+            pass
+    try:
+        candidates.extend(Path(p) for p in site.getsitepackages())
+    except Exception:  # noqa: BLE001 - site may be unavailable in odd embedders
+        pass
+    for candidate in candidates:
+        if (candidate / "nooa").is_dir() or list(candidate.glob("*.dist-info")):
+            return base, candidate
+    if not candidates:
+        raise RuntimeError("could not locate a site-packages directory")
+    return base, candidates[0]
+
+
+# Directories copied wholesale from the interpreter prefix; everything else at
+# the top level is a file (python.exe, python313.dll, ...).
+_COPY_DIRS = ("Lib", "DLLs", "libs", "include")
+# stdlib subtrees no worker needs; each is tens of MB.
+_SKIP_STDLIB = ("__pycache__", "test", "tests", "idlelib", "tkinter", "turtledemo")
+
+
+def build_root(
+    root: RuntimeRoot,
+    *,
+    interpreter_prefix: Path | None = None,
+    site_packages: Path | None = None,
+) -> str:
+    """Copy interpreter + stdlib + site-packages into ``root``.
+
+    This is stage one; :func:`sync_package` is stage two and must run after it.
+    An existing root is removed first: a partial merge would produce an
+    interpreter whose DLLs and stdlib come from different builds.
+    """
+    source_prefix, source_sp = (
+        (Path(interpreter_prefix), Path(site_packages))
+        if interpreter_prefix and site_packages
+        else _source_layout()
+    )
+    if not (source_prefix / "python.exe").exists() and not (source_prefix / "python").exists():
+        raise RuntimeError(f"{source_prefix} does not look like an interpreter prefix")
+    if not source_sp.is_dir():
+        raise RuntimeError(f"{source_sp} is not a directory")
+
+    started = time.perf_counter()
+    shutil.rmtree(root.root, ignore_errors=True)
+    root.root.mkdir(parents=True, exist_ok=True)
+
+    for name in os.listdir(source_prefix):
+        source = source_prefix / name
+        target = root.root / name
+        if source.is_dir():
+            if name in _COPY_DIRS:
+                shutil.copytree(
+                    source,
+                    target,
+                    symlinks=True,
+                    ignore=shutil.ignore_patterns(*_SKIP_STDLIB),
+                )
+        else:
+            shutil.copy2(source, target)
+
+    root.site_packages.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        source_sp,
+        root.site_packages,
+        symlinks=True,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+    elapsed = time.perf_counter() - started
+    files = 0
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root.root):
+        for filename in filenames:
+            files += 1
+            try:
+                total += os.path.getsize(os.path.join(dirpath, filename))
+            except OSError:
+                pass
+    return f"{root.root}: {files} files, {total / 1e6:.1f} MB, {elapsed:.1f}s"
 
 
 def _tree_signature(root: Path) -> dict[str, int]:
@@ -272,3 +384,57 @@ def prepare_root(
     if recovered:
         summary += f"; revoked {len(recovered)} stale grant(s)"
     return summary
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Command line: build the root, refresh the package, or report on it.
+
+    ``python -m nooa.runtime.sandbox.win_runtime --build``
+        Create the runtime root from the running interpreter (one-time, ~4.5 min).
+    ``--sync``
+        Refresh only the ``nooa`` package inside an existing root (sub-second).
+    ``--status``
+        Say where the root is and whether it is usable.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m nooa.runtime.sandbox.win_runtime")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--build", action="store_true", help="create the runtime root")
+    group.add_argument("--sync", action="store_true", help="refresh the nooa package only")
+    group.add_argument("--status", action="store_true", help="report on the current root")
+    parser.add_argument("--root", default=None, help="override the runtime root path")
+    parser.add_argument("--force", action="store_true", help="with --sync, copy unconditionally")
+    args = parser.parse_args(argv)
+
+    root = resolve_root(args.root)
+
+    if args.status:
+        print(f"root: {root.root}")
+        try:
+            root.check()
+        except Exception as exc:  # noqa: BLE001 - status reports, never raises
+            print(f"usable: no ({exc})")
+            return 1
+        print("usable: yes")
+        return 0
+
+    if args.sync:
+        # Only the interpreter must exist: installing the package is this
+        # command's job, so requiring it here would be circular.
+        root.check(require_package=False)
+        print(f"nooa package: {sync_package(root, force=args.force)}")
+        return 0
+
+    if args.build:
+        print(f"building {root.root} ...")
+        print(build_root(root))
+        print(f"nooa package: {sync_package(root, force=True)}")
+        return 0
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

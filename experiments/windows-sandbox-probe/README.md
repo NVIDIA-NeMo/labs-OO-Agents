@@ -57,11 +57,22 @@ python _mkroot.py
 # Refresh the nooa package in an existing root (<2 s); run after source edits
 python _mkroot.py --sync-nooa
 
-# All seven scenarios
+# All eight scenarios
 python runner.py
 
 # One scenario
 python runner.py --only 4
+```
+
+`_mkroot.py` is a thin wrapper over `nooa.runtime.sandbox.win_runtime`; the
+implementation lives in the package so this experiment and the shipped backend
+cannot drift apart. It targets this directory's `.rt`, deliberately separate
+from the backend's per-user cache. Use the package entry point for a real
+session:
+
+```bash
+python -m nooa.runtime.sandbox.win_runtime --build
+python -m nooa.runtime.sandbox.win_runtime --status
 ```
 
 Requires Windows 10 1809+ (AppContainer) and Windows 10 1803+ for named pipes.

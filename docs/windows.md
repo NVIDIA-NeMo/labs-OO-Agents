@@ -36,18 +36,32 @@ is mandatory rather than an optimisation — the system interpreter's directory
 denies DACL writes to a non-admin user, so the container cannot be granted
 access to it in place.
 
-Build the runtime root once (≈4.5 min, ~420 MB), then point the backend at it:
+Build the runtime root once (≈4.5 min, ~420 MB):
 
 ```powershell
-python experiments\windows-sandbox-probe\_mkroot.py
-$env:NOOA_SANDBOX_RUNTIME = "$PWD\experiments\windows-sandbox-probe\.rt"
+python -m nooa.runtime.sandbox.win_runtime --build
+```
+
+That writes to `%LOCALAPPDATA%\nooa\sandbox-runtime` by default. To use a
+different location, pass `--root <dir>` and set `NOOA_SANDBOX_RUNTIME` to the
+same path:
+
+```powershell
+python -m nooa.runtime.sandbox.win_runtime --build --root D:\sandbox-rt
+$env:NOOA_SANDBOX_RUNTIME = "D:\sandbox-rt"
 ```
 
 After editing framework source, refresh the package copy inside the root
 (sub-second; the launcher also does this on every start):
 
 ```powershell
-python experiments\windows-sandbox-probe\_mkroot.py --sync-nooa
+python -m nooa.runtime.sandbox.win_runtime --sync
+```
+
+Check the current state at any time:
+
+```powershell
+python -m nooa.runtime.sandbox.win_runtime --status
 ```
 
 ```python
