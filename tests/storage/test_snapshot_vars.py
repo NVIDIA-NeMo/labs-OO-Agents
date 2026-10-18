@@ -175,30 +175,79 @@ class TestSnapshotVarsPydantic:
         assert isinstance(copied.vars, SnapshotVars) and copied.vars is not holder.vars
         assert dict(copied.vars) == {"a": 1}
 
-    def test_non_json_values_round_trip_as_a_tagged_snapshot_blob(self):
+    def test_non_json_values_are_refused_in_json_mode_naming_the_key(self):
+        import pytest
+        from pydantic_core import PydanticSerializationError
+
         from nooa.tools.todo import TodoComment
 
-        comment = TodoComment(body="hi")
-        holder = self._model()(vars={"pair": (1, 2), "comment": comment, "n": 3})
-        dumped = holder.model_dump(mode="json")["vars"]
-        assert set(dumped) == {"__snapshot_vars__"}
-        assert dumped["__snapshot_vars__"]["allowlist"] == ["nooa.tools.todo.TodoComment"]
-        back = type(holder).model_validate_json(holder.model_dump_json())
-        assert dict(back.vars) == {"pair": (1, 2), "comment": comment, "n": 3}
+        holder = self._model()(vars={"n": 3, "comment": TodoComment(body="hi")})
+        with pytest.raises(PydanticSerializationError, match="var 'comment' holds a TodoComment"):
+            holder.model_dump(mode="json")
+        with pytest.raises(PydanticSerializationError, match="var 'comment'"):
+            holder.model_dump_json()
+        pair = self._model()(vars={"pair": (1, 2)})
+        with pytest.raises(PydanticSerializationError, match="var 'pair' holds a tuple"):
+            pair.model_dump_json()
 
-    def test_a_tagged_blob_naming_a_class_outside_its_allowlist_is_refused(self):
-        import pytest
-
-        from nooa.errors.storage import DeserializationError
-
-        blob = {
-            "__snapshot_vars__": {
-                "blob": {"x": {"__type__": "pydantic", "__class__": "os.Evil", "data": {}}},
-                "allowlist": [],
-            }
+    @staticmethod
+    def _popen_payload(marker):
+        return {
+            "title": "innocent",
+            "vars": {
+                "__snapshot_vars__": {
+                    "blob": {
+                        "x": {
+                            "__type__": "dict_class",
+                            "__class__": "subprocess.Popen",
+                            "data": {"args": ["touch", str(marker)]},
+                        }
+                    },
+                    "allowlist": ["subprocess.Popen"],
+                }
+            },
         }
-        with pytest.raises(DeserializationError):
-            self._model().model_validate({"vars": blob})
+
+    def test_a_payload_carrying_its_own_allowlist_constructs_nothing(self, tmp_path):
+        """Validating a Todo never imports or constructs a class named by the data."""
+        import json
+        import time
+
+        import pytest
+        from pydantic import ValidationError
+
+        from nooa.tools.todo import Todo
+
+        marker = tmp_path / "pwned"
+        payload = self._popen_payload(marker)
+        with pytest.raises(ValidationError, match="tagged SnapshotVars payloads are not accepted"):
+            Todo.model_validate(payload)
+        with pytest.raises(ValidationError, match="tagged SnapshotVars payloads are not accepted"):
+            Todo.model_validate_json(json.dumps(payload))
+        time.sleep(0.3)  # a spawned Popen would have touched the file by now
+        assert not marker.exists()
+
+    def test_plain_json_vars_round_trip_through_a_todo(self):
+        from nooa.tools.todo import Todo
+
+        todo = Todo(title="t", vars={"a": 1, "b": ["x", {"c": None}], "s": "y"})
+        back = Todo.model_validate_json(todo.model_dump_json())
+        assert dict(back.vars) == dict(todo.vars)
+        assert Todo.model_validate(todo.model_dump(mode="json")) == back
+
+    def test_non_json_todo_vars_still_survive_the_session_snapshot(self):
+        from nooa.storage.serialization import deserialize, serialize
+        from nooa.tools.todo import TodoComment, TodoManager
+
+        tm = TodoManager()
+        todo = tm.add("t")
+        todo.vars["pair"] = (1, 2)
+        comment = TodoComment(body="hi")
+        todo.vars["comment"] = comment
+        restored = deserialize(*serialize(tm))
+        again = restored.get(todo.id)
+        assert again.vars["pair"] == (1, 2)
+        assert again.vars["comment"] == comment
 
     def test_validation_wraps_a_plain_dict_and_keeps_the_write_filter(self):
         holder = self._model().model_validate({"vars": {"ok": 1, "bad": _Unserializable()}})

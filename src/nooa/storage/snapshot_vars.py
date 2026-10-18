@@ -16,13 +16,14 @@ captures its internal ``_data`` (already clean), instead of the strict dict
 branch.
 
 Pydantic models can embed ``SnapshotVars`` as a field (``Todo.vars``). Python-mode
-``model_dump()`` and ``model_copy()`` keep the ``SnapshotVars`` object; JSON mode
+``model_dump()`` and ``model_copy()`` keep the ``SnapshotVars`` object. JSON mode
 (``model_dump(mode="json")``, ``model_dump_json()``), which is how items cross
-sessions, writes the plain data when every value is JSON-native. Otherwise it
-writes a tagged snapshot blob, ``{"__snapshot_vars__": {"blob": ..., "allowlist":
-[...]}}``. Validation accepts a ``SnapshotVars``, a plain dict, or that tagged
-form. The tagged form is restored with the snapshot deserializer and its
-allowlist, the same trust model as a snapshot file on disk.
+sessions, carries plain JSON only: a value that is not JSON data (a pydantic
+model, a tuple, ...) raises an error naming its key. Validation accepts a
+``SnapshotVars``, a plain dict or ``None`` and never imports or constructs a
+class: a payload must not be able to choose what gets instantiated. Non-JSON
+values survive only the session snapshot (``nooa.storage.serialization``), whose
+allowlist comes from code.
 """
 
 import enum
@@ -32,11 +33,12 @@ from typing import Any
 
 from nooa.errors.storage import SerializationError
 from nooa.storage.markers import snapshotable
-from nooa.storage.serialization import deserialize, serialize
+from nooa.storage.serialization import serialize
 
 logger = logging.getLogger(__name__)
 
-# Key of the tagged JSON form for values that need snapshot envelopes.
+# Key of a removed tagged JSON form that carried its own deserialization
+# allowlist; payloads using it are refused instead of being restored.
 _TAGGED_KEY = "__snapshot_vars__"
 
 
@@ -119,31 +121,36 @@ class SnapshotVars(MutableMapping):
     # ── pydantic integration ─────────────────────
 
     def to_json_data(self) -> dict[str, Any]:
-        """Return the JSON form used by pydantic's JSON mode.
+        """Return the plain-JSON form used by pydantic's JSON mode.
 
-        Plain JSON values come out as a plain dict. If any value needs a
-        snapshot envelope (a pydantic model, a tuple, ...), the whole mapping is
-        written as a tagged snapshot blob with its allowlist instead.
+        Raises ``ValueError`` naming the first key whose value is not JSON data
+        (a pydantic model, a tuple, ...): only plain JSON crosses sessions.
         """
-        if _is_json_native(self._data):
-            return dict(self._data)
-        blob, allowlist = serialize(dict(self._data))
-        return {_TAGGED_KEY: {"blob": blob, "allowlist": sorted(allowlist)}}
+        for key, value in self._data.items():
+            if not _is_json_native(value):
+                raise ValueError(
+                    f"var {key!r} holds a {type(value).__name__}, which is not plain JSON; "
+                    "Todo vars sent to another session must be JSON data "
+                    "(dict, list, str, int, float, bool, None)"
+                )
+        return dict(self._data)
 
     @classmethod
     def from_data(cls, value: Any) -> "SnapshotVars":
-        """Accept a ``SnapshotVars`` as-is, a dict, ``None``, or the tagged JSON form."""
+        """Accept a ``SnapshotVars`` as-is, a plain dict or ``None``.
+
+        Never deserializes snapshot envelopes, so validating a model that embeds
+        ``SnapshotVars`` cannot import or construct arbitrary classes.
+        """
         if isinstance(value, SnapshotVars):
             return value
         if value is None:
             return cls()
         if isinstance(value, dict):
-            tagged = value.get(_TAGGED_KEY) if len(value) == 1 else None
-            if isinstance(tagged, dict) and "blob" in tagged:
-                restored = deserialize(tagged["blob"], set(tagged.get("allowlist") or ()))
-                if not isinstance(restored, dict):
-                    raise ValueError("tagged SnapshotVars blob must decode to a dict")
-                return cls(restored)
+            if len(value) == 1 and _TAGGED_KEY in value:
+                raise ValueError(
+                    "tagged SnapshotVars payloads are not accepted; vars must be plain JSON"
+                )
             return cls(value)
         raise TypeError(f"expected a dict or SnapshotVars, got {type(value).__name__}")
 

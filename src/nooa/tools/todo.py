@@ -99,7 +99,6 @@ class Todo(BaseModel):
     @classmethod
     def _coerce_vars(cls, value: Any) -> "SnapshotVars":
         if isinstance(value, (SnapshotVars, dict)) or value is None:
-            # Also restores the tagged JSON form of non-JSON vars.
             return SnapshotVars.from_data(value)
         raise TypeError(f"Todo.vars must be a dict or SnapshotVars, got {type(value).__name__}")
 

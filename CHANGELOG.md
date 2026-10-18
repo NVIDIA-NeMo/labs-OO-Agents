@@ -53,8 +53,11 @@ to follow semantic versioning.
   turn result's message.
 - `send()` of a Todo (or any model embedding `SnapshotVars`) no longer fails
   with `PydanticSerializationError`: `SnapshotVars` has a pydantic schema.
-  JSON mode writes the plain vars, or a tagged snapshot blob restored through
-  the snapshot allowlist when a value is not plain JSON (a model, a tuple).
+  JSON mode carries plain JSON only: a var that is not JSON data (a model, a
+  tuple) raises an error naming its key, so a Todo sent to another session must
+  have plain-JSON vars. Validation never imports or constructs a class (a
+  payload naming its own allowlist is refused); non-JSON vars still survive the
+  session snapshot, whose allowlist comes from code.
   `spawn()`/`delegate()` adopt a hand-built `Todo(...)` into `self.todo`
   (`TodoManager.adopt`) instead of raising, so the merge-back reaches the
   caller's object; a different Todo reusing a managed id still raises.

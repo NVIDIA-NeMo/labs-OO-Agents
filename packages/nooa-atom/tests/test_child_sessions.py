@@ -1181,6 +1181,18 @@ def test_a_todo_survives_the_session_record_and_the_send_copy():
         assert Todo.model_validate_json(item_to_json(todo)) == copy
 
 
+def test_a_todo_with_a_non_json_var_is_refused_when_sent_naming_the_key():
+    from nooa_atom.session.session import as_data, item_to_json
+    from pydantic_core import PydanticSerializationError
+
+    todos = TodoManager()
+    todo = todos.add("with a tuple")
+    todos.set_var(todo, "pair", (1, 2))
+    for send_copy in (as_data, item_to_json):
+        with pytest.raises(PydanticSerializationError, match="var 'pair' holds a tuple"):
+            send_copy(todo)
+
+
 async def test_send_hands_a_todo_to_a_kept_child(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
         _wait_then("self.v.ref = await self.spawn('Kept', 'first task')"),
