@@ -108,19 +108,45 @@ def test_debug_handler_is_optional_when_sigusr2_is_unavailable(monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows has no Unix sandbox mechanisms")
-def test_windows_sandbox_capabilities_can_be_queried():
+def test_windows_sandbox_capabilities_can_be_queried(tmp_path, monkeypatch):
     from nooa.runtime.sandbox.guards import probe_capabilities
 
+    # Pin the root: otherwise the answer depends on whether this machine has
+    # built one at the default location.
+    monkeypatch.setenv("NOOA_SANDBOX_RUNTIME", str(tmp_path))
     capabilities = probe_capabilities()
-    # No mechanism is available on Windows yet. Each guardrail reports None so
-    # the executor fails closed instead of running cells unconfined; the
-    # AppContainer backend is validated in experiments/windows-sandbox-probe.
+    # The AppContainer mechanisms need a working runtime root. Without one each
+    # guardrail reports None, so the executor fails closed instead of running
+    # cells unconfined, and the reason names the root that was checked.
     assert capabilities.filesystem is None
     assert capabilities.network is None
     assert capabilities.memory is None
     assert capabilities.cpu is None
     assert capabilities.landlock_abi == 0
-    assert "reason" in capabilities.detail
+    assert str(tmp_path.resolve()) in capabilities.detail["reason"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the runtime root is a Windows concept")
+def test_sandbox_validates_the_configured_runtime_root(tmp_path, monkeypatch):
+    """Construction checks the root the config names, not the environment's.
+
+    The launcher runs the worker from the configured root, so probing any other
+    lets construction and launch disagree about whether the sandbox is usable.
+    """
+    from nooa.runtime.sandbox import executor
+    from nooa.runtime.sandbox.config import SandboxConfig
+    from nooa.runtime.sandbox.errors import SandboxUnavailable
+
+    monkeypatch.setattr(executor, "_CAPS_CACHE", {})
+    monkeypatch.setenv("NOOA_SANDBOX_RUNTIME", str(tmp_path / "from-env"))
+    configured = tmp_path / "from-config"
+    configured.mkdir()
+    config = SandboxConfig(
+        start_method="spawn", backend="appcontainer", runtime_root=str(configured)
+    )
+    with pytest.raises(SandboxUnavailable) as excinfo:
+        executor.SandboxedExecutor(_PlatformAgent(), config, cell_timeout=1)
+    assert str(configured.resolve()) in str(excinfo.value)
 
 
 @pytest.mark.parametrize("require", [False, True])

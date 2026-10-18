@@ -13,8 +13,9 @@ subsequent code — that is the "no leakage by design" guarantee:
 These three are the Linux mechanisms. :class:`Capabilities` names the mechanism
 actually available per guardrail, so a platform without one reports ``None``
 rather than pretending. The Windows mechanisms (AppContainer ACLs, Job Object
-limits) are not implemented here yet; see ``experiments/windows-sandbox-probe``
-for the feasibility evidence behind that design.
+limits) are not self-imposed: ``win_launcher`` applies them when it creates the
+worker, so this module only probes for them. See
+``experiments/windows-sandbox-probe`` for the feasibility evidence.
 """
 
 from __future__ import annotations
@@ -182,13 +183,19 @@ class Capabilities:
     detail: dict[str, str] = field(default_factory=dict)
 
 
-def probe_capabilities() -> Capabilities:
-    """Probe this host once for every enforcement mechanism the sandbox uses."""
+def probe_capabilities(runtime_root: str | None = None) -> Capabilities:
+    """Probe this host for every enforcement mechanism the sandbox uses.
+
+    ``runtime_root`` is ``SandboxConfig.runtime_root``. Only the Windows
+    backend uses it: its mechanisms are usable only with a working runtime
+    root, so the probe has to check the one the config names. ``None`` resolves
+    the root from the environment, as the launcher does.
+    """
     system = platform.system()
     if system == "Linux":
         return _probe_linux()
     if system == "Windows":
-        return _probe_windows()
+        return _probe_windows(runtime_root)
     return Capabilities(detail={"reason": f"unsupported platform: {system}"})
 
 
@@ -220,7 +227,7 @@ def _probe_linux() -> Capabilities:
     )
 
 
-def _probe_windows() -> Capabilities:
+def _probe_windows(runtime_root: str | None = None) -> Capabilities:
     """Windows enforcement: AppContainer ACLs plus Job Object limits.
 
     Unlike the Linux mechanisms, none of these are applied by the *child*. An
@@ -246,7 +253,7 @@ def _probe_windows() -> Capabilities:
         return Capabilities(detail={"reason": f"Win32 bindings unavailable: {exc}"})
 
     try:
-        root = resolve_root()
+        root = resolve_root(runtime_root)
         prepare_root(root, sync=False)
     except SandboxUnavailable as exc:
         return Capabilities(detail={"reason": str(exc)})

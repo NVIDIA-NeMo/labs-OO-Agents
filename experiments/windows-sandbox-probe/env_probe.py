@@ -86,9 +86,6 @@ def main() -> int:
         print(f"no runtime root at {ROOT}; build it with _mkroot.py first")
         return 2
 
-    # The capability probe resolves the root from the environment rather than
-    # from ``SandboxConfig.runtime_root``, so both are set.
-    os.environ.setdefault("NOOA_SANDBOX_RUNTIME", str(ROOT))
     os.environ[SENTINEL] = "set-in-the-parent-only"
     parent_keys = {key.upper() for key in os.environ}
 

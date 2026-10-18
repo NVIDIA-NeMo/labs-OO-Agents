@@ -829,7 +829,7 @@ async def test_require_true_raises_when_unavailable(monkeypatch):
         cpu="rlimit",
         hard_kill="sigkill",
     )
-    monkeypatch.setattr(ex_mod, "_CAPS_CACHE", fake)
+    monkeypatch.setattr(ex_mod, "_CAPS_CACHE", {None: fake})
     # The constructor validates the start method before the guardrails. Without
     # this the test would stop at the platform check on Windows and never reach
     # check_enforceable, so the assertions below would be untested there.
@@ -844,4 +844,3 @@ async def test_require_true_raises_when_unavailable(monkeypatch):
         )
     assert "filesystem" in str(excinfo.value)
     assert "network isolation" in str(excinfo.value)
-    ex_mod._CAPS_CACHE = None

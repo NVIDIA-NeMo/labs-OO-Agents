@@ -126,8 +126,8 @@ class SandboxConfig(BaseModel):
         default=None,
         description=(
             "Windows only: private interpreter root the AppContainer runs from. "
-            "None -> $NOOA_SANDBOX_RUNTIME, else a per-user cache. Built once with "
-            "experiments/windows-sandbox-probe/_mkroot.py."
+            "None -> $NOOA_SANDBOX_RUNTIME, else a per-user cache. Build it once with "
+            "`python -m nooa.runtime.sandbox.win_runtime --build --root <dir>`."
         ),
     )
     env_passthrough: tuple[str, ...] = Field(

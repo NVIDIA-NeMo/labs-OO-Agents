@@ -60,7 +60,11 @@ def _bounded_text(value: object, fallback: str, *, limit: int) -> str:
     return _hard_bound_text(text, limit)
 
 
-_CAPS_CACHE: Capabilities | None = None
+# Keyed by ``SandboxConfig.runtime_root``: on Windows the answer depends on
+# which runtime root a config names, so one cached answer per host would let
+# a config that names a working root inherit another config's failure (or the
+# reverse). ``None`` is the root resolved from the environment.
+_CAPS_CACHE: dict[str | None, Capabilities] = {}
 
 
 def _is_container_proc(proc: Any) -> bool:
@@ -83,11 +87,10 @@ def _release_worker(proc: Any) -> None:
             logger.debug("container worker release failed", exc_info=True)
 
 
-def _capabilities() -> Capabilities:
-    global _CAPS_CACHE
-    if _CAPS_CACHE is None:
-        _CAPS_CACHE = probe_capabilities()
-    return _CAPS_CACHE
+def _capabilities(runtime_root: str | None = None) -> Capabilities:
+    if runtime_root not in _CAPS_CACHE:
+        _CAPS_CACHE[runtime_root] = probe_capabilities(runtime_root)
+    return _CAPS_CACHE[runtime_root]
 
 
 def check_enforceable(config: SandboxConfig, caps: Capabilities | None = None) -> list[str]:
@@ -98,7 +101,7 @@ def check_enforceable(config: SandboxConfig, caps: Capabilities | None = None) -
     A config that requests nothing returns an empty list even if the host could
     enforce nothing.
     """
-    caps = caps or _capabilities()
+    caps = caps or _capabilities(config.runtime_root)
     missing: list[str] = []
     # The probe records why a mechanism is unavailable (missing runtime root,
     # unsupported kernel, ...). That reason is the actionable part; without it
@@ -174,7 +177,9 @@ class SandboxedExecutor:
             except BlueprintError as exc:
                 raise SandboxUnavailable(str(exc)) from exc
 
-        caps = _capabilities()
+        # The probe must validate the root this config names, which is the one
+        # the launcher will run from; probing any other lets the two disagree.
+        caps = _capabilities(config.runtime_root)
         missing = check_enforceable(config, caps)
         if missing and config.require:
             raise SandboxUnavailable(

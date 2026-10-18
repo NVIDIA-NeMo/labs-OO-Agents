@@ -76,6 +76,17 @@ pytestmark.append(
 )
 
 
+@pytest.fixture(autouse=True)
+def _root_only_from_config(monkeypatch):
+    """The environment variable only locates the root for this module.
+
+    Every session names it through ``SandboxConfig.runtime_root``. Leaving the
+    variable set as well would let a backend that ignores the config field pass
+    here anyway, which is how that defect went unnoticed.
+    """
+    monkeypatch.delenv("NOOA_SANDBOX_RUNTIME", raising=False)
+
+
 def _config(workspace: Path, **overrides):
     from nooa.runtime.sandbox.config import SandboxConfig
 

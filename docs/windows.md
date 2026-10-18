@@ -43,8 +43,9 @@ python -m nooa.runtime.sandbox.win_runtime --build
 ```
 
 That writes to `%LOCALAPPDATA%\nooa\sandbox-runtime` by default. To use a
-different location, pass `--root <dir>` and set `NOOA_SANDBOX_RUNTIME` to the
-same path:
+different location, pass `--root <dir>` and point the sandbox at the same path,
+with `NOOA_SANDBOX_RUNTIME` or with `SandboxConfig(runtime_root=...)`, which
+wins when both are set:
 
 ```powershell
 python -m nooa.runtime.sandbox.win_runtime --build --root D:\sandbox-rt
