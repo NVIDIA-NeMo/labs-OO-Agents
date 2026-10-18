@@ -10,6 +10,8 @@ import inspect
 import typing
 from typing import Any
 
+from nooa.agentdoc._metadata import get_docs_metadata, get_field_metadata
+
 # Builtins to exclude from referenced types
 BUILTIN_TYPE_NAMES = {
     "str",
@@ -187,6 +189,9 @@ def _extract_types_from_callable(attr: Any, discovered: set[type]) -> None:
         attr: The function or method to scan.
         discovered: Set to add discovered types to (modified in place).
     """
+    if get_docs_metadata(attr).get("expand") is False:
+        return
+
     # 1. Fully-resolved hints (handles PEP 563 strings and forward refs in one shot).
     resolved: dict[str, Any] = {}
     try:
@@ -242,6 +247,9 @@ def _extract_types_from_field(
         field_type_str: Formatted type string (for reference)
         discovered: Set to add discovered types to (modified in place)
     """
+    if get_field_metadata(cls, field_name).get("expand") is False:
+        return
+
     # 1. Check if field is a class-level annotation
     annotations = inspect.get_annotations(cls)
     if field_name in annotations:

@@ -37,7 +37,7 @@ def _form(typed=True, options=None):
         questions = "[TextQuestion(id='target', label='Target?'), TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')]"
     elif options:
         choices = [{"value": value, "title": value} for value in options]
-        questions = f"[PickOneQuestion(id='answer', label='Answer?', choices={choices!r})]"
+        questions = f"[ChoiceQuestion(id='answer', label='Answer?', choices={choices!r})]"
     else:
         questions = "[TextQuestion(id='answer', label='Answer?')]"
     return cell(
@@ -54,14 +54,11 @@ def _inspect_answer():
 
 
 @pytest.mark.parametrize("pool", [False, True])
-@pytest.mark.parametrize("options", [None, ["main", "dev"], ["Yes", "No"]])
-async def test_question_never_opens_a_dialog(make_adapter, workspace, client, pool, options):
+async def test_question_never_opens_a_dialog(make_adapter, workspace, client, pool):
     models = ScriptedModels(
         {
             None: [
-                cell(
-                    f"return_result(NeedInput(question='Which?', reason='Safety.', options={options!r}))"
-                ),
+                cell("return_result(NeedInput(question='Which?', reason='Safety.'))"),
                 _inspect_answer(),
             ]
         }
@@ -116,7 +113,16 @@ async def test_standard_accept_is_structured_validated_and_echoed_once(
     [echo] = client.texts(UserMessageChunk, session_id)
     assert json.loads(echo) == {"action": "accept", "content": expected}
     [(_, _, mode)] = [e for e in client.log if e[0] == "elicitation"]
-    assert list(mode.requested_schema.properties) == (list(content) if typed else ["answer"])
+    wire = mode.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert wire["sessionId"] == session_id
+    assert wire["requestedSchema"]["type"] == "object"
+    assert list(mode.requested_schema.properties) == (
+        list(content) if typed else (["answer", "__acp_other_0"] if options else ["answer"])
+    )
+    if options:
+        assert wire["requestedSchema"]["properties"]["answer"]["oneOf"] == [
+            {"const": value, "title": value} for value in options
+        ]
     assert not any(e[0] == "permission" for e in client.log)
     assert len(models.llms[None].calls) == 2
     assert [e.content for e in session.transcript() if e.role == "user"] == ["push it", echo]
@@ -215,14 +221,16 @@ async def test_fallback_preserves_form_intent_and_does_not_validate_raw_text(
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
     [text] = client.texts(AgentMessageChunk, session_id)
-    assert "Explicit form request" in text and "unvalidated" in text and '"replicas"' in text
+    assert text.rstrip() == "Details?\n\nSafety.\n\n1. Target?\n2. Replicas?\n3. Dry run?"
     assert len(models.llms[None].calls) == 1
     client.log.clear()
     await adapter.load_session(str(workspace), session_id)
-    assert "Explicit form request" in client.texts(AgentMessageChunk, session_id)[-1]
-    assert "unvalidated" in client.texts(AgentMessageChunk, session_id)[-1]
+    assert "1. Target?" in client.texts(AgentMessageChunk, session_id)[-1]
+    assert "3. Dry run?" in client.texts(AgentMessageChunk, session_id)[-1]
     assert len(models.llms[None].calls) == 1
-    await adapter.prompt(session_id, [text_block('{"target":"prod","replicas":3,"dry_run":false}')])
+    raw = '  {"target":"prod","replicas":3,"dry_run":false}  '
+    await adapter.prompt(session_id, [text_block(raw)])
+    assert adapter.session(session_id)._agent.v.answer == raw
     assert isinstance(adapter.session(session_id)._agent.v.answer, str)
 
 
@@ -412,9 +420,7 @@ async def test_stop_during_pre_dialog_flush_never_opens_dialog(
 
 
 @pytest.mark.parametrize("pool", [False, True])
-@pytest.mark.parametrize(
-    "payload", [{}, {"action": "unknown"}, {"action": "decline", "content": {"x": "y"}}]
-)
+@pytest.mark.parametrize("payload", [{}, {"action": "unknown"}, {"action": "accept"}])
 async def test_malformed_transport_envelope_fails_closed_once(
     make_adapter, workspace, client, pool, payload
 ):
@@ -435,7 +441,10 @@ async def test_malformed_transport_envelope_fails_closed_once(
     assert response.stop_reason == "end_turn"
     assert not client.texts(UserMessageChunk, sid)
     assert len(models.llms[None].calls) == 1
-    assert sum("No automatic retry" in t for t in client.texts(AgentMessageChunk, sid)) == 1
+    assert (
+        sum("Form response was not accepted" in t for t in client.texts(AgentMessageChunk, sid))
+        == 1
+    )
 
 
 @pytest.mark.parametrize("pool", [False, True])
@@ -630,7 +639,7 @@ async def test_form_failure_uses_ordered_bridge_and_revocable_flush(
         if text.startswith("before failure"):
             entered.set()
             await release.wait()
-        if operation == "fail" and "No automatic retry" in text:
+        if operation == "fail" and "Form response was not accepted" in text:
             raise RuntimeError("notice transport failed")
         await original(session_id, update, **kwargs)
 
@@ -655,7 +664,9 @@ async def test_form_failure_uses_ordered_bridge_and_revocable_flush(
             closing = asyncio.create_task(adapter.close_session(sid))
         else:
             # A direct send would overtake the blocked predecessor.
-            assert not any("No automatic retry" in t for t in client.texts(AgentMessageChunk, sid))
+            assert not any(
+                "Form response was not accepted" in t for t in client.texts(AgentMessageChunk, sid)
+            )
             release.set()
         if operation == "fail":
             with pytest.raises(RuntimeError, match="notice transport failed"):
@@ -670,10 +681,272 @@ async def test_form_failure_uses_ordered_bridge_and_revocable_flush(
         if operation == "deliver":
             texts = client.texts(AgentMessageChunk, sid)
             assert texts[-2] == "before failure\n\n"
-            assert "No automatic retry" in texts[-1]
+            assert "Form response was not accepted" in texts[-1]
         assert client.updates(sid, UserMessageChunk) == []
     finally:
         release.set()
         await asyncio.gather(pending, return_exceptions=True)
         if closing is not None:
             await asyncio.wait_for(closing, TIMEOUT)
+
+
+@pytest.mark.parametrize("action", ["decline", "cancel"])
+@pytest.mark.parametrize("content", [{"unknown": True}, "ignored", 23])
+async def test_standard_wire_nonaccept_content_is_ignored_but_action_preserved(
+    make_adapter, workspace, client, action, content
+):
+    async def wire_answer(*args, **kwargs):
+        return {"action": action, "content": content, "_meta": {"trace": "wire"}}
+
+    client.create_elicitation = wire_answer
+    models = ScriptedModels({None: [_form(), _inspect_answer()]})
+    adapter = await make_adapter(models, capabilities=FORMS)
+    sid, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    assert adapter.session(sid)._agent.v.answer == FormResponse(action=action)
+    assert len(models.llms[None].calls) == 2
+    assert not any("not accepted" in t for t in client.texts(AgentMessageChunk, sid))
+
+
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("payload", [{"action": "accept"}, {"action": "accept", "content": None}])
+async def test_standard_omitted_and_null_accept_input_use_owner_required_validation(
+    make_adapter, workspace, client, required, payload
+):
+    async def wire_answer(*args, **kwargs):
+        return payload
+
+    client.create_elicitation = wire_answer
+    models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    "return_result(NeedInputForm(heading='Notes', questions=["
+                    f"TextQuestion(id='notes', label='Notes?', required={required})]))"
+                ),
+                _inspect_answer(),
+            ]
+        }
+    )
+    adapter = await make_adapter(models, capabilities=FORMS)
+    sid, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    if required:
+        assert len(models.llms[None].calls) == 1
+        assert not client.texts(UserMessageChunk, sid)
+        assert "not accepted" in client.texts(AgentMessageChunk, sid)[-1]
+        await adapter.prompt(sid, [text_block("  actual answer  ")])
+        assert adapter.session(sid)._agent.v.answer == "  actual answer  "
+    else:
+        assert adapter.session(sid)._agent.v.answer == FormResponse(action="accept", content={})
+        assert len(models.llms[None].calls) == 2
+
+
+@pytest.mark.parametrize("capabilities", [ClientCapabilities()])
+async def test_text_only_choice_falls_back_whole_form_without_coercion(
+    make_adapter, workspace, client, capabilities
+):
+    models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    "return_result(NeedInputForm(heading='Release', reason='Safety.', questions=["
+                    "TextQuestion(id='notes', label='Notes?', help='Useful notes'), "
+                    "ChoiceQuestion(id='branch', label='Branch?', choices=["
+                    "FormChoice(value='main', title='Main branch')])]))"
+                ),
+                _inspect_answer(),
+            ]
+        }
+    )
+    adapter = await make_adapter(models, capabilities=capabilities)
+    sid, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    assert not any(e[0] in ("elicitation", "permission", "ext") for e in client.log)
+    assert client.texts(AgentMessageChunk, sid)[-1].rstrip() == (
+        "Release\n\nSafety.\n\n1. Notes? — Useful notes\n2. Branch? Choices: Main branch (main), or write Other"
+    )
+    raw = "  main or a new branch; keep punctuation!  "
+    await adapter.prompt(sid, [text_block(raw)])
+    assert adapter.session(sid)._agent.v.answer == raw
+    assert adapter.session(sid)._pending_form is None
+
+
+@pytest.mark.parametrize(
+    "wire_content,expected",
+    [
+        (
+            {
+                "count": 2,
+                "ratio": 0.5,
+                "flag": False,
+                "region": "main",
+                "__acp_other_3": "custom",
+                "tags": ["main"],
+                "__acp_other_4": "another",
+            },
+            {
+                "count": 2,
+                "ratio": 0.5,
+                "flag": False,
+                "region": "custom",
+                "tags": ["main", "another"],
+            },
+        ),
+        (
+            {
+                "count": 3,
+                "ratio": 1,
+                "flag": True,
+                "__acp_other_3": "custom",
+                "__acp_other_4": "custom",
+            },
+            {"count": 3, "ratio": 1, "flag": True, "region": "custom", "tags": ["custom"]},
+        ),
+    ],
+)
+async def test_native_all_controls_and_other_admitted_once_and_replayed(
+    make_adapter, workspace, client, wire_content, expected
+):
+    ask = cell(
+        "return_result(NeedInputForm(heading='Native', questions=["
+        "IntegerQuestion(id='count', label='Count?', minimum=1, maximum=3),"
+        "NumberQuestion(id='ratio', label='Ratio?', minimum=0, maximum=1),"
+        "BooleanQuestion(id='flag', label='Flag?'),"
+        "ChoiceQuestion(id='region', label='Region?', choices=[FormChoice(value='main')]),"
+        "MultiChoiceQuestion(id='tags', label='Tags?', choices=[FormChoice(value='main')], max_items=3),"
+        "TextQuestion(id='optional', label='Optional?', required=False)]))"
+    )
+    models = ScriptedModels({None: [ask, _inspect_answer()]})
+    client.elicitation_answers = [AcceptElicitationResponse(action="accept", content=wire_content)]
+    adapter = await make_adapter(models, capabilities=FORMS)
+    sid, _ = await _run(adapter, workspace)
+    response = adapter.session(sid)._agent.v.answer
+    assert response.content == expected
+    for key in expected:
+        assert type(response.content[key]) is type(expected[key])
+    assert "optional" not in response.content
+    [echo] = client.texts(UserMessageChunk, sid)
+    assert json.loads(echo)["content"] == expected
+    assert "__acp_other" not in echo
+    client.log.clear()
+    await adapter.load_session(str(workspace), sid)
+    assert json.loads(client.texts(UserMessageChunk, sid)[-1])["content"] == expected
+    assert not any(e[0] == "elicitation" for e in client.log)
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        "IntegerQuestion(id='q', label='Count?', default=2)",
+        "NumberQuestion(id='q', label='Ratio?', minimum=0, maximum=1)",
+        "BooleanQuestion(id='q', label='Flag?', default=True)",
+        "MultiChoiceQuestion(id='q', label='Tags?', choices=[FormChoice(value='main')])",
+        "ChoiceQuestion(id='q', label='Optional choice?', required=False, choices=[FormChoice(value='main')])",
+    ],
+)
+async def test_pool_unsupported_native_or_optional_choice_complete_raw_fallback(
+    make_adapter, workspace, client, descriptor
+):
+    ask = cell(
+        "return_result(NeedInputForm(heading='Fallback', questions=["
+        "TextQuestion(id='first', label='First?')," + descriptor + "]))"
+    )
+    models = ScriptedModels({None: [ask, _inspect_answer()]})
+    # Advertised standard capability must NOT make an unsupported Pool form
+    # accidentally fall through to the standard route.
+    adapter = await make_adapter(
+        models, capabilities=FORMS, client_info=Implementation(name="pool", version="1.0.16")
+    )
+    sid, _ = await _run(adapter, workspace)
+    assert not any(e[0] in ("elicitation", "ext", "permission") for e in client.log)
+    text = "".join(client.texts(AgentMessageChunk, sid))
+    assert "1. First?" in text and "2." in text
+    if "ChoiceQuestion" in descriptor:
+        assert "or write Other" in text
+    raw = "  2, false, a/custom — raw!  "
+    await adapter.prompt(sid, [text_block(raw)])
+    assert adapter.session(sid)._agent.v.answer == raw
+
+
+async def test_unknown_sdk_action_is_opaque_durable_not_admitted_or_displayed(
+    make_adapter, workspace, client
+):
+    from acp.agent.connection import AgentSideConnection
+
+    from nooa.context_blocks import Metadata
+
+    payload = {
+        "action": "_deferred",
+        "content": {"future": "opaque-secret"},
+        "_meta": {"context": "keep"},
+        "vendorField": {"nested": [17]},
+    }
+
+    class RPC:
+        async def send_request(self, method, params):
+            assert method == "elicitation/create"
+            return payload
+
+    conn = object.__new__(AgentSideConnection)
+    conn._conn = RPC()
+    # Use actual SDK validation, not a dict stub for the new action.
+    client.create_elicitation = conn.create_elicitation
+    models = ScriptedModels({None: [_form(), _inspect_answer()]})
+    adapter = await make_adapter(models, capabilities=FORMS)
+    sid, response = await _run(adapter, workspace)
+    session = adapter.session(sid)
+    assert response.stop_reason == "end_turn" and session._pending_form is not None
+    rows = session.handle.events.filter(type="ACPOpaqueElicitationResponse")
+    [record] = rows
+    assert isinstance(record, Metadata) and record.response == payload
+    assert record.request_id == session._form_request_id
+    [(_, durable)] = adapter._registry_holding(sid).store.load_rows(
+        sid, frozenset({"ACPOpaqueElicitationResponse"})
+    )
+    assert durable["response"] == payload
+    assert client.texts(UserMessageChunk, sid) == []
+    texts = "\n".join(client.texts(AgentMessageChunk, sid))
+    assert texts.count("Form response was not accepted") == 1
+    assert "opaque-secret" not in texts and "vendorField" not in texts
+    assert all("opaque-secret" not in entry.content for entry in session.transcript())
+    assert len(models.llms[None].calls) == 1
+    await adapter.prompt(sid, [text_block("continue in plain text")])
+    assert session._agent.v.answer == "continue in plain text"
+    assert "opaque-secret" not in str(models.llms[None].calls[-1].messages)
+
+
+@pytest.mark.parametrize("pool", [False, True])
+async def test_superseded_owner_during_validation_await_is_not_admitted(
+    make_adapter, workspace, client, monkeypatch, pool
+):
+    import nooa_atom.acp.server as server
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    name = "_validate_form_response" if pool else "_standard_form_response_async"
+    original = getattr(server, name)
+
+    async def validate(*args):
+        entered.set()
+        await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(server, name, validate)
+    models = ScriptedModels({None: [_form(False), reply("Never mind.")]})
+    payload = {"action": "accept", "content": {"answer": "a"}}
+    if pool:
+        client.ext_answers = [payload]
+    else:
+        client.elicitation_answers = [AcceptElicitationResponse(**payload)]
+    adapter = await make_adapter(
+        models,
+        capabilities=FORMS,
+        client_info=Implementation(name="pool", version="1") if pool else None,
+    )
+    sid = (await adapter.new_session(str(workspace))).session_id
+    pending = asyncio.create_task(adapter.prompt(sid, [text_block("go")]))
+    await asyncio.wait_for(entered.wait(), TIMEOUT)
+    await adapter.prompt(sid, [text_block("never mind")])
+    release.set()
+    assert (await asyncio.wait_for(pending, TIMEOUT)).stop_reason == "end_turn"
+    assert client.texts(UserMessageChunk, sid) == []

@@ -309,8 +309,9 @@ def test_old_tui_claims_and_workspaces_in_the_in_use_listing(tmp_path):
     assert free.id not in {info.id for info in store.in_use()}
 
 
+@pytest.mark.parametrize("native", [False, True])
 async def test_recover_after_descriptor_form_preserves_questions_without_reopening(
-    root_options, sessions_dir
+    root_options, sessions_dir, native
 ):
     import json
 
@@ -319,7 +320,13 @@ async def test_recover_after_descriptor_form_preserves_questions_without_reopeni
         {
             None: [
                 cell(
-                    "return_result(NeedInputForm(heading='Deploy?', questions=[TextQuestion(id='target', label='Target?'), TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')]))"
+                    "return_result(NeedInputForm(heading='Deploy?', questions=[TextQuestion(id='target', label='Target?'), "
+                    + (
+                        "IntegerQuestion(id='replicas', label='Replicas?', minimum=1, maximum=5), BooleanQuestion(id='dry_run', label='Dry run?')"
+                        if native
+                        else "TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')"
+                    )
+                    + "]))"
                 )
             ]
         }
@@ -363,14 +370,17 @@ async def test_recover_after_descriptor_form_preserves_questions_without_reopeni
                 action="accept",
                 content={
                     "target": "staging",
-                    "replicas": "2",
-                    "dry_run": "yes",
+                    "replicas": 2 if native else "2",
+                    "dry_run": True if native else "yes",
                 },
             )
         )
         assert await asyncio.wait_for(loaded.outcome(receipt.item_id), TIMEOUT)
         assert loaded._agent.v.answer.action == "accept"
-        assert loaded._agent.v.answer.content["replicas"] == "2"
+        assert loaded._agent.v.answer.content["replicas"] == (2 if native else "2")
+        if native:
+            assert type(loaded._agent.v.answer.content["replicas"]) is int
+            assert type(loaded._agent.v.answer.content["dry_run"]) is bool
         assert len(loaded._agent.llm.calls) == 1
     finally:
         await registry.close_all()

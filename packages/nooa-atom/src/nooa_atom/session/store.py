@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
+from nooa.forms import question_lines
 from nooa.runtime.event_manager import EventManager
 from nooa.storage import read_lock_owner
 from nooa.storage.sqlite import (
@@ -800,33 +801,28 @@ class SessionStore:
                 "need_input_form",
             ):
                 content = str(raw.get("explanation", ""))
+                try:
+                    request = json.loads(str(raw.get("result_json", "{}")))
+                except (ValueError, TypeError):
+                    request = {}
+                if not isinstance(request, dict):
+                    request = {}
+                if request.get("reason"):
+                    content += "\n\n" + str(request["reason"])
                 if raw.get("outcome_kind") == "need_input_form":
-                    try:
-                        request = json.loads(str(raw.get("result_json", "{}")))
-                    except (ValueError, TypeError):
-                        request = {}
-                    if not isinstance(request, dict):
-                        request = {}
-                    content += (
-                        "\n\nExplicit form request: FormResponse with action accept and validated "
-                        "content, decline, or cancel. Raw text remains unvalidated."
-                    )
-                    if request.get("reason"):
-                        content += "\n\n" + str(request["reason"])
+                    questions = request.get("questions")
+                    lines = question_lines(questions) if isinstance(questions, list) else []
+                    # Old untyped forms retain useful suggestions as text, not answers.
                     options = request.get("options")
-                    if isinstance(options, list) and all(isinstance(o, str) for o in options):
-                        if options:
-                            content += "\n\nChoices: " + ", ".join(options)
-                    if request.get("questions") or request.get("answer_schema"):
-                        content += (
-                            "\n\nQuestion descriptors (legacy schema if unavailable):\n```json\n"
-                        )
-                        content += json.dumps(
-                            request.get("questions", request.get("answer_schema")),
-                            indent=2,
-                            ensure_ascii=False,
-                        )
-                        content += "\n```"
+                    if (
+                        not lines
+                        and isinstance(options, list)
+                        and options
+                        and all(isinstance(o, str) for o in options)
+                    ):
+                        lines.append("Choices: " + ", ".join(options))
+                    if lines:
+                        content += "\n\n" + "\n".join(lines)
                 entries.append(
                     TranscriptEntry(role="question", content=content, timestamp=timestamp)
                 )

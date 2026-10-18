@@ -58,13 +58,10 @@ def test_child_question_from_need_input_carries_the_json_schema():
         ),
     )
     assert question.questions == [TextQuestion(id="branch", label="Branch?")]
-    assert question.options is None
     assert ChildQuestion.model_validate_json(question.model_dump_json()) == question
 
-    choice = ChildQuestion.from_need_input(
-        _CHILD, NeedInput(question="Which?", options=["main", "dev"])
-    )
-    assert (choice.options, choice.answer_schema) == (["main", "dev"], None)
+    choice = ChildQuestion.from_need_input(_CHILD, NeedInput(question="Which?"))
+    assert (choice.question, choice.reason, choice.answer_schema) == ("Which?", None, None)
 
 
 _LEAVES = {str, int, float, bool, type(None), typing.Any}

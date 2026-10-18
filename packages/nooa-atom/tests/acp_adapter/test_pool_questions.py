@@ -21,7 +21,7 @@ def _ask(typed=True, options=None):
         questions = "[TextQuestion(id='target', label='Target?'), TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')]"
     elif options:
         choices = [{"value": value, "title": value} for value in options]
-        questions = f"[PickOneQuestion(id='answer', label='Answer?', choices={choices!r})]"
+        questions = f"[ChoiceQuestion(id='answer', label='Answer?', choices={choices!r})]"
     else:
         questions = "[TextQuestion(id='answer', label='Answer?')]"
     return cell(
@@ -100,9 +100,10 @@ async def test_pool_actions_survive_transport_and_replay(make_adapter, workspace
     visible = "".join(client.texts(AgentMessageChunk, sid))
     assert "Details?" in visible and "Safety." in visible
     for field in ("target", "replicas", "dry_run"):
-        assert f'"id": "{field}"' in visible
-    assert "Client-reported decline does not tell us" in visible
-    assert "questions remain visible as text" in visible
+        assert {"target": "1. Target?", "replicas": "2. Replicas?", "dry_run": "3. Dry run?"}[
+            field
+        ] in visible
+    assert "FormResponse" not in visible and "unvalidated" not in visible
     assert "user declined" not in visible.lower()
     assert len(models.llms[None].calls) == 2
     [echo] = client.texts(UserMessageChunk, sid)
@@ -113,12 +114,14 @@ async def test_pool_actions_survive_transport_and_replay(make_adapter, workspace
     replayed = "".join(client.texts(AgentMessageChunk, sid))
     assert "Details?" in replayed
     for field in ("target", "replicas", "dry_run"):
-        assert f'"id": "{field}"' in replayed
+        assert {"target": "1. Target?", "replicas": "2. Replicas?", "dry_run": "3. Dry run?"}[
+            field
+        ] in replayed
     assert not _requests(client)
 
 
 @pytest.mark.parametrize(
-    "invalid", [None, {}, {"answer": " "}, {"answer": 2}, {"answer": "unlisted"}]
+    "invalid", [None, {}, {"answer": 2}, {"answer": []}, {"answer": "main", "unknown": "x"}]
 )
 async def test_pool_invalid_choice_fails_closed_once(make_adapter, workspace, client, invalid):
     models = ScriptedModels({None: [_ask(False, ["main", "dev"])]})
@@ -131,7 +134,7 @@ async def test_pool_invalid_choice_fails_closed_once(make_adapter, workspace, cl
     assert len(_requests(client)) == 1
     assert len(models.llms[None].calls) == 1
     assert not client.texts(UserMessageChunk, sid)
-    assert "No automatic retry" in client.texts(AgentMessageChunk, sid)[-1]
+    assert "Form response was not accepted" in client.texts(AgentMessageChunk, sid)[-1]
 
 
 @pytest.mark.parametrize("failure", ["bad-content", "unknown-action", "client-error"])
@@ -151,7 +154,7 @@ async def test_pool_unsupported_or_invalid_never_manufactures_response(
     assert response.stop_reason == "end_turn"
     assert client.updates(sid, UserMessageChunk) == []
     assert len(models.llms[None].calls) == 1
-    assert "Explicit form request" in "".join(client.texts(AgentMessageChunk, sid))
+    assert "1. Target?" in "".join(client.texts(AgentMessageChunk, sid))
 
 
 async def test_pool_stop_never_submits_pending_response(make_adapter, workspace, client):
@@ -177,7 +180,7 @@ async def test_pool_literal_or_text_field_explicitly_accepts_alternative(
         {
             None: [
                 cell(
-                    "return_result(NeedInputForm(heading='Branch?', questions=[PickOneOrTextQuestion(id='name', label='Branch?', choices=[FormChoice(value='main', title='Main branch')])]))"
+                    "return_result(NeedInputForm(heading='Branch?', questions=[ChoiceQuestion(id='name', label='Branch?', choices=[FormChoice(value='main', title='Main branch')])]))"
                 ),
                 _inspect(),
             ]

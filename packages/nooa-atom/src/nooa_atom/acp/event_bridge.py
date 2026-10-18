@@ -53,6 +53,7 @@ from acp.schema import (
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
+from nooa.forms import question_lines
 from nooa.interactive import AgentMessage, Done, NeedInput, NeedInputForm, Waiting
 from nooa_atom.agent.activity import (
     FileEdit,
@@ -194,11 +195,9 @@ def cancel_text(by: str) -> str:
     return "Stopped at your request." if by == "user" else f"Stopped by {by}."
 
 
-def question_text(question: str, options: list[str] | None, reason: str | None = None) -> str:
+def question_text(question: str, reason: str | None = None) -> str:
     """A ``NeedInput`` question as the agent's final message of the turn; its reason last."""
     text = question
-    if options:
-        text += "\n\n" + "\n".join(f"- {option}" for option in options)
     if reason:
         text += "\n\n" + reason
     return text
@@ -552,21 +551,11 @@ class ACPEventBridge:
             # Rendered once per turn, here; the prompt that owns the consumed
             # item decides whether to also open a form.
             question = str(update.outcome.get("heading", update.outcome.get("question", "")))
-            options = update.outcome.get("options")
             reason = update.outcome.get("reason")
-            text = question_text(question, options, str(reason) if reason else None)
+            text = question_text(question, str(reason) if reason else None)
             if update.outcome_kind == "need_input_form":
-                import json
-
-                text += (
-                    "\n\nExplicit form request. Submit FormResponse(action='accept', content={id: string}), "
-                    "or decline/cancel. Client-reported decline does not tell us whether the form "
-                    "was dismissed or could not render; these questions remain visible as text. "
-                    "Optional blank answers are empty strings. Raw text is not "
-                    "an accepted form response; it remains unvalidated. Domain validation belongs to the agent. Questions:\n```json\n"
-                    + json.dumps(update.outcome.get("questions", []), indent=2, ensure_ascii=False)
-                    + "\n```"
-                )
+                lines = question_lines(update.outcome.get("questions", []))
+                text += "\n\n" + "\n".join(lines)
             self._enqueue(update_agent_message(text_block(text)))
         elif update.outcome_kind == "error":
             # A turn ending on an error does not always write the PythonOutput

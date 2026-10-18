@@ -27,15 +27,18 @@ from pydantic import BaseModel, Field
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.interactive import (  # noqa: F401
+    BooleanQuestion,  # noqa: F401 - generation constructor
+    ChoiceQuestion,  # noqa: F401 - generation constructor
     Done,
     FormChoice,  # noqa: F401 - generation constructor
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,
+    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
+    MultiChoiceQuestion,  # noqa: F401 - generation constructor
     NeedInput,
     NeedInputForm,
-    PickOneOrTextQuestion,  # noqa: F401 - generation constructor
-    PickOneQuestion,  # noqa: F401 - generation constructor
+    NumberQuestion,  # noqa: F401 - generation constructor
     TextQuestion,  # noqa: F401 - generation constructor
     Waiting,
 )

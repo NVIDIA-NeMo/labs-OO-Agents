@@ -12,16 +12,19 @@ from nooa.agentdoc import doc, spec
 from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
+    BooleanQuestion,  # noqa: F401 - generation constructor
+    ChoiceQuestion,  # noqa: F401 - generation constructor
     Done,
     FormChoice,  # noqa: F401 - generation constructor
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,  # noqa: F401 - visible to generated cells
     InputRequest,
+    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
+    MultiChoiceQuestion,  # noqa: F401 - generation constructor
     NeedInput,  # noqa: F401 - visible generation constructor
     NeedInputForm,  # noqa: F401 - visible generation constructor
-    PickOneOrTextQuestion,  # noqa: F401 - generation constructor
-    PickOneQuestion,  # noqa: F401 - generation constructor
+    NumberQuestion,  # noqa: F401 - generation constructor
     SummarizationConfig,
     TextQuestion,  # noqa: F401 - generation constructor
     Waiting,
@@ -214,10 +217,11 @@ class CodingAgent(InteractiveAgent):
           is a short status line. Add ``evidence=[...]`` for checks you ran.
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. The host shows the question, so do not also send it with
-          ``self.message()``. Add ``options=[...]`` for suggested answers, not a dialog.
+          ``self.message()``. The next ordinary message answers; no dialog opens.
         - ``NeedInputForm(heading=..., questions=[TextQuestion(id="name", label="Name?")])`` — explicit form;
-          Use PickOneQuestion or PickOneOrTextQuestion with FormChoice(value=..., title=...)
-          for choices. Stable ids key the accepted string dictionary in FormResponse.
+          Use ChoiceQuestion with FormChoice(value=..., title=...)
+          for choices; every choice allows written Other. IntegerQuestion, NumberQuestion,
+          BooleanQuestion and MultiChoiceQuestion preserve native answers. Stable ids key the accepted native-value dictionary in FormResponse.
           Decline/cancel carry no content. Domain validation is yours: ask targeted
           follow-ups, never automatically repeat the whole form. Text-only hosts cannot promise validated answers.
         - ``Waiting(message=..., explanation=..., on=[...])`` — a background

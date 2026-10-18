@@ -57,12 +57,10 @@ async def test_a_greeting_turn_ends_done_with_a_message(atom_registry, atom_opti
 async def test_a_question_with_options_ends_the_turn_as_need_input(
     atom_registry, atom_options, atom_models
 ):
-    atom_models.scripts[None] = [
-        cell("return_result(NeedInput(question='Which branch?', options=['main', 'dev']))")
-    ]
+    atom_models.scripts[None] = [cell("return_result(NeedInput(question='Which branch?'))")]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("push it"), TIMEOUT)
-    assert outcome == NeedInput(question="Which branch?", options=["main", "dev"])
+    assert outcome == NeedInput(question="Which branch?")
 
 
 async def test_a_batch_turn_must_carry_a_task_result(atom_registry, atom_options, atom_models):

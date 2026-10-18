@@ -154,7 +154,7 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
     models.scripts["Helper"] = [
         cell(
             "return_result(NeedInputForm(heading='Which branch?', "
-            "reason='Safety.', questions=[PickOneQuestion(id='branch', label='Branch?', choices=[FormChoice(value='main', title='Main')])]))"
+            "reason='Safety.', questions=[ChoiceQuestion(id='branch', label='Branch?', choices=[FormChoice(value='main', title='Main')])]))"
         ),
         cell(
             "[a] = notification['user_messages']\n"
@@ -716,3 +716,80 @@ async def test_parent_send_child_preserves_domain_action_data(
 
     assert json.loads(row["item_json"]) == item
     assert child._pending_form is None
+
+
+async def test_retained_child_conversational_question_preserves_reason_and_raw_answer(
+    registry, root_options, models
+):
+    raw = "  choose another branch, please  "
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('Helper', 'ask me', retain=True)\n"
+            "return_result(Waiting(explanation='child working', on=['delegates']))"
+        ),
+        cell(
+            "[q] = notification['delegates']\n"
+            "self.v.question = q\n"
+            f"await q.answer({raw!r})\n"
+            "return_result(Waiting(explanation='answered', on=['delegates']))"
+        ),
+        cell("return_result(Done(explanation='finished'))"),
+    ]
+    models.scripts["Helper"] = [
+        cell("return_result(NeedInput(question='Which branch?', reason='Safety.'))"),
+        cell(
+            "self.v.answer = notification['user_messages'][0]\n"
+            "return_result(Done(explanation='received'))"
+        ),
+    ]
+    root = await registry.create(root_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="finished")
+    q = root._agent.v.question
+    assert (q.question, q.reason, q.request_kind) == ("Which branch?", "Safety.", "question")
+    assert "options" not in q.model_dump()
+    assert registry.get(q.child.id)._agent.v.answer == raw
+
+
+async def test_retained_child_native_form_answers_have_one_value_per_id(
+    registry, root_options, models
+):
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('Native', 'ask', retain=True)\n"
+            "return_result(Waiting(explanation='child', on=['delegates']))"
+        ),
+        cell(
+            "[q] = notification['delegates']\n"
+            "self.v.questions = q.questions\n"
+            "self.v.child = q.child\n"
+            "await q.answer(FormResponse(action='accept', content={'i': 2, 'n': 0.5, 'b': False, 'm': ['a', 'custom']}))\n"
+            "return_result(Waiting(explanation='answered', on=['delegates']))"
+        ),
+        cell("return_result(Done(explanation='finished'))"),
+    ]
+    models.scripts["Native"] = [
+        cell(
+            "return_result(NeedInputForm(heading='Native', questions=["
+            "IntegerQuestion(id='i', label='I', minimum=1),"
+            "NumberQuestion(id='n', label='N'),"
+            "BooleanQuestion(id='b', label='B'),"
+            "MultiChoiceQuestion(id='m', label='M', choices=[FormChoice(value='a')]),"
+            "TextQuestion(id='optional', label='Optional', required=False)]))"
+        ),
+        cell(
+            "self.v.answer = notification['user_messages'][0]\nreturn_result(Done(explanation='received'))"
+        ),
+    ]
+    root = await registry.create(root_options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="finished")
+    assert [q.kind for q in root._agent.v.questions] == [
+        "integer",
+        "number",
+        "boolean",
+        "multi_choice",
+        "text",
+    ]
+    child = registry.get(root._agent.v.child.id)
+    answer = child._agent.v.answer.content
+    assert answer == {"i": 2, "n": 0.5, "b": False, "m": ["a", "custom"]}
+    assert type(answer["i"]) is int and type(answer["n"]) is float and type(answer["b"]) is bool

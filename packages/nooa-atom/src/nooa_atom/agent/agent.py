@@ -11,16 +11,19 @@ from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
+    BooleanQuestion,  # noqa: F401 - generation constructor
+    ChoiceQuestion,  # noqa: F401 - generation constructor
     Done,
     FormChoice,  # noqa: F401 - generation constructor
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,
     InputRequest,
+    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
+    MultiChoiceQuestion,  # noqa: F401 - generation constructor
     NeedInput,
     NeedInputForm,
-    PickOneOrTextQuestion,  # noqa: F401 - generation constructor
-    PickOneQuestion,  # noqa: F401 - generation constructor
+    NumberQuestion,  # noqa: F401 - generation constructor
     SummarizationConfig,
     TextQuestion,  # noqa: F401 - generation constructor
     Waiting,
@@ -122,13 +125,14 @@ class AtomAgent(InteractiveAgent):
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=..., options=[...])`` for a
+    ``NeedInput(question=...)`` for a
     lightweight question only when a person must answer; use
     ``NeedInputForm(heading=..., questions=[TextQuestion(id="name", label="Name?")])``
-    for explicit forms. Use TextQuestion, PickOneQuestion or PickOneOrTextQuestion
+    for explicit forms. Use TextQuestion, IntegerQuestion, NumberQuestion, BooleanQuestion,
+    ChoiceQuestion or MultiChoiceQuestion (listed values or written Other)
     with stable unique ids and FormChoice(value=..., title=...) choices. Domain validation
     belongs to the agent: ask a targeted follow-up, never repeat the whole wizard. Answers are ``FormResponse(action="accept", content=...)``
-    with a string dictionary keyed by question ids, or action ``decline``/``cancel``. Unsupported hosts
+    with a native-value dictionary keyed by question ids, or action ``decline``/``cancel``. Unsupported hosts
     preserve the request as text; raw text is not validated accepted content,
     and ``Waiting(explanation=..., on=[...])`` only while something you started
     is still running, naming the channel or job it waits on.
@@ -484,15 +488,15 @@ class AtomAgent(InteractiveAgent):
               self.message("Fixed the off-by-one in `parse()`; the parser tests pass.")
               return_result(Done(explanation="fixed parse() and ran its tests"))
 
-        - ``NeedInput(question=..., options=[...])``
+        - ``NeedInput(question=...)``
           for a lightweight question. For an explicit form use
           ``NeedInputForm(heading=..., questions=[TextQuestion(id="name", label="Name?")])``.
-          Choice descriptors are PickOneQuestion and PickOneOrTextQuestion, with
+          Choice descriptors are ChoiceQuestion and MultiChoiceQuestion, with
           FormChoice(value=..., title=...) choices and stable unique question ids.
           Domain validation belongs to you: ask a targeted follow-up, not the entire wizard. The host shows ``question``, so
-          do not also send it with ``self.message()``. Use ``options`` for a
-          suggested answer; questions never open dialogs. Forms deliver a ``FormResponse``
-          with action accept (a string dictionary keyed by ids), decline or cancel in the next
+          do not also send it with ``self.message()``. The next ordinary message
+          answers; questions never open dialogs. Forms deliver a ``FormResponse``
+          with action accept (a native-value dictionary keyed by ids), decline or cancel in the next
           notification. Raw fallback text remains unvalidated.
 
         - ``Waiting(explanation=..., on=[...])`` when a job you started is

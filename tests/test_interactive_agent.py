@@ -83,7 +83,7 @@ def test_message_records_event_and_renders(agent):
 def test_turn_results_require_their_text():
     assert Done(explanation=" finished ").explanation == "finished"
     assert Waiting(explanation="job ci-42", on=["jobs:ci-42"]).on == ["jobs:ci-42"]
-    assert NeedInput(question="Which branch?", options=["main", "dev"]).options == ["main", "dev"]
+    assert NeedInput(question="Which branch?").question == "Which branch?"
     with pytest.raises(ValidationError):
         Done(explanation="  ")
     with pytest.raises(ValidationError):
@@ -165,16 +165,11 @@ def test_form_descriptors_serialise_in_tool_events():
     assert NeedInputForm.model_validate_json(form.model_dump_json()) == form
 
 
-def test_need_input_options_must_not_be_empty():
-    assert NeedInput(question="Anything else?").options is None
-    with pytest.raises(ValidationError):
-        NeedInput(question="Which branch?", options=[])
-
-
-def test_need_input_options_must_not_be_blank():
-    assert NeedInput(question="Which branch?", options=[" main "]).options == ["main"]
-    with pytest.raises(ValidationError):
-        NeedInput(question="Which branch?", options=["main", "  "])
+@pytest.mark.parametrize("options", [None, [], ["main"], ["  "]])
+def test_need_input_rejects_removed_options(options):
+    assert set(NeedInput.model_json_schema()["properties"]) == {"kind", "question", "reason"}
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        NeedInput(question="Which branch?", options=options)
 
 
 def _cell(code: str, call_id: str) -> LLMResponse:
@@ -336,7 +331,7 @@ def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction)
 
 def test_explicit_input_roundtrip_and_extra_rejection():
     for need in (
-        NeedInput(question="Which?", options=["main", "dev"]),
+        NeedInput(question="Which?"),
         NeedInputForm(heading="Which?", questions=[TextQuestion(id="name", label="Name?")]),
     ):
         assert type(need).model_validate_json(need.model_dump_json()) == need

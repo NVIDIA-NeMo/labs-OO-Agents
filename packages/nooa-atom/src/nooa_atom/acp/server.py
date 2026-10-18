@@ -57,7 +57,9 @@ from acp.schema import (
 )
 from pydantic import ValidationError
 
+from nooa.context_blocks import Metadata
 from nooa.errors import GenerationError
+from nooa.forms import _validate_form_response
 from nooa.interactive import FormResponse, NeedInputForm
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
@@ -66,6 +68,7 @@ from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUS
 from nooa_atom.acp.event_bridge import ACPEventBridge, cancel_text, pool_input_event
 from nooa_atom.acp.listing import list_sessions, validate_workspace
 from nooa_atom.acp.need_input import (
+    _standard_form_response_async,
     need_input_schema,
     pool_form_schema,
 )
@@ -845,8 +848,8 @@ class AtomACPAgent:
         """Ask the client to answer ``need``: ``(item, source)``, ``None`` or ``_CANCELLED``.
 
         Only explicit forms route here: Pool's own form extension, then standard
-        ACP form capability. Unsupported schemas/clients leave a clearly marked
-        request in the conversation. Client failure never manufactures an answer.
+        ACP form capability. Unsupported schemas/clients leave the questions
+        in the conversation. Client failure never manufactures an answer.
         """
         if bridge not in self._attachments or session.id in self._stopped_forms:
             return _CANCELLED
@@ -854,7 +857,9 @@ class AtomACPAgent:
             return None
         conn = self._require_conn()
         pool_schema = pool_form_schema(need) if self._pool_forms else None
-        if pool_schema is not None:
+        if self._pool_client:
+            if pool_schema is None:
+                return None
             return await self._ask_pool(session, bridge, need, pool_schema)
         capabilities = self.client_capabilities
         forms = (
@@ -862,7 +867,11 @@ class AtomACPAgent:
             and capabilities.elicitation is not None
             and capabilities.elicitation.form is not None
         )
-        schema = need_input_schema(need)
+        try:
+            schema = need_input_schema(need)
+        except ValueError:
+            # Unsupported default composition: retain the complete plain request.
+            return None
         if forms and schema is not None:
             mode = ElicitationFormSessionMode(session_id=session.id, requested_schema=schema)
             response = await self._client_call(
@@ -882,15 +891,34 @@ class AtomACPAgent:
                 envelope = (
                     response
                     if isinstance(response, dict)
-                    else response.model_dump(mode="json", exclude_none=True)
+                    else response.model_dump(mode="json", by_alias=True, exclude_none=True)
                 )
-                # SDK/protocol metadata belongs to transport, not the strict answer.
-                outcome = FormResponse(
-                    action=envelope.get("action"), content=envelope.get("content")
-                )
-                return need.validate_response(outcome), FORM_ANSWER_SOURCE
-            except (ValidationError, ValueError, AttributeError, TypeError) as exc:
-                await self._form_failure(bridge, exc)
+                # ACP ignores decline/cancel content; absent/null accept means
+                # no input. The owning request still checks required questions.
+                # SDK metadata belongs to transport, not the strict answer.
+                if isinstance(envelope.get("action"), str) and envelope["action"] not in (
+                    "accept",
+                    "decline",
+                    "cancel",
+                ):
+                    # Durable opaque transport data, never an admitted/model-visible item.
+                    session.handle.events.add(
+                        Metadata(
+                            event_type="ACPOpaqueElicitationResponse",
+                            request_id=session._form_request_id,
+                            response=envelope,
+                        )
+                    )
+                    await self._form_failure(bridge)
+                    return None
+                result = await _standard_form_response_async(need, envelope)
+                if session.id in self._stopped_forms or bridge not in self._attachments:
+                    return _CANCELLED
+                if not session.form_is_current(need):
+                    return None
+                return result, FORM_ANSWER_SOURCE
+            except (ValidationError, ValueError, AttributeError, TypeError):
+                await self._form_failure(bridge)
                 return None
         return None
 
@@ -922,21 +950,27 @@ class AtomACPAgent:
             self._pool_forms = False
             return None
         try:
-            outcome = FormResponse(action=response.get("action"), content=response.get("content"))
-            return need.validate_response(outcome), FORM_ANSWER_SOURCE
-        except (ValidationError, ValueError, AttributeError, TypeError) as exc:
-            await self._form_failure(bridge, exc)
+            action = response.get("action")
+            content = response.get("content")
+            outcome = FormResponse(
+                action=action,
+                content=(content if content is not None else {}) if action == "accept" else None,
+            )
+            result = await _validate_form_response(need, outcome)
+            if session.id in self._stopped_forms or bridge not in self._attachments:
+                return _CANCELLED
+            if not session.form_is_current(need):
+                return None
+            return result, FORM_ANSWER_SOURCE
+        except (ValidationError, ValueError, AttributeError, TypeError):
+            await self._form_failure(bridge)
             return None
 
-    async def _form_failure(self, bridge: ACPEventBridge, exc: Exception) -> None:
+    async def _form_failure(self, bridge: ACPEventBridge) -> None:
         """Flush an ordered fallback notice; the owning form wait remains revocable."""
         bridge.publish(
             update_agent_message(
-                text_block(
-                    f"Form response was not accepted: {exc}\n\n"
-                    "No automatic retry was made. Submit a FormResponse with a string dictionary "
-                    "keyed by the question ids, decline/cancel, or ask the agent for a targeted follow-up."
-                )
+                text_block("Form response was not accepted. Please answer the questions above.")
             ),
         )
         await bridge.flush()

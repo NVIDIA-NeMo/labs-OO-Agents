@@ -193,6 +193,23 @@ def load_typed(type_name: str | None, data: Any) -> Any:
     if module_name == "builtins" or not qualname:
         return value
     module_name = canonical_module(module_name)
+    if module_name == "nooa.interactive" and qualname in (
+        "PickOneQuestion",
+        "PickOneOrTextQuestion",
+    ):
+        # Compatibility is ONLY at durable decoding, not new authoring.
+        from nooa.forms import ChoiceQuestion
+
+        if not isinstance(value, dict):
+            return value
+        old_kind = "pick_one" if qualname == "PickOneQuestion" else "pick_one_or_text"
+        if value.get("kind") not in (None, old_kind):
+            return value
+        record = dict(value, kind="choice")
+        try:
+            return ChoiceQuestion.model_validate(record)
+        except ValueError:
+            return value
     try:
         target: Any = importlib.import_module(module_name)
         for part in qualname.split("."):
@@ -203,7 +220,7 @@ def load_typed(type_name: str | None, data: Any) -> Any:
     if not (isinstance(target, type) and issubclass(target, BaseModel)):
         return value
     if (
-        target.__module__ == "nooa.interactive"
+        target.__module__ in ("nooa.interactive", "nooa.forms")
         and target.__name__ in ("NeedInput", "NeedInputForm")
         and isinstance(value, dict)
     ):
@@ -214,7 +231,11 @@ def load_typed(type_name: str | None, data: Any) -> Any:
 
         target = NeedInputForm if record.get("kind") == "form" else NeedInput
         value = record
-    if target.__name__ == "ChildQuestion" and isinstance(value, dict):
+    if (
+        target.__module__ == "nooa_atom.session.items"
+        and target.__name__ == "ChildQuestion"
+        and isinstance(value, dict)
+    ):
         value = dict(value)
         presentation = value.pop("presentation", None)
         if "request_kind" not in value:
@@ -223,6 +244,14 @@ def load_typed(type_name: str | None, data: Any) -> Any:
                 if presentation == "form" or value.get("answer_schema") is not None
                 else "question"
             )
+        if isinstance(value.get("questions"), list):
+            value["questions"] = migrate_input_request(
+                {"kind": "form", "questions": value["questions"]}, form=True
+            )["questions"]
+        # Drop conversational suggestions, or the old null carrier on form records.
+        # Non-null legacy form choices remain data, not a conversational migration.
+        if value["request_kind"] == "question" or value.get("options") is None:
+            value.pop("options", None)
     try:
         return target.model_validate(value)
     except Exception:
@@ -233,10 +262,13 @@ def load_typed(type_name: str | None, data: Any) -> Any:
 def migrate_input_request(value: dict[str, Any], *, form: bool = False) -> dict[str, Any] | None:
     """Migrate valid legacy string questions; corrupt/typed records stay unavailable.
 
-    Descriptor records pass through for strict model validation. Legacy choices
+    Conversational records drop only obsolete suggestions. Descriptor records
+    pass through for strict model validation. Legacy choices
     must be string lists: iterating arbitrary containers would invent new choices.
     """
     record = dict(value)
+    if record.get("kind") not in (None, "question", "form"):
+        return record  # unknown discriminators must still fail strict validation
     record.pop("request_id", None)
     presentation = record.pop("presentation", None)
     answer_type = record.pop("answer_type", None)
@@ -245,9 +277,18 @@ def migrate_input_request(value: dict[str, Any], *, form: bool = False) -> dict[
     if answer_type is not None or answer_schema is not None:
         return None
     if not form:
+        record.pop("options", None)
         record["kind"] = "question"
         return record
     if "questions" in record:
+        questions = record["questions"]
+        if isinstance(questions, list):
+            record["questions"] = [
+                dict(q, kind="choice")
+                if isinstance(q, dict) and q.get("kind") in ("pick_one", "pick_one_or_text")
+                else q
+                for q in questions
+            ]
         return record
     question = record.pop("question", None)
     options = record.pop("options", None)
@@ -260,6 +301,6 @@ def migrate_input_request(value: dict[str, Any], *, form: bool = False) -> dict[
         return None
     descriptor: dict[str, Any] = {"id": "answer", "label": question, "kind": "text"}
     if options:
-        descriptor.update(kind="pick_one", choices=[{"value": c, "title": c} for c in options])
+        descriptor.update(kind="choice", choices=[{"value": c, "title": c} for c in options])
     record.update(kind="form", heading=question, questions=[descriptor])
     return record

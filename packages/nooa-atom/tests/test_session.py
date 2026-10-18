@@ -1112,3 +1112,35 @@ async def test_restoration_replaces_form_intent_with_new_conversational_request(
     session.restore_input_request("need_input_form", {"question": "New?", "request_id": "new"})
     assert session._pending_form.heading == "New?"
     assert session._form_request_id == "new"
+
+
+async def test_form_supersession_during_async_validation_never_admits_old_answer(
+    make_session, monkeypatch
+):
+    import nooa_atom.session.session as session_module
+
+    from nooa.forms import FormResponse, NeedInputForm, TextQuestion
+
+    session, _ = make_session(start=False)
+    old = NeedInputForm(heading="Old", questions=[TextQuestion(id="q", label="Q", pattern="a")])
+    new = NeedInputForm(heading="New", questions=[TextQuestion(id="q", label="Q")])
+    session.restore_input_request("need_input_form", {**old.model_dump(), "request_id": "old"})
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = session_module._validate_form_response
+
+    async def validate(need, response):
+        entered.set()
+        await release.wait()
+        return await original(need, response)
+
+    monkeypatch.setattr(session_module, "_validate_form_response", validate)
+    pending = asyncio.create_task(
+        session.submit(FormResponse(action="accept", content={"q": "a"}), request_id="old")
+    )
+    await entered.wait()
+    session.restore_input_request("need_input_form", {**new.model_dump(), "request_id": "new"})
+    release.set()
+    with pytest.raises(ValueError, match="superseded"):
+        await pending
+    assert session._pending_form.heading == "New" and session._form_request_id == "new"
+    assert session.handle.events.filter(type="ItemAdmitted") == []

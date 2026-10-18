@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification
+from nooa.forms import _validate_form_response
 from nooa.interactive import (
     AgentMessage,
     Done,
@@ -531,11 +532,12 @@ class Session:
                     raise ValueError(
                         "Stored corrupt or legacy typed form cannot be restored; ask for a new descriptor form."
                     )
-                item = (
-                    self._pending_form.validate_response(response)
-                    if self._pending_form
-                    else response
-                )
+                request, token = self._pending_form, self._form_request_id
+                item = await _validate_form_response(request, response) if request else response
+                # Validation may yield; never transfer an old answer to a new owner.
+                self._ensure_external_admission()
+                if self._pending_form is not request or self._form_request_id != token:
+                    raise ValueError("Form request was superseded or already answered.")
             # Raw text remains raw: the agent must not treat it as a validated form outcome.
         elif channel == "user_messages" and is_response:
             raise ValueError("No pending form request to validate this response.")

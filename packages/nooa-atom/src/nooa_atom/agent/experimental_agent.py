@@ -64,13 +64,14 @@ class ExperimentalAtomAgent(AtomAgent):
 
     End every turn with exactly one in-cell ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=..., options=[...])`` for a
+    ``NeedInput(question=...)`` for a
     lightweight question only when a person must answer; use
     ``NeedInputForm(heading=..., questions=[TextQuestion(id="name", label="Name?")])``
-    for explicit forms. Use TextQuestion, PickOneQuestion or PickOneOrTextQuestion
+    for explicit forms. Use TextQuestion, IntegerQuestion, NumberQuestion, BooleanQuestion,
+    ChoiceQuestion or MultiChoiceQuestion (listed values or written Other)
     with stable unique ids and FormChoice(value=..., title=...) choices. Domain validation
     belongs to the agent: ask a targeted follow-up, never repeat the whole wizard. Answers are ``FormResponse(action="accept", content=...)``
-    with a string dictionary keyed by question ids, or action ``decline``/``cancel``. Unsupported hosts
+    with a native-value dictionary keyed by question ids, or action ``decline``/``cancel``. Unsupported hosts
     preserve the request as text; raw text is not validated accepted content, and
     ``Waiting(explanation=..., on=[...])`` only while something you started is still
     running, naming the channel or job it waits on.

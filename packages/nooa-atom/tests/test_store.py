@@ -452,3 +452,71 @@ def test_a_file_in_use_on_another_machine_is_not_read_when_listing(tmp_path, mon
 
     monkeypatch.setattr(SessionStore, "_read_info", guard)
     assert store.list() == []
+
+
+@pytest.mark.parametrize("payload", [None, [], 42, "corrupt", {"questions": [None, 42, {}]}])
+def test_corrupt_stored_form_replay_is_safe_plain_text(sessions_dir, payload):
+    from nooa_atom.session.events import TurnEnded
+
+    store = SessionStore(sessions_dir)
+    with store.create() as handle:
+        handle.events.add(
+            TurnEnded(
+                outcome_kind="need_input_form",
+                explanation="Details?",
+                result_json=json.dumps(payload),
+            )
+        )
+        session_id = handle.id
+    [entry] = store.load_transcript(session_id)
+    assert entry.role == "question" and entry.content == "Details?"
+
+
+def test_old_conversational_replay_keeps_reason_without_obsolete_options(sessions_dir):
+    from nooa_atom.session.events import TurnEnded
+
+    store = SessionStore(sessions_dir)
+    with store.create() as handle:
+        handle.events.add(
+            TurnEnded(
+                outcome_kind="need_input",
+                explanation="Which branch?",
+                result_json=json.dumps(
+                    {"question": "Which branch?", "reason": "Safety.", "options": ["main", "dev"]}
+                ),
+            )
+        )
+        session_id = handle.id
+    [entry] = store.load_transcript(session_id)
+    assert entry.content == "Which branch?\n\nSafety."
+
+
+@pytest.mark.parametrize(
+    "choices",
+    [
+        42,
+        {"value": "bad"},
+        "bad",
+        [None, 42, {}, {"value": 42}],
+        [{"value": "a", "title": [], "description": {}}],
+    ],
+)
+def test_nested_corrupt_choices_preserve_question_and_help_on_actual_replay(sessions_dir, choices):
+    from nooa_atom.session.events import TurnEnded
+
+    store = SessionStore(sessions_dir)
+    with store.create() as handle:
+        handle.events.add(
+            TurnEnded(
+                outcome_kind="need_input_form",
+                explanation="Details?",
+                result_json=json.dumps(
+                    {"questions": [{"label": "Q", "help": "Helpful", "choices": choices}]}
+                ),
+            )
+        )
+        session_id = handle.id
+    [entry] = store.load_transcript(session_id)
+    assert entry.role == "question"
+    assert entry.content.startswith("Details?\n\n1. Q — Helpful")
+    assert "bad" not in entry.content and "{}" not in entry.content and "[]" not in entry.content

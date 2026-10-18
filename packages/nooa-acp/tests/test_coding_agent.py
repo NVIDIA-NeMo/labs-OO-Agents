@@ -198,22 +198,26 @@ async def test_dispatcher_shows_the_messages_of_typed_turn_results(tmp_path):
 
 class _QuestionAgent(CodingAgent):
     async def handle(self, notification: dict[str, list[Any]]) -> NeedInput:
-        return NeedInput(question="Which branch?", options=["main", "dev"])
+        return NeedInput(question="Which branch?")
 
 
-async def test_dispatcher_shows_a_need_input_question_with_its_choices(tmp_path):
+async def test_dispatcher_shows_a_need_input_question(tmp_path):
     agent = _QuestionAgent(llm=FakeLLMClient(), cwd=tmp_path)
     dispatcher = InteractiveSessionDispatcher(agent)
 
     result = await dispatcher.submit("push it")
 
     assert isinstance(result, NeedInput)
-    assert _agent_messages(agent) == ["Which branch?\n\n- main\n- dev"]
+    assert _agent_messages(agent) == ["Which branch?"]
     await dispatcher.close()
 
 
 class _TypedQuestionAgent(CodingAgent):
-    async def handle(self, notification: dict[str, list[Any]]) -> NeedInputForm:
+    async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInputForm:
+        if "asked" in self.v:
+            self.v.answer = notification["user_messages"][0]
+            return Done(explanation="answered")
+        self.v.asked = True
         return NeedInputForm(
             heading="Which release?",
             reason="The version decides the changelog heading.",
@@ -225,7 +229,7 @@ class _TypedQuestionAgent(CodingAgent):
 
 
 async def test_dispatcher_shows_a_need_input_reason_and_answer_fields(tmp_path):
-    """The reason and the answer_type fields reach the person, who answers as text."""
+    """Ordered labels and help reach the person; the next reply stays raw text."""
     agent = _TypedQuestionAgent(llm=FakeLLMClient(), cwd=tmp_path)
     dispatcher = InteractiveSessionDispatcher(agent)
 
@@ -234,12 +238,13 @@ async def test_dispatcher_shows_a_need_input_reason_and_answer_fields(tmp_path):
     assert _agent_messages(agent) == [
         "Which release?\n\n"
         "The version decides the changelog heading.\n\n"
-        "Explicit form requested; this host has no dialog. Text is unvalidated.\n"
-        "Text replies require agent interpretation and targeted follow-up. Structured "
-        "FormResponse submission requires a capable session host.\n\n"
-        "- version: Version? — The version number\n"
-        "- notes: Notes?"
+        "1. Version? — The version number\n"
+        "2. Notes?"
     ]
+    raw = "  1.2.3, keep notes as-is  "
+    await dispatcher.submit(raw)
+    assert agent.v.answer == raw
+    assert isinstance(agent.v.answer, str)
     await dispatcher.close()
 
 
@@ -251,8 +256,11 @@ def test_coding_agent_generation_names_include_both_input_constructors():
         "NeedInputForm",
         "FormResponse",
         "TextQuestion",
-        "PickOneQuestion",
-        "PickOneOrTextQuestion",
+        "ChoiceQuestion",
+        "MultiChoiceQuestion",
+        "IntegerQuestion",
+        "NumberQuestion",
+        "BooleanQuestion",
         "FormChoice",
         "FormQuestion",
         "InputRequest",

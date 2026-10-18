@@ -628,7 +628,7 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
 @pytest.mark.parametrize(
     "value",
     [
-        NeedInput(question="Which branch?", options=["main", "dev"]),
+        NeedInput(question="Which branch?", reason="Safety."),
         Done(explanation="finished"),
         Waiting(explanation="job running", on=["jobs"]),
         Done(explanation="answered", message="The answer is 42."),
@@ -877,11 +877,11 @@ async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
         TurnEndedUpdate(
             session_id="session-1",
             outcome_kind="need_input",
-            outcome={"question": "Which branch?", "options": ["main", "dev"]},
+            outcome={"question": "Which branch?", "reason": "Safety."},
         )
     )
     await bridge.flush()
-    assert _messages(client) == ["Which branch?\n\n- main\n- dev\n\n"]
+    assert _messages(client) == ["Which branch?\n\nSafety.\n\n"]
 
 
 async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):

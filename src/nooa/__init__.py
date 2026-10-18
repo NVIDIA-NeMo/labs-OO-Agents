@@ -41,6 +41,18 @@ from nooa.errors import (  # noqa: E402
     StorageNotConfiguredError,
     ValidationError,
 )
+from nooa.forms import (  # noqa: E402
+    BooleanQuestion,
+    ChoiceQuestion,
+    FormChoice,
+    FormQuestion,
+    FormResponse,
+    IntegerQuestion,
+    MultiChoiceQuestion,
+    NeedInputForm,
+    NumberQuestion,
+    TextQuestion,
+)
 from nooa.library_manager import LibraryManager  # noqa: E402
 from nooa.media import Audio, File, Image, Media, Video  # noqa: E402
 from nooa.metaclass import AgentMeta, no_trace  # noqa: E402
@@ -129,6 +141,16 @@ def __getattr__(name):
 
 
 __all__ = [
+    "BooleanQuestion",
+    "ChoiceQuestion",
+    "FormChoice",
+    "FormQuestion",
+    "FormResponse",
+    "IntegerQuestion",
+    "MultiChoiceQuestion",
+    "NeedInputForm",
+    "NumberQuestion",
+    "TextQuestion",
     "__version__",
     "llm_config_chain",  # Lazy (see _LAZY)
     # Types

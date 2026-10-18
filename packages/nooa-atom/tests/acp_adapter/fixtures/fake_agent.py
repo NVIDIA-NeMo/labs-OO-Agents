@@ -57,16 +57,32 @@ def llm_factory(alias, workspace) -> FakeLLMClient:
         script = [_cell("await self.shell.run('sleep 30', timeout=30)")]
     elif "--blocking" in sys.argv:
         script = [_cell("await asyncio.Event().wait()")]
+    elif "--native-form" in sys.argv:
+        script = [
+            _cell(
+                "return_result(NeedInputForm(heading='Native', questions=["
+                "IntegerQuestion(id='i', label='I', minimum=1, maximum=3, default=2),"
+                "NumberQuestion(id='n', label='N', minimum=0, maximum=1),"
+                "BooleanQuestion(id='b', label='B', default=False),"
+                "MultiChoiceQuestion(id='m', label='M', choices=[FormChoice(value='a')], max_items=3)]))"
+            ),
+            _cell(
+                "a = notification['user_messages'][0]\n"
+                "assert a.content == {'i': 2, 'n': 0.5, 'b': False, 'm': ['a', 'custom']}\n"
+                "assert type(a.content['i']) is int and type(a.content['b']) is bool\n"
+                "self.message('Native answer received.')\nreturn_result(Done(explanation='answered'))"
+            ),
+        ]
     elif "--form" in sys.argv:
         script = [
             _cell(
-                "return_result(NeedInputForm(heading='Which branch?', questions=[PickOneQuestion(id='answer', label='Branch', choices=[{'value': 'main', 'title': 'main'}, {'value': 'dev', 'title': 'dev'}])]))"
+                "return_result(NeedInputForm(heading='Which branch?', questions=[ChoiceQuestion(id='answer', label='Branch', choices=[{'value': 'main', 'title': 'main'}, {'value': 'dev', 'title': 'dev'}])]))"
             ),
             _cell("self.message('Using the answer.')\nreturn_result(Done(explanation='answered'))"),
         ]
     elif "--question" in sys.argv:
         script = [
-            _cell("return_result(NeedInput(question='Which branch?', options=['main', 'dev']))"),
+            _cell("return_result(NeedInput(question='Which branch?'))"),
             _cell("self.message('Using the answer.')\nreturn_result(Done(explanation='answered'))"),
         ]
     else:

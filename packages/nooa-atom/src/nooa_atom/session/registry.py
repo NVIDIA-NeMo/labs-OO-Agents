@@ -417,7 +417,6 @@ class SessionRegistry:
                         else "question"
                     ),
                     reason=update.outcome.get("reason"),
-                    options=update.outcome.get("options"),
                     questions=update.outcome.get("questions"),
                     request_id=update.outcome.get("request_id"),
                     answer_schema=update.outcome.get("answer_schema"),

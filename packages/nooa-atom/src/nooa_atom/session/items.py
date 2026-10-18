@@ -155,11 +155,12 @@ class ChildQuestion(BaseModel):
     Legacy answer_schema data is retained only for unavailable old typed requests.
     """
 
+    model_config = {"extra": "forbid"}
+
     child: ChildRef
     question: str
     request_kind: Literal["question", "form"] = "question"
     reason: str | None = None
-    options: list[str] | None = None
     questions: list[FormQuestion] | None = None
     request_id: str | None = None
     answer_schema: dict[str, Any] | None = None
@@ -175,7 +176,6 @@ class ChildQuestion(BaseModel):
             request_kind=need.kind,
             request_id=request_id,
             reason=need.reason,
-            options=need.options if isinstance(need, NeedInput) else None,
             questions=need.questions if isinstance(need, NeedInputForm) else None,
         )
 
@@ -389,7 +389,7 @@ class TurnEndedUpdate(_Update):
     """A turn ended.
 
     ``outcome`` is the outcome as data (``Done``/``Waiting`` fields; for a
-    question: ``question``, ``options``; form: ``heading``, ``questions``, ``request_id``; for a cancel:
+    question: ``question``, ``reason``; form: ``heading``, ``questions``, ``request_id``; for a cancel:
     ``by``; for an error: ``error``). ``result_type`` is the
     ``module:qualname`` of a pydantic ``Done.result``, so a receiver can
     rebuild it. ``usage`` is this turn's own delta.
