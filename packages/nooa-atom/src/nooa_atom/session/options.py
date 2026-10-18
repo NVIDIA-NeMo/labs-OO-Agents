@@ -37,8 +37,8 @@ class SessionOptions(BaseModel):
     worker (``delegate()``): it may not ask questions and is closed after its
     first result. ``True`` is a kept child (``spawn()``): it may ask its
     parent questions, takes follow-ups, and stays open until it is closed or
-    its tree ends. Both run the worker turn. ``todo_id`` is the parent's Todo
-    the child works on, when it was handed one. Unknown fields are refused,
+    its tree ends. Both run the worker turn. ``todo_id`` is the id of the
+    Todo the child was briefed on (provenance only). Unknown fields are refused,
     so a removed option (``retain``, ``keep``, ``mode``) cannot be ignored.
     """
 

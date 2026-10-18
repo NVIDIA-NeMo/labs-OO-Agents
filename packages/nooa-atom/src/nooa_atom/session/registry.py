@@ -22,12 +22,10 @@ from typing import Any
 
 from nooa.events import TuiSessionResumed
 from nooa.interactive import AgentMessage, Done
-from nooa.storage.serialization import deserialize, serialize
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa_atom.session.events import (
     ChildClosed,
     ChildDeleted,
-    ChildTodoBase,
     SnapshotRestoreFailed,
 )
 from nooa_atom.session.items import (
@@ -127,9 +125,6 @@ class SessionRegistry:
         # tombstones (``ChildClosed``) and kept current by ``_mark_closed``.
         self._closed_children: dict[str, set[str]] = {}
         self._queued: dict[tuple[str, str], list[tuple[Receipt, ChildOutcome]]] = {}
-        # The base each child's Todo merges against, by (parent id, child id);
-        # read once per parent from its ``ChildTodoBase`` records.
-        self._todo_bases: dict[str, dict[str, Any]] = {}
         self._background: set[asyncio.Task[None]] = set()
 
     # ---- create ------------------------------------------------------
@@ -415,7 +410,6 @@ class SessionRegistry:
         kind = update.outcome_kind
         if kind not in ("done", "need_input", "error", "cancelled"):
             return
-        self._merge_todo(parent, child)
         ref = self.child_ref(child)
         source = f"child:{child.name or child.id}"
         key = (parent.id, child.id)
@@ -469,73 +463,6 @@ class SessionRegistry:
                 task = asyncio.get_running_loop().create_task(self.close(child.id))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
-
-    # ---- the Todo a child works on --------------------------------------
-
-    def record_todo_base(self, parent: Session, child_id: str, todo: Any) -> None:
-        """Record the copy of a Todo ``child_id`` starts from: the base its changes merge against.
-
-        Durable (a ``ChildTodoBase`` in the parent's record), so a reloaded
-        parent merges against it too. Every path that hands a child a Todo
-        records it (``SessionPort.delegate(todo=...)``).
-        """
-        base = todo.model_copy(deep=True)
-        self._todo_bases_of(parent.id)[child_id] = base
-        blob, allowlist = serialize(base)
-        parent.handle.events.add(
-            ChildTodoBase(
-                child_id=child_id,
-                todo_json=json.dumps({"blob": blob, "allowlist": sorted(allowlist)}),
-            )
-        )
-
-    def _todo_bases_of(self, parent_id: str) -> dict[str, Any]:
-        """The recorded base of each child's Todo, read once per parent (the latest per child)."""
-        bases = self._todo_bases.get(parent_id)
-        if bases is None:
-            bases = {}
-            with suppress(Exception):
-                for _kind, raw in self.store.load_rows(parent_id, frozenset({"ChildTodoBase"})):
-                    try:
-                        data = json.loads(str(raw.get("todo_json")))
-                        bases[str(raw.get("child_id"))] = deserialize(
-                            data["blob"], set(data["allowlist"])
-                        )
-                    except Exception:
-                        logger.warning("Session %s: unreadable ChildTodoBase", parent_id)
-            self._todo_bases[parent_id] = bases
-        return bases
-
-    def _merge_todo(self, parent: Session, child: Session) -> None:
-        """Merge the child's copy of its Todo into the parent's, as its outcome is delivered.
-
-        The parent agent decides what merges (``merge_delegated_todo``,
-        given the recorded base, or ``None`` when none was recorded) and
-        returns the new base, which is recorded. A failure is logged and
-        never blocks the delivery.
-        """
-        todo_id = child.options.todo_id
-        merge = getattr(parent._agent, "merge_delegated_todo", None)
-        get = getattr(getattr(child._agent, "todo", None), "get", None)
-        if todo_id is None or not callable(merge) or not callable(get):
-            return
-        try:
-            updated = get(todo_id)
-            if updated is None:
-                return
-            base = self._todo_bases_of(parent.id).get(child.id)
-            base = base.model_copy(deep=True) if base is not None else None
-            new_base = merge(child.name or child.id, updated, base)
-            if new_base is not None:
-                self.record_todo_base(parent, child.id, new_base)
-        except Exception:
-            logger.warning(
-                "Session %s: could not merge child %s's Todo %s",
-                parent.id,
-                child.id,
-                todo_id,
-                exc_info=True,
-            )
 
     def _deliver_message(self, child: Session, event: AgentMessage) -> None:
         """Send a child's ``self.message()`` text to its live parent as a ``ChildMessage``.

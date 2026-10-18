@@ -25,7 +25,7 @@ ORCHESTRATOR_TEXT = (
     "task's requirements and its rules or constraints in it.",
     "run one editing child at a time",
     "a ``ChildMessage`` (``item.text``) is a progress",
-    "The child's Todo comments and status merge back into your",
+    "Its report is the TaskResult; record what you verified on",
     "Before ``Done``, leave the tree clean: no scratch files.",
     "Run every acceptance check yourself; a report is",
     "Leave children open; the host closes them after grading.",

@@ -66,7 +66,7 @@ class ChildRef(BaseModel):
     status: ChildStatus
     parent_id: str | None = None
     todo_id: str | None = None
-    """The parent's Todo this child works on, when it was handed one."""
+    """The id of the Todo this child was briefed on (provenance only; nothing flows back)."""
 
     def __getattribute__(self, name: str) -> Any:
         # ``status`` is live in the parent's turn (read from the registry);
@@ -314,7 +314,7 @@ class SessionInfo(BaseModel):
     """A kept child (``spawn()``): it stays open after its results."""
     turn_method: str = "handle"
     todo_id: str | None = None
-    """The parent's Todo this child works on, when it was handed one."""
+    """The id of the Todo this child was briefed on (provenance only; nothing flows back)."""
     created_at: float = 0.0
     last_active: float = 0.0
     turn_count: int = 0

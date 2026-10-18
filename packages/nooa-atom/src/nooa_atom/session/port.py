@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.interactive import InteractiveAgent
-from nooa.tools.todo import Todo
 from nooa_atom.session.items import (
     ChildFailedError,
     ChildQuestion,
@@ -120,10 +119,10 @@ class SessionPort:
                 that may not ask questions. ``True``: it may ask, takes
                 follow-ups, and stays open until it is closed or its tree ends.
             permission_mode: Permission mode for the child; yours when omitted.
-            todo: A ``Todo`` the child works on: a copy of it becomes the
-                active Todo in the child's own list (the agent's
-                ``receive_delegated_todo``), the ref records its id, and the
-                copy is recorded as the base its changes merge back against.
+            todo: A ``Todo`` brief: a copy of it becomes the active Todo in
+                the child's own list (the agent's ``receive_delegated_todo``)
+                and the ref records its id (provenance only). Nothing flows
+                back; the child's result is its ``TaskResult``.
         """
         _reject_removed("delegate", removed)
         parent = self._session
@@ -138,7 +137,6 @@ class SessionPort:
         registry = self._registry
 
         async def hand_over(child: Session) -> None:
-            registry.record_todo_base(parent, child.id, todo)
             receive = getattr(child._agent, "receive_delegated_todo", None)
             if callable(receive):
                 receive(todo)
@@ -224,10 +222,9 @@ class SessionPort:
 
         Text on ``user_messages`` steers a running turn (it reads it before
         its next model call) or, when the child is idle, queues it and starts
-        a turn. A new turn of the child ends its pending question. The Todo
-        the child was handed (same id), sent again, updates the child's copy
-        (``update_delegated_todo``), becomes the new merge base, and reaches
-        the child as a line saying what changed.
+        a turn. A new turn of the child ends its pending question. A Todo
+        is an ordinary data item: to change a child's task, send the new
+        brief as text or a Todo; the child decides how to update its own Todo.
         """
         child = await self._registry.open_child(self._session, child_id)
         source = _parent_source(self._session)
@@ -237,14 +234,6 @@ class SessionPort:
         self._registry.clear_question(self._session, child_id)
         if isinstance(item, str):
             return await child.steer(item, source=source)
-        update = getattr(child._agent, "update_delegated_todo", None)
-        handed = child.options.todo_id
-        if isinstance(item, Todo) and handed is not None and item.id == handed and callable(update):
-            # The parent's own Todo: its version is the child's new copy and
-            # the new merge base; the child is told what changed.
-            todo = as_data(item)
-            self._registry.record_todo_base(self._session, child_id, todo)
-            return await child.steer(update(todo), source=source)
         return await child.submit(as_data(item), channel=channel, source=source)
 
     @hidden
