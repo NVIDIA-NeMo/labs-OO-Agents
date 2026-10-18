@@ -266,9 +266,20 @@ def start_container_worker(
             grant_path(rule.path, FILE_ALL_ACCESS if rule.write else READ_EXECUTE)
         # 3. Tokenizer data. The container has no network; importing the LLM
         #    stack makes tiktoken look for cl100k_base and download it when the
-        #    cache is missing. The parent warmed this directory in prepare_root.
+        #    cache is missing. The parent warmed this directory in prepare_root,
+        #    which means the files already exist when the grant is written.
+        #
+        #    Granting the directory alone is not enough: an inheritable ACE is
+        #    not reliably pushed onto pre-existing children, and tiktoken checks
+        #    ``os.path.exists`` — which returns *False* rather than raising when
+        #    stat is denied. The failure is therefore silent and looks like a
+        #    missing cache. Grant the files themselves.
         tokenizer_cache = root.tokenizer_cache
         grant_path(str(tokenizer_cache), READ_EXECUTE)
+        if tokenizer_cache.is_dir():
+            for entry in tokenizer_cache.iterdir():
+                if entry.is_file():
+                    grant_path(str(entry), READ_EXECUTE)
         # 4. The agent's own module. The worker imports it by name inside the
         #    container, which is confined from creation — unlike Linux spawn,
         #    where that import happens before the guards go on. Without this the

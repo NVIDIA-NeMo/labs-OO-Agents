@@ -110,6 +110,30 @@ def _cache_entries(path: str | None) -> str:
         return f"unreadable ({type(exc).__name__}: {exc})"
 
 
+def _cache_readable(path: str | None) -> str:
+    """Open each cache file and report which ones this process can read.
+
+    ``os.path.isdir`` and ``os.listdir`` can both succeed on a directory whose
+    entries are still unreadable to this token; ``open`` is the only check that
+    matches what tiktoken will actually do.
+    """
+    if not path:
+        return "unset"
+    try:
+        entries = sorted(os.listdir(path))
+    except OSError as exc:
+        return f"unlistable ({type(exc).__name__}: {exc})"
+    results = []
+    for name in entries:
+        try:
+            with open(os.path.join(path, name), "rb") as handle:
+                handle.read(1)
+            results.append(f"{name}=readable")
+        except OSError as exc:
+            results.append(f"{name}=DENIED({type(exc).__name__})")
+    return ", ".join(results) if results else "empty"
+
+
 def _crash_log(message: str, path: str | None = None) -> None:
     if path:
         try:
@@ -181,6 +205,10 @@ def _run(handle: int, expected_container: str | None, crash_path: str | None = N
             "tokenizer_cache": _cache_dir,
             "tokenizer_cache_exists": bool(_cache_dir) and os.path.isdir(_cache_dir),
             "tokenizer_cache_entries": _cache_entries(_cache_dir),
+            # "exists" and "readable" are different questions, and the gap
+            # between them is exactly what made this fail silently: tiktoken
+            # calls os.path.exists, which reports False on a denied stat.
+            "tokenizer_cache_readable": _cache_readable(_cache_dir),
             "argv": list(sys.argv),
         },
     )
