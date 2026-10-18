@@ -559,7 +559,7 @@ async def test_wait_returns_a_question_then_the_result(atom_registry, atom_optio
             "    await ref.wait()\n"
             "except ChildFailedError as exc:\n"
             "    self.v.waiting = str(exc)\n"
-            "await q.answer('main')\n"
+            "await q.child.send('main')\n"
             "assert 'pending_question' not in repr(self.children()[0])\n"
             "r = await ref.wait()\n"
             "return_result(Done(explanation=f'{type(r).__name__}: {r.done.result.report}'))"
@@ -665,22 +665,34 @@ async def test_an_unanswered_question_is_pending_and_does_not_block_done(
     assert [c.body for c in todo.comments] == ["found two branches"]
 
 
-async def test_answering_a_stale_question_id_is_refused(atom_registry, atom_options, atom_models):
+async def test_send_answers_and_clears_the_pending_question(
+    atom_registry, atom_options, atom_models
+):
+    """``ChildQuestion`` is data: the reply is ``child.send()``, which clears it."""
     atom_models.scripts[None] = [
         cell(
             "ref = await self.spawn('Asker', 'ask')\n"
             "q = await ref.wait()\n"
-            "stale = q.model_copy(update={'id': 'stale000'})\n"
-            "try:\n"
-            "    await stale.answer('x')\n"
-            "except ChildFailedError as exc:\n"
-            "    return_result(Done(explanation=str(exc)))"
+            "assert not hasattr(q, 'answer')\n"
+            "assert self.session.pending_question(ref.id).id == q.id\n"
+            "await q.child.send('dev')\n"
+            "assert self.session.pending_question(ref.id) is None\n"
+            "assert 'pending_question' not in repr(ref)\n"
+            "r = await ref.wait()\n"
+            "return_result(Done(explanation=r.done.result.report))"
         )
     ]
-    atom_models.scripts["Asker"] = [cell(ASK)]
+    atom_models.scripts["Asker"] = [
+        cell(ASK),
+        cell(
+            "[a] = notification['user_messages']\n"
+            "return_result(Done(explanation='pushed', result=TaskResult("
+            "solution_description=a, evidence='e', how_to_verify='h', report='pushed ' + a)))"
+        ),
+    ]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
-    assert "is not the child's pending question" in outcome.explanation
+    assert outcome == Done(explanation="pushed dev")
 
 
 # ---- finding 4: a one-shot worker cannot ask, and is always closed ---------
@@ -794,13 +806,8 @@ async def test_a_pending_question_survives_a_reload_with_its_id(
                     "    await self.v.ref.wait()\n"
                     "except ChildFailedError as exc:\n"
                     "    self.v.waiting = str(exc)\n"
-                    "from nooa_atom.session.items import ChildQuestion as _Q\n"
-                    "q = _Q(id=self.v.question_id, child=self.v.ref, question='Which branch?')\n"
-                    "try:\n"
-                    "    await q.model_copy(update={'id': 'stale000'}).answer('x')\n"
-                    "except ChildFailedError as exc:\n"
-                    "    self.v.stale = str(exc)\n"
-                    "await q.answer('dev')\n"
+                    "await self.v.ref.send('dev')\n"
+                    "assert 'pending_question' not in repr(self.v.ref)\n"
                     "r = await self.v.ref.wait()\n"
                     "return_result(Done(explanation=r.done.result.report))"
                 )
@@ -823,7 +830,6 @@ async def test_a_pending_question_survives_a_reload_with_its_id(
         outcome = await asyncio.wait_for(loaded.prompt("answer it"), TIMEOUT)
         assert outcome == Done(explanation="pushed dev")
         assert "is waiting for your answer" in loaded._agent.v.waiting
-        assert "is not the child's pending question" in loaded._agent.v.stale
     finally:
         await fresh.close_all()
 

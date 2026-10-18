@@ -43,9 +43,9 @@ class ExperimentalAtomAgent(AtomAgent):
     ``await child.close()``. When nothing else is left, end the turn with
     ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
     ``notification["delegates"]``: ``ChildResult`` (``item.done``), ``ChildQuestion``
-    (``await item.answer(...)``), ``ChildFailed`` (``item.error``) or ``ChildMessage``
-    (``item.text``, a progress note). The child's comments and status merge into your
-    Todo. Never predict or make up a pending child's result, poll, or sleep to wait.
+    (reply with ``await item.child.send(...)``), ``ChildFailed`` (``item.error``) or
+    ``ChildMessage`` (``item.text``, a progress note). The child's comments and status
+    merge into your Todo. Never predict or make up a pending child's result, poll, or sleep to wait.
     Children share this checkout: run one editing child at a time. Children can
     delegate in turn only down to a fixed depth; past it ``DepthLimitError`` is
     raised. Inspect a child's report before final verification.

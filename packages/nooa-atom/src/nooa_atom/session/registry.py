@@ -398,7 +398,7 @@ class SessionRegistry:
             self._deliver_message(child, update.event)
             return
         if isinstance(update, TurnStartedUpdate):
-            # A new turn, by any route (the parent's send or answer, a host
+            # A new turn, by any route (the parent's send, a host
             # submit), ends the child's pending question.
             if child.parent_id is not None:
                 self._questions[(child.parent_id, child.id)] = None
@@ -623,7 +623,7 @@ class SessionRegistry:
         return _question_from_outcome(ref, asked, replies)
 
     def clear_question(self, parent: Session, child_id: str) -> None:
-        """The parent answered (or sent the child a message): no question is pending."""
+        """The parent sent the child a message (its reply): no question is pending."""
         self._questions[(parent.id, child_id)] = None
 
     def is_idle(self, child: Session) -> bool:

@@ -139,7 +139,7 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
         cell(
             "[q] = notification['delegates']\n"
             "self.v.schema_title = q.answer_schema['title']\n"
-            "await q.answer({'branch': 'main'})\n"
+            "await q.child.send({'branch': 'main'})\n"
             "return_result(Waiting(explanation='answered', on=['delegates']))"
         ),
         cell(

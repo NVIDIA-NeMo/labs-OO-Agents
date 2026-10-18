@@ -167,11 +167,12 @@ class ChildResult(BaseModel):
 
 
 class ChildQuestion(BaseModel):
-    """A kept child asked you a question (its ``NeedInput``); answer with ``await item.answer(...)``.
+    """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``.
 
-    ``id`` identifies it until you answer it or the child starts another
-    turn. ``answer_schema`` is the JSON schema of the child's ``answer_type``
-    when it gave one; the answer is then a dict matching it. An unanswered
+    It is data. Any ``send()`` to the child, and the child's next turn, end
+    it as the child's pending question; ``id`` names it until then.
+    ``answer_schema`` is the JSON schema of the child's ``answer_type`` when
+    it gave one; the reply is then a dict matching it. An unanswered
     question does not stop you from ending your own turn with ``Done``.
     """
 
@@ -193,10 +194,6 @@ class ChildQuestion(BaseModel):
             reason=getattr(need, "reason", None),
             answer_schema=schema,
         )
-
-    async def answer(self, answer: Any) -> "Receipt":
-        """Send the answer to the child; it is no longer the child's pending question."""
-        return await _port(self.child).answer_child(self.child.id, self.id, answer)
 
 
 class ChildFailed(BaseModel):

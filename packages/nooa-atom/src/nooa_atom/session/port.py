@@ -52,7 +52,7 @@ class SessionPort:
     - ``kept=False`` (the default) is a one-shot worker: it may not ask
       questions and is closed after its result.
     - ``kept=True`` keeps it: it may ask you questions (``ChildQuestion``,
-      answered with ``await item.answer(...)``), takes follow-ups with
+      reply with ``await item.child.send(...)``), takes follow-ups with
       ``await child.send(...)``, and stays open until ``close()`` or the end
       of its tree. A closed child stays closed: ``send()`` raises.
 
@@ -248,17 +248,6 @@ class SessionPort:
         return await child.submit(as_data(item), channel=channel, source=source)
 
     @hidden
-    async def answer_child(self, child_id: str, question_id: str, answer: Any) -> Receipt:
-        """Answer a child's question (``ChildQuestion.answer()``); it is no longer pending."""
-        pending = self._registry.pending_question(self._session, child_id)
-        if pending is None or pending.id != question_id:
-            current = "it has none" if pending is None else f"it is {pending.id!r}"
-            raise ChildFailedError(
-                f"Question {question_id!r} is not the child's pending question ({current})"
-            )
-        return await self.send_child(child_id, answer, channel="user_messages")
-
-    @hidden
     def pending_question(self, child_id: str) -> ChildQuestion | None:
         """The child's unanswered question (shown in a ``ChildRef``'s repr)."""
         return self._registry.pending_question(self._session, child_id)
@@ -288,7 +277,7 @@ class SessionPort:
 def _waits_for_answer(name: str, question: ChildQuestion) -> str:
     return (
         f"Child {name!r} is waiting for your answer to [{question.id}] {question.question!r}; "
-        "answer that ChildQuestion with `await question.answer(...)` before waiting"
+        "reply with `await child.send(...)` before waiting"
     )
 
 

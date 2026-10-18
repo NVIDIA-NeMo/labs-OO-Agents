@@ -72,14 +72,18 @@ RESULT = (
 # Added handle_orchestrate (#446, the v2 orchestrator prompt as arm D
 # evaluated it, on the #451 child API with the D4/D6 guidance) (2026-10-17):
 # the other rows are unchanged; measured values plus about 2% headroom.
+# Re-measured when ChildQuestion.answer() was removed (2026-10-18): the class
+# docs say to reply with ``await item.child.send(...)``, 15 characters more for
+# every row (system and total; was 14,669 / 14,467 system). Within the limits,
+# so they stay.
 LIMITS = {
-    (ATOM, "handle"): (15_000, 18_000),  # measured 14,669 / 17,620
-    (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,669 / 17,218
-    (ATOM, "handle_work"): (15_000, 18_200),  # measured 14,669 / 17,825
-    (ATOM, "handle_orchestrate"): (15_000, 19_600),  # measured 14,669 / 19,197
-    (EXPERIMENTAL, "handle"): (14_800, 16_600),  # measured 14,467 / 16,237
-    (EXPERIMENTAL, "handle_batch"): (14_800, 16_950),  # measured 14,467 / 16,590
-    (EXPERIMENTAL, "handle_work"): (14_800, 17_250),  # measured 14,467 / 16,902
+    (ATOM, "handle"): (15_000, 18_000),  # measured 14,684 / 17,635
+    (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,684 / 17,233
+    (ATOM, "handle_work"): (15_000, 18_200),  # measured 14,684 / 17,840
+    (ATOM, "handle_orchestrate"): (15_000, 19_600),  # measured 14,684 / 19,216
+    (EXPERIMENTAL, "handle"): (14_800, 16_600),  # measured 14,482 / 16,252
+    (EXPERIMENTAL, "handle_batch"): (14_800, 16_950),  # measured 14,482 / 16,605
+    (EXPERIMENTAL, "handle_work"): (14_800, 17_250),  # measured 14,482 / 16,917
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -146,6 +150,20 @@ async def test_execution_context_hides_internal_helpers(spec, method, tmp_path, 
     stub = rendered[start : rendered.index("</python_cell_context>", start)]
     for leaked in ("_without_removed", "retain=", "keep=", "mode="):
         assert leaked not in stub
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_prompts_reply_to_a_child_question_with_send(spec, method, tmp_path, sessions_dir):
+    """``ChildQuestion`` is data with no ``answer()``; prompts say ``child.send()``."""
+    from nooa_atom.session.items import ChildQuestion
+    from nooa_atom.session.port import SessionPort
+
+    assert not hasattr(ChildQuestion, "answer")
+    assert not hasattr(SessionPort, "answer_child")
+    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = "\n".join(str(m.get("content", "")) for m in messages)
+    assert ".answer(" not in rendered
+    assert "answer_child" not in rendered
 
 
 class _InstalledSkill:

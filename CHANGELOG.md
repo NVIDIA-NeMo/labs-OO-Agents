@@ -22,7 +22,7 @@ to follow semantic versioning.
   model=None) -> Done` runs a one-shot worker that may not ask questions and
   is closed after its result; `spawn(description, prompt, *, brief=None,
   model=None) -> ChildRef` starts a kept child that may ask its parent
-  questions (`ChildQuestion` with an id, answered with `question.answer()`),
+  questions (`ChildQuestion`, a data item; reply with `child.send()`),
   takes follow-ups with `send()` and stays open until `close()` or the end
   of its tree. Both run the new `handle_work` turn, written for a parent,
   whose `Done` must carry a `TaskResult`; a one-shot worker that returns

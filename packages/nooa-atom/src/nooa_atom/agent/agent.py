@@ -105,7 +105,7 @@ class AtomAgent(InteractiveAgent):
     until ``await child.close()``. When nothing else is left, end the turn with
     ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
     ``notification["delegates"]``: ``ChildResult`` (``item.done``), ``ChildQuestion``
-    (``await item.answer(...)``), ``ChildFailed`` (``item.error``) or
+    (reply with ``await item.child.send(...)``), ``ChildFailed`` (``item.error``) or
     ``ChildMessage`` (``item.text``, a progress note). The child's comments and
     status merge into your Todo. Never predict or make up a pending child's
     result, poll, or sleep to wait. Children share this checkout: run one editing
@@ -330,7 +330,7 @@ class AtomAgent(InteractiveAgent):
 
         Its outcomes arrive under ``notification["delegates"]``: a
         ``ChildResult`` (``item.done.result`` is a ``TaskResult``), a
-        ``ChildQuestion`` (answer with ``await item.answer(...)``) or a
+        ``ChildQuestion`` (reply with ``await item.child.send(...)``) or a
         ``ChildFailed``, after any ``ChildMessage`` progress notes;
         ``item.child.id`` matches the returned ref (keep it in ``self.v``).
         Send follow-ups with ``await ref.send(text)``; it stays open until
@@ -702,7 +702,7 @@ class AtomAgent(InteractiveAgent):
            ``Waiting(explanation=..., on=["delegates"])``.
         4. Measure: results arrive in ``notification["delegates"]`` (a
            ``ChildResult`` whose ``item.done.result`` is the child's
-           ``TaskResult``, a ``ChildQuestion``: ``await item.answer(...)``, or
+           ``TaskResult``, a ``ChildQuestion``: ``await item.child.send(...)``, or
            a ``ChildFailed``; a ``ChildMessage`` (``item.text``) is a progress
            note). The child's Todo comments and status merge back into your
            Todo; review it with ``self.todo.get(todo)``.
