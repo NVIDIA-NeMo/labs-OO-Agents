@@ -198,6 +198,38 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --no-sync python -m pytest -q -m sandbox `
             tests/runtime/sandbox/test_windows_appcontainer.py --timeout=900
+      - name: UDP egress probe (diagnostic)
+        # Measures whether omitting capability SIDs blocks UDP, which the
+        # acceptance tests cannot assert yet. It depends on the runner's
+        # network, so it reports and never fails the job.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $root = "$PWD\.sandbox-rt"
+          $probe = "experiments/windows-sandbox-probe/udp_dns_probe.py"
+          # A missing reply cannot rule out a one-way send, so also count what
+          # reaches the wire. Only the probe's two resolvers are captured, which
+          # keeps the runner's own DNS traffic out of the count. pktmon logs a
+          # packet once per component it crosses: presence matters, not the count.
+          pktmon filter remove | Out-Null
+          pktmon filter add -i 1.1.1.1 -t UDP -p 53 | Out-Null
+          pktmon filter add -i 8.8.8.8 -t UDP -p 53 | Out-Null
+          foreach ($case in "none", "cap") {
+            $etl = "$env:RUNNER_TEMP\udp-$case.etl"
+            pktmon start --capture --pkt-size 0 -f $etl | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Output "pktmon start failed ($LASTEXITCODE)" }
+            uv run --no-sync python $probe --root $root --case $case
+            pktmon stop | Out-Null
+            pktmon etl2txt $etl -o "$etl.txt"
+            $sent = @(Select-String -Path "$etl.txt" -Pattern '> (1\.1\.1\.1|8\.8\.8\.8)\.53:' -ErrorAction SilentlyContinue)
+            Write-Output "wire [$case]: $($sent.Count) line(s) of datagrams sent to 1.1.1.1/8.8.8.8:53"
+            $sent | Select-Object -First 3 | ForEach-Object { Write-Output "  $($_.Line)" }
+          }
+          # The 'cap' case is the control for the capture itself: if it shows
+          # nothing either, the capture or its parsing failed, not the block.
+          uv run --no-sync python $probe --root $root --case all
 
   windows-wheels:
     runs-on: windows-latest
