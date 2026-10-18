@@ -81,11 +81,17 @@ RESULT = (
 # ExperimentalAtomAgent (its rows are gone) and added the storage-guidance
 # sentence to the AtomAgent class doc, 141 characters more for every row
 # (system and total; was 14,684 system). Measured values plus about 2% headroom.
+# Re-measured for the one-way Todo brief (2026-10-18): the class doc says the
+# brief is one-way and to update your own Todo after verifying, 84 characters
+# more in the system prompt (was 14,825). The handle_work prompt's merge-back
+# lines became one sentence (51 characters less in total, was 17,981), and
+# handle_orchestrate's merge-back sentence became the one-way one (53 more,
+# was 19,357). Within the limits, so they stay.
 LIMITS = {
-    (ATOM, "handle"): (15_200, 18_200),  # measured 14,825 / 17,776
-    (ATOM, "handle_batch"): (15_200, 17_800),  # measured 14,825 / 17,374
-    (ATOM, "handle_work"): (15_200, 18_400),  # measured 14,825 / 17,981
-    (ATOM, "handle_orchestrate"): (15_200, 19_800),  # measured 14,825 / 19,357
+    (ATOM, "handle"): (15_200, 18_200),  # measured 14,909 / 17,860
+    (ATOM, "handle_batch"): (15_200, 17_800),  # measured 14,909 / 17,458
+    (ATOM, "handle_work"): (15_200, 18_400),  # measured 14,909 / 17,930
+    (ATOM, "handle_orchestrate"): (15_200, 19_800),  # measured 14,909 / 19,410
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

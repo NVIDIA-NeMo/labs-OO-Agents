@@ -717,8 +717,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         You are a child session. Your parent is an agent, not a person, and it
         reads only your result. The task is in ``notification["user_messages"]``;
         its first line says whether you can ask your parent questions (later
-        messages there are follow-ups). Do all the work, verify it, then end
-        with exactly one ``return_result(...)``:
+        messages there are follow-ups). Your task is the brief; your
+        ``TaskResult`` is your report; a Todo in your list is your own working
+        copy. Do all the work, verify it, then end with exactly one
+        ``return_result(...)``:
 
         - ``Done`` with a ``TaskResult``, when the task is finished or blocked
           (then say what blocked you and what you tried)::
