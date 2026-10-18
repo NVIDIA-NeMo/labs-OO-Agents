@@ -393,6 +393,13 @@ def warm_tokenizer_cache(root: RuntimeRoot) -> str:
     Best-effort: a backend that never imports ``tiktoken`` must not fail to
     start because a tokenizer could not be fetched. The directory is created
     either way so the child's environment points somewhere valid.
+
+    ``tiktoken.get_encoding`` is deliberately NOT used. It goes through a
+    process-wide registry, so if the encoding was already constructed (importing
+    the LLM stack does exactly that) it returns the cached object without
+    touching the cache directory — the warm-up then reports success having
+    written nothing, and the child still fails. Calling the plugin's
+    constructor directly forces ``read_file_cached`` to run.
     """
     cache = root.tokenizer_cache
     try:
@@ -403,9 +410,9 @@ def warm_tokenizer_cache(root: RuntimeRoot) -> str:
     previous = os.environ.get("TIKTOKEN_CACHE_DIR")
     os.environ["TIKTOKEN_CACHE_DIR"] = str(cache)
     try:
-        import tiktoken
+        from tiktoken_ext import openai_public
 
-        tiktoken.get_encoding("cl100k_base")
+        openai_public.cl100k_base()
     except ImportError:
         return "no tiktoken installed; nothing to warm"
     except Exception as exc:  # noqa: BLE001 - offline host, proxy, etc.
@@ -415,7 +422,15 @@ def warm_tokenizer_cache(root: RuntimeRoot) -> str:
             os.environ.pop("TIKTOKEN_CACHE_DIR", None)
         else:
             os.environ["TIKTOKEN_CACHE_DIR"] = previous
-    return f"tokenizer cache ready at {cache}"
+
+    # Verify rather than trust: the whole point is that the child finds a file.
+    written = list(cache.iterdir())
+    if not written:
+        return (
+            f"tokenizer warm-up wrote nothing to {cache}; the container will "
+            "fail to import the LLM stack"
+        )
+    return f"tokenizer cache ready at {cache} ({len(written)} file(s))"
 
 
 def prepare_root(
