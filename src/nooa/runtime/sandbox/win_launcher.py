@@ -392,7 +392,16 @@ def start_container_worker(
                     os.remove(_crash_log_path(workspace))
                 except OSError:
                     pass
-            child = _spawn(argv, name, handle, workspace or str(root.root), env=child_env)
+            child = _spawn(
+                argv,
+                name,
+                handle,
+                workspace or str(root.root),
+                env=child_env,
+                # network=False is the absence of capability SIDs; network=True
+                # has to grant one, or the container still has no network.
+                capabilities=() if spec.block_network else ("internetClient",),
+            )
         except BaseException:
             parent_conn.close()
             child_conn.close()
@@ -435,12 +444,14 @@ def _spawn(
     handle: int,
     cwd: str,
     env: dict[str, str] | None = None,
+    capabilities: tuple[str, ...] = (),
 ) -> Child:
     from nooa.runtime.sandbox.win_api import spawn_in_container
 
     return spawn_in_container(
         argv,
         container_name=container_name,
+        capabilities=capabilities,
         inherit_handles=(handle,),
         cwd=cwd,
         env=env,

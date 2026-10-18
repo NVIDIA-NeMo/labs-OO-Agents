@@ -85,6 +85,7 @@ What each guardrail maps to:
 | --- | --- |
 | Filesystem | AppContainer DACL grants, written before the process is created |
 | Network (`network=False`) | Omission of capability SIDs; blocks TCP and UDP egress |
+| Network (`network=True`) | The `internetClient` capability: outbound internet; LAN access not granted |
 | Memory | Job Object `ProcessMemoryLimit` = worker baseline + `max_memory_mb` |
 | CPU | Job Object `PerJobUserTimeLimit` |
 | Timeout / hard kill | `TerminateJobObject` |

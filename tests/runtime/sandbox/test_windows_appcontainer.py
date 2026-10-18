@@ -235,6 +235,28 @@ def test_outbound_udp_round_trip_is_blocked(session):
     assert result.error is not None, "a UDP query from the container got a reply"
 
 
+def test_network_true_reaches_the_cell(tmp_path):
+    """The control for the two denials above: network=True must connect.
+
+    Without it a launcher that never grants a capability would pass every
+    network test while making ``network=True`` silently useless.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace, network=True)
+    try:
+        code = (
+            "import socket\n"
+            "socket.create_connection(('1.1.1.1', 443), timeout=4).close()\n"
+            "'connected'"
+        )
+        result = session.run(code)
+        assert result.error is None, result.error
+        assert result.returned_value == "connected"
+    finally:
+        session.close()
+
+
 # --- environment -------------------------------------------------------------
 _SENTINEL = "NOOA_TEST_PARENT_ONLY"
 
