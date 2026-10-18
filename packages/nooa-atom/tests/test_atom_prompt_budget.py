@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prompt-size guards for the Atom agents' first model call.
+"""Prompt-size guards for the Atom agent's first model call.
 
 Installed ``nooa.skills`` entry points are loaded into the agent, and the
 user's skill directories under the home directory are discovered, so both
@@ -17,16 +17,15 @@ prompt must raise a limit here on purpose.
 import asyncio
 
 import pytest
+from atom_test_agents import python_cell
 from nooa_atom.agent.factory import create_session_agent
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
-from test_experimental_agent import python_cell
 
 from nooa.unifiedllm import FakeLLMClient
 
 ATOM = "nooa_atom.agent:AtomAgent"
-EXPERIMENTAL = "nooa_atom.agent:ExperimentalAtomAgent"
 RESULT = (
     "return_result(Done(explanation='x', result=TaskResult("
     "solution_description='a', evidence='b', how_to_verify='c')))"
@@ -76,14 +75,17 @@ RESULT = (
 # docs say to reply with ``await item.child.send(...)``, 15 characters more for
 # every row (system and total; was 14,669 / 14,467 system). Within the limits,
 # so they stay.
+# On dev/atom (#452): raised when AtomAgent kept the storage guidance from the
+# removed experimental prompt (2026-10-16, about 190 characters): measured values plus about 2% headroom.
+# Re-measured after merging dev/atom into #451 (2026-10-18): #452 removed
+# ExperimentalAtomAgent (its rows are gone) and added the storage-guidance
+# sentence to the AtomAgent class doc, 141 characters more for every row
+# (system and total; was 14,684 system). Measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (15_000, 18_000),  # measured 14,684 / 17,635
-    (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,684 / 17,233
-    (ATOM, "handle_work"): (15_000, 18_200),  # measured 14,684 / 17,840
-    (ATOM, "handle_orchestrate"): (15_000, 19_600),  # measured 14,684 / 19,216
-    (EXPERIMENTAL, "handle"): (14_800, 16_600),  # measured 14,482 / 16,252
-    (EXPERIMENTAL, "handle_batch"): (14_800, 16_950),  # measured 14,482 / 16,605
-    (EXPERIMENTAL, "handle_work"): (14_800, 17_250),  # measured 14,482 / 16,917
+    (ATOM, "handle"): (15_200, 18_200),  # measured 14,825 / 17,776
+    (ATOM, "handle_batch"): (15_200, 17_800),  # measured 14,825 / 17,374
+    (ATOM, "handle_work"): (15_200, 18_400),  # measured 14,825 / 17,981
+    (ATOM, "handle_orchestrate"): (15_200, 19_800),  # measured 14,825 / 19,357
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

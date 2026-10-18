@@ -101,10 +101,7 @@ async def test_a_child_loads_as_an_atom_agent(workspace):
     ("spec", "name"),
     [
         ("nooa_coder.coding.agent:CodingAgent", "AtomAgent"),
-        (
-            "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent",
-            "ExperimentalAtomAgent",
-        ),
+        ("nooa_coder.coding.experimental_agent:ExperimentalCodingAgent", "AtomAgent"),
     ],
 )
 def test_nooa_coder_agent_specs_load_the_renamed_classes(spec, name):

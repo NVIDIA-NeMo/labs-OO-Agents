@@ -283,11 +283,11 @@ async def test_an_old_snapshot_with_mcp_state_loads_and_the_agent_is_told(
     """A snapshot from before SkillManager holds the ``<mcp>`` block, ``self.mcp.status()``."""
     import json
 
+    from atom_test_agents import python_cell
     from nooa_atom.agent.factory import create_session_agent
     from nooa_atom.session.options import SessionOptions
     from nooa_atom.session.registry import SessionRegistry
     from nooa_atom.session.store import SessionStore
-    from test_experimental_agent import python_cell
 
     from nooa.storage.json_snapshot import snapshot_to_json
 

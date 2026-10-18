@@ -4,14 +4,12 @@
 
 from nooa_atom.session.loader import (
     ATOM_AGENT,
-    EXPERIMENTAL_ATOM_AGENT,
     LEGACY_AGENT_SPECS,
     canonical_agent_spec,
 )
 
 __all__ = [
     "ATOM_AGENT",
-    "EXPERIMENTAL_ATOM_AGENT",
     "LEGACY_AGENT_SPECS",
     "canonical_agent_spec",
 ]

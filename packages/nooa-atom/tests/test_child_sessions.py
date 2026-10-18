@@ -736,11 +736,10 @@ async def test_a_one_shot_question_from_an_agent_without_the_check_fails_and_clo
     assert registry.pending_question(root, child.id) is None
 
 
-@pytest.mark.parametrize("spec", [ATOM_SPEC, "nooa_atom.agent:ExperimentalAtomAgent"])
-def test_no_doc_tells_the_model_to_catch_a_question_as_a_failure(spec):
+def test_no_doc_tells_the_model_to_catch_a_question_as_a_failure():
     from nooa_atom.session.loader import load_agent_class
 
-    cls = load_agent_class(spec)
+    cls = load_agent_class(ATOM_SPEC)
     texts = [cls.__doc__, cls.delegate.__doc__, cls.spawn.__doc__, cls.handle_work.__doc__]
     for text in texts:
         assert "ChildQuestionError" not in text and "ChildIdleError" not in text
@@ -1144,11 +1143,10 @@ async def test_a_result_message_handled_late_is_not_relayed(registry, root_optio
 # ---- model-facing guidance ---------------------------------------------------
 
 
-@pytest.mark.parametrize("spec", [ATOM_SPEC, "nooa_atom.agent:ExperimentalAtomAgent"])
-def test_the_parent_docs_say_what_to_put_in_the_todo_and_who_edits(spec):
+def test_the_parent_docs_say_what_to_put_in_the_todo_and_who_edits():
     from nooa_atom.session.loader import load_agent_class
 
-    cls = load_agent_class(spec)
+    cls = load_agent_class(ATOM_SPEC)
     text = " ".join((cls.__doc__ or "").split())
     assert "requirements and its rules or constraints" in text
     assert "one editing child at a time" in text

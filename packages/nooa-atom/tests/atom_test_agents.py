@@ -120,6 +120,17 @@ def cell(code: str, *, usage: LLMUsage | None = None) -> LLMResponse:
     )
 
 
+def python_cell(code: str, call_id: str) -> LLMResponse:
+    """A model response that runs ``code`` in one ``python_cell`` call with id ``call_id``."""
+    return LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[ToolCall(id=call_id, name="python_cell", arguments=json.dumps({"code": code}))],
+        finish_reason="tool_calls",
+        assistant_message={"role": "assistant", "content": ""},
+    )
+
+
 def reply(text: str, explanation: str = "answered", **kwargs: Any) -> LLMResponse:
     """A cell that sends ``text`` to the user and ends the turn with ``Done``."""
     return cell(
