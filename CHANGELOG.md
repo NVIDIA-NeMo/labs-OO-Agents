@@ -38,12 +38,14 @@ to follow semantic versioning.
   `pending_question` are removed (a pending question shows in the ref's
   repr). `ChildRef.wait()` returns a `ChildResult` or `ChildQuestion` and
   raises `ChildFailedError` instead of hanging on an idle child or one
-  waiting for an answer. A Todo handed to a child becomes its active Todo (a
-  copy), and its comments, status and vars merge back into the parent's Todo
-  against a recorded base (`ChildTodoBase`, durable across a reload); a
-  conflicting field is noted and retried, never blocking the rest. Each
-  distinct conflict (child, field, values) is noted once, derived from the
-  Todo's comments so it holds across a reload; a repeated merge adds no note.
+  waiting for an answer. A Todo passed to `spawn()`/`delegate()` is a one-way
+  brief: it is rendered into the child's first message, and the child's own
+  list gets a local copy, activated, that is its working copy. Nothing flows
+  back: the parent gets the child's `TaskResult` (and `ChildMessage`/
+  `ChildQuestion`) and updates its own Todo after verifying. Any Todo works
+  as a brief, managed or hand-built, since only its fields are read;
+  `ChildRef.todo_id` records which Todo the child was briefed on. A shared
+  per-tree todo manager is on the backlog.
   `brief=` reaches the child with the Todo, after a line naming its parent
   and saying whether it may ask. A closed child stays closed (`send()`
   raises), `ChildRef.status` is live, a child whose turn ended `Waiting`
@@ -58,17 +60,18 @@ to follow semantic versioning.
   have plain-JSON vars. Validation never imports or constructs a class (a
   payload naming its own allowlist is refused); non-JSON vars still survive the
   session snapshot, whose allowlist comes from code.
-  `spawn()`/`delegate()` adopt a hand-built `Todo(...)` into `self.todo`
-  (`TodoManager.adopt`) instead of raising, so the merge-back reaches the
-  caller's object; a different Todo reusing a managed id still raises.
   `TodoManager.status()` caps the active Todo's description at 600 characters,
   with a pointer to `self.todo.get(id).description`, so the Other Todos and
-  Hint lines are no longer cut. `await ref.send(todo)` with the Todo a child
-  was handed is the parent-to-child merge: the child's copy takes the
-  parent's title, description, deps, status and vars (comments from both
-  sides are kept), the parent's version becomes the new merge base, and the
-  child gets a line such as "Your parent updated Todo <id>: status open."
-  instead of the raw object. Another Todo or a string is an ordinary item.
+  Hint lines are no longer cut. `await ref.send(todo)` is an ordinary item:
+  to change a child's task, send the new brief as text or a Todo; the child
+  decides how to update its own Todo.
+- `nooa-atom`: the Todo copy/merge-back contract of #451 is replaced by the
+  one-way brief (breaking for code written against the earlier #451 heads).
+  Removed: `AtomAgent.merge_delegated_todo` and `update_delegated_todo`, the
+  registry's `_merge_todo`/`record_todo_base`, the `ChildTodoBase` event,
+  `TodoManager.adopt()` and `receive_todo()`, the `send(todo)` special case,
+  and the parent Todo's `child` var. A saved session holding `ChildTodoBase`
+  rows still loads; the rows are ignored.
 - `nooa-atom`: Removed ExperimentalAtomAgent; it differed from AtomAgent only in
   its prompt wording and the missing context-usage block. Saved sessions that used
   it now load as AtomAgent (the spec `nooa_atom.agent:ExperimentalAtomAgent` and
