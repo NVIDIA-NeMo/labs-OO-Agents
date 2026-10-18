@@ -363,6 +363,16 @@ def start_container_worker(
         # cannot depend on a channel whose delivery is only observable after
         # the fact.
         child_env = _container_environment(env_passthrough)
+        # nooa's config discovery otherwise walks up from the package to the
+        # nearest pyproject.toml, and one the container cannot read makes
+        # ``Path.exists()`` raise: with the root inside a checkout, every agent
+        # built on nooa's helpers fails to import. Point discovery at a
+        # location under the read-only root that does not exist, so reads find
+        # no settings and writes fail like any other ungranted path (measured:
+        # importing the helpers writes nothing). A passed-through value wins.
+        absent = root.root / "no-nooa-config"
+        child_env.setdefault("NEMO_OO_PROJECT_DIR", str(absent / "project"))
+        child_env.setdefault("NEMO_OO_USER_DIR", str(absent / "user"))
 
         parent_conn, child_conn = mp.Pipe(duplex=True)
         handle = child_conn.fileno()

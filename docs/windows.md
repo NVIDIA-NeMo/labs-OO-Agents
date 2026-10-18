@@ -108,7 +108,9 @@ Three behaviours differ from Linux and are worth knowing:
   Name anything a cell needs — a proxy, or a key for `network=True` — in
   `env_passthrough`. The agent module is imported with the same environment,
   so module-level `os.environ["X"]` fails unless `X` is passed through. The
-  Linux backend does not filter the environment.
+  Linux backend does not filter the environment. nooa's own config discovery
+  (`NEMO_OO_PROJECT_DIR`, `NEMO_OO_USER_DIR`) points at an empty location, so
+  project and user `.nooa` settings are not loaded in the container.
 
 Verify containment — these tests fail when isolation leaks, not when a feature
 breaks:

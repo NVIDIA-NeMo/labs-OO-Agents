@@ -341,6 +341,12 @@ raises instead of returning `False`. A runtime root inside a checkout (this
 probe's `.rt`, CI's `.sandbox-rt`) has the checkout's `pyproject.toml` as an
 ancestor. The default `%LOCALAPPDATA%` root was not measured.
 
+**Fixed later** in the launcher, not in `nooa.paths`: it sets
+`NEMO_OO_PROJECT_DIR` and `NEMO_OO_USER_DIR` for the container to a location
+under the read-only root that does not exist, so discovery never walks up.
+Measured first: with both set, the import succeeds and writes nothing.
+`test_agent_built_on_the_quickstart_helpers_runs` fails without the change.
+
 ```powershell
 uv run python experiments\windows-sandbox-probe\env_probe.py
 ```

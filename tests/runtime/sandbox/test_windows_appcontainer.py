@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -106,12 +107,12 @@ def _config(workspace: Path, **overrides):
 class _Session:
     """One executor plus the temp workspace it was granted."""
 
-    def __init__(self, workspace: Path, **overrides):
+    def __init__(self, workspace: Path, *, agent=None, **overrides):
         from nooa.runtime.sandbox.executor import SandboxedExecutor
 
         self.workspace = workspace
         self.executor = SandboxedExecutor(
-            _agent_instance(),
+            agent if agent is not None else _agent_instance(),
             _config(workspace, **overrides),
             cell_timeout=90,
             framework_builtins={},
@@ -157,6 +158,28 @@ def test_broker_round_trip(session):
     result = session.run("self.echo('hi')")
     assert result.error is None, result.error
     assert result.returned_value == "probe:hi"
+
+
+def test_agent_built_on_the_quickstart_helpers_runs(tmp_path):
+    """An agent written like the examples must start in the container.
+
+    Importing ``nooa.util.quickstart`` runs nooa's config discovery, which the
+    agent above never does. With the runtime root inside a checkout (CI's is)
+    discovery used to reach the checkout's unreadable ``pyproject.toml`` and
+    fail the import with PermissionError.
+    """
+    sys.path.insert(0, str(_HERE))
+    from win_quickstart_agent import QuickstartAgent
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace, agent=QuickstartAgent())
+    try:
+        result = session.run("self.answer()")
+        assert result.error is None, result.error
+        assert result.returned_value == 42
+    finally:
+        session.close()
 
 
 # --- filesystem denials ------------------------------------------------------
