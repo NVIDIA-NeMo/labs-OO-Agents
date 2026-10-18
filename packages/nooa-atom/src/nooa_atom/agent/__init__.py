@@ -11,7 +11,6 @@ _EXPORT_MODULES = {
     "TerminalCommandOutput": "activity",
     "TerminalCommandStarted": "activity",
     "AtomAgent": "agent",
-    "ExperimentalAtomAgent": "experimental_agent",
     "discover_agent_instruction_files": "instructions",
     "render_agent_instructions": "instructions",
     "load_skills_dirs": "nooa_atom.workspace.settings",
@@ -34,7 +33,6 @@ def __getattr__(name: str):
 __all__ = [
     "ActivityShellTools",
     "AtomAgent",
-    "ExperimentalAtomAgent",
     "SlashCommand",
     "SlashCommandRegistry",
     "FileEdit",
