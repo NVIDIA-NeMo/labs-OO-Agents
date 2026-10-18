@@ -410,11 +410,15 @@ def warm_tokenizer_cache(root: RuntimeRoot) -> str:
     previous = os.environ.get("TIKTOKEN_CACHE_DIR")
     os.environ["TIKTOKEN_CACHE_DIR"] = str(cache)
     try:
-        from tiktoken_ext import openai_public
-
+        try:
+            from tiktoken_ext import openai_public
+        except ImportError:
+            return "no tiktoken installed; nothing to warm"
+        # Deliberately outside the ImportError handler above: a download
+        # failure can itself be an ImportError (``read_file`` imports
+        # ``requests`` lazily), and reporting that as "tiktoken missing" would
+        # hide the real cause and leave the cache empty.
         openai_public.cl100k_base()
-    except ImportError:
-        return "no tiktoken installed; nothing to warm"
     except Exception as exc:  # noqa: BLE001 - offline host, proxy, etc.
         return f"tokenizer warm-up failed ({type(exc).__name__}: {exc})"
     finally:

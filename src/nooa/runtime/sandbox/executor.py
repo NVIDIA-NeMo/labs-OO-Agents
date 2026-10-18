@@ -199,6 +199,9 @@ class SandboxedExecutor:
         # attribute, so multiprocessing's CreateProcess cannot enter a container.
         self._uses_container = os.name == "nt" and caps.filesystem == "appcontainer"
         self._runtime_root: Any = None
+        # Last ``prepare_root`` summary. Carried into startup failures so the
+        # real precondition problem is visible instead of only its symptom.
+        self._runtime_summary: str = ""
         if self._uses_container:
             from nooa.runtime.sandbox.win_runtime import resolve_root
 
@@ -290,7 +293,13 @@ class SandboxedExecutor:
         from nooa.runtime.sandbox.win_launcher import start_container_worker
         from nooa.runtime.sandbox.win_runtime import prepare_root
 
-        prepare_root(self._runtime_root, sync=True)
+        # Logged, not discarded: the summary says whether the package copy and
+        # the tokenizer cache are usable. Both are silent preconditions of the
+        # launch, and a failure here shows up later as an opaque worker-start
+        # error inside the sandbox.
+        summary = prepare_root(self._runtime_root, sync=True)
+        logger.debug("sandbox runtime prepared: %s", summary)
+        self._runtime_summary = summary
         init: dict[str, Any] = {
             "restrictions": self._restrictions,
             "spec": self._spec,
@@ -299,12 +308,19 @@ class SandboxedExecutor:
             "mode": "blueprint",
             "blueprint": self._blueprint,
         }
-        handles = start_container_worker(
-            init,
-            self._spec,
-            self._runtime_root,
-            workspace=self._config.workspace,
-        )
+        try:
+            handles = start_container_worker(
+                init,
+                self._spec,
+                self._runtime_root,
+                workspace=self._config.workspace,
+            )
+        except SandboxUnavailable as exc:
+            # The worker's own error says what failed inside the sandbox; the
+            # runtime summary says whether the preconditions were ever met
+            # (package copy, tokenizer cache). Without both, diagnosing a clean
+            # CI runner means guessing.
+            raise SandboxUnavailable(f"{exc} [runtime: {self._runtime_summary}]") from exc
         self._conn = handles.conn
         self._proc = handles.proc
 

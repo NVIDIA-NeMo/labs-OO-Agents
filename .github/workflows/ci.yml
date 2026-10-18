@@ -191,6 +191,11 @@ jobs:
           # Fail, do not skip, when the root is missing: a silent skip here
           # would report a green job while testing nothing at all.
           $env:NOOA_SANDBOX_REQUIRE_ROOT = "1"
+          # Report the sandbox preconditions before testing. A warm-up failure
+          # inside the container looks identical whether the data was never
+          # downloaded, landed somewhere unreadable, or could not be fetched.
+          uv run --no-sync python -c "import os; from nooa.runtime.sandbox.win_runtime import resolve_root, warm_tokenizer_cache; r = resolve_root(os.environ['NOOA_SANDBOX_RUNTIME']); print('warm:', warm_tokenizer_cache(r)); print('cache:', sorted(p.name for p in r.tokenizer_cache.iterdir()))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --no-sync python -m pytest -q -m sandbox `
             tests/runtime/sandbox/test_windows_appcontainer.py --timeout=900
 
