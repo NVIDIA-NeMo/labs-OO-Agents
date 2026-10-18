@@ -400,6 +400,15 @@ def warm_tokenizer_cache(root: RuntimeRoot) -> str:
     touching the cache directory — the warm-up then reports success having
     written nothing, and the child still fails. Calling the plugin's
     constructor directly forces ``read_file_cached`` to run.
+
+    The download is performed by the **runtime root's own interpreter**, not by
+    the process calling this function. Content is validated against an
+    ``expected_hash`` compiled into ``tiktoken_ext``, and the filename is only
+    a hash of the blob URL — so a parent and a root carrying different
+    ``tiktoken`` versions produce a cache entry that the child reads, fails to
+    validate, deletes, and re-downloads (which it cannot, having no network).
+    Warming with the reader's interpreter makes that mismatch impossible by
+    construction.
     """
     cache = root.tokenizer_cache
     try:
@@ -407,25 +416,32 @@ def warm_tokenizer_cache(root: RuntimeRoot) -> str:
     except OSError as exc:
         return f"tokenizer cache unavailable ({exc})"
 
-    previous = os.environ.get("TIKTOKEN_CACHE_DIR")
-    os.environ["TIKTOKEN_CACHE_DIR"] = str(cache)
+    if not root.python.exists():
+        return f"tokenizer cache not warmed: {root.python} is missing"
+
+    import subprocess
+
+    env = {**os.environ, "TIKTOKEN_CACHE_DIR": str(cache)}
     try:
-        try:
-            from tiktoken_ext import openai_public
-        except ImportError:
-            return "no tiktoken installed; nothing to warm"
-        # Deliberately outside the ImportError handler above: a download
-        # failure can itself be an ImportError (``read_file`` imports
-        # ``requests`` lazily), and reporting that as "tiktoken missing" would
-        # hide the real cause and leave the cache empty.
-        openai_public.cl100k_base()
-    except Exception as exc:  # noqa: BLE001 - offline host, proxy, etc.
+        completed = subprocess.run(
+            [
+                str(root.python),
+                "-I",
+                "-c",
+                "from tiktoken_ext import openai_public; openai_public.cl100k_base()",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
         return f"tokenizer warm-up failed ({type(exc).__name__}: {exc})"
-    finally:
-        if previous is None:
-            os.environ.pop("TIKTOKEN_CACHE_DIR", None)
-        else:
-            os.environ["TIKTOKEN_CACHE_DIR"] = previous
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit {completed.returncode}"
+        return f"tokenizer warm-up failed ({tail})"
 
     # Verify rather than trust: the whole point is that the child finds a file.
     written = list(cache.iterdir())
