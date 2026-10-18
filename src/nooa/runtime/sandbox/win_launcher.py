@@ -281,12 +281,12 @@ def start_container_worker(
         # PYTHONPATH, so the granted roots have to be named explicitly.
         if import_roots:
             init = {**init, "import_roots": import_roots}
-        # ``-I`` implies ``-E``, so ``PYTHON*`` variables would be ignored; a
-        # non-``PYTHON`` name like this one is still read by the library.
-        child_env = {
-            **os.environ,
-            "TIKTOKEN_CACHE_DIR": str(tokenizer_cache),
-        }
+        # The tokenizer path travels on argv, not here: it is set before any
+        # import, and a value that must be correct before the first import
+        # cannot depend on a channel whose delivery is only observable after
+        # the fact. The environment block stays as-is for now; narrowing it to
+        # an allowlist is a separate change.
+        child_env = dict(os.environ)
 
         parent_conn, child_conn = mp.Pipe(duplex=True)
         handle = child_conn.fileno()
@@ -304,12 +304,11 @@ def start_container_worker(
             "nooa.runtime.sandbox.win_worker",
             str(handle),
             name,
+            # Positional from here on: the child indexes them directly, so every
+            # slot must be present even when empty.
+            str(_crash_log_path(workspace)) if workspace else "",
+            str(tokenizer_cache),
         ]
-        # A startup crash writes nothing to stderr: the process is created with
-        # no inherited std handles. The only writable path the container has is
-        # the workspace, so the crash log goes there.
-        if workspace:
-            argv.append(str(_crash_log_path(workspace)))
         job = Job()
         try:
             if workspace:

@@ -74,7 +74,10 @@ def _current_rss_bytes() -> int:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        _crash_log("usage: python -m nooa.runtime.sandbox.win_worker <pipe-handle> [name] [log]")
+        _crash_log(
+            "usage: python -m nooa.runtime.sandbox.win_worker "
+            "<pipe-handle> [name] [log] [tokenizer-cache]"
+        )
         return 2
     handle = int(sys.argv[1])
     expected_container = sys.argv[2] if len(sys.argv) > 2 else None
@@ -82,13 +85,29 @@ def main() -> int:
     # traceback printed to stderr goes nowhere. A crash log in the (granted)
     # workspace is the only channel that survives a startup failure.
     crash_path = sys.argv[3] if len(sys.argv) > 3 else None
+    # Set from argv, before any import: argv exists from interpreter startup,
+    # whereas a value sent over the pipe only arrives after ``_run`` connects.
+    # Any import chain that touches tiktoken at module scope would otherwise
+    # read the environment before the path was known.
+    if len(sys.argv) > 4 and sys.argv[4]:
+        os.environ["TIKTOKEN_CACHE_DIR"] = sys.argv[4]
     try:
-        return _run(handle, expected_container)
+        return _run(handle, expected_container, crash_path)
     except BaseException:  # noqa: BLE001 - the report is the whole point
         import traceback
 
         _crash_log(traceback.format_exc(), crash_path)
         return 9
+
+
+def _cache_entries(path: str | None) -> str:
+    """List a cache directory's entries, or say why it cannot be read."""
+    if not path:
+        return "unset"
+    try:
+        return repr(sorted(os.listdir(path)))
+    except OSError as exc:
+        return f"unreadable ({type(exc).__name__}: {exc})"
 
 
 def _crash_log(message: str, path: str | None = None) -> None:
@@ -105,7 +124,7 @@ def _crash_log(message: str, path: str | None = None) -> None:
         pass
 
 
-def _run(handle: int, expected_container: str | None) -> int:
+def _run(handle: int, expected_container: str | None, crash_path: str | None = None) -> int:
     from multiprocessing.connection import PipeConnection
 
     from nooa.runtime.sandbox import wire
@@ -148,6 +167,21 @@ def _run(handle: int, expected_container: str | None) -> int:
     for root in reversed(list(init.get("import_roots") or [])):
         if root not in sys.path:
             sys.path.insert(0, root)
+
+    # Tokenizer data cannot be fetched here (no network), so the parent
+    # pre-populates a granted directory and passes it on argv (set in ``main``
+    # before any import). Record what this process actually sees: when the child
+    # falls back to downloading, the only useful question is whether the
+    # variable was set and the file readable, and that is not inferable from
+    # the parent's side.
+    if crash_path:
+        _crash_log(
+            "startup: "
+            f"TIKTOKEN_CACHE_DIR={os.environ.get('TIKTOKEN_CACHE_DIR')!r} "
+            f"exists={os.path.isdir(os.environ.get('TIKTOKEN_CACHE_DIR') or '')} "
+            f"entries={_cache_entries(os.environ.get('TIKTOKEN_CACHE_DIR'))}",
+            crash_path,
+        )
 
     # ``ready`` is sent from the callback, not here: the parent's first-cell
     # deadline must not include this process's cold import cost. The memory
