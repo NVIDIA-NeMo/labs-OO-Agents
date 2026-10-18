@@ -89,8 +89,14 @@ def main() -> int:
     # whereas a value sent over the pipe only arrives after ``_run`` connects.
     # Any import chain that touches tiktoken at module scope would otherwise
     # read the environment before the path was known.
+    #
+    # ``CUSTOM_TIKTOKEN_CACHE_DIR`` is what matters, not ``TIKTOKEN_CACHE_DIR``:
+    # litellm overwrites the latter at import time to point at its bundled
+    # tokenizers, and only honors the former. Setting both keeps plain tiktoken
+    # users on the same directory.
     if len(sys.argv) > 4 and sys.argv[4]:
         os.environ["TIKTOKEN_CACHE_DIR"] = sys.argv[4]
+        os.environ["CUSTOM_TIKTOKEN_CACHE_DIR"] = sys.argv[4]
     try:
         return _run(handle, expected_container, crash_path)
     except BaseException:  # noqa: BLE001 - the report is the whole point
