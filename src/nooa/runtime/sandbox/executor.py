@@ -314,6 +314,7 @@ class SandboxedExecutor:
                 self._spec,
                 self._runtime_root,
                 workspace=self._config.workspace,
+                env_passthrough=self._config.env_passthrough,
             )
         except SandboxUnavailable as exc:
             # The worker's own error says what failed inside the sandbox; the

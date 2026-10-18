@@ -23,6 +23,7 @@ network          omission of capability SIDs (TCP; UDP unproven)
 memory           Job Object ``ProcessMemoryLimit``
 cpu              Job Object ``PerJobUserTimeLimit``
 timeout / kill   ``TerminateJobObject``
+environment      allowlist (``CONTAINER_ENV`` + ``env_passthrough``)
 ===============  ===================================================
 
 Memory keeps the Linux meaning: ``max_memory_mb`` is *headroom above the
@@ -68,6 +69,67 @@ _READY_TIMEOUT_S = 180.0
 # The startup handshake is worker -> parent control traffic, not agent data:
 # decode it with the default codec, never the agent-typed one.
 _READY_CODEC = wire.Codec()
+
+# What the container inherits from the parent's environment. Copying
+# ``os.environ`` made every parent variable readable by cell code, credentials
+# included (measured: the probe's sentinel crossed). The list is Windows' own
+# session variables; anything a user or installer adds, which is where tokens
+# live, stays in the parent unless named in ``env_passthrough``.
+CONTAINER_ENV: tuple[str, ...] = (
+    # Process basics. Without SYSTEMROOT, Winsock cannot initialise and
+    # ``socket.socket()`` fails with WinError 10106 (measured).
+    "SYSTEMROOT",
+    "WINDIR",
+    "SYSTEMDRIVE",
+    "COMSPEC",
+    "PATH",
+    "PATHEXT",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "PROCESSOR_LEVEL",
+    "PROCESSOR_REVISION",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432",
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    # Identity. Without USERPROFILE ``Path.home()`` raises RuntimeError (nooa's
+    # ``get_user_dir`` uses it); without USERNAME ``getpass.getuser()`` raises
+    # OSError. Both measured. These are names, not secrets.
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "USERDOMAIN",
+    "COMPUTERNAME",
+    "APPDATA",
+    # Inside the container these point at its own folder
+    # (``%LOCALAPPDATA%\Packages\<name>\AC``), not at the parent's values, and
+    # that is where ``tempfile`` lands. Measured with and without the allowlist.
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+)
+
+
+def _container_environment(passthrough: tuple[str, ...] = ()) -> dict[str, str]:
+    """The container's starting environment: an allowlist, never a copy.
+
+    Names match case-insensitively, as Windows does. A requested name the
+    parent does not have is skipped rather than set empty.
+    """
+    env: dict[str, str] = {}
+    for name in (*CONTAINER_ENV, *passthrough):
+        value = os.environ.get(name)
+        if value is not None:
+            env[name.upper()] = value
+    return env
 
 
 def _agent_import_roots(init: dict[str, Any]) -> list[str]:
@@ -225,6 +287,7 @@ def start_container_worker(
     *,
     container_name: str | None = None,
     workspace: str | None = None,
+    env_passthrough: tuple[str, ...] = (),
     ready_timeout_s: float = _READY_TIMEOUT_S,
 ) -> ContainerHandles:
     """Create the container, grant, launch suspended, assign, resume, handshake.
@@ -298,9 +361,8 @@ def start_container_worker(
         # The tokenizer path travels on argv, not here: it is set before any
         # import, and a value that must be correct before the first import
         # cannot depend on a channel whose delivery is only observable after
-        # the fact. The environment block stays as-is for now; narrowing it to
-        # an allowlist is a separate change.
-        child_env = dict(os.environ)
+        # the fact.
+        child_env = _container_environment(env_passthrough)
 
         parent_conn, child_conn = mp.Pipe(duplex=True)
         handle = child_conn.fileno()

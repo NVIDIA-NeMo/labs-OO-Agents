@@ -204,6 +204,47 @@ def test_outbound_tcp_is_blocked(session):
     assert result.error is not None, "the container opened an outbound TCP connection"
 
 
+# --- environment -------------------------------------------------------------
+_SENTINEL = "NOOA_TEST_PARENT_ONLY"
+
+
+def test_parent_environment_does_not_reach_the_cell(tmp_path, monkeypatch):
+    """A variable only the parent has must be invisible to cell code.
+
+    This is how a credential leaks: the parent holds an API token in its
+    environment, and the container inherits it. The cell reports a boolean, so
+    a failure never prints the value.
+    """
+    monkeypatch.setenv(_SENTINEL, "parent-only")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace)
+    try:
+        result = session.run(f"import os\n{_SENTINEL!r} in os.environ")
+        assert result.error is None, result.error
+        assert result.returned_value is False, "a parent-only variable reached the cell"
+    finally:
+        session.close()
+
+
+def test_env_passthrough_lets_a_named_variable_in(tmp_path, monkeypatch):
+    """The control: the same variable, named in ``env_passthrough``, arrives.
+
+    Without it the test above could pass for the wrong reason — a sentinel set
+    too late to be in the environment block at all.
+    """
+    monkeypatch.setenv(_SENTINEL, "parent-only")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace, env_passthrough=(_SENTINEL,))
+    try:
+        result = session.run(f"import os\nos.environ.get({_SENTINEL!r})")
+        assert result.error is None, result.error
+        assert result.returned_value == "parent-only"
+    finally:
+        session.close()
+
+
 # --- resource limits ---------------------------------------------------------
 def test_cpu_limit_kills_and_the_session_recovers(session):
     """Exhausting the job's CPU budget terminates the worker, and the next cell

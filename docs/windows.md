@@ -88,7 +88,7 @@ What each guardrail maps to:
 | CPU | Job Object `PerJobUserTimeLimit` |
 | Timeout / hard kill | `TerminateJobObject` |
 
-Two behaviours differ from Linux and are worth knowing:
+Three behaviours differ from Linux and are worth knowing:
 
 - **The agent module's directory must be readable.** An AppContainer is
   confined from process creation, so the worker imports the agent class *inside*
@@ -99,6 +99,13 @@ Two behaviours differ from Linux and are worth knowing:
   `sendto` succeeds either way and datagram arrival could not be attributed on
   the reference machine. Treat `network=False` as TCP-only until a WFP filter
   backs it.
+- **The worker does not inherit the parent's environment.** It starts with
+  Windows' own session variables (`SYSTEMROOT`, `PATH`, `USERPROFILE`, ...) and
+  nothing a user or installer added, so API tokens in the parent stay there.
+  Name anything a cell needs — a proxy, or a key for `network=True` — in
+  `env_passthrough`. The agent module is imported with the same environment,
+  so module-level `os.environ["X"]` fails unless `X` is passed through. The
+  Linux backend does not filter the environment.
 
 Verify containment — these tests fail when isolation leaks, not when a feature
 breaks:

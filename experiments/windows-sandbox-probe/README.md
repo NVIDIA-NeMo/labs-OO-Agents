@@ -292,6 +292,56 @@ the container can read the directory holding the agent module — for the probe,
 who keeps an agent module inside a sensitive tree should move it or accept that
 one directory of it is readable by cell code.
 
+## Environment inheritance
+
+**Question.** Does a variable that exists only in the parent reach cell code,
+and does narrowing the environment block break anything that worked before?
+
+**Design.** `env_probe.py` sets a sentinel in the parent, starts the shipped
+`SandboxedExecutor`, and asks the cell for its variable names, whether it sees
+the sentinel, and whether Winsock, asyncio, `tempfile` and `Path.home()` work.
+Only names, counts, booleans and exception types leave the cell; the workspace
+is a temp directory removed afterwards. Run once on the launcher that copied
+`os.environ`, once on the allowlist (`CONTAINER_ENV` + `env_passthrough`).
+
+| Metric | Copy of `os.environ` | Allowlist |
+|---|---|---|
+| Parent variables | 119 | 119 |
+| Visible in the container | 120 | 33 |
+| Sentinel reached the cell | **yes** | **no** |
+| Crossed but not allowlisted | — | none |
+| `tempfile.gettempdir()` | `…\Packages\nooa-sandbox\AC\Temp` | same |
+| `Path.home()`, `socket.socket()`, asyncio loop | ok | ok |
+
+The one variable on top of the parent's is `CUSTOM_TIKTOKEN_CACHE_DIR`, which
+the worker sets from argv; it and `TIKTOKEN_CACHE_DIR` are the 2 of 33 not on
+the allowlist. Three of the parent's variables were credentials for unrelated
+services, all readable by cell code before the change.
+
+What fixed the allowlist's contents, each measured on a bare interpreter:
+
+- **`SYSTEMROOT`** — without it Winsock does not initialise: `socket.socket()`
+  raises `WinError 10106`.
+- **`USERPROFILE`** — without it `Path.home()` raises `RuntimeError`; nooa's
+  `get_user_dir` depends on it.
+- **`USERNAME`** — without it `getpass.getuser()` raises `OSError`.
+- **`TEMP` / `TMP` / `LOCALAPPDATA`** point at the container's own `AC` folder
+  in both runs, not at the parent's values. Redirecting `TEMP` to the
+  workspace was considered and dropped: `tempfile` already has a private,
+  writable directory.
+
+Found along the way, unrelated to the environment and not fixed by this change:
+importing `nooa.util.quickstart` in the container raises `PermissionError`.
+`find_project_root()` walks up from the package and calls `Path.exists()` on
+each ancestor's `pyproject.toml`; for a file that exists but is unreadable that
+raises instead of returning `False`. A runtime root inside a checkout (this
+probe's `.rt`, CI's `.sandbox-rt`) has the checkout's `pyproject.toml` as an
+ancestor. The default `%LOCALAPPDATA%` root was not measured.
+
+```powershell
+uv run python experiments\windows-sandbox-probe\env_probe.py
+```
+
 ## Consequences for the backend
 
 1. **A private runtime root is mandatory, not an optimisation.** 22,598 files /
@@ -325,3 +375,4 @@ one directory of it is readable by cell code.
 - Low-integrity / LPAC variants, and network enforcement via WFP.
 - Whether a worker can import an agent module that lives outside the granted
   workspace (the blueprint path needs `module:qualname` to be importable).
+- Environment visibility on the Linux backend, which does not filter it.

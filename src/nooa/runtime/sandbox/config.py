@@ -130,6 +130,15 @@ class SandboxConfig(BaseModel):
             "experiments/windows-sandbox-probe/_mkroot.py."
         ),
     )
+    env_passthrough: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Windows only: parent environment variables the AppContainer worker "
+            "receives beyond the OS baseline (e.g. a proxy or an API key a cell "
+            "needs with network=True). Everything else stays in the parent. Linux "
+            "workers inherit the full environment."
+        ),
+    )
     recovery: Literal["restart_empty", "disabled"] = Field(
         default="restart_empty",
         description="After a kill: restart the worker fresh (empty namespace) or disable it.",
