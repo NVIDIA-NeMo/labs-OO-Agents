@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prompt-size guards for the Atom agents' first model call.
+"""Prompt-size guards for the Atom agent's first model call.
 
 Installed ``nooa.skills`` entry points are loaded into the agent, and the
 user's skill directories under the home directory are discovered, so both
@@ -17,16 +17,15 @@ prompt must raise a limit here on purpose.
 import asyncio
 
 import pytest
+from atom_test_agents import python_cell
 from nooa_atom.agent.factory import create_session_agent
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
-from test_experimental_agent import python_cell
 
 from nooa.unifiedllm import FakeLLMClient
 
 ATOM = "nooa_atom.agent:AtomAgent"
-EXPERIMENTAL = "nooa_atom.agent:ExperimentalAtomAgent"
 RESULT = (
     "return_result(Done(explanation='x', result=TaskResult("
     "solution_description='a', evidence='b', how_to_verify='c')))"
@@ -50,11 +49,11 @@ RESULT = (
 # Raised for #447 review (2026-10-14: replace() split into replace() and
 # replace_match(), self.web removed, show() names nooa.media.Image; about 300
 # characters net): measured values plus about 2% headroom.
+# Raised when AtomAgent kept the storage guidance from the removed experimental
+# prompt (2026-10-16, about 140 characters): measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (14_850, 17_950),  # measured 14,548 / 17,560
-    (ATOM, "handle_batch"): (14_850, 17_450),  # measured 14,548 / 17,098
-    (EXPERIMENTAL, "handle"): (14_650, 16_450),  # measured 14,363 / 16,134
-    (EXPERIMENTAL, "handle_batch"): (14_650, 16_850),  # measured 14,363 / 16,487
+    (ATOM, "handle"): (15_000, 18_100),  # measured 14,689 / 17,701
+    (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,689 / 17,239
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

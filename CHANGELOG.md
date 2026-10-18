@@ -14,7 +14,12 @@ to follow semantic versioning.
   `replace_match()` raises a `TypeError` that names the right method; no file is
   written. `ActivityShellTools` (nooa-atom) and the nooa-cli coding shell expose
   both methods.
-
+- `nooa-atom`: Removed ExperimentalAtomAgent; it differed from AtomAgent only in
+  its prompt wording and the missing context-usage block. Saved sessions that used
+  it now load as AtomAgent (the spec `nooa_atom.agent:ExperimentalAtomAgent` and
+  the older experimental-agent spellings, such as `ExperimentalTUIAgent` and
+  `ExperimentalCodingAgent`, are session-restore aliases for
+  `nooa_atom.agent:AtomAgent`).
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive
@@ -193,7 +198,7 @@ to follow semantic versioning.
     delegates with `delegate()` (a throwaway child, awaited, returning the
     child's `Done`), `spawn()` and `children()`; `rename_session()` is
     async, and a host asks for a title by submitting
-    `session_title_request(text)` on `system_messages`. `ExperimentalAtomAgent` (CodeActV2) follows the same rules.
+    `session_title_request(text)` on `system_messages`.
     The workspace settings, MCP registry and skill controls moved in as
     `nooa_atom.workspace` (`AtomOptions`), and the repository tools as
     `nooa_atom.tools`.

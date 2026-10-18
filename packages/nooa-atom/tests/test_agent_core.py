@@ -355,17 +355,10 @@ async def test_rename_session_needs_a_session(tmp_path):
         await agent.aclose()
 
 
-@pytest.mark.parametrize("module", ["agent", "experimental_agent"])
-def test_cells_see_the_turn_types_but_not_the_helpers(module):
-    from importlib import import_module
-
+def test_cells_see_the_turn_types_but_not_the_helpers():
     from nooa.agentdoc._visibility import filter_mro_module_globals
 
-    cls = getattr(
-        import_module(f"nooa_atom.agent.{module}"),
-        "AtomAgent" if module == "agent" else "ExperimentalAtomAgent",
-    )
-    names = set(filter_mro_module_globals(cls))
+    names = set(filter_mro_module_globals(AtomAgent))
     assert {"Done", "NeedInput", "Waiting", "TaskResult", "ChildResult"} <= names
     assert {"ChildFailedError", "DepthLimitError"} <= names
     hidden = {
@@ -380,12 +373,9 @@ def test_cells_see_the_turn_types_but_not_the_helpers(module):
 
 
 def test_the_handle_prompt_names_every_input_channel():
-    from nooa_atom.agent.experimental_agent import ExperimentalAtomAgent
-
-    for cls in (AtomAgent, ExperimentalAtomAgent):
-        text = cls.handle.__doc__ or ""
-        for channel in ("user_messages", "system_messages", "slash_commands", "delegates"):
-            assert f'"{channel}"' in text, (cls.__name__, channel)
+    text = AtomAgent.handle.__doc__ or ""
+    for channel in ("user_messages", "system_messages", "slash_commands", "delegates"):
+        assert f'"{channel}"' in text, channel
     assert "SessionInfo" not in (AtomAgent.get_summarization_status.__doc__ or "")
 
 
@@ -515,7 +505,7 @@ def test_the_turn_methods_run_on_the_single_tool_strategy(method):
 
 async def _first_call_messages(tmp_path, method: str) -> list[dict]:
     """The messages of the first model call of a ``method`` turn."""
-    from test_experimental_agent import python_cell
+    from atom_test_agents import python_cell
 
     code = (
         "return_result(Done(explanation='x', result=TaskResult("
