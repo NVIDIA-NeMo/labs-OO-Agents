@@ -110,6 +110,50 @@ def _cache_entries(path: str | None) -> str:
         return f"unreadable ({type(exc).__name__}: {exc})"
 
 
+def _cache_hash_facts(path: str | None) -> str:
+    """Compare the cached file's digest with this interpreter's expectation.
+
+    ``read_file_cached`` deletes a mismatching entry and re-downloads, so a
+    stale or foreign cache entry produces exactly the same symptom as a missing
+    one. The filename is only ``sha1(blob-url)``, which both sides agree on —
+    the contents are what can disagree.
+    """
+    if not path:
+        return "unset"
+    try:
+        import hashlib
+
+        entries = sorted(os.listdir(path))
+    except OSError as exc:
+        return f"unlistable ({type(exc).__name__}: {exc})"
+    if not entries:
+        return "empty"
+
+    actual = ""
+    for name in entries:
+        try:
+            with open(os.path.join(path, name), "rb") as handle:
+                actual = hashlib.sha256(handle.read()).hexdigest()
+        except OSError as exc:
+            return f"unreadable ({type(exc).__name__}: {exc})"
+        break
+
+    expected = ""
+    try:
+        import inspect
+        import re
+
+        from tiktoken_ext import openai_public
+
+        source = inspect.getsource(openai_public.cl100k_base)
+        matched = re.search(r"expected_hash=\"([0-9a-f]{64})\"", source)
+        expected = matched.group(1) if matched else ""
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never fail hard
+        return f"actual={actual} expected=unavailable({type(exc).__name__})"
+    verdict = "match" if actual and actual == expected else "MISMATCH"
+    return f"actual={actual} expected={expected} {verdict}"
+
+
 def _cache_readable(path: str | None) -> str:
     """Open each cache file and report which ones this process can read.
 
@@ -209,6 +253,7 @@ def _run(handle: int, expected_container: str | None, crash_path: str | None = N
             # between them is exactly what made this fail silently: tiktoken
             # calls os.path.exists, which reports False on a denied stat.
             "tokenizer_cache_readable": _cache_readable(_cache_dir),
+            "tokenizer_cache_hash": _cache_hash_facts(_cache_dir),
             "argv": list(sys.argv),
         },
     )
