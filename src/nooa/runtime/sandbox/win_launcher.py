@@ -142,6 +142,9 @@ class ContainerProcess:
         self._container_name = container_name
         self.pid = child.pid
         self._released = False
+        # The child's own report of what it sees before building the namespace.
+        # Empty until the child sends it; quoted in startup failures.
+        self.startup_report: dict[str, Any] = {}
 
     # --- liveness ----------------------------------------------------------
     def is_alive(self) -> bool:
@@ -406,6 +409,12 @@ def _handshake(
         except (EOFError, OSError) as exc:
             raise SandboxUnavailable(f"sandbox worker pipe closed during startup: {exc}") from exc
         kind = message.get("type")
+        if kind == "startup":
+            # The child's view of its own preconditions. Kept on the process so
+            # a later failure can quote it; the child cannot put it in a file the
+            # parent is guaranteed to find (tests use a tmp_path workspace).
+            proc.startup_report = message
+            continue
         if kind == "ready":
             baseline = int(message.get("baseline_bytes") or 0)
             memory_mb = 0
@@ -415,7 +424,10 @@ def _handshake(
             proc._job.set_limits(memory_mb=memory_mb, cpu_seconds=spec.max_cpu_seconds)
             return
         if kind == "fatal":
-            raise SandboxUnavailable(f"sandbox worker failed to start: {message.get('error')}")
+            raise SandboxUnavailable(
+                f"sandbox worker failed to start: {message.get('error')} "
+                f"[child saw: {proc.startup_report}]"
+            )
 
 
 def _sid_text(sid: ctypes.c_void_p) -> str:

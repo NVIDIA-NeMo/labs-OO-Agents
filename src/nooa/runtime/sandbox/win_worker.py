@@ -170,18 +170,20 @@ def _run(handle: int, expected_container: str | None, crash_path: str | None = N
 
     # Tokenizer data cannot be fetched here (no network), so the parent
     # pre-populates a granted directory and passes it on argv (set in ``main``
-    # before any import). Record what this process actually sees: when the child
-    # falls back to downloading, the only useful question is whether the
-    # variable was set and the file readable, and that is not inferable from
-    # the parent's side.
-    if crash_path:
-        _crash_log(
-            "startup: "
-            f"TIKTOKEN_CACHE_DIR={os.environ.get('TIKTOKEN_CACHE_DIR')!r} "
-            f"exists={os.path.isdir(os.environ.get('TIKTOKEN_CACHE_DIR') or '')} "
-            f"entries={_cache_entries(os.environ.get('TIKTOKEN_CACHE_DIR'))}",
-            crash_path,
-        )
+    # before any import). Report what this process actually sees over the pipe.
+    # The workspace crash log is not a reliable channel: tests create it under
+    # tmp_path and delete it when the test ends, so CI never sees the diagnosis.
+    _cache_dir = os.environ.get("TIKTOKEN_CACHE_DIR")
+    wire.send(
+        conn,
+        {
+            "type": "startup",
+            "tokenizer_cache": _cache_dir,
+            "tokenizer_cache_exists": bool(_cache_dir) and os.path.isdir(_cache_dir),
+            "tokenizer_cache_entries": _cache_entries(_cache_dir),
+            "argv": list(sys.argv),
+        },
+    )
 
     # ``ready`` is sent from the callback, not here: the parent's first-cell
     # deadline must not include this process's cold import cost. The memory
