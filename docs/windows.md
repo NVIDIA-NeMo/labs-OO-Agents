@@ -84,7 +84,7 @@ What each guardrail maps to:
 | Guardrail | Windows mechanism |
 | --- | --- |
 | Filesystem | AppContainer DACL grants, written before the process is created |
-| Network (`network=False`) | Omission of capability SIDs; blocks TCP egress |
+| Network (`network=False`) | Omission of capability SIDs; blocks TCP and UDP egress |
 | Memory | Job Object `ProcessMemoryLimit` = worker baseline + `max_memory_mb` |
 | CPU | Job Object `PerJobUserTimeLimit` |
 | Timeout / hard kill | `TerminateJobObject` |
@@ -96,10 +96,11 @@ Three behaviours differ from Linux and are worth knowing:
   the sandbox. The launcher grants read on the module's own directory (not its
   ancestors) and adds it to the child's `sys.path`. Linux `spawn` imports the
   agent before installing guards, so it has no such requirement.
-- **UDP egress is not proven blocked.** Omitting capability SIDs blocks TCP, but
-  `sendto` succeeds either way and datagram arrival could not be attributed on
-  the reference machine. Treat `network=False` as TCP-only until a WFP filter
-  backs it.
+- **Network isolation depends on the Windows firewall service.** Omitting
+  capability SIDs blocks TCP and UDP egress; a wire capture shows the UDP
+  datagram dropped before it leaves the host. The filters that do this belong
+  to the firewall service (`mpssvc`), and both measurements ran with it
+  running. Behaviour with the service stopped was not measured.
 - **The worker does not inherit the parent's environment.** It starts with
   Windows' own session variables (`SYSTEMROOT`, `PATH`, `USERPROFILE`, ...) and
   nothing a user or installer added, so API tokens in the parent stay there.

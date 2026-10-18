@@ -19,7 +19,7 @@ Guards map onto the two Windows mechanisms:
 guardrail        mechanism
 ===============  ===================================================
 filesystem       AppContainer DACL grants written before creation
-network          omission of capability SIDs (TCP; UDP unproven)
+network          omission of capability SIDs (TCP and UDP)
 memory           Job Object ``ProcessMemoryLimit``
 cpu              Job Object ``PerJobUserTimeLimit``
 timeout / kill   ``TerminateJobObject``

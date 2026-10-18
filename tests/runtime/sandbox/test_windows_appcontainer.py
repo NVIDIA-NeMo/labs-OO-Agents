@@ -215,6 +215,26 @@ def test_outbound_tcp_is_blocked(session):
     assert result.error is not None, "the container opened an outbound TCP connection"
 
 
+def test_outbound_udp_round_trip_is_blocked(session):
+    """A DNS query must get no reply: a bare ``sendto`` succeeds either way.
+
+    A reply would prove the datagram left. The positive control (the same
+    query answered with ``internetClient``) and the wire capture showing the
+    datagram dropped before it leaves are in
+    ``experiments/windows-sandbox-probe/udp_dns_probe.py``.
+    """
+    code = (
+        "import socket\n"
+        "query = bytes.fromhex('abcd01000001000000000000076578616d706c6503636f6d0000010001')\n"
+        "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+        "s.settimeout(4)\n"
+        "s.sendto(query, ('1.1.1.1', 53))\n"
+        "s.recvfrom(512)\n"
+    )
+    result = session.run(code)
+    assert result.error is not None, "a UDP query from the container got a reply"
+
+
 # --- environment -------------------------------------------------------------
 _SENTINEL = "NOOA_TEST_PARENT_ONLY"
 

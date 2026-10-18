@@ -158,6 +158,9 @@ out a blanket host firewall but not the TUN path.
 should be backed by an explicit WFP filter (or verified on a machine with a
 real LAN adapter), not by capability omission alone.
 
+**Resolved later** by [UDP egress](#udp-egress): with a working positive
+control and a wire capture, omitting capability SIDs blocks UDP as well.
+
 ### 5. Job limits — both work
 
 | Metric | Value |
@@ -342,6 +345,37 @@ ancestor. The default `%LOCALAPPDATA%` root was not measured.
 uv run python experiments\windows-sandbox-probe\env_probe.py
 ```
 
+## UDP egress
+
+**Question.** Does omitting capability SIDs block UDP egress, or only TCP?
+Scenario 4 could not tell: its check failed even with `internetClient`.
+
+**Design.** `udp_dns_probe.py` runs one child three ways (host unconfined,
+container with `internetClient`, container with no capability) and completes
+DNS round trips to `1.1.1.1` and `8.8.8.8`. A reply proves the datagram left;
+the capability case is the positive control. A missing reply cannot rule out
+a one-way send, which is all exfiltration needs, so the CI step also captures
+the wire with `pktmon`, filtered to the two resolvers.
+
+| Check | Host | `internetClient` | No capability |
+|---|---|---|---|
+| TCP `1.1.1.1:443` | connected | connected | `WinError 10013` |
+| UDP DNS `1.1.1.1` / `8.8.8.8` | reply | reply | timeout (4 s) |
+| `getaddrinfo` | resolved | resolved | `gaierror 11001` |
+| Wire (`pktmon`, CI only) | — | Ethernet frames to both | `Drop:` at the IP layer, no frame |
+
+The table holds on the reference machine and on the CI runner (a real NIC,
+`10.1.0.x`). The wire capture settles the one-way question: without the
+capability the stack drops the datagram before any Ethernet frame is built.
+
+Both ran with the Windows firewall service (`mpssvc`) running, whose WFP
+filters implement AppContainer network isolation. Behaviour with it stopped
+was not measured.
+
+```powershell
+uv run python experiments\windows-sandbox-probe\udp_dns_probe.py
+```
+
 ## Consequences for the backend
 
 1. **A private runtime root is mandatory, not an optimisation.** 22,598 files /
@@ -359,8 +393,8 @@ uv run python experiments\windows-sandbox-probe\env_probe.py
    inside the runtime root, which the root needs a grant on anyway.
 3. **Teardown uses `revoke`, not SDDL replay.** Plus a journal for crash
    recovery: a killed parent leaves ACEs behind, and they are persistent.
-4. **`network=False` needs a non-AppContainer enforcement path** until UDP is
-   verified on a normal adapter.
+4. **`network=False` is backed by capability omission alone**, for TCP and UDP
+   ([UDP egress](#udp-egress)). No WFP filter of our own, so no admin rights.
 5. **The launcher must be a separate, unconfined process**: it needs to write
    ACLs and create the job, and `SECURITY_CAPABILITIES` cannot be applied to an
    existing process.
@@ -371,8 +405,8 @@ uv run python experiments\windows-sandbox-probe\env_probe.py
 
 - Warm-start cost after the bytecode cache is populated (19.7 s is cold).
 - Long-running stability and startup cost under repeated worker restarts.
-- Behaviour on a machine with a real LAN adapter (UDP attribution).
-- Low-integrity / LPAC variants, and network enforcement via WFP.
+- Network isolation with the Windows firewall service stopped.
+- Low-integrity / LPAC variants.
 - Whether a worker can import an agent module that lives outside the granted
   workspace (the blueprint path needs `module:qualname` to be importable).
 - Environment visibility on the Linux backend, which does not filter it.

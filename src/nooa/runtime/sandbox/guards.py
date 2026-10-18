@@ -236,12 +236,13 @@ def _probe_windows(runtime_root: str | None = None) -> Capabilities:
     first instruction. ``install_guards`` is therefore a no-op there — the
     guards are already in place when the worker starts.
 
-    Network is reported as ``appcontainer`` because TCP egress is blocked by
-    omitting capability SIDs, which the M0 probe confirmed with a two-way
-    control (blocked without ``internetClient``, allowed with it). UDP is *not*
-    covered by that mechanism: ``sendto`` succeeds either way, so capability
-    omission proves nothing for datagrams. The detail string records that
-    rather than letting the capability name imply more than was measured.
+    Network is reported as ``appcontainer`` because omitting capability SIDs
+    blocks both TCP and UDP egress, each measured with a two-way control
+    (blocked without ``internetClient``, allowed with it). For UDP a bare
+    ``sendto`` succeeds either way, so the evidence is a wire capture: without
+    the capability the stack drops the datagram before any frame is built.
+    The filters are the Windows firewall service's, so that holds while it is
+    running; the detail string says so.
     """
     from nooa.runtime.sandbox.errors import SandboxUnavailable
     from nooa.runtime.sandbox.win_runtime import prepare_root, resolve_root
@@ -262,8 +263,8 @@ def _probe_windows(runtime_root: str | None = None) -> Capabilities:
 
     detail["runtime_root"] = str(root.root)
     detail["network"] = (
-        "capability omission blocks TCP; UDP egress is not attributable and needs "
-        "a WFP filter before network=False can claim datagram isolation"
+        "capability omission blocks TCP and UDP egress (measured with the Windows "
+        "firewall service running; not measured with it stopped)"
     )
     detail["memory"] = "job ProcessMemoryLimit = worker baseline + max_memory_mb"
     return Capabilities(
