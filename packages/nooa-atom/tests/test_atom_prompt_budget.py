@@ -87,10 +87,16 @@ RESULT = (
 # lines became one sentence (51 characters less in total, was 17,981), and
 # handle_orchestrate's merge-back sentence became the one-way one (53 more,
 # was 19,357). Within the limits, so they stay.
+# Re-measured after the #451 review-3 fixes (2026-10-19): handle_work says "a
+# Todo in your list" instead of "the Todo in your list", 2 characters less in
+# total (was 17,930). delegate() no longer comments on the parent's Todo and
+# copy_todo/merge_todo/with_todo are gone (insert_copy() is hidden), but
+# those docs are past what the prompt shows: every other row is unchanged.
+# Within the limits, so they stay.
 LIMITS = {
     (ATOM, "handle"): (15_200, 18_200),  # measured 14,909 / 17,860
     (ATOM, "handle_batch"): (15_200, 17_800),  # measured 14,909 / 17,458
-    (ATOM, "handle_work"): (15_200, 18_400),  # measured 14,909 / 17,930
+    (ATOM, "handle_work"): (15_200, 18_400),  # measured 14,909 / 17,928
     (ATOM, "handle_orchestrate"): (15_200, 19_800),  # measured 14,909 / 19,410
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
