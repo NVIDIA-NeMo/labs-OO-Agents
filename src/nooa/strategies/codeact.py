@@ -30,6 +30,7 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
+    ClassVar,
     Literal,
     get_args,
     get_origin,
@@ -705,9 +706,18 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:
             return ", ".join(name for name, _ in ordered)
 
+    # show() is in every cell's namespace, for both CodeAct strategies.
+    SHOW_NOTE_LINES: ClassVar[tuple[str, ...]] = (
+        "show(obj) attaches a nooa.media.Image/Audio/Video/File so you can see or hear it;",
+        "here `Image` is nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image.",
+    )
+
     def _always_available_text(self) -> str:
         names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
-        return f"Always available without import: {names}, plus stdlib `asyncio` and `typing`."
+        return (
+            f"Always available without import: {names}, plus stdlib `asyncio` and `typing`. "
+            + " ".join(self.SHOW_NOTE_LINES)
+        )
 
     def _always_available_builtins(self) -> tuple[str, ...]:
         return ("self", "print()", "pprint()", "doc()", "return_result()")

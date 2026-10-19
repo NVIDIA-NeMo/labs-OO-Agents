@@ -280,10 +280,12 @@ _UNCALLED_TYPES = frozenset(
 
 
 def _awaited_uncalled_target(error: BaseException) -> tuple[str, bool] | None:
-    """For ``await self.shell.read`` (no call), return ``("self.shell.read", is_async)``.
+    """For ``await <name or attribute chain>`` with no call, return ``(chain, is_async)``.
 
-    Parses the failing user source line for an ``await`` whose operand is a name
-    or attribute chain (not a call) and resolves it statically. None on any miss.
+    Works for any object in the cell's namespace; e.g. ``await self.shell.read``
+    gives ``("self.shell.read", True)``. Parses the failing user source line for
+    an ``await`` whose operand is not a call and resolves it statically, without
+    running any code. None on any miss.
     """
     location = _last_user_frame(error)
     if location is None:
@@ -322,7 +324,7 @@ def _sync_await_hint(error: BaseException) -> str | None:
         return None
     kind = match.group(1)
     if kind in _UNCALLED_TYPES:
-        # ``await self.shell.read``: the function object itself was awaited.
+        # ``await obj.method`` (e.g. ``await self.shell.read``): the function itself was awaited.
         try:
             target = _awaited_uncalled_target(error)
         except Exception:

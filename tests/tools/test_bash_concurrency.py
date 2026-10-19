@@ -176,6 +176,28 @@ class TestResetDuringStartupDrain:
             await session.close()
 
 
+class TestCancelledStart:
+    async def test_cancelled_start_closes_its_bash_before_a_retry(self, tmp_path):
+        """Cancelling start() during a slow init must not leave that bash running:
+        the retry would replace self._process and close() would miss it."""
+        session = BashSession(cwd=tmp_path, init_command="sleep 5; export INIT_DONE=1")
+        task = asyncio.create_task(session.start())
+        await asyncio.sleep(0.5)  # start() is now inside the init command
+        first = session._process
+        assert first is not None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert session._process is None and session._ready is False
+        await asyncio.wait_for(first.wait(), timeout=10)  # the first bash is gone
+        try:
+            session._init_command = "export INIT_DONE=1"
+            stdout, _err, _code = await session.run("echo $INIT_DONE")
+            assert stdout == "1"
+        finally:
+            await session.close()
+
+
 class TestStartDuringInit:
     """#447 review finding 2: run()/reset() during a slow init command wait for it."""
 

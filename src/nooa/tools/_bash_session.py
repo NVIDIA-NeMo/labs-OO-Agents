@@ -249,6 +249,11 @@ class BashSession:
         self._start_task = asyncio.current_task()
         try:
             await self._start_bash()
+        except BaseException:
+            # A failed or cancelled start must not leave a half-started bash
+            # behind: the next start() would replace self._process and orphan it.
+            await asyncio.shield(self.close())
+            raise
         finally:
             self._start_task = None
 

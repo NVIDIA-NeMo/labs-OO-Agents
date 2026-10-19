@@ -355,7 +355,9 @@ class AgentVars:
         self._agent.vars[key] = value
 
     def __setitem__(self, key: str, value: Any) -> None:
-        raise TypeError(f"self.v does not support item assignment; write self.v.{key} = ... instead.")
+        raise TypeError(
+            f"self.v does not support item assignment; write self.v.{key} = ... instead."
+        )
 
     def __delattr__(self, key: str) -> None:
         try:
