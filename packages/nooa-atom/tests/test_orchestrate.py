@@ -35,8 +35,9 @@ ORCHESTRATOR_TEXT = (
 # Changing either prompt on purpose means updating its digest here.
 UNCHANGED_PROMPTS = {
     # handle() as on dev/atom after #447 and #451 (#451's "or from your parent
-    # agent if you are a child" line and #447's NeedInput free-text wording).
-    "handle": "ce9800990421efdd718c60f4fe8eee4908eec54437fc0161d60f04f1ab57a1ae",
+    # agent if you are a child" line and #447's NeedInput free-text wording),
+    # plus the regular progress-update guidance.
+    "handle": "4b8cac52ffa8278c0fbf5ea358df39b57b029b3cc7a555df016211e5e77d6e43",
     "handle_batch": "9124c2874abd30f61a26f313abacbdc925f02a20efac8b4d7e3319a22ab545f0",
 }
 
