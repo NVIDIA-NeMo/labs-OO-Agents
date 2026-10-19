@@ -628,30 +628,13 @@ class _SecurityVisitor(ast.NodeVisitor):
 
 
 # =============================================================================
-# Missing-await rules live in nooa.runtime.async_calls (shared with
-# GeneratedCodeValidator and the error formatter); re-exported here.
-# =============================================================================
-from nooa.runtime.async_calls import (  # noqa: E402, F401
-    async_self_chain,
-    collect_async_method_names,
-    held_coroutine_example,
-    held_coroutine_message,
-    held_coroutine_uses,
-    is_gather_argument,
-    missing_await_calls,
-    missing_await_example,
-    missing_await_message,
-)
-
-
-# =============================================================================
 # REPL Policy Validator
 # =============================================================================
 class REPLPolicyValidator:
     """Validates REPL-style coding conventions.
 
     Checks for:
-    - Missing await on async method calls (rules: nooa.runtime.async_calls)
+    - Missing await on async method calls
     - Infinite ``while True`` loops
     """
 
@@ -659,40 +642,7 @@ class REPLPolicyValidator:
         """Validate REPL policy rules and return issues."""
         visitor = _REPLPolicyVisitor(context)
         visitor.visit(tree)
-        return _missing_await_issues(tree, context.agent) + visitor.issues
-
-
-def _missing_await_issues(tree: ast.AST, agent: Any) -> list[ValidationIssue]:
-    """E301 issues for calls that need ``await`` (rules: nooa.runtime.async_calls)."""
-    from nooa.runtime.harness_metrics import get_harness_metrics
-
-    issues: list[ValidationIssue] = []
-    for node, name, chain in missing_await_calls(tree, agent):
-        get_harness_metrics().missing_await(name)
-        message = missing_await_message(name, chain=chain)
-        example = missing_await_example(name, chain=chain)
-        issues.append(
-            ValidationIssue(
-                line=node.lineno,
-                col=node.col_offset,
-                message=f"{message} Example: result = {example}" if chain else message,
-                code="E301",
-                fix_hint=example,
-            )
-        )
-    for node, chain in held_coroutine_uses(tree, agent):
-        get_harness_metrics().missing_await(chain)
-        example = held_coroutine_example(node.id, chain)
-        issues.append(
-            ValidationIssue(
-                line=node.lineno,
-                col=node.col_offset,
-                message=f"{held_coroutine_message(node.id, chain)} Example: {example}",
-                code="E301",
-                fix_hint=example,
-            )
-        )
-    return issues
+        return visitor.issues
 
 
 class _REPLPolicyVisitor(ast.NodeVisitor):
@@ -701,7 +651,9 @@ class _REPLPolicyVisitor(ast.NodeVisitor):
     def __init__(self, context: ValidationContext):
         self.context = context
         self.issues: list[ValidationIssue] = []
+        self.async_method_names: set[str] = set()
         self.parent_map: dict[ast.AST, ast.AST] = {}
+        self._collect_async_methods()
 
     def visit(self, node: ast.AST) -> Any:
         """Build parent map while visiting."""
@@ -788,6 +740,97 @@ class _REPLPolicyVisitor(ast.NodeVisitor):
         for subnode in ast.iter_child_nodes(node):
             if self._has_exit_in_subtree(subnode, check_break):
                 return True
+
+        return False
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        """Check for missing await on async method calls."""
+        if not self.async_method_names:
+            self.generic_visit(node)
+            return
+
+        # Check self.method() calls
+        if not isinstance(node.func, ast.Attribute):
+            self.generic_visit(node)
+            return
+
+        if not isinstance(node.func.value, ast.Name):
+            self.generic_visit(node)
+            return
+
+        if node.func.value.id != "self":
+            self.generic_visit(node)
+            return
+
+        method_name = node.func.attr
+        if method_name not in self.async_method_names:
+            self.generic_visit(node)
+            return
+
+        # Check if already awaited or in a gather-friendly context
+        if not self._is_awaited_or_gathered(node):
+            from nooa.runtime.harness_metrics import get_harness_metrics
+
+            get_harness_metrics().missing_await(method_name)
+            self.issues.append(
+                ValidationIssue(
+                    line=node.lineno,
+                    col=node.col_offset,
+                    message=f"Method `{method_name}` is async and must be called with `await`",
+                    code="E301",
+                    fix_hint=f"await self.{method_name}(...)",
+                )
+            )
+
+        self.generic_visit(node)
+
+    def _collect_async_methods(self) -> None:
+        """Collect names of async methods from agent."""
+        from nooa.agentdoc.visibility import is_hidden_method
+
+        agent = self.context.agent
+        if not agent:
+            return
+
+        # Check class-level methods
+        for attr_name in dir(agent.__class__):
+            if attr_name.startswith("__"):
+                continue
+            try:
+                attr = getattr(agent.__class__, attr_name, None)
+                if attr and inspect.iscoroutinefunction(attr):
+                    if not is_hidden_method(attr):
+                        self.async_method_names.add(attr_name)
+            except Exception:
+                continue
+
+        # Check instance-level methods
+        for attr_name in dir(agent):
+            if attr_name.startswith("__"):
+                continue
+            try:
+                attr = getattr(agent, attr_name)
+                if callable(attr) and inspect.iscoroutinefunction(attr):
+                    if not is_hidden_method(attr):
+                        self.async_method_names.add(attr_name)
+            except Exception:
+                continue
+
+    def _is_awaited_or_gathered(self, node: ast.AST) -> bool:
+        """Check if call is awaited or in a gather-friendly context."""
+        current = node
+        while current in self.parent_map:
+            parent = self.parent_map[current]
+
+            # Direct await
+            if isinstance(parent, ast.Await) and getattr(parent, "value", None) == current:
+                return True
+
+            # In list/generator comprehension (for gather patterns)
+            if isinstance(parent, (ast.ListComp, ast.GeneratorExp)):
+                return True
+
+            current = parent
 
         return False
 
@@ -1419,10 +1462,7 @@ class UnifiedCodeValidator:
 
     By default, includes SecurityValidator and BlockingCallValidator,
     which are the checks performed by execute_code(). The REPLPolicyValidator
-    (missing await, infinite loops) is opt-in here: CodeActStrategy, CodeActV2
-    and PurePythonStrategy check missing awaits before each cell with
-    ``GeneratedCodeValidator`` (nooa.strategies.generated_code), which shares
-    the attribute-chain resolution (``async_self_chain``) used by E301.
+    (class definitions, missing await) is used by strategies separately.
     """
 
     def __init__(
@@ -1437,8 +1477,7 @@ class UnifiedCodeValidator:
         Args:
             validators: List of validators to use. If provided, overrides defaults.
             include_repl_policy: If True, include REPLPolicyValidator (class defs,
-                missing await). Default False: the CodeAct strategies run the
-                missing-await check themselves via GeneratedCodeValidator.
+                missing await). Default False since strategies handle this separately.
             restrictions: Code execution restrictions (blocked modules/calls).
                 None uses defaults from RestrictionsConfig().
         """
