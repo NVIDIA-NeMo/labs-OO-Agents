@@ -255,3 +255,48 @@ class TestSnapshotVarsPydantic:
         assert dict(holder.vars) == {"ok": 1}
         same = SnapshotVars({"k": "v"})
         assert self._model()(vars=same).vars is same
+
+
+class TestEnvelopeShapedTodoVars:
+    """PR #451 review 3, finding 1: a var shaped like an envelope stays a plain dict."""
+
+    INJECTED = (
+        '{"title":"b","vars":{"x":{"__type__":"pydantic",'
+        '"__class__":"nooa.tools.todo.Todo","data":{"title":"INJECTED"}}}}'
+    )
+
+    @staticmethod
+    def _manager_with(todo):
+        from nooa.tools.todo import TodoManager
+
+        manager = TodoManager()
+        manager._todos[todo.id] = todo
+        manager._order.append(todo.id)
+        return manager
+
+    def test_an_injected_todo_envelope_comes_back_as_a_plain_dict(self):
+        from nooa.storage.serialization import deserialize
+        from nooa.tools.todo import Todo
+
+        todo = Todo.model_validate_json(self.INJECTED)
+        restored = deserialize(*serialize(self._manager_with(todo)))
+        x = restored.get(todo.id).vars["x"]
+        assert type(x) is dict
+        assert x == {
+            "__type__": "pydantic",
+            "__class__": "nooa.tools.todo.Todo",
+            "data": {"title": "INJECTED"},
+        }
+
+    def test_an_os_system_envelope_does_not_wipe_the_todo_manager(self):
+        from nooa.storage.serialization import deserialize
+        from nooa.tools.todo import Todo
+
+        bad = Todo.model_validate_json(
+            '{"title":"b","vars":{"x":{"__type__":"pydantic","__class__":"os.system","data":{}}}}'
+        )
+        manager = self._manager_with(bad)
+        other = manager.add("keep me")
+        restored = deserialize(*serialize(manager))
+        assert restored.get(other.id).title == "keep me"
+        assert restored.get(bad.id).vars["x"]["__class__"] == "os.system"
