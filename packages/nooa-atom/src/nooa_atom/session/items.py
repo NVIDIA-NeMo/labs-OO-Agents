@@ -8,6 +8,7 @@ live agents never cross.
 """
 
 import uuid
+from contextlib import suppress
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import (
@@ -70,13 +71,19 @@ class ChildRef(BaseModel):
 
     def __getattribute__(self, name: str) -> Any:
         # ``status`` is live in the parent's turn (read from the registry);
-        # elsewhere it is the stored value, the status when the ref was made.
-        # Dumps and comparisons read the stored field, so they are stable.
+        # elsewhere, or when the registry no longer knows the child, it is
+        # the stored value, the status when the ref was made. Dumps,
+        # snapshots and comparisons read the stored field, so they are stable.
         if name == "status":
             port = _parent_port(self)
             if port is not None:
-                return port.child_status(object.__getattribute__(self, "id"))
+                with suppress(ChildFailedError):
+                    return port.child_status(object.__getattribute__(self, "id"))
         return super().__getattribute__(name)
+
+    def __snapshot_data__(self) -> dict[str, Any]:
+        """The stored fields for a snapshot; never asks the port for the live status."""
+        return self.model_dump(mode="json")
 
     @classmethod
     def __restore_snapshot__(cls, data: dict[str, Any]) -> "ChildRef":
@@ -90,7 +97,10 @@ class ChildRef(BaseModel):
         for name, value in super().__repr_args__():
             yield (name, self.status) if name == "status" else (name, value)
         port = _parent_port(self)
-        question = None if port is None else port.pending_question(self.id)
+        question = None
+        if port is not None:
+            with suppress(ChildFailedError):
+                question = port.pending_question(self.id)
         if question is not None:
             yield "pending_question", f"[{question.id}] {question.question}"
 

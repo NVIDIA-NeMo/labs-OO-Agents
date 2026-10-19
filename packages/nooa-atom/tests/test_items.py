@@ -182,3 +182,66 @@ def test_options_require_an_agent_and_do_not_serialise_the_llm(tmp_path):
     options = SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent", llm=object())
     assert "llm" not in options.model_dump()
     assert Path(options.model_dump(mode="json")["workspace"]) == tmp_path
+
+
+# ---- review-2 finding 6: a ref whose child the registry no longer knows ----
+
+
+class _GonePort:
+    """A parent port whose registry no longer knows the child (e.g. after delete)."""
+
+    id = "parent1"
+
+    def __init__(self):
+        self.calls = 0
+
+    def child_status(self, child_id):
+        self.calls += 1
+        raise items.ChildFailedError(f"Child {child_id!r} does not exist")
+
+    def pending_question(self, child_id):
+        raise items.ChildFailedError(f"Child {child_id!r} does not exist")
+
+
+def test_a_child_ref_snapshots_its_stored_status_and_never_raises():
+    from nooa.storage.serialization import deserialize, serialize
+    from nooa.storage.snapshot_vars import SnapshotVars
+    from nooa_atom.session.port import current_port
+
+    ref = ChildRef(id="c1", name="worker", depth=1, status="idle", parent_id="parent1")
+    port = _GonePort()
+    token = current_port.set(port)
+    try:
+        blob, allowlist = serialize(ref)
+        dumped = ref.model_dump()
+        assert port.calls == 0  # snapshots and dumps never ask the port
+        assert blob["data"]["status"] == "idle" and dumped["status"] == "idle"
+        assert deserialize(blob, allowlist) == ref
+        v = SnapshotVars()
+        v["child"] = ref  # self.v assignment serializes; it must not raise
+        assert "child" in v
+        assert "status='idle'" in repr(ref)  # repr falls back to the stored value
+        assert ref.status == "idle"  # so does a live read
+    finally:
+        current_port.reset(token)
+
+
+def test_a_child_ref_reads_status_live_in_its_parents_turn():
+    from nooa_atom.session.port import current_port
+
+    class LivePort:
+        id = "parent1"
+
+        def child_status(self, child_id):
+            return "running"
+
+        def pending_question(self, child_id):
+            return None
+
+    ref = ChildRef(id="c1", name="worker", depth=1, status="idle", parent_id="parent1")
+    token = current_port.set(LivePort())
+    try:
+        assert ref.status == "running"
+        assert ref.model_dump()["status"] == "idle"
+    finally:
+        current_port.reset(token)
