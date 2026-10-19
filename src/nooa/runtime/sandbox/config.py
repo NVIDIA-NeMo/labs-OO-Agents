@@ -130,6 +130,16 @@ class SandboxConfig(BaseModel):
             "`python -m nooa.runtime.sandbox.win_runtime --build --root <dir>`."
         ),
     )
+    container_name: str | None = Field(
+        default=None,
+        description=(
+            "Windows only: the AppContainer profile this session runs under. The "
+            "profile name determines the container SID, so two live sessions that "
+            "share a name share an identity and can revoke each other's grants. "
+            "None -> a unique per-session name. Set it only to make a session "
+            "reuse a profile deliberately, never as a shared default."
+        ),
+    )
     env_passthrough: tuple[str, ...] = Field(
         default=(),
         description=(

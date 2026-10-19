@@ -57,7 +57,7 @@ from nooa.runtime.sandbox.win_api import (
     grant,
     revoke,
 )
-from nooa.runtime.sandbox.win_runtime import AclJournal, RuntimeRoot
+from nooa.runtime.sandbox.win_runtime import AclJournal, RuntimeRoot, default_container_name
 
 __all__ = ["ContainerProcess", "start_container_worker"]
 
@@ -208,6 +208,11 @@ class ContainerProcess:
         # Empty until the child sends it; quoted in startup failures.
         self.startup_report: dict[str, Any] = {}
 
+    @property
+    def container_name(self) -> str:
+        """The profile this worker runs under; unique to its session."""
+        return self._container_name
+
     # --- liveness ----------------------------------------------------------
     def is_alive(self) -> bool:
         if self._released:
@@ -248,6 +253,7 @@ class ContainerProcess:
         if self._released:
             return
         self._released = True
+        failed = 0
         try:
             sid = container_sid_quiet(self._container_name)
             if sid is not None:
@@ -255,21 +261,42 @@ class ContainerProcess:
                     try:
                         revoke(path, sid)
                     except OSError:
-                        pass
+                        failed += 1
                 _k32.LocalFree(sid)
         finally:
             self._granted = []
-            self._journal.clear()
+            # A revoke that failed leaves a persistent ACE behind. Keep the
+            # journal then — it is the only thing that knows the path and SID —
+            # and the next start reclaims it. Otherwise the record dies with
+            # the session and nothing can ever remove the grant.
+            self._journal.clear(keep=bool(failed))
             self._job.close()
             self._child.close()
+            # Only when nothing was left behind: the SID is what a later
+            # recovery would need, and deleting the profile strands any ACE
+            # that still names it.
+            if not failed:
+                _delete_profile_quiet(self._container_name)
+
+
+def _delete_profile_quiet(name: str) -> None:
+    """Remove a session's AppContainer profile. Never raises."""
+    from nooa.runtime.sandbox.win_api import delete_profile
+
+    try:
+        delete_profile(name)
+    except OSError:
+        # Leaking a profile is survivable; failing teardown is not. Recovery
+        # cannot clean it either, since it is not part of a DACL.
+        pass
 
 
 def container_sid_quiet(name: str | None = None) -> Any | None:
     """A container's SID, or None if its profile is gone."""
-    from nooa.runtime.sandbox.win_runtime import DEFAULT_CONTAINER_NAME
+    from nooa.runtime.sandbox.win_runtime import default_container_name
 
     try:
-        return container_sid(name or DEFAULT_CONTAINER_NAME)
+        return container_sid(name or default_container_name())
     except OSError:
         return None
 
@@ -297,14 +324,28 @@ def start_container_worker(
     already picklable by construction.
     """
     from nooa.runtime.sandbox.win_api import create_profile
-    from nooa.runtime.sandbox.win_runtime import DEFAULT_CONTAINER_NAME
 
-    name = container_name or DEFAULT_CONTAINER_NAME
+    # One profile per session: the name determines the SID, and a shared SID
+    # means one session's teardown revokes the other's grants.
+    name = container_name or default_container_name()
     root.check()
     create_profile(name)
     app_sid = container_sid(name)
+    sid_text = _sid_text(app_sid)
 
-    journal = AclJournal(root.journal)
+    # Opened before the first grant, so every recorded ACE has an owner that can
+    # be proved dead before it is reclaimed. Refuses if another live session
+    # already holds this journal — that would mean two sessions share a name.
+    try:
+        journal = AclJournal.open(root.journal_for(name), sid_text)
+    except BlockingIOError:
+        # The profile belongs to the session that holds the journal: it is still
+        # running and still needs its SID, so it must not be deleted here.
+        _k32.LocalFree(app_sid)
+        raise SandboxUnavailable(
+            f"container profile {name!r} is already in use by a live session: "
+            "SandboxConfig.container_name must be unique among concurrent sessions"
+        ) from None
     granted: list[str] = []
 
     def grant_path(path: str, access: int) -> None:
@@ -312,7 +353,7 @@ def start_container_worker(
             return
         grant(path, app_sid, access)
         granted.append(path)
-        journal.record(path, _sid_text(app_sid))
+        journal.record(path, sid_text)
 
     try:
         # 1. The runtime root: read+execute, never write. The worker may import
@@ -434,12 +475,18 @@ def start_container_worker(
     except BaseException:
         # Any failure before the process is handed to the caller must not leak
         # ACEs: they are persistent, and a retry would otherwise stack them.
+        failed = 0
         for path in reversed(granted):
             try:
                 revoke(path, app_sid)
             except OSError:
-                pass
-        journal.clear()
+                failed += 1
+        # Same rule as ``ContainerProcess.release``: a grant that could not be
+        # revoked keeps its journal entry and its SID, so the next start can
+        # finish the job. Everything else is removed now.
+        journal.clear(keep=bool(failed))
+        if not failed:
+            _delete_profile_quiet(name)
         raise
     finally:
         # ``container_sid`` returns a LocalAlloc'd SID; both the success and the

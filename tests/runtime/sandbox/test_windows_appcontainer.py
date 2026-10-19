@@ -340,6 +340,134 @@ def test_cpu_limit_kills_and_the_session_recovers(session):
         session.close()
 
 
+# --- session identity --------------------------------------------------------
+def test_recovery_leaves_a_live_sessions_journal_alone(tmp_path):
+    """Liveness is the journal's lock, not its existence.
+
+    This is the mechanism the whole fix rests on, so it is tested without a
+    container: a locked journal must survive recovery untouched, and the same
+    journal must be reclaimed once its owner lets go.
+    """
+    from nooa.runtime.sandbox.win_runtime import (
+        AclJournal,
+        RuntimeRoot,
+        recover_stale_grants,
+    )
+
+    root = RuntimeRoot(tmp_path)
+    journal = AclJournal.open(root.journal_for("live-session"), "S-1-15-2-1")
+    path = journal.path
+    try:
+        assert path.exists()
+        assert recover_stale_grants(root) == []
+        assert path.exists(), "recovery deleted a live session's journal"
+        # A second session must not be able to take the same identity either.
+        with pytest.raises(BlockingIOError):
+            AclJournal.open(root.journal_for("live-session"), "S-1-15-2-1")
+    finally:
+        journal.clear()
+    assert not path.exists()
+    recover_stale_grants(root)
+    assert not path.exists()
+
+
+def test_concurrent_sessions_do_not_share_an_identity(tmp_path):
+    """Starting B must leave A running and A's workspace writable.
+
+    Both sessions share one runtime root, which is what the old backend keyed
+    everything on: one profile name and one journal. B's startup then recovered
+    "stale" grants — A's — and revoked them, and closing A deleted the journal B
+    would need after a crash. The measured failure was a PermissionError in A,
+    not an exception anywhere in B.
+    """
+    from nooa.runtime.sandbox import win_api
+
+    ws_a = tmp_path / "ws-a"
+    ws_b = tmp_path / "ws-b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    a = _Session(ws_a)
+    b = None
+    try:
+        assert a.run("1").error is None
+        name_a = a.executor._proc.container_name
+        sid_a = win_api.sid_string(win_api.container_sid(name_a))
+        assert sid_a in win_api.read_dacl(str(ws_a))
+
+        b = _Session(ws_b)
+        assert b.run("1").error is None, "the second session could not start"
+        name_b = b.executor._proc.container_name
+        assert name_b != name_a, "two live sessions share one container identity"
+        assert win_api.sid_string(win_api.container_sid(name_b)) != sid_a
+
+        # The measurement: B's startup must not have touched A's grant.
+        assert sid_a in win_api.read_dacl(str(ws_a)), (
+            "starting a second session revoked the first session's grant"
+        )
+        result = a.run("open('after-b.txt','w').write('ok')")
+        assert result.error is None, result.error
+        assert (ws_a / "after-b.txt").read_text(encoding="utf-8") == "ok"
+    finally:
+        a.close()
+        if b is not None:
+            b.close()
+
+
+def test_closing_a_session_leaves_another_session_running(tmp_path):
+    """A's teardown must not delete B's recovery record or revoke B's grants."""
+    from nooa.runtime.sandbox import win_api
+    from nooa.runtime.sandbox.win_runtime import resolve_root
+
+    ws_a = tmp_path / "ws-a"
+    ws_b = tmp_path / "ws-b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    a = _Session(ws_a)
+    b = None
+    try:
+        assert a.run("1").error is None
+        b = _Session(ws_b)
+        assert b.run("1").error is None
+        name_b = b.executor._proc.container_name
+        sid_b = win_api.sid_string(win_api.container_sid(name_b))
+        journal_b = resolve_root(str(ROOT)).journal_for(name_b)
+        assert journal_b.exists(), "B has no recovery record, so this test proves nothing"
+    finally:
+        a.close()
+    try:
+        assert journal_b.exists(), "closing A deleted B's recovery record"
+        assert sid_b in win_api.read_dacl(str(ws_b)), "closing A revoked B's grant"
+        result = b.run("2 + 2")
+        assert result.error is None, result.error
+        assert result.returned_value == 4
+    finally:
+        b.close()
+
+
+def test_teardown_removes_the_session_profile(tmp_path):
+    """A per-session profile must not outlive its session.
+
+    The name is unique per start, so a leaked profile is a permanent entry in
+    the user's package registry that nothing will ever reuse or clean up.
+    ``DeriveAppContainerSidFromAppContainerName`` keeps resolving a deleted
+    name (the SID is derived, not looked up), so the profile's folder under
+    ``%LOCALAPPDATA%\\Packages`` is what tells the two apart.
+    """
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        pytest.skip("LOCALAPPDATA is not set, so profiles cannot be located")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace)
+    assert session.run("1").error is None
+    name = session.executor._proc.container_name
+    profile = Path(local_app_data) / "Packages" / name
+    assert profile.exists(), "the profile was never created, so this test proves nothing"
+    session.close()
+    assert not profile.exists(), "the session's AppContainer profile survived teardown"
+
+
 # --- teardown ----------------------------------------------------------------
 def test_teardown_revokes_container_grants(tmp_path):
     """After close, the workspace DACL must no longer name the container SID.
@@ -348,14 +476,16 @@ def test_teardown_revokes_container_grants(tmp_path):
     grant the next container more than it asked for.
     """
     from nooa.runtime.sandbox import win_api
-    from nooa.runtime.sandbox.win_runtime import DEFAULT_CONTAINER_NAME
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
     session = _Session(workspace)
-    sid_text = win_api.sid_string(win_api.container_sid(DEFAULT_CONTAINER_NAME))
     try:
         assert session.run("1").error is None
+        # The session's identity is minted per start, so it is only knowable
+        # from the process that was created under it.
+        name = session.executor._proc.container_name
+        sid_text = win_api.sid_string(win_api.container_sid(name))
         assert sid_text in win_api.read_dacl(str(workspace)), (
             "the grant was never written, so this test proves nothing"
         )

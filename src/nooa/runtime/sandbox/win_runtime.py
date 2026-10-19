@@ -12,9 +12,16 @@ things about that copy:
 * **what must be inside it** — ``python.exe`` plus the ``nooa`` package, with
   no editable ``.pth`` hook left behind that would resolve imports back to the
   checkout;
-* **the ACL journal** — which grants were written, so a crashed parent's ACEs
-  can be revoked on the next start. The journal is for recovery only; live
-  teardown always uses ``REVOKE_ACCESS``.
+* **the ACL journal** — one per session, which grants that session wrote, so a
+  crashed parent's ACEs can be revoked on the next start. The journal is for
+  recovery only; live teardown always uses ``REVOKE_ACCESS``.
+
+The journal is also the session's liveness marker. Its owning process holds an
+exclusive lock on it for as long as it runs; the kernel drops the lock when the
+process dies. A start that finds an unlocked journal therefore knows the session
+is gone and may revoke its grants — a start that finds a locked one must leave
+it alone. Sharing a journal (or a container name) across sessions is what made
+two concurrent sessions revoke each other's grants.
 """
 
 from __future__ import annotations
@@ -23,22 +30,42 @@ import json
 import os
 import shutil
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nooa._file_lock import lock_file
+
 __all__ = [
     "AclJournal",
     "RuntimeRoot",
+    "default_container_name",
     "default_runtime_root",
     "prepare_root",
+    "recover_stale_grants",
     "resolve_root",
     "sync_package",
 ]
 
+# Retained for callers that name the profile explicitly; a session that does not
+# choose a name gets a unique one from :func:`default_container_name`.
 DEFAULT_CONTAINER_NAME = "nooa-sandbox"
 _RUNTIME_ENV = "NOOA_SANDBOX_RUNTIME"
 _SUBDIR = "sandbox-runtime"
+_JOURNAL_STEM = "acl-journal"
+_JOURNAL_SUFFIX = ".jsonl"
+
+
+def default_container_name() -> str:
+    """A container profile name unique to one session.
+
+    AppContainer profiles are host-global: the SID is derived from the name, so
+    two sessions sharing a name share an identity, and every ACE written for one
+    is usable by the other. A per-session name is what makes the grants a
+    session writes mean "this session" rather than "whoever ran last".
+    """
+    return f"{DEFAULT_CONTAINER_NAME}-{uuid.uuid4().hex[:12]}"
 
 
 @dataclass(frozen=True)
@@ -61,7 +88,21 @@ class RuntimeRoot:
 
     @property
     def journal(self) -> Path:
-        return self.root / "acl-journal.jsonl"
+        """The pre-session journal path, kept only so recovery can reclaim it."""
+        return self.root / f"{_JOURNAL_STEM}{_JOURNAL_SUFFIX}"
+
+    def journal_for(self, container_name: str) -> Path:
+        """The journal one session owns: ``acl-journal-<container>.jsonl``.
+
+        Keyed by container name rather than by PID: the name is what identifies
+        the SID whose ACEs the journal describes, so recovery can revoke with
+        the same identity that wrote them even after the writer is gone.
+        """
+        return self.root / f"{_JOURNAL_STEM}-{container_name}{_JOURNAL_SUFFIX}"
+
+    def journals(self) -> list[Path]:
+        """Every journal in the root, current per-session ones and the legacy one."""
+        return sorted(self.root.glob(f"{_JOURNAL_STEM}*{_JOURNAL_SUFFIX}"))
 
     @property
     def tokenizer_cache(self) -> Path:
@@ -298,20 +339,64 @@ class _Grant:
 
 
 class AclJournal:
-    """Append-only record of grants, for recovery after a parent crash.
+    """Append-only record of one session's grants, for recovery after a crash.
 
     A killed parent leaves its ACEs behind: DACLs are persistent objects, not
-    process resources. The next start revokes every journaled entry before
-    adding its own. Live teardown still uses ``REVOKE_ACCESS`` directly — the
+    process resources. Live teardown uses ``REVOKE_ACCESS`` directly — the
     journal exists only for the paths teardown never got to run.
+
+    Each journal belongs to exactly one session, and its lock is that session's
+    liveness marker. :meth:`open` takes the lock and fails if another live
+    process holds it; :func:`recover_stale_grants` only reclaims journals whose
+    lock can be taken, which is exactly the ones whose owner died.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, sid: str | None = None):
         self._path = path
+        self._sid = sid
         self._entries: list[_Grant] = []
+        self._lock_fd: int | None = None
 
-    def record(self, path: str, sid: str) -> None:
-        grant = _Grant(str(path), sid)
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @classmethod
+    def open(cls, path: Path, sid: str) -> AclJournal:
+        """Create the journal and hold its lock until :meth:`clear`.
+
+        ``sid`` is the container SID this session's grants name; it is written
+        with every entry so recovery never has to re-derive it (a profile
+        deleted between crash and recovery would otherwise strand the ACEs).
+
+        A journal that is already locked belongs to a live session. That is a
+        caller bug — two sessions were given the same identity — and refusing is
+        the only safe answer: continuing would let this session revoke or
+        overwrite another's recovery record.
+        """
+        journal = cls(path, sid)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        except OSError:
+            # The journal is a recovery aid; losing it must not break a session.
+            return journal
+        try:
+            lock_file(fd, blocking=False)
+        except BlockingIOError:
+            os.close(fd)
+            raise
+        except OSError:
+            # Locking unsupported here: keep the journal, skip the liveness
+            # marker. Recovery will treat it as stale, which is the old
+            # behaviour, not a regression.
+            journal._lock_fd = fd
+            return journal
+        journal._lock_fd = fd
+        return journal
+
+    def record(self, path: str, sid: str | None = None) -> None:
+        grant = _Grant(str(path), sid or self._sid or "")
         if grant in self._entries:
             return
         self._entries.append(grant)
@@ -323,43 +408,28 @@ class AclJournal:
             # The journal is a recovery aid; losing it must not break a session.
             pass
 
-    def recover(self) -> list[str]:
-        """Revoke everything a previous process left behind; return path list."""
-        from nooa.runtime.sandbox import win_api
+    def clear(self, *, keep: bool = False) -> None:
+        """Release the lock, and delete this session's journal unless ``keep``.
 
-        if not self._path.exists():
-            return []
-        import ctypes
+        The handle is closed first: Windows refuses to delete a file another
+        handle has open, so unlinking while holding the lock leaves the file
+        behind. Teardown has already revoked the ACEs by this point, so the
+        brief window without the lock exposes nothing.
 
-        revoked: list[str] = []
-        try:
-            lines = self._path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-        for line in lines:
-            try:
-                entry = json.loads(line)
-                path = entry["path"]
-                sid_text = entry["sid"]
-            except (ValueError, KeyError, TypeError):
-                continue
-            sid = ctypes.c_void_p()
-            if not win_api._adv.ConvertStringSidToSidW(sid_text, ctypes.byref(sid)):
-                continue
-            try:
-                if os.path.exists(path):
-                    win_api.revoke(path, sid)
-                    revoked.append(path)
-            except OSError:
-                # Path gone or ACL already clean; nothing to recover.
-                pass
-            finally:
-                win_api._k32.LocalFree(sid)
-        self.clear()
-        return revoked
-
-    def clear(self) -> None:
+        ``keep=True`` is for a teardown that could not revoke everything: the
+        lock must still be released (or the file would look live forever), but
+        the entries are the only record of ACEs that outlived the session, and
+        the next start reclaims them.
+        """
         self._entries.clear()
+        if self._lock_fd is not None:
+            try:
+                os.close(self._lock_fd)
+            except OSError:
+                pass
+            self._lock_fd = None
+        if keep:
+            return
         try:
             self._path.unlink()
         except OSError:
@@ -378,6 +448,99 @@ class AclJournal:
         except OSError:
             return []
         return out
+
+
+def _read_entries(path: Path) -> list[dict[str, Any]]:
+    """Parse a journal, skipping lines a crash truncated mid-write."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _revoke_entries(entries: list[dict[str, Any]]) -> tuple[list[str], int]:
+    """Revoke every ACE a journal lists. Assumes the journal's owner is gone.
+
+    Returns ``(revoked paths, failures)``. A failure means the ACE may still be
+    there, so the caller keeps the journal rather than losing the only record
+    of a grant nothing would ever revoke again.
+    """
+    import ctypes
+
+    from nooa.runtime.sandbox import win_api
+
+    revoked: list[str] = []
+    failed = 0
+    for entry in entries:
+        try:
+            target = entry["path"]
+            sid_text = entry["sid"]
+        except (KeyError, TypeError):
+            continue
+        sid = ctypes.c_void_p()
+        if not win_api._adv.ConvertStringSidToSidW(sid_text, ctypes.byref(sid)):
+            failed += 1
+            continue
+        try:
+            if os.path.exists(target):
+                win_api.revoke(target, sid)
+                revoked.append(target)
+        except OSError:
+            failed += 1
+        finally:
+            win_api._k32.LocalFree(sid)
+    return revoked, failed
+
+
+def recover_stale_grants(root: RuntimeRoot) -> list[str]:
+    """Revoke the ACEs of every journal whose owning session is dead.
+
+    Liveness is the journal's lock, not its existence: a live session holds it
+    for as long as it runs, and the kernel drops it when the process exits
+    however it exits. A journal that can be locked has no live owner, so its
+    grants are leftovers and safe to revoke.
+
+    A journal that cannot be locked is left completely alone — including its
+    file — so one session's startup can never destroy another's recovery record.
+    """
+    revoked: list[str] = []
+    for path in root.journals():
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            continue
+        try:
+            try:
+                lock_file(fd, blocking=False)
+            except (BlockingIOError, OSError):
+                # Locked by a live session, or locking unsupported. Either way
+                # this journal is not ours to touch.
+                continue
+            paths, failed = _revoke_entries(_read_entries(path))
+            revoked.extend(paths)
+            # Keep the journal until every grant it lists is really gone: a
+            # failed revoke would otherwise lose the only record of a permanent
+            # ACE, with nothing left that could ever remove it.
+            if failed:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        finally:
+            # Every path must close: a leaked descriptor keeps the file open,
+            # and Windows then refuses the owner's own unlink at teardown.
+            os.close(fd)
+    return revoked
 
 
 def warm_tokenizer_cache(root: RuntimeRoot) -> str:
@@ -465,7 +628,9 @@ def prepare_root(
     """
     root.check()
     summary = sync_package(root) if sync else "skipped"
-    recovered = AclJournal(root.journal).recover()
+    # Only dead sessions' grants: a live session's journal is locked, so its
+    # ACEs are untouched no matter how many sessions start concurrently.
+    recovered = recover_stale_grants(root)
     if recovered:
         summary += f"; revoked {len(recovered)} stale grant(s)"
     # The child has no network, so anything its import chain would fetch has to

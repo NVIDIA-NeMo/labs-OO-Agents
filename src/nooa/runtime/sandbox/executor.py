@@ -318,6 +318,10 @@ class SandboxedExecutor:
                 init,
                 self._spec,
                 self._runtime_root,
+                # None lets the launcher mint one per start. The worker is
+                # restarted after a kill, and a restarted worker is a new
+                # process that should not inherit the dead one's identity.
+                container_name=self._config.container_name,
                 workspace=self._config.workspace,
                 env_passthrough=self._config.env_passthrough,
             )

@@ -90,6 +90,13 @@ What each guardrail maps to:
 | CPU | Job Object `PerJobUserTimeLimit` |
 | Timeout / hard kill | `TerminateJobObject` |
 
+Each session runs under its own AppContainer profile and owns its own ACL
+journal, so concurrent sessions cannot revoke each other's grants. Recovery on
+startup reclaims only journals whose owning process has exited. Set
+`container_name=` only to make a session reuse a profile deliberately — a name
+shared by two live sessions is an error, not a default. The profile is removed
+at teardown.
+
 Three behaviours differ from Linux and are worth knowing:
 
 - **The agent module's directory must be readable.** An AppContainer is

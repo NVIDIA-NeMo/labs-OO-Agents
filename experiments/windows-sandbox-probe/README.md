@@ -382,6 +382,41 @@ was not measured.
 uv run python experiments\windows-sandbox-probe\udp_dns_probe.py
 ```
 
+## Concurrent sessions
+
+**Question.** Can two sandbox sessions run at the same time without one
+affecting the other?
+
+**Design.** `concurrency_probe.py` starts session A, runs a cell, starts B while
+A is live, then measures three things: whether B's startup revoked A's
+workspace grant (A's DACL, then a write from A), whether closing A destroyed B's
+journal, and whether the two sessions ran under the same container SID. All
+three are measured against real processes.
+
+**Result (before the fix).** Both sessions ran as `nooa-sandbox` and appended to
+one `acl-journal.jsonl`. B's `prepare_root` recovered that journal — revoking
+A's live workspace grant, so A's next write raised `PermissionError` — and
+`A.release()` unlinked the journal B would need after a crash. Verdict:
+`SHARED IDENTITY: concurrent sessions interfere. Not production-safe.`
+
+**Result (after the fix).** Each session mints `nooa-sandbox-<12 hex>`, so the
+SIDs differ; each owns `acl-journal-<name>.jsonl`; recovery reclaims only
+journals whose lock no live process holds, and the owning process holds that
+lock for its whole life (the kernel drops it on exit, however the process
+dies). The same probe now reports `distinct_identity True`,
+`a_grant_survived_b_start True`, `a_lost_write_access False`,
+`journal_survived_a_close True`, `b_grant_survived_a_close True` — verdict
+`INDEPENDENT`.
+
+The profile is deleted at teardown: its name is unique per start, so leaving it
+behind would accumulate entries in the user's package registry that nothing can
+ever reuse.
+
+```powershell
+$env:NOOA_SANDBOX_RUNTIME = "$PWD\experiments\windows-sandbox-probe\.rt"
+uv run python experiments\windows-sandbox-probe\concurrency_probe.py
+```
+
 ## Consequences for the backend
 
 1. **A private runtime root is mandatory, not an optimisation.** 22,598 files /
@@ -397,8 +432,11 @@ uv run python experiments\windows-sandbox-probe\udp_dns_probe.py
    byte-exact DACL rollback is impossible (scenario 2), so a killed parent
    leaves a permanent ACE on the user's working tree. Every ACL write must stay
    inside the runtime root, which the root needs a grant on anyway.
-3. **Teardown uses `revoke`, not SDDL replay.** Plus a journal for crash
-   recovery: a killed parent leaves ACEs behind, and they are persistent.
+3. **Teardown uses `revoke`, not SDDL replay.** Plus a per-session journal for
+   crash recovery: a killed parent leaves ACEs behind, and they are persistent.
+   The journal is keyed by the session's container name and locked by its owner
+   for as long as it runs, so a start only reclaims journals whose lock no live
+   process holds — see [Concurrent sessions](#concurrent-sessions).
 4. **`network=False` is backed by capability omission alone**, for TCP and UDP
    ([UDP egress](#udp-egress)). No WFP filter of our own, so no admin rights.
 5. **The launcher must be a separate, unconfined process**: it needs to write
