@@ -282,7 +282,7 @@ class ShellResult(str):
         if self.stderr:
             parts.append(f"stderr={self.stderr!r}")
         if self.returncode != 0:
-            parts.append(f"return_code={self.returncode}")
+            parts.append(f"returncode={self.returncode}")
         return f"BashOutput({', '.join(parts)})"
 
     def __str__(self) -> str:
