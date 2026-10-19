@@ -361,7 +361,6 @@ def test_cells_see_the_turn_types_but_not_the_helpers():
     assert {"ChildFailedError", "DepthLimitError"} <= names
     hidden = {
         "_todo_prompt",
-        "_report_text",
         "_V2_CONTEXT",
         "require_result",
         "session_title_request",

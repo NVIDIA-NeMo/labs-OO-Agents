@@ -71,7 +71,9 @@ to follow semantic versioning.
   registry's `_merge_todo`/`record_todo_base`, the `ChildTodoBase` event,
   `TodoManager.adopt()` and `receive_todo()`, the `send(todo)` special case,
   and the parent Todo's `child` var. A saved session holding `ChildTodoBase`
-  rows still loads; the rows are ignored.
+  rows still loads; the rows are ignored. `delegate()` no longer adds a
+  "Delegated to …: report" comment to the parent's Todo (breaking): the
+  parent records what it verified itself.
 - `nooa-atom`: Removed ExperimentalAtomAgent; it differed from AtomAgent only in
   its prompt wording and the missing context-usage block. Saved sessions that used
   it now load as AtomAgent (the spec `nooa_atom.agent:ExperimentalAtomAgent` and

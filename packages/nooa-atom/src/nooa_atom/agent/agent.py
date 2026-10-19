@@ -297,8 +297,8 @@ class AtomAgent(InteractiveAgent):
         its result. ``done.result`` is its ``TaskResult`` (read
         ``result.report``). Use it only when you need the report before
         continuing; otherwise use ``spawn()``. A Todo prompt is a one-way
-        brief, as in ``spawn()``; the report is added to it as a comment when
-        it is in your list. Record what you verified on it yourself.
+        brief, as in ``spawn()``: nothing is written to your Todo. Record
+        what you verified on it yourself.
 
         Raises ``ChildFailedError`` when the child's turn fails, and
         ``DepthLimitError`` when a child would exceed the depth limit.
@@ -315,10 +315,7 @@ class AtomAgent(InteractiveAgent):
         outcome = await child.wait()
         if not isinstance(outcome, ChildResult):  # a one-shot worker's question is a failure
             raise ChildFailedError(f"Child {description!r} did not return a result")
-        done = outcome.done
-        if isinstance(prompt, Todo):
-            self.todo.comment(prompt, f"Delegated to {description!r}: {_report_text(done)}")
-        return done
+        return outcome.done
 
     async def spawn(
         self,
@@ -828,17 +825,3 @@ def _todo_prompt(todo: Todo) -> str:
         lines += ["", "Notes so far:"]
         lines += [f"- {comment.body}" for comment in todo.comments]
     return "\n".join(lines)
-
-
-@hidden
-def _report_text(done: Done) -> str:
-    """The report in a child's Done: the TaskResult's report, else its summary fields."""
-    result = done.result
-    if isinstance(result, TaskResult):
-        if result.report.strip():
-            return result.report
-        return (
-            f"{result.solution_description}\nEvidence: {result.evidence}\n"
-            f"How to verify: {result.how_to_verify}"
-        )
-    return done.explanation

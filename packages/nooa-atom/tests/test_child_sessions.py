@@ -539,8 +539,8 @@ async def test_a_second_object_with_a_managed_id_works_as_a_brief(
     root = await atom_registry.create(atom_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="open")
     todo = root._agent.todo.get(root._agent.v.todo_id)
-    # delegate() notes the report on the parent's own Todo; nothing else changes.
-    assert [c.body for c in todo.comments] == ["Delegated to 'X': REPORT: off-by-one fixed"]
+    # Review-3 finding 3: delegate() writes nothing to the parent's Todo.
+    assert todo.comments == [] and todo.status == "open"
 
 
 def test_receive_delegated_todo_activates_a_local_copy():
