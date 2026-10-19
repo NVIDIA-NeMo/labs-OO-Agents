@@ -1002,6 +1002,9 @@ def test_the_parent_docs_say_what_to_put_in_the_todo_and_who_edits():
     work = " ".join((cls.handle_work.__doc__ or "").split())
     assert "remove scratch files" in work and "TaskResult" in work
     assert "context" not in work
+    # Review-3 finding 8: a text-prompt child has no Todo; use the base wording.
+    assert "a Todo in your list is your own working copy" in work
+    assert "the Todo in your list" not in work
 
 
 # ---- send(todo): a Todo crosses sessions as data ------------------------------

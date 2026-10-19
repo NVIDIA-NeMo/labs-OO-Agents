@@ -662,7 +662,7 @@ class AtomAgent(InteractiveAgent):
         reads only your result. The task is in ``notification["user_messages"]``;
         its first line says whether you can ask your parent questions (later
         messages there are follow-ups). Your task is the brief; your
-        ``TaskResult`` is your report; the Todo in your list is your own
+        ``TaskResult`` is your report; a Todo in your list is your own
         working copy (nothing in it goes back to your parent).
 
         Assume you are the only one editing this checkout, and leave it clean:
