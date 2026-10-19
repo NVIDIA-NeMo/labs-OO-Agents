@@ -114,13 +114,19 @@ class BashSession:
         # before any user command — to set up the environment (e.g. activating a
         # conda env). Re-run on reset() because a fresh bash loses prior env.
         self._init_command = init_command
-        self._running_init = False
         self._process: asyncio.subprocess.Process | None = None
         self._control_reader: asyncio.StreamReader | None = None
         self._control_transport: asyncio.BaseTransport | None = None
         self._started = False
         self._started_on_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
+        # True once start() has fully finished (bash spawned, startup drained,
+        # init command run). ``_started`` turns True earlier, mid-start.
+        self._ready = False
+        # The task currently inside _start_unlocked() (it holds _start_lock).
+        self._start_task: asyncio.Task[object] | None = None
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
@@ -217,10 +223,41 @@ class BashSession:
         return diag
 
     async def start(self) -> None:
-        """Start the bash subprocess with a dedicated control fd."""
-        if self._started:
-            return
+        """Start the bash subprocess with a dedicated control fd.
 
+        Concurrent callers (e.g. several ``run()`` calls gathered on a fresh
+        session) share one start: they used to each spawn a bash and race on
+        the control reader ("readuntil() called while another coroutine is
+        already waiting").
+        """
+        if self._ready:
+            return
+        self._ensure_lock_on_current_loop()
+        async with self._start_lock:
+            # Callers that arrive while another start() runs the init command
+            # wait here until it has finished, then return without a second bash.
+            if self._ready:
+                return
+            await self._start_unlocked()
+
+    def _in_own_start(self) -> bool:
+        """True inside the task that is starting bash (it holds ``_start_lock``)."""
+        return self._start_task is not None and self._start_task is asyncio.current_task()
+
+    async def _start_unlocked(self) -> None:
+        """Start bash; the caller holds ``_start_lock``."""
+        self._start_task = asyncio.current_task()
+        try:
+            await self._start_bash()
+        except BaseException:
+            # A failed or cancelled start must not leave a half-started bash
+            # behind: the next start() would replace self._process and orphan it.
+            await asyncio.shield(self.close())
+            raise
+        finally:
+            self._start_task = None
+
+    async def _start_bash(self) -> None:
         self._start_count += 1
         env = os.environ.copy()
         env["PS1"] = ""
@@ -271,24 +308,24 @@ class BashSession:
         await self._read_control_until(sentinel, timeout=5.0)
 
         # Run the one-time init command (env setup) before any user command.
-        # ``_running_init`` guards against re-entry if _send_and_wait triggers a
-        # reset (which would call start() again). _send_and_wait drains
-        # stdout/stderr so init output never bleeds into the first user command.
-        if self._init_command and not self._running_init:
-            self._running_init = True
-            try:
-                init_sentinel = f"__CTRL_{secrets.token_hex(8)}__"
-                init_script = (
-                    f"{self._init_command}\n_nemo_ec=$?\n"
-                    f"echo $_nemo_ec >&3\npwd >&3\necho {init_sentinel} >&3\n"
-                )
-                ctrl_lines, _out, _err, _timed = await self._send_and_wait(
-                    init_script, init_sentinel, timeout=60.0
-                )
-                if len(ctrl_lines) >= 2 and ctrl_lines[1].strip().startswith("/"):
-                    self._cwd = Path(ctrl_lines[1].strip())
-            finally:
-                self._running_init = False
+        # If bash is lost while starting (startup drain or init), reset() raises
+        # (see there) so the session is never marked ready without its init.
+        # _send_and_wait drains stdout/stderr so init output never bleeds into
+        # the first user command.
+        if self._init_command:
+            init_sentinel = f"__CTRL_{secrets.token_hex(8)}__"
+            init_script = (
+                f"{self._init_command}\n_nemo_ec=$?\n"
+                f"echo $_nemo_ec >&3\npwd >&3\necho {init_sentinel} >&3\n"
+            )
+            ctrl_lines, _out, _err, _timed = await self._send_and_wait(
+                init_script, init_sentinel, timeout=60.0
+            )
+            if len(ctrl_lines) >= 2 and ctrl_lines[1].strip().startswith("/"):
+                self._cwd = Path(ctrl_lines[1].strip())
+        # Only now may run() use the session: the startup drain and the init
+        # command own the control reader until here.
+        self._ready = self._started
 
     def _build_script(self, command: str, sentinel: str) -> str:
         """Compose the wire script: the command, then the control-channel protocol.
@@ -310,12 +347,17 @@ class BashSession:
         return f'eval "$(base64 -d <<<{blob})" </dev/null\n{protocol}'
 
     def _ensure_lock_on_current_loop(self) -> None:
-        """Recreate the lock if the event loop changed since it was created."""
-        if (
-            self._started_on_loop is not None
-            and self._started_on_loop is not asyncio.get_running_loop()
-        ):
+        """Recreate the locks if the event loop changed since they were created.
+
+        Keyed on the loop the locks belong to (not the loop bash was started
+        on), so concurrent callers on a new loop share one fresh lock instead of
+        each creating their own while a reset is in progress.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is not loop:
             self._lock = asyncio.Lock()
+            self._start_lock = asyncio.Lock()
+            self._lock_loop = loop
 
     async def run(self, command: str, timeout: float = 30.0) -> tuple[str, str, int]:
         """Run a command and return (stdout, stderr, exit_code).
@@ -345,7 +387,7 @@ class BashSession:
 
         Returns (stdout, stderr, exit_code, timed_out).
         """
-        if not self._started:
+        if not self._ready:
             await self.start()
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
@@ -404,7 +446,7 @@ class BashSession:
         self, command: str, timeout: float
     ) -> AsyncIterator[tuple[str, str]]:
         """Actual run_stream implementation (caller must hold self._lock)."""
-        if not self._started:
+        if not self._ready:
             await self.start()
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
@@ -764,9 +806,23 @@ class BashSession:
     async def reset(self) -> None:
         """Kill the current session and start a fresh one, preserving cwd."""
         cwd = self._cwd
-        await self.close()
-        self._cwd = cwd
-        await self.start()
+        if self._in_own_start():
+            # Bash was lost while starting (startup drain or the init command).
+            # This task already holds _start_lock, and a restart here would skip
+            # the init, so fail this start(); the next call starts afresh.
+            await self.close()
+            self._cwd = cwd
+            raise RuntimeError(
+                "bash stopped while starting (startup or the shell init command); "
+                "the session was not started"
+            )
+        # Serialized with start(): a reset while another task runs the init
+        # command waits for it instead of spawning a second bash beside it.
+        self._ensure_lock_on_current_loop()
+        async with self._start_lock:
+            await self.close()
+            self._cwd = cwd
+            await self._start_unlocked()
 
     async def close(self) -> None:
         """Terminate the bash session cleanly."""
@@ -817,8 +873,11 @@ class BashSession:
         self._process = None
         self._background_pids = frozenset()
         self._started = False
+        self._ready = False
         self._started_on_loop = None
-        self._lock = asyncio.Lock()
+        # Locks are not replaced here: close() runs inside run() during a reset,
+        # and a fresh lock would let a queued caller bypass the holder. A loop
+        # change is handled by _ensure_lock_on_current_loop().
 
     async def _close_keeping_background(self, proc: asyncio.subprocess.Process) -> None:
         """End bash only; its background jobs keep running with drained output."""

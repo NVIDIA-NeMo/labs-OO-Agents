@@ -834,7 +834,7 @@ class EventManager:
         except ValueError as e:
             raise ValueError(
                 f"Invalid tag format '{tag}': tags must be numeric (e.g., '5') "
-                f"or ranges (e.g., '2..40')"
+                f"or ranges (e.g., '2..40'); use the number N from <sys tag=\"N\">"
             ) from e
 
     def _parse_tag_end(self, tag: str) -> int:
@@ -850,7 +850,7 @@ class EventManager:
         except ValueError as e:
             raise ValueError(
                 f"Invalid tag format '{tag}': tags must be numeric (e.g., '5') "
-                f"or ranges (e.g., '2..40')"
+                f"or ranges (e.g., '2..40'); use the number N from <sys tag=\"N\">"
             ) from e
 
     def _validate_tag(self, tag: str) -> None:

@@ -334,7 +334,7 @@ class MCPServers:
     # ------------------------------------------------------------------
 
     def connected(self) -> list[str]:
-        """Connected server names (active or not)."""
+        """Connected server names (active or not). Takes no arguments: connected()."""
         return sorted(self._connected)
 
     def activated(self) -> list[str]:
@@ -342,6 +342,7 @@ class MCPServers:
         return sorted(self._activated)
 
     def state(self, name: str) -> State:
+        """State of the server ``name``, e.g. state("github") -> "active"."""
         if name in self._activated:
             return "active"
         if name in self._connected:
@@ -362,10 +363,15 @@ class MCPServers:
         return pending.signin.url if pending is not None else None
 
     def tool(self, name: str) -> Any:
-        """The connected tool object of ``name``, or ``None``."""
+        """The connected tool object of the server ``name``, or ``None``.
+
+        The same object is ``self.<server>`` on the agent; call its tools with
+        ``await self.<server>.<tool>(...)``.
+        """
         return self._connected.get(name)
 
     def tool_names(self, name: str) -> list[str]:
+        """Tool names of the connected server ``name``, e.g. tool_names("github")."""
         tool = self._connected.get(name)
         return tool_names(tool) if tool is not None else []
 

@@ -114,7 +114,8 @@ class AtomAgent(InteractiveAgent):
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=..., options=[...])`` only when a person must answer,
+    ``NeedInput(question=...)`` only when a person must answer (``options=[...]``
+    for fixed choices),
     and ``Waiting(explanation=..., on=[...])`` only while something you started
     is still running, naming the channel or job it waits on.
     """
@@ -251,8 +252,8 @@ class AtomAgent(InteractiveAgent):
             f"Working directory (already active for `self.shell` and `self.repo`; persists across cells and turns): {cwd}\n"
             f"Repository root (the boundary for repo searches): {root}\n"
             "Use relative paths; call `cd` only to intentionally change directories.\n"
-            f"`self.v`: {count} persistent vars — inspect: `print(self.v.items())`; "
-            "remove one: `del self.v.<name>`; clear all: `self.v.clear()`"
+            f"`self.v`: {count} persistent vars — list: `print(dict(self.vars))`; "
+            "remove one: `del self.v.<name>`; clear all: `self.vars.clear()`"
         )
 
     async def rename_session(self, title: str) -> str:
@@ -474,10 +475,12 @@ class AtomAgent(InteractiveAgent):
               self.message("Fixed the off-by-one in `parse()`; the parser tests pass.")
               return_result(Done(explanation="fixed parse() and ran its tests"))
 
-        - ``NeedInput(question=..., options=[...])`` when you cannot go on
-          without an answer from the person. The host shows ``question``, so
-          do not also send it with ``self.message()``. Use ``options`` for a
-          choice; the answer arrives in the next notification.
+        - ``NeedInput(question=...)`` when you cannot go on without an
+          answer from the person. The host shows ``question``, so do not also
+          send it with ``self.message()``. Omit ``options`` for a free-text
+          answer; add ``options=[...]`` only for one choice among fixed values
+          (the answer is then just the chosen option). The answer arrives in
+          the next notification.
 
         - ``Waiting(explanation=..., on=[...])`` when a job you started is
           still running and nothing else is left to do. ``on`` names what

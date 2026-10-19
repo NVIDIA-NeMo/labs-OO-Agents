@@ -12,7 +12,17 @@ to follow semantic versioning.
   compacts with its own tools in that turn. Over ACP (Pool) it used to answer
   "not available through ACP yet". Any extra words are passed on as
   instructions; a host control named `compact` still replaces it.
-
+- `self.v["x"] = ...` now raises a `TypeError` that names the working form
+  (`write self.v.x = ... instead`). It used to be Python's bare "'AgentVars'
+  object does not support item assignment". Nothing is stored either way.
+- `ShellTools.replace()` is split into two methods, with no backward
+  compatibility: `replace(path, old, new)` edits a file by unique substring and
+  `replace_match(match, new)` rewrites a Match's whole line region (same
+  stale-anchor and resolved-path checks as before). The `target=` and
+  `old_or_new=` keywords are gone. Passing a Match to `replace()` or a path to
+  `replace_match()` raises a `TypeError` that names the right method; no file is
+  written. `ActivityShellTools` (nooa-atom) and the nooa-cli coding shell expose
+  both methods.
 - `nooa-atom`: Removed ExperimentalAtomAgent; it differed from AtomAgent only in
   its prompt wording and the missing context-usage block. Saved sessions that used
   it now load as AtomAgent (the spec `nooa_atom.agent:ExperimentalAtomAgent` and

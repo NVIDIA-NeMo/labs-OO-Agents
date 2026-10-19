@@ -43,11 +43,17 @@ RESULT = (
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
+# Raised for truthful API text (2026-10-14: replace() forms and real parameter
+# names, sync/async labels in <skills>, NeedInput free-text guidance, the show()
+# line; about 290 characters): measured values plus about 2% headroom.
+# Raised for #447 review (2026-10-14: replace() split into replace() and
+# replace_match(), self.web removed, show() names nooa.media.Image; about 300
+# characters net): measured values plus about 2% headroom.
 # Raised when AtomAgent kept the storage guidance from the removed experimental
-# prompt (2026-10-16, about 190 characters): measured values plus about 2% headroom.
+# prompt (2026-10-16, about 140 characters): measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (14_700, 17_650),  # measured 14,416 / 17,321
-    (ATOM, "handle_batch"): (14_700, 17_300),  # measured 14,416 / 16,965
+    (ATOM, "handle"): (15_000, 18_100),  # measured 14,689 / 17,701
+    (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,689 / 17,239
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

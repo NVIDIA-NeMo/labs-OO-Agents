@@ -25,7 +25,7 @@ from typing import Annotated, Any, ClassVar, Literal
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from nooa import hidden, strategy
-from nooa.agentdoc import doc
+from nooa.agentdoc import doc  # noqa: F401  # visible in the REPL, as on base
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
@@ -42,7 +42,6 @@ with hidden:
     from nooa.runtime.producers_skill import ProducersSkill
     from nooa.runtime.turn_loop import TurnLoop
     from nooa.strategies import CodeActStrategy
-    from nooa.tools.web_publisher import WebPublisher
 
 # Standard library — all visible in REPL
 import asyncio  # noqa: F401
@@ -52,11 +51,6 @@ import re  # noqa: F401
 
 from nooa.runtime import producers  # noqa: F401
 from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: F401
-
-# os is used by this module (NEMO_OO_RICH_URL check) but not useful to expose to
-# the agent's REPL — hide it so doc(self) / exec_globals don't advertise it.
-with hidden:
-    import os
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -137,8 +131,8 @@ class NeedInput(BaseModel):
     """Turn result: a question the agent cannot continue without.
 
     ``question`` is the question itself; the host shows it to the person,
-    so do not also send it with ``self.message()``. Set ``options`` for a
-    single choice, or ``answer_type`` (a pydantic model class whose fields
+    so do not also send it with ``self.message()``. Omit ``options`` for a
+    free-text answer. Set ``options`` only for a single choice among fixed values, or ``answer_type`` (a pydantic model class whose fields
     are simple values: str, int, float, bool, or a list of str) for a typed
     answer, or neither for free text. The host turns ``answer_type`` into a
     form and the answer arrives in the next notification as an instance of
@@ -159,6 +153,16 @@ class NeedInput(BaseModel):
     )
 
     _check_question = field_validator("question")(_non_blank)
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _options_not_empty(cls, value: Any) -> Any:
+        if isinstance(value, list | tuple) and not value:
+            raise ValueError(
+                "options=[] is empty: omit options for a free-text answer, e.g. "
+                'NeedInput(question="..."), or list at least one choice'
+            )
+        return value
 
     @field_validator("options")
     @classmethod
@@ -350,6 +354,11 @@ class AgentVars:
     def __setattr__(self, key: str, value: Any) -> None:
         self._agent.vars[key] = value
 
+    def __setitem__(self, key: str, value: Any) -> None:
+        raise TypeError(
+            f"self.v does not support item assignment; write self.v.{key} = ... instead."
+        )
+
     def __delattr__(self, key: str) -> None:
         try:
             del self._agent.vars[key]
@@ -423,18 +432,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         from nooa import Context
 
         self.context["queues"] = Context(expr="self.queue_manager.status()")
-        if os.environ.get("NEMO_OO_RICH_URL"):
-            from nooa.tools.web_publisher import RichOutput
-
-            self.event_manager.register_event_type(RichOutput)
-            self.web: Annotated[WebPublisher, nosnapshot] = WebPublisher(
-                event_manager=self.event_manager
-            )
-            # The WebPublisher's doc is static across the session, so
-            # it goes into the cacheable prefix with the system prompt.
-            from nooa import Context
-
-            self.context["web"] = Context(doc(self.web), prefix=True)
 
     @hidden
     @no_trace
