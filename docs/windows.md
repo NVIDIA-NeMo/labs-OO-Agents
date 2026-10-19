@@ -86,7 +86,7 @@ What each guardrail maps to:
 | Filesystem | AppContainer DACL grants, written before the process is created |
 | Network (`network=False`) | Omission of capability SIDs; blocks TCP and UDP egress |
 | Network (`network=True`) | The `internetClient` capability: outbound internet; LAN access not granted |
-| Memory | Job Object `ProcessMemoryLimit` = worker baseline + `max_memory_mb` |
+| Memory | Job Object `ProcessMemoryLimit` = worker baseline + `max_memory_mb`; an allocation past it fails with `MemoryError` in the cell rather than killing the worker |
 | CPU | Job Object `PerJobUserTimeLimit` |
 | Timeout / hard kill | `TerminateJobObject` |
 
@@ -97,8 +97,14 @@ startup reclaims only journals whose owning process has exited. Set
 shared by two live sessions is an error, not a default. The profile is removed
 at teardown.
 
-Three behaviours differ from Linux and are worth knowing:
+Four behaviours differ from Linux and are worth knowing:
 
+- **A killed worker costs about a minute to replace.** After a timeout or a
+  resource kill the executor restarts the worker before returning the error, so
+  a cell that hits `cell_timeout=1` reports after roughly 58 seconds, not one.
+  The restart re-syncs the package, warms the tokenizer cache, creates a new
+  container profile, and completes the startup handshake. Set `cell_timeout`
+  for how long a cell may run, not for how quickly a failure returns.
 - **The agent module's directory must be readable.** An AppContainer is
   confined from process creation, so the worker imports the agent class *inside*
   the sandbox. The launcher grants read on the module's own directory (not its
