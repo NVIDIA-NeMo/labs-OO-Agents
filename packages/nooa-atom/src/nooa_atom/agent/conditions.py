@@ -85,6 +85,9 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
     - a child's name or id: that child is running, ``working`` (its last
       turn ended Waiting on its own job) or has queued input.
 
+    - any channel with an item already buffered on it (a job that finished
+      during the turn with its result queued, by its channel name).
+
     The person (``"user_messages"``) is never a valid target. Anything else
     raises ``WaitingTargetNotRunning``, which the strategy shows the model
     as the error from its ``return_result`` cell; the turn then continues.
@@ -152,8 +155,11 @@ def _running_names(agent: Any) -> dict[str, Any]:
     jobs = {key for handle in handles for key in (handle.name, handle.label)}
     known_jobs = set(queues.jobs())
     now = {name for name, active in children.items() if active} | jobs
-    delegates = queues.channels().get("delegates")
-    if any(children.values()) or (delegates is not None and delegates.qsize() > 0):
+    # A channel with an item already buffered delivers at once: a job that
+    # finished during the turn (its result queued on its channel) or a
+    # child's outcome on ``delegates``.
+    now |= {name for name, channel in queues.channels().items() if channel.qsize() > 0}
+    if any(children.values()):
         now.add("delegates")
     if handles:
         now.add("jobs")

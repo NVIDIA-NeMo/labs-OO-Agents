@@ -24,6 +24,7 @@ from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
 
 from nooa.interactive import Done, Waiting
+from nooa.runtime.channels import QueueManager
 from nooa.tools.todo import TodoManager
 
 TIMEOUT = 30
@@ -923,6 +924,28 @@ async def test_a_waiting_child_reads_idle_after_a_reload(
             )
     finally:
         await fresh.close_all()
+
+
+async def test_waiting_on_a_finished_job_with_its_result_queued_is_accepted():
+    queues = QueueManager()
+    queues.queue("build")
+
+    async def job():
+        return "build ok"
+
+    queues.spawn(job(), channel="build", label="build")
+    await until(lambda: queues.channels()["build"].qsize() > 0, TIMEOUT)
+    assert queues.running_handles() == []
+    agent = SimpleNamespace(session=None, queue_manager=queues)
+    # Its result is buffered: Waiting on it delivers at once.
+    check_waiting_targets(agent, Waiting(explanation="build", on=["build"]), fix=UNATTENDED_FIX)
+    # An empty channel with no job running still cannot deliver.
+    queues.queue("lint")
+    with pytest.raises(WaitingTargetNotRunning, match="'lint'"):
+        check_waiting_targets(agent, Waiting(explanation="lint", on=["lint"]), fix=UNATTENDED_FIX)
+    queues.channels()["build"].flush()
+    with pytest.raises(WaitingTargetNotRunning, match="no such job is running"):
+        check_waiting_targets(agent, Waiting(explanation="build", on=["build"]), fix=UNATTENDED_FIX)
 
 
 # ---- finding 6: tombstones are read once per parent ------------------------
