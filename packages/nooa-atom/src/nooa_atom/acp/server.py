@@ -145,6 +145,17 @@ DECLINED = "(declined to answer)"
 """What the agent receives when the person declines or dismisses a question."""
 DECLINED_SOURCE = "user:declined"
 
+# Run here, not through the agent's command registry: it needs the session's
+# turn state and context size, which the agent's commands do not have.
+COMPACT = CommandInfo(
+    name="compact",
+    description=(
+        "Summarize the conversation history into one summary block (frees context). "
+        "Runs between turns."
+    ),
+)
+
+
 _CANCELLED = object()  # a client request stopped by session/cancel
 
 _CONNECT_TEXT = (
@@ -1061,6 +1072,9 @@ class AtomACPAgent:
             return await self._say(bridge, message)
         if name == RECOVER.name:
             return await self._say(bridge, await self._recover(session, raw_args))
+        if name == COMPACT.name:
+            with _trace_scope(session):
+                return await self._say(bridge, await session.compact(raw_args))
         if name not in {command.name for command in session.commands()}:
             if name == "connect":
                 message = _CONNECT_TEXT
@@ -1624,7 +1638,7 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
 
 
 def _available_commands_update(commands: list[CommandInfo]) -> Any:
-    """The session's commands, and the ones this adapter runs itself (``/recover`` and ``/verbosity``)."""
+    """The session's commands, and the ones this adapter runs itself (``/recover``, ``/compact`` and ``/verbosity``)."""
     available: list[AvailableCommand] = []
     names = {command.name for command in commands}
     verbosity = CommandInfo(
@@ -1635,7 +1649,7 @@ def _available_commands_update(commands: list[CommandInfo]) -> Any:
     # The ACP-local command wins over a skill command with the same name.
     for command in [
         *(c for c in commands if c.name != verbosity.name),
-        *(c for c in (RECOVER,) if c.name not in names),
+        *(c for c in (RECOVER, COMPACT) if c.name not in names),
         verbosity,
     ]:
         input_spec = (

@@ -990,6 +990,76 @@ class Session:
             data=data,
         )
 
+    async def compact(self, raw_args: str = "") -> str:
+        """``/compact``: fold the whole active history into one summary, between turns.
+
+        As the native TUI's ``/compact`` does: the session's automatic
+        summarizer renders every active event and writes the summary with
+        its own ``summarize()`` and ``target_chars``, then the events are
+        collapsed into one ``Summary``. The context stats and the session's
+        context size are set to an estimate so the next status line shows
+        the smaller context; the next model call reports the real count.
+        Returns the reply for the person.
+        """
+        if raw_args.strip():
+            return "/compact takes no arguments: the summarizer has no custom instructions."
+        agent = self._agent
+        if agent.turns.running or self.info.status == "running":
+            return "/compact runs between turns and a turn is running. Send /compact again when it ends."
+        summarizers = getattr(agent, "_summarizers", [])
+        if not summarizers:
+            return "/compact is not available: this session has no summarizer (summarization policy none)."
+        summarizer = summarizers[0]
+        manager = agent.event_manager
+        tags = manager.keys()
+        # A new session's only event is its start record: no conversation yet.
+        if len(tags) < 2:
+            if tags and ".." in tags[0]:
+                return "Nothing to compact \u2014 history is already one summary."
+            return "Nothing to compact \u2014 history is already empty."
+        source = [(tag, manager[tag].id) for tag in tags]
+        try:
+            history = summarizer._render_range_to_markdown(tags[0], tags[-1])
+            summary_text = await summarizer.summarize(history, summarizer.config.target_chars)
+        except Exception as exc:
+            logger.warning("Session %s: /compact summary failed", self.id, exc_info=True)
+            return f"Summarization failed ({exc}); kept {len(tags)} events intact."
+        finally:
+            # The summarizer keeps no history of its own, as after an automatic summary.
+            summarizer.event_manager.clear()
+        if not isinstance(summary_text, str) or not summary_text.strip():
+            return f"Summarization returned no text; kept {len(tags)} events intact."
+        if agent.turns.running or [(tag, manager[tag].id) for tag in manager.keys()] != source:
+            return (
+                "A turn started while /compact was summarizing, so the history was left unchanged."
+            )
+        summary_tag = manager.collapse(tags[0], tags[-1], summary_text)
+        events_after = len(manager.keys())
+        reply = f"Compacted {len(tags)} events \u2192 {events_after} (summary block {summary_tag})"
+        stats = agent.context_stats
+        before = self.info.usage.last_input_tokens or (stats.prompt_tokens if stats else 0) or 0
+        total_chars = stats.context_blocks_chars + stats.events_chars if stats else 0
+        if not before or not total_chars:
+            return reply + "."
+        # The provider counts tokens only on the next call. Until then, scale the
+        # last count by the rendered characters that remain: the context blocks
+        # and the summary, in place of every event.
+        after = min(
+            before, round(before * (stats.context_blocks_chars + len(summary_text)) / total_chars)
+        )
+        agent.runtime._last_context_stats = stats.model_copy(
+            update={
+                "prompt_tokens": after,
+                "events_count": events_after,
+                "events_chars": len(summary_text),
+            }
+        )
+        totals = self.info.usage
+        totals.last_input_tokens = after
+        self.handle.update_usage(totals)
+        self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
+        return reply + f"; context ~{before:,} \u2192 ~{after:,} tokens."
+
     # ---- title, mode, usage -----------------------------------------
 
     async def set_title(self, title: str, *, user_set: bool = False) -> None:
