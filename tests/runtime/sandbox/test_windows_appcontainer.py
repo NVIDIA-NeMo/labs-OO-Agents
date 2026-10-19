@@ -434,6 +434,53 @@ def test_wallclock_timeout_kills_a_cpu_bound_cell(tmp_path):
         session.close()
 
 
+# --- startup preconditions ---------------------------------------------------
+def test_tokenizer_warm_up_does_not_inherit_stdin(monkeypatch, tmp_path):
+    """The warm-up child must not inherit the caller's stdin.
+
+    An ACP host gives the agent a pipe as stdin and holds it open for the
+    session. The first child launched with that handle inherited blocked in
+    process creation until the 180 s timeout — twice per container start,
+    because prepare_root runs again after the worker is restarted — which made
+    every sandboxed ACP prompt take ~390 s instead of ~35 s.
+
+    Asserted on the call rather than by launching: a test that reproduced the
+    hang would need a live host pipe and would take 180 s to fail.
+    """
+    import subprocess as sp
+
+    from nooa.runtime.sandbox import win_runtime
+
+    seen: dict[str, object] = {}
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        # Do not actually launch the root interpreter: the assertion is about
+        # the arguments the function passes, and the interpreter may not exist
+        # on a host that only has the package installed.
+
+        class _Done:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Done()
+
+    monkeypatch.setattr(sp, "run", spy)
+    monkeypatch.setattr(win_runtime.os, "walk", lambda *a, **k: iter(()))
+    root = win_runtime.RuntimeRoot(tmp_path)
+    (tmp_path / "python.exe").write_bytes(b"")
+    win_runtime.warm_tokenizer_cache(root)
+    assert seen.get("stdin") is sp.DEVNULL, (
+        "the warm-up inherits stdin; under an ACP host that blocks the first "
+        "child launch until its 180 s timeout"
+    )
+    # The other contract this call carries, restated so a future edit that
+    # drops it is caught here rather than by a hanging CI job.
+    assert seen.get("capture_output") is True
+    assert seen.get("timeout")
+
+
 # --- session identity --------------------------------------------------------
 def test_recovery_leaves_a_live_sessions_journal_alone(tmp_path):
     """Liveness is the journal's lock, not its existence.

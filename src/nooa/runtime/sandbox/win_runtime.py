@@ -294,16 +294,45 @@ def _tree_signature(root: Path) -> dict[str, int]:
 
 
 def _workspace_packages() -> dict[str, Path]:
-    """Every workspace distribution this process imported, by import name.
+    """The workspace distributions this process imported, by import name.
 
     A spawned worker rebuilds the agent class by importing its module, so the
     container needs whatever module the agent lives in — not only ``nooa``. An
     agent defined in ``nooa_cli`` (the coding agent) or in a host package fails
-    with ModuleNotFoundError otherwise. Only packages that are actually
-    imported are considered: one that is not installed cannot be mirrored, and
-    one that is installed but unused has no reason to enter the container.
+    with ModuleNotFoundError otherwise.
+
+    "Workspace" is the operative word. ``build_root`` already copies the whole
+    of the source environment's site-packages and stdlib into the root, so a
+    third-party package or a stdlib module found there is *already* present;
+    mirroring it again copies thousands of files for nothing. What the root
+    cannot have is an editable install, because its source lives in the
+    checkout rather than in site-packages. Those are exactly the packages
+    whose path falls outside every interpreter directory.
+
+    An earlier version returned every imported top-level package. In a plain
+    executor that is two packages; in an ACP process, which imports litellm,
+    openai, pandas and numpy, it was sixty — and every container start copied
+    all of them.
     """
+    import site
     import sys
+    import sysconfig
+
+    excluded: list[Path] = []
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
+        try:
+            excluded.append(Path(sysconfig.get_path(key)).resolve())
+        except (KeyError, OSError):
+            pass
+    try:
+        excluded.extend(Path(p).resolve() for p in site.getsitepackages())
+    except Exception:  # noqa: BLE001 - site may be unavailable in odd embedders
+        pass
+    excluded.append(Path(sys.base_prefix).resolve())
+    excluded.append(Path(sys.prefix).resolve())
+
+    def inside_interpreter(path: Path) -> bool:
+        return any(path == base or base in path.parents for base in excluded)
 
     found: dict[str, Path] = {}
     for name, module in list(sys.modules.items()):
@@ -314,6 +343,8 @@ def _workspace_packages() -> dict[str, Path]:
             continue
         path = Path(location).resolve()
         if path.name != "__init__.py" or not path.parent.is_dir():
+            continue
+        if inside_interpreter(path.parent):
             continue
         found[name] = path.parent
     return found
@@ -669,6 +700,13 @@ def warm_tokenizer_cache(root: RuntimeRoot) -> str:
             capture_output=True,
             text=True,
             timeout=180,
+            # The child must not inherit the parent's stdin. An ACP host (Zed,
+            # an editor) gives this process a pipe as stdin and keeps it open
+            # for the life of the session; the first child launched with that
+            # handle inherited blocks in process creation until the 180 s
+            # timeout expires. Measured: the same launch takes 0.07 s with
+            # DEVNULL. The warm-up never reads stdin, so nothing is lost.
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return f"tokenizer warm-up failed ({type(exc).__name__}: {exc})"
