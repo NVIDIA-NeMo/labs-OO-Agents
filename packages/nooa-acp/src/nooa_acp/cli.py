@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import click
 
 if TYPE_CHECKING:
+    from nooa.runtime.sandbox.config import SandboxConfig
     from nooa.unifiedllm import UnifiedLLM
 
 
@@ -25,7 +26,35 @@ if TYPE_CHECKING:
     default=None,
     help="Override the configured NOOA LLM client type.",
 )
-def command(model: str, client_type: str | None) -> None:
+@click.option(
+    "--sandbox",
+    is_flag=True,
+    default=False,
+    help=(
+        "Run generated code in an OS sandbox (AppContainer on Windows, Landlock on "
+        "Linux) instead of the agent's own process. Requires a built runtime root on "
+        "Windows; see docs/windows.md."
+    ),
+)
+@click.option(
+    "--sandbox-root",
+    default=None,
+    envvar="NOOA_SANDBOX_RUNTIME",
+    help="Windows only: the private interpreter root the sandbox runs from.",
+)
+@click.option(
+    "--sandbox-network",
+    is_flag=True,
+    default=False,
+    help="Allow outbound network from sandboxed cells. Off by default.",
+)
+def command(
+    model: str,
+    client_type: str | None,
+    sandbox: bool,
+    sandbox_root: str | None,
+    sandbox_network: bool,
+) -> None:
     """Serve the NOOA coding agent over ACP on standard input/output."""
     from nooa.secrets import load_secrets_into_env
     from nooa.unifiedllm import get_llm_client
@@ -38,7 +67,33 @@ def command(model: str, client_type: str | None) -> None:
         overrides = {"api_key": nvidia_api_key} if nvidia_api_key else {}
         return get_llm_client(model, client_type=client_type, **overrides)
 
-    asyncio.run(serve(llm_factory))
+    sandbox_config = _sandbox_config(sandbox, sandbox_root, sandbox_network)
+    asyncio.run(serve(llm_factory, sandbox=sandbox_config))
+
+
+def _sandbox_config(
+    enabled: bool,
+    runtime_root: str | None,
+    network: bool,
+) -> "SandboxConfig | None":
+    """Build the sandbox config the server resolves per session, or None.
+
+    ``start_method`` is not set here: the backend decides. Windows requires
+    ``spawn`` (the launcher creates the process itself) and the executor
+    enforces that; Linux keeps its default.
+    """
+    if not enabled:
+        return None
+    from nooa.runtime.sandbox.config import SandboxConfig
+
+    return SandboxConfig(
+        filesystem=True,
+        network=network,
+        runtime_root=runtime_root,
+        # The workspace is filled in per session from the editor's root.
+        workspace=None,
+        require=True,
+    )
 
 
 def main() -> None:

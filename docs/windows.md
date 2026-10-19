@@ -272,6 +272,23 @@ starting it alone waits for protocol input. Use a configured model alias or
 provider model name. See [ACP setup](../packages/nooa-acp/README.md) for editor
 configuration.
 
+Add `--sandbox` to run generated code in an AppContainer instead of the agent's
+own process. The agent stays in the parent — cells reach it through the same
+broker the fork path uses — so tools, edits, and shell commands behave
+identically; only the cell code is confined. Each session gets its own
+workspace grant, taken from the editor's root, so one session cannot write into
+another's.
+
+```powershell
+uv run --no-sync nooa-acp --model my-model-alias --sandbox `
+  --sandbox-root "$PWD\.sandbox-rt"
+```
+
+`--sandbox-root` also reads `NOOA_SANDBOX_RUNTIME`. `--sandbox-network` allows
+outbound network from cells; without it, a cell that tries to connect fails.
+The flag is opt-in because the sandbox needs a built runtime root, and a
+session that silently required one would fail on hosts that never built it.
+
 The Windows acceptance tests launch both installed command entry points with
 PowerShell 7 and 5.1. They use a local HTTP model responder while keeping the
 model client, ACP transport, code execution, repository edits, and test commands

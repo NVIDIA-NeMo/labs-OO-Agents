@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -118,8 +119,17 @@ class _ACPSession:
 
 
 class CodingACPAdapter:
-    def __init__(self, llm_factory: Callable[[], UnifiedLLM]) -> None:
+    def __init__(
+        self,
+        llm_factory: Callable[[], UnifiedLLM],
+        *,
+        sandbox: Any | None = None,
+    ) -> None:
         self._llm_factory = llm_factory
+        # ``SandboxConfig`` when the host asked for OS containment, else None.
+        # Resolved once per session into the strategy override the dispatcher
+        # passes on every turn; None keeps the decorated in-process default.
+        self._sandbox = sandbox
         self._client: Client | None = None
         self._sessions: SessionRuntimePool[_ACPSession] = SessionRuntimePool()
 
@@ -423,7 +433,7 @@ class CodingACPAdapter:
                     # connect path already offers for an unreachable server —
                     # instead of failing session/new with an opaque error.
                     registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
-            dispatcher = InteractiveSessionDispatcher(agent)
+            dispatcher = InteractiveSessionDispatcher(agent, strategy=self._session_strategy(root))
             bridge = ACPEventBridge(agent, self._client, handle.id)
             commands = CodingSlashCommandRegistry(agent)
             value = _ACPSession(
@@ -454,6 +464,41 @@ class CodingACPAdapter:
             else:
                 await llm.aclose()
             raise
+
+    def _session_strategy(self, root: Path) -> Any | None:
+        """The call-site strategy override for one session, or None.
+
+        A fresh strategy per session, not a shared one: ``CodeActStrategy``
+        holds per-session state (the sandbox executor), and one ACP process
+        serves several workspaces. The workspace defaults to the session root,
+        so a cell can only write where the editor opened.
+        """
+        if self._sandbox is None:
+            return None
+        from nooa.config import CodeActConfig
+        from nooa.strategies import CodeActStrategy
+
+        sandbox = self._sandbox
+        updates: dict[str, Any] = {}
+        if sandbox.workspace is None:
+            updates["workspace"] = str(root)
+        # Windows has no fork, and the AppContainer launcher creates the process
+        # itself, so spawn is the only method it can use. The executor enforces
+        # this too, but failing at session creation with a clear message beats
+        # failing on the first cell.
+        if os.name == "nt" and sandbox.start_method != "spawn":
+            updates["start_method"] = "spawn"
+        if updates:
+            sandbox = sandbox.model_copy(update=updates)
+        return CodeActStrategy(
+            config=CodeActConfig(
+                # Same ceiling the decorated default uses; the sandbox turns it
+                # from advisory into a hard kill.
+                cell_timeout=1800.0,
+                execution_backend="sandbox",
+                sandbox=sandbox,
+            )
+        )
 
     async def _create_mcp_tools(
         self,
@@ -609,9 +654,13 @@ class CodingACPAdapter:
         await self._sessions.close()
 
 
-async def serve(llm_factory: Callable[[], UnifiedLLM]) -> None:
+async def serve(
+    llm_factory: Callable[[], UnifiedLLM],
+    *,
+    sandbox: Any | None = None,
+) -> None:
     async with protocol_stdio() as (reader, writer):
-        adapter = CodingACPAdapter(llm_factory)
+        adapter = CodingACPAdapter(llm_factory, sandbox=sandbox)
         try:
             # session/close is registered by the router as unstable. initialize()
             # advertises the close capability, so without this flag the agent

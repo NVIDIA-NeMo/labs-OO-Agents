@@ -17,8 +17,9 @@ def stubbed_serve(monkeypatch):
     """Capture the llm_factory the command builds instead of serving."""
     captured = {}
 
-    def fake_serve(llm_factory):
+    def fake_serve(llm_factory, *, sandbox=None):
         captured["llm_factory"] = llm_factory
+        captured["sandbox"] = sandbox
         return "coroutine-placeholder"
 
     monkeypatch.setattr("nooa_acp.server.serve", fake_serve)
@@ -65,6 +66,44 @@ def test_explicit_flag_overrides_the_environment(monkeypatch, stubbed_serve):
     assert result.exit_code == 0, result.output
     stubbed_serve["llm_factory"]()
     assert requested["name"] == "anthropic/claude-sonnet-4-5"
+
+
+def test_sandbox_is_off_unless_asked(stubbed_serve):
+    """The default must stay in-process: the sandbox needs a runtime root.
+
+    A session that silently turned it on would fail on hosts without one, so
+    the flag is opt-in and the value reaching ``serve`` is what proves it.
+    """
+    result = click.testing.CliRunner().invoke(command, ["--model", "openai/gpt-4o-mini"])
+
+    assert result.exit_code == 0, result.output
+    assert stubbed_serve["sandbox"] is None
+
+
+def test_sandbox_flag_builds_a_fail_closed_config(stubbed_serve):
+    result = click.testing.CliRunner().invoke(
+        command,
+        ["--model", "openai/gpt-4o-mini", "--sandbox", "--sandbox-root", "D:/sandbox-rt"],
+    )
+
+    assert result.exit_code == 0, result.output
+    sandbox = stubbed_serve["sandbox"]
+    assert sandbox is not None
+    assert sandbox.require is True, "a sandbox that cannot be enforced must refuse, not degrade"
+    assert sandbox.network is False, "network must be off unless --sandbox-network is given"
+    assert sandbox.runtime_root == "D:/sandbox-rt"
+    # Filled in per session from the editor's root; a process-wide workspace
+    # would let one session write into another's.
+    assert sandbox.workspace is None
+
+
+def test_sandbox_network_flag_is_separate(stubbed_serve):
+    result = click.testing.CliRunner().invoke(
+        command, ["--model", "openai/gpt-4o-mini", "--sandbox", "--sandbox-network"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert stubbed_serve["sandbox"].network is True
 
 
 def _console_script() -> str:

@@ -17,8 +17,13 @@ TurnResult = Done | NeedInput | Waiting
 
 
 class InteractiveSessionDispatcher:
-    def __init__(self, agent: CodingAgent) -> None:
+    def __init__(self, agent: CodingAgent, *, strategy: Any | None = None) -> None:
         self.agent = agent
+        # A call-site strategy override. ``None`` keeps the decorated default,
+        # which is what every session without an explicit backend wants: the
+        # override exists for the sandbox, and it must not change the in-process
+        # path even subtly.
+        self._strategy = strategy
         self._active_task: asyncio.Task[Any] | None = None
         self._cancel_requested = False
         self._cancelling = False
@@ -81,7 +86,14 @@ class InteractiveSessionDispatcher:
                 if drained := channel.drain():
                     notification.setdefault(name, []).extend(drained)
 
-            result = await self.agent.handle(notification)
+            # ``_strategy`` is the framework's call-site override: it wins over
+            # the ``@strategy`` decorator without touching the class, which
+            # matters because the decorator's value is shared by every session
+            # in this process.
+            if self._strategy is None:
+                result = await self.agent.handle(notification)
+            else:
+                result = await self.agent.handle(notification, _strategy=self._strategy)
             self._show(result)
             # Keep the prompt open while the turn waits on a job or queue.
             if isinstance(result, Waiting):
