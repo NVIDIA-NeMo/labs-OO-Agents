@@ -30,10 +30,12 @@ Typical callers should use :func:`format_error_for_llm`.  The
 formatter injection.
 """
 
+import ast
+import linecache
 import re
 import traceback
 from pathlib import Path, PurePath
-from typing import Protocol
+from typing import Any, Protocol
 
 from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
@@ -267,6 +269,229 @@ def _is_validation_error(error: Exception) -> bool:
         return isinstance(error, (ValidationError, RestrictedCodeError))
     except ImportError:
         return type(error).__name__ in ("ValidationError", "RestrictedCodeError")
+
+
+_SYNC_AWAIT_RE = re.compile(r"^(?:object )?(\S+) can't be used in 'await' expression$")
+
+
+_UNCALLED_TYPES = frozenset(
+    {"method", "function", "builtin_function_or_method", "functools.partial"}
+)
+
+
+def _awaited_uncalled_target(error: BaseException) -> tuple[str, bool] | None:
+    """For ``await <name or attribute chain>`` with no call, return ``(chain, is_async)``.
+
+    Works for any object in the cell's namespace; e.g. ``await self.shell.read``
+    gives ``("self.shell.read", True)``. Parses the failing user source line for
+    an ``await`` whose operand is not a call and resolves it statically, without
+    running any code. None on any miss.
+    """
+    location = _last_user_frame(error)
+    if location is None:
+        return None
+    frame, lineno = location
+    source = linecache.getline(frame.f_code.co_filename, lineno).strip()
+    if not source:
+        return None
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        try:
+            tree = ast.parse(f"{source} pass")
+        except SyntaxError:
+            return None
+    from nooa.runtime.async_calls import is_coroutine_function, resolve_static_chain
+
+    namespace = {**frame.f_globals, **frame.f_locals}
+    targets = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Await) and isinstance(node.value, (ast.Name, ast.Attribute))
+    ]
+    if len(targets) != 1:
+        return None
+    value = resolve_static_chain(targets[0], namespace)
+    return ast.unparse(targets[0]), is_coroutine_function(value)
+
+
+def _sync_await_hint(error: BaseException) -> str | None:
+    """Explain ``await`` applied to a plain (non-awaitable) value."""
+    if not isinstance(error, TypeError):
+        return None
+    match = _SYNC_AWAIT_RE.match(str(error))
+    if match is None:
+        return None
+    kind = match.group(1)
+    if kind in _UNCALLED_TYPES:
+        # ``await obj.method`` (e.g. ``await self.shell.read``): the function itself was awaited.
+        try:
+            target = _awaited_uncalled_target(error)
+        except Exception:
+            target = None
+        if target is not None and target[1]:
+            name = target[0]
+            return (
+                f"Hint: `{name}` was awaited without being called. It is async, so call "
+                f"it and await the result: `await {name}(...)`."
+            )
+        if target is not None:
+            name = target[0]
+            return (
+                f"Hint: `{name}` was awaited without being called, and it is synchronous: "
+                f"call it without `await`, as `{name}(...)`."
+            )
+        return (
+            f"Hint: the awaited value is a {kind} that was not called. Call it: "
+            "`await f(...)` if it is async, or `f(...)` without `await` if it is synchronous."
+        )
+    return (
+        f"Hint: the awaited value is a {kind}, not a coroutine. If it came from "
+        "a call, that call is synchronous and has already run; call it without `await`."
+    )
+
+
+_COROUTINE_MISUSE_RE = re.compile(
+    r"'coroutine'|\"coroutine\"|type 'coroutine'|non-iterable coroutine object"
+)
+_COROUTINE_ATTRIBUTE_RE = re.compile(r"^'coroutine' object has no attribute '(\w+)'")
+
+
+def _last_user_frame(error: BaseException) -> tuple[Any, int] | None:
+    """The deepest traceback frame in user code, with its line number."""
+    found = None
+    cursor = error.__traceback__
+    while cursor is not None:
+        if _is_user_code_frame(cursor.tb_frame.f_code.co_filename):
+            found = (cursor.tb_frame, cursor.tb_lineno)
+        cursor = cursor.tb_next
+    return found
+
+
+def _unawaited_call(
+    source: str, attribute: str | None, kind: str, namespace: dict[str, Any]
+) -> ast.Call | None:
+    """Find the call on ``source`` whose un-awaited coroutine caused the error."""
+    text = source.strip()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        # A compound-statement header (``for x in f():``) needs a body to parse.
+        try:
+            tree = ast.parse(f"{text} pass")
+        except SyntaxError:
+            return None
+    # Imported lazily: nooa.runtime's package import pulls in modules that import this one.
+    from nooa.runtime.async_calls import is_coroutine_function, resolve_static_chain
+
+    awaited = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Await)}
+
+    def unawaited(node: ast.AST | None) -> ast.Call | None:
+        if isinstance(node, ast.Call) and id(node) not in awaited:
+            return node
+        return None
+
+    preferred: list[ast.Call] = []
+    calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        call = None
+        if kind == "attribute" and isinstance(node, ast.Attribute) and node.attr == attribute:
+            call = unawaited(node.value)
+        elif kind == "subscript" and isinstance(node, ast.Subscript):
+            call = unawaited(node.value)
+        elif kind == "iterable" and isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            call = unawaited(node.iter)
+        elif kind == "iterable" and isinstance(node, ast.Compare):
+            call = next(filter(None, map(unawaited, node.comparators)), None)
+        if call is not None:
+            preferred.append(call)
+        found = unawaited(node)
+        if found is not None:
+            calls.append(found)
+    for group in (preferred, calls):
+        async_calls = [
+            call
+            for call in group
+            if is_coroutine_function(resolve_static_chain(call.func, namespace))
+        ]
+        if len(async_calls) == 1:
+            return async_calls[0]
+        if group is preferred and len(group) == 1:
+            return group[0]
+    return None
+
+
+def _coroutine_misuse_hint(error: BaseException) -> str | None:
+    """Name the async call whose result was used without ``await``.
+
+    ``self.shell.read(p).numbered`` raises "'coroutine' object has no attribute
+    'numbered'", which says nothing about the missing ``await``. The failing
+    source line is parsed to find the un-awaited call; a coroutine held in a
+    local variable is named by its function. Best-effort: None on any miss.
+    """
+    if not isinstance(error, (AttributeError, TypeError)):
+        return None
+    try:
+        message = str(error)
+        if not _COROUTINE_MISUSE_RE.search(message):
+            return None
+        attribute_match = _COROUTINE_ATTRIBUTE_RE.match(message)
+        attribute = attribute_match.group(1) if attribute_match else None
+        if attribute is not None:
+            kind = "attribute"
+        elif "not subscriptable" in message:
+            kind = "subscript"
+        elif "iterable" in message:
+            kind = "iterable"
+        else:
+            kind = "other"
+
+        location = _last_user_frame(error)
+        call = None
+        namespace: dict[str, Any] = {}
+        source = ""
+        if location is not None:
+            frame, lineno = location
+            namespace = {**frame.f_globals, **frame.f_locals}
+            source = linecache.getline(frame.f_code.co_filename, lineno)
+            call = _unawaited_call(source, attribute, kind, namespace) if source else None
+        if call is not None:
+            text = f"{ast.unparse(call.func)}(...)"
+            fix = {
+                "attribute": f"(await {text}).{attribute}",
+                "subscript": f"(await {text})[...]",
+                "iterable": f"for item in await {text}:",
+            }.get(kind, f"result = await {text}")
+            return f"Hint: `{text}` is async: write `{fix}`."
+
+        # A coroutine stored in a variable: name the variable and its function.
+        import inspect
+
+        for name, value in namespace.items():
+            if inspect.iscoroutine(value) and re.search(rf"\b{re.escape(name)}\b", source):
+                qualname = getattr(
+                    getattr(value, "cr_code", None), "co_qualname", "an async function"
+                )
+                return (
+                    f"Hint: `{name}` holds an un-awaited coroutine from `{qualname}(...)`, "
+                    f"not its result. Await the call where `{name}` is assigned: "
+                    f"`{name} = await ...`."
+                )
+        return (
+            "Hint: this value is an un-awaited coroutine, not a result: an async call "
+            "was used without `await`. Write `(await obj.method(...)).attr` or "
+            "`result = await obj.method(...)`."
+        )
+    except BaseException:
+        return None
+
+
+def _wrapped_syntax_error(error: Exception) -> SyntaxError | None:
+    """Return the parser ``SyntaxError`` a validation error wraps, if any."""
+    if not _is_validation_error(error):
+        return None
+    original = getattr(error, "original_exception", None)
+    return original if isinstance(original, SyntaxError) else None
 
 
 def _strip_file_prefix(text: str) -> str:
@@ -573,8 +798,13 @@ class IPythonErrorFormatter:
                 closing="\n</truncated-output>",
             )
 
+        wrapped_syntax = _wrapped_syntax_error(error)
         if isinstance(error, SyntaxError):
             formatted = self._format_syntax_error(error, code, line_offset)
+        elif wrapped_syntax is not None:
+            # A validator wrapped the parser's SyntaxError; render it like a raw
+            # SyntaxError (cell, line, caret, hints) instead of a one-line string.
+            formatted = self._format_syntax_error(wrapped_syntax, code, line_offset)
         elif _is_validation_error(error):
             formatted = f"{type(error).__name__}: {error}"
         else:
@@ -590,6 +820,9 @@ class IPythonErrorFormatter:
                 formatted = (
                     f"{formatted}\n\nThe callable you called has this signature:\n{agentdoc}"
                 )
+            await_hint = _sync_await_hint(error) or _coroutine_misuse_hint(error)
+            if await_hint:
+                formatted = f"{formatted}\n\n{await_hint}"
 
         return _bound_diagnostic(formatted, max_error, tail_chars)
 

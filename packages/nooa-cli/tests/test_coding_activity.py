@@ -66,13 +66,13 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")
     try:
         match = await shell.read("example.txt", lines=(2, 2))
-        await shell.replace(match, "changed")
+        await shell.replace_match(match, "changed")
     finally:
         await shell.close()
 
     edit = next(event for event in events if isinstance(event, FileEdit))
     assert edit.old_text == "two\n"
-    # replace() re-terminates the region so the following line survives; the
+    # replace_match() re-terminates the region so the following line survives; the
     # event has to report the text that actually landed in the file.
     assert edit.new_text == "changed\n"
     assert (tmp_path / "example.txt").read_text() == "one\nchanged\nthree\n"
@@ -90,7 +90,7 @@ async def test_stale_match_rejection_emits_no_successful_file_edit(tmp_path):
         path.write_bytes(b"one\nchanged externally\nthree\n")
         before = path.read_bytes()
         with pytest.raises(StaleMatchError, match="No file was changed"):
-            await shell.replace(match, "replacement")
+            await shell.replace_match(match, "replacement")
         assert path.read_bytes() == before
         assert not any(isinstance(event, FileEdit) for event in events)
     finally:
@@ -102,7 +102,7 @@ async def test_match_replace_at_end_of_file_keeps_the_file_terminated(tmp_path):
     (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")
     try:
         match = await shell.read("example.txt", lines=(3, 3))
-        await shell.replace(match, "changed")
+        await shell.replace_match(match, "changed")
     finally:
         await shell.close()
 
@@ -123,7 +123,7 @@ async def test_match_replace_after_cwd_change_emits_original_path(tmp_path):
     try:
         match = await shell.read("example.txt")
         await shell.run("cd other")
-        await shell.replace(match, "after")
+        await shell.replace_match(match, "after")
     finally:
         await shell.close()
 
@@ -440,3 +440,16 @@ async def test_overwrite_reads_the_previous_content_boundedly(tmp_path):
     # "<= limit" assertion.
     assert reads, "the previous content was never read"
     assert all(0 < size <= activity._MAX_DIFF_INPUT_CHARS + 1 for size in reads), reads
+
+
+async def test_replace_match_with_a_path_raises_and_reports_nothing(tmp_path):
+    """#447 review finding 9: no wrapper branch; ShellTools' TypeError surfaces."""
+    shell, events = _observed_shell(tmp_path)
+    (tmp_path / "example.txt").write_text("one\n")
+    try:
+        with pytest.raises(TypeError, match="replace"):
+            await shell.replace_match("example.txt", "two")
+    finally:
+        await shell.close()
+    assert (tmp_path / "example.txt").read_text() == "one\n"
+    assert not any(isinstance(event, FileEdit) for event in events)

@@ -9,6 +9,7 @@ The design follows "Type Names are Prompts" - the LLM sees `EventsApi` as
 a database-like interface for querying past interactions.
 """
 
+import re
 from typing import TYPE_CHECKING
 
 from nooa.events import EventBase
@@ -16,6 +17,22 @@ from nooa.skill import Skill
 
 if TYPE_CHECKING:
     from nooa.agent import Agent
+
+
+_TAG_RE = re.compile(r"\d+(?:\.\.\d+)?")
+_TAG_HELP = (
+    'A tag is the number N from <sys tag="N"> in the transcript, e.g. "22", or a '
+    'summary range such as "2..40" (span and call ids are not tags). '
+    "List active tags with self.events.keys()."
+)
+
+
+def _normalize_tag(name: str, tag: str) -> str:
+    """Return ``tag`` stripped, or raise if it is not a number or ``N..M`` range."""
+    text = tag.strip()
+    if _TAG_RE.fullmatch(text):
+        return text
+    raise ValueError(f"Invalid {name} {tag!r}. {_TAG_HELP}")
 
 
 class EventsApi(Skill):
@@ -204,13 +221,14 @@ class EventsApi(Skill):
     def collapse(
         self, start_tag: str | int, end_tag: str | int, summary_text: str | None = None
     ) -> str:
-        """Archive a range of events into a single Summary marker.
+        """Archive a range of events into one Summary marker. Synchronous: do not await.
 
         Replaces tags start_tag..end_tag with one summary tag.
         Original events remain accessible by their individual tags.
-        Prefer string tags, including summary tags such as "2..10". Integers
-        are accepted if they identify existing events (including archived ones).
-        Either endpoint may be an integer.
+        A tag is the number N shown as <sys tag="N"> in the transcript (e.g. "22"),
+        or a summary range such as "2..10"; span or call ids are not tags.
+        Integers are accepted if they identify existing events (including
+        archived ones). List the active tags with events.keys().
 
         Args:
             start_tag: First tag to collapse (inclusive), e.g. "2".
@@ -230,9 +248,16 @@ class EventsApi(Skill):
             if type(tag) is int:
                 tag = str(tag)
                 if self._manager.get(tag) is None:
-                    raise ValueError(f"{name} does not identify an existing event: {tag!r}")
-            elif not isinstance(tag, str):
-                raise TypeError(f"{name} must be a string tag or an integer event tag")
+                    raise ValueError(
+                        f"{name} does not identify an existing event: {tag!r}. {_TAG_HELP}"
+                    )
+            elif isinstance(tag, str):
+                tag = _normalize_tag(name, tag)
+            else:
+                raise TypeError(
+                    f"{name} must be a string tag or an integer event tag, got "
+                    f"{type(tag).__name__}. {_TAG_HELP}"
+                )
             tags.append(tag)
 
         return self._manager.collapse(tags[0], tags[1], summary_text)

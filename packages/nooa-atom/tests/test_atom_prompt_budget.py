@@ -93,11 +93,23 @@ RESULT = (
 # copy_todo/merge_todo/with_todo are gone (insert_copy() is hidden), but
 # those docs are past what the prompt shows: every other row is unchanged.
 # Within the limits, so they stay.
+# From dev/atom (#447, merged 2026-10-19):
+# Raised for truthful API text (2026-10-14: replace() forms and real parameter
+# names, sync/async labels in <skills>, NeedInput free-text guidance, the show()
+# line; about 290 characters): measured values plus about 2% headroom.
+# Raised for #447 review (2026-10-14: replace() split into replace() and
+# replace_match(), self.web removed, show() names nooa.media.Image; about 300
+# characters net): measured values plus about 2% headroom.
+# Raised when AtomAgent kept the storage guidance from the removed experimental
+# prompt (2026-10-16, about 140 characters): measured values plus about 2% headroom.
+# Re-measured after merging dev/atom with #447 into #451 (2026-10-19): #447's
+# truthful API text plus the child-session docs, 273 characters more in the system
+# prompt for every row (was 14,909). Measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (15_200, 18_200),  # measured 14,909 / 17,860
-    (ATOM, "handle_batch"): (15_200, 17_800),  # measured 14,909 / 17,458
-    (ATOM, "handle_work"): (15_200, 18_400),  # measured 14,909 / 17,928
-    (ATOM, "handle_orchestrate"): (15_200, 19_800),  # measured 14,909 / 19,410
+    (ATOM, "handle"): (15_500, 18_600),  # measured 15,182 / 18,240
+    (ATOM, "handle_batch"): (15_500, 18_100),  # measured 15,182 / 17,732
+    (ATOM, "handle_work"): (15_500, 18_600),  # measured 15,182 / 18,202
+    (ATOM, "handle_orchestrate"): (15_500, 20_100),  # measured 15,182 / 19,684
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

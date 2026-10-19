@@ -30,6 +30,7 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
+    ClassVar,
     Literal,
     get_args,
     get_origin,
@@ -91,6 +92,16 @@ OUTPUT_TOKENS_EXHAUSTED_MESSAGE = (
     "Increase `max_tokens` (16384 or more is often needed for reasoning models)."
 )
 """The ``GenerationError`` message when a response stops at its output-token limit."""
+
+MAX_LENGTH_RECOVERIES = 2
+"""Cut-off replies per call that get a recovery nudge before the call fails."""
+
+OUTPUT_LIMIT_NUDGE = (
+    "Your last reply was cut off at the output-token limit before it finished, so "
+    "nothing ran. Reply again more briefly: keep reasoning short and call the "
+    "tool with the next step now."
+)
+"""Feedback after a reply stopped at its output-token limit (finish_reason=length)."""
 
 MAX_ITERATIONS_MESSAGE = (
     "Generation failed after {iterations} iterations (max_iterations={max_iterations}). "
@@ -272,6 +283,7 @@ class CodeActSession:
     iteration: int = 0
     error_count: int = 0
     consecutive_text_only: int = 0
+    length_recoveries: int = 0  # Cut-off (finish_reason=length) replies nudged so far
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
@@ -694,9 +706,18 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:
             return ", ".join(name for name, _ in ordered)
 
+    # show() is in every cell's namespace, for both CodeAct strategies.
+    SHOW_NOTE_LINES: ClassVar[tuple[str, ...]] = (
+        "show(obj) attaches a nooa.media.Image/Audio/Video/File so you can see or hear it;",
+        "here `Image` is nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image.",
+    )
+
     def _always_available_text(self) -> str:
         names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
-        return f"Always available without import: {names}, plus stdlib `asyncio` and `typing`."
+        return (
+            f"Always available without import: {names}, plus stdlib `asyncio` and `typing`. "
+            + " ".join(self.SHOW_NOTE_LINES)
+        )
 
     def _always_available_builtins(self) -> tuple[str, ...]:
         return ("self", "print()", "pprint()", "doc()", "return_result()")
@@ -1057,6 +1078,16 @@ Standard Python builtins and agent instance (`self`) are available."""
                             content=f"Truncated response: {_response_debug_details(response)}"
                         )
                     )
+                    # A cut-off reply ran nothing. Give the model a bounded number
+                    # of chances to answer briefly before failing the call.
+                    if (
+                        session.length_recoveries < MAX_LENGTH_RECOVERIES
+                        and not session.is_exhausted()
+                    ):
+                        session.length_recoveries += 1
+                        session.record_iteration()
+                        runtime.event_manager.add(Error(content=OUTPUT_LIMIT_NUDGE))
+                        continue
                     turn_state.is_final = True
                     raise GenerationError(OUTPUT_TOKENS_EXHAUSTED_MESSAGE)
 

@@ -221,6 +221,218 @@ class TestFormatValidationError:
         assert "Traceback" not in result
 
 
+class TestWrappedSyntaxError:
+    """A validator-wrapped SyntaxError renders like a raw SyntaxError."""
+
+    def _wrapped(self, code: str, cell: int = 4):
+        from nooa.runtime.code_validator import UnifiedCodeValidator, ValidationContext
+
+        with pytest.raises(RestrictedCodeError) as exc_info:
+            UnifiedCodeValidator().validate(code, ValidationContext(execution_count=cell))
+        return exc_info.value
+
+    def test_wrapped_syntax_error_shows_cell_line_and_caret(self):
+        from nooa.errors import CodeSyntaxError
+
+        code = "x = 1\nif x\n    pass\n"
+        error = self._wrapped(code)
+
+        assert isinstance(error, CodeSyntaxError)
+        result = format_error_for_llm(error, code)
+
+        assert "Cell In[4], line 2" in result
+        assert "if x" in result
+        assert "^" in result
+        assert "SyntaxError:" in result
+        # Labelled as a syntax error, not as a restriction.
+        assert "RestrictedCodeError" not in result
+        assert "<unknown>" not in result
+
+    def test_wrapped_syntax_error_keeps_heredoc_hint(self):
+        code = 'r = await self.shell.run("cat <<EOF\nhello\nEOF")\n'
+        result = format_error_for_llm(self._wrapped(code), code)
+
+        assert "SyntaxError:" in result
+        assert "heredoc" in result
+
+    def test_wrapped_syntax_error_is_bounded(self):
+        code = "x = (" + "1, " * 50_000 + "\n"
+        result = format_error_for_llm(self._wrapped(code), code, max_error=2_000)
+
+        assert len(result) < 4_000
+
+    def test_policy_rejection_unchanged(self):
+        code = 'exec("x = 1")\n'
+        result = format_error_for_llm(self._wrapped(code), code)
+
+        assert result.startswith("RestrictedCodeError:")
+        assert "SyntaxError" not in result
+
+
+class TestSyncAwaitHint:
+    """Awaiting a synchronous call's result explains the call already ran."""
+
+    def test_await_on_plain_value_gets_hint(self):
+        import asyncio
+
+        async def cell():
+            await "2..40"
+
+        with pytest.raises(TypeError) as exc_info:
+            asyncio.run(cell())
+        result = format_error_for_llm(exc_info.value)
+
+        assert "can't be used in 'await' expression" in result
+        assert "the awaited value is a str" in result
+        assert "call it without `await`" in result
+
+    def test_await_on_uncalled_async_method_says_to_call_it(self):
+        """#447 review finding 3: ``await self.shell.read`` must not say "drop await"."""
+        import asyncio
+
+        class Shell:
+            async def read(self, path):
+                return path
+
+        class Agent:
+            shell = Shell()
+
+        async def cell(self):
+            await self.shell.read
+
+        with pytest.raises(TypeError) as exc_info:
+            asyncio.run(cell(Agent()))
+        result = format_error_for_llm(exc_info.value)
+
+        assert "can't be used in 'await' expression" in result
+        assert "`await self.shell.read(...)`" in result
+        assert "without `await`" not in result
+
+    def test_await_on_uncalled_coroutine_function_says_to_call_it(self):
+        import asyncio
+
+        async def fetch():
+            return 1
+
+        async def cell():
+            await fetch
+
+        with pytest.raises(TypeError) as exc_info:
+            asyncio.run(cell())
+        result = format_error_for_llm(exc_info.value)
+
+        assert "`await fetch(...)`" in result
+        assert "has already run" not in result
+
+    def test_await_on_uncalled_sync_method_says_call_without_await(self):
+        import asyncio
+
+        class Tools:
+            def name(self):
+                return "x"
+
+        async def cell(tools):
+            await tools.name
+
+        with pytest.raises(TypeError) as exc_info:
+            asyncio.run(cell(Tools()))
+        result = format_error_for_llm(exc_info.value)
+
+        assert "`tools.name` was awaited without being called" in result
+        assert "call it without `await`, as `tools.name(...)`" in result
+
+    def test_other_type_errors_have_no_await_hint(self):
+        result = format_error_for_llm(TypeError("unsupported operand"))
+        assert "without `await`" not in result
+
+
+class _AsyncShell:
+    async def read(self, path):
+        return path
+
+    async def run(self, command):
+        return [command]
+
+    def sync_read(self, path):
+        return path
+
+
+class _AgentLike:
+    def __init__(self):
+        self.shell = _AsyncShell()
+
+
+def _run_cell_and_format(source: str, **namespace) -> str:
+    """Run *source* as a 'Cell In[N]' cell (async wrapper) and format its error."""
+    import asyncio
+    import linecache
+    import textwrap
+    import warnings
+
+    filename = "Cell In[91]"
+    body = "async def __repl_wrapper__():\n" + textwrap.indent(source, "    ")
+    linecache.cache[filename] = (len(body), None, body.splitlines(True), filename)
+    scope = dict(namespace)
+    exec(compile(body, filename, "exec"), scope)  # noqa: S102
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # the never-awaited warning
+        try:
+            asyncio.run(scope["__repl_wrapper__"]())
+        except Exception as error:  # noqa: BLE001
+            return format_error_for_llm(error, line_offset=1)
+    raise AssertionError("expected the cell to fail")
+
+
+class TestCoroutineMisuseHint:
+    """Using an un-awaited coroutine names the async call and the fix (#447)."""
+
+    def test_attribute_on_unawaited_call_names_the_call(self):
+        result = _run_cell_and_format(
+            'print(self.shell.read("f.py").numbered)\n', self=_AgentLike()
+        )
+        assert "'coroutine' object has no attribute 'numbered'" in result
+        assert (
+            "Hint: `self.shell.read(...)` is async: write `(await self.shell.read(...)).numbered`."
+            in result
+        )
+
+    def test_subscript_on_unawaited_call(self):
+        result = _run_cell_and_format('x = self.shell.run("ls")[0]\n', self=_AgentLike())
+        assert "'coroutine' object is not subscriptable" in result
+        assert "`self.shell.run(...)` is async: write `(await self.shell.run(...))[...]`" in result
+
+    def test_iteration_over_unawaited_call(self):
+        result = _run_cell_and_format(
+            'for line in self.shell.run("ls"):\n    print(line)\n', self=_AgentLike()
+        )
+        assert "'coroutine' object is not iterable" in result
+        assert "write `for item in await self.shell.run(...):`" in result
+
+    def test_picks_the_async_call_among_several(self):
+        result = _run_cell_and_format(
+            'n = len(self.shell.sync_read("a")) + self.shell.read("b").count\n',
+            self=_AgentLike(),
+        )
+        assert "`self.shell.read(...)` is async" in result
+        assert "sync_read" not in result.split("Hint:", 1)[1]
+
+    def test_coroutine_in_a_variable_names_its_function(self):
+        result = _run_cell_and_format(
+            'm = self.shell.read("f.py")\nprint(m.numbered)\n', self=_AgentLike()
+        )
+        assert "`m` holds an un-awaited coroutine from `_AsyncShell.read(...)`" in result
+        assert "`m = await ...`" in result
+
+    def test_unrelated_attribute_errors_have_no_hint(self):
+        result = _run_cell_and_format("x = (1).nope\n")
+        assert "Hint:" not in result
+
+    def test_hint_never_breaks_formatting_without_traceback(self):
+        result = format_error_for_llm(AttributeError("'coroutine' object has no attribute 'text'"))
+        assert "'coroutine' object has no attribute 'text'" in result
+        assert "un-awaited coroutine" in result
+
+
 class TestFormatRuntimeError:
     """Tests for runtime error formatting."""
 
@@ -672,7 +884,7 @@ class TestHeredocHint:
 
 
 class _ShellToolsLike:
-    def replace(self, target, old_or_new="", new=None):
+    def replace(self, path, old, new):
         """Replace at an unambiguous location."""
         ...
 
@@ -719,9 +931,9 @@ class TestBadCallAgentdoc:
             tool.replace(target="x", old="a", new="b")
 
         result = _format_bad_call(cell)
-        assert "unexpected keyword argument 'old'" in result
+        assert "unexpected keyword argument 'target'" in result
         assert "_ShellToolsLike.replace" in result
-        assert "old_or_new" in result
+        assert "path, old, new" in result
         assert "Replace at an unambiguous location" in result
 
     def test_missing_positional_appends_signature(self):

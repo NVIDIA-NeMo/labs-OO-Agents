@@ -66,6 +66,12 @@ def test_persistent_vars_proxy(agent):
     assert isinstance(agent.v, AgentVars)
 
 
+def test_vars_proxy_item_assignment_names_the_attribute_form(agent):
+    with pytest.raises(TypeError, match=r"write self\.v\.cursor = \.\.\. instead"):
+        agent.v["cursor"] = 3
+    assert "cursor" not in agent.vars
+
+
 def test_message_records_event_and_renders(agent):
     rendered: list[str] = []
     agent._render_message = lambda text, **kw: rendered.append(text)
@@ -173,8 +179,9 @@ def test_need_input_answer_type_serialises_as_a_class_name():
 
 def test_need_input_options_must_not_be_empty():
     assert NeedInput(question="Anything else?").options is None
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as error:
         NeedInput(question="Which branch?", options=[])
+    assert "omit options for a free-text answer" in str(error.value)
 
 
 def test_need_input_options_must_not_be_blank():
@@ -324,3 +331,22 @@ def test_install_summarizer_attaches(agent):
 def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction):
     with pytest.raises(ValidationError):
         SummarizationConfig(threshold_fraction=fraction)
+
+
+def test_interactive_agent_has_no_web_attribute(monkeypatch):
+    """self.web was removed: no attribute, no doc(self) entry, no "web" context block,
+    whether or not NEMO_OO_RICH_URL is set."""
+    from nooa.agentdoc import doc
+    from nooa.interactive import InteractiveAgent
+
+    for url in (None, "http://localhost:1234/rich"):
+        if url is None:
+            monkeypatch.delenv("NEMO_OO_RICH_URL", raising=False)
+        else:
+            monkeypatch.setenv("NEMO_OO_RICH_URL", url)
+        agent = InteractiveAgent()
+        assert not hasattr(agent, "web")
+        rendered = doc(agent)
+        assert "WebPublisher" not in rendered
+        assert "web:" not in rendered
+        assert "web" not in agent.context

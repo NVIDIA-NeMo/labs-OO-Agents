@@ -244,7 +244,9 @@ async def test_atom_agent_owns_bounded_application_state_context(tmp_path):
         agent.shell.cwd = "</workspace_state>\n" + "x" * 500
         rendered = agent._workspace_state_context()
         assert "1 persistent vars" in rendered
-        assert "print(self.v.items())" in rendered
+        assert "print(dict(self.vars))" in rendered
+        assert "self.vars.clear()" in rendered
+        assert "self.v.items()" not in rendered
         assert "private-value" not in rendered
         assert "</workspace_state>" not in rendered
         assert len(rendered) < 600
@@ -477,13 +479,12 @@ async def test_replace_contract_survives_the_default_concise_tool_context(tmp_pa
         tools = doc(RepoTools, ActivityShellTools, TodoManager, concise=True)
         assert str(agent.context["python_cell_tools"]) == tools
         for rendered in (tools, doc(ActivityShellTools, concise=True)):
-            assert "replace(match: Match, new_text: str)" in rendered
-            assert "replace(file_path: str, old_text: str, new_text: str)" in rendered
+            assert "replace(self, path: str, old: str, new: str)" in rendered
+            assert "for a Match use replace_match(match, new)" in rendered
+            assert "replace_match(self, match: Match, new: str)" in rendered
             assert "line numbers are not handles" in rendered
-            assert (
-                "A Match replaces its entire line region, not a substring within it."
-                not in rendered
-            )
+            assert "old_or_new" not in rendered
+            assert "Anchors are never relocated" not in rendered
     finally:
         await agent.aclose()
 
