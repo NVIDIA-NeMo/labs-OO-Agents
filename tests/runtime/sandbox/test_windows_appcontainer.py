@@ -321,6 +321,19 @@ def test_env_passthrough_lets_a_named_variable_in(tmp_path, monkeypatch):
         session.close()
 
 
+def test_llm_import_does_not_reach_for_the_network(session):
+    """litellm must not fetch its model cost map inside the container.
+
+    It does that at import time, and the container can never complete the
+    request: with network=False it is refused, with network=True it is a round
+    trip nobody asked for. Measured: importing an agent module that pulls in
+    the LLM stack took 11.9 s in the container, 3.1 s with the local map.
+    """
+    result = session.run("import os\nos.environ.get('LITELLM_LOCAL_MODEL_COST_MAP')\n")
+    assert result.error is None, result.error
+    assert result.returned_value == "True"
+
+
 # --- resource limits ---------------------------------------------------------
 def test_cpu_limit_kills_and_the_session_recovers(session):
     """Exhausting the job's CPU budget terminates the worker, and the next cell

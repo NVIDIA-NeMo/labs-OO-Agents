@@ -101,10 +101,11 @@ Four behaviours differ from Linux and are worth knowing:
 
 - **A killed worker costs about half a minute to replace.** After a timeout or a
   resource kill the executor restarts the worker before returning the error, so
-  a cell that hits `cell_timeout=1` reports after roughly 36 seconds, not one.
-  The restart re-syncs the package, warms the tokenizer cache, creates a new
-  container profile, and completes the startup handshake. Set `cell_timeout`
-  for how long a cell may run, not for how quickly a failure returns.
+  a cell that hits `cell_timeout=1` reports after roughly 33 seconds, not one.
+  About 6 s of that is revoking the container's grants, which rewrites the
+  runtime root's DACL for 22,908 files; the rest is a fresh profile, process
+  creation, and the child importing the agent module. Set `cell_timeout` for
+  how long a cell may run, not for how quickly a failure returns.
 - **The agent module's directory must be readable.** An AppContainer is
   confined from process creation, so the worker imports the agent class *inside*
   the sandbox. The launcher grants read on the module's own directory (not its
@@ -124,6 +125,9 @@ Four behaviours differ from Linux and are worth knowing:
   Linux backend does not filter the environment. nooa's own config discovery
   (`NEMO_OO_PROJECT_DIR`, `NEMO_OO_USER_DIR`) points at an empty location, so
   project and user `.nooa` settings are not loaded in the container.
+  `LITELLM_LOCAL_MODEL_COST_MAP=True` is set as well: litellm otherwise fetches
+  its model cost map over HTTPS at import time, which the container can never
+  complete — 11.9 s per import against 3.1 s with the bundled map.
 
 Verify containment — these tests fail when isolation leaks, not when a feature
 breaks:

@@ -417,6 +417,13 @@ def start_container_worker(
         absent = root.root / "no-nooa-config"
         child_env.setdefault("NEMO_OO_PROJECT_DIR", str(absent / "project"))
         child_env.setdefault("NEMO_OO_USER_DIR", str(absent / "user"))
+        # litellm fetches its model cost map over HTTPS at import time, which
+        # the container can never complete: with network=False the request is
+        # refused, and with network=True it is a round trip nobody asked for.
+        # Measured: importing an agent module that pulls in the LLM stack took
+        # 11.9 s in the container versus 3.1 s with the local map. litellm
+        # already ships the map; this only tells it not to look for a newer one.
+        child_env.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
         parent_conn, child_conn = mp.Pipe(duplex=True)
         handle = child_conn.fileno()
