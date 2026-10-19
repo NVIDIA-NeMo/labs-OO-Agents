@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: `/compact` is a built-in slash command. It sends the agent a
+  short directive on its `slash_commands` channel ("Please compact your history
+  now using self.events.collapse(...)", plus what to keep), and the agent
+  compacts with its own tools in that turn. Over ACP (Pool) it used to answer
+  "not available through ACP yet". Any extra words are passed on as
+  instructions; a host control named `compact` still replaces it.
 - `nooa-atom`: `AtomAgent.handle_orchestrate()` (from #446), an unattended
   root that plans a task, hands the work to child sessions (they run
   `handle_work`) and verifies it without editing files itself. It is opt-in:
