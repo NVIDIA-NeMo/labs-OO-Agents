@@ -271,7 +271,8 @@ class _ClientHttp:
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
         api_base = config.get("api_base") or dynamic_api_base
-        common: dict[str, Any] = {"timeout": self._timeout}
+        # CompletionClient's RetryConfig owns retries; calls set their own value.
+        common: dict[str, Any] = {"timeout": self._timeout, "max_retries": 0}
         if api_key:
             common["api_key"] = api_key
         if api_base:
@@ -1549,6 +1550,17 @@ def _collect_sync(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
+def _with_sdk_retries(client: Any, max_retries: int) -> Any:
+    """Return a per-call copy of an OpenAI SDK client with its own retry setting.
+
+    LiteLLM writes ``max_retries`` onto the SDK client it is given, so a shared
+    client would let concurrent calls change each other's retry budget. The
+    copy keeps the same HTTP pool. Other client types are returned unchanged.
+    """
+    with_options = getattr(client, "with_options", None)
+    return with_options(max_retries=max_retries) if callable(with_options) else client
+
+
 async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     """Consume an async streaming or non-streaming litellm response, returning ModelResponse."""
     if isinstance(raw, litellm.CustomStreamWrapper):
@@ -1918,7 +1930,9 @@ class CompletionClient(UnifiedLLM):
                          disconnects, and unreachable endpoints. Pass
                          RetryConfig(max_retries=0, rate_limit_extra_retries=0) to disable endpoint retries. Set
                          retry_on_empty_content=True to also retry when reasoning
-                         models return empty content.
+                         models return empty content. The OpenAI SDK's own
+                         retries are disabled unless ``max_retries`` is passed
+                         in ``**config``.
             http_config: Optional per-client HTTP connection-pool and timeout
                          settings. Applied only to THIS client's requests: the
                          client builds its own httpx client from these values and
@@ -1954,7 +1968,9 @@ class CompletionClient(UnifiedLLM):
             },
         }
 
-    def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
+    def _completion_http_client(
+        self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
+    ) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""
         routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
         if self._effective_model(call_config) != self.model or any(
@@ -1965,7 +1981,8 @@ class CompletionClient(UnifiedLLM):
             # for overrides; these calls use LiteLLM's default HTTP pool settings.
             return None
         assert self._http is not None
-        return self._http.async_client if is_async else self._http.sync_client
+        client = self._http.async_client if is_async else self._http.sync_client
+        return _with_sdk_retries(client, max_retries)
 
     def call(
         self,
@@ -2033,12 +2050,23 @@ class CompletionClient(UnifiedLLM):
             api_params.pop("tool_choice")
 
         add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(call_config, is_async=False)
-        if http_client is not None:
-            api_params.setdefault("client", http_client)
+        if "client" in api_params:
+            api_params["client"] = _with_sdk_retries(
+                api_params["client"], api_params["max_retries"]
+            )
+        else:
+            http_client = self._completion_http_client(
+                call_config, is_async=False, max_retries=api_params["max_retries"]
+            )
+            if http_client is not None:
+                api_params["client"] = http_client
 
         def _make_call():
             raw_response = _collect_sync(litellm.completion(**api_params))
@@ -2133,12 +2161,23 @@ class CompletionClient(UnifiedLLM):
             api_params.pop("tool_choice")
 
         add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(call_config, is_async=True)
-        if http_client is not None:
-            api_params.setdefault("client", http_client)
+        if "client" in api_params:
+            api_params["client"] = _with_sdk_retries(
+                api_params["client"], api_params["max_retries"]
+            )
+        else:
+            http_client = self._completion_http_client(
+                call_config, is_async=True, max_retries=api_params["max_retries"]
+            )
+            if http_client is not None:
+                api_params["client"] = http_client
 
         async def _make_call():
             async def provider_call():

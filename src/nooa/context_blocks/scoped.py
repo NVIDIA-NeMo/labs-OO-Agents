@@ -21,17 +21,17 @@ Usage:
 import contextvars
 from typing import TYPE_CHECKING, Any
 
-from nooa.context_blocks.models import DynamicContext
+from nooa.context_blocks.models import Context, DynamicContext
 
 if TYPE_CHECKING:
     from nooa.runtime.event_query import EventQuery
 
 # Context variable for scoped block overrides (inherits to nested calls).
-# Structure: {key: str | DynamicContext | None, ...} or None
+# Structure: {key: str | Context | DynamicContext | None, ...} or None
 # Read by _prepare_context() in the runtime to apply temporary overrides.
-_scoped_blocks_var: contextvars.ContextVar[dict[str, str | DynamicContext | None] | None] = (
-    contextvars.ContextVar("scoped_blocks", default=None)
-)
+_scoped_blocks_var: contextvars.ContextVar[
+    dict[str, str | Context | DynamicContext | None] | None
+] = contextvars.ContextVar("scoped_blocks", default=None)
 
 # Context variable for scoped event query (inherits to nested calls).
 # Structure: EventQuery or None
@@ -54,6 +54,7 @@ class ScopedContext:
     Args:
         context: Dict of context block overrides (system prompt).
             - str: Static content override
+            - Context: Literal or expression-backed content
             - DynamicContext("expr"): DynamicContext expression override
             - None: Remove block within this scope
         events: EventQuery for filtering which events appear in context.
@@ -87,7 +88,7 @@ class ScopedContext:
 
     def __init__(
         self,
-        context: dict[str, str | DynamicContext | None] | None = None,
+        context: dict[str, str | Context | DynamicContext | None] | None = None,
         events: "EventQuery | None" = None,
     ):
         """Initialize scoped block and event filtering overrides.
@@ -110,7 +111,7 @@ class ScopedContext:
         parent_evt = _scoped_events_var.get()
 
         # Merge context blocks with parent scope (inheritance)
-        merged_ctx: dict[str, str | DynamicContext | None] = {}
+        merged_ctx: dict[str, str | Context | DynamicContext | None] = {}
         if parent_ctx:
             merged_ctx.update(parent_ctx)
         if self.context:

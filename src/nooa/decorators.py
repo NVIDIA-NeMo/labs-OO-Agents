@@ -15,6 +15,7 @@ from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
+    from nooa.decisions import UnifiedDecisionModel
     from nooa.strategies import GenerationStrategy as GenerationStrategyABC
     from nooa.unifiedllm import UnifiedLLM
 
@@ -27,6 +28,7 @@ def strategy(
     context: "ScopedContext | dict[str, Any] | None" = None,
     *,
     llm: "UnifiedLLM | str | Callable[[Any], UnifiedLLM] | None" = None,
+    decision_model: "UnifiedDecisionModel | str | Callable[[Any], UnifiedDecisionModel] | None" = None,
     truncation: "TruncationConfig | None" = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Strategy decorator for agent methods.
@@ -42,8 +44,8 @@ def strategy(
             - A ``ScopedContext`` instance when you also need event filtering.
             Applied in _prepare_context() between strategy overrides and scoped blocks.
         llm: Optional LLM override for this method. One of:
-            - a ``UnifiedLLM`` instance (fixed at import time, shared by every
-              instance of the class)
+            - a client compatible with the selected strategy (fixed at import
+              time and shared by every instance of the class)
             - a registry alias or litellm model string (resolved lazily on the
               first call per agent instance, then cached on it, so no client
               is constructed at import time)
@@ -51,6 +53,11 @@ def strategy(
               on each generation call, so it can vary per instance or per call)
             Standalone functions may pass a client or an alias string, but not
             a callable — they have no instance for one to bind against.
+        decision_model: Optional decision model for a standalone
+            ``DecideStrategy`` function or agent method. Accepts a client, a
+            configured registry alias, or (for agent methods) a callable that
+            resolves against the agent instance. For agent methods, this
+            overrides the agent's default decision model.
         truncation: Optional TruncationConfig override for this method. Fields set
             here take precedence over the agent-level truncation config. Unset fields
             inherit from the agent-level config.
@@ -98,6 +105,7 @@ def strategy(
         # Attach metadata for metaclass to read (when used at class definition time)
         setattr(func, "_strategy_override", strategy_instance)  # noqa: B010
         setattr(func, "_strategy_llm", llm)  # noqa: B010
+        setattr(func, "_strategy_decision_model", decision_model)  # noqa: B010
         setattr(func, "_strategy_context", final_context)  # noqa: B010
         setattr(func, "_strategy_events", final_events)  # noqa: B010
         setattr(func, "_strategy_truncation", truncation)  # noqa: B010
@@ -129,12 +137,25 @@ def strategy(
         _params = list(inspect.signature(func).parameters)
         is_standalone = not _params or _params[0] != "self"
 
+        if decision_model is not None:
+            from nooa.decisions.resolution import validate_decision_model_spec
+
+            validate_decision_model_spec(
+                decision_model,
+                func.__name__,
+                standalone=is_standalone,
+            )
+
         # Validate the llm spec now so a bad value points at the @strategy
         # line rather than failing mid-generation.
         if llm is not None:
             from nooa.method_llm import validate_method_llm_spec
 
-            validate_method_llm_spec(llm, func.__name__, standalone=is_standalone)
+            validate_method_llm_spec(
+                llm,
+                func.__name__,
+                standalone=is_standalone,
+            )
 
         strat = None
         if needs_gen:
@@ -149,7 +170,7 @@ def strategy(
             if needs_gen:
                 from nooa.standalone import create_standalone_wrapper
 
-                return create_standalone_wrapper(func, strat, llm)
+                return create_standalone_wrapper(func, strat, llm, decision_model)
             return func  # type: ignore[return-value]  # non-generation standalone: nothing to wrap
 
         from nooa.runtime.method_wrapper import create_agent_method_wrapper
@@ -164,6 +185,7 @@ def strategy(
 
         # Attach additional metadata specific to @strategy decorator
         setattr(wrapper, "_plan_llm", llm)  # noqa: B010
+        setattr(wrapper, "_plan_decision_model", decision_model)  # noqa: B010
         setattr(wrapper, "_strategy_context", final_context)  # noqa: B010
         setattr(wrapper, "_strategy_events", final_events)  # noqa: B010
         setattr(wrapper, "_strategy_truncation", truncation)  # noqa: B010
@@ -172,6 +194,7 @@ def strategy(
         setattr(func, "_agent_decorator", "auto")  # noqa: B010
         setattr(func, "_needs_generation", needs_gen)  # noqa: B010
         setattr(func, "_plan_llm", llm)  # noqa: B010
+        setattr(func, "_plan_decision_model", decision_model)  # noqa: B010
         if strat:
             setattr(func, "_plan_strategy", strat)  # noqa: B010
 

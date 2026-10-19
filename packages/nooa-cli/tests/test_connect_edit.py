@@ -96,6 +96,32 @@ def test_edit_cancel_preserves_file(registry, monkeypatch):
     assert not path.with_name("secrets.yaml").exists()
 
 
+def test_edit_decision_model_preserves_flat_entry(registry):
+    path, _ = registry
+    original = {
+        "model_name": "decision-model",
+        "client_type": "decision",
+        "api_style": "systemone",
+        "endpoint": "https://decision.example/v1/systemone",
+        "api_key_env": "EDIT_TEST_KEY",
+        "custom_metadata": "keep me",
+    }
+    path.write_text(yaml.safe_dump({"models": {"saved": original}}))
+
+    result = CliRunner().invoke(
+        command,
+        ["--edit-model", "saved", "--no-probe", "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    actual = yaml.safe_load(path.read_text())["models"]["saved"]
+    for key, value in original.items():
+        assert actual[key] == value
+    assert "max_tokens" not in actual
+    assert "context_window" not in actual
+    assert "No context window selected" not in result.output
+
+
 @pytest.mark.parametrize("explicit", [False, True])
 def test_endpoint_reuses_saved_variable_unless_explicit(registry, explicit):
     path, _ = registry

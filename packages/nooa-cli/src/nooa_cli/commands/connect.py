@@ -33,8 +33,11 @@ from ._connect_stages import STAGES
 @click.option("--endpoint", help="API base URL (otherwise prompted).")
 @click.option(
     "--api-style",
-    type=click.Choice(["chat", "responses", "anthropic"]),
-    help="Request interface used by this model route.",
+    type=click.Choice(["chat", "responses", "anthropic", "systemone", "openai"]),
+    help=(
+        "Request interface used by this model route. systemone and openai are "
+        "decision-model interfaces (System One, or OpenAI's /v1/decisions)."
+    ),
 )
 @click.option(
     "--api-key-env",

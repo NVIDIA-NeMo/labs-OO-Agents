@@ -243,6 +243,14 @@ class TaskResult(BaseModel):
         default="",
         description="Concise human-readable report that a parent or runner shows inline.",
     )
+    value: str = Field(
+        default="",
+        description=(
+            "The exact output the task asks for, if any, with nothing added: no label, "
+            "explanation or formatting. It is delivered verbatim, whitespace included. "
+            "Leave empty when the task only asks for actions."
+        ),
+    )
 
 
 ONE_SHOT_QUESTION: Annotated[str, hidden] = (

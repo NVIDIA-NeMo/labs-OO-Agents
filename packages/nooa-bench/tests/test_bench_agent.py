@@ -129,6 +129,7 @@ def test_task_result_model(how_to_verify):
     assert "URL-encoding" in r.solution_description
     assert r.how_to_verify == how_to_verify
     assert r.report == ""
+    assert r.value == ""
     with_report = TaskResult(**r.model_dump(exclude={"report"}), report="Fixed URL-encoding.")
     assert with_report.report == "Fixed URL-encoding."
     properties = TaskResult.model_json_schema()["properties"]
@@ -316,10 +317,49 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
             "evidence": "pytest passed",
             "how_to_verify": how_to_verify,
             "report": "",
+            "value": "",
         },
     }
     assert shells[-1].cwd == str(tmp_path)
     assert shells[0].closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["EXISTS", "  two\nlines \n", "0"])
+async def test_run_evaluation_returns_exact_value_as_answer(monkeypatch, tmp_path, value):
+    async def fake_solve_task(description: str):
+        return TaskResult(
+            solution_description="Kept the existing destination.",
+            evidence="destination unchanged",
+            how_to_verify="cat dest",
+            report="EXISTS — the destination was already present.",
+            value=value,
+        )
+
+    monkeypatch.setattr(bench_agent_module, "ShellTools", lambda cwd, **kwargs: _FakeShell(cwd))
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    agent = BenchAgent(llm=FakeLLMClient())
+    monkeypatch.setattr(agent, "_solve_task", fake_solve_task)
+
+    result = await agent._run_evaluation(
+        {"problem_statement": "move", "working_dir": str(tmp_path)}
+    )
+
+    assert result["answer"] == value
+    assert result["response"] == "cat dest"
+    assert result["result"]["value"] == value
+
+
+def test_solve_task_prompts_for_exact_value():
+    from nooa_bench.rlm_bench_agent import RLMBenchAgent
+
+    for agent_class in (BenchAgent, RLMBenchAgent):
+        assert "exactly that output in ``value``" in " ".join(
+            agent_class._solve_task.__doc__.split()
+        )
+    description = TaskResult.model_json_schema()["properties"]["value"]["description"]
+    assert "exact output the task asks for" in description
+    assert "Leave empty when the task only asks for actions" in description
 
 
 @pytest.mark.asyncio

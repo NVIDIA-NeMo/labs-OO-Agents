@@ -189,11 +189,15 @@ class BenchAgent(
         try:
             result = await self._solve_task(description)
             if isinstance(result, TaskResult):
-                return {
+                output = {
                     "response": result.how_to_verify,
                     "success": bool(result.solution_description),
                     "result": result.model_dump(),
                 }
+                if result.value:
+                    # The runner prefers "answer" over "response" for the answer file.
+                    output["answer"] = result.value
+                return output
             result_str = str(result) if result is not None else ""
             return {"response": result_str, "success": True, "result": result}
         except Exception as e:
@@ -242,6 +246,7 @@ class BenchAgent(
         Inspect before editing. Make the minimum sufficient change, preserve unrelated
         work, and run relevant tests. Then call ``return_result(TaskResult(...))``
         with the root cause and fix, concrete observed evidence, and how to verify
-        the result.
+        the result. If the task asks for a specific output, put exactly that output
+        in ``value`` and keep any explanation in the other fields.
         """
         ...

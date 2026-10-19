@@ -30,7 +30,7 @@ with hidden:
     from nooa.agents.summarization import _in_summary_fork
     from nooa.config.summarizer_config import TokenBudgetConfig
     from nooa.context_blocks.events import UserEvent
-    from nooa.events import PythonOutput, Summary
+    from nooa.events import Summary
     from nooa.llm_types import LLMResponse
     from nooa.unifiedllm import CacheBoundary
     from nooa.unifiedllm.unifiedllm import _ClientHttp
@@ -178,11 +178,15 @@ async def _run_summary_agent(case, client, monkeypatch, *, mock_usage=None):
             assert "Background memory compaction:" in ctx.messages[-1]["content"]
             started.set()
             await release.wait()
-        result = await nxt(ctx)
         if not is_fork and parent_request is None:
-            # Dispatch enriches effective params (tools, cache key, etc.). The
-            # runtime forks that completed request, not the pre-dispatch input.
-            parent_request = (list(result.messages), dict(result.params), result.runtime)
+            # Keep params live so the blocking fork sees dispatch's cache key.
+            parent_request = (list(ctx.messages), ctx.params, ctx.runtime)
+        before = [(tag, event.id) for tag, event in agent.event_manager.items()]
+        result = await nxt(ctx)
+        if is_fork:
+            assert [(tag, event.id) for tag, event in agent.event_manager.items()] == before, (
+                "fork executed tools or wrote parent events"
+            )
         response = result.response
         assert isinstance(response, LLMResponse)
         if mock_usage:
@@ -191,7 +195,7 @@ async def _run_summary_agent(case, client, monkeypatch, *, mock_usage=None):
             assert usage.input_tokens == 14_000
             assert usage.output_tokens == 40
             assert usage.total_tokens == 14_040
-            expected_cached = 0 if not records else 12_000
+            expected_cached = 12_000 if is_fork or len(records) > 1 else 0
             if is_fork and mock_usage == "cache":
                 expected_cached = 0
             assert usage.cached_input_tokens == expected_cached
@@ -217,30 +221,28 @@ async def _run_summary_agent(case, client, monkeypatch, *, mock_usage=None):
     summarizer = TokenBudgetSummarizer.install(
         agent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=1, target_chars=600)
     )
+    parent_call = asyncio.create_task(agent.answer())
+    started_wait = asyncio.create_task(started.wait())
     try:
-        assert await asyncio.wait_for(agent.answer(), 200) == 3, "fork changed parent result"
+        await asyncio.wait_for(
+            asyncio.wait({parent_call, started_wait}, return_when=asyncio.FIRST_COMPLETED), 200
+        )
         task = summarizer._pending_task
         assert task is not None, "installed threshold summarizer did not fork"
-        await asyncio.wait_for(started.wait(), 10)
-        assert not task.done(), "parent waited for background summary"
+        assert started.is_set()
+        assert not task.done()
+        assert not parent_call.done(), "parent advanced before summary completed"
         source = dict(summarizer._pending_source)
         assert set(old) <= source.keys(), "fork did not select old events"
         before = [(tag, event.id) for tag, event in agent.event_manager.items()]
         recent = {tag: identity for tag, identity in before if tag not in source}
         assert not any(isinstance(e, Summary) for e in agent.event_manager.values())
-        outputs = [e.id for e in agent.event_manager.values() if isinstance(e, PythonOutput)]
         agent._summary_phase = 1  # Fork must keep the already-sent phase 0.
         release.set()
-        await asyncio.wait_for(task, 200)  # No sleeps or polling; await actual fork completion.
-        assert [(tag, e.id) for tag, e in agent.event_manager.items()] == before, (
-            "fork executed tools or wrote parent events"
-        )
-        assert [
-            e.id for e in agent.event_manager.values() if isinstance(e, PythonOutput)
-        ] == outputs
+        assert await asyncio.wait_for(parent_call, 200) == 3, "fork changed parent result"
         _assert_projected_fork(case, *bodies[:2])
-        assert [fork for fork, _ in records] == [False, True]
-        _require_fork_cache(records[0][1], records[1][1])
+        assert [fork for fork, _ in records] == [True, False]
+        _require_fork_cache(records[1][1], records[0][1])
         text = summarizer._pending_summary
         assert isinstance(text, str) and text.strip(), "fork produced no usable pending summary"
         assert all(tag in agent.event_manager.keys() for tag in old), "summary applied too early"
@@ -262,7 +264,7 @@ async def _run_summary_agent(case, client, monkeypatch, *, mock_usage=None):
         assert all(agent.event_manager[tag].id == identity for tag, identity in recent.items())
         assert summarizer._pending_task is summarizer._pending_summary is None
         assert len(bodies) == len(records) == 3, "expected three calls per model"
-        assert [fork for fork, _ in records] == [False, True, False]
+        assert [fork for fork, _ in records] == [True, False, False]
         continuation = list(_strings(bodies[2]))
         assert any(text in s for s in continuation), "summary text missing on wire"
         # Old facts (and even quoted event markers) may legitimately appear in
@@ -281,6 +283,9 @@ async def _run_summary_agent(case, client, monkeypatch, *, mock_usage=None):
     finally:
         release.set()
         await agent.aclose()
+        parent_call.cancel()
+        started_wait.cancel()
+        await asyncio.gather(parent_call, started_wait, return_exceptions=True)
         bodies.clear()  # Never retain native requests as artifacts.
 
 
