@@ -115,6 +115,7 @@ jobs:
             "tests/unifiedllm/connect",
             "tests/runtime/test_generator_method_span_tree.py",
             "tests/runtime/test_producers.py",
+            "tests/runtime/sandbox",
             "src/nooa/runtime/tests/test_producers.py",
             "tests/tracing/test_context_isolation.py",
             "tests/viewer/test_main.py",
