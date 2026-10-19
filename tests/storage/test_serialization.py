@@ -877,7 +877,23 @@ class TestAdditionalEdgeCases:
 # ---------------------------------------------------------------------------
 
 
+class SnapshotOwned(BaseModel):
+    """A model that writes its own snapshot data, like LLMResponse and ChildRef."""
+
+    payload: dict[str, Any]
+
+    def __snapshot_data__(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class TestEnvelopeShapedPlainDicts:
+    def test_snapshot_data_with_an_envelope_shaped_dict_comes_back_as_that_dict(self):
+        plain = {"__type__": "pydantic", "__class__": f"{__name__}.MyModel", "data": {"name": "x"}}
+        blob, al = serialize(SnapshotOwned(payload={"native": plain}))
+        restored = deserialize(blob, al)
+        assert isinstance(restored, SnapshotOwned)
+        assert restored.payload == {"native": plain}
+
     def test_a_plain_dict_shaped_like_a_pydantic_envelope_comes_back_as_that_dict(self):
         plain = {"__type__": "pydantic", "__class__": f"{__name__}.MyModel", "data": {"name": "x"}}
         blob, al = serialize({"x": plain})

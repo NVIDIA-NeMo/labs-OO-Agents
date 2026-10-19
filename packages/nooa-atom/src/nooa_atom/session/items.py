@@ -115,10 +115,7 @@ class ChildRef(BaseModel):
         return await _port(self).wait_child(self.id)
 
     async def send(self, item: Any, *, channel: str = "user_messages") -> "Receipt":
-        """Send the child a message: a running turn reads it next, an idle child starts a turn.
-
-        Sending the Todo the child was handed updates its copy to yours.
-        """
+        """Send the child a message: a running turn reads it next, an idle child starts a turn."""
         return await _port(self).send_child(self.id, item, channel=channel)
 
     async def close(self) -> None:

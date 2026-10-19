@@ -164,7 +164,14 @@ def _serialize(value: Any, allowlist: set[str]) -> Any:
         if snapshot_data := getattr(value, "__snapshot_data__", None):
             # Durable JSON types can own their schema and migration. Other
             # models still need recursive envelopes for arbitrary live fields.
-            return {"__type__": _PYDANTIC, "__class__": fqn, "data": snapshot_data()}
+            # Serialize each value too, so a nested plain dict that looks like an
+            # envelope is escaped and comes back as a dict, not a typed object.
+            data = {
+                k: s
+                for k, v in snapshot_data().items()
+                if (s := _serialize(v, allowlist)) is not SKIP
+            }
+            return {"__type__": _PYDANTIC, "__class__": fqn, "data": data}
         # Iterate over model_fields directly so nested non-Pydantic objects
         # (dataclasses, @snapshotable) are serialized with their type envelopes
         # instead of being flattened to plain dicts by model_dump().
