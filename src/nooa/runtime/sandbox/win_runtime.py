@@ -473,6 +473,12 @@ def _revoke_entries(entries: list[dict[str, Any]]) -> tuple[list[str], int]:
     Returns ``(revoked paths, failures)``. A failure means the ACE may still be
     there, so the caller keeps the journal rather than losing the only record
     of a grant nothing would ever revoke again.
+
+    Each entry is checked before it is revoked. ``REVOKE_ACCESS`` on an
+    inheriting directory rewrites the DACL of every child, which is ~5 s for a
+    runtime root of 22k files even when the SID is already absent; reading the
+    DACL first is milliseconds. Without the check, a journal left behind by an
+    earlier crash costs that much on every single start.
     """
     import ctypes
 
@@ -491,9 +497,21 @@ def _revoke_entries(entries: list[dict[str, Any]]) -> tuple[list[str], int]:
             failed += 1
             continue
         try:
-            if os.path.exists(target):
-                win_api.revoke(target, sid)
-                revoked.append(target)
+            if not os.path.exists(target):
+                continue
+            try:
+                if sid_text not in win_api.read_dacl(target):
+                    continue
+            except OSError:
+                # The read is an optimisation, so an unreadable DACL falls
+                # through to revoke and lets it report. A path that vanished
+                # between the check and the read is not that case: nothing is
+                # left to revoke, and counting it as a failure would keep the
+                # journal alive forever.
+                if not os.path.exists(target):
+                    continue
+            win_api.revoke(target, sid)
+            revoked.append(target)
         except OSError:
             failed += 1
         finally:
@@ -532,14 +550,17 @@ def recover_stale_grants(root: RuntimeRoot) -> list[str]:
             # ACE, with nothing left that could ever remove it.
             if failed:
                 continue
-            try:
-                path.unlink()
-            except OSError:
-                pass
         finally:
-            # Every path must close: a leaked descriptor keeps the file open,
-            # and Windows then refuses the owner's own unlink at teardown.
+            # Close before unlinking. Windows refuses to delete a file that any
+            # handle still has open — including this one — so an unlink while
+            # holding the lock fails with WinError 32 and leaves the journal
+            # behind to be recovered again on every start. The lock is dropped
+            # here; nothing can race in, because the file is deleted next.
             os.close(fd)
+        try:
+            path.unlink()
+        except OSError:
+            pass
     return revoked
 
 

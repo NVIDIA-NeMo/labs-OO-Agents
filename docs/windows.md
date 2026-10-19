@@ -99,9 +99,9 @@ at teardown.
 
 Four behaviours differ from Linux and are worth knowing:
 
-- **A killed worker costs about a minute to replace.** After a timeout or a
+- **A killed worker costs about half a minute to replace.** After a timeout or a
   resource kill the executor restarts the worker before returning the error, so
-  a cell that hits `cell_timeout=1` reports after roughly 58 seconds, not one.
+  a cell that hits `cell_timeout=1` reports after roughly 36 seconds, not one.
   The restart re-syncs the package, warms the tokenizer cache, creates a new
   container profile, and completes the startup handshake. Set `cell_timeout`
   for how long a cell may run, not for how quickly a failure returns.
