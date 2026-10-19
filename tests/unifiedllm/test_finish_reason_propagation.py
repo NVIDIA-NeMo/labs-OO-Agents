@@ -341,8 +341,9 @@ class TestCodeActAbortOnRealLengthPath:
             with pytest.raises(GenerationError, match="max_tokens"):
                 await agent_instance.my_task()
 
-        # Abort must be immediate: a single call, no retry loop.
-        assert mock_acompletion.call_count == 1
+        # Not the empty-response retry loop: the first call plus at most two
+        # "your reply was cut off" nudges, then the GenerationError (#447).
+        assert mock_acompletion.call_count == 3
 
     @pytest.mark.asyncio
     async def test_truncated_tool_call_is_never_executed(self):
@@ -366,7 +367,7 @@ class TestCodeActAbortOnRealLengthPath:
             with pytest.raises(GenerationError, match="max_tokens"):
                 await agent_instance.my_task()
 
-        assert mock_acompletion.call_count == 1
+        assert mock_acompletion.call_count == 3  # first call + two nudges (#447)
         assert all(
             event.event_type != "ToolCallEvent" for event in agent_instance.event_manager.values()
         )

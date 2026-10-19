@@ -54,6 +54,7 @@ async def test_a_solved_task_gives_the_runners_result_shape(workspace):
         "evidence": "it printed hello",
         "how_to_verify": "python hello.py",
         "report": "hello.py prints hello",
+        "value": "",
     }
     assert (result["n_input_tokens"], result["n_output_tokens"]) == (120, 30)
     assert result.get("error") is None
