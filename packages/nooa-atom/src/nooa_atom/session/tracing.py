@@ -11,7 +11,11 @@ reconnected here, for every host: the parent's OTel context is captured
 when the child is created (inside the parent's ``delegate()`` or
 ``spawn()`` call, so its current span is that call's span; when a child is
 reopened from a cell, that cell's ``code_execution`` span) and attached in
-the child's loop context, with the tracing hooks. Only OTel state is
+the child's loop context, with the tracing hooks. A persisted child
+loaded directly by a host (``SessionRegistry.load`` with no ``prepare``)
+while its parent is live has no calling cell: it is traced in the tree's
+trace session instead, as its own top-level trace (``trace_in_tree``).
+Only OTel state is
 copied; the child's context stays fresh otherwise (no call stack,
 generation state or scoped blocks of the parent).
 
@@ -38,6 +42,17 @@ PARENT_ID_ATTR = "nooa.atom.session.parent_id"
 DEPTH_ATTR = "nooa.atom.session.depth"
 
 
+def _attributes(session: "Session") -> dict[str, str | int]:
+    attributes: dict[str, str | int] = {
+        SESSION_ID_ATTR: session.id,
+        SESSION_NAME_ATTR: session.name or "",
+        DEPTH_ATTR: session.depth,
+    }
+    if session.parent_id is not None:
+        attributes[PARENT_ID_ATTR] = session.parent_id
+    return attributes
+
+
 def trace_under_caller(session: "Session") -> None:
     """Make ``session``'s turns continue the caller's trace, under the caller's span.
 
@@ -60,13 +75,37 @@ def trace_under_caller(session: "Session") -> None:
     captured = capture_trace_context()
     if session.name:
         set_agent_trace_name(session._agent, session.name)
-    attributes: dict[str, str | int] = {
-        SESSION_ID_ATTR: session.id,
-        SESSION_NAME_ATTR: session.name or "",
-        DEPTH_ATTR: session.depth,
-    }
-    if session.parent_id is not None:
-        attributes[PARENT_ID_ATTR] = session.parent_id
+    attributes = _attributes(session)
+
+    def enter() -> None:
+        attach_trace_context(captured, attributes)
+
+    session.add_loop_context_hook(enter)
+
+
+def trace_in_tree(session: "Session", trace_session_id: str) -> None:
+    """Trace ``session``'s turns in trace session ``trace_session_id``, under no span.
+
+    For a child opened with no calling cell (a host's direct
+    ``SessionRegistry.load``): its spans carry ``session.id`` =
+    ``trace_session_id`` (the root's id), the ``nooa.atom.session.*``
+    attributes and the session name as agent name, and form their own
+    top-level trace. The context is built from a fresh OTel context, so
+    nothing of the loading caller (its span or session) is captured.
+    """
+    try:
+        from openinference.semconv.trace import SpanAttributes
+        from opentelemetry import context as otel_context
+
+        from nooa.tracing import attach_trace_context, set_agent_trace_name
+    except ImportError:
+        return
+    captured = otel_context.set_value(
+        SpanAttributes.SESSION_ID, trace_session_id, otel_context.Context()
+    )
+    if session.name:
+        set_agent_trace_name(session._agent, session.name)
+    attributes = _attributes(session)
 
     def enter() -> None:
         attach_trace_context(captured, attributes)

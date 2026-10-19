@@ -52,9 +52,9 @@ def set_session(session_id: str | None) -> None:
     otel_context.attach(new_ctx)
 
 
-def get_session() -> str | None:
-    """Get the current session ID for this async context (``None`` if unset)."""
-    value = otel_context.get_value(_KEY)
+def get_session(context: otel_context.Context | None = None) -> str | None:
+    """The session ID carried by ``context`` (default: the current one; ``None`` if unset)."""
+    value = otel_context.get_value(_KEY, context)
     if not value:
         return None
     return str(value)

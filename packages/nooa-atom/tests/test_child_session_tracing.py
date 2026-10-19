@@ -325,3 +325,80 @@ async def test_without_nooa_tracing_children_still_run(
     atom_models.scripts["Fix"] = [cell(CHILD_RESULT)]
     root, outcome = await _run_root(atom_registry, atom_options)
     assert outcome == Done(explanation="ok")
+
+
+async def _root_and_closed_child(registry, options, models, spans, name="Kid"):
+    # The root's later turns read the child's results on ``delegates``.
+    models.scripts[None] = [cell("return_result(Done(explanation='root'))")] * 3
+    models.scripts[name] = [cell(CHILD_RESULT)]
+    root, _ = await _run_root(registry, options)
+    child = await registry.create(root.options.inherit(name=name, kept=True), parent_id=root.id)
+    await registry.close(child.id)
+    assert registry.get(child.id) is None and registry.get(root.id) is root
+    spans.clear()
+    return root, child.id
+
+
+async def _run_child(child):
+    outcome = await asyncio.wait_for(child.prompt("work"), TIMEOUT)
+    assert outcome is not None
+    await child.close()
+
+
+async def test_a_direct_load_of_a_child_with_a_live_parent_is_traced_in_the_roots_session(
+    spans, atom_registry, atom_options, atom_models
+):
+    from opentelemetry import trace
+
+    import nooa.tracing as tracing
+
+    root, child_id = await _root_and_closed_child(atom_registry, atom_options, atom_models, spans)
+    # The loading host has its own span and trace session: neither is captured.
+    tracer = trace.get_tracer_provider().get_tracer(__name__)
+    tracing.set_session("host-session")
+    with tracer.start_as_current_span("host-call") as host_call:
+        child = await atom_registry.load(child_id)
+    await _run_child(child)
+    finished = spans.get_finished_spans()
+    child_spans = _of_session(finished, "Kid")
+    names = {s.name for s in child_spans}
+    # ``prompt`` runs the ``handle`` turn method.
+    assert {"method.handle", "generation", "code_execution"} <= names, names
+    by_id = {s.context.span_id: s for s in finished}
+    for span in child_spans:
+        assert span.attributes.get("session.id") == root.id, span.name
+        assert span.attributes[SESSION_ID_ATTR] == child_id
+        assert span.attributes[PARENT_ID_ATTR] == root.id
+        assert span.attributes[DEPTH_ATTR] == 1
+        assert span.context.trace_id != host_call.context.trace_id, span.name
+        assert host_call.context.span_id not in _ancestors(span, by_id), span.name
+    # Its own top-level trace: the turn has no parent span.
+    [turn] = _methods(finished, "handle", "Kid")
+    assert turn.parent is None
+    _assert_named(child_spans, "Kid")
+
+
+async def test_a_detached_load_of_a_child_is_not_traced(
+    spans, atom_registry, atom_options, atom_models
+):
+    root, child_id = await _root_and_closed_child(atom_registry, atom_options, atom_models, spans)
+    await atom_registry.close(root.id)
+    child = await atom_registry.load(child_id)
+    await _run_child(child)
+    assert _of_session(spans.get_finished_spans(), "Kid") == []
+
+
+async def test_open_child_still_nests_a_reopened_child_under_the_reopening_call(
+    spans, atom_registry, atom_options, atom_models
+):
+    from opentelemetry import trace
+
+    root, child_id = await _root_and_closed_child(atom_registry, atom_options, atom_models, spans)
+    tracer = trace.get_tracer_provider().get_tracer(__name__)
+    with tracer.start_as_current_span("reopening-call") as call:
+        child = await atom_registry.open_child(root, child_id)
+    await _run_child(child)
+    finished = spans.get_finished_spans()
+    [turn] = _methods(finished, "handle", "Kid")
+    assert turn.parent.span_id == call.context.span_id
+    assert turn.context.trace_id == call.context.trace_id

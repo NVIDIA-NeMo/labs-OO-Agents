@@ -5,7 +5,8 @@
 Must be added to TracerProvider **before** export processors so the attribute
 is present when exporters see the span.
 
-Reads the session id from the OpenTelemetry context — the same source
+Reads the session id from the span's parent OpenTelemetry context (the
+``context=`` it was started with, else the current one) — the same source
 :mod:`nooa.tracing._session` writes via :func:`set_session`.
 Needed for spans created by the plain SDK tracer (framework hooks)
 because those don't go through OpenInference's ``OITracer`` and therefore
@@ -26,10 +27,13 @@ class SessionSpanProcessor(SpanProcessor):
     """Stamps ``session.id`` (and any context span attributes) on every span at ``on_start``."""
 
     def on_start(self, span, parent_context: Context | None = None) -> None:
-        session_id = get_session()
+        # A span started with an explicit ``context=`` takes its session and
+        # attributes from that context, not the ambient one (``None``: the
+        # span was started in the current context).
+        session_id = get_session(parent_context)
         if session_id:
             span.set_attribute(SpanAttributes.SESSION_ID, session_id)
-        for key, value in get_span_attributes().items():
+        for key, value in get_span_attributes(parent_context).items():
             span.set_attribute(key, value)
 
     def shutdown(self) -> None:
