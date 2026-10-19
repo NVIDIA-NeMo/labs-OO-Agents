@@ -54,7 +54,13 @@ from nooa.tracing._hooks_impl import OpenInferenceHooks, end_active_spans
 from nooa.tracing._metadata import get_all_metadata
 from nooa.tracing._otlp_file_exporter import OtlpJsonFileExporter
 from nooa.tracing._otlp_http_exporter import OtlpJsonHttpExporter
-from nooa.tracing._session import get_session, session_scope, set_session
+from nooa.tracing._session import (
+    get_session,
+    get_span_attributes,
+    session_scope,
+    set_session,
+    with_span_attributes,
+)
 from nooa.tracing._session_processor import SessionSpanProcessor
 
 logger = logging.getLogger(__name__)
@@ -434,6 +440,45 @@ def register_hooks_in_current_context() -> None:
         set_hooks(compose_hooks(get_hooks(), _hooks))
 
 
+def capture_trace_context() -> Any:
+    """The current OTel context, to hand to work that runs in a fresh context.
+
+    It carries the trace session (``session.id``), any context span
+    attributes and the current span. When generated code is running (a
+    ``code_execution`` span is active in this task) that span is made the
+    current one, so work started from a cell nests under the cell that
+    started it, as a sub-agent method call does. Pass the result to
+    :func:`attach_trace_context` in the other context.
+    """
+    from opentelemetry import context as otel_context
+
+    from nooa.tracing._hooks_impl import _current_code_execution
+
+    captured = otel_context.get_current()
+    active = _current_code_execution.get()
+    if active is not None:
+        captured = trace.set_span_in_context(active[0], captured)
+    return captured
+
+
+def attach_trace_context(captured: Any, attributes: dict[str, Any] | None = None) -> None:
+    """Continue a captured trace in the current context (e.g. a fresh ``contextvars.Context``).
+
+    Attaches ``captured`` (from :func:`capture_trace_context`), plus extra
+    span ``attributes`` stamped on every span started here, and registers
+    the tracing hooks (:func:`register_hooks_in_current_context`). Like
+    :func:`set_session`, the attach token is not kept: the value holds for
+    the rest of this context. Copies only OTel state; nothing else of the
+    capturing context. Harmless when tracing is off.
+    """
+    from opentelemetry import context as otel_context
+
+    if attributes:
+        captured = with_span_attributes(attributes, captured)
+    otel_context.attach(captured)
+    register_hooks_in_current_context()
+
+
 def _add_exporters(provider: TracerProvider, exporters: list[SpanExporter]) -> None:
     """Attach span processors for each exporter to *provider*.
 
@@ -600,6 +645,10 @@ __all__ = [
     "exporters",
     "probe_otlp_endpoint",
     "register_hooks_in_current_context",
+    "capture_trace_context",
+    "attach_trace_context",
+    "get_span_attributes",
+    "with_span_attributes",
     "resolve_otlp_endpoint",
     "set_session",
     "session_scope",

@@ -30,6 +30,9 @@ from openinference.semconv.trace import SpanAttributes
 from opentelemetry import context as otel_context
 
 _KEY = SpanAttributes.SESSION_ID
+# Extra span attributes carried in the OTel context; SessionSpanProcessor
+# stamps them on every span started there (e.g. which Atom child session ran).
+_ATTRIBUTES_KEY = "nooa.span_attributes"
 
 
 def set_session(session_id: str | None) -> None:
@@ -68,3 +71,25 @@ def session_scope(session_id: str | None) -> Iterator[None]:
         yield
     finally:
         otel_context.detach(token)
+
+
+def with_span_attributes(
+    attributes: dict[str, str | int | float | bool], context: otel_context.Context | None = None
+) -> otel_context.Context:
+    """Return ``context`` (default: the current one) carrying extra span attributes.
+
+    They are merged over any attributes the context already carries (a
+    key set later wins), and :class:`SessionSpanProcessor` stamps them on
+    every span started in a context derived from the returned one.
+    """
+    base = otel_context.get_current() if context is None else context
+    merged = {**get_span_attributes(base), **attributes}
+    return otel_context.set_value(_ATTRIBUTES_KEY, merged, base)
+
+
+def get_span_attributes(
+    context: otel_context.Context | None = None,
+) -> dict[str, str | int | float | bool]:
+    """The extra span attributes carried by ``context`` (default: the current one)."""
+    value = otel_context.get_value(_ATTRIBUTES_KEY, context)
+    return dict(value) if isinstance(value, dict) else {}

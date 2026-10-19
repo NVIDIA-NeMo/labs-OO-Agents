@@ -54,6 +54,7 @@ from nooa_atom.session.store import (
     SessionNotFoundError,
     SessionStore,
 )
+from nooa_atom.session.tracing import trace_under_caller
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,8 @@ class SessionRegistry:
                 todo_id=options.todo_id,
             )
             session = await self._build(options, handle)
+            if parent is not None:
+                trace_under_caller(session)
             if prepare is not None:
                 await prepare(session)
             for channel, item in initial_items:
@@ -690,8 +693,13 @@ class SessionRegistry:
         # The record gives the child's own options; the parent passes on
         # what it does not record (the depth cap) and a client it shares.
         shared_llm = parent.options.llm if (info.model or None) == parent.options.model else None
+
+        async def trace(child: Session) -> None:
+            trace_under_caller(child)
+
         return await self.load(
             child_id,
+            prepare=trace,
             max_depth=parent.options.max_depth,
             llm=shared_llm,
         )

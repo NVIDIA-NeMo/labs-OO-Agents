@@ -19,16 +19,18 @@ from openinference.semconv.trace import SpanAttributes
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import SpanProcessor
 
-from nooa.tracing._session import get_session
+from nooa.tracing._session import get_session, get_span_attributes
 
 
 class SessionSpanProcessor(SpanProcessor):
-    """Stamps ``session.id`` on every span at ``on_start``."""
+    """Stamps ``session.id`` (and any context span attributes) on every span at ``on_start``."""
 
     def on_start(self, span, parent_context: Context | None = None) -> None:
         session_id = get_session()
         if session_id:
             span.set_attribute(SpanAttributes.SESSION_ID, session_id)
+        for key, value in get_span_attributes().items():
+            span.set_attribute(key, value)
 
     def shutdown(self) -> None:
         pass
