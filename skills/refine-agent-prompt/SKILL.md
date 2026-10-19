@@ -203,11 +203,6 @@ Check:
 - Is any skill API already fully replicated in the task prompt? If so, that's waste —
   the skill docstring is the canonical source.
 
-**For `WebPublisher` (the `nemo.web` skill)**: the agent should be able to produce a working
-Plotly call on the first try. If it takes multiple LLM iterations, check whether the
-skill examples cover the user's data shape (long-form vs wide-form DataFrames,
-the right `px.*` function, axis mapping). Add more targeted examples to the skill docstring.
-
 ---
 
 ### Are return types and data structures strongly typed?
