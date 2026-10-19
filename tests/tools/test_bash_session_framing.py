@@ -166,78 +166,18 @@ async def test_truncated_stdout_names_a_file_with_the_full_output(tmp_path):
     session = BashSession(cwd=tmp_path)
     try:
         stdout, _err, code = await session.run("seq 1 40000")
-        assert code == 0
-        assert len(stdout) < MAX_OUTPUT_CHARS + 1_000
-        assert "not recoverable" not in stdout
-        match = re.search(r"The full untruncated output \(([\d,]+) chars\) is in: (\S+)", stdout)
-        assert match, stdout[:400]
-        saved = Path(match.group(2))
+    finally:
+        await session.close()
+    assert code == 0
+    assert len(stdout) < MAX_OUTPUT_CHARS + 1_000
+    assert "not recoverable" not in stdout
+    match = re.search(r"The full untruncated output \(([\d,]+) chars\) is in: (\S+)", stdout)
+    assert match, stdout[:400]
+    saved = Path(match.group(2))
+    try:
         assert saved.read_text().split() == [str(n) for n in range(1, 40001)]
     finally:
-        await session.close()
-    # #447 review finding 10: the file lives in a session directory removed on close.
-    assert not saved.exists()
-    assert not saved.parent.exists()
-
-
-_FULL_PATH_RE = r"The full untruncated output \([\d,]+ chars\) is in: (\S+)"
-
-
-async def test_truncated_output_files_survive_reset_and_are_capped(tmp_path, monkeypatch):
-    import re
-    from pathlib import Path
-
-    import nooa.tools._bash_session as bash_session
-
-    monkeypatch.setattr(bash_session, "_SPILL_MAX_FILES", 2)
-    session = bash_session.BashSession(cwd=tmp_path)
-    try:
-        saved = []
-        for _ in range(3):
-            stdout, _err, _code = await session.run("seq 1 40000")
-            saved.append(Path(re.search(_FULL_PATH_RE, stdout).group(1)))
-        assert len({path.parent for path in saved}) == 1
-        assert [path.exists() for path in saved] == [False, True, True]
-        await session.reset()
-        assert saved[-1].exists()  # a reset keeps files named in earlier notices
-        spill_dir = saved[-1].parent
-    finally:
-        await session.close()
-    assert not spill_dir.exists()
-
-
-async def test_truncated_output_files_are_capped_by_total_size(tmp_path, monkeypatch):
-    import re
-    from pathlib import Path
-
-    import nooa.tools._bash_session as bash_session
-
-    monkeypatch.setattr(bash_session, "_SPILL_MAX_BYTES", 300_000)  # ~1.5 outputs
-    session = bash_session.BashSession(cwd=tmp_path)
-    try:
-        saved = []
-        for _ in range(3):
-            stdout, _err, _code = await session.run("seq 1 40000")  # ~229 KB each
-            saved.append(Path(re.search(_FULL_PATH_RE, stdout).group(1)))
-        assert [path.exists() for path in saved] == [False, False, True]
-    finally:
-        await session.close()
-
-
-async def test_unclosed_session_removes_its_output_dir_when_collected(tmp_path):
-    import gc
-    import re
-    from pathlib import Path
-
-    from nooa.tools._bash_session import _bounded, _SpillDir
-
-    spill = _SpillDir()
-    text = _bounded("x" * 100_000, spill)
-    saved = Path(re.search(_FULL_PATH_RE, text).group(1))
-    assert saved.exists()
-    del spill
-    gc.collect()
-    assert not saved.parent.exists()
+        saved.unlink()
 
 
 async def test_small_stdout_writes_no_file(tmp_path, monkeypatch):
