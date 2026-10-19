@@ -54,6 +54,7 @@ from nooa_atom.session.store import (
     SessionNotFoundError,
     SessionStore,
 )
+from nooa_atom.session.tracing import trace_in_tree, trace_under_caller
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,8 @@ class SessionRegistry:
                 todo_id=options.todo_id,
             )
             session = await self._build(options, handle)
+            if parent is not None:
+                trace_under_caller(session)
             if prepare is not None:
                 await prepare(session)
             for channel, item in initial_items:
@@ -690,8 +693,13 @@ class SessionRegistry:
         # The record gives the child's own options; the parent passes on
         # what it does not record (the depth cap) and a client it shares.
         shared_llm = parent.options.llm if (info.model or None) == parent.options.model else None
+
+        async def trace(child: Session) -> None:
+            trace_under_caller(child)
+
         return await self.load(
             child_id,
+            prepare=trace,
             max_depth=parent.options.max_depth,
             llm=shared_llm,
         )
@@ -728,6 +736,10 @@ class SessionRegistry:
         or withdrawn are re-queued (``ItemRequeued``), and the session is
         published and started. Loading a child whose parent is not live is
         allowed (a detached child: its results stay in its own transcript).
+        A child loaded with no ``prepare`` while its parent is live is traced
+        in its tree's trace session (the root's id), as its own top-level
+        trace (``trace_in_tree``); ``open_child`` passes a ``prepare`` that
+        nests it under the reopening call instead.
         Loading a parent whose descendant is live elsewhere, or a child
         whose ancestor is, is refused with ``ChildActiveElsewhereError``. Concurrent loads of one id share it.
         ``prepare(session)`` runs before the re-queue and before the session
@@ -757,6 +769,10 @@ class SessionRegistry:
             )
             if prepare is not None:
                 await prepare(session)
+            elif session.parent_id in self.sessions:
+                # A direct load of a child whose parent is live: no calling
+                # cell to nest under, so trace it in its tree's trace session.
+                trace_in_tree(session, self._tree_root_id(session.parent_id))
             last_kind = self._last_outcome_kind(session_id)
             # A turn that ended Waiting waited on jobs that died with the old
             # process: nothing can deliver, so the child reads idle, not working.
@@ -777,6 +793,17 @@ class SessionRegistry:
             raise
         self._publish(session, reservation)
         return session
+
+    def _tree_root_id(self, session_id: str) -> str:
+        """The id of the topmost live session of ``session_id``'s ancestry (itself included)."""
+        root_id = session_id
+        live = self.sessions.get(session_id)
+        while live is not None and live.parent_id is not None:
+            parent = self.sessions.get(live.parent_id)
+            if parent is None:
+                break
+            root_id, live = parent.id, parent
+        return root_id
 
     def _stored_options(self, info: SessionInfo, overrides: dict[str, Any]) -> SessionOptions:
         values: dict[str, Any] = {

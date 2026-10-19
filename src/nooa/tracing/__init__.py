@@ -50,11 +50,22 @@ from nooa.tracing import exporters as exporters_mod
 # NOTE: The old OTel-based ``AtifTrajectoryExporter`` was removed when ATIF
 # export became event-subscriber-based; see
 # ``nooa.atif.install_atif`` / ``atif_scope``.
-from nooa.tracing._hooks_impl import OpenInferenceHooks, end_active_spans
+from nooa.tracing._hooks_impl import (
+    OpenInferenceHooks,
+    agent_trace_name,
+    end_active_spans,
+    set_agent_trace_name,
+)
 from nooa.tracing._metadata import get_all_metadata
 from nooa.tracing._otlp_file_exporter import OtlpJsonFileExporter
 from nooa.tracing._otlp_http_exporter import OtlpJsonHttpExporter
-from nooa.tracing._session import get_session, session_scope, set_session
+from nooa.tracing._session import (
+    get_session,
+    get_span_attributes,
+    session_scope,
+    set_session,
+    with_span_attributes,
+)
 from nooa.tracing._session_processor import SessionSpanProcessor
 
 logger = logging.getLogger(__name__)
@@ -434,6 +445,69 @@ def register_hooks_in_current_context() -> None:
         set_hooks(compose_hooks(get_hooks(), _hooks))
 
 
+def capture_trace_context() -> Any:
+    """The current OTel context, to hand to work that runs in a fresh context.
+
+    It carries the trace session (``session.id``), any context span
+    attributes and the current span, which is the span of the call that
+    asks for it, so work started there nests under that call, as a
+    sub-agent method call does:
+
+    - in an agent method called from generated code (e.g. ``delegate()``
+      run from a cell), that method's span;
+    - in generated code itself (a ``code_execution`` span is active in this
+      task and its agent's method is the current call), that cell's span.
+
+    Method spans live in the hooks' active-span registry rather than the
+    OTel context, so they are looked up there by the current call id. Pass
+    the result to :func:`attach_trace_context` in the other context.
+    """
+    from opentelemetry import context as otel_context
+
+    from nooa.runtime.context_vars import _get_agent_call_stack
+    from nooa.tracing._hooks_impl import _current_code_execution, _get_active_spans
+
+    captured = otel_context.get_current()
+    stack = _get_agent_call_stack()
+    call_id = stack[-1] if stack else None
+    active = _current_code_execution.get()
+    span = None
+    if active is not None and (call_id is None or active[1] == call_id):
+        span = active[0]  # the cell is the innermost call
+    elif call_id is not None:
+        span = _get_active_spans().get(call_id)
+        # No registry entry (e.g. a method resumed in another task): its span
+        # may still be the current OTel span (``activate_agent_call``), so keep
+        # that; only without a valid current span fall back to the cell.
+        if (
+            span is None
+            and active is not None
+            and not trace.get_current_span(captured).get_span_context().is_valid
+        ):
+            span = active[0]
+    if span is not None:
+        captured = trace.set_span_in_context(span, captured)
+    return captured
+
+
+def attach_trace_context(captured: Any, attributes: dict[str, Any] | None = None) -> None:
+    """Continue a captured trace in the current context (e.g. a fresh ``contextvars.Context``).
+
+    Attaches ``captured`` (from :func:`capture_trace_context`), plus extra
+    span ``attributes`` stamped on every span started here, and registers
+    the tracing hooks (:func:`register_hooks_in_current_context`). Like
+    :func:`set_session`, the attach token is not kept: the value holds for
+    the rest of this context. Copies only OTel state; nothing else of the
+    capturing context. Harmless when tracing is off.
+    """
+    from opentelemetry import context as otel_context
+
+    if attributes:
+        captured = with_span_attributes(attributes, captured)
+    otel_context.attach(captured)
+    register_hooks_in_current_context()
+
+
 def _add_exporters(provider: TracerProvider, exporters: list[SpanExporter]) -> None:
     """Attach span processors for each exporter to *provider*.
 
@@ -600,6 +674,12 @@ __all__ = [
     "exporters",
     "probe_otlp_endpoint",
     "register_hooks_in_current_context",
+    "capture_trace_context",
+    "agent_trace_name",
+    "set_agent_trace_name",
+    "attach_trace_context",
+    "get_span_attributes",
+    "with_span_attributes",
     "resolve_otlp_endpoint",
     "set_session",
     "session_scope",
