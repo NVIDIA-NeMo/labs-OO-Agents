@@ -4,7 +4,7 @@
 
 import pytest
 
-from nooa.tools.todo import TodoManager
+from nooa.tools.todo import Todo, TodoManager
 
 
 @pytest.mark.parametrize("status", ["open", "blocked", "in_progress", "done", None])
@@ -662,3 +662,42 @@ def test_a_short_description_renders_exactly_as_before():
     exact = manager.add("exactly at the cap", description="x" * 600)
     manager.activate(exact)
     assert "Description: " + "x" * 600 + "\n" in manager.status()
+
+
+# ---- insert_copy: a child's local copy of its brief (PR #451 review 3, finding 7)
+
+
+def test_insert_copy_adds_an_independent_copy_and_activates_it() -> None:
+    manager = TodoManager()
+    first = manager.add("first")
+    manager.activate(first)
+    brief = Todo(title="brief", description="REQ", vars={"n": 1})
+    mine = manager.insert_copy(brief)
+    assert mine is not brief and mine == brief and mine.vars is not brief.vars
+    assert manager.get(brief.id) is mine and manager.active() is mine
+    assert [t.id for t in manager.list_todos()] == [first.id, brief.id]
+    manager.set_var(mine, "n", 2)
+    assert brief.vars["n"] == 1
+
+
+def test_insert_copy_adds_a_done_todo_without_activating_it() -> None:
+    manager = TodoManager()
+    first = manager.add("first")
+    manager.activate(first)
+    manager.insert_copy(Todo(title="finished", status="done"))
+    assert manager.active() is first
+
+
+def test_insert_copy_raises_on_a_same_id_clash() -> None:
+    manager = TodoManager()
+    existing = manager.add("existing")
+    with pytest.raises(ValueError, match="already in this TodoManager"):
+        manager.insert_copy(existing.model_copy(update={"title": "other"}))
+    assert manager.get(existing.id) is existing and existing.title == "existing"
+    assert len(manager.list_todos()) == 1
+
+
+def test_insert_copy_is_hidden_from_models() -> None:
+    from nooa.agentdoc import doc
+
+    assert "insert_copy" not in doc(TodoManager())

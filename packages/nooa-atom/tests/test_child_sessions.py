@@ -561,6 +561,20 @@ def test_receive_delegated_todo_activates_a_local_copy():
     assert (brief.status, brief.comments) == ("open", [])
 
 
+def test_receive_delegated_todo_refuses_a_same_id_todo_instead_of_replacing_it():
+    """Review-3 finding 7: a brief whose id is already in the child's list raises."""
+    from nooa_atom.agent.agent import AtomAgent
+
+    child = SimpleNamespace(todo=TodoManager())
+    mine = child.todo.add("already mine", description="keep me")
+    clash = mine.model_copy(deep=True)
+    clash.description = "the brief"
+    with pytest.raises(ValueError, match=f"todo {mine.id!r} is already in this TodoManager"):
+        AtomAgent.receive_delegated_todo(child, clash)
+    assert child.todo.get(mine.id) is mine and mine.description == "keep me"
+    assert [t.id for t in child.todo.list_todos()] == [mine.id]
+
+
 # ---- wait() returns an outcome and never hangs; questions -------------------
 
 

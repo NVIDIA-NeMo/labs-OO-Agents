@@ -317,6 +317,23 @@ class TodoManager(Skill):
         self._order.append(t.id)
         return t
 
+    @hidden
+    def insert_copy(self, todo: Todo) -> Todo:
+        """Add an independent copy of ``todo`` (same id) and activate it if it is open.
+
+        Used to give a child session a local copy of its brief. Raises
+        ``ValueError`` when a todo with the same id is already in this list:
+        an existing todo is never silently replaced.
+        """
+        if todo.id in self._todos:
+            raise ValueError(f"todo {todo.id!r} is already in this TodoManager")
+        copied = todo.model_copy(deep=True)
+        self._todos[copied.id] = copied
+        self._order.append(copied.id)
+        if copied.status != "done":
+            self._active_id = copied.id
+        return copied
+
     def get(self, todo_id: Todo | str) -> Todo | None:
         """Return the matching managed todo, or ``None`` if it is missing."""
         return self._todos.get(self._todo_id(todo_id))

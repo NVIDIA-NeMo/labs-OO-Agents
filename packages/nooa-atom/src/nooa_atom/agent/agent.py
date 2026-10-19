@@ -358,16 +358,12 @@ class AtomAgent(InteractiveAgent):
         """Called on a child before its first turn: a local copy of its brief becomes its active Todo.
 
         The copy is this child's own working copy: nothing in it flows back
-        to the parent, whose result is the ``TaskResult``.
+        to the parent, whose result is the ``TaskResult``. It keeps the
+        brief's id (the id named in the child's first message); a Todo with
+        that id already in the child's list raises ``ValueError`` rather
+        than being replaced. A done brief is added but not activated.
         """
-        brief = TodoManager.with_todo(todo).to_dict()
-        mine = self.todo.to_dict()
-        self.todo.from_dict(
-            {
-                "todos": [t for t in mine["todos"] if t["id"] != todo.id] + brief["todos"],
-                "active_id": brief["active_id"] or mine["active_id"],
-            }
-        )
+        self.todo.insert_copy(todo)
 
     def children(self) -> list[ChildRef]:
         """Handles on the child sessions you started, with live status and any unanswered question."""
