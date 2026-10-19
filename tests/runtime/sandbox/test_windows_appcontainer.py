@@ -573,3 +573,34 @@ def test_teardown_revokes_container_grants(tmp_path):
     finally:
         session.close()
     assert sid_text not in win_api.read_dacl(str(workspace)), "the container ACE survived teardown"
+
+
+def test_teardown_revokes_after_the_profile_is_gone(tmp_path):
+    """Deleting the profile must not strand the grants it wrote.
+
+    ``DeriveAppContainerSidFromAppContainerName`` is a pure derivation and
+    keeps returning the same SID for a deleted name (measured), so this path
+    cannot fail through the profile alone. What it pins is the *source* of the
+    SID used at teardown: it now comes from the text recorded when the ACE was
+    written, not from the profile, so a future change that deletes the profile
+    earlier — or a profile deleted by something outside this process — cannot
+    make teardown skip the revoke loop and leave a permanent ACE for a
+    container that no longer exists.
+    """
+    from nooa.runtime.sandbox import win_api
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace)
+    try:
+        assert session.run("1").error is None
+        name = session.executor._proc.container_name
+        sid_text = win_api.sid_string(win_api.container_sid(name))
+        assert sid_text in win_api.read_dacl(str(workspace))
+        # Simulate the profile going away underneath the live session.
+        win_api.delete_profile(name)
+    finally:
+        session.close()
+    assert sid_text not in win_api.read_dacl(str(workspace)), (
+        "teardown skipped the revoke because the profile was already gone"
+    )

@@ -56,6 +56,7 @@ from nooa.runtime.sandbox.win_api import (
     container_sid,
     grant,
     revoke,
+    sid_from_string,
 )
 from nooa.runtime.sandbox.win_runtime import AclJournal, RuntimeRoot, default_container_name
 
@@ -194,14 +195,18 @@ class ContainerProcess:
         journal: AclJournal,
         granted: list[str],
         container_name: str,
+        sid_text: str,
     ):
         self._child = child
         self._job = job
         self._journal = journal
         self._granted = granted
         # Revoking with the wrong SID silently leaves the grants in place, so
-        # the name this process was created under has to be carried, not assumed.
+        # the identity this process was created under has to be carried, not
+        # assumed. The text form is the durable one: it still revokes after the
+        # profile is gone, which re-deriving the SID from the name cannot.
         self._container_name = container_name
+        self._sid_text = sid_text
         self.pid = child.pid
         self._released = False
         # The child's own report of what it sees before building the namespace.
@@ -255,8 +260,16 @@ class ContainerProcess:
         self._released = True
         failed = 0
         try:
-            sid = container_sid_quiet(self._container_name)
-            if sid is not None:
+            # Recorded when the grants were written, not re-derived from the
+            # profile name: a profile that disappeared before teardown would
+            # otherwise leave every ACE in place, silently and with nothing
+            # left that knows they exist.
+            sid = sid_from_string(self._sid_text)
+            if sid is None:
+                # Unparseable SID text. The journal still holds it verbatim, so
+                # keep the record and let recovery try rather than dropping it.
+                failed = len(self._granted)
+            else:
                 for path in reversed(self._granted):
                     try:
                         revoke(path, sid)
@@ -289,16 +302,6 @@ def _delete_profile_quiet(name: str) -> None:
         # Leaking a profile is survivable; failing teardown is not. Recovery
         # cannot clean it either, since it is not part of a DACL.
         pass
-
-
-def container_sid_quiet(name: str | None = None) -> Any | None:
-    """A container's SID, or None if its profile is gone."""
-    from nooa.runtime.sandbox.win_runtime import default_container_name
-
-    try:
-        return container_sid(name or default_container_name())
-    except OSError:
-        return None
 
 
 @dataclass
@@ -462,7 +465,7 @@ def start_container_worker(
         child.resume()
         child_conn.close()
 
-        proc = ContainerProcess(child, job, journal, granted, name)
+        proc = ContainerProcess(child, job, journal, granted, name, sid_text)
         try:
             _handshake(parent_conn, init, proc, spec, ready_timeout_s)
         except BaseException:

@@ -30,6 +30,7 @@ __all__ = [
     "delete_profile",
     "grant",
     "revoke",
+    "sid_from_string",
     "sid_string",
     "spawn_in_container",
 ]
@@ -396,6 +397,20 @@ def sid_string(sid: ctypes.c_void_p) -> str:
         return out.value
     finally:
         _k32.LocalFree(out)
+
+
+def sid_from_string(text: str) -> ctypes.c_void_p | None:
+    """The SID a string names, or None if it is not a valid SID.
+
+    Needed wherever a grant must be revoked after its profile may be gone:
+    ``DeriveAppContainerSidFromAppContainerName`` keeps working for a deleted
+    name, but the caller cannot tell the two cases apart, so a SID that was
+    recorded when the ACE was written is the only dependable source.
+    """
+    sid = ctypes.c_void_p()
+    if not _adv.ConvertStringSidToSidW(text, ctypes.byref(sid)):
+        return None
+    return sid
 
 
 def capability_sid(name: str) -> ctypes.c_void_p:
