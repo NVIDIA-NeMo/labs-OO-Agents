@@ -50,7 +50,12 @@ from nooa.tracing import exporters as exporters_mod
 # NOTE: The old OTel-based ``AtifTrajectoryExporter`` was removed when ATIF
 # export became event-subscriber-based; see
 # ``nooa.atif.install_atif`` / ``atif_scope``.
-from nooa.tracing._hooks_impl import OpenInferenceHooks, end_active_spans
+from nooa.tracing._hooks_impl import (
+    OpenInferenceHooks,
+    agent_trace_name,
+    end_active_spans,
+    set_agent_trace_name,
+)
 from nooa.tracing._metadata import get_all_metadata
 from nooa.tracing._otlp_file_exporter import OtlpJsonFileExporter
 from nooa.tracing._otlp_http_exporter import OtlpJsonHttpExporter
@@ -444,20 +449,37 @@ def capture_trace_context() -> Any:
     """The current OTel context, to hand to work that runs in a fresh context.
 
     It carries the trace session (``session.id``), any context span
-    attributes and the current span. When generated code is running (a
-    ``code_execution`` span is active in this task) that span is made the
-    current one, so work started from a cell nests under the cell that
-    started it, as a sub-agent method call does. Pass the result to
-    :func:`attach_trace_context` in the other context.
+    attributes and the current span, which is the span of the call that
+    asks for it, so work started there nests under that call, as a
+    sub-agent method call does:
+
+    - in an agent method called from generated code (e.g. ``delegate()``
+      run from a cell), that method's span;
+    - in generated code itself (a ``code_execution`` span is active in this
+      task and its agent's method is the current call), that cell's span.
+
+    Method spans live in the hooks' active-span registry rather than the
+    OTel context, so they are looked up there by the current call id. Pass
+    the result to :func:`attach_trace_context` in the other context.
     """
     from opentelemetry import context as otel_context
 
-    from nooa.tracing._hooks_impl import _current_code_execution
+    from nooa.runtime.context_vars import _get_agent_call_stack
+    from nooa.tracing._hooks_impl import _current_code_execution, _get_active_spans
 
     captured = otel_context.get_current()
+    stack = _get_agent_call_stack()
+    call_id = stack[-1] if stack else None
     active = _current_code_execution.get()
-    if active is not None:
-        captured = trace.set_span_in_context(active[0], captured)
+    span = None
+    if active is not None and (call_id is None or active[1] == call_id):
+        span = active[0]  # the cell is the innermost call
+    elif call_id is not None:
+        span = _get_active_spans().get(call_id)
+        if span is None and active is not None:
+            span = active[0]
+    if span is not None:
+        captured = trace.set_span_in_context(span, captured)
     return captured
 
 
@@ -646,6 +668,8 @@ __all__ = [
     "probe_otlp_endpoint",
     "register_hooks_in_current_context",
     "capture_trace_context",
+    "agent_trace_name",
+    "set_agent_trace_name",
     "attach_trace_context",
     "get_span_attributes",
     "with_span_attributes",

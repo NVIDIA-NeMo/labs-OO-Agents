@@ -9,6 +9,7 @@ import json
 import os
 import time
 import traceback
+import weakref
 from contextvars import ContextVar
 from typing import Any
 
@@ -38,6 +39,36 @@ _context_active_spans: ContextVar[dict[str, Span] | None] = ContextVar(
 _current_code_execution: ContextVar[tuple[Span, str | None] | None] = ContextVar(
     "current_code_execution", default=None
 )
+
+
+# Trace names an agent instance goes by, set with :func:`set_agent_trace_name`.
+# Kept off the instance (no attribute to snapshot or document to the model);
+# weak keys, so the entry goes with the agent.
+_agent_trace_names: "weakref.WeakKeyDictionary[Any, str]" = weakref.WeakKeyDictionary()
+
+
+def set_agent_trace_name(agent: Any, name: str | None) -> None:
+    """Name ``agent`` (this instance only) ``name`` in its spans' ``agent.name``.
+
+    A host that runs one agent class under several identities (e.g. a child
+    session's agent) calls this so the trace shows each as its own agent.
+    ``None`` or ``""`` restores the class name. Agents that cannot be weakly
+    referenced or hashed keep their class name.
+    """
+    with contextlib.suppress(TypeError):
+        if name:
+            _agent_trace_names[agent] = name
+        else:
+            _agent_trace_names.pop(agent, None)
+
+
+def agent_trace_name(agent: Any) -> str:
+    """The name ``agent``'s spans carry: the one set for it, else its class name."""
+    try:
+        name = _agent_trace_names.get(agent)
+    except TypeError:
+        name = None
+    return name or type(agent).__name__
 
 
 def _get_active_spans() -> dict[str, Span]:
@@ -191,7 +222,7 @@ class OpenInferenceHooks:
         **extra_kwargs: Any,
     ) -> Any:
         """Create AGENT span for ellipsis method execution."""
-        agent_name = type(agent).__name__
+        agent_name = agent_trace_name(agent)
 
         # DEFENSIVE: Initialize spans dict unconditionally to ensure early context establishment
         # This pattern prevents potential timing issues with ContextVar inheritance in async contexts
@@ -387,7 +418,7 @@ class OpenInferenceHooks:
         """
         from opentelemetry import context
 
-        agent_name = type(agent).__name__
+        agent_name = agent_trace_name(agent)
 
         # Get parent context: prefer the AGENT span for this specific call so that
         # sub-agent generation spans are correctly parented to the sub-agent's AGENT
@@ -511,7 +542,7 @@ class OpenInferenceHooks:
         **kwargs: Any,
     ) -> Any:
         """Create TOOL span for code execution."""
-        agent_name = type(agent).__name__
+        agent_name = agent_trace_name(agent)
 
         # Find parent span - prefer generation span if generation_id provided
         parent_span = None
@@ -662,7 +693,7 @@ class OpenInferenceHooks:
         **extra_kwargs: Any,
     ) -> Any:
         """Create TOOL span for generated method invocation."""
-        agent_name = type(agent).__name__
+        agent_name = agent_trace_name(agent)
 
         # Find parent span (most recent generation or agent span)
         parent_span = None
@@ -777,7 +808,7 @@ class OpenInferenceHooks:
         **kwargs: Any,
     ) -> Any:
         """Create TOOL span for tool execution (e.g., return_result)."""
-        agent_name = type(agent).__name__
+        agent_name = agent_trace_name(agent)
 
         # Find parent span - prefer generation span if generation_id provided
         parent_span = None

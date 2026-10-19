@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A child session's spans land in its parent's trace, under the cell that created it.
+"""A child session's spans land in its parent's trace, as a separate agent.
+
+The child's turns nest under the ``delegate()``/``spawn()`` call that
+created it, and its agent's spans are named after the session
+(``Fix.handle_work``), as a sub-agent called from a cell would be.
 
 Each session's turn loop runs in a fresh context, so without the registry's
 ``trace_under_caller`` hook a child's turns emitted no spans at all. The
@@ -104,6 +108,37 @@ def _cell_span(finished, code_fragment):
     return span
 
 
+def _methods(finished, method, session_name=None):
+    """The ``method.<method>`` spans of one session (``None``: the root's own)."""
+    return [
+        s
+        for s in finished
+        if s.name == f"method.{method}" and s.attributes.get(SESSION_NAME_ATTR) == session_name
+    ]
+
+
+def _parent(span, finished):
+    [parent] = [s for s in finished if s.context.span_id == span.parent.span_id]
+    return parent
+
+
+def _assert_turns_under(finished, session_name, call, count=1):
+    """``session_name``'s turns (and its close) have ``call``'s span as direct parent."""
+    turns = _methods(finished, "handle_work", session_name)
+    assert len(turns) == count, [s.name for s in _of_session(finished, session_name)]
+    for span in turns + _methods(finished, "aclose", session_name):
+        assert span.parent.span_id == call.context.span_id, span.name
+
+
+def _assert_named(child_spans, name):
+    """The child's method, generation, code and tool spans name the child as their agent."""
+    kinds = ("method.", "generation", "code_execution", "tool_execution")
+    named = [s for s in child_spans if s.name.startswith(kinds)]
+    assert {s.name.split(".")[0] for s in named} >= {"method", "generation", "code_execution"}
+    for span in named:
+        assert span.attributes.get("agent.name") == name, span.name
+
+
 def _of_session(finished, name):
     return [s for s in finished if s.attributes.get(SESSION_NAME_ATTR) == name]
 
@@ -129,7 +164,7 @@ def _assert_nested(child_spans, under, root_id, finished):
         assert under.context.span_id in _ancestors(span, by_id), span.name
 
 
-async def test_a_delegated_childs_spans_nest_under_the_parents_cell(
+async def test_a_delegated_child_is_its_own_agent_under_the_delegate_call(
     spans, atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
@@ -142,6 +177,13 @@ async def test_a_delegated_childs_spans_nest_under_the_parents_cell(
     under = _cell_span(finished, "self.delegate('Fix'")
     child_spans = _of_session(finished, "Fix")
     _assert_nested(child_spans, under, root.id, finished)
+    [delegate] = _methods(finished, "delegate")
+    assert _parent(delegate, finished) is under
+    _assert_turns_under(finished, "Fix", delegate)
+    _assert_named(child_spans, "Fix")
+    # The root keeps its class name.
+    root_spans = [s for s in finished if s.attributes.get(SESSION_NAME_ATTR) is None]
+    assert {s.attributes.get("agent.name") for s in root_spans} - {None} == {"AtomAgent"}
     [child] = atom_registry.children(root.id)
     for span in child_spans:
         assert span.attributes[SESSION_ID_ATTR] == child.id
@@ -177,9 +219,15 @@ async def test_a_kept_childs_follow_up_turn_stays_in_the_roots_trace(
     # spawn cell: its loop context was set up once, when it was created.
     assert len([s for s in child_spans if s.name == "method.handle_work"]) == 2
     _assert_nested(child_spans, spawn_cell, root.id, finished)
+    # Directly under the spawn call, the follow-up turn too (it ran after
+    # that call returned, in the loop context set up at creation).
+    [spawn] = _methods(finished, "spawn")
+    assert _parent(spawn, finished) is spawn_cell
+    _assert_turns_under(finished, "Kept", spawn, count=2)
+    _assert_named(child_spans, "Kept")
 
 
-async def test_a_grandchilds_spans_nest_under_the_childs_cell(
+async def test_a_grandchild_nests_under_the_childs_delegate_call(
     spans, atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
@@ -202,10 +250,42 @@ async def test_a_grandchilds_spans_nest_under_the_childs_cell(
     _assert_nested(_of_session(finished, "Mid"), root_cell, root.id, finished)
     _assert_nested(leaf_spans, mid_cell, root.id, finished)
     _assert_nested(leaf_spans, root_cell, root.id, finished)
+    [root_delegate] = _methods(finished, "delegate")
+    [mid_delegate] = _methods(finished, "delegate", "Mid")
+    assert _parent(mid_delegate, finished) is mid_cell
+    assert mid_delegate.attributes["agent.name"] == "Mid"
+    _assert_turns_under(finished, "Mid", root_delegate)
+    _assert_turns_under(finished, "Leaf", mid_delegate)
+    _assert_named(_of_session(finished, "Mid"), "Mid")
+    _assert_named(leaf_spans, "Leaf")
     [mid] = atom_registry.children(root.id)
     for span in leaf_spans:
         assert span.attributes[DEPTH_ATTR] == 2
         assert span.attributes[PARENT_ID_ATTR] == mid.id
+
+
+async def test_an_ordinary_agent_called_in_a_childs_cell_keeps_its_class_name(
+    spans, atom_registry, atom_options, atom_models
+):
+    atom_models.scripts[None] = [
+        cell("done = await self.delegate('Fix', 'fix it')\nreturn_result(Done(explanation='ok'))")
+    ]
+    atom_models.scripts["Fix"] = [
+        cell(
+            "from nooa import Agent\n"
+            "class Helper(Agent):\n"
+            "    async def ping(self) -> int:\n"
+            "        return 1\n"
+            "assert await Helper().ping() == 1\n" + CHILD_RESULT
+        )
+    ]
+    root, outcome = await _run_root(atom_registry, atom_options)
+    assert outcome == Done(explanation="ok")
+    finished = spans.get_finished_spans()
+    [ping] = _methods(finished, "ping", "Fix")
+    assert ping.attributes["agent.name"] == "Helper"
+    assert _parent(ping, finished).name == "code_execution"
+    assert _parent(ping, finished).attributes["agent.name"] == "Fix"
 
 
 async def test_with_tracing_off_children_run_and_emit_no_spans(

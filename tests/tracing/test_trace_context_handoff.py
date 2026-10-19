@@ -69,3 +69,49 @@ def test_span_attributes_merge_and_a_later_key_wins():
     assert get_span_attributes(second) == {"a": 1, "b": "y"}
     assert get_span_attributes(first) == {"a": 1, "b": "x"}
     assert get_span_attributes() == {}
+
+
+def test_in_a_method_called_from_a_cell_that_methods_span_is_captured():
+    """``delegate()`` run from a cell: the child nests under the call, not beside it."""
+    from nooa.runtime.context_vars import _pop_agent_call_id, _push_agent_call_id
+    from nooa.tracing._hooks_impl import _get_active_spans
+
+    tracer, _ = _provider()
+    cell = tracer.start_span("code_execution")
+    method = tracer.start_span("method.delegate")
+    token = _current_code_execution.set((cell, "owner-call"))
+    _get_active_spans()["owner-call"] = tracer.start_span("method.handle")
+    _get_active_spans()["delegate-call"] = method
+    try:
+        _push_agent_call_id("owner-call")
+        # In the cell itself, the cell's span.
+        assert trace.get_current_span(capture_trace_context()) is cell
+        _push_agent_call_id("delegate-call")
+        # In a method the cell called, that method's span.
+        assert trace.get_current_span(capture_trace_context()) is method
+    finally:
+        _pop_agent_call_id()
+        _pop_agent_call_id()
+        _get_active_spans().clear()
+        _current_code_execution.reset(token)
+
+
+def test_an_agent_trace_name_belongs_to_that_instance():
+    from nooa.tracing import agent_trace_name, set_agent_trace_name
+
+    class Worker:
+        pass
+
+    named, other = Worker(), Worker()
+    set_agent_trace_name(named, "Multiply")
+    assert agent_trace_name(named) == "Multiply"
+    assert agent_trace_name(other) == "Worker"
+    set_agent_trace_name(named, None)
+    assert agent_trace_name(named) == "Worker"
+
+    class Unhashable:
+        __hash__ = None
+
+    thing = Unhashable()
+    set_agent_trace_name(thing, "X")  # cannot be keyed: keeps its class name
+    assert agent_trace_name(thing) == "Unhashable"
