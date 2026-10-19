@@ -31,7 +31,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from nooa.agentdoc._truncating_stream import FileBackedTruncatingStringIO
+from nooa.agentdoc import TruncatingStringIO
 
 logger = logging.getLogger(__name__)
 
@@ -66,20 +66,12 @@ def _bounded(text: str) -> str:
     """
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
-    # The full text is saved to a temp file named in the notice, so output that
-    # can be produced only once is still readable in ranges; if the file
-    # cannot be written the notice falls back to "not recoverable".
-    buffer = FileBackedTruncatingStringIO(
-        limit=MAX_OUTPUT_CHARS, prefix="nooa_shell_output_", suffix=".txt"
-    )
-    try:
-        # Feed the buffer in bounded pieces: one write of the whole stream would
-        # copy everything past the head a second time before the tail is trimmed.
-        for start in range(0, len(text), _BOUNDED_CHUNK_CHARS):
-            buffer.write(text[start : start + _BOUNDED_CHUNK_CHARS])
-        return buffer.getvalue()
-    finally:
-        buffer.close()
+    buffer = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
+    # Feed the buffer in bounded pieces: one write of the whole stream would
+    # copy everything past the head a second time before the tail is trimmed.
+    for start in range(0, len(text), _BOUNDED_CHUNK_CHARS):
+        buffer.write(text[start : start + _BOUNDED_CHUNK_CHARS])
+    return buffer.getvalue()
 
 
 def _process_start_time(pid: int) -> str | None:
