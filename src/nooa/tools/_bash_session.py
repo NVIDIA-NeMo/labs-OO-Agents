@@ -316,11 +316,6 @@ class BashSession:
         """
         if self._ready:
             return
-        if self._in_own_init():
-            # Re-entry from a reset during the init command: the outer start()
-            # already holds the start lock.
-            await self._start_unlocked()
-            return
         self._ensure_lock_on_current_loop()
         async with self._start_lock:
             # Callers that arrive while another start() runs the init command
@@ -330,7 +325,7 @@ class BashSession:
             await self._start_unlocked()
 
     def _in_own_init(self) -> bool:
-        """True inside the init command's own task (a reset re-entering start)."""
+        """True inside the init command's own task (bash died during init)."""
         return self._running_init and self._init_task is asyncio.current_task()
 
     async def _start_unlocked(self) -> None:
@@ -385,10 +380,10 @@ class BashSession:
         await self._read_control_until(sentinel, timeout=5.0)
 
         # Run the one-time init command (env setup) before any user command.
-        # ``_running_init`` guards against re-entry if _send_and_wait triggers a
-        # reset (which would call start() again). _send_and_wait drains
+        # If bash dies during it, reset() raises (see there) so the session is
+        # never marked ready without its init. _send_and_wait drains
         # stdout/stderr so init output never bleeds into the first user command.
-        if self._init_command and not self._running_init:
+        if self._init_command:
             self._running_init = True
             self._init_task = asyncio.current_task()
             try:
@@ -405,10 +400,9 @@ class BashSession:
             finally:
                 self._running_init = False
                 self._init_task = None
-        if not self._running_init:
-            # Only now may run() use the session: the startup drain and the init
-            # command own the control reader until here.
-            self._ready = self._started
+        # Only now may run() use the session: the startup drain and the init
+        # command own the control reader until here.
+        self._ready = self._started
 
     def _build_script(self, command: str, sentinel: str) -> str:
         """Compose the wire script: the command, then the control-channel protocol.
@@ -890,11 +884,13 @@ class BashSession:
         """Kill the current session and start a fresh one, preserving cwd."""
         cwd = self._cwd
         if self._in_own_init():
-            # Bash died during the init command; the outer start() holds the lock.
+            # Bash died during the init command. A restart here would skip the
+            # init, so fail this start(); the next call starts afresh with init.
             await self._terminate()
             self._cwd = cwd
-            await self.start()
-            return
+            raise RuntimeError(
+                "bash exited while running the shell init command; the session was not started"
+            )
         # Serialized with start(): a reset while another task runs the init
         # command waits for it instead of spawning a second bash beside it.
         self._ensure_lock_on_current_loop()

@@ -121,6 +121,32 @@ class TestConcurrentStart:
         finally:
             await session.close()
 
+    async def test_reset_during_init_fails_start_instead_of_skipping_init(
+        self, tmp_path, monkeypatch
+    ):
+        """A reset inside the init command (e.g. failed timeout recovery) must not
+        leave a ready session whose bash never ran the init command."""
+        session = BashSession(cwd=tmp_path, init_command="export NOOA_INIT=yes")
+        real_send = session._send_and_wait
+        calls = 0
+
+        async def send_and_wait(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:  # the first init command: bash is lost and reset
+                await session.reset()
+            return await real_send(*args, **kwargs)
+
+        monkeypatch.setattr(session, "_send_and_wait", send_and_wait)
+        try:
+            with pytest.raises(RuntimeError, match="init command"):
+                await session.start()
+            assert session._ready is False
+            stdout, _err, _code = await session.run("echo $NOOA_INIT")
+            assert stdout == "yes"
+        finally:
+            await session.close()
+
 
 class TestStartDuringInit:
     """#447 review finding 2: run()/reset() during a slow init command wait for it."""
