@@ -300,3 +300,80 @@ class TestEnvelopeShapedTodoVars:
         restored = deserialize(*serialize(manager))
         assert restored.get(other.id).title == "keep me"
         assert restored.get(bad.id).vars["x"]["__class__"] == "os.system"
+
+
+class TestTaggedKeyAndNonFiniteVars:
+    """PR #451 review 3, findings 4 and 5."""
+
+    TAGGED = {"blob": {"__type__": "tuple", "data": []}, "allowlist": ["subprocess.Popen"]}
+
+    def test_a_var_named_snapshot_vars_holding_plain_data_crosses_sessions(self):
+        from nooa.tools.todo import Todo
+
+        for value in (1, "x", {"blob": 1}, {"blob": 1, "allowlist": [], "more": 2}):
+            todo = Todo(title="z", vars={"__snapshot_vars__": value})
+            assert (
+                Todo.model_validate_json(todo.model_dump_json()).vars["__snapshot_vars__"] == value
+            )
+            later = Todo(title="z")
+            later.vars["__snapshot_vars__"] = value
+            back = Todo.model_validate(later.model_dump(mode="json"))
+            assert back.vars["__snapshot_vars__"] == value
+
+    def test_only_the_old_tagged_shape_is_refused_everywhere(self, caplog):
+        import pytest
+        from pydantic import ValidationError
+
+        from nooa.storage.serialization import deserialize
+        from nooa.tools.todo import Todo
+
+        with pytest.raises(ValidationError, match="tagged SnapshotVars payloads are not accepted"):
+            Todo(title="z", vars={"__snapshot_vars__": self.TAGGED})
+        with pytest.raises(ValidationError, match="tagged SnapshotVars payloads are not accepted"):
+            Todo(title="z", vars={"__snapshot_vars__": self.TAGGED, "other": 1})
+        # Writing it is refused too (logged, not stored), so a Todo never holds what it can't send.
+        todo = Todo(title="z")
+        with caplog.at_level(logging.WARNING):
+            todo.vars["__snapshot_vars__"] = self.TAGGED
+        assert "__snapshot_vars__" not in todo.vars
+        assert "tagged SnapshotVars payloads" in caplog.text
+        assert Todo.model_validate_json(todo.model_dump_json()).vars == {}
+        # A store restored with it (bypassing the write check) refuses the JSON dump.
+        restored = deserialize(*serialize(SnapshotVars()))
+        restored._data["__snapshot_vars__"] = self.TAGGED
+        with pytest.raises(ValueError, match="tagged SnapshotVars payloads are not accepted"):
+            restored.to_json_data()
+
+    def test_non_finite_floats_are_refused_naming_the_key(self):
+        import pytest
+        from pydantic_core import PydanticSerializationError
+
+        from nooa.tools.todo import Todo
+
+        for value in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            [1.0, float("nan")],
+            {"a": float("inf")},
+        ):
+            todo = Todo(title="f")
+            todo.vars["f"] = value
+            with pytest.raises(
+                PydanticSerializationError, match="var 'f' holds a non-finite float"
+            ):
+                todo.model_dump_json()
+            with pytest.raises(
+                PydanticSerializationError, match="var 'f' holds a non-finite float"
+            ):
+                todo.model_dump(mode="json")
+
+    def test_finite_floats_still_cross_sessions(self):
+        from nooa.tools.todo import Todo
+
+        todo = Todo(title="f", vars={"f": 1.5, "big": 1e308, "neg": -0.0})
+        assert dict(Todo.model_validate_json(todo.model_dump_json()).vars) == {
+            "f": 1.5,
+            "big": 1e308,
+            "neg": -0.0,
+        }
