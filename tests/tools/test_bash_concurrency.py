@@ -148,6 +148,34 @@ class TestConcurrentStart:
             await session.close()
 
 
+class TestResetDuringStartupDrain:
+    async def test_failed_startup_drain_fails_start_instead_of_deadlocking(
+        self, tmp_path, monkeypatch
+    ):
+        """reset() from the startup drain (failed timeout recovery) runs while
+        start() holds _start_lock; it must fail the start, not wait for the lock."""
+        session = BashSession(cwd=tmp_path)
+        real_read = session._read_control_until
+        calls = 0
+
+        async def read_control_until(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:  # the startup drain: recovery failed, so it resets
+                await session.reset()
+            return await real_read(*args, **kwargs)
+
+        monkeypatch.setattr(session, "_read_control_until", read_control_until)
+        try:
+            with pytest.raises(RuntimeError, match="stopped while starting"):
+                await asyncio.wait_for(session.start(), timeout=10)
+            assert session._ready is False
+            stdout, _err, _code = await session.run("echo ok")
+            assert stdout == "ok"
+        finally:
+            await session.close()
+
+
 class TestStartDuringInit:
     """#447 review finding 2: run()/reset() during a slow init command wait for it."""
 

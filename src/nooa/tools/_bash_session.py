@@ -114,7 +114,6 @@ class BashSession:
         # before any user command — to set up the environment (e.g. activating a
         # conda env). Re-run on reset() because a fresh bash loses prior env.
         self._init_command = init_command
-        self._running_init = False
         self._process: asyncio.subprocess.Process | None = None
         self._control_reader: asyncio.StreamReader | None = None
         self._control_transport: asyncio.BaseTransport | None = None
@@ -126,7 +125,8 @@ class BashSession:
         # True once start() has fully finished (bash spawned, startup drained,
         # init command run). ``_started`` turns True earlier, mid-start.
         self._ready = False
-        self._init_task: asyncio.Task[object] | None = None
+        # The task currently inside _start_unlocked() (it holds _start_lock).
+        self._start_task: asyncio.Task[object] | None = None
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
@@ -240,12 +240,19 @@ class BashSession:
                 return
             await self._start_unlocked()
 
-    def _in_own_init(self) -> bool:
-        """True inside the init command's own task (bash died during init)."""
-        return self._running_init and self._init_task is asyncio.current_task()
+    def _in_own_start(self) -> bool:
+        """True inside the task that is starting bash (it holds ``_start_lock``)."""
+        return self._start_task is not None and self._start_task is asyncio.current_task()
 
     async def _start_unlocked(self) -> None:
-        """Start bash (caller holds ``_start_lock`` or is re-entering from init)."""
+        """Start bash; the caller holds ``_start_lock``."""
+        self._start_task = asyncio.current_task()
+        try:
+            await self._start_bash()
+        finally:
+            self._start_task = None
+
+    async def _start_bash(self) -> None:
         self._start_count += 1
         env = os.environ.copy()
         env["PS1"] = ""
@@ -296,26 +303,21 @@ class BashSession:
         await self._read_control_until(sentinel, timeout=5.0)
 
         # Run the one-time init command (env setup) before any user command.
-        # If bash dies during it, reset() raises (see there) so the session is
-        # never marked ready without its init. _send_and_wait drains
-        # stdout/stderr so init output never bleeds into the first user command.
+        # If bash is lost while starting (startup drain or init), reset() raises
+        # (see there) so the session is never marked ready without its init.
+        # _send_and_wait drains stdout/stderr so init output never bleeds into
+        # the first user command.
         if self._init_command:
-            self._running_init = True
-            self._init_task = asyncio.current_task()
-            try:
-                init_sentinel = f"__CTRL_{secrets.token_hex(8)}__"
-                init_script = (
-                    f"{self._init_command}\n_nemo_ec=$?\n"
-                    f"echo $_nemo_ec >&3\npwd >&3\necho {init_sentinel} >&3\n"
-                )
-                ctrl_lines, _out, _err, _timed = await self._send_and_wait(
-                    init_script, init_sentinel, timeout=60.0
-                )
-                if len(ctrl_lines) >= 2 and ctrl_lines[1].strip().startswith("/"):
-                    self._cwd = Path(ctrl_lines[1].strip())
-            finally:
-                self._running_init = False
-                self._init_task = None
+            init_sentinel = f"__CTRL_{secrets.token_hex(8)}__"
+            init_script = (
+                f"{self._init_command}\n_nemo_ec=$?\n"
+                f"echo $_nemo_ec >&3\npwd >&3\necho {init_sentinel} >&3\n"
+            )
+            ctrl_lines, _out, _err, _timed = await self._send_and_wait(
+                init_script, init_sentinel, timeout=60.0
+            )
+            if len(ctrl_lines) >= 2 and ctrl_lines[1].strip().startswith("/"):
+                self._cwd = Path(ctrl_lines[1].strip())
         # Only now may run() use the session: the startup drain and the init
         # command own the control reader until here.
         self._ready = self._started
@@ -799,13 +801,15 @@ class BashSession:
     async def reset(self) -> None:
         """Kill the current session and start a fresh one, preserving cwd."""
         cwd = self._cwd
-        if self._in_own_init():
-            # Bash died during the init command. A restart here would skip the
-            # init, so fail this start(); the next call starts afresh with init.
+        if self._in_own_start():
+            # Bash was lost while starting (startup drain or the init command).
+            # This task already holds _start_lock, and a restart here would skip
+            # the init, so fail this start(); the next call starts afresh.
             await self.close()
             self._cwd = cwd
             raise RuntimeError(
-                "bash exited while running the shell init command; the session was not started"
+                "bash stopped while starting (startup or the shell init command); "
+                "the session was not started"
             )
         # Serialized with start(): a reset while another task runs the init
         # command waits for it instead of spawning a second bash beside it.
