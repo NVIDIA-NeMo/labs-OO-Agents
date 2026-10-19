@@ -42,9 +42,11 @@ _current_code_execution: ContextVar[tuple[Span, str | None] | None] = ContextVar
 
 
 # Trace names an agent instance goes by, set with :func:`set_agent_trace_name`.
-# Kept off the instance (no attribute to snapshot or document to the model);
-# weak keys, so the entry goes with the agent.
-_agent_trace_names: "weakref.WeakKeyDictionary[Any, str]" = weakref.WeakKeyDictionary()
+# Kept off the instance (no attribute to snapshot or document to the model).
+# Keyed by identity, not equality, so two agents that compare equal keep
+# their own names; each entry holds a weak reference whose callback drops it
+# when the agent goes.
+_agent_trace_names: dict[int, tuple["weakref.ref[Any]", str]] = {}
 
 
 def set_agent_trace_name(agent: Any, name: str | None) -> None:
@@ -53,22 +55,31 @@ def set_agent_trace_name(agent: Any, name: str | None) -> None:
     A host that runs one agent class under several identities (e.g. a child
     session's agent) calls this so the trace shows each as its own agent.
     ``None`` or ``""`` restores the class name. Agents that cannot be weakly
-    referenced or hashed keep their class name.
+    referenced keep their class name.
     """
-    with contextlib.suppress(TypeError):
-        if name:
-            _agent_trace_names[agent] = name
-        else:
-            _agent_trace_names.pop(agent, None)
+    key = id(agent)
+    if not name:
+        _agent_trace_names.pop(key, None)
+        return
+
+    def forget(ref: "weakref.ref[Any]", key: int = key) -> None:
+        entry = _agent_trace_names.get(key)
+        if entry is not None and entry[0] is ref:
+            del _agent_trace_names[key]
+
+    try:
+        ref = weakref.ref(agent, forget)
+    except TypeError:
+        return
+    _agent_trace_names[key] = (ref, name)
 
 
 def agent_trace_name(agent: Any) -> str:
     """The name ``agent``'s spans carry: the one set for it, else its class name."""
-    try:
-        name = _agent_trace_names.get(agent)
-    except TypeError:
-        name = None
-    return name or type(agent).__name__
+    entry = _agent_trace_names.get(id(agent))
+    if entry is not None and entry[0]() is agent:
+        return entry[1]
+    return type(agent).__name__
 
 
 def _get_active_spans() -> dict[str, Span]:

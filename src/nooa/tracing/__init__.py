@@ -476,7 +476,14 @@ def capture_trace_context() -> Any:
         span = active[0]  # the cell is the innermost call
     elif call_id is not None:
         span = _get_active_spans().get(call_id)
-        if span is None and active is not None:
+        # No registry entry (e.g. a method resumed in another task): its span
+        # may still be the current OTel span (``activate_agent_call``), so keep
+        # that; only without a valid current span fall back to the cell.
+        if (
+            span is None
+            and active is not None
+            and not trace.get_current_span(captured).get_span_context().is_valid
+        ):
             span = active[0]
     if span is not None:
         captured = trace.set_span_in_context(span, captured)

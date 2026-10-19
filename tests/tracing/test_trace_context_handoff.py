@@ -113,5 +113,58 @@ def test_an_agent_trace_name_belongs_to_that_instance():
         __hash__ = None
 
     thing = Unhashable()
-    set_agent_trace_name(thing, "X")  # cannot be keyed: keeps its class name
-    assert agent_trace_name(thing) == "Unhashable"
+    set_agent_trace_name(thing, "X")  # keyed by identity, so hashing is not needed
+    assert agent_trace_name(thing) == "X"
+
+    class NoWeakref:
+        __slots__ = ()
+
+    plain = NoWeakref()
+    set_agent_trace_name(plain, "Y")  # cannot be weakly referenced: keeps its class name
+    assert agent_trace_name(plain) == "NoWeakref"
+
+
+def test_agents_that_compare_equal_keep_their_own_trace_names():
+    import gc
+
+    from nooa.tracing import agent_trace_name, set_agent_trace_name
+    from nooa.tracing._hooks_impl import _agent_trace_names
+
+    class Same:
+        def __eq__(self, other):
+            return isinstance(other, Same)
+
+        def __hash__(self):
+            return 1
+
+    first, second = Same(), Same()
+    set_agent_trace_name(first, "First")
+    set_agent_trace_name(second, "Second")
+    assert agent_trace_name(first) == "First"
+    assert agent_trace_name(second) == "Second"
+    set_agent_trace_name(second, None)
+    assert agent_trace_name(first) == "First"
+    assert agent_trace_name(second) == "Same"
+
+    key = id(first)
+    del first
+    gc.collect()
+    assert key not in _agent_trace_names  # the entry goes with the agent
+
+
+def test_a_method_without_a_registry_entry_keeps_the_current_span_over_the_cell():
+    """A method resumed in another task has no registry entry, but its span is current."""
+    from nooa.runtime.context_vars import _pop_agent_call_id, _push_agent_call_id
+
+    tracer, _ = _provider()
+    cell = tracer.start_span("code_execution")
+    token = _current_code_execution.set((cell, "owner-call"))
+    try:
+        _push_agent_call_id("resumed-call")
+        with tracer.start_as_current_span("method.resumed") as method:
+            assert trace.get_current_span(capture_trace_context()) is method
+        # Without a valid current span, the running cell is the fallback.
+        assert trace.get_current_span(capture_trace_context()) is cell
+    finally:
+        _pop_agent_call_id()
+        _current_code_execution.reset(token)
