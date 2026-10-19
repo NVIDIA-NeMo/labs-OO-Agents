@@ -99,6 +99,18 @@ to follow semantic versioning.
   the older experimental-agent spellings, such as `ExperimentalTUIAgent` and
   `ExperimentalCodingAgent`, are session-restore aliases for
   `nooa_atom.agent:AtomAgent`).
+- `RetryConfig` is the only endpoint retry budget for `CompletionClient` on
+  OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt twice
+  more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent server
+  error instead of 3 (`max_retries + 1`; rate limits may also use
+  `rate_limit_extra_retries`). NOOA now passes `max_retries=0` to the SDK, on a
+  per-call copy of its client so concurrent calls cannot change each other's
+  setting. Passing `max_retries` to the client explicitly still enables SDK
+  retries.
+- The bench `TaskResult` gains an optional `value` field: the exact output the
+  task asks for, with no explanation. `_run_evaluation` returns a non-empty
+  `value` as `answer`, and the runner writes it to `/app/answer.txt` verbatim.
+  When `value` is empty, the answer file holds `how_to_verify`, as before.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive

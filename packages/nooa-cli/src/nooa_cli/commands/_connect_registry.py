@@ -40,7 +40,7 @@ def credential_names(registry, endpoint):
     target = normalized(endpoint)
     names = []
     for entry, _ in registry.values():
-        address, name = entry.get("api_base"), entry.get("api_key_env")
+        address, name = entry.get("endpoint") or entry.get("api_base"), entry.get("api_key_env")
         if not isinstance(address, str) or not isinstance(name, str):
             continue
         try:
@@ -100,6 +100,7 @@ def diagnostic_context(
     alias=None,
     model=None,
     endpoint=None,
+    api_style=None,
     api_key_env=None,
     api_key=None,
     budget=None,
@@ -119,7 +120,7 @@ def diagnostic_context(
 
     from nooa._version import __version__
     from nooa.llm_config import llm_config_chain
-    from nooa.unifiedllm.connect import normalize_endpoint
+    from nooa.unifiedllm.connect import DECISION_API_STYLES, normalize_endpoint
     from nooa.unifiedllm.connect._diagnostics import installation_context
 
     context = {
@@ -196,10 +197,16 @@ def diagnostic_context(
                         if context["credential_source"] == "pasted"
                         else ["--api-key-env", api_key_env or ""]
                     ),
-                    "--output-tokens",
-                    str(output_tokens),
-                    "--budget-tokens",
-                    str(min(remaining, 3 * (output_tokens + 512))),
+                    *(
+                        ["--api-style", api_style, "--budget-tokens", str(min(remaining, 512))]
+                        if api_style in DECISION_API_STYLES
+                        else [
+                            "--output-tokens",
+                            str(output_tokens),
+                            "--budget-tokens",
+                            str(min(remaining, 3 * (output_tokens + 512))),
+                        ]
+                    ),
                 ]
             )
     if context["credential_source"] == "pasted":

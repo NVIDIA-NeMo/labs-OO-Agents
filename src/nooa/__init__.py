@@ -27,6 +27,21 @@ from nooa._visible import visible  # noqa: E402
 from nooa.agent import Agent  # noqa: E402
 from nooa.agentdoc import hidden, spec  # noqa: E402
 from nooa.context_blocks import Context, ContextWindowStats, DynamicContext  # noqa: E402
+from nooa.decisions import (  # noqa: E402
+    BooleanDecision,
+    ChoiceDecision,
+    Criteria,
+    Decision,
+    DecisionClient,
+    DecisionModel,
+    DecisionModelRequiredError,
+    DecisionRequest,
+    DecisionResponse,
+    Instructions,
+    ScoreDecision,
+    Threshold,
+    UnifiedDecisionModel,
+)
 from nooa.decorators import strategy  # noqa: E402
 
 # Export errors
@@ -81,6 +96,7 @@ if _typing.TYPE_CHECKING:  # the same names, for type checkers and IDEs
     from nooa.strategies import (
         CodeActStrategy,
         CodeActV2,
+        DecideStrategy,
         GenerationStrategy,
         InspectInputsPrefill,
         PredictStrategy,
@@ -96,6 +112,7 @@ if _typing.TYPE_CHECKING:  # the same names, for type checkers and IDEs
 _LAZY = {
     "CodeActStrategy": "nooa.strategies",
     "CodeActV2": "nooa.strategies",
+    "DecideStrategy": "nooa.strategies",
     "GenerationStrategy": "nooa.strategies",
     "InspectInputsPrefill": "nooa.strategies",
     "PredictStrategy": "nooa.strategies",
@@ -155,6 +172,7 @@ __all__ = [
     "return_text_as_result",
     "ReflexionStrategy",
     "PredictStrategy",
+    "DecideStrategy",
     "get_default_strategy",
     "set_default_strategy",
     # Method validators
@@ -184,6 +202,20 @@ __all__ = [
     "strategy",
     "no_trace",
     "AgentMeta",
+    # Decisions
+    "BooleanDecision",
+    "ChoiceDecision",
+    "Criteria",
+    "Decision",
+    "DecisionClient",
+    "DecisionModel",
+    "DecisionModelRequiredError",
+    "DecisionRequest",
+    "DecisionResponse",
+    "Instructions",
+    "ScoreDecision",
+    "Threshold",
+    "UnifiedDecisionModel",
     # Logging
     "enable_logging",
     # Visibility

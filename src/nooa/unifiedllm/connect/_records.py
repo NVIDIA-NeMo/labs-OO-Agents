@@ -43,6 +43,8 @@ class ProbeRecord(TypedDict, total=False):
     transport: str
     tested_reasoning_level: str | None
     reported_tokens: int
+    resolved_model: str
+    probability_true: float
     stable_prefix: bool
     marker_count: int
     explicit_mode: bool

@@ -62,6 +62,8 @@ Three agent types are available through `nemo-harbor --agent-type`: `atom`
 Both use `CodeActV2` with the single `python_cell` tool and return a structured `TaskResult`.
 Its `how_to_verify` field describes concrete checks and expected results; commands
 are optional. The `evidence` field records results the agent actually observed.
+The optional `value` field holds the exact output the task asks for, if any, with
+no explanation; it stays empty for tasks that only ask for actions.
 Both delegate through an awaited call returning a `TaskResult`; neither exposes
 the Atom agent's background `spawn()` / job-handle API.
 The strategy allows ten retries, uses a 1,800-second cell timeout, and has no
@@ -90,7 +92,8 @@ that usable input window. Explicit summarization thresholds stay fixed; an
 unknown reply cap uses a labelled planning reserve, not a claimed model limit.
 
 The runner writes `result.json`, `trajectory.json` and aggregate `behavior.json`
-under `/logs/agent`, and the verification instructions to `/app/answer.txt`. Behavior
+under `/logs/agent`. It writes `TaskResult.value` to `/app/answer.txt` verbatim,
+or `how_to_verify` when `value` is empty. Behavior
 metrics count both Python tool names and exclude framework prefill. Set
 `NOOA_INTERFACE_CHANGE_ID` to label a comparison; the default is `baseline`.
 Set `NOOA_TASK_ID` to identify the task when logs share the `/logs/agent` path.

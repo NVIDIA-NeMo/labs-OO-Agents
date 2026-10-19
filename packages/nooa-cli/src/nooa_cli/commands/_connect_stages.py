@@ -151,6 +151,18 @@ def run_stage(
             if not endpoint:
                 raise click.UsageError("Stage requires --endpoint")
             style = api_style or "chat"
+            if style in connect.DECISION_API_STYLES and stage == "discover":
+                raise click.UsageError(
+                    "Decision endpoints do not list decision models; pass the exact MODEL "
+                    "and use --stage interfaces or --stage routing"
+                )
+            if style in connect.DECISION_API_STYLES and discovery_file:
+                raise click.UsageError(f"--discovery-file does not apply to --api-style {style}")
+            if style in connect.DECISION_API_STYLES and (reasoning_template or reasoning_level):
+                raise click.UsageError(
+                    "--reasoning-template and --reasoning-level do not apply to "
+                    f"--api-style {style}"
+                )
             key_env = api_key_env or ""
             budget = connect.DEFAULT_CHECK_BUDGET if budget_tokens is None else budget_tokens
             levels = None
@@ -168,7 +180,8 @@ def run_stage(
                 reasoning_output_tokens=reasoning_output_tokens,
                 reply_tokens=reply_tokens,
                 reasoning_levels=levels,
-                session_checks=stage in {"session", "all"},
+                session_checks=stage in {"session", "all"}
+                and style not in connect.DECISION_API_STYLES,
                 endpoint_model=next(
                     (m for m in read_discovery(discovery_file, endpoint) if m["id"] == model), None
                 )
@@ -214,6 +227,7 @@ def run_stage(
                         reasoning_template=reasoning_template,
                         reasoning_level=reasoning_level or "medium",
                         reasoning_output_tokens=reasoning_output_tokens,
+                        **({"styles": (style,)} if style in connect.DECISION_API_STYLES else {}),
                     ):
                         if isinstance(event, connect.InterfaceResult):
                             result = event
@@ -278,6 +292,7 @@ def run_stage(
         alias=alias,
         model=model,
         endpoint=endpoint,
+        api_style=api_style,
         api_key_env=api_key_env,
         api_key=key,
         budget=total_budget,

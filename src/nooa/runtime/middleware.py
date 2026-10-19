@@ -1,19 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Middleware engine for intercepting LLM calls and code execution.
+"""Middleware engine for intercepting model calls and code execution.
 
 Register middleware via ``event_manager.intercept()``::
 
     agent.event_manager.intercept("llm_call", my_guardrail)
+    agent.event_manager.intercept("decision_call", my_decision_policy)
     agent.event_manager.intercept("execute_python", my_sandbox)
 
-Three hooks are available:
+Four hooks are available:
 
 - ``agent_call``: wraps an instrumented async agent method (all turns, all code).
   Does **not** apply to sync methods, ``@no_trace`` methods, ``staticmethod`` /
   ``classmethod``, or methods inherited from non-Agent bases — see
   :class:`AgentCallContext`.
 - ``llm_call``: wraps ``runtime.generate()`` (the LLM round-trip)
+- ``decision_call``: wraps ``runtime.decide()`` (the decision-model round-trip)
 - ``execute_python``: wraps ``runtime.execute_code()`` (sandbox execution)
 
 Each middleware is ``async def(ctx, nxt) -> result`` where *ctx* is a typed
@@ -32,6 +34,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from nooa.agent import Agent
+from nooa.decisions import DecisionRequest, DecisionResponse, UnifiedDecisionModel
 from nooa.events import ExecutionResult
 from nooa.runtime.actor import ActorRuntime
 from nooa.unifiedllm import CacheBoundary, LLMResponse, UnifiedLLM
@@ -43,6 +46,7 @@ _AGENT_RESULT_NOT_SET = object()
 __all__ = [
     "MIDDLEWARE_AGENT_CALL",
     "MIDDLEWARE_LLM_CALL",
+    "MIDDLEWARE_DECISION_CALL",
     "MIDDLEWARE_EXECUTE_PYTHON",
     "AgentCallContext",
     "AgentCallMiddleware",
@@ -50,6 +54,9 @@ __all__ = [
     "LLMCallContext",
     "LLMCallMiddleware",
     "LLMCallNext",
+    "DecisionCallContext",
+    "DecisionCallMiddleware",
+    "DecisionCallNext",
     "ExecutePythonContext",
     "ExecutePythonMiddleware",
     "ExecutePythonNext",
@@ -61,6 +68,7 @@ __all__ = [
 
 MIDDLEWARE_AGENT_CALL = "agent_call"
 MIDDLEWARE_LLM_CALL = "llm_call"
+MIDDLEWARE_DECISION_CALL = "decision_call"
 MIDDLEWARE_EXECUTE_PYTHON = "execute_python"
 
 # ---------------------------------------------------------------------------
@@ -145,6 +153,30 @@ class LLMCallContext(BaseModel):
     response: LLMResponse | None = None
 
 
+class DecisionCallContext(BaseModel):
+    """Context for ``decision_call`` middleware.
+
+    Attributes:
+        request: Effective decision request. Middleware may replace it.
+        agent: The agent instance that owns the runtime.
+        runtime: The ``ActorRuntime`` instance.
+        client: Effective decision model for this call. Read-only.
+        response: ``None`` on entry; set by the inner handler or by
+            short-circuiting middleware.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    request: DecisionRequest
+    # Standalone strategy functions run through a deliberately minimal agent
+    # adapter rather than an ``Agent`` subclass, but expose the same runtime
+    # attributes middleware needs.
+    agent: Any = None
+    runtime: ActorRuntime | None = None
+    client: UnifiedDecisionModel | None = Field(default=None, frozen=True)
+    response: DecisionResponse | None = None
+
+
 class ExecutePythonContext(BaseModel):
     """Context for ``execute_python`` middleware.
 
@@ -173,10 +205,14 @@ class ExecutePythonContext(BaseModel):
 
 AgentCallNext = Callable[[AgentCallContext], Awaitable[AgentCallContext]]
 LLMCallNext = Callable[[LLMCallContext], Awaitable[LLMCallContext]]
+DecisionCallNext = Callable[[DecisionCallContext], Awaitable[DecisionCallContext]]
 ExecutePythonNext = Callable[[ExecutePythonContext], Awaitable[ExecutePythonContext]]
 
 AgentCallMiddleware = Callable[[AgentCallContext, AgentCallNext], Awaitable[AgentCallContext]]
 LLMCallMiddleware = Callable[[LLMCallContext, LLMCallNext], Awaitable[LLMCallContext]]
+DecisionCallMiddleware = Callable[
+    [DecisionCallContext, DecisionCallNext], Awaitable[DecisionCallContext]
+]
 ExecutePythonMiddleware = Callable[
     [ExecutePythonContext, ExecutePythonNext], Awaitable[ExecutePythonContext]
 ]
