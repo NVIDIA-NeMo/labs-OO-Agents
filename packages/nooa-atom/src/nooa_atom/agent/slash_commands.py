@@ -66,6 +66,26 @@ RESERVED_COMMAND_NAMES = frozenset(
     "help exit quit clear compact context edit connect model models skills session resume restart jobs events todos mcp reasoning recover".split()
 )
 
+# Built-in commands that are plain directives to the agent: the body is sent as
+# a turn on the agent's ``slash_commands`` channel and the agent does the work
+# with its own tools. A host control with the same name replaces one.
+COMPACT = SlashCommand(
+    name="compact",
+    description="Ask the agent to compact its history with self.events.collapse()",
+    argument_hint="[instructions]",
+    body=(
+        "Please compact your history now using self.events.collapse(start_tag, end_tag, "
+        "summary_text=...).\n"
+        "- Collapse the older events. Leave the first few events (the session start and the "
+        "original request) and your most recent turn out of the range.\n"
+        "- Write the summary so you can keep working from it alone: the user's goals and "
+        "requirements, decisions made, files and functions changed, test results, commit "
+        "hashes, and what is still open.\n"
+        "- Then show self.context_stats and say which tag range you collapsed."
+    ),
+)
+BUILTIN_COMMANDS = {COMPACT.name: COMPACT}
+
 
 def discover_markdown_commands(skills_dirs, reserved=RESERVED_COMMAND_NAMES):
     skills: dict[str, SlashCommand] = {}
@@ -236,6 +256,7 @@ class SlashCommandRegistry:
         previous = self.commands()
         commands = discover_markdown_commands(self.skills_dirs, self.reserved)
         commands.update(discover_python_commands(self.agent, self.reserved))
+        commands.update(BUILTIN_COMMANDS)
         commands.update(self.controls)
         self._commands = commands
         if self._on_change is not None and self.commands() != previous:
