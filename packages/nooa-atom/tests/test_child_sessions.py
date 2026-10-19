@@ -13,12 +13,17 @@ from types import SimpleNamespace
 
 import pytest
 from atom_test_agents import ATOM_SPEC, AtomModels, cell, done, fresh_events, until
-from nooa_atom.session.items import ChildRef
+from nooa_atom.agent.conditions import (
+    UNATTENDED_FIX,
+    WaitingTargetNotRunning,
+    check_waiting_targets,
+)
+from nooa_atom.session.items import ChildFailedError, ChildRef
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
 
-from nooa.interactive import Done
+from nooa.interactive import Done, Waiting
 from nooa.tools.todo import TodoManager
 
 TIMEOUT = 30
@@ -889,7 +894,7 @@ async def test_a_queued_outcome_is_withdrawn_by_wait_after_a_reload(
         await fresh.close_all()
 
 
-async def test_a_waiting_child_still_reads_working_after_a_reload(
+async def test_a_waiting_child_reads_idle_after_a_reload(
     atom_options, atom_models, sessions_dir
 ):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
@@ -906,11 +911,16 @@ async def test_a_waiting_child_still_reads_working_after_a_reload(
         loaded = await fresh.load(root.id)
         await fresh.load(ref.id)
         port = loaded._agent.session
-        assert port.child_status(ref.id) == "working"
-        waiting = asyncio.ensure_future(port.wait_child(ref.id))
-        await asyncio.sleep(0.05)
-        assert not waiting.done()  # its job still runs: wait() waits, it does not fail
-        waiting.cancel()
+        # Its job died with the old process: nothing can deliver, so the
+        # kept child reads idle ("retained"), and wait() fails fast.
+        assert loaded._agent.queue_manager.running_handles() == []
+        assert port.child_status(ref.id) == "retained"
+        with pytest.raises(ChildFailedError, match="idle"):
+            await asyncio.wait_for(port.wait_child(ref.id), TIMEOUT)
+        with pytest.raises(WaitingTargetNotRunning):
+            check_waiting_targets(
+                loaded._agent, Waiting(explanation="w", on=["delegates"]), fix=UNATTENDED_FIX
+            )
     finally:
         await fresh.close_all()
 

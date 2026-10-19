@@ -728,7 +728,10 @@ class SessionRegistry:
             )
             if prepare is not None:
                 await prepare(session)
-            session.last_outcome_kind = self._last_outcome_kind(session_id)
+            last_kind = self._last_outcome_kind(session_id)
+            # A turn that ended Waiting waited on jobs that died with the old
+            # process: nothing can deliver, so the child reads idle, not working.
+            session.last_outcome_kind = None if last_kind == "waiting" else last_kind
             self._requeue(session)
             session.start()
         except BaseException:
@@ -793,7 +796,7 @@ class SessionRegistry:
                 pending.append(info.id)
 
     def _last_outcome_kind(self, session_id: str) -> str | None:
-        """How the session's last recorded turn ended (``waiting`` reads as ``working``)."""
+        """How the session's last recorded turn ended, as recorded (``load`` drops ``waiting``)."""
         kind: str | None = None
         with suppress(Exception):
             for _type, raw in self.store.load_rows(session_id, frozenset({"TurnEnded"})):
