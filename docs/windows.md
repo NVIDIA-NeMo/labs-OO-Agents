@@ -97,8 +97,18 @@ startup reclaims only journals whose owning process has exited. Set
 shared by two live sessions is an error, not a default. The profile is removed
 at teardown.
 
-Four behaviours differ from Linux and are worth knowing:
+Five behaviours differ from Linux and are worth knowing:
 
+- **System directories stay readable.** Windows grants `ALL APPLICATION
+  PACKAGES` (`S-1-15-2-1`) read access to `C:\Windows` and its subdirectories by
+  default, and an AppContainer is one of those packages. A cell can therefore
+  read `C:\Windows\win.ini` or `System32\drivers\etc\hosts` even though the
+  launcher granted neither. This is the OS's design, not a gap in the grants:
+  every packaged app needs the system DLLs. What *is* confined is user data —
+  files beside the workspace, the project checkout, and the profile directory
+  all fail with `PermissionError` (measured end to end through ACP). If a threat
+  model needs the system tree closed too, that requires a Less Privileged
+  AppContainer or a different mechanism; this backend does not attempt it.
 - **A killed worker costs about half a minute to replace.** After a timeout or a
   resource kill the executor restarts the worker before returning the error, so
   a cell that hits `cell_timeout=1` reports after roughly 33 seconds, not one.
@@ -136,6 +146,11 @@ breaks:
 $env:NOOA_SANDBOX_RUNTIME = "$PWD\experiments\windows-sandbox-probe\.rt"
 uv run pytest -m sandbox tests\runtime\sandbox\test_windows_appcontainer.py
 ```
+
+The suite covers what a cell *cannot* reach: a file beside the workspace, the
+project checkout, the parent environment, and outbound TCP/UDP. It does not
+assert anything about `C:\Windows`, because that tree is readable by design
+(see above).
 
 ## Work from this repository
 
