@@ -204,9 +204,10 @@ class _GonePort:
 
 
 def test_a_child_ref_snapshots_its_stored_status_and_never_raises():
+    from nooa_atom.session.port import current_port
+
     from nooa.storage.serialization import deserialize, serialize
     from nooa.storage.snapshot_vars import SnapshotVars
-    from nooa_atom.session.port import current_port
 
     ref = ChildRef(id="c1", name="worker", depth=1, status="idle", parent_id="parent1")
     port = _GonePort()

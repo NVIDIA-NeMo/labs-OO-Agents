@@ -12,7 +12,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from atom_test_agents import ATOM_SPEC, AtomModels, cell, done, fresh_events, until
+from atom_test_agents import ATOM_SPEC, AtomModels, cell, done, fresh_events, until, work_done
 from nooa_atom.agent.conditions import (
     UNATTENDED_FIX,
     WaitingTargetNotRunning,
@@ -895,9 +895,7 @@ async def test_a_queued_outcome_is_withdrawn_by_wait_after_a_reload(
         await fresh.close_all()
 
 
-async def test_a_waiting_child_reads_idle_after_a_reload(
-    atom_options, atom_models, sessions_dir
-):
+async def test_a_waiting_child_reads_idle_after_a_reload(atom_options, atom_models, sessions_dir):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
     root = await registry.create(atom_options)
     atom_models.scripts["Slow"] = [
@@ -1250,3 +1248,103 @@ async def test_spawn_and_send_refuse_the_same_non_json_todo_var(
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     # All three refuse naming the key, and no second child was started.
     assert outcome == Done(explanation="[True, True, True] 1")
+
+
+# ---- review-2 findings 7, 8, 10: questions and tombstones after a reload ---
+
+
+async def test_a_closed_childs_question_does_not_come_back_after_a_reload(
+    atom_options, atom_models, sessions_dir
+):
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
+    root = await registry.create(atom_options)
+    atom_models.scripts["Asker"] = [cell("return_result(NeedInput(question='Which branch?'))")]
+    port = root._agent.session
+    ref = await port.delegate("Asker", "do it", kept=True)
+    await until(lambda: registry.pending_question(root, ref.id) is not None, TIMEOUT)
+    await port.close_child(ref.id)
+    await registry.close_all()
+
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    try:
+        loaded = await fresh.load(root.id)
+        p2 = loaded._agent.session
+        assert p2.child_status(ref.id) == "closed"
+        assert p2.pending_question(ref.id) is None  # closed means closed
+        with pytest.raises(ChildFailedError, match="not running"):
+            await p2.wait_child(ref.id)
+    finally:
+        await fresh.close_all()
+
+
+async def test_a_question_keeps_its_id_after_a_reload_when_the_child_sent_messages(
+    atom_options, atom_models, sessions_dir
+):
+    # Turn 1: the child sends progress messages and finishes.
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
+    root = await registry.create(atom_options)
+    atom_models.scripts["Chatty"] = [
+        cell("self.message('looking around')\nself.message('found two branches')"),
+        work_done("looked"),
+    ]
+    ref = await root._agent.session.delegate("Chatty", "look", kept=True)
+    await root._agent.session.wait_child(ref.id)
+    await registry.close_all()
+
+    # Restart: the store seeds the child's reply_count from its messages
+    # and ended turns. Turn 2 asks a question.
+    models = AtomModels()
+    models.scripts["Chatty"] = [cell("return_result(NeedInput(question='Which branch?'))")]
+    second = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
+    try:
+        loaded = await second.load(root.id)
+        port = loaded._agent.session
+        await port.send_child(ref.id, "now pick one", channel="user_messages")
+        await until(lambda: second.pending_question(loaded, ref.id) is not None, TIMEOUT)
+        live_id = second.pending_question(loaded, ref.id).id
+    finally:
+        await second.close_all()
+
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    try:
+        loaded = await fresh.load(root.id)
+        p2 = loaded._agent.session
+        on_disk = p2.pending_question(ref.id)  # the child is not loaded: read from its record
+        assert on_disk is not None and on_disk.id == live_id
+        await fresh.load(ref.id)  # loaded: seeded from the same record
+        assert p2.pending_question(ref.id).id == live_id
+    finally:
+        await fresh.close_all()
+
+
+async def test_answered_and_closed_children_leave_no_registry_entries(
+    atom_options, atom_models, sessions_dir
+):
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
+    root = await registry.create(atom_options)
+    atom_models.scripts["Asker"] = [
+        cell("return_result(NeedInput(question='Which branch?'))"),
+        work_done("used main"),
+    ]
+    port = root._agent.session
+    ref = await port.delegate("Asker", "do it", kept=True)
+    await until(lambda: registry.pending_question(root, ref.id) is not None, TIMEOUT)
+    await port.send_child(ref.id, "main", channel="user_messages")
+    result = await port.wait_child(ref.id)
+    assert result.done.explanation == "used main"
+    assert registry.pending_question(root, ref.id) is None
+    assert registry._questions == {}  # popped, not kept as None
+
+    await port.close_child(ref.id)
+    assert registry.is_closed(root.id, ref.id)
+    await registry.close(root.id)  # the parent closes: its per-child state goes
+    assert registry._questions == {}
+    assert root.id not in registry._closed_children
+    # Closed still means closed: the tombstone is re-read from the record.
+    loaded = await registry.load(root.id)
+    try:
+        assert registry.is_closed(root.id, ref.id)
+        with pytest.raises(ChildFailedError, match="closed"):
+            await loaded._agent.session.send_child(ref.id, "more", channel="user_messages")
+    finally:
+        await registry.close_all()

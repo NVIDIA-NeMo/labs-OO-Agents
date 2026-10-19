@@ -70,6 +70,7 @@ from nooa_atom.session.items import (
     TurnStartedUpdate,
     Usage,
     UsageChangedUpdate,
+    question_id,
 )
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.store import SessionHandle
@@ -823,6 +824,9 @@ class Session:
         # A failed steer delivery retains its buffer/ledger ownership for recovery.
         usage = _usage_delta(self._usage_before, self.info.usage)
         data, result_type = _outcome_data(outcome, kind)
+        if kind == "need_input":
+            # Recorded, so the question keeps its id after a reload.
+            data["question_id"] = question_id(self.id, self.info.reply_count + 1)
         explanation = _explanation(outcome, kind)
         self.handle.events.add(
             TurnEnded(

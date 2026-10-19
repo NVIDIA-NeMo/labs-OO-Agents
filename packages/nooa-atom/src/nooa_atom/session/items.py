@@ -7,6 +7,7 @@ no live objects. Sessions, hosts and parent agents exchange these values;
 live agents never cross.
 """
 
+import hashlib
 import uuid
 from contextlib import suppress
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -123,6 +124,17 @@ class ChildRef(BaseModel):
     async def close(self) -> None:
         """Close the child session for good (its children first)."""
         await _port(self).close_child(self.id)
+
+
+def question_id(child_id: str, reply: int) -> str:
+    """The id of the question a child asked in its ``reply``-th reply.
+
+    ``reply`` counts the child's replies as ``SessionInfo.reply_count`` does
+    (its messages and its ended turns). The child's session stores it in the
+    ``need_input`` outcome, so the live question and the one read back from
+    the record after a reload have the same id.
+    """
+    return hashlib.sha1(f"{child_id}:{reply}".encode()).hexdigest()[:8]
 
 
 def _parent_port(ref: ChildRef) -> "SessionPort | None":
