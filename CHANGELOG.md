@@ -12,6 +12,76 @@ to follow semantic versioning.
   compacts with its own tools in that turn. Over ACP (Pool) it used to answer
   "not available through ACP yet". Any extra words are passed on as
   instructions; a host control named `compact` still replaces it.
+- `nooa-atom`: `AtomAgent.handle_orchestrate()` (from #446), an unattended
+  root that plans a task, hands the work to child sessions (they run
+  `handle_work`) and verifies it without editing files itself. It is opt-in:
+  `SessionOptions(turn_method="handle_orchestrate")`, which `run_task` keeps
+  (any other turn method still means `handle_batch`), or
+  `nooa-bench run --turn-method handle_orchestrate`. A Waiting-target check
+  now rejects a `Waiting` whose `on` names nothing that can deliver (a child
+  that is running, `working` or has queued input, a buffered `delegates`
+  item, or a running job); the person is never a valid target. `handle`
+  points the model at `Done`/`NeedInput`, the unattended turns at sending or
+  spawning a child or finishing with `Done`.
+- `nooa-atom`: the child-session interface is reworked (breaking). The two
+  verbs carry the difference: `delegate(description, prompt, *, brief=None,
+  model=None) -> Done` runs a one-shot worker that may not ask questions and
+  is closed after its result; `spawn(description, prompt, *, brief=None,
+  model=None) -> ChildRef` starts a kept child that may ask its parent
+  questions (`ChildQuestion`, a data item; reply with `child.send()`),
+  takes follow-ups with `send()` and stays open until `close()` or the end
+  of its tree. Both run the new `handle_work` turn, written for a parent,
+  whose `Done` must carry a `TaskResult`; a one-shot worker that returns
+  `NeedInput` gets turn feedback to decide and state its assumptions.
+  `InteractiveAgent` defines a generic `handle_work` (with the
+  `require_task_result` postcondition and `TaskResult`, now in
+  `nooa.interactive` and re-exported from `nooa_atom.session.items`), so every
+  child runs it: the fallback to `handle_batch`/`handle` for a class without
+  one is removed, and such a class raises a `TypeError` at delegate time.
+  `retain=`, `mode=` and `keep=` raise a `TypeError`; `context=` is removed.
+  `ChildRef` has `wait()`, `send()` (steers a running child, or queues and
+  starts a turn) and `close()` only: `steer()`, `info` and
+  `pending_question` are removed (a pending question shows in the ref's
+  repr). `ChildRef.wait()` returns a `ChildResult` or `ChildQuestion` and
+  raises `ChildFailedError` instead of hanging on an idle child or one
+  waiting for an answer. A Todo passed to `spawn()`/`delegate()` is a one-way
+  brief: it is rendered into the child's first message, and the child's own
+  list gets a local copy, activated, that is its working copy. Nothing flows
+  back: the parent gets the child's `TaskResult` (and `ChildMessage`/
+  `ChildQuestion`) and updates its own Todo after verifying. Any Todo works
+  as a brief, managed or hand-built, since only its fields are read;
+  `ChildRef.todo_id` records which Todo the child was briefed on. A shared
+  per-tree todo manager is on the backlog.
+  `brief=` reaches the child with the Todo, after a line naming its parent
+  and saying whether it may ask. A closed child stays closed (`send()`
+  raises), `ChildRef.status` is live, a child whose turn ended `Waiting`
+  reads `working`, and pending questions and queued outcomes are rebuilt
+  from the record after a reload. `SessionOptions` refuses unknown fields
+  and carries one child flag, `kept`. `AgentMessage.is_result_text` marks a
+  turn result's message.
+- `send()` of a Todo (or any model embedding `SnapshotVars`) no longer fails
+  with `PydanticSerializationError`: `SnapshotVars` has a pydantic schema.
+  JSON mode carries plain JSON only: a var that is not JSON data (a model, a
+  tuple) raises an error naming its key, so a Todo sent to another session must
+  have plain-JSON vars. Validation never imports or constructs a class (a
+  payload naming its own allowlist is refused); non-JSON vars still survive the
+  session snapshot, whose allowlist comes from code.
+  `TodoManager.status()` caps the active Todo's description at 600 characters,
+  with a pointer to `self.todo.get(id).description`, so the Other Todos and
+  Hint lines are no longer cut. `await ref.send(todo)` is an ordinary item:
+  to change a child's task, send the new brief as text or a Todo; the child
+  decides how to update its own Todo.
+- `nooa-atom`: the Todo copy/merge-back contract of #451 is replaced by the
+  one-way brief (breaking for code written against the earlier #451 heads).
+  Removed: `AtomAgent.merge_delegated_todo` and `update_delegated_todo`, the
+  registry's `_merge_todo`/`record_todo_base`, the `ChildTodoBase` event,
+  `TodoManager.adopt()`, `receive_todo()`, `copy_todo()`, `merge_todo()` and
+  `with_todo()` (`insert_copy()` gives a child its brief and raises on a
+  same-id clash), the `send(todo)` special case,
+  and the parent Todo's `child` var. A saved session holding `ChildTodoBase`
+  rows still loads; the rows are ignored. `delegate()` no longer adds a
+  "Delegated to …: report" comment to the parent's Todo (breaking): the
+  parent records what it verified itself.
 - `self.v["x"] = ...` now raises a `TypeError` that names the working form
   (`write self.v.x = ... instead`). It used to be Python's bare "'AgentVars'
   object does not support item assignment". Nothing is stored either way.

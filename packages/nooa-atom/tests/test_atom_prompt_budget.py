@@ -43,6 +43,57 @@ RESULT = (
 # 2,570 characters): measured values plus about 2% headroom.
 # Raised after main's #415 rendered import lines from the declared module
 # (about 430 characters): measured values plus about 2% headroom.
+# Raised for the child-session interface (2026-10-15): the class doc tells the
+# model to put a task's requirements and rules in the Todo it hands a child and
+# to run one editing child at a time, spawn() takes brief=, and
+# ChildRef/ChildQuestion carry todo_id, a live status and question ids (about
+# 770 characters over the 2026-10-02 values, ChildMessage docs included). The
+# handle_work rows are the new worker turn. Measured values plus about 2%.
+# Lowered when the child API was trimmed (2026-10-16): delegate() is one-shot and
+# spawn() kept, with no mode=/keep=/context= parameters and no
+# ChildRef.steer()/info/pending_question (about 150 characters less than at
+# 5b84477a7). Measured values plus about 2%.
+# Re-measured when InteractiveAgent gained the base handle_work and TaskResult
+# moved to nooa.interactive (2026-10-16): unchanged for every row (the Atom
+# agents override handle_work), so the limits stay.
+# Lowered when agent.py's internal _without_removed helper was hidden from the
+# execution-context stub (2026-10-16): 168 characters less for every row (its
+# signature and docstring, which named the removed retain=/mode=/keep=
+# options). Measured values plus about 2%.
+# Re-measured after the #451 review fixes (2026-10-17): SnapshotVars got a
+# pydantic schema, spawn()/delegate() adopt a hand-built Todo,
+# TodoManager.status() caps the active Todo's description at 600 characters,
+# and send() of the handed Todo updates the child's copy (one sentence in the
+# spawn() and ChildRef.send() docs, past the summary line the prompt shows).
+# Unchanged for every row (the first call has no active Todo), so the limits
+# stay. A worker's todo_status block for a 5,000-character description falls
+# from 2,000 characters (cut before Other Todos and Hint) to 870, all kept.
+# Added handle_orchestrate (#446, the v2 orchestrator prompt as arm D
+# evaluated it, on the #451 child API with the D4/D6 guidance) (2026-10-17):
+# the other rows are unchanged; measured values plus about 2% headroom.
+# Re-measured when ChildQuestion.answer() was removed (2026-10-18): the class
+# docs say to reply with ``await item.child.send(...)``, 15 characters more for
+# every row (system and total; was 14,669 / 14,467 system). Within the limits,
+# so they stay.
+# On dev/atom (#452): raised when AtomAgent kept the storage guidance from the
+# removed experimental prompt (2026-10-16, about 190 characters): measured values plus about 2% headroom.
+# Re-measured after merging dev/atom into #451 (2026-10-18): #452 removed
+# ExperimentalAtomAgent (its rows are gone) and added the storage-guidance
+# sentence to the AtomAgent class doc, 141 characters more for every row
+# (system and total; was 14,684 system). Measured values plus about 2% headroom.
+# Re-measured for the one-way Todo brief (2026-10-18): the class doc says the
+# brief is one-way and to update your own Todo after verifying, 84 characters
+# more in the system prompt (was 14,825). The handle_work prompt's merge-back
+# lines became one sentence (51 characters less in total, was 17,981), and
+# handle_orchestrate's merge-back sentence became the one-way one (53 more,
+# was 19,357). Within the limits, so they stay.
+# Re-measured after the #451 review-3 fixes (2026-10-19): handle_work says "a
+# Todo in your list" instead of "the Todo in your list", 2 characters less in
+# total (was 17,930). delegate() no longer comments on the parent's Todo and
+# copy_todo/merge_todo/with_todo are gone (insert_copy() is hidden), but
+# those docs are past what the prompt shows: every other row is unchanged.
+# Within the limits, so they stay.
+# From dev/atom (#447, merged 2026-10-19):
 # Raised for truthful API text (2026-10-14: replace() forms and real parameter
 # names, sync/async labels in <skills>, NeedInput free-text guidance, the show()
 # line; about 290 characters): measured values plus about 2% headroom.
@@ -51,9 +102,14 @@ RESULT = (
 # characters net): measured values plus about 2% headroom.
 # Raised when AtomAgent kept the storage guidance from the removed experimental
 # prompt (2026-10-16, about 140 characters): measured values plus about 2% headroom.
+# Re-measured after merging dev/atom with #447 into #451 (2026-10-19): #447's
+# truthful API text plus the child-session docs, 273 characters more in the system
+# prompt for every row (was 14,909). Measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (15_000, 18_100),  # measured 14,689 / 17,701
-    (ATOM, "handle_batch"): (15_000, 17_600),  # measured 14,689 / 17,239
+    (ATOM, "handle"): (15_500, 18_600),  # measured 15,182 / 18,240
+    (ATOM, "handle_batch"): (15_500, 18_100),  # measured 15,182 / 17,732
+    (ATOM, "handle_work"): (15_500, 18_600),  # measured 15,182 / 18,202
+    (ATOM, "handle_orchestrate"): (15_500, 20_100),  # measured 15,182 / 19,684
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -69,9 +125,9 @@ def _no_installed_skills(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
 
 
-@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
-async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
-    code = RESULT if method == "handle_batch" else "return_result(Done(explanation='x'))"
+async def _first_call(spec, method, tmp_path, sessions_dir):
+    """Run one turn of ``method`` and return the first call's messages and workspace."""
+    code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
     response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
     workspace = tmp_path / "workspace"
@@ -90,7 +146,12 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
         await asyncio.wait_for(root.prompt("hello"), 30)
     finally:
         await registry.close_all()
-    messages = llm.calls[0].messages
+    return llm.calls[0].messages, workspace
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
+    messages, workspace = await _first_call(spec, method, tmp_path, sessions_dir)
     system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     # The workspace path appears in the prompt; count it as a fixed token.
@@ -100,6 +161,35 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     assert len(system) <= system_limit
     assert len(rendered) <= total_limit
     assert len(system) < BENCH_SYSTEM_LIMIT
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_execution_context_hides_internal_helpers(spec, method, tmp_path, sessions_dir):
+    """agent.py's internal helpers stay out of the ``<python_cell_context>`` stub.
+
+    ``_without_removed`` once leaked there with a docstring naming the removed
+    ``retain=``/``mode=``/``keep=`` options, putting them in front of the model.
+    """
+    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = "\n".join(str(m.get("content", "")) for m in messages)
+    start = rendered.index("<python_cell_context>")
+    stub = rendered[start : rendered.index("</python_cell_context>", start)]
+    for leaked in ("_without_removed", "retain=", "keep=", "mode="):
+        assert leaked not in stub
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_prompts_reply_to_a_child_question_with_send(spec, method, tmp_path, sessions_dir):
+    """``ChildQuestion`` is data with no ``answer()``; prompts say ``child.send()``."""
+    from nooa_atom.session.items import ChildQuestion
+    from nooa_atom.session.port import SessionPort
+
+    assert not hasattr(ChildQuestion, "answer")
+    assert not hasattr(SessionPort, "answer_child")
+    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = "\n".join(str(m.get("content", "")) for m in messages)
+    assert ".answer(" not in rendered
+    assert "answer_child" not in rendered
 
 
 class _InstalledSkill:

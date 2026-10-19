@@ -126,7 +126,7 @@ def test_options_inherit_for_a_child(tmp_path):
         llm=llm,
         permission_mode="auto",
         max_depth=3,
-        retain=True,
+        kept=True,
         name="root",
         host="acp",
         sessions_dir=tmp_path / "s",
@@ -144,16 +144,34 @@ def test_options_inherit_for_a_child(tmp_path):
         "acp",
         tmp_path / "s",
     )
-    assert (child.name, child.retain) == ("Review auth", False)
+    assert (child.name, child.kept) == ("Review auth", False)
 
-    other = parent.inherit(model="other-alias", retain=True, turn_method="handle_batch")
-    assert (other.model, other.llm, other.retain, other.turn_method) == (
+    other = parent.inherit(model="other-alias", kept=True, turn_method="handle_work")
+    assert (other.model, other.llm, other.kept, other.turn_method) == (
         "other-alias",
         None,
         True,
-        "handle_batch",
+        "handle_work",
     )
     assert parent.inherit(model=None).llm is llm
+
+
+@pytest.mark.parametrize("removed", ["retain", "keep", "mode", "child_mode"])
+def test_a_removed_child_option_raises_instead_of_being_ignored(tmp_path, removed):
+    """Finding 7: ``retain=`` (and the short-lived ``keep=``/``mode=``) must not vanish silently."""
+    parent = SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent")
+    with pytest.raises(TypeError, match=f"{removed}=, which was removed"):
+        parent.inherit(name="kid", **{removed: True})
+    with pytest.raises(TypeError, match=f"{removed}=, which was removed"):
+        SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent", **{removed: True})
+
+
+def test_session_options_refuse_unknown_fields(tmp_path):
+    from pydantic import ValidationError
+
+    parent = SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent")
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent", kep=True)
     with pytest.raises(ValidationError):
         parent.inherit(turn_method="run")
 
@@ -164,3 +182,67 @@ def test_options_require_an_agent_and_do_not_serialise_the_llm(tmp_path):
     options = SessionOptions(workspace=tmp_path, agent_spec="pkg:Agent", llm=object())
     assert "llm" not in options.model_dump()
     assert Path(options.model_dump(mode="json")["workspace"]) == tmp_path
+
+
+# ---- review-2 finding 6: a ref whose child the registry no longer knows ----
+
+
+class _GonePort:
+    """A parent port whose registry no longer knows the child (e.g. after delete)."""
+
+    id = "parent1"
+
+    def __init__(self):
+        self.calls = 0
+
+    def child_status(self, child_id):
+        self.calls += 1
+        raise items.ChildFailedError(f"Child {child_id!r} does not exist")
+
+    def pending_question(self, child_id):
+        raise items.ChildFailedError(f"Child {child_id!r} does not exist")
+
+
+def test_a_child_ref_snapshots_its_stored_status_and_never_raises():
+    from nooa_atom.session.port import current_port
+
+    from nooa.storage.serialization import deserialize, serialize
+    from nooa.storage.snapshot_vars import SnapshotVars
+
+    ref = ChildRef(id="c1", name="worker", depth=1, status="idle", parent_id="parent1")
+    port = _GonePort()
+    token = current_port.set(port)
+    try:
+        blob, allowlist = serialize(ref)
+        dumped = ref.model_dump()
+        assert port.calls == 0  # snapshots and dumps never ask the port
+        assert blob["data"]["status"] == "idle" and dumped["status"] == "idle"
+        assert deserialize(blob, allowlist) == ref
+        v = SnapshotVars()
+        v["child"] = ref  # self.v assignment serializes; it must not raise
+        assert "child" in v
+        assert "status='idle'" in repr(ref)  # repr falls back to the stored value
+        assert ref.status == "idle"  # so does a live read
+    finally:
+        current_port.reset(token)
+
+
+def test_a_child_ref_reads_status_live_in_its_parents_turn():
+    from nooa_atom.session.port import current_port
+
+    class LivePort:
+        id = "parent1"
+
+        def child_status(self, child_id):
+            return "running"
+
+        def pending_question(self, child_id):
+            return None
+
+    ref = ChildRef(id="c1", name="worker", depth=1, status="idle", parent_id="parent1")
+    token = current_port.set(LivePort())
+    try:
+        assert ref.status == "running"
+        assert ref.model_dump()["status"] == "idle"
+    finally:
+        current_port.reset(token)

@@ -18,11 +18,13 @@ from nooa.storage.markers import snapshotable
 from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
-_MISSING = object()
 _STATUS_MAX_ITEMS = 10
 _STATUS_MAX_CHARS = 2_000
 _STATUS_TITLE_CHARS = 120
 _STATUS_MAX_DEPS = 3
+# Characters of the active Todo's description shown by status(); the rest is
+# reached through self.todo.get(id).description.
+_STATUS_DESCRIPTION_CHARS = 600
 # Completed rows shown when no todo is active; the rest are counted.
 _STATUS_MAX_DONE = 2
 
@@ -95,12 +97,8 @@ class Todo(BaseModel):
     @field_validator("vars", mode="before")
     @classmethod
     def _coerce_vars(cls, value: Any) -> "SnapshotVars":
-        if isinstance(value, SnapshotVars):
-            return value
-        if value is None:
-            return SnapshotVars()
-        if isinstance(value, dict):
-            return SnapshotVars(value)
+        if isinstance(value, (SnapshotVars, dict)) or value is None:
+            return SnapshotVars.from_data(value)
         raise TypeError(f"Todo.vars must be a dict or SnapshotVars, got {type(value).__name__}")
 
     @property
@@ -206,89 +204,6 @@ class TodoManager(Skill):
             return todo
         raise TypeError(f"expected Todo or str, got {type(todo).__name__}")
 
-    @hidden
-    def copy_todo(self, todo: Todo | str) -> Todo:
-        """Return an independent copy of a manager-owned todo for delegation."""
-        todo_id = self._todo_id(todo)
-        current = self._todos.get(todo_id)
-        if current is None:
-            raise ValueError(f"todo {todo_id!r} is not managed by this TodoManager")
-        return current.model_copy(deep=True)
-
-    @classmethod
-    @hidden
-    def with_todo(cls, todo: Todo) -> "TodoManager":
-        """Create a manager containing an independent copy of one delegated todo."""
-        manager = cls()
-        copied = todo.model_copy(deep=True)
-        manager._todos[copied.id] = copied
-        manager._order.append(copied.id)
-        manager._active_id = copied.id if copied.status != "done" else None
-        return manager
-
-    @hidden
-    def merge_todo(self, updated: Todo, *, base: Todo) -> Todo:
-        """Atomically merge delegated changes without overwriting concurrent edits."""
-        # Freeze the worker result so the committed parent cannot alias worker state.
-        updated = updated.model_copy(deep=True)
-        if updated.id != base.id:
-            raise ValueError("updated and base todos must have the same id")
-        current = self._todos.get(updated.id)
-        if current is None:
-            raise ValueError(f"todo {updated.id!r} is not managed by this TodoManager")
-
-        missing = set(updated.deps) - set(base.deps) - self._todos.keys()
-        if missing:
-            raise ValueError(
-                "delegated dependencies are not in the parent workspace: "
-                + ", ".join(sorted(missing))
-            )
-        candidate = current.model_copy(deep=True)
-        for field in ("title", "status", "deps", "description"):
-            before = getattr(base, field)
-            after = getattr(updated, field)
-            existing = getattr(current, field)
-            if after == before:
-                continue
-            if existing != before and existing != after:
-                raise ValueError(f"todo {updated.id!r} has conflicting {field!r} changes")
-            setattr(candidate, field, after.copy() if isinstance(after, list) else after)
-
-        base_vars = dict(base.vars)
-        updated_vars = dict(updated.vars)
-        current_vars = dict(current.vars)
-        for key in base_vars.keys() | updated_vars.keys():
-            before = base_vars.get(key, _MISSING)
-            after = updated_vars.get(key, _MISSING)
-            if after == before:
-                continue
-            existing = current_vars.get(key, _MISSING)
-            if existing != before and existing != after:
-                raise ValueError(f"todo {updated.id!r} has conflicting variable {key!r}")
-            if after is _MISSING:
-                candidate.vars.pop(key, None)
-            else:
-                candidate.vars[key] = after
-
-        if updated.comments[: len(base.comments)] != base.comments:
-            raise ValueError(f"todo {updated.id!r} modified existing comments")
-        if current.comments[: len(base.comments)] != base.comments:
-            raise ValueError(f"todo {updated.id!r} has conflicting comment changes")
-        existing_comment_ids = {comment.id for comment in candidate.comments}
-        for comment in updated.comments[len(base.comments) :]:
-            if comment.id not in existing_comment_ids:
-                # Parent comments must remain independent of the worker result.
-                candidate.comments.append(comment.model_copy(deep=True))
-                existing_comment_ids.add(comment.id)
-
-        # Commit only after every conflict check has succeeded, preserving the
-        # authoritative Todo object's identity for existing callers.
-        for field in ("title", "status", "deps", "description", "vars", "comments"):
-            setattr(current, field, getattr(candidate, field))
-        if current.status == "done" and current.id == self._active_id:
-            self._active_id = None
-        return current
-
     def add(
         self,
         title: str,
@@ -317,6 +232,23 @@ class TodoManager(Skill):
         self._todos[t.id] = t
         self._order.append(t.id)
         return t
+
+    @hidden
+    def insert_copy(self, todo: Todo) -> Todo:
+        """Add an independent copy of ``todo`` (same id) and activate it if it is open.
+
+        Used to give a child session a local copy of its brief. Raises
+        ``ValueError`` when a todo with the same id is already in this list:
+        an existing todo is never silently replaced.
+        """
+        if todo.id in self._todos:
+            raise ValueError(f"todo {todo.id!r} is already in this TodoManager")
+        copied = todo.model_copy(deep=True)
+        self._todos[copied.id] = copied
+        self._order.append(copied.id)
+        if copied.status != "done":
+            self._active_id = copied.id
+        return copied
 
     def get(self, todo_id: Todo | str) -> Todo | None:
         """Return the matching managed todo, or ``None`` if it is missing."""
@@ -644,7 +576,21 @@ class TodoManager(Skill):
             # limits the additional dependency rows.
             selected = dependencies[:max_items]
 
-            def render_active(rows: list[Todo]) -> str:
+            note = " ".join(active.description.split())
+            recent = " ".join(active.comments[-1].body.split()) if active.comments else ""
+            pointer = f" … (full text: self.todo.get('{active.id}').description)"
+
+            def clip(text: str, limit: int | None, suffix: str) -> str:
+                if limit is None or len(text) <= limit:
+                    return text
+                return text[:limit].rstrip() + suffix
+
+            def render_active(
+                rows: list[Todo],
+                note_chars: int | None = _STATUS_DESCRIPTION_CHARS,
+                recent_chars: int | None = None,
+            ) -> str:
+                """Render without the final bound; the caller trims to fit."""
                 omitted_count = len(dependencies) - len(rows)
                 active_title = self._status_title(active.title)
                 effective = self._effective_status(active)
@@ -661,11 +607,10 @@ class TodoManager(Skill):
                         f"{len(active.comments)} comment{'s' if len(active.comments) != 1 else ''}"
                     )
                 lines = [f"Active [{active.id}] {active_title}", f"Status: {' · '.join(details)}"]
-                note = " ".join(active.description.split())
-                lines.append(f"Description: {note or '(none)'}")
+                shown_note = clip(note, note_chars, pointer).lstrip()
+                lines.append(f"Description: {shown_note or '(none)'}")
                 if active.comments:
-                    recent = " ".join(active.comments[-1].body.split())
-                    lines.append(f"Recent activity: {recent}")
+                    lines.append(f"Recent activity: {clip(recent, recent_chars, ' …')}")
                 if rows or omitted_count or missing:
                     lines.append("")
                     lines.append("Dependencies:")
@@ -708,13 +653,24 @@ class TodoManager(Skill):
                     hints.append("record material progress with self.todo.comment(id, ...)")
                 hints.append("show all: self.todo.list_todos()")
                 lines.append("Hint: " + " · ".join(hints))
-                return self._bounded_status("\n".join(lines), max_chars)
+                return "\n".join(lines)
 
-            output = render_active(selected)
-            while selected and output.endswith("… status truncated"):
+            # The description is capped so the status, comment, Other Todos and
+            # Hint lines fit. When the card is still too long, shorten the
+            # description, then drop dependency rows, then shorten the latest
+            # comment; the final bound applies only after all of those.
+            note_chars = min(_STATUS_DESCRIPTION_CHARS, len(note))
+            output = render_active(selected, note_chars)
+            while len(output) > max_chars and note_chars > 0:
+                note_chars = max(0, note_chars - (len(output) - max_chars))
+                output = render_active(selected, note_chars)
+            while selected and len(output) > max_chars:
                 selected.pop()
-                output = render_active(selected)
-            return output
+                output = render_active(selected, note_chars)
+            if len(output) > max_chars and recent:
+                recent_chars = max(0, len(recent) - (len(output) - max_chars) - 2)
+                output = render_active(selected, note_chars, recent_chars)
+            return self._bounded_status(output, max_chars)
 
         by_status: dict[str, list[Todo]] = {"open": [], "blocked": [], "done": []}
         for todo in todos:

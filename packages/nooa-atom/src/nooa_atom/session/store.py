@@ -598,6 +598,7 @@ class SessionStore:
         turn_method: str = "handle",
         mode: str = "auto",
         session_id: str | None = None,
+        todo_id: str | None = None,
     ) -> SessionHandle:
         session_id = self.validate_id(session_id or str(uuid.uuid4()))
         # Recorded as a resolved absolute path: a relative one ("../", as the
@@ -623,6 +624,7 @@ class SessionStore:
             name=name,
             retained=retained,
             turn_method=turn_method,
+            todo_id=todo_id,
             mode=mode,
             utc_offset=offset.total_seconds() if offset is not None else None,
         )
@@ -648,6 +650,7 @@ class SessionStore:
                 name=name,
                 retained=retained,
                 turn_method=turn_method,
+                todo_id=todo_id,
                 mode=mode,
             ),
         )
@@ -1135,6 +1138,7 @@ class SessionStore:
             name=_optional_str(start.get("name")),
             retained=bool(start.get("retained", False)),
             turn_method=str(start.get("turn_method") or "handle"),
+            todo_id=_optional_str(start.get("todo_id")),
             title=title,
             title_is_user_set=title_is_user_set,
             forked_from=forked_from,

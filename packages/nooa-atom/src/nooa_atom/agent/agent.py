@@ -33,6 +33,7 @@ from nooa_atom.agent.slash_commands import SlashCommandRegistry
 from nooa_atom.session.items import (
     ChildFailed,
     ChildFailedError,
+    ChildMessage,
     ChildQuestion,
     ChildRef,
     ChildResult,
@@ -46,8 +47,13 @@ from nooa_atom.tools.repo_tools import RepoTools
 with hidden:
     from nooa.agents import TokenBudgetSummarizer
     from nooa.runtime.channels import Channel, ChannelReader
-    from nooa_atom.agent.conditions import require_result
-    from nooa_atom.session.port import SessionPort
+    from nooa_atom.agent.conditions import (
+        require_result,
+        require_running_wait,
+        require_running_wait_unattended,
+        require_task_result,
+    )
+    from nooa_atom.session.port import SessionPort, _reject_removed
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
@@ -55,6 +61,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ChildFailed",
     "ChildFailedError",
+    "ChildMessage",
     "ChildQuestion",
     "ChildRef",
     "ChildResult",
@@ -87,17 +94,22 @@ class AtomAgent(InteractiveAgent):
     root bounds repo searches.
 
     Delegate bounded, context-heavy work (exploration, diagnosis, review, an
-    independently verifiable change) to a child session with its own history:
-    ``done = await self.delegate(description, prompt)`` waits for it and returns
-    its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
-    ``await self.spawn(description, prompt)`` starts one and returns at once; when
-    nothing else is left, end the turn with
-    ``Waiting(explanation=..., on=["delegates"])``. Its outcome arrives in a later
-    turn under ``notification["delegates"]``: a ``ChildResult`` (``item.done``), a
-    ``ChildQuestion`` from a retained child (``await item.answer(...)``) or a
-    ``ChildFailed`` (``item.error``). Never predict or make up a pending child's
-    result, poll, or sleep to wait. Children share this checkout: run concurrent
-    children only for read-only work and serialize edits. Children can delegate
+    independently verifiable change) to a child session with its own history.
+    Hand it a Todo whose description carries the task's requirements and its
+    rules or constraints: the child sees nothing else of your task.
+    ``done = await self.delegate(description, todo)`` runs a one-shot worker and
+    returns its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
+    ``child = await self.spawn(description, todo)`` starts a kept child and returns
+    at once; it may ask you questions and takes ``await child.send(...)`` follow-ups
+    until ``await child.close()``. When nothing else is left, end the turn with
+    ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
+    ``notification["delegates"]``: ``ChildResult`` (``item.done``), ``ChildQuestion``
+    (reply with ``await item.child.send(...)``), ``ChildFailed`` (``item.error``) or
+    ``ChildMessage`` (``item.text``, a progress note). The Todo is a one-way
+    brief: the child works on its own copy and its report comes back as the
+    ``TaskResult``; update your own Todo after verifying it. Never predict or make up a pending child's
+    result, poll, or sleep to wait. Children share this checkout: run one editing
+    child at a time; read-only children can run in parallel. Children can delegate
     in turn only down to a fixed depth; past it ``DepthLimitError`` is raised.
     Inspect and verify what a child reports before relying on it.
 
@@ -275,78 +287,87 @@ class AtomAgent(InteractiveAgent):
         description: str,
         prompt: str | Todo,
         *,
-        context: Any = None,
+        brief: str | None = None,
         model: str | None = None,
+        **removed: Any,
     ) -> Done:
-        """Run a child session on ``prompt``, wait for it, and return its ``Done``.
+        """Run a one-shot worker child on ``prompt``, wait for it, and return its ``Done``.
 
-        The child is a new session of this agent with its own history, working
-        unattended in this checkout; it is closed after it returns. It must end
-        with a ``TaskResult``, so ``done.result.report`` (plus
-        ``solution_description``, ``evidence`` and ``how_to_verify``) is its
-        report; ``done.explanation`` is its one-line status. Use this only when
-        you need the report before continuing; otherwise use ``spawn()``.
+        The child works in this checkout with its own history, cannot ask you
+        questions (it decides and states its assumptions), and is closed after
+        its result. ``done.result`` is its ``TaskResult`` (read
+        ``result.report``). Use it only when you need the report before
+        continuing; otherwise use ``spawn()``. A Todo prompt is a one-way
+        brief, as in ``spawn()``: nothing is written to your Todo. Record
+        what you verified on it yourself.
 
-        Pass a ``Todo`` as ``prompt`` to hand over that task: the child gets its
-        title, description and comments as the prompt, and the report is added
-        to the Todo as a comment when the child returns.
-
-        Raises ``ChildFailedError`` when the child's turn fails or it is closed
-        first, and ``DepthLimitError`` when a child would exceed the depth
-        limit; catch them to report or recover.
+        Raises ``ChildFailedError`` when the child's turn fails, and
+        ``DepthLimitError`` when a child would exceed the depth limit.
 
         Args:
             description: Short label (2-6 words); the child's name and title.
-            prompt: The full task: outcome, scope, whether edits are allowed.
-            context: Optional data (a pydantic model or JSON data) sent with it.
+            prompt: A ``Todo`` carrying the task's requirements, rules and
+                acceptance checks, or the full task as text.
+            brief: Extra instructions sent with the prompt.
             model: Model alias for the child; yours when omitted.
         """
-        todo = prompt if isinstance(prompt, Todo) else None
-        text = _todo_prompt(todo) if todo is not None else str(prompt)
-        child = await self._port().delegate(
-            description, text, context=context, model=model, retain=False
-        )
-        done = await child.wait()
-        if todo is not None:
-            self.todo.comment(todo, f"Delegated to {description!r}: {_report_text(done)}")
-        return done
+        _reject_removed("delegate", removed)
+        child = await _start_child(self, description, prompt, brief, model, kept=False)
+        outcome = await child.wait()
+        if not isinstance(outcome, ChildResult):  # a one-shot worker's question is a failure
+            raise ChildFailedError(f"Child {description!r} did not return a result")
+        return outcome.done
 
     async def spawn(
         self,
         description: str,
         prompt: str | Todo,
         *,
-        context: Any = None,
+        brief: str | None = None,
         model: str | None = None,
-        retain: bool = False,
+        **removed: Any,
     ) -> ChildRef:
-        """Start a child session on ``prompt`` and return its ``ChildRef`` at once.
+        """Start a kept child on ``prompt`` and return its ``ChildRef`` at once.
 
-        Keep working, and when only the child's outcome is left end the turn
-        with ``Waiting(explanation=..., on=["delegates"])``. The outcome arrives
-        in a later turn under ``notification["delegates"]`` as a ``ChildResult``
-        (``item.done.result`` is a ``TaskResult``), a ``ChildQuestion`` or a
-        ``ChildFailed``; ``item.child.id`` matches the returned ref, which you
-        can keep in ``self.v``. A ``Todo`` prompt is sent as text; comment on
-        the Todo yourself when the result arrives.
+        Its outcomes arrive under ``notification["delegates"]``: a
+        ``ChildResult`` (``item.done.result`` is a ``TaskResult``), a
+        ``ChildQuestion`` (reply with ``await item.child.send(...)``) or a
+        ``ChildFailed``, after any ``ChildMessage`` progress notes;
+        ``item.child.id`` matches the returned ref (keep it in ``self.v``).
+        Send follow-ups with ``await ref.send(text)``; it stays open until
+        ``await ref.close()``.
+
+        A ``Todo`` prompt (managed or hand-built) is a one-way brief: the child
+        gets its fields and works on its own copy; nothing flows back to your
+        Todo. The result comes back as a ``TaskResult``: update your own Todo
+        (``self.todo.comment``, ``self.todo.complete``) after verifying it. To
+        change a child's task, send the new brief as text or a Todo; the child
+        decides how to update its own Todo.
 
         Args:
             description: Short label (2-6 words); the child's name and title.
-            prompt: The full task: outcome, scope, whether edits are allowed.
-            context: Optional data (a pydantic model or JSON data) sent with it.
+            prompt: A ``Todo`` carrying the task's requirements, rules and
+                acceptance checks, or the full task as text.
+            brief: Extra instructions sent with the prompt.
             model: Model alias for the child; yours when omitted.
-            retain: ``False``: unattended, returns a ``TaskResult`` and closes.
-                ``True``: a conversation partner that may ask questions
-                (``ChildQuestion``) and takes more messages with
-                ``await ref.send(text)``; close it with ``await ref.close()``.
         """
-        text = _todo_prompt(prompt) if isinstance(prompt, Todo) else str(prompt)
-        return await self._port().delegate(
-            description, text, context=context, model=model, retain=retain
-        )
+        _reject_removed("spawn", removed)
+        return await _start_child(self, description, prompt, brief, model, kept=True)
+
+    @hidden
+    def receive_delegated_todo(self, todo: Todo) -> None:
+        """Called on a child before its first turn: a local copy of its brief becomes its active Todo.
+
+        The copy is this child's own working copy: nothing in it flows back
+        to the parent, whose result is the ``TaskResult``. It keeps the
+        brief's id (the id named in the child's first message); a Todo with
+        that id already in the child's list raises ``ValueError`` rather
+        than being replaced. A done brief is added but not activated.
+        """
+        self.todo.insert_copy(todo)
 
     def children(self) -> list[ChildRef]:
-        """Handles on the child sessions you started, running and closed."""
+        """Handles on the child sessions you started, with live status and any unanswered question."""
         return self._port().children()
 
     @hidden
@@ -450,7 +471,10 @@ class AtomAgent(InteractiveAgent):
         ...
 
     @hidden
-    @strategy(CodeActV2(config=CodeActConfig(cell_timeout=1800.0)), context=_V2_CONTEXT)
+    @strategy(
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_running_wait])),
+        context=_V2_CONTEXT,
+    )
     async def handle(
         self,
         notification: Annotated[
@@ -460,7 +484,8 @@ class AtomAgent(InteractiveAgent):
         """Handle one interactive turn: the newest request and anything else that arrived.
 
         ``notification`` maps a channel name to the items that arrived on it:
-        ``"user_messages"`` (text from the person), ``"system_messages"``
+        ``"user_messages"`` (text from the person, or from your parent agent if
+        you are a child), ``"system_messages"``
         (host housekeeping), ``"slash_commands"`` (command output sent to you)
         and ``"delegates"`` (results of children you spawned). Do all the work
         the request needs before ending the turn; use as many cells as it
@@ -496,7 +521,12 @@ class AtomAgent(InteractiveAgent):
 
     @hidden
     @strategy(
-        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_result])),
+        CodeActV2(
+            config=CodeActConfig(
+                cell_timeout=1800.0,
+                postconditions=[require_result, require_running_wait_unattended],
+            )
+        ),
         context=_V2_CONTEXT,
     )
     async def handle_batch(
@@ -537,6 +567,141 @@ class AtomAgent(InteractiveAgent):
         ...
 
     @hidden
+    @strategy(
+        CodeActV2(
+            config=CodeActConfig(
+                cell_timeout=1800.0,
+                postconditions=[require_result, require_running_wait_unattended],
+            )
+        ),
+        context=_V2_CONTEXT,
+    )
+    async def handle_orchestrate(
+        self,
+        notification: Annotated[
+            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+        ],
+    ) -> Done | Waiting:
+        """You are a recursive language model agent.
+
+        You work on one task on your own. Nobody is watching and nobody can
+        answer a question; the result you return is the only thing the
+        requester reads.
+
+        The task is the text in ``notification["user_messages"]``; data sent
+        with it is in ``notification.get("context", [])``.
+
+        You are the orchestrator. You decide how the work is split and who does
+        each part, and you are responsible for the result. Do not implement the
+        work yourself; understanding, writing requirements and measuring are yours.
+
+        Work in this loop:
+        1. Understand the request. Read what you need, or have a read-only child
+           explore.
+        2. Write the requirements: how success will be measured. Put them in a
+           Todo (``self.todo.add(title, description=...)``): the goal, the exact
+           requirements and constraints from the task, and acceptance checks
+           that can be run. When a requirement is best written as code (for
+           example a failing test), decide who writes it, and confirm it fails
+           before the work starts.
+        3. Do the work: hand each Todo to a child with
+           ``child = await self.spawn(description, todo)`` and keep ``child`` in
+           ``self.v``. The Todo is all the child sees of the task: put the
+           task's requirements and its rules or constraints in it. Children
+           share one checkout: run one editing child at a time; read-only work
+           can run in parallel. While children run, end the turn with
+           ``Waiting(explanation=..., on=["delegates"])``.
+        4. Measure: results arrive in ``notification["delegates"]`` (a
+           ``ChildResult`` whose ``item.done.result`` is the child's
+           ``TaskResult``, a ``ChildQuestion``: ``await item.child.send(...)``, or
+           a ``ChildFailed``; a ``ChildMessage`` (``item.text``) is a progress
+           note). Its report is the TaskResult; record what you verified on
+           your own Todo.
+           Run every acceptance check yourself; a report is
+           not proof. Record each result with ``self.todo.comment(todo, ...)``.
+        5. Loop: if a requirement is not met, send the child the failing check
+           and its output with ``await child.send(...)`` and wait again. Decide
+           when another round is not worth it given the time left.
+
+        Finish with ``Done`` and a ``TaskResult`` whose ``evidence`` is what you
+        measured in step 4; if requirements are still unmet, say which.
+        Before ``Done``, leave the tree clean: no scratch files.
+        Leave children open; the host closes them after grading.
+
+            return_result(Done(
+                explanation="fixed the parser bug",
+                result=TaskResult(
+                    solution_description="What was done, including modified paths",
+                    evidence="The checks you ran and what they showed",
+                    how_to_verify="How someone else can check it",
+                    report="The full report for the requester",
+                ),
+            ))
+
+        If something blocks you, still return ``Done`` with a ``TaskResult``
+        that says what blocked you and what was tried.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
+        """
+        ...
+
+    @hidden
+    @strategy(
+        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_task_result])),
+        context=_V2_CONTEXT,
+    )
+    async def handle_work(
+        self,
+        notification: Annotated[
+            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+        ],
+    ) -> Done | NeedInput | Waiting:
+        """Work on a task for your parent agent and report back to it.
+
+        You are a child session. Your parent is an agent, not a person, and it
+        reads only your result. The task is in ``notification["user_messages"]``;
+        its first line says whether you can ask your parent questions (later
+        messages there are follow-ups). Your task is the brief; your
+        ``TaskResult`` is your report; a Todo in your list is your own
+        working copy (nothing in it goes back to your parent).
+
+        Assume you are the only one editing this checkout, and leave it clean:
+        remove scratch files before ``Done``.
+
+        End with exactly one ``return_result(...)``:
+
+        - ``Done`` with a ``TaskResult``, when the task is finished or blocked
+          (then say what blocked you and what you tried)::
+
+              return_result(Done(
+                  explanation="fixed the parser bug",
+                  result=TaskResult(
+                      solution_description="What was done, including modified paths",
+                      evidence="Commands run and what they showed",
+                      how_to_verify="How someone else can check it",
+                      report="The full report for your parent",
+                  ),
+              ))
+
+        - ``NeedInput(question=...)`` only if you can ask and cannot go on
+          without your parent's answer; it arrives as your next message.
+        - ``Waiting(explanation=..., on=[...])`` only while a job you started
+          is still running.
+
+        ``self.message()`` sends your parent a progress note; it does not
+        replace the result.
+
+        Python locals live for one method call; when the call returns they
+        are gone. Anything you need later goes in ``self.v`` (durable,
+        snapshot-backed) or the todo list. Do not rely on a variable from an
+        earlier call.
+        """
+        ...
+
+    @hidden
     async def aclose(self) -> None:
         """Release the agent's background work, skills (MCP servers) and shell.
 
@@ -558,6 +723,21 @@ class AtomAgent(InteractiveAgent):
 
 # A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.
 spec(AtomAgent, "session_port_visible", hidden=True)
+
+
+@hidden
+def _without_removed(method: Any) -> None:
+    """Document ``method`` without its ``**removed`` catch-all (it rejects ``retain=``, ``mode=``, ``keep=``)."""
+    import inspect
+
+    signature = inspect.signature(method)
+    method.__signature__ = signature.replace(
+        parameters=[p for p in signature.parameters.values() if p.kind is not p.VAR_KEYWORD]
+    )
+
+
+_without_removed(AtomAgent.spawn)
+_without_removed(AtomAgent.delegate)
 
 
 @hidden
@@ -583,26 +763,64 @@ def session_title_request(opening_message: str) -> str:
 
 
 @hidden
+async def _start_child(
+    agent: AtomAgent,
+    description: str,
+    prompt: Any,
+    brief: str | None,
+    model: str | None,
+    *,
+    kept: bool,
+) -> ChildRef:
+    """Start a child for ``spawn()``/``delegate()`` (a plain function: no agent-method wrapper).
+
+    A Todo prompt is a one-way brief: only its fields are read, into the
+    child's first message and a copy for the child's own list. The parent's
+    Todo (managed or hand-built) is never changed or tracked. The child's copy
+    is built by ``as_data``, as ``ref.send(todo)`` builds it, so a var that is
+    not plain JSON is refused here too, naming its key, before any child starts.
+    """
+    from nooa_atom.session.session import as_data
+
+    port = agent._port()
+    handed = as_data(prompt) if isinstance(prompt, Todo) else None
+    text = _child_prompt(port.name, port.id, prompt, handed, brief, kept=kept)
+    return await port.delegate(description, text, model=model, kept=kept, todo=handed)
+
+
+@hidden
+def _child_prompt(
+    parent_name: str,
+    parent_id: str,
+    prompt: Any,
+    todo: Todo | None,
+    brief: str | None,
+    *,
+    kept: bool,
+) -> str:
+    """A child's first message: who its parent is, what kind of child it is, the task and the brief."""
+    parent = f"parent {parent_name} ({parent_id})"
+    task = f" on Todo {todo.id}: {todo.title}" if todo is not None else ""
+    kind = (
+        "You can ask your parent questions and may get follow-ups."
+        if kept
+        else "One-shot task: you can't ask questions; decide, and state your assumptions in "
+        "the report."
+    )
+    lines = [f"You are working for {parent}{task}. {kind}", ""]
+    lines.append(_todo_prompt(todo) if todo is not None else str(prompt))
+    if brief:
+        lines += ["", "Brief:", str(brief)]
+    return "\n".join(lines)
+
+
+@hidden
 def _todo_prompt(todo: Todo) -> str:
-    """A Todo as the text a child works from: title, description, comments."""
-    lines = [f"Task: {todo.title}"]
+    """A Todo as the text a child works from: id, title, description, comments."""
+    lines = [f"Task [{todo.id}]: {todo.title}"]
     if todo.description:
         lines += ["", todo.description]
     if todo.comments:
         lines += ["", "Notes so far:"]
         lines += [f"- {comment.body}" for comment in todo.comments]
     return "\n".join(lines)
-
-
-@hidden
-def _report_text(done: Done) -> str:
-    """The report in a child's Done: the TaskResult's report, else its summary fields."""
-    result = done.result
-    if isinstance(result, TaskResult):
-        if result.report.strip():
-            return result.report
-        return (
-            f"{result.solution_description}\nEvidence: {result.evidence}\n"
-            f"How to verify: {result.how_to_verify}"
-        )
-    return done.explanation

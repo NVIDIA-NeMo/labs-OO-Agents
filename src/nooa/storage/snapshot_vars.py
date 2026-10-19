@@ -14,9 +14,21 @@ is a ``MutableMapping`` (not a ``dict`` subclass) decorated with
 ``@snapshotable``, the serializer routes it through the snapshotable branch and
 captures its internal ``_data`` (already clean), instead of the strict dict
 branch.
+
+Pydantic models can embed ``SnapshotVars`` as a field (``Todo.vars``). Python-mode
+``model_dump()`` and ``model_copy()`` keep the ``SnapshotVars`` object. JSON mode
+(``model_dump(mode="json")``, ``model_dump_json()``), which is how items cross
+sessions, carries plain JSON only: a value that is not JSON data (a pydantic
+model, a tuple, NaN or infinity, ...) raises an error naming its key. Validation accepts a
+``SnapshotVars``, a plain dict or ``None`` and never imports or constructs a
+class: a payload must not be able to choose what gets instantiated. Non-JSON
+values survive only the session snapshot (``nooa.storage.serialization``), whose
+allowlist comes from code.
 """
 
+import enum
 import logging
+import math
 from collections.abc import Iterator, MutableMapping
 from typing import Any
 
@@ -25,6 +37,54 @@ from nooa.storage.markers import snapshotable
 from nooa.storage.serialization import serialize
 
 logger = logging.getLogger(__name__)
+
+# Key of a removed tagged JSON form that carried its own deserialization
+# allowlist; payloads using it are refused instead of being restored.
+_TAGGED_KEY = "__snapshot_vars__"
+_TAGGED_REFUSED = (
+    "tagged SnapshotVars payloads are not accepted "
+    f"({{{_TAGGED_KEY!r}: {{'blob': ..., 'allowlist': ...}}}}); vars must be plain JSON"
+)
+
+
+def _non_json(value: Any) -> str | None:
+    """Why *value* is not plain JSON data, or ``None`` when it is.
+
+    Plain JSON is ``None``, bool, int, finite float, str, and lists and
+    string-keyed dicts of those: no tuples, models or other objects, and no
+    NaN or infinity (JSON has no such numbers; they would arrive as null).
+    """
+    if isinstance(value, enum.Enum):
+        return f"a {type(value).__name__}"
+    if isinstance(value, float) and not math.isfinite(value):
+        return f"a non-finite float ({value!r})"
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return None
+    if isinstance(value, list):
+        return next((r for item in value if (r := _non_json(item))), None)
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                return f"a dict with a {type(k).__name__} key"
+            if reason := _non_json(v):
+                return reason
+        return None
+    return f"a {type(value).__name__}"
+
+
+def _is_tagged_value(value: Any) -> bool:
+    """Whether *value* is the inner part of the removed tagged form: ``{"blob", "allowlist"}``."""
+    return isinstance(value, dict) and set(value) == {"blob", "allowlist"}
+
+
+def _is_tagged(data: Any) -> bool:
+    """Whether *data* carries the removed tagged form ``{"__snapshot_vars__": {"blob", "allowlist"}}``.
+
+    Only that shape is refused: a var named ``__snapshot_vars__`` holding
+    anything else is ordinary data. Writing, JSON dumping and validation all
+    apply this same test, so whatever is stored can be sent and reloaded.
+    """
+    return isinstance(data, dict) and _is_tagged_value(data.get(_TAGGED_KEY))
 
 
 @snapshotable
@@ -64,6 +124,9 @@ class SnapshotVars(MutableMapping):
                 type(key).__name__,
             )
             return
+        if key == _TAGGED_KEY and _is_tagged_value(value):
+            logger.warning("SnapshotVars: %r will NOT be stored: %s", key, _TAGGED_REFUSED)
+            return
         try:
             serialize(value)
         except (SerializationError, TypeError, ValueError, RecursionError) as exc:
@@ -91,3 +154,54 @@ class SnapshotVars(MutableMapping):
 
     def __repr__(self) -> str:
         return f"SnapshotVars({self._data!r})"
+
+    # ── pydantic integration ─────────────────────
+
+    def to_json_data(self) -> dict[str, Any]:
+        """Return the plain-JSON form used by pydantic's JSON mode.
+
+        Raises ``ValueError`` naming the first key whose value is not JSON data
+        (a pydantic model, a tuple, ...): only plain JSON crosses sessions.
+        """
+        if _is_tagged(self._data):
+            raise ValueError(_TAGGED_REFUSED)
+        for key, value in self._data.items():
+            if reason := _non_json(value):
+                raise ValueError(
+                    f"var {key!r} holds {reason}, which is not plain JSON; "
+                    "Todo vars sent to another session must be JSON data "
+                    "(dict, list, str, int, float, bool, None)"
+                )
+        return dict(self._data)
+
+    @classmethod
+    def from_data(cls, value: Any) -> "SnapshotVars":
+        """Accept a ``SnapshotVars`` as-is, a plain dict or ``None``.
+
+        Never deserializes snapshot envelopes, so validating a model that embeds
+        ``SnapshotVars`` cannot import or construct arbitrary classes.
+        """
+        if isinstance(value, SnapshotVars):
+            return value
+        if value is None:
+            return cls()
+        if isinstance(value, dict):
+            if _is_tagged(value):
+                raise ValueError(_TAGGED_REFUSED)
+            return cls(value)
+        raise TypeError(f"expected a dict or SnapshotVars, got {type(value).__name__}")
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source: Any, handler: Any) -> Any:
+        from pydantic_core import core_schema
+
+        return core_schema.no_info_plain_validator_function(
+            cls.from_data,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda value: value.to_json_data(), when_used="json"
+            ),
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema: Any, handler: Any) -> dict[str, Any]:
+        return {"type": "object"}

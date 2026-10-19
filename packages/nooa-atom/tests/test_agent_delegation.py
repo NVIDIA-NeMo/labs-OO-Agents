@@ -63,7 +63,7 @@ async def test_delegate_returns_the_childs_done_with_its_task_result(
     assert "CHILD-PROMPT: fix the parser" in _messages(atom_models, "Fix parser")
     # The child is a session of its own, with its own record.
     [child] = atom_registry.children(root.id)
-    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle_batch", False)
+    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle_work", False)
     assert child.agent == ATOM_SPEC
     assert atom_registry.store.load_rows(child.id, frozenset({"TurnStarted"}))
 
@@ -156,18 +156,19 @@ async def test_a_todo_objective_goes_as_text_and_gets_the_report(
             "todo = self.todo.add('Fix the parser', description='parse() drops the last line')\n"
             "self.todo.comment(todo, 'suspect the loop bound')\n"
             "done = await self.delegate('Parser', todo)\n"
-            "return_result(Done(explanation='delegated'))"
+            "return_result(Done(explanation=done.result.report))"
         )
     ]
     atom_models.scripts["Parser"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
-    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     prompt = _messages(atom_models, "Parser")
     for text in ("Fix the parser", "parse() drops the last line", "suspect the loop bound"):
         assert text in prompt
+    # The report comes back in the TaskResult; delegate() writes nothing to the Todo.
+    assert outcome == Done(explanation="REPORT: off-by-one fixed")
     [todo] = root._agent.todo.list_todos()
-    assert [c.body for c in todo.comments][0] == "suspect the loop bound"
-    assert "REPORT: off-by-one fixed" in todo.comments[-1].body
+    assert [c.body for c in todo.comments] == ["suspect the loop bound"]
 
 
 async def test_delegating_past_the_depth_limit_fails_in_the_cell(

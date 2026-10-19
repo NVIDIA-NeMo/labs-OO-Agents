@@ -18,6 +18,7 @@ RESULT = (
 
 WAIT_FOREVER = """\
 self.queue_manager.queue("test_jobs")
+self.queue_manager.spawn(asyncio.Event().wait(), channel="test_jobs")
 return_result(Waiting(explanation="job running", on=["test_jobs"]))
 """
 
@@ -67,6 +68,30 @@ def test_a_solved_task_exits_0_and_prints_only_the_result(monkeypatch, workspace
     assert printed["turns"] == 1
     assert (workspace / ".nooa" / "sessions").is_dir()
     assert printed["session_id"]
+
+
+def test_the_turn_method_defaults_to_handle_batch_and_can_be_handle_orchestrate(
+    monkeypatch, workspace
+):
+    from nooa_atom import SessionStore
+    from nooa_atom.session.store import sessions_root
+
+    store = SessionStore(sessions_root(workspace))
+    for args, method in (
+        ((), "handle_batch"),
+        (("--turn-method", "handle_orchestrate"), "handle_orchestrate"),
+    ):
+        _model(monkeypatch, cell(RESULT))
+        outcome = _run(workspace, *args, "Create hello.py")
+        assert outcome.exit_code == 0, outcome.output
+        assert store.get(json.loads(outcome.stdout)["session_id"]).turn_method == method
+
+
+def test_an_unknown_turn_method_is_refused(monkeypatch, workspace):
+    _model(monkeypatch)
+    outcome = _run(workspace, "--turn-method", "handle", "Create hello.py")
+    assert outcome.exit_code == 2
+    assert "handle_batch" in outcome.output
 
 
 def test_a_run_stopped_at_the_turn_limit_exits_1(monkeypatch, workspace):

@@ -7,53 +7,36 @@ no live objects. Sessions, hosts and parent agents exchange these values;
 live agents never cross.
 """
 
+import hashlib
+import uuid
+from contextlib import suppress
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, SerializeAsAny, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializeAsAny,
+    ValidationError,
+    field_validator,
+)
 
 from nooa.context_blocks import EventBase
-from nooa.interactive import Done, NeedInput
+from nooa.interactive import Done, NeedInput, TaskResult  # noqa: F401  (TaskResult re-exported)
 from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:
     from nooa_atom.session.port import SessionPort
 
-SessionStatus = Literal["running", "idle", "retained", "closed", "on_disk"]
+SessionStatus = Literal["running", "working", "idle", "retained", "closed", "on_disk"]
+"""``running``: a turn is running. ``working``: its last turn ended ``Waiting``
+on a job of its own. ``idle``: live, nothing to do. ``retained``: an idle kept
+child (``spawn()``). ``closed``: closed for good. ``on_disk``: not loaded in
+this process."""
 ChildStatus = SessionStatus  # a child reports the same statuses as any session
 
 
-class TaskResult(BaseModel):
-    """Structured result of a delegated objective or a benchmark task.
-
-    The field descriptions are what the model reads when it builds one;
-    they come from the benchmark agent, which re-exports this class.
-    """
-
-    solution_description: str = Field(
-        description="What you did and why it solves the problem. Describe root cause and fix."
-    )
-    evidence: str = Field(
-        description=(
-            "Concrete evidence that the task is done: what tests passed, "
-            "what output was produced, what behavior changed. Not a guess -- "
-            "cite the actual results you observed."
-        )
-    )
-    how_to_verify: str = Field(
-        title="How to Verify",
-        description=(
-            "How a verifier can confirm correctness: concrete checks or steps and their "
-            "expected results. Include commands when appropriate; a shell command is not required."
-        ),
-    )
-    report: str = Field(
-        default="",
-        description="Concise human-readable report that a parent or runner shows inline.",
-    )
-
-
 class Receipt(BaseModel):
-    """Returned by ``submit()`` and ``steer()``: where an item went and its id.
+    """Returned by ``submit()``, ``steer()`` and ``ChildRef.send()``: where an item went and its id.
 
     ``delivered`` is ``queued`` when the item waits on a channel for a
     turn, ``steered`` when it was handed to the running turn's next model
@@ -67,7 +50,7 @@ class Receipt(BaseModel):
 
 
 class ChildRef(BaseModel):
-    """A handle on a child session: data plus methods.
+    """A handle on a child session: data plus ``wait()``, ``send()`` and ``close()``.
 
     It holds the child's id and a few facts, never the child itself. The
     methods find the parent's port at call time from the running turn, so
@@ -75,7 +58,8 @@ class ChildRef(BaseModel):
     reload, and one that arrives in a ``ChildResult`` can be acted on
     directly (``item.child.send(...)``). Only the child's parent can use
     it: ``parent_id`` is that parent, and the methods raise
-    ``ChildFailedError`` in any other session.
+    ``ChildFailedError`` in any other session. Its repr shows a question
+    of the child's that you have not answered.
     """
 
     id: str
@@ -83,30 +67,81 @@ class ChildRef(BaseModel):
     depth: int
     status: ChildStatus
     parent_id: str | None = None
+    todo_id: str | None = None
+    """The id of the Todo this child was briefed on (provenance only; nothing flows back)."""
 
-    async def wait(self) -> Done:
-        """Wait for the child's next ``Done`` and return it.
+    def __getattribute__(self, name: str) -> Any:
+        # ``status`` is live in the parent's turn (read from the registry);
+        # elsewhere, or when the registry no longer knows the child, it is
+        # the stored value, the status when the ref was made. Dumps,
+        # snapshots and comparisons read the stored field, so they are stable.
+        if name == "status":
+            port = _parent_port(self)
+            if port is not None:
+                with suppress(ChildFailedError):
+                    return port.child_status(object.__getattribute__(self, "id"))
+        return super().__getattribute__(name)
 
-        Raises ``ChildFailedError`` if the child fails or is closed first.
+    def __snapshot_data__(self) -> dict[str, Any]:
+        """The stored fields for a snapshot; never asks the port for the live status."""
+        return self.model_dump(mode="json")
+
+    @classmethod
+    def __restore_snapshot__(cls, data: dict[str, Any]) -> "ChildRef":
+        """Rebuild a ref from a snapshot: ``status``, or ``status_when_made`` in older ones."""
+        known = {key: value for key, value in data.items() if key in cls.model_fields}
+        if "status" not in known and "status_when_made" in data:
+            known["status"] = data["status_when_made"]
+        return cls.model_validate(known)
+
+    def __repr_args__(self) -> Any:
+        for name, value in super().__repr_args__():
+            yield (name, self.status) if name == "status" else (name, value)
+        port = _parent_port(self)
+        question = None
+        if port is not None:
+            with suppress(ChildFailedError):
+                question = port.pending_question(self.id)
+        if question is not None:
+            yield "pending_question", f"[{question.id}] {question.question}"
+
+    async def wait(self) -> "ChildResult | ChildQuestion":
+        """Wait for the child's next ``ChildResult`` or ``ChildQuestion`` and return it.
+
+        Raises ``ChildFailedError`` when the child fails or is closed, and at
+        once when waiting could never end: the child is idle with nothing
+        queued, or it waits for your answer. A ``ChildMessage`` does not end it.
         """
         return await _port(self).wait_child(self.id)
 
     async def send(self, item: Any, *, channel: str = "user_messages") -> "Receipt":
-        """Send an item (text or data) to the child on one of its channels."""
+        """Send the child a message: a running turn reads it next, an idle child starts a turn."""
         return await _port(self).send_child(self.id, item, channel=channel)
 
-    async def steer(self, text: str) -> "Receipt":
-        """Give the child's running turn extra text; queued if it is idle."""
-        return await _port(self).steer_child(self.id, text)
-
     async def close(self) -> None:
-        """Close the child session (its children first)."""
+        """Close the child session for good (its children first)."""
         await _port(self).close_child(self.id)
 
-    @property
-    def info(self) -> "SessionInfo":
-        """The child's current metadata."""
-        return _port(self).child_info(self.id)
+
+def question_id(child_id: str, reply: int) -> str:
+    """The id of the question a child asked in its ``reply``-th reply.
+
+    ``reply`` counts the child's replies as ``SessionInfo.reply_count`` does
+    (its messages and its ended turns). The child's session stores it in the
+    ``need_input`` outcome, so the live question and the one read back from
+    the record after a reload have the same id.
+    """
+    return hashlib.sha1(f"{child_id}:{reply}".encode()).hexdigest()[:8]
+
+
+def _parent_port(ref: ChildRef) -> "SessionPort | None":
+    """The running turn's port when it is ``ref``'s parent, else ``None``."""
+    from nooa_atom.session.port import current_port
+
+    port = current_port.get()
+    if port is None or (ref.parent_id is not None and ref.parent_id != port.id):
+        return None
+    return port
 
 
 def _port(ref: ChildRef) -> "SessionPort":
@@ -122,7 +157,7 @@ def _port(ref: ChildRef) -> "SessionPort":
 
 
 class ChildFailedError(RuntimeError):
-    """Raised by ``ChildRef.wait()`` when the child fails or is closed before a ``Done``."""
+    """A child's turn failed, it is closed, or waiting for it could never end."""
 
 
 class ChildResult(BaseModel):
@@ -130,7 +165,9 @@ class ChildResult(BaseModel):
 
     A ``done.result`` that arrives as data (a child that returned a dict, or
     a result reloaded from the record) is rebuilt as a ``TaskResult`` when it
-    is one. ``delegate()`` gets its ``Done`` through this class too.
+    is one. A worker's ``done.result`` is always a ``TaskResult``: its turn
+    cannot end ``Done`` without one. ``delegate()`` gets its ``Done`` through
+    this class too.
     """
 
     child: ChildRef
@@ -149,26 +186,33 @@ class ChildResult(BaseModel):
 
 
 class ChildQuestion(BaseModel):
-    """A child asked a question (its ``NeedInput``); answer with ``item.answer(...)``.
+    """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``.
 
+    It is data. Any ``send()`` to the child, and the child's next turn, end
+    it as the child's pending question; ``id`` names it until then.
     ``answer_schema`` is the JSON schema of the child's ``answer_type`` when
-    it gave one; the answer is then a dict matching it.
+    it gave one; the reply is then a dict matching it. An unanswered
+    question does not stop you from ending your own turn with ``Done``.
     """
 
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
     child: ChildRef
     question: str
     options: list[str] | None = None
+    reason: str | None = None
     answer_schema: dict[str, Any] | None = None
 
     @classmethod
     def from_need_input(cls, child: ChildRef, need: NeedInput) -> "ChildQuestion":
         """Convert a child's ``NeedInput``; its answer class becomes a JSON schema."""
         schema = need.answer_type.model_json_schema() if need.answer_type is not None else None
-        return cls(child=child, question=need.question, options=need.options, answer_schema=schema)
-
-    async def answer(self, answer: Any) -> "Receipt":
-        """Send the answer to the child; shorthand for ``self.child.send(answer)``."""
-        return await self.child.send(answer)
+        return cls(
+            child=child,
+            question=need.question,
+            options=need.options,
+            reason=getattr(need, "reason", None),
+            answer_schema=schema,
+        )
 
 
 class ChildFailed(BaseModel):
@@ -176,6 +220,18 @@ class ChildFailed(BaseModel):
 
     child: ChildRef
     error: str
+
+
+class ChildMessage(BaseModel):
+    """A child sent a message with ``self.message()``; delivered on the parent's ``delegates`` channel.
+
+    One item per message, in order, before the result of the same turn: a
+    progress note, not the result (a worker's result is its ``TaskResult``).
+    It does not end ``ChildRef.wait()``, which waits for a result or a question.
+    """
+
+    child: ChildRef
+    text: str
 
 
 class TurnCancelledOutcome(BaseModel):
@@ -274,7 +330,10 @@ class SessionInfo(BaseModel):
     mode: str = "auto"
     status: SessionStatus = "on_disk"
     retained: bool = False
+    """A kept child (``spawn()``): it stays open after its results."""
     turn_method: str = "handle"
+    todo_id: str | None = None
+    """The id of the Todo this child was briefed on (provenance only; nothing flows back)."""
     created_at: float = 0.0
     last_active: float = 0.0
     turn_count: int = 0

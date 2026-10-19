@@ -14,6 +14,12 @@ Envelope format for non-primitive types::
 
     {"__type__": "tuple",
      "data": [...]}
+
+A plain dict that itself carries an envelope key (``__type__`` or
+``__class__``) is escaped as ``{"__type__": "plain_dict", "data": {...}}`` so
+it comes back as the same plain dict instead of being read as an envelope:
+data must not choose what ``deserialize()`` builds. Blobs written before the
+escape existed contain no ``plain_dict`` envelopes and load unchanged.
 """
 
 from __future__ import annotations
@@ -58,6 +64,9 @@ _PYDANTIC = "pydantic"
 _DATACLASS = "dataclass"
 _DICT_CLASS = "dict_class"
 _TUPLE = "tuple"
+_PLAIN_DICT = "plain_dict"
+# Keys that make a dict look like an envelope; plain dicts carrying them are escaped.
+_ENVELOPE_KEYS = ("__type__", "__class__")
 _ENVELOPE_TYPES = frozenset({_PYDANTIC, _DATACLASS, _DICT_CLASS, _TUPLE})
 _LEGACY_CLASS_PREFIXES = {
     "nemo_oo_agents.": "nooa.",
@@ -133,6 +142,8 @@ def _serialize(value: Any, allowlist: set[str]) -> Any:
             serialized = _serialize(v, allowlist)
             if serialized is not SKIP:
                 result[k] = serialized
+        if any(key in value for key in _ENVELOPE_KEYS):
+            return {"__type__": _PLAIN_DICT, "data": result}
         return result
     if isinstance(value, tuple):
         return {
@@ -153,7 +164,14 @@ def _serialize(value: Any, allowlist: set[str]) -> Any:
         if snapshot_data := getattr(value, "__snapshot_data__", None):
             # Durable JSON types can own their schema and migration. Other
             # models still need recursive envelopes for arbitrary live fields.
-            return {"__type__": _PYDANTIC, "__class__": fqn, "data": snapshot_data()}
+            # Serialize each value too, so a nested plain dict that looks like an
+            # envelope is escaped and comes back as a dict, not a typed object.
+            data = {
+                k: s
+                for k, v in snapshot_data().items()
+                if (s := _serialize(v, allowlist)) is not SKIP
+            }
+            return {"__type__": _PYDANTIC, "__class__": fqn, "data": data}
         # Iterate over model_fields directly so nested non-Pydantic objects
         # (dataclasses, @snapshotable) are serialized with their type envelopes
         # instead of being flattened to plain dicts by model_dump().
@@ -215,6 +233,9 @@ def _deserialize(blob: Any, allowlist: set[str]) -> Any:
     # Dicts — check if envelope
     if isinstance(blob, dict):
         envelope_type = blob.get("__type__")
+        if envelope_type == _PLAIN_DICT and isinstance(blob.get("data"), dict):
+            # An escaped plain dict: restore its values, never the dict itself.
+            return {k: _deserialize(v, allowlist) for k, v in blob["data"].items()}
         if envelope_type == _TUPLE and "data" in blob:
             return tuple(_deserialize(item, allowlist) for item in blob["data"])
         if envelope_type in _ENVELOPE_TYPES and "__class__" in blob and "data" in blob:

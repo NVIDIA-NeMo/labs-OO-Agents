@@ -12,7 +12,8 @@ queues and re-enters ``handle()`` once per notification. It provides:
   and sessions,
 * ``message()`` — send a Markdown message to the user,
 * the turn protocol: ``handle()`` returns ``Done``, ``NeedInput`` or
-  ``Waiting``; ``handle_batch()`` runs unattended turns and returns ``Done`` or ``Waiting``,
+  ``Waiting``; ``handle_batch()`` runs unattended turns and returns ``Done`` or ``Waiting``;
+  ``handle_work()`` is a child session's worker turn, whose ``Done`` carries a ``TaskResult``,
 * token-budget history summarization (``install_summarizer`` /
   ``apply_model_limits``).
 
@@ -22,7 +23,14 @@ interactive hosts such as the TUI and ACP.
 
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from nooa import hidden, strategy
 from nooa.agentdoc import doc  # noqa: F401  # visible in the REPL, as on base
@@ -42,6 +50,7 @@ with hidden:
     from nooa.runtime.producers_skill import ProducersSkill
     from nooa.runtime.turn_loop import TurnLoop
     from nooa.strategies import CodeActStrategy
+    from nooa.strategy_validation import InvariantError
 
 # Standard library — all visible in REPL
 import asyncio  # noqa: F401
@@ -104,8 +113,8 @@ class Done(BaseModel):
     ends. ``explanation`` stays a short status line. ``evidence`` is
     optional: short factual lines a reviewer can check, used when you
     verified something. ``result`` is set only when a delegated objective
-    or benchmark task completes; it is then a ``TaskResult`` (defined with
-    the bench and session code, so it is typed ``Any`` here).
+    or benchmark task completes; it is then a ``TaskResult`` (a worker
+    turn, ``handle_work``, requires one; other turns may leave it unset).
     """
 
     explanation: str = Field(description="Status line saying what was finished; not the reply")
@@ -206,6 +215,72 @@ class Waiting(BaseModel):
         return [_non_blank(name) for name in value]
 
 
+class TaskResult(BaseModel):
+    """Structured result of a delegated objective or a benchmark task.
+
+    A worker turn (``handle_work``) ends with a ``Done`` whose ``result`` is
+    one. The field descriptions are what the model reads when it builds one.
+    """
+
+    solution_description: str = Field(
+        description="What you did and why it solves the problem. Describe root cause and fix."
+    )
+    evidence: str = Field(
+        description=(
+            "Concrete evidence that the task is done: what tests passed, "
+            "what output was produced, what behavior changed. Not a guess -- "
+            "cite the actual results you observed."
+        )
+    )
+    how_to_verify: str = Field(
+        title="How to Verify",
+        description=(
+            "How a verifier can confirm correctness: concrete checks or steps and their "
+            "expected results. Include commands when appropriate; a shell command is not required."
+        ),
+    )
+    report: str = Field(
+        default="",
+        description="Concise human-readable report that a parent or runner shows inline.",
+    )
+
+
+ONE_SHOT_QUESTION: Annotated[str, hidden] = (
+    "Your parent can't answer a one-shot worker: decide, state your assumptions in "
+    "the TaskResult report, and return Done."
+)
+
+
+@hidden
+def require_task_result(agent: Any, result: Any, call: Any) -> None:
+    """Reject a worker ``Done`` whose ``result`` is not a ``TaskResult``, and a one-shot question.
+
+    The postcondition of every worker turn (``handle_work``). A worker's
+    parent reads ``done.result``; ``self.message()`` text reaches it only as
+    progress notes. A dict that validates as a ``TaskResult`` is accepted
+    (the parent receives it as one). A one-shot worker may not ask: its
+    session port says so (``agent.session.may_ask``).
+    """
+    if isinstance(result, NeedInput):
+        port = getattr(agent, "session", None)
+        if port is not None and not getattr(port, "may_ask", True):
+            raise InvariantError(ONE_SHOT_QUESTION)
+        return
+    if not isinstance(result, Done) or isinstance(result.result, TaskResult):
+        return
+    if isinstance(result.result, dict):
+        try:
+            TaskResult.model_validate(result.result)
+            return
+        except ValidationError:
+            pass
+    raise InvariantError(
+        "A worker turn must end with Done(explanation=..., result=TaskResult(...)): "
+        "set solution_description, evidence and how_to_verify, and put the full report "
+        "in report. Your parent reads only the result; self.message() is no substitute."
+    )
+
+
 class AgentMessage(Metadata):
     """A Markdown message sent by the agent to the user via ``self.message()``.
 
@@ -216,6 +291,12 @@ class AgentMessage(Metadata):
     _role: ClassVar[Role] = Role.METADATA
 
     content: str = ""
+    is_result_text: bool = False
+    """The text of the turn's ``Done``/``Waiting`` message, not a progress message.
+
+    A session hands it to a parent with the turn's result, so a relay of
+    progress messages skips it.
+    """
 
 
 class SummarizationConfig(BaseModel):
@@ -483,6 +564,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
 
+        In a child session the text goes to the parent instead, as a
+        ``ChildMessage`` on its ``delegates`` channel: a progress note, not
+        the child's result.
+
         Each call renders as an independent block — so every call must be a
         complete, self-contained Markdown document.  In particular, never split
         a table across calls: the header row and all data rows must be in the
@@ -496,15 +581,20 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
                 ``echo=True`` when you need to reference the sent content in
                 subsequent cells.
         """
-        event = AgentMessage(content=str(text))
+        self._send_message(text)
+        if echo:
+            print(text)
+
+    @hidden
+    def _send_message(self, text: str, *, is_result_text: bool = False) -> None:
+        """Record and render one message; ``is_result_text`` marks a turn result's message."""
+        event = AgentMessage(content=str(text), is_result_text=is_result_text)
         tag = self.event_manager.add(event)
         if self._render_message is not None:
             try:
                 self._render_message(text, event_id=str(event.id), tags={str(tag)})
             except TypeError:
                 self._render_message(text)
-        if echo:
-            print(text)
 
     @hidden
     @strategy(CodeActStrategy())
@@ -610,5 +700,47 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
           Set ``result`` when the task asks for a structured result.
         - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
           background job or queue you started. ``on`` names it.
+        """
+        ...
+
+    @hidden
+    @strategy(CodeActStrategy(config=CodeActConfig(postconditions=[require_task_result])))
+    async def handle_work(
+        self,
+        notification: dict[str, list],
+    ) -> Done | NeedInput | Waiting:
+        """Work on a task for your parent agent and report back to it.
+
+        You are a child session. Your parent is an agent, not a person, and it
+        reads only your result. The task is in ``notification["user_messages"]``;
+        its first line says whether you can ask your parent questions (later
+        messages there are follow-ups). Your task is the brief; your
+        ``TaskResult`` is your report; a Todo in your list is your own working
+        copy. Do all the work, verify it, then end with exactly one
+        ``return_result(...)``:
+
+        - ``Done`` with a ``TaskResult``, when the task is finished or blocked
+          (then say what blocked you and what you tried)::
+
+              return_result(Done(
+                  explanation="fixed the parser bug",
+                  result=TaskResult(
+                      solution_description="What was done, including modified paths",
+                      evidence="Commands run and what they showed",
+                      how_to_verify="How someone else can check it",
+                      report="The full report for your parent",
+                  ),
+              ))
+
+          ``TaskResult`` comes from ``nooa.interactive``, like ``Done``; a dict
+          with the same fields is accepted.
+        - ``NeedInput(question=...)`` only if you can ask (a kept child) and
+          cannot go on without your parent's answer; it arrives as your next
+          message. A one-shot worker's question is rejected.
+        - ``Waiting(explanation=..., on=[...])`` only while a job you started
+          is still running.
+
+        ``self.message()`` sends your parent a progress note (a
+        ``ChildMessage``); it does not replace the result.
         """
         ...

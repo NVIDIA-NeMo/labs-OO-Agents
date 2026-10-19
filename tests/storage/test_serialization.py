@@ -870,3 +870,66 @@ class TestAdditionalEdgeCases:
         assert isinstance(restored.payload.config, DeepConfig)
         assert restored.payload.config.host == "db.local"
         assert restored.payload.config.port == 5432
+
+
+# ---------------------------------------------------------------------------
+# Plain dicts shaped like envelopes are escaped (PR #451 review 3, finding 1)
+# ---------------------------------------------------------------------------
+
+
+class SnapshotOwned(BaseModel):
+    """A model that writes its own snapshot data, like LLMResponse and ChildRef."""
+
+    payload: dict[str, Any]
+
+    def __snapshot_data__(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class TestEnvelopeShapedPlainDicts:
+    def test_snapshot_data_with_an_envelope_shaped_dict_comes_back_as_that_dict(self):
+        plain = {"__type__": "pydantic", "__class__": f"{__name__}.MyModel", "data": {"name": "x"}}
+        blob, al = serialize(SnapshotOwned(payload={"native": plain}))
+        restored = deserialize(blob, al)
+        assert isinstance(restored, SnapshotOwned)
+        assert restored.payload == {"native": plain}
+
+    def test_a_plain_dict_shaped_like_a_pydantic_envelope_comes_back_as_that_dict(self):
+        plain = {"__type__": "pydantic", "__class__": f"{__name__}.MyModel", "data": {"name": "x"}}
+        blob, al = serialize({"x": plain})
+        assert deserialize(blob, al) == {"x": plain}
+
+    def test_a_plain_dict_naming_a_class_outside_the_allowlist_still_loads(self):
+        plain = {"__type__": "pydantic", "__class__": "os.system", "data": {}}
+        blob, al = serialize([plain, {"__class__": "x"}, {"__type__": "tuple", "data": [1]}])
+        assert deserialize(blob, al) == [
+            plain,
+            {"__class__": "x"},
+            {"__type__": "tuple", "data": [1]},
+        ]
+
+    def test_escaped_dict_values_are_still_restored(self):
+        value = {"__type__": "mine", "point": Point(1.0, 2.0), "pair": (1, 2)}
+        blob, al = serialize(value)
+        assert deserialize(blob, al) == value
+
+    def test_an_escaped_dict_inside_an_escaped_dict_round_trips(self):
+        value = {"__type__": "plain_dict", "data": {"__type__": "plain_dict", "data": {}}}
+        blob, al = serialize(value)
+        assert deserialize(blob, al) == value
+
+    def test_a_blob_written_before_the_escape_still_loads(self):
+        # A blob as serialize() wrote it before plain_dict existed.
+        old_blob = {
+            "model": {
+                "__type__": "pydantic",
+                "__class__": f"{__name__}.MyModel",
+                "data": {"name": "a", "value": 2},
+            },
+            "pair": {"__type__": "tuple", "data": [1, 2]},
+            "plain": {"a": [1, {"b": None}]},
+        }
+        restored = deserialize(old_blob, {f"{__name__}.MyModel"})
+        assert restored["model"] == MyModel(name="a", value=2)
+        assert restored["pair"] == (1, 2)
+        assert restored["plain"] == {"a": [1, {"b": None}]}
