@@ -713,6 +713,17 @@ class QueueManager:
         # TUI) react to puts — such as (re)starting its dispatcher — via a
         # supported API instead of monkey-patching _set_notify.
         self._notify_callback: Callable[[], None] | None = None
+        # channel name -> status() cancel hint template with ``{label}``.
+        self._cancel_hints: dict[str, str] = {}
+
+    def set_cancel_hint(self, channel: str, template: str) -> None:
+        """Show ``template.format(label=...)`` as the cancel hint for jobs on ``channel``.
+
+        For channels owned by a model-facing API (``self.jobs``): ``status()``
+        then names that API instead of the hidden ``queue_manager`` and does
+        not offer the channel for removal.
+        """
+        self._cancel_hints[channel] = template
 
     def set_notify_callback(self, callback: Callable[[], None] | None) -> None:
         """Register an extra callback fired after each channel ``put()``.
@@ -919,18 +930,27 @@ class QueueManager:
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
 
-        # Cheat sheet: show cancel/cleanup commands
-        cancel_hints = [f".cancel('{h.name}')" for h in active_spawns]
+        # Cheat sheet: show cancel/cleanup commands. Channels owned by a
+        # model-facing API (``set_cancel_hint``) show that API's command
+        # instead, and are not offered for removal.
+        owned = self._cancel_hints
+        cancel_hints = [f".cancel('{h.name}')" for h in active_spawns if h.name not in owned]
         extra = [
             n
             for n, ch in self._channels.items()
-            if n != "user_messages" and (ch.mode != "queue" or not ch.is_empty())
+            if n != "user_messages" and n not in owned and (ch.mode != "queue" or not ch.is_empty())
         ]
         cleanup_hints = [f".remove_channel('{n}')" for n in extra]
         all_hints = cancel_hints + cleanup_hints
         if all_hints:
             hints = " | ".join(all_hints)
             cheat = f"💡 self.queue_manager{hints} | .shutdown()"
+            body = f"{body}\n{cheat}" if body else cheat
+        owned_hints = [
+            owned[h.name].format(label=h.label) for h in active_spawns if h.name in owned
+        ]
+        if owned_hints:
+            cheat = "💡 " + " | ".join(owned_hints)
             body = f"{body}\n{cheat}" if body else cheat
 
         return body or "(nothing queued)"

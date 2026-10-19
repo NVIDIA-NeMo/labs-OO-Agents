@@ -94,7 +94,7 @@ async def test_need_input_is_returned_and_shown_as_a_question(make_session):
 
 async def test_waiting_keeps_prompt_open_until_a_later_turn_ends(make_session):
     session, _ = make_session(wait_on("jobs"), done("job finished"), start=False)
-    jobs = session._agent.queue_manager.queue("jobs")
+    jobs = session._agent.queue_manager.get_channel("jobs")  # every agent has one
     session.start()
     ended = []
     session.subscribe(lambda e: ended.append(e) if isinstance(e, TurnEndedUpdate) else None)
@@ -464,7 +464,6 @@ async def test_a_flushed_item_fails_its_outcome_and_is_not_requeued(make_session
 
 async def test_an_item_on_a_removed_channel_fails_its_outcome(make_session):
     session, _ = make_session(start=False)
-    session._agent.queue_manager.queue("jobs")
     receipt = await session.submit({"job": 1}, channel="jobs")
     pending = asyncio.ensure_future(session.outcome(receipt.item_id))
     await asyncio.sleep(0)

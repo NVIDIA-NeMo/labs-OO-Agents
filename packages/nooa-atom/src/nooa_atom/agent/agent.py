@@ -19,6 +19,7 @@ from nooa.interactive import (
     install_summarizer,
 )
 from nooa.paths import get_project_dir
+from nooa.runtime.jobs import JobInfo, JobResult, JobUpdate  # noqa: F401  (visible to cells)
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
@@ -121,8 +122,11 @@ class AtomAgent(InteractiveAgent):
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
-    check passed without running it. Send each user-facing answer through
-    ``self.message()`` as a complete Markdown document.
+    check passed without running it. Run anything that may take more than a
+    minute or two (test suites, builds, long scripts) with ``self.jobs.run(...)``
+    instead of blocking a cell, and if nothing else is left end the turn with
+    ``Waiting(explanation=..., on=["jobs:<label>"])``. Send each user-facing answer
+    through ``self.message()`` as a complete Markdown document.
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
@@ -216,13 +220,17 @@ class AtomAgent(InteractiveAgent):
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
         # Memory integration is deferred; do not auto-load its entry point.
-        # Also ignore the retired web publisher entry point in older installed
-        # package metadata.
+        # Also ignore the retired web publisher and producers entry points in
+        # older installed package metadata (``self.jobs`` replaced producers).
         loaded = set(self.skills.loaded())
         installed = []
         for name in self.skills.discovered():
             attr_name = name.rsplit(".", 1)[-1].replace("-", "_")
-            if name in {"nemo.memory", "nemo.web"} or name in loaded or hasattr(self, attr_name):
+            if (
+                name in {"nemo.memory", "nemo.web", "nemo.producers"}
+                or name in loaded
+                or hasattr(self, attr_name)
+            ):
                 continue
             installed.append(name)
         if installed:

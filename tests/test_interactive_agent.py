@@ -38,14 +38,14 @@ def agent():
     return _Host(llm=FakeLLMClient())
 
 
-def test_declares_only_the_user_channel(agent):
-    """Being dispatcher-driven implies a human feeding it, and nothing more.
+def test_declares_only_the_user_and_jobs_channels(agent):
+    """Being dispatcher-driven implies a human feeding it, plus ``self.jobs`` output.
 
     Hosts declare whatever else they need. slash_commands and system_messages
     are coding-host concepts and live on CodingAgent — see
     packages/nooa-cli/tests/test_coding_agent.py.
     """
-    assert agent.queue_manager.channels().keys() == {"user_messages"}
+    assert agent.queue_manager.channels().keys() == {"user_messages", "jobs"}
     # Reader facade exposed under the public name; producer side hidden.
     assert agent.user_messages is agent._user_messages_in.reader
 

@@ -86,7 +86,8 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
       turn ended Waiting on its own job) or has queued input.
 
     - any channel with an item already buffered on it (a job that finished
-      during the turn with its result queued, by its channel name).
+      during the turn with its result queued, by its channel name), and
+      ``"jobs:<label>"`` when a ``self.jobs`` item with that label is buffered.
 
     The person (``"user_messages"``) is never a valid target. Anything else
     raises ``WaitingTargetNotRunning``, which the strategy shows the model
@@ -158,7 +159,14 @@ def _running_names(agent: Any) -> dict[str, Any]:
     # A channel with an item already buffered delivers at once: a job that
     # finished during the turn (its result queued on its channel) or a
     # child's outcome on ``delegates``.
-    now |= {name for name, channel in queues.channels().items() if channel.qsize() > 0}
+    channels = queues.channels()
+    now |= {name for name, channel in channels.items() if channel.qsize() > 0}
+    # A ``self.jobs`` job that already delivered: its labelled item is buffered.
+    if "jobs" in channels:
+        for item in channels["jobs"].snapshot():
+            label = getattr(item, "label", None)
+            if isinstance(label, str) and label:
+                now.add(f"jobs:{label}")
     if any(children.values()):
         now.add("delegates")
     if handles:

@@ -47,7 +47,6 @@ with hidden:
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
     from nooa.events import _json_safe
     from nooa.runtime.channels import Channel, ChannelReader, QueueManager
-    from nooa.runtime.producers_skill import ProducersSkill
     from nooa.runtime.turn_loop import TurnLoop
     from nooa.strategies import CodeActStrategy
     from nooa.strategy_validation import InvariantError
@@ -59,6 +58,7 @@ import json  # noqa: F401
 import re  # noqa: F401
 
 from nooa.runtime import producers  # noqa: F401
+from nooa.runtime.jobs import JobInfo, JobResult, JobsApi, JobUpdate  # noqa: F401
 from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: F401
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
@@ -499,6 +499,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # Read-only facade (just .get() / .status() / .name) is what the
     # LLM sees as ``self.user_messages``.
     user_messages: Annotated[ChannelReader, nosnapshot]
+    # Background jobs (``self.jobs``): the model-facing view of
+    # ``queue_manager.spawn``. Their results arrive on the ``jobs`` channel.
+    _jobs_in: Annotated[Channel, hidden, nosnapshot]
+    jobs: Annotated[JobsApi, nosnapshot]
     # Persistent variables for the LLM — survives across turns AND
     # across sessions (snapshot-backed). Accessed via the ``self.v``
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
@@ -513,7 +517,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self.user_messages = self._user_messages_in.reader
         self.event_manager.on_close(self.queue_manager.shutdown)
         self.turns = TurnLoop(self)
-        self.producers = ProducersSkill()
+        self._jobs_in = self.queue_manager.queue("jobs")
+        self.jobs = JobsApi(self)
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
         # from the ``queues`` context block. Composed via
@@ -676,6 +681,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Recognized ``queue_name`` values:
 
         - ``"user_messages"`` — text from the human; ``item`` is a str.
+        - ``"jobs"`` — output of ``self.jobs`` background jobs; each item
+          (``JobResult`` or ``JobUpdate``) has a ``.label``.
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned

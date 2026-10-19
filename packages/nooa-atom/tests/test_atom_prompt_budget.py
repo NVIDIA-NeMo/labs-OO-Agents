@@ -105,11 +105,16 @@ RESULT = (
 # Re-measured after merging dev/atom with #447 into #451 (2026-10-19): #447's
 # truthful API text plus the child-session docs, 273 characters more in the system
 # prompt for every row (was 14,909). Measured values plus about 2% headroom.
+# Raised for self.jobs (2026-10-19): the class doc says to run long work with
+# self.jobs.run(...) and wait on "jobs:<label>", and the self doc lists the
+# jobs attribute: 224 characters more in the system prompt and in total for
+# every row (handle measured 18,475 total before, not 18,240). Measured values
+# plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (15_500, 18_600),  # measured 15,182 / 18,240
-    (ATOM, "handle_batch"): (15_500, 18_100),  # measured 15,182 / 17,732
-    (ATOM, "handle_work"): (15_500, 18_600),  # measured 15,182 / 18,202
-    (ATOM, "handle_orchestrate"): (15_500, 20_100),  # measured 15,182 / 19,684
+    (ATOM, "handle"): (15_800, 19_100),  # measured 15,406 / 18,699
+    (ATOM, "handle_batch"): (15_800, 18_400),  # measured 15,406 / 17,956
+    (ATOM, "handle_work"): (15_800, 18_800),  # measured 15,406 / 18,426
+    (ATOM, "handle_orchestrate"): (15_800, 20_400),  # measured 15,406 / 19,908
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
