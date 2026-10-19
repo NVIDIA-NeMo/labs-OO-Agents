@@ -107,14 +107,14 @@ def _config(workspace: Path, **overrides):
 class _Session:
     """One executor plus the temp workspace it was granted."""
 
-    def __init__(self, workspace: Path, *, agent=None, **overrides):
+    def __init__(self, workspace: Path, *, agent=None, cell_timeout: float = 90, **overrides):
         from nooa.runtime.sandbox.executor import SandboxedExecutor
 
         self.workspace = workspace
         self.executor = SandboxedExecutor(
             agent if agent is not None else _agent_instance(),
             _config(workspace, **overrides),
-            cell_timeout=90,
+            cell_timeout=cell_timeout,
             framework_builtins={},
         )
 
@@ -336,6 +336,87 @@ def test_cpu_limit_kills_and_the_session_recovers(session):
         followup = session.run("1 + 1")
         assert followup.error is None, followup.error
         assert followup.returned_value == 2
+    finally:
+        session.close()
+
+
+def test_memory_limit_stops_a_runaway_allocation(tmp_path):
+    """A cell that allocates past the ceiling must die, not swap or OOM the host.
+
+    ``max_memory_mb`` is headroom above the worker's own baseline, so the
+    launcher can only set the job's absolute ``ProcessMemoryLimit`` after the
+    worker reports that baseline. Setting it too early kills a worker that has
+    not imported the agent yet; setting it too high, or not at all, makes the
+    guardrail a no-op that no other test here would notice.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace, max_memory_mb=256)
+    try:
+        # Touch every page: an untouched bytearray is virtual, and the job's
+        # limit is on committed memory, so allocating alone may not trip it.
+        code = (
+            "blocks = []\n"
+            "for _ in range(40):\n"
+            "    block = bytearray(32 * 1024 * 1024)\n"
+            "    for offset in range(0, len(block), 4096):\n"
+            "        block[offset] = 1\n"
+            "    blocks.append(block)\n"
+            "len(blocks)\n"
+        )
+        result = session.run(code)
+        assert result.error is not None, "the memory limit did not stop the allocation"
+        # Measured: the job's ProcessMemoryLimit makes the allocation fail and
+        # the cell reports MemoryError; it does not kill the worker. Asserting
+        # the error's kind is what distinguishes "the limit bit" from "the cell
+        # happened to fail for some other reason".
+        assert "memory" in str(result.error).lower(), result.error
+        # The worker survives that error; what matters is that the session can
+        # still be used, which is what distinguishes a limit from a wedge.
+        followup = session.run("1 + 1", count=2)
+        assert followup.error is None, followup.error
+        assert followup.returned_value == 2
+    finally:
+        session.close()
+
+
+def test_memory_limit_leaves_ordinary_work_alone(tmp_path):
+    """The control for the test above: the same session runs normal cells.
+
+    Without it, a launcher that sets the limit to something tiny (or to the
+    baseline itself) would pass the denial test while making every real cell
+    fail. A few MiB is well inside a 256 MiB headroom.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace, max_memory_mb=256)
+    try:
+        result = session.run("data = bytearray(8 * 1024 * 1024)\nlen(data)")
+        assert result.error is None, result.error
+        assert result.returned_value == 8 * 1024 * 1024
+    finally:
+        session.close()
+
+
+def test_wallclock_timeout_kills_a_cpu_bound_cell(tmp_path):
+    """The parent's deadline must kill a cell that ignores every other guard.
+
+    This is the guardrail that does not depend on the child cooperating: no
+    capability, ACL or job limit is consulted, the parent simply stops waiting
+    and terminates. The follow-up cell is the part that matters — a kill that
+    leaves the session unusable is a different, worse failure than the one this
+    test exists to catch.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace, cell_timeout=1.0, timeout_grace_s=1.0)
+    try:
+        result = session.run("while True:\n    pass")
+        assert result.error is not None, "the deadline did not stop a runaway cell"
+        assert "deadline" in str(result.error).lower() or "kill" in str(result.error).lower()
+        followup = session.run("40 + 2", count=2)
+        assert followup.error is None, followup.error
+        assert followup.returned_value == 42
     finally:
         session.close()
 
