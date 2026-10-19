@@ -1167,3 +1167,36 @@ async def test_an_old_record_with_a_child_todo_base_row_reloads(
         assert "ChildTodoBase" not in _messages(later, None)
     finally:
         await fresh.close_all()
+
+
+async def test_spawn_and_send_refuse_the_same_non_json_todo_var(
+    atom_registry, atom_options, atom_models
+):
+    """Review-3 finding 2: the in-process hand-over applies send()'s JSON check."""
+    atom_models.scripts[None] = [
+        _wait_then("self.v.ref = await self.spawn('Kept', 'first task')"),
+        cell(
+            "from pydantic_core import PydanticSerializationError\n"
+            "t = self.todo.add('With a tuple')\n"
+            "self.todo.set_var(t, 'pair', (1, 2))\n"
+            "errors = []\n"
+            "try:\n"
+            "    await self.spawn('S', t)\n"
+            "except PydanticSerializationError as exc:\n"
+            "    errors.append(\"var 'pair' holds a tuple\" in str(exc))\n"
+            "try:\n"
+            "    await self.delegate('D', t)\n"
+            "except PydanticSerializationError as exc:\n"
+            "    errors.append(\"var 'pair' holds a tuple\" in str(exc))\n"
+            "try:\n"
+            "    await self.v.ref.send(t)\n"
+            "except PydanticSerializationError as exc:\n"
+            "    errors.append(\"var 'pair' holds a tuple\" in str(exc))\n"
+            "return_result(Done(explanation=f'{errors} {len(self.children())}'))"
+        ),
+    ]
+    atom_models.scripts["Kept"] = [cell(CHILD_RESULT)]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    # All three refuse naming the key, and no second child was started.
+    assert outcome == Done(explanation="[True, True, True] 1")

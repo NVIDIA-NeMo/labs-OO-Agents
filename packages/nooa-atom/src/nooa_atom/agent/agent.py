@@ -780,10 +780,14 @@ async def _start_child(
 
     A Todo prompt is a one-way brief: only its fields are read, into the
     child's first message and a copy for the child's own list. The parent's
-    Todo (managed or hand-built) is never changed or tracked.
+    Todo (managed or hand-built) is never changed or tracked. The child's copy
+    is built by ``as_data``, as ``ref.send(todo)`` builds it, so a var that is
+    not plain JSON is refused here too, naming its key, before any child starts.
     """
+    from nooa_atom.session.session import as_data
+
     port = agent._port()
-    handed = prompt.model_copy(deep=True) if isinstance(prompt, Todo) else None
+    handed = as_data(prompt) if isinstance(prompt, Todo) else None
     text = _child_prompt(port.name, port.id, prompt, handed, brief, kept=kept)
     return await port.delegate(description, text, model=model, kept=kept, todo=handed)
 
