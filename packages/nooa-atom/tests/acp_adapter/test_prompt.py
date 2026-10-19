@@ -374,7 +374,7 @@ async def test_trace_url_answers_with_the_viewer_url(atom_adapter, workspace, cl
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("/compact", "/compact is not available through ACP"),
+        ("/context", "/context is not available through ACP"),
         ("/connect", "nooa connect"),
     ],
 )
