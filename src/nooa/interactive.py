@@ -354,6 +354,13 @@ class AgentVars:
     def __setattr__(self, key: str, value: Any) -> None:
         self._agent.vars[key] = value
 
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if isinstance(key, str) and key.isidentifier():
+            hint = f"self.v.{key} = ..."
+        else:
+            hint = f"self.vars[{key!r}] = ..."
+        raise TypeError(f"self.v does not support item assignment; write {hint} instead.")
+
     def __delattr__(self, key: str) -> None:
         try:
             del self._agent.vars[key]

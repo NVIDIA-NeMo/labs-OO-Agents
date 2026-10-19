@@ -66,6 +66,15 @@ def test_persistent_vars_proxy(agent):
     assert isinstance(agent.v, AgentVars)
 
 
+def test_vars_proxy_item_assignment_names_the_attribute_form(agent):
+    with pytest.raises(TypeError, match=r"write self\.v\.cursor = \.\.\. instead"):
+        agent.v["cursor"] = 3
+    with pytest.raises(TypeError, match=r"write self\.vars\['my-key'\] = \.\.\. instead"):
+        agent.v["my-key"] = 3
+    assert "cursor" not in agent.vars
+    assert "my-key" not in agent.vars
+
+
 def test_message_records_event_and_renders(agent):
     rendered: list[str] = []
     agent._render_message = lambda text, **kw: rendered.append(text)

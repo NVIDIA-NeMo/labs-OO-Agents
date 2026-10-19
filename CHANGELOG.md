@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `self.v["x"] = ...` now raises a `TypeError` that names the working form
+  (`write self.v.x = ... instead`, or `self.vars['x'] = ...` for keys that are not
+  identifiers). It used to be Python's bare "'AgentVars' object does not support
+  item assignment". Nothing is stored either way.
 - `ShellTools.replace()` is split into two methods, with no backward
   compatibility: `replace(path, old, new)` edits a file by unique substring and
   `replace_match(match, new)` rewrites a Match's whole line region (same
