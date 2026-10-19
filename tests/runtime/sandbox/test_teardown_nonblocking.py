@@ -10,11 +10,17 @@ now runs the blocking join off the loop via ``asyncio.to_thread``.
 This uses a fake proc whose ``join`` blocks, so no real worker/fork is needed;
 the assertion is purely that a concurrent coroutine keeps making progress while
 teardown is in flight.
+
+The executor is built under the platform's own start method: constructing one
+with the default ``"fork"`` fails on Windows before any of this code runs, and
+the teardown paths under test do not depend on which method a worker would
+have used.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 import pytest
@@ -27,6 +33,10 @@ from nooa.unifiedllm import FakeLLMClient
 
 class _Agent(Agent, llm=FakeLLMClient()):
     pass
+
+
+# Windows has no "fork"; the teardown paths under test are identical either way.
+_START_METHOD = "spawn" if os.name == "nt" else "fork"
 
 
 class _SlowProc:
@@ -55,7 +65,9 @@ class _SlowProc:
 
 @pytest.mark.asyncio
 async def test_async_teardown_does_not_block_the_event_loop():
-    ex = SandboxedExecutor(_Agent(), SandboxConfig(require=False), cell_timeout=10.0)
+    ex = SandboxedExecutor(
+        _Agent(), SandboxConfig(require=False, start_method=_START_METHOD), cell_timeout=10.0
+    )
     proc = _SlowProc()
     ex._proc = proc  # type: ignore[assignment]
     ex._conn = None
@@ -88,7 +100,9 @@ async def test_async_teardown_does_not_block_the_event_loop():
 
 def test_sync_terminate_still_available_for_close_sync():
     """The sync path (close_sync) keeps a synchronous _terminate_worker."""
-    ex = SandboxedExecutor(_Agent(), SandboxConfig(require=False), cell_timeout=10.0)
+    ex = SandboxedExecutor(
+        _Agent(), SandboxConfig(require=False, start_method=_START_METHOD), cell_timeout=10.0
+    )
     proc = _SlowProc()
     ex._proc = proc  # type: ignore[assignment]
     ex._conn = None

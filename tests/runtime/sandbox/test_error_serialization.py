@@ -117,7 +117,9 @@ async def test_stale_match_broker_error_survives_as_actionable_surrogate(tmp_pat
     from nooa.runtime.sandbox.worker import ParentToolError, _raise_broker_error
 
     path = tmp_path / "example.txt"
-    path.write_text("current\n")
+    # Bytes, not text: ``write_text`` translates "\n" to "\r\n" on Windows, and
+    # the assertion below is that the failed edit left the file byte-identical.
+    path.write_bytes(b"current\n")
     match = Match("example.txt", 1, 1, "captured\n", resolved_path=path)
     shell = ShellTools(cwd=str(tmp_path))
 
@@ -134,7 +136,16 @@ async def test_stale_match_broker_error_survives_as_actionable_surrogate(tmp_pat
         )
         assert response["ok"] is False
         assert response["error_type"] == "StaleMatchError"
-        for text in [str(path), "captured lines 1-1", "No file was changed", "recompute the Match"]:
+        # The message renders the path with ``repr``, which on Windows doubles
+        # every backslash. Compare against that rendering rather than the raw
+        # path, so the assertion holds on both platforms instead of only on
+        # POSIX, where the two happen to be identical.
+        for text in [
+            repr(str(path)),
+            "captured lines 1-1",
+            "No file was changed",
+            "recompute the Match",
+        ]:
             assert text in response["error"]
         with pytest.raises(ParentToolError) as caught:
             _raise_broker_error(response)
