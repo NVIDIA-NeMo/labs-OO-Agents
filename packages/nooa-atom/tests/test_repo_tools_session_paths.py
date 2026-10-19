@@ -202,7 +202,7 @@ async def test_host_repo_anchor_remains_editable(tmp_path):
     assert result[0].editable
     shell = ShellTools(cwd=str(tmp_path))
     try:
-        await shell.replace(result[0], "def renamed():")
+        await shell.replace_match(result[0], "def renamed():")
         assert path.read_text() == "def renamed():\n    pass\n"
     finally:
         await shell.close()
@@ -372,7 +372,7 @@ async def test_real_bash_session_anchors_remain_editable(tmp_path: Path) -> None
         result = await repo.symbols("mod.py")
         assert result.matches
         assert all(match.editable for match in result.matches)
-        await shell.replace(result[0], "def renamed():")
+        await shell.replace_match(result[0], "def renamed():")
         assert (tmp_path / "mod.py").read_text() == "def renamed():\n    pass\n"
     finally:
         await shell.close()

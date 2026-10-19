@@ -463,14 +463,6 @@ def _not_found_replace_message(path: str, resolved: Path, content: str, old: str
     def excerpt(text: str) -> str:
         return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)
 
-    def line_at(position: int) -> tuple[int, int, int]:
-        start = content.rfind("\n", 0, position) + 1
-        end = content.find("\n", position)
-        end = len(content) if end == -1 else end
-        if end > start and content[end - 1] == "\r":
-            end -= 1
-        return content.count("\n", 0, start) + 1, start, end
-
     def describe(whitespace: str) -> str:
         if not whitespace:
             return "no indentation"
@@ -496,18 +488,15 @@ def _not_found_replace_message(path: str, resolved: Path, content: str, old: str
         )
         exact: list[int] = []
         shifted: list[str] = []
-        search = 0
-        while len(exact) + len(shifted) < 3:
-            position = content.find(stripped, search)
-            if position == -1:
+        wanted = first[: len(first) - len(first.lstrip())]
+        # One linear pass over the lines; a long line is only compared once.
+        for number, row in enumerate(content.split("\n"), start=1):
+            if len(exact) + len(shifted) >= 3:
                 break
-            search = position + len(stripped)
-            number, start, end = line_at(position)
-            row = content[start:end]
-            if row.strip() != stripped:
+            row = row.rstrip("\r")
+            if stripped not in row or row.strip() != stripped:
                 continue
             indent = row[: len(row) - len(row.lstrip())]
-            wanted = first[: len(first) - len(first.lstrip())]
             if indent == wanted and row.rstrip() == first.rstrip():
                 exact.append(number)
             else:
@@ -529,7 +518,7 @@ def _not_found_replace_message(path: str, resolved: Path, content: str, old: str
             lines.append("The file uses tabs; old text uses none.")
     # Short replacements (``x``, ``)``) occur by chance; only report distinctive text.
     if len(new.strip()) >= 8 and new in content:
-        number, _, _ = line_at(content.find(new))
+        number = content.count("\n", 0, content.find(new)) + 1
         lines.append(
             f"The replacement text already appears in the file (starting on line {number}); "
             "this edit may already have been applied."
