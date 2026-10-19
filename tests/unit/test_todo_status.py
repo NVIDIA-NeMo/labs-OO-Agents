@@ -104,19 +104,6 @@ def test_failed_restore_keeps_existing_workspace():
     assert manager.to_dict() == before
 
 
-def test_worker_local_dependency_does_not_leave_dangling_parent_id():
-    manager = TodoManager()
-    task = manager.add("work")
-    base = manager.copy_todo(task)
-    worker = TodoManager.with_todo(base)
-    dependency = worker.add("worker-only")
-    worker.add_dep(task.id, dependency)
-    before = manager.to_dict()
-    with pytest.raises(ValueError, match="dependencies are not in the parent"):
-        manager.merge_todo(worker.get(task.id), base=base)
-    assert manager.to_dict() == before
-
-
 @pytest.mark.parametrize("name", ["keys", "items", "get", "set", "clear", "_owner"])
 def test_reserved_var_names_have_explicit_access_and_cannot_replace_proxy(name):
     manager = TodoManager()
@@ -454,14 +441,6 @@ def test_other_completion_paths_clear_active_root() -> None:
     manager.update(via_update, status="done")
     assert manager.active() is None
 
-    via_merge = manager.add("merged")
-    manager.activate(via_merge)
-    base = manager.copy_todo(via_merge)
-    worker = base.model_copy(deep=True)
-    worker.status = "done"
-    manager.merge_todo(worker, base=base)
-    assert manager.active() is None
-
     direct = manager.add("direct")
     manager.activate(direct)
     direct.status = "done"
@@ -541,16 +520,6 @@ def test_active_dependency_order_is_dependency_first_for_shared_siblings() -> No
     rows = [line for line in output.splitlines() if line.startswith("  ") and "[" in line]
 
     assert [shared.id, dependent.id] == [line.split("[", 1)[1].split("]", 1)[0] for line in rows]
-
-
-def test_with_todo_makes_open_delegated_todo_active() -> None:
-    manager = TodoManager()
-    todo = manager.add("delegated")
-
-    worker_manager = TodoManager.with_todo(todo)
-
-    assert worker_manager.active() is not None
-    assert worker_manager.active().id == todo.id
 
 
 def test_status_bounds_framing_when_no_rows_fit() -> None:

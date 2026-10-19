@@ -18,7 +18,6 @@ from nooa.storage.markers import snapshotable
 from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
-_MISSING = object()
 _STATUS_MAX_ITEMS = 10
 _STATUS_MAX_CHARS = 2_000
 _STATUS_TITLE_CHARS = 120
@@ -204,89 +203,6 @@ class TodoManager(Skill):
         if isinstance(todo, str):
             return todo
         raise TypeError(f"expected Todo or str, got {type(todo).__name__}")
-
-    @hidden
-    def copy_todo(self, todo: Todo | str) -> Todo:
-        """Return an independent copy of a manager-owned todo for delegation."""
-        todo_id = self._todo_id(todo)
-        current = self._todos.get(todo_id)
-        if current is None:
-            raise ValueError(f"todo {todo_id!r} is not managed by this TodoManager")
-        return current.model_copy(deep=True)
-
-    @classmethod
-    @hidden
-    def with_todo(cls, todo: Todo) -> "TodoManager":
-        """Create a manager containing an independent copy of one delegated todo."""
-        manager = cls()
-        copied = todo.model_copy(deep=True)
-        manager._todos[copied.id] = copied
-        manager._order.append(copied.id)
-        manager._active_id = copied.id if copied.status != "done" else None
-        return manager
-
-    @hidden
-    def merge_todo(self, updated: Todo, *, base: Todo) -> Todo:
-        """Atomically merge delegated changes without overwriting concurrent edits."""
-        # Freeze the worker result so the committed parent cannot alias worker state.
-        updated = updated.model_copy(deep=True)
-        if updated.id != base.id:
-            raise ValueError("updated and base todos must have the same id")
-        current = self._todos.get(updated.id)
-        if current is None:
-            raise ValueError(f"todo {updated.id!r} is not managed by this TodoManager")
-
-        missing = set(updated.deps) - set(base.deps) - self._todos.keys()
-        if missing:
-            raise ValueError(
-                "delegated dependencies are not in the parent workspace: "
-                + ", ".join(sorted(missing))
-            )
-        candidate = current.model_copy(deep=True)
-        for field in ("title", "status", "deps", "description"):
-            before = getattr(base, field)
-            after = getattr(updated, field)
-            existing = getattr(current, field)
-            if after == before:
-                continue
-            if existing != before and existing != after:
-                raise ValueError(f"todo {updated.id!r} has conflicting {field!r} changes")
-            setattr(candidate, field, after.copy() if isinstance(after, list) else after)
-
-        base_vars = dict(base.vars)
-        updated_vars = dict(updated.vars)
-        current_vars = dict(current.vars)
-        for key in base_vars.keys() | updated_vars.keys():
-            before = base_vars.get(key, _MISSING)
-            after = updated_vars.get(key, _MISSING)
-            if after == before:
-                continue
-            existing = current_vars.get(key, _MISSING)
-            if existing != before and existing != after:
-                raise ValueError(f"todo {updated.id!r} has conflicting variable {key!r}")
-            if after is _MISSING:
-                candidate.vars.pop(key, None)
-            else:
-                candidate.vars[key] = after
-
-        if updated.comments[: len(base.comments)] != base.comments:
-            raise ValueError(f"todo {updated.id!r} modified existing comments")
-        if current.comments[: len(base.comments)] != base.comments:
-            raise ValueError(f"todo {updated.id!r} has conflicting comment changes")
-        existing_comment_ids = {comment.id for comment in candidate.comments}
-        for comment in updated.comments[len(base.comments) :]:
-            if comment.id not in existing_comment_ids:
-                # Parent comments must remain independent of the worker result.
-                candidate.comments.append(comment.model_copy(deep=True))
-                existing_comment_ids.add(comment.id)
-
-        # Commit only after every conflict check has succeeded, preserving the
-        # authoritative Todo object's identity for existing callers.
-        for field in ("title", "status", "deps", "description", "vars", "comments"):
-            setattr(current, field, getattr(candidate, field))
-        if current.status == "done" and current.id == self._active_id:
-            self._active_id = None
-        return current
 
     def add(
         self,

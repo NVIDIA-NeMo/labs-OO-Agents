@@ -69,7 +69,9 @@ to follow semantic versioning.
   one-way brief (breaking for code written against the earlier #451 heads).
   Removed: `AtomAgent.merge_delegated_todo` and `update_delegated_todo`, the
   registry's `_merge_todo`/`record_todo_base`, the `ChildTodoBase` event,
-  `TodoManager.adopt()` and `receive_todo()`, the `send(todo)` special case,
+  `TodoManager.adopt()`, `receive_todo()`, `copy_todo()`, `merge_todo()` and
+  `with_todo()` (`insert_copy()` gives a child its brief and raises on a
+  same-id clash), the `send(todo)` special case,
   and the parent Todo's `child` var. A saved session holding `ChildTodoBase`
   rows still loads; the rows are ignored. `delegate()` no longer adds a
   "Delegated to …: report" comment to the parent's Todo (breaking): the
