@@ -293,13 +293,48 @@ def _tree_signature(root: Path) -> dict[str, int]:
     return {"files": files, "bytes": total, "newest_ns": newest}
 
 
-def sync_package(root: RuntimeRoot, *, force: bool = False) -> str:
-    """Mirror the running ``nooa`` package into the root and drop editable hooks.
+def _workspace_packages() -> dict[str, Path]:
+    """Every workspace distribution this process imported, by import name.
+
+    A spawned worker rebuilds the agent class by importing its module, so the
+    container needs whatever module the agent lives in — not only ``nooa``. An
+    agent defined in ``nooa_cli`` (the coding agent) or in a host package fails
+    with ModuleNotFoundError otherwise. Only packages that are actually
+    imported are considered: one that is not installed cannot be mirrored, and
+    one that is installed but unused has no reason to enter the container.
+    """
+    import sys
+
+    found: dict[str, Path] = {}
+    for name, module in list(sys.modules.items()):
+        if "." in name or module is None:
+            continue
+        location = getattr(module, "__file__", None)
+        if not location:
+            continue
+        path = Path(location).resolve()
+        if path.name != "__init__.py" or not path.parent.is_dir():
+            continue
+        found[name] = path.parent
+    return found
+
+
+def sync_package(
+    root: RuntimeRoot,
+    *,
+    force: bool = False,
+    packages: dict[str, Path] | None = None,
+) -> str:
+    """Mirror the running nooa package into the root and drop editable hooks.
 
     Copying is deliberately chosen over installing: it is sub-second for a
     ~4 MB package, needs no build backend or dependency resolution, and the
     source location is whatever this process imported — so an editable checkout
     and an installed wheel both work without special-casing.
+
+    ``packages`` names additional importable distributions to mirror alongside
+    ``nooa`` (see :func:`_workspace_packages`). Each gets its own signature, so
+    a change to one does not force a re-copy of the other.
     """
     from nooa.runtime.sandbox.errors import SandboxUnavailable
 
@@ -311,25 +346,41 @@ def sync_package(root: RuntimeRoot, *, force: bool = False) -> str:
     for hook in root.site_packages.glob("_editable_impl_*.pth"):
         hook.unlink()
 
+    wanted: dict[str, Path] = {"nooa": source}
+    for name, path in (packages or {}).items():
+        if name in wanted or not (path / "__init__.py").exists():
+            continue
+        wanted[name] = path
+
     marker = root.site_packages / ".nooa-sync.json"
-    signature = _tree_signature(source)
+    signatures = {name: _tree_signature(path) for name, path in wanted.items()}
     if not force and marker.exists():
         try:
             previous = json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             previous = {}
-        if previous.get("signature") == signature:
-            return f"unchanged ({signature['files']} files)"
+        if previous.get("signatures") == signatures:
+            files = sum(sig["files"] for sig in signatures.values())
+            return f"unchanged ({files} files in {len(signatures)} package(s))"
 
     started = time.perf_counter()
-    shutil.rmtree(root.package, ignore_errors=True)
-    shutil.copytree(source, root.package, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    for name, path in wanted.items():
+        target = root.site_packages / name
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.copytree(path, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     elapsed = time.perf_counter() - started
+    files = sum(sig["files"] for sig in signatures.values())
     marker.write_text(
-        json.dumps({"signature": signature, "source": str(source), "copied_at": time.time()}),
+        json.dumps(
+            {
+                "signatures": signatures,
+                "sources": {name: str(path) for name, path in wanted.items()},
+                "copied_at": time.time(),
+            }
+        ),
         encoding="utf-8",
     )
-    return f"copied {signature['files']} files in {elapsed:.2f}s"
+    return f"copied {files} files in {len(wanted)} package(s) in {elapsed:.2f}s"
 
 
 @dataclass(frozen=True)
@@ -641,6 +692,7 @@ def prepare_root(
     root: RuntimeRoot,
     *,
     sync: bool = True,
+    packages: dict[str, Path] | None = None,
 ) -> str:
     """Validate the root, refresh the package if asked, recover stale ACEs.
 
@@ -648,7 +700,7 @@ def prepare_root(
     here would allow the two to disagree.
     """
     root.check()
-    summary = sync_package(root) if sync else "skipped"
+    summary = sync_package(root, packages=packages) if sync else "skipped"
     # Only dead sessions' grants: a live session's journal is locked, so its
     # ACEs are untouched no matter how many sessions start concurrently.
     recovered = recover_stale_grants(root)

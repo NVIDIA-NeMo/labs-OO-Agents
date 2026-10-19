@@ -296,13 +296,18 @@ class SandboxedExecutor:
         lookup, which is why none of the broker code branches on platform.
         """
         from nooa.runtime.sandbox.win_launcher import start_container_worker
-        from nooa.runtime.sandbox.win_runtime import prepare_root
+        from nooa.runtime.sandbox.win_runtime import _workspace_packages, prepare_root
 
         # Logged, not discarded: the summary says whether the package copy and
         # the tokenizer cache are usable. Both are silent preconditions of the
         # launch, and a failure here shows up later as an opaque worker-start
         # error inside the sandbox.
-        summary = prepare_root(self._runtime_root, sync=True)
+        #
+        # Every distribution this process imported goes into the root: a spawned
+        # worker imports the agent's module by name, and an agent that lives in
+        # a host package (nooa_cli's coding agent, for instance) would otherwise
+        # fail with ModuleNotFoundError before its first cell.
+        summary = prepare_root(self._runtime_root, sync=True, packages=_workspace_packages())
         logger.debug("sandbox runtime prepared: %s", summary)
         self._runtime_summary = summary
         init: dict[str, Any] = {
