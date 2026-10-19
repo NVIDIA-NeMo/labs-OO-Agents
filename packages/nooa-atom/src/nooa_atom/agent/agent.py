@@ -491,6 +491,11 @@ class AtomAgent(InteractiveAgent):
         the request needs before ending the turn; use as many cells as it
         takes, and run checks rather than assume them.
 
+        Use ``self.message()`` regularly to keep the user informed with brief
+        progress updates while you work, especially during tool use or longer
+        tasks. Updates should explain what you are doing, what you have
+        learned, and what comes next.
+
         End with exactly one ``return_result(...)``:
 
         - ``Done(explanation=...)`` when the request is complete. Send the
