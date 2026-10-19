@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: `/compact` is a built-in slash command. It sends the agent a
+  short directive on its `slash_commands` channel ("Please compact your history
+  now using self.events.collapse(...)", plus what to keep), and the agent
+  compacts with its own tools in that turn. Over ACP (Pool) it used to answer
+  "not available through ACP yet". Any extra words are passed on as
+  instructions; a host control named `compact` still replaces it.
 - `self.v["x"] = ...` now raises a `TypeError` that names the working form
   (`write self.v.x = ... instead`). It used to be Python's bare "'AgentVars'
   object does not support item assignment". Nothing is stored either way.

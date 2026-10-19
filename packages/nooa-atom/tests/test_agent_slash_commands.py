@@ -41,10 +41,10 @@ async def test_registry_discovers_metadata_and_dispatches_typed_arguments(tmp_pa
     agent.skills.register("test.workflow", _WorkflowSkill())
     registry = SlashCommandRegistry(agent)
     try:
-        assert registry.commands()[0].name == "diagnose"
-        assert registry.commands()[0].description == "Diagnose the current failure."
-        assert registry.commands()[0].argument_hint == "<fast|deep>"
-        assert registry.commands()[0].completions == ("fast", "deep")
+        diagnose = registry.get("diagnose")
+        assert diagnose.description == "Diagnose the current failure."
+        assert diagnose.argument_hint == "<fast|deep>"
+        assert diagnose.completions == ("fast", "deep")
 
         result = await registry.invoke("diagnose", "deep")
 
@@ -80,8 +80,8 @@ async def test_registry_refresh_callback_observes_new_skill_commands(tmp_path):
         agent.skills.register("test.workflow", _WorkflowSkill())
         await agent.skills.activate(["test.workflow"])
 
-        # /mcp-add comes from the skill manager itself.
-        assert updates == [("mcp-add",), ("diagnose", "mcp-add")]
+        # /mcp-add comes from the skill manager itself; /compact is built in.
+        assert updates == [("compact", "mcp-add"), ("compact", "diagnose", "mcp-add")]
     finally:
         registry.close()
         await agent.aclose()
@@ -229,6 +229,33 @@ def test_markdown_skill_arguments_placeholder_never_reaches_the_agent(args, expe
 
     command = SlashCommand(name="review", description="", body="Review $ARGUMENTS now.")
     assert command.make_agent_message(args) == expected
+
+
+async def test_compact_is_a_builtin_directive_for_the_agent(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    registry = SlashCommandRegistry(agent)
+    try:
+        result = await registry.invoke("compact", "")
+        assert result.output_to_agent is True
+        assert result.text.startswith("Please compact your history now using self.events.collapse(")
+    finally:
+        registry.close()
+        await agent.aclose()
+
+
+async def test_a_host_control_named_compact_replaces_the_builtin(tmp_path):
+    from nooa_atom.agent.slash_commands import SlashCommand
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    control = SlashCommand(
+        name="compact", description="host compact", output_to_agent=False, is_control=True
+    )
+    registry = SlashCommandRegistry(agent, controls=(control,))
+    try:
+        assert registry.get("compact") is control
+    finally:
+        registry.close()
+        await agent.aclose()
 
 
 def test_markdown_skill_without_placeholder_appends_arguments():
