@@ -165,22 +165,8 @@ _closing_sessions: contextvars.ContextVar[tuple[str, ...]] = contextvars.Context
 
 
 def _is_form_response(item: Any) -> bool:
-    """Reserve explicit response actions/envelope shapes, not domain action data.
-
-    Recognized actions stay reserved even with malformed extra fields. Action-only
-    dictionaries and response-key-only data without a string action fail closed.
-    An arbitrary string action plus content can be domain data; callers declare
-    ambiguous response intent with request_id rather than us guessing its meaning.
-    """
-    if isinstance(item, FormResponse):
-        return True
-    if not isinstance(item, dict):
-        return False
-    return item.get("action") in ("accept", "decline", "cancel") or (
-        bool(item)
-        and item.keys() <= {"action", "content"}
-        and ("content" not in item or not isinstance(item.get("action"), str))
-    )
+    """Only a ``FormResponse`` answers a form; any other item is ordinary input."""
+    return isinstance(item, FormResponse)
 
 
 class Session:
@@ -515,9 +501,9 @@ class Session:
     ) -> Receipt:
         """Record then queue input, validating explicit form responses against their owner.
 
-        Recognizable response envelopes are reserved on ``user_messages``; other
-        structured domain data remains ordinary input. ``request_id`` explicitly
-        declares response intent and must match the current durable request.
+        A ``FormResponse`` on ``user_messages`` must answer the pending form;
+        other items are ordinary input. ``request_id`` marks the item as a
+        response (it may be serialized data) and must match the current request.
         """
         self._ensure_external_admission()
         if request_id is not None and request_id != self._form_request_id:

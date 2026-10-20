@@ -232,7 +232,7 @@ async def test_an_explicit_form_is_answered_over_the_wire(tmp_path):
     assert response.stop_reason == "end_turn"
     [(message, mode)] = client.elicitations
     assert message == "Which branch?"
-    assert mode.requested_schema.properties["answer"].enum == ["main", "dev"]
+    assert [o.const for o in mode.requested_schema.properties["answer"].one_of] == ["main", "dev"]
     assert client.texts()[-1] == "Using the answer.\n\n"
 
 

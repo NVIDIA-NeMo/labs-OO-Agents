@@ -9,7 +9,15 @@ from typing import Any
 
 from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
 
-from nooa.interactive import Done, InputRequest, NeedInput, NeedInputForm, Waiting
+from nooa.interactive import (
+    Done,
+    FormQuestion,
+    InputRequest,
+    NeedInput,
+    NeedInputForm,
+    PickOneQuestion,
+    Waiting,
+)
 from nooa.slash_dispatch import SlashCommandResult
 
 TurnResult = Done | InputRequest | Waiting
@@ -88,39 +96,22 @@ class InteractiveSessionDispatcher:
             return result
 
     def _show(self, result: TurnResult) -> None:
-        """Send the person the text a typed result carries, as an agent message.
+        """Show the person a turn result's text: a reply, a question, or a form as text.
 
-        Done/Waiting carry optional messages. Questions show their text; explicit
-        forms show response/validation guidance and field descriptions. This legacy
-        text-only host does not validate text as accepted form content.
+        This host has no dialogs, so a form is rendered as its questions; the
+        person's next message is the answer, as plain text.
         """
-        if isinstance(result, (NeedInput, NeedInputForm)):
-            parts = [result.heading if isinstance(result, NeedInputForm) else result.question]
-            if result.reason:
-                parts.append(result.reason)
-            if isinstance(result, NeedInputForm):
-                parts.append(
-                    "Explicit form requested; this host has no dialog. Text is unvalidated.\n"
-                    "Text replies require agent interpretation and targeted follow-up. Structured "
-                    "FormResponse submission requires a capable session host."
-                )
-                parts.append(
-                    "\n".join(
-                        f"- {q.id}: {q.label}"
-                        + (f" — {q.help}" if q.help else "")
-                        + (
-                            " Choices: "
-                            + ", ".join(f"{c.title} ({c.value})" for c in q.choices)
-                            + (" — or type another answer" if q.allow_other else "")
-                            if q.kind != "text"
-                            else ""
-                        )
-                        for q in result.questions
-                    )
-                )
-            text: str | None = "\n\n".join(parts)
+        if isinstance(result, NeedInput):
+            parts = [result.question, result.reason]
+        elif isinstance(result, NeedInputForm):
+            parts = [
+                result.heading,
+                result.reason,
+                "\n".join(_question_line(q) for q in result.questions),
+            ]
         else:
-            text = result.message
+            parts = [result.message]
+        text = "\n\n".join(part for part in parts if part)
         if text:
             self.agent.message(text)
 
@@ -146,3 +137,11 @@ class InteractiveSessionDispatcher:
     async def close(self) -> None:
         await self.cancel()
         await self.agent.close()
+
+
+def _question_line(question: FormQuestion) -> str:
+    """``- label (help)`` plus the choices of a picker."""
+    line = f"- {question.label}" + (f" ({question.help})" if question.help else "")
+    if isinstance(question, PickOneQuestion):
+        line += ": " + ", ".join(c.title for c in question.choices)
+    return line

@@ -1,44 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Map explicit descriptors to verified form schemas, without hidden conversion.
+"""Map a ``NeedInputForm`` to an elicitation schema and read the answer back.
 
-Pool mappings here are experimentally tested text, oneOf const/title (strict pick one) and
-anyOf (pick one with allow_other) schemas, not a claim about every Pool type. Standard ACP maps
-text and strict pickers (single enum); pickers with allow_other fall back
-explicitly to a text property listing the suggestions.
+Each question becomes one required-or-optional string property:
+
+- ``TextQuestion``: ``{"type": "string"}``.
+- ``PickOneQuestion(allow_other=False)``: a single-select string,
+  ``oneOf`` of ``{"const": value, "title": title}``.
+- ``PickOneQuestion(allow_other=True)``: standard ACP has no select-or-text
+  property, so it is a plain string whose description lists the choices;
+  Pool shows ``anyOf`` of that single-select and a plain string.
 """
 
 from typing import Any
 
-from acp.schema import ElicitationSchema, ElicitationStringPropertySchema
+from acp.schema import ElicitationSchema, ElicitationStringPropertySchema, EnumOption
 
 from nooa.interactive import FormResponse, NeedInput, NeedInputForm
 
 
 def need_input_schema(need: NeedInputForm | NeedInput) -> ElicitationSchema | None:
-    """Standard ACP: strings and strict single enums; choice-or-other is text."""
+    """The ACP elicitation schema of a form; ``None`` for a plain question."""
     if not isinstance(need, NeedInputForm):
         return None
     properties = {}
     for question in need.questions:
         description = question.help
+        one_of = None
         if question.kind == "pick_one" and question.allow_other:
-            choices = "; ".join(f"{c.title}: {c.value}" for c in question.choices)
-            description = "\n".join(
-                filter(None, [description, f"Enter text (suggestions: {choices})."])
-            )
+            choices = ", ".join(c.value for c in question.choices)
+            description = "\n".join(filter(None, [description, f"For example: {choices}."]))
         elif question.kind == "pick_one":
-            # ACP's enum has no verified distinct label field. Display labels honestly
-            # in help, while keeping the actual submitted values in enum.
-            choices = "; ".join(f"{c.title}: {c.value}" for c in question.choices)
-            description = "\n".join(filter(None, [description, f"Choices: {choices}"]))
+            one_of = [EnumOption(const=c.value, title=c.title) for c in question.choices]
         properties[question.id] = ElicitationStringPropertySchema(
-            type="string",
-            title=question.label,
-            description=description,
-            enum=[c.value for c in question.choices]
-            if question.kind == "pick_one" and not question.allow_other
-            else None,
+            type="string", title=question.label, description=description, one_of=one_of
         )
     return ElicitationSchema(
         title=need.heading,
@@ -48,7 +43,7 @@ def need_input_schema(need: NeedInputForm | NeedInput) -> ElicitationSchema | No
 
 
 def pool_form_schema(need: NeedInputForm | NeedInput) -> dict[str, Any] | None:
-    """Verified Pool 1.0.16 schemas; optional pickers are rejected by descriptors."""
+    """The ``_poolside/elicitation`` schema of a form; ``None`` for a plain question."""
     if not isinstance(need, NeedInputForm):
         return None
     properties = {}
@@ -72,29 +67,11 @@ def pool_form_schema(need: NeedInputForm | NeedInput) -> dict[str, Any] | None:
     }
 
 
-def form_content(need: NeedInputForm, content: dict[str, Any] | None) -> dict[str, str]:
-    """Validate only response envelope shape; request validation is done by the owner."""
-    response = FormResponse(action="accept", content=content)
-    assert response.content is not None
-    return response.content
-
-
-pool_content = form_content
-
-
 def answer_from_content(need: NeedInputForm, content: dict[str, Any] | None) -> dict[str, str]:
+    """An accepted form's content, validated against the form."""
     response = need.validate_response(FormResponse(action="accept", content=content))
     assert response.content is not None
     return response.content
 
 
-pool_answer = answer_from_content
-
-__all__ = [
-    "answer_from_content",
-    "form_content",
-    "need_input_schema",
-    "pool_answer",
-    "pool_content",
-    "pool_form_schema",
-]
+__all__ = ["answer_from_content", "need_input_schema", "pool_form_schema"]

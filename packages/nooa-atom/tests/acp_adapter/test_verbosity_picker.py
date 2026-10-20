@@ -118,7 +118,11 @@ async def test_standard_acp_form_also_stays_local(make_adapter, workspace, clien
     await adapter.prompt(session_id, [text_block("/verbosity")])
     [request] = [entry for entry in client.log if entry[0] == "elicitation"]
     schema = request[2].requested_schema
-    assert schema.properties["verbosity"].enum == ["silent", "concise", "verbose"]
+    assert [o.const for o in schema.properties["verbosity"].one_of] == [
+        "silent",
+        "concise",
+        "verbose",
+    ]
     assert adapter.bridge(session_id).verbosity == "concise"
     assert adapter.session(session_id).info.reply_count == 0
     assert client.texts(UserMessageChunk, session_id) == []

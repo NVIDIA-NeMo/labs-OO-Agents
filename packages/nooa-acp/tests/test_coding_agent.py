@@ -224,8 +224,8 @@ class _TypedQuestionAgent(CodingAgent):
         )
 
 
-async def test_dispatcher_shows_a_need_input_reason_and_answer_fields(tmp_path):
-    """The reason and the answer_type fields reach the person, who answers as text."""
+async def test_dispatcher_shows_a_form_as_its_questions(tmp_path):
+    """A form's heading, reason and questions reach the person, who answers as text."""
     agent = _TypedQuestionAgent(llm=FakeLLMClient(), cwd=tmp_path)
     dispatcher = InteractiveSessionDispatcher(agent)
 
@@ -234,11 +234,8 @@ async def test_dispatcher_shows_a_need_input_reason_and_answer_fields(tmp_path):
     assert _agent_messages(agent) == [
         "Which release?\n\n"
         "The version decides the changelog heading.\n\n"
-        "Explicit form requested; this host has no dialog. Text is unvalidated.\n"
-        "Text replies require agent interpretation and targeted follow-up. Structured "
-        "FormResponse submission requires a capable session host.\n\n"
-        "- version: Version? — The version number\n"
-        "- notes: Notes?"
+        "- Version? (The version number)\n"
+        "- Notes?"
     ]
     await dispatcher.close()
 

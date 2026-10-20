@@ -6,7 +6,6 @@ import pytest
 from nooa_atom.acp.need_input import (
     answer_from_content,
     need_input_schema,
-    pool_answer,
     pool_form_schema,
 )
 from pydantic import ValidationError
@@ -78,17 +77,20 @@ def test_standard_single_enum_and_explicit_choice_or_text_fallback():
     schema = need_input_schema(form()).model_dump(mode="json", by_alias=True, exclude_none=True)
     assert list(schema["properties"]) == ["notes", "branch", "target"]
     assert schema["required"] == ["branch", "target"]
-    assert schema["properties"]["branch"]["enum"] == ["main", "dev"]
-    assert "Main branch: main" in schema["properties"]["branch"]["description"]
-    assert "enum" not in schema["properties"]["target"]
-    assert "suggestions" in schema["properties"]["target"]["description"]
+    assert schema["properties"]["branch"]["oneOf"] == [
+        {"const": "main", "title": "Main branch"},
+        {"const": "dev", "title": "Development"},
+    ]
+    assert "enum" not in schema["properties"]["branch"]
+    assert "oneOf" not in schema["properties"]["target"]
+    assert "main, dev" in schema["properties"]["target"]["description"]
     assert not any(key in str(schema) for key in ("default", "minimum", "maximum", "minLength"))
     assert need_input_schema(NeedInput(question="Why?")) is None
     assert pool_form_schema(NeedInput(question="Why?")) is None
 
 
-@pytest.mark.parametrize("mapper", [pool_answer, answer_from_content])
-def test_string_response_no_conversion_and_explicit_optional_blank(mapper):
+def test_string_response_no_conversion_and_explicit_optional_blank():
+    mapper = answer_from_content
     assert mapper(form(), {"branch": "dev", "target": "  custom  "}) == {
         "notes": "",
         "branch": "dev",
@@ -116,7 +118,7 @@ def test_string_response_no_conversion_and_explicit_optional_blank(mapper):
 )
 def test_invalid_protocol_never_converts(content):
     with pytest.raises(ValueError):
-        pool_answer(form(), content)
+        answer_from_content(form(), content)
 
 
 @pytest.mark.parametrize("action", ["decline", "cancel"])
@@ -169,7 +171,7 @@ def test_optional_picker_rejected_with_explicit_text_alternative(allow_other):
     )
     assert pool_form_schema(need)["required"] == []
     for content in ({}, {"choice": ""}, {"choice": "   "}):
-        assert pool_answer(need, content) == {"choice": ""}
+        assert answer_from_content(need, content) == {"choice": ""}
 
 
 def test_pick_one_allows_other_by_default():

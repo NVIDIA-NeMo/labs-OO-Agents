@@ -963,7 +963,7 @@ async def test_form_claim_is_one_shot_and_withdrawal_does_not_resurrect(make_ses
     assert receipt is not None
     assert session.admit_form_response(need, response, source="acp:form-answer") is None
     with pytest.raises(ValueError, match="No pending"):
-        await session.submit(response.model_dump())
+        await session.submit(response)
     assert session.withdraw(receipt)
     assert not session.form_is_current(need)
 
@@ -996,11 +996,11 @@ async def test_raw_submission_and_request_tokens_supersede_old_forms(make_sessio
     await session.submit(FormResponse(action="accept", content={"answer": "b"}), request_id="b")
 
 
-@pytest.mark.parametrize("content", [{"answer": "x"}, {"answer": 4}])
-async def test_no_owner_response_dictionaries_are_rejected(make_session, content):
+async def test_a_form_response_without_a_pending_form_is_rejected(make_session):
     session, _ = make_session(start=False)
     with pytest.raises(ValueError, match="No pending"):
-        await session.submit({"action": "accept", "content": content})
+        await session.submit(FormResponse(action="accept", content={"answer": "x"}))
+    assert _rows(session, "ItemAdmitted") == []
 
 
 @pytest.mark.parametrize("pending", [False, True])
@@ -1011,6 +1011,10 @@ async def test_no_owner_response_dictionaries_are_rejected(make_session, content
         {"action": "deploy", "content": {"target": "staging"}},
         {"action": {"name": "deploy"}, "target": "staging"},
         {},
+        # Only a FormResponse answers a form: response-shaped dicts are data too.
+        {"action": "accept"},
+        {"action": "accept", "content": {"answer": "x"}},
+        {"action": "cancel"},
     ],
 )
 async def test_domain_action_data_remains_ordinary_input(make_session, pending, item):
@@ -1029,34 +1033,6 @@ async def test_domain_action_data_remains_ordinary_input(make_session, pending, 
     assert json.loads(row["item_json"]) == item
     assert row["item_id"] == receipt.item_id
     assert session._pending_form is None
-
-
-@pytest.mark.parametrize("pending", [False, True])
-@pytest.mark.parametrize(
-    "item",
-    [
-        {"action": "accept"},
-        {"action": "accept", "content": {"answer": 1}},
-        {"action": "cancel", "extra": "invalid"},
-        {"action": "decline", "content": {}},
-        {"action": "unknown"},
-        {"content": {"answer": "a"}},
-        {"action": ["accept"]},
-        FormResponse(action="cancel"),
-    ],
-)
-async def test_recognizable_responses_never_slip_through_as_domain_data(
-    make_session, pending, item
-):
-    session, _ = make_session(start=False)
-    if pending:
-        session.restore_input_request("need_input_form", {"question": "Name?"})
-    if pending and isinstance(item, FormResponse):
-        await session.submit(item)
-    else:
-        with pytest.raises(ValueError):
-            await session.submit(item)
-        assert _rows(session, "ItemAdmitted") == []
 
 
 @pytest.mark.parametrize(
