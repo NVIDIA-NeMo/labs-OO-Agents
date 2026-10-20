@@ -40,6 +40,20 @@ async def _next(agent) -> object:
     return await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
 
 
+async def _stream_updates(agent, label: str) -> list[JobUpdate]:
+    """Every JobUpdate a streaming job delivers, read until it has ended."""
+    channel = agent.queue_manager.get_channel("jobs")
+    updates = []
+    while agent.jobs.get(label).state == "running" or channel.qsize():
+        try:
+            item = await asyncio.wait_for(channel.get(), 0.2)
+        except TimeoutError:
+            continue
+        assert isinstance(item, JobUpdate) and item.label == label
+        updates.append(item)
+    return updates
+
+
 async def _until(predicate, timeout: float = TIMEOUT) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -214,9 +228,8 @@ async def test_throttle_by_seconds_batches_slow_output(agent):
             await asyncio.sleep(0.1)
 
     agent.jobs.spawn(ticks(), label="tick", seconds=0.35)
-    updates = [await _next(agent)]
-    while not updates[-1].final:
-        updates.append(await _next(agent))
+    updates = await _stream_updates(agent, "tick")
+    assert updates[-1].final
     flat = [v for u in updates for v in u.items]
     assert flat == list(range(6))
     assert len(updates[0].items) >= 3  # several items per delivery
@@ -239,9 +252,12 @@ async def test_throttle_changes_a_running_job(agent):
     assert info.throttle.lines == 3
     gate.set()
     assert (await _next(agent)).items == [3, 4, 5]
-    assert (await _next(agent)).items == [6, 7, 8]
-    final = await _next(agent)
-    assert final.final and final.items == []
+    last = await _next(agent)
+    assert last.items == [6, 7, 8] and not last.final
+    # It ended with nothing batched: no extra empty update, the state says so.
+    await _until(lambda: agent.jobs.get("n").state == "done")
+    await asyncio.sleep(0.05)
+    assert agent.queue_manager.get_channel("jobs").qsize() == 0
 
 
 async def test_throttle_off_flushes_pending_items(agent):
@@ -257,13 +273,9 @@ async def test_throttle_off_flushes_pending_items(agent):
     assert agent.jobs.throttle("p").throttle is None
     # Turning batching off delivers what is pending as soon as more arrives or the job ends.
     gate.set()
-    items = []
-    while True:
-        update = await _next(agent)
-        items.extend(update.items)
-        if update.final:
-            break
-    assert items == ["a", "b"]
+    updates = await _stream_updates(agent, "p")
+    assert [item for u in updates for item in u.items] == ["a", "b"]
+    assert not any(u.final for u in updates)  # nothing was left at the end
 
 
 async def test_throttle_rejects_non_streaming_jobs(agent):
@@ -572,3 +584,119 @@ async def test_payload_defaults_to_none(agent):
     items = [await _next(agent), await _next(agent)]
     assert next(i for i in items if i.label == "a").result is None
     await agent.jobs.cancel("e")
+
+
+# ---- replace=True ----
+
+
+async def test_replace_restarts_a_running_run_job(agent, tmp_path):
+    pidfile = tmp_path / "old.pid"
+    await agent.jobs.run(f"echo $$ > {pidfile}; exec sleep 60", label="srv", lines=1)
+    await _until(lambda: pidfile.exists() and pidfile.read_text().strip())
+    old_pid = int(pidfile.read_text())
+    with pytest.raises(ValueError, match="already running"):
+        await agent.jobs.run("true", label="srv")
+    info = await agent.jobs.run("echo new", label="srv", replace=True)
+    assert info.state == "running" and info.target == "echo new"
+    await _until(lambda: not _alive(old_pid))
+    item = await _next(agent)
+    while isinstance(item, JobUpdate):  # the new job's progress, if any
+        item = await _next(agent)
+    assert isinstance(item, JobResult) and item.result.stdout == "new\n"
+    await asyncio.sleep(0.1)
+    assert agent.queue_manager.get_channel("jobs").qsize() == 0  # nothing from the old job
+    states = [(job.target, job.state) for job in agent.jobs.list()]
+    assert states[-2:] == [
+        (f"echo $$ > {pidfile}; exec sleep 60", "cancelled"),
+        ("echo new", "done"),
+    ]
+
+
+async def test_replace_restarts_a_running_spawn_job_from_sync_code(agent):
+    async def ticking(name):
+        n = 0
+        while True:
+            n += 1
+            yield f"{name}{n}"
+            await asyncio.sleep(0.05)
+
+    agent.jobs.spawn(ticking("old"), label="w")
+    assert (await _next(agent)).items == ["old1"]
+    agent.jobs.spawn(ticking("new"), label="w", replace=True)  # sync, no await
+    seen = [(await _next(agent)).items[0] for _ in range(3)]
+    assert seen == ["new1", "new2", "new3"]
+    assert agent.jobs.list()[-2].state == "cancelled"
+    await agent.jobs.cancel("w")
+
+
+async def test_replace_without_a_running_job_just_starts(agent):
+    info = agent.jobs.after(0.01, label="t", replace=True, payload="p")
+    assert info.state == "running"
+    assert (await _next(agent)).result == "p"
+
+
+# ---- cancel hints ----
+
+
+async def test_status_has_no_queue_manager_cancel_hint_for_skill_channels():
+    qm = QueueManager()
+    qm.queue("mesh")
+
+    async def pump():
+        await asyncio.sleep(30)
+        yield None
+
+    qm.spawn(pump(), channel="mesh", label="inbox")
+    await asyncio.sleep(0)
+    status = qm.status()
+    assert "inbox" in status and "cancel" not in status
+    qm.set_cancel_hint("mesh", "await self.mesh.stop()  # {label}")
+    assert "💡 await self.mesh.stop()  # inbox" in qm.status()
+    await qm.shutdown()
+
+
+# ---- lost on restart ----
+
+
+async def test_jobs_running_at_a_snapshot_are_reported_once_after_restore(tmp_path):
+    from nooa.interactive import InteractiveAgent
+    from nooa.runtime.jobs import JobsLost
+    from nooa.storage.snapshot import AgentSnapshot
+    from nooa.unifiedllm import FakeLLMClient
+
+    class Host(InteractiveAgent, llm=FakeLLMClient()):
+        pass
+
+    old = Host(llm=FakeLLMClient())
+    await old.jobs.run("sleep 30", label="tests", description="full run")
+    old.jobs.after(0.01, label="quick")
+    await asyncio.wait_for(old.queue_manager.get_channel("jobs").get(), TIMEOUT)
+    await _until(lambda: "quick" not in old._jobs_running)  # a finished job is forgotten
+    snapshot = AgentSnapshot.from_agent(old)
+    await old.queue_manager.shutdown()  # the old process ends
+    assert set(old._jobs_running) == {"tests"}  # a shutdown keeps the record
+
+    new = Host(llm=FakeLLMClient())
+    snapshot.restore(new)
+    new.after_restore()
+    [event] = new.event_manager.filter(type="JobsLost")
+    assert isinstance(event, JobsLost)
+    assert event.jobs == [
+        {
+            "label": "tests",
+            "kind": "run",
+            "target": "sleep 30",
+            "description": "full run",
+            "started_at": event.jobs[0]["started_at"],
+        }
+    ]
+    assert new._jobs_running == {}
+    new.after_restore()
+    assert len(new.event_manager.filter(type="JobsLost")) == 1  # once
+    await new.queue_manager.shutdown()
+
+
+async def test_a_job_cancelled_by_the_model_is_not_reported_lost(agent):
+    await agent.jobs.run("sleep 30", label="x")
+    await agent.jobs.cancel("x")
+    assert agent._jobs_running == {}

@@ -71,3 +71,36 @@ async def test_jobs_use_the_agent_shell_directory_and_exports(agent, tmp_path):
     await agent.jobs.run('pwd; echo "$ATOM_JOBS_VAR"', label="where")
     item = await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
     assert item.result.stdout.splitlines() == [str(tmp_path / "pkg"), "1"]
+
+
+async def test_a_resumed_session_reports_jobs_that_did_not_survive(tmp_path, sessions_dir):
+    """Jobs running at the last checkpoint come back as one JobsLost event."""
+    from atom_test_agents import ATOM_SPEC, AtomModels
+    from nooa_atom.session.options import SessionOptions
+    from nooa_atom.session.registry import SessionRegistry
+    from nooa_atom.session.store import SessionStore
+
+    from nooa.runtime.jobs import JobsLost
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir)
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    root = await registry.create(options)
+    await root._agent.jobs.run("sleep 30", label="tests", description="full run")
+    root._checkpoint()  # what a settled turn does
+    await root.wait_for_checkpoint()
+    await registry.close_all()  # the process ends; the job dies with it
+
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    try:
+        loaded = await fresh.load(root.id)
+        [event] = loaded._agent.event_manager.filter(type="JobsLost")
+        assert isinstance(event, JobsLost)
+        assert [(j["label"], j["kind"], j["target"], j["description"]) for j in event.jobs] == [
+            ("tests", "run", "sleep 30", "full run")
+        ]
+        assert loaded._agent._jobs_running == {}
+        assert loaded._agent.queue_manager.running_handles() == []
+    finally:
+        await fresh.close_all()

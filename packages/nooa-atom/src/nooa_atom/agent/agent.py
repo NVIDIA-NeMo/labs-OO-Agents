@@ -383,6 +383,7 @@ class AtomAgent(InteractiveAgent):
         """Called by the session registry after it restores a snapshot into this agent."""
         from nooa_atom.workspace.options import drop_stale_memory_context
 
+        super().after_restore()  # reports self.jobs jobs that did not survive
         drop_stale_memory_context(self)
         self.skills.after_restore()
 

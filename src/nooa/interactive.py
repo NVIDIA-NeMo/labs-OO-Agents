@@ -501,6 +501,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # ``queue_manager.spawn``. Their results arrive on the ``jobs`` channel.
     _jobs_in: Annotated[Channel, hidden, nosnapshot]
     jobs: Annotated[JobsApi, nosnapshot]
+    # label -> small record of each running job, saved with the snapshot so a
+    # resumed session can report the jobs that did not survive (JobsApi).
+    _jobs_running: Annotated[dict, hidden]
     # Persistent variables for the LLM — survives across turns AND
     # across sessions (snapshot-backed). Accessed via the ``self.v``
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
@@ -516,6 +519,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self.event_manager.on_close(self.queue_manager.shutdown)
         self.turns = TurnLoop(self)
         self._jobs_in = self.queue_manager.queue("jobs")
+        self._jobs_running = {}
         self.jobs = JobsApi(self)
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
@@ -547,6 +551,15 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             await self.turns.stop()
         finally:
             await self.queue_manager.shutdown()
+
+    @hidden
+    def after_restore(self) -> None:
+        """Called by a host after it restores a snapshot into this agent.
+
+        Reports, once, the ``self.jobs`` jobs that were running when the saved
+        session stopped (a ``JobsLost`` event); they did not survive.
+        """
+        self.jobs.after_restore()
 
     @property
     def v(self) -> AgentVars:

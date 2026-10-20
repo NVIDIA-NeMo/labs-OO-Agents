@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from nooa.agentdoc import hidden
+from nooa.context_blocks import EventBase
 from nooa.skill import Skill
 from nooa.tools._results import StreamDone, StreamEvent
 from nooa.tools.shell_tools import ShellResult
@@ -38,7 +39,7 @@ from nooa.tools.shell_tools import ShellResult
 if TYPE_CHECKING:
     from nooa.runtime.channels import Channel, JobHandle, QueueManager
 
-__all__ = ["JobInfo", "JobResult", "JobUpdate", "JobsApi", "Throttle"]
+__all__ = ["JobInfo", "JobResult", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
 
 JOBS_CHANNEL = "jobs"
 # Output kept in a delivered ShellResult (the full output is in the log).
@@ -110,8 +111,9 @@ class JobUpdate(BaseModel):
     """Delivered while a job runs: ``tail``, ``every``, async-iterator ``spawn``, or a throttled ``run``.
 
     ``items`` are the new values (``StreamEvent`` lines for ``run``); one per
-    update unless throttled. A ``run`` ends with its ``JobResult``; any other
-    job's last update has ``final=True``. ``error`` is set when the job raised.
+    update unless throttled. A ``run`` ends with its ``JobResult``; for other
+    jobs the final batch, if any, has ``final=True`` (``JobInfo.state`` shows
+    the end). ``error`` is set when the job raised.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -121,6 +123,20 @@ class JobUpdate(BaseModel):
     final: bool = False
     log_path: str | None = None
     error: str | None = None
+
+
+_LOST_KEYS = ("label", "kind", "target", "description", "started_at")
+
+
+class JobsLost(EventBase):
+    """Jobs that were running when the previous process ended: they did not survive.
+
+    Added once when a saved session is resumed in a new process. Nothing
+    they would have delivered will arrive; start them again if still needed.
+    """
+
+    jobs: list[dict[str, str]] = Field(default_factory=list)
+    note: str = "These self.jobs jobs were running when the session last stopped; they are gone."
 
 
 _WAKE = object()  # throttle changed: re-evaluate batching
@@ -146,6 +162,8 @@ class _Job:
         self.target = target
         self.description = description
         self.payload: Any = None
+        self.id = uuid.uuid4().hex
+        self.proc: asyncio.subprocess.Process | None = None  # set while a run command runs
         self.streaming = streaming
         self.throttle = throttle
         self.log_path = log_path
@@ -179,6 +197,17 @@ class _Job:
             pending=self.pending,
             last=list(self.last),
         )
+
+    def record(self) -> dict[str, str]:
+        """The small, snapshot-safe record kept while the job runs (see ``JobsLost``)."""
+        return {
+            "id": self.id,
+            "label": self.label,
+            "kind": self.kind,
+            "target": self.target,
+            "description": self.description,
+            "started_at": self.started_at,
+        }
 
     def status_line(self) -> str:
         """One short line for the per-turn queue status: label · state · description or target."""
@@ -298,7 +327,8 @@ class JobsApi(Skill):
 
     ``tail(path)`` follows a file, ``after(seconds)`` is a timer and
     ``every(seconds)`` ticks. Every start method takes an optional
-    ``description=``; ``JobInfo.target`` says what runs. Labels are unique among running jobs. ``list()``/``get(label)`` show
+    ``description=``; ``JobInfo.target`` says what runs. ``replace=True``
+    restarts a running job with the same label. Labels are unique among running jobs. ``list()``/``get(label)`` show
     state; ``await cancel(label)`` stops a job (and kills its process).
     """
 
@@ -366,7 +396,77 @@ class JobsApi(Skill):
         self._channel()
         job.handle = self._queues.spawn(work, channel=JOBS_CHANNEL, label=job.label)
         job.handle.describe = job.status_line
+        self._running_record()[job.label] = job.record()
+        job.handle._task.add_done_callback(lambda task: self._forget(job, task))
         return job.info()
+
+    @hidden
+    def _running_record(self) -> dict[str, dict[str, str]]:
+        """``agent._jobs_running``: label -> record of each running job.
+
+        A plain dict on the agent, so it is saved with the agent's snapshot;
+        ``after_restore`` reads what the previous process left there.
+        """
+        record = getattr(self._agent, "_jobs_running", None)
+        if not isinstance(record, dict):
+            record = {}
+            self._agent._jobs_running = record
+        return record
+
+    @hidden
+    def _forget(self, job: _Job, task: asyncio.Task[Any]) -> None:
+        if task.cancelled() and job.final_state is None:
+            return  # stopped by a shutdown, not by the job or the model: it did not survive
+        record = self._running_record()
+        entry = record.get(job.label)
+        if isinstance(entry, dict) and entry.get("id") == job.id:
+            del record[job.label]
+
+    @hidden
+    def _stop_now(self, label: str) -> None:
+        """Stop a running job without awaiting it (``replace=True``).
+
+        Kills a ``run`` command's process group at once and requests the
+        task's cancellation, so the old job delivers nothing more.
+        """
+        job = self._jobs.get(label)
+        if job is None or job.handle is None or job.state != "running":
+            return
+        if job.proc is not None:
+            _kill_group(job.proc)
+        job.handle._task.cancel()
+        job.handle.state = "cancelled"
+        job.final_state = "cancelled"
+        job.finished_at = job.finished_at or _now()
+
+    @hidden
+    def after_restore(self) -> None:
+        """Report jobs a previous process left running; they did not survive.
+
+        Called after the agent's snapshot was restored in a new process:
+        ``agent._jobs_running`` then holds the previous process's running
+        jobs. Adds one ``JobsLost`` event (the model sees it in the next turn)
+        and clears the record, so it is reported once.
+        """
+        record = self._running_record()
+        lost = [
+            entry
+            for label, entry in record.items()
+            if isinstance(entry, dict)
+            and not (label in self._jobs and self._jobs[label].id == entry.get("id"))
+        ]
+        self._agent._jobs_running = {
+            label: entry for label, entry in record.items() if entry not in lost
+        }
+        if not lost:
+            return
+        events = getattr(self._agent, "event_manager", None)
+        if events is not None:
+            events.add(
+                JobsLost(
+                    jobs=[{key: str(entry.get(key, "")) for key in _LOST_KEYS} for entry in lost]
+                )
+            )
 
     @hidden
     def _shell_dir(self) -> str:
@@ -444,9 +544,12 @@ class JobsApi(Skill):
         cwd: str | Path | None,
         log: _Log,
         context: tuple[str, dict],
+        job: _Job | None = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         """Run one command in its own process; yield its lines, then a ``StreamDone``."""
         proc = await self._spawn_process(command, stdin, cwd, context)
+        if job is not None:
+            job.proc = proc
         queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
 
         async def pump(stream: asyncio.StreamReader, kind: str) -> None:
@@ -529,7 +632,7 @@ class JobsApi(Skill):
 
         async def source() -> AsyncIterator[Any]:
             try:
-                async for event in self._lines(command, stdin, timeout, cwd, log, context):
+                async for event in self._lines(command, stdin, timeout, cwd, log, context, job):
                     yield event
             finally:
                 log.close()
@@ -660,7 +763,8 @@ class JobsApi(Skill):
                 job.final_state = "failed"
             job.finished_at = _now()
             if finish is None:
-                yield update(final=True)
+                if batch:  # nothing extra when nothing is left; JobInfo.state shows the end
+                    yield update(final=True)
             else:
                 if batch:
                     yield update()
@@ -691,6 +795,7 @@ class JobsApi(Skill):
         lines: int | None = None,
         seconds: float | None = None,
         description: str = "",
+        replace: bool = False,
     ) -> JobInfo:
         """Run a shell command in the background, in its own bash process.
 
@@ -706,6 +811,8 @@ class JobsApi(Skill):
             await self.jobs.run("uv run pytest -q", label="tests")
             return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
         """
+        if replace:
+            self._stop_now(label)
         throttle = _throttle(lines, seconds)
         self._check_label(label)
         context = await self._shell_context()
@@ -722,17 +829,20 @@ class JobsApi(Skill):
         lines: int | None = None,
         seconds: float | None = None,
         description: str = "",
+        replace: bool = False,
     ) -> JobInfo:
         """Run a coroutine or async iterator in the background.
 
         A coroutine delivers one ``JobResult`` (``.result`` is its return
         value, ``.error`` set if it raised). An async iterator delivers one
-        ``JobUpdate`` per yielded value (batched with ``lines``/``seconds``),
-        the last with ``final=True``.
+        ``JobUpdate`` per yielded value (batched with ``lines``/``seconds``);
+        the final batch, if any, has ``final=True``.
 
             self.jobs.spawn(fetch_report(url), label="report")  # any coroutine
             self.jobs.spawn(watch_queue(), label="watch", seconds=60)  # an async generator
         """
+        if replace:
+            self._stop_now(label)
         about = {"target": _callable_target(work), "description": description}
         if hasattr(work, "__aiter__"):
             job = self._new_job(
@@ -754,6 +864,7 @@ class JobsApi(Skill):
         lines: int | None = None,
         seconds: float | None = None,
         description: str = "",
+        replace: bool = False,
     ) -> JobInfo:
         """Deliver lines appended to a file from now on, until cancelled.
 
@@ -763,6 +874,8 @@ class JobsApi(Skill):
 
             self.jobs.tail("logs/server.log", label="server-log", seconds=60)
         """
+        if replace:
+            self._stop_now(label)
         throttle = _throttle(lines, seconds)
         self._check_label(label)
         resolved = (Path(self._shell_dir()) / Path(path)).resolve()
@@ -781,7 +894,13 @@ class JobsApi(Skill):
         return self._start(job, self._stream_job(job, _tail_lines(handle)))
 
     def after(
-        self, seconds: float, *, label: str, payload: Any = None, description: str = ""
+        self,
+        seconds: float,
+        *,
+        label: str,
+        payload: Any = None,
+        description: str = "",
+        replace: bool = False,
     ) -> JobInfo:
         """Deliver one ``JobResult`` after ``seconds``: a timer; ``.result`` is ``payload``.
 
@@ -789,6 +908,8 @@ class JobsApi(Skill):
 
             self.jobs.after(600, label="check-ci", payload="check CI on PR #462 and report")
         """
+        if replace:
+            self._stop_now(label)
         job = self._new_job(
             label,
             "after",
@@ -802,7 +923,13 @@ class JobsApi(Skill):
         return self._start(job, self._call_job(job, asyncio.sleep(seconds, result=payload)))
 
     def every(
-        self, seconds: float, *, label: str, payload: Any = None, description: str = ""
+        self,
+        seconds: float,
+        *,
+        label: str,
+        payload: Any = None,
+        description: str = "",
+        replace: bool = False,
     ) -> JobInfo:
         """Deliver a tick (1, 2, 3, ...) every ``seconds`` until cancelled.
 
@@ -811,6 +938,8 @@ class JobsApi(Skill):
 
             self.jobs.every(300, label="poll-ci", payload="check CI and report changes")
         """
+        if replace:
+            self._stop_now(label)
         if seconds <= 0:
             raise ValueError("seconds must be positive")
         job = self._new_job(
@@ -863,8 +992,10 @@ class JobsApi(Skill):
         job = self._jobs.get(label)
         if job is None or job.handle is None or job.state != "running":
             return False
+        job.final_state = "cancelled"  # first: the done callback then forgets the job
+        if job.proc is not None:
+            _kill_group(job.proc)
         await job.handle.cancel()
-        job.final_state = "cancelled"
         if job.finished_at is None:
             job.finished_at = _now()
         return True
