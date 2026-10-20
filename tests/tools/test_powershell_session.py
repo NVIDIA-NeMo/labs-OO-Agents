@@ -598,3 +598,31 @@ async def test_strict_mode_init_handles_an_empty_error_history(tmp_path, executa
         stdout, stderr, code = await shell.run("$NooaStrictModeUndefinedVariable")
         assert stdout == "" and stderr and code != 0
         assert await shell.run("Write-Output alive") == ("alive", "", 0)
+
+
+async def test_credentials_loaded_from_secrets_do_not_reach_the_shell(monkeypatch):
+    """A key this process loaded at startup must not be readable from a command.
+
+    A model that can call ``self.shell.run`` can print any env var it finds
+    there. Names the user exported stay — the shell is their tool — but names
+    ``load_secrets_into_env`` pushed in exist only to configure this process's
+    own LLM client.
+    """
+    monkeypatch.setenv("NOOA_TEST_FILE_SECRET", "from-file")
+    monkeypatch.setenv("NOOA_TEST_USER_EXPORT", "from-shell")
+    monkeypatch.setattr(
+        "nooa.secrets.names_loaded_from_file",
+        lambda: frozenset({"NOOA_TEST_FILE_SECRET"}),
+    )
+
+    shell = PowerShellSession()
+    try:
+        stdout, stderr, code = await shell.run(
+            "Write-Output \"file=$env:NOOA_TEST_FILE_SECRET\"; "
+            "Write-Output \"user=$env:NOOA_TEST_USER_EXPORT\""
+        )
+        assert code == 0, stderr
+        assert "from-file" not in stdout, stdout
+        assert "from-shell" in stdout, stdout
+    finally:
+        await shell.close()

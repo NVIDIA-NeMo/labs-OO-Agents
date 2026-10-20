@@ -37,6 +37,23 @@ from nooa.agentdoc import TruncatingStringIO
 
 logger = logging.getLogger(__name__)
 
+
+def _shell_environment() -> dict[str, str]:
+    """The host's environment, minus credentials this process loaded itself.
+
+    Same rule as the PowerShell host: names the user exported stay, names
+    ``load_secrets_into_env()`` added at startup do not. A command that can
+    print an env var can send it anywhere.
+    """
+    from nooa.secrets import names_loaded_from_file
+
+    loaded = names_loaded_from_file()
+    env = {key: value for key, value in os.environ.items() if key not in loaded}
+    env["PS1"] = ""
+    env["TERM"] = "dumb"
+    return env
+
+
 MAX_OUTPUT_CHARS = 30_000
 """Characters kept of each of a command's stdout and stderr: the first and last half."""
 _BOUNDED_CHUNK_CHARS = 65_536  # Pieces fed to the truncating buffer by _bounded
@@ -228,9 +245,7 @@ class BashSession:
             raise RuntimeError("BashSession requires Unix; use PowerShellSession on native Windows")
 
         self._start_count += 1
-        env = os.environ.copy()
-        env["PS1"] = ""
-        env["TERM"] = "dumb"
+        env = _shell_environment()
 
         # Create pipe for control channel (fd 3 inside bash).
         ctrl_r, ctrl_w = os.pipe()

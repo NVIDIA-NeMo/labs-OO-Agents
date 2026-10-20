@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 _SECRETS_FILENAME = "secrets.yaml"
 _SECRETS_ENV_VAR = "NEMO_OO_SECRETS"
 
+# Names this process pushed into ``os.environ`` from secrets.yaml, as opposed
+# to names it inherited from the shell. The distinction is the only way a
+# child-spawning subsystem can tell "the user exported this" from "this
+# process added it on startup"; both look identical in ``os.environ``.
+_LOADED_FROM_FILE: set[str] = set()
+
 
 def load_secrets_into_env() -> list[str]:
     """Load layered ``secrets.yaml`` and push its ``env:`` map into ``os.environ``.
@@ -65,7 +71,19 @@ def load_secrets_into_env() -> list[str]:
             continue
         os.environ[key] = str(value)
         applied.append(key)
+    _LOADED_FROM_FILE.update(applied)
     return applied
+
+
+def names_loaded_from_file() -> frozenset[str]:
+    """The env names :func:`load_secrets_into_env` set in this process.
+
+    A subsystem that spawns a child with a copy of ``os.environ`` can use this
+    to leave those names out. The values are credentials; a shell the model can
+    drive has no reason to hold them, and every one it holds is one a command
+    can print.
+    """
+    return frozenset(_LOADED_FROM_FILE)
 
 
 def write_secret_env(path, name: str, value: str) -> None:
@@ -120,4 +138,4 @@ def write_secret_env(path, name: str, value: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
-__all__ = ["load_secrets_into_env", "write_secret_env"]
+__all__ = ["load_secrets_into_env", "names_loaded_from_file", "write_secret_env"]

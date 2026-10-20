@@ -36,6 +36,27 @@ logger = logging.getLogger(__name__)
 _MAX_OUTPUT_CHARS = 30_000
 
 
+def _shell_environment() -> dict[str, str]:
+    """The host's environment, minus credentials this process loaded itself.
+
+    A shell the model can drive must not hold API keys. Names the *user*
+    exported are left alone — the shell is their tool and they asked for them —
+    but names that ``load_secrets_into_env()`` pushed in at startup exist only
+    to configure this process's own LLM client. A command that can print an env
+    var can send it anywhere, and a model that can call ``self.shell.run`` can
+    write that command.
+
+    The value is still reachable where it is needed: the LLM client read it
+    from ``os.environ`` in this process before any shell started.
+    """
+    from nooa.secrets import names_loaded_from_file
+
+    loaded = names_loaded_from_file()
+    env = {key: value for key, value in os.environ.items() if key not in loaded}
+    env.update(TERM="dumb", NO_COLOR="1", PYTHONIOENCODING="utf-8")
+    return env
+
+
 @dataclass(frozen=True)
 class _Completion:
     code: int
@@ -278,8 +299,7 @@ class PowerShellSession:
             port = server.sockets[0].getsockname()[1]
             self._job = WindowsJob()
             self._jobs.append(self._job)
-            env = os.environ.copy()
-            env.update(TERM="dumb", NO_COLOR="1", PYTHONIOENCODING="utf-8")
+            env = _shell_environment()
             self._process = await asyncio.create_subprocess_exec(
                 executable,
                 "-NoLogo",

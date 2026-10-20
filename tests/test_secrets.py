@@ -151,3 +151,29 @@ def test_non_mapping_env_warns(user_dir, project_dir, caplog):
     with caplog.at_level(logging.WARNING, logger="nooa.secrets"):
         assert load_secrets_into_env() == []
     assert "not a mapping" in caplog.text
+
+
+def test_loaded_names_are_reported_and_exported_ones_are_not(
+    user_dir, project_dir, monkeypatch
+):
+    """The shell needs to tell "this process added it" from "the user set it".
+
+    Both look identical in ``os.environ``, so the loader records what it set.
+    Without the distinction a child that filters credentials would also drop
+    names the user exported on purpose.
+    """
+    from nooa.secrets import _LOADED_FROM_FILE, names_loaded_from_file
+
+    monkeypatch.delenv(_KEY, raising=False)
+    monkeypatch.setenv(_KEY2, "exported")
+    _write(user_dir, f"env:\n  {_KEY}: from-file\n  {_KEY2}: file-value\n")
+
+    applied = load_secrets_into_env()
+
+    assert applied == [_KEY], "the exported name must not be re-applied"
+    assert os.environ[_KEY] == "from-file"
+    assert os.environ[_KEY2] == "exported", "the shell value must win"
+    loaded = names_loaded_from_file()
+    assert _KEY in loaded
+    assert _KEY2 not in loaded, "an exported name must not be reported as file-loaded"
+    assert _KEY in _LOADED_FROM_FILE
