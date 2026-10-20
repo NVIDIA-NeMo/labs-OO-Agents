@@ -223,9 +223,19 @@ def test_integer_and_boolean_questions_map_to_typed_schemas_and_answers():
         "replicas": {"type": "integer", "title": "Replicas?", "minimum": 1, "maximum": 10},
         "dry_run": {"type": "boolean", "title": "Dry run?", "description": "No changes"},
     }
+    # Pool 1.0.16 declines a form with integer or boolean properties.
     assert pool_form_schema(need)["properties"] == {
-        "replicas": {"title": "Replicas?", "type": "integer", "minimum": 1, "maximum": 10},
-        "dry_run": {"title": "Dry run?", "description": "No changes", "type": "boolean"},
+        "replicas": {
+            "title": "Replicas?",
+            "type": "string",
+            "description": "A whole number from 1 to 10.",
+        },
+        "dry_run": {
+            "title": "Dry run?",
+            "description": "No changes",
+            "type": "string",
+            "oneOf": [{"const": "true", "title": "Yes"}, {"const": "false", "title": "No"}],
+        },
     }
     # Typed answers, and text-box strings converted for these questions only.
     assert answer_from_content(need, {"replicas": 3, "dry_run": True}) == {

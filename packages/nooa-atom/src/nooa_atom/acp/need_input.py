@@ -5,8 +5,10 @@
 Each question becomes one property:
 
 - ``TextQuestion``: ``{"type": "string"}``.
-- ``IntegerQuestion``: ``{"type": "integer"}`` with ``minimum``/``maximum``.
-- ``BooleanQuestion``: ``{"type": "boolean"}``.
+- ``IntegerQuestion``: ``{"type": "integer"}`` with ``minimum``/``maximum``;
+  Pool declines that, so there it is a string whose description gives the range.
+- ``BooleanQuestion``: ``{"type": "boolean"}``; for Pool, a Yes/No single-select
+  of ``"true"``/``"false"``. ``validate_response`` converts both answers back.
 - ``PickOneQuestion(allow_other=False)``: a single-select string,
   ``oneOf`` of ``{"const": value, "title": title}``.
 - ``PickOneQuestion(allow_other=True)``: standard ACP has no select-or-text
@@ -76,13 +78,12 @@ def pool_form_schema(need: NeedInputForm | NeedInput) -> dict[str, Any] | None:
         if question.kind == "text":
             prop["type"] = "string"
         elif question.kind == "integer":
-            prop["type"] = "integer"
-            if question.minimum is not None:
-                prop["minimum"] = question.minimum
-            if question.maximum is not None:
-                prop["maximum"] = question.maximum
+            # Pool declines a form with ``type: integer``: a text box, checked on our side.
+            prop["type"] = "string"
+            prop["description"] = "\n".join(filter(None, [question.help, _integer_hint(question)]))
         elif question.kind == "boolean":
-            prop["type"] = "boolean"
+            # Pool declines ``type: boolean``: a Yes/No picker, converted on our side.
+            prop.update(type="string", oneOf=[*_YES_NO])
         else:
             picker = {"oneOf": [{"const": c.value, "title": c.title} for c in question.choices]}
             if not question.allow_other:
@@ -95,6 +96,20 @@ def pool_form_schema(need: NeedInputForm | NeedInput) -> dict[str, Any] | None:
         "properties": properties,
         "required": [q.id for q in need.questions if q.required],
     }
+
+
+_YES_NO = ({"const": "true", "title": "Yes"}, {"const": "false", "title": "No"})
+
+
+def _integer_hint(question: Any) -> str:
+    low, high = question.minimum, question.maximum
+    if low is not None and high is not None:
+        return f"A whole number from {low} to {high}."
+    if low is not None:
+        return f"A whole number of at least {low}."
+    if high is not None:
+        return f"A whole number of at most {high}."
+    return "A whole number."
 
 
 def answer_from_content(

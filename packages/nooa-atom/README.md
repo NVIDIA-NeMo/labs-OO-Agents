@@ -200,8 +200,10 @@ schemas. These mappings derive from Pool 1.0.16;
 preserved. **Only text questions can be optional.** Pool 1.0.16 automatically declines the
 entire form if any non-text field is optional; constructors reject
 `required=False` on pickers, integers and booleans with actionable guidance before a UI request.
-Integers and booleans are sent to Pool as `type: integer` (with `minimum`/`maximum`)
-and `type: boolean`. Optional text remains supported.
+Pool 1.0.16 automatically declines a form with `type: integer` or `type: boolean`
+properties, so for Pool an integer is a string whose description gives the range and a
+boolean is a Yes/No single-select (`"true"`/`"false"`); `validate_response()` converts both
+back. Standard ACP uses the native integer (with `minimum`/`maximum`) and boolean schemas. Optional text remains supported.
 If text is appropriate, explicitly author a `TextQuestion(required=False)` with
 choice values/titles in its help. This is a text input, not a strict picker:
 validate any domain restriction yourself. Neither required flags nor picker
