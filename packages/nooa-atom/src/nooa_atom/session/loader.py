@@ -206,8 +206,90 @@ def load_typed(type_name: str | None, data: Any) -> Any:
         return value
     if not (isinstance(target, type) and issubclass(target, BaseModel)):
         return value
+    if (
+        target.__module__ == "nooa.interactive"
+        and target.__name__ in ("NeedInput", "NeedInputForm")
+        and isinstance(value, dict)
+    ):
+        record = migrate_input_request(value, form=target.__name__ == "NeedInputForm")
+        if record is None:
+            return value  # preserve obsolete typed request as data, not a fake restored class
+        from nooa.interactive import NeedInput, NeedInputForm
+
+        target = NeedInputForm if record.get("kind") == "form" else NeedInput
+        value = record
+    if target.__name__ == "ChildQuestion" and isinstance(value, dict):
+        value = _migrate_questions(_fold_options(dict(value)))
+        presentation = value.pop("presentation", None)
+        if "request_kind" not in value:
+            value["request_kind"] = (
+                "form"
+                if presentation == "form" or value.get("answer_schema") is not None
+                else "question"
+            )
     try:
         return target.model_validate(value)
     except Exception:
         logger.warning("Recorded data does not validate as %s; keeping JSON data", type_name)
         return value
+
+
+def _fold_options(record: dict[str, Any]) -> dict[str, Any]:
+    """Legacy ``NeedInput.options`` were suggestions; keep them as question text."""
+    options = record.pop("options", None)
+    question = record.get("question")
+    if isinstance(options, list) and isinstance(question, str):
+        listed = [o for o in options if isinstance(o, str) and o.strip()]
+        if listed:
+            record["question"] = question + "\n\n" + "\n".join(f"- {o}" for o in listed)
+    return record
+
+
+def _migrate_questions(record: dict[str, Any]) -> dict[str, Any]:
+    from nooa.interactive import migrate_form_question
+
+    questions = record.get("questions")
+    if isinstance(questions, list):
+        record["questions"] = [migrate_form_question(q) for q in questions]
+    return record
+
+
+def migrate_input_request(value: dict[str, Any], *, form: bool = False) -> dict[str, Any] | None:
+    """Migrate valid legacy string questions; corrupt/typed records stay unavailable.
+
+    Descriptor records pass through for strict model validation. Legacy choices
+    must be string lists: iterating arbitrary containers would invent new choices.
+    """
+    record = dict(value)
+    # Session bookkeeping recorded beside the request, not request fields.
+    record.pop("request_id", None)
+    record.pop("question_id", None)
+    presentation = record.pop("presentation", None)
+    answer_type = record.pop("answer_type", None)
+    answer_schema = record.pop("answer_schema", None)
+    form = form or record.get("kind") == "form" or presentation == "form"
+    if answer_type is not None or answer_schema is not None:
+        return None
+    if not form:
+        record["kind"] = "question"
+        return _fold_options(record)
+    if "questions" in record:
+        return _migrate_questions(record)
+    question = record.pop("question", None)
+    options = record.pop("options", None)
+    if not isinstance(question, str) or not question.strip():
+        return None
+    if options is not None and (
+        not isinstance(options, list)
+        or any(not isinstance(option, str) or not option.strip() for option in options)
+    ):
+        return None
+    descriptor: dict[str, Any] = {"id": "answer", "label": question, "kind": "text"}
+    if options:
+        descriptor.update(
+            kind="pick_one",
+            choices=[{"value": c, "title": c} for c in options],
+            allow_other=False,
+        )
+    record.update(kind="form", heading=question, questions=[descriptor])
+    return record

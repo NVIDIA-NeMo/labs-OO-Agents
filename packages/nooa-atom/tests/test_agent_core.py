@@ -359,7 +359,20 @@ def test_cells_see_the_turn_types_but_not_the_helpers():
     from nooa.agentdoc._visibility import filter_mro_module_globals
 
     names = set(filter_mro_module_globals(AtomAgent))
-    assert {"Done", "NeedInput", "Waiting", "TaskResult", "ChildResult"} <= names
+    assert {
+        "Done",
+        "NeedInput",
+        "NeedInputForm",
+        "InputRequest",
+        "FormResponse",
+        "TextQuestion",
+        "PickOneQuestion",
+        "FormChoice",
+        "FormQuestion",
+        "Waiting",
+        "TaskResult",
+        "ChildResult",
+    } <= names
     assert {"ChildFailedError", "DepthLimitError"} <= names
     hidden = {
         "_todo_prompt",

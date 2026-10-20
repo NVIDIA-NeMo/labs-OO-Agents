@@ -767,7 +767,7 @@ async def test_a_pool_steer_the_running_turn_takes_is_done_with_it(make_adapter,
                 cell(BLOCKING_CELL),
                 cell(
                     "await self.queue_manager.get_channel('user_messages').get()\n"
-                    "return_result(NeedInput(question='Which branch?'))"
+                    "return_result(NeedInputForm(heading='Which branch?', questions=[TextQuestion(id='answer', label='Which branch?')]))"
                 ),
                 reply("Pushed."),
             ]
@@ -799,10 +799,12 @@ async def test_a_pool_steers_question_is_a_pool_form_inside_the_prompt(
             None: [
                 cell(BLOCKING_CELL),
                 reply("First."),
-                cell("return_result(NeedInput(question='Name the release?'))"),
+                cell(
+                    "return_result(NeedInputForm(heading='Name the release?', questions=[TextQuestion(id='answer', label='Name the release?')]))"
+                ),
                 cell(
                     "[a] = notification['user_messages']\n"
-                    "self.message(repr(a))\n"
+                    "self.message(repr(a.content))\n"
                     "return_result(Done(explanation='answered'))"
                 ),
             ]
@@ -822,7 +824,7 @@ async def test_a_pool_steers_question_is_a_pool_form_inside_the_prompt(
     [(_, method, params)] = [entry for entry in client.log if entry[0] == "ext"]
     assert method == "poolside/elicitation"
     assert params["message"] == "Name the release?"
-    assert _order(client, session_id)[-2:] == ["'Aurora'\n\n", "response"]
+    assert _order(client, session_id)[-2:] == ["{'answer': 'Aurora'}\n\n", "response"]
     assert _order(client, session_id).index("ext") < _order(client, session_id).index("response")
 
 
@@ -946,7 +948,9 @@ async def test_a_pool_steer_is_answered_while_a_form_is_open(make_adapter, works
     models = ScriptedModels(
         {
             None: [
-                cell("return_result(NeedInput(question='Name the release?'))"),
+                cell(
+                    "return_result(NeedInputForm(heading='Name the release?', questions=[TextQuestion(id='answer', label='Name the release?')]))"
+                ),
                 reply("Noted."),
                 cell(
                     "[a] = notification['user_messages']\n"
@@ -971,7 +975,10 @@ async def test_a_pool_steer_is_answered_while_a_form_is_open(make_adapter, works
 
     assert response.stop_reason == "end_turn"
     order = _order(client, session_id)
-    assert {"Noted.\n\n", "'Aurora'\n\n"} <= set(order[order.index("ext") :])
+    assert "Noted.\n\n" in order[order.index("ext") :]
+    assert "'Aurora'\n\n" not in order
+    assert len(models.llms[None].calls) == 2
+    assert client.updates(session_id, UserMessageChunk) == []
     assert order[-1] == "response"
 
 

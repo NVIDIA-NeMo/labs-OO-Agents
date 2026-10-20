@@ -138,8 +138,10 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
         ),
         cell(
             "[q] = notification['delegates']\n"
-            "self.v.schema_title = q.answer_schema['title']\n"
-            "await q.child.send({'branch': 'main'})\n"
+            "self.v.schema_title = q.questions[0].label\n"
+            "self.v.request_kind = q.request_kind\n"
+            "self.v.reason = q.reason\n"
+            "await q.child.send(FormResponse(action='accept', content={'branch': 'main'}))\n"
             "return_result(Waiting(explanation='answered', on=['delegates']))"
         ),
         cell(
@@ -152,10 +154,13 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
         ),
     ]
     models.scripts["Helper"] = [
-        cell("return_result(NeedInput(question='Which branch?', answer_type=Answer))"),
+        cell(
+            "return_result(NeedInputForm(heading='Which branch?', "
+            "reason='Safety.', questions=[PickOneQuestion(id='branch', label='Branch?', choices=[FormChoice(value='main', title='Main')])]))"
+        ),
         cell(
             "[a] = notification['user_messages']\n"
-            "return_result(Done(explanation=f\"branch {a['branch']}\", result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+            "return_result(Done(explanation='branch ' + a.content['branch'], result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
         ),
         cell(
             "[m] = notification['user_messages']\nreturn_result(Done(explanation=f'second: {m}', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
@@ -164,7 +169,9 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
     root = await registry.create(root_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="second: SECOND-MESSAGE")
-    assert root._agent.v.schema_title == "Answer"
+    assert root._agent.v.schema_title == "Branch?"
+    assert root._agent.v.request_kind == "form"
+    assert root._agent.v.reason == "Safety."
     [child_options] = [o for o in models.built if o.name == "Helper"]
     assert (child_options.turn_method, child_options.kept) == ("handle_work", True)
     [helper] = registry.children(root.id)
@@ -611,3 +618,156 @@ def test_an_agent_without_a_worker_turn_cannot_run_a_child():
     assert _worker_turn_method(
         SimpleNamespace(_agent=SimpleNamespace(handle_work=lambda: None))
     ) == ("handle_work")
+
+
+@pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
+async def test_child_form_actions_are_preserved_and_accept_validated(
+    registry, root_options, models, action
+):
+    content = {"branch": "main"} if action == "accept" else None
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('Helper', 'ask', kept=True)\n"
+            "return_result(Waiting(explanation='child', on=['delegates']))"
+        ),
+        cell(
+            "[q] = notification['delegates']\n"
+            "assert q.request_kind == 'form'\n"
+            f"await q.child.send(FormResponse(action={action!r}, content={content!r}))\n"
+            "return_result(Waiting(explanation='answered', on=['delegates']))"
+        ),
+        cell(
+            "[r] = notification['delegates']\nreturn_result(Done(explanation=r.done.explanation))"
+        ),
+    ]
+    models.scripts["Helper"] = [
+        cell(
+            "return_result(NeedInputForm(heading='Branch?', questions=[TextQuestion(id='branch', label='Branch?')]))"
+        ),
+        cell(
+            "[a] = notification['user_messages']\n"
+            "assert isinstance(a, FormResponse)\n"
+            "if a.action == 'accept':\n    assert a.content == {'branch': 'main'}\n"
+            "return_result(Done(explanation=a.action, result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+        ),
+    ]
+    root = await registry.create(root_options)
+    assert (await asyncio.wait_for(root.prompt("go"), TIMEOUT)).explanation == action
+
+
+@pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
+async def test_child_question_answer_rejects_superseded_same_id_form(
+    registry, root_options, models, action
+):
+    content = {"answer": "old"} if action == "accept" else None
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('Helper', 'ask', kept=True)\nreturn_result(Waiting(explanation='child', on=['delegates']))"
+        ),
+        cell(
+            "[q] = notification['delegates']\nself.v.old = q\nawait q.child.send('new question please')\nreturn_result(Waiting(explanation='replace', on=['delegates']))"
+        ),
+        cell(
+            "[q] = notification['delegates']\n"
+            "try:\n"
+            # The stale question's own ownership token, named explicitly.
+            "    await self.session.send_child(self.v.old.child.id, "
+            f"FormResponse(action={action!r}, content={content!r}), "
+            "channel='user_messages', request_id=self.v.old.request_id)\n"
+            "except ValueError as e:\n    assert 'superseded' in str(e)\n"
+            "else:\n    raise AssertionError('stale question accepted')\n"
+            "await q.child.send(FormResponse(action='cancel'))\nreturn_result(Waiting(explanation='answered current', on=['delegates']))"
+        ),
+        cell(
+            "[r] = notification['delegates']\nreturn_result(Done(explanation=r.done.explanation))"
+        ),
+    ]
+    models.scripts["Helper"] = [
+        cell(
+            "return_result(NeedInputForm(heading='A', questions=[TextQuestion(id='answer', label='A?')]))"
+        ),
+        cell(
+            "return_result(NeedInputForm(heading='B', questions=[TextQuestion(id='answer', label='B?')]))"
+        ),
+        cell(
+            "[a] = notification['user_messages']\nassert a.action == 'cancel'\nreturn_result(Done(explanation='current cancelled', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+        ),
+    ]
+    root = await registry.create(root_options)
+    assert (await asyncio.wait_for(root.prompt("go"), TIMEOUT)).explanation == "current cancelled"
+
+
+@pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
+async def test_idle_child_steer_withdraw_and_reload_cannot_revive_form(
+    registry, root_options, models, action
+):
+    from nooa.interactive import FormResponse
+
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('Helper', 'ask', kept=True)\nreturn_result(Done(explanation='spawned'))"
+        ),
+        done("noted"),
+    ]
+    models.scripts["Helper"] = [
+        cell(
+            "return_result(NeedInputForm(heading='Name?', questions=[TextQuestion(id='answer', label='Name?')]))"
+        ),
+    ]
+    root = await registry.create(root_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    [info] = registry.children(root.id)
+    child = registry.get(info.id)
+    await until(lambda: child._pending_form is not None)
+    child._agent.turns.pause()
+    need = child._pending_form
+    request_id = child._form_request_id
+    assert need is not None
+    receipt = await root._agent.session.send_child(child.id, "never mind", channel="user_messages")
+    assert not child.form_is_current(need)
+    assert child.withdraw(receipt)
+    await registry.close(child.id)
+    child = await registry.load(child.id)
+    assert child._pending_form is None
+    response = FormResponse(
+        action=action, content={"answer": "old"} if action == "accept" else None
+    )
+    with pytest.raises(ValueError, match="superseded"):
+        await root._agent.session.send_child(
+            child.id, response, channel="user_messages", request_id=request_id
+        )
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_parent_send_child_preserves_domain_action_data(
+    registry, root_options, models, pending
+):
+    from nooa.interactive import NeedInputForm
+
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('Helper', 'ask', kept=True)\nreturn_result(Done(explanation='spawned'))"
+        )
+    ]
+    models.scripts["Helper"] = [
+        cell(
+            "return_result(NeedInputForm(heading='Name?', questions=[TextQuestion(id='answer', label='Name?')]))"
+        )
+    ]
+    root = await registry.create(root_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    [info] = registry.children(root.id)
+    child = registry.get(info.id)
+    await until(lambda: isinstance(child._pending_form, NeedInputForm))
+    child._agent.turns.pause()
+    if not pending:
+        await child.submit("never mind")
+    item = {"action": "deploy", "target": "staging"}
+    receipt = await root._agent.session.send_child(child.id, item, channel="user_messages")
+    assert receipt.delivered == "queued"
+    rows = registry.store.load_rows(child.id, frozenset({"ItemAdmitted"}))
+    [row] = [raw for _, raw in rows if raw["item_id"] == receipt.item_id]
+    import json
+
+    assert json.loads(row["item_json"]) == item
+    assert child._pending_form is None

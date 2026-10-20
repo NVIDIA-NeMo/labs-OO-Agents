@@ -20,7 +20,7 @@ from nooa_atom.session.items import (
     Usage,
 )
 from nooa_atom.session.options import reject_removed_options
-from nooa_atom.session.session import Session, as_data
+from nooa_atom.session.session import Session, _is_form_response, as_data
 
 if TYPE_CHECKING:
     from nooa_atom.session.registry import SessionRegistry
@@ -217,7 +217,9 @@ class SessionPort:
             raise
 
     @hidden
-    async def send_child(self, child_id: str, item: Any, *, channel: str) -> Receipt:
+    async def send_child(
+        self, child_id: str, item: Any, *, channel: str, request_id: str | None = None
+    ) -> Receipt:
         """Admit ``item`` on one of a child's channels (loading the child if needed).
 
         Text on ``user_messages`` steers a running turn (it reads it before
@@ -225,11 +227,29 @@ class SessionPort:
         a turn. A new turn of the child ends its pending question. A Todo
         is an ordinary data item: to change a child's task, send the new
         brief as text or a Todo; the child decides how to update its own Todo.
+
+        A ``FormResponse`` answers the child's pending form: it is checked
+        against that form and carries the form's ownership token
+        (``request_id``), so a superseded or already answered form is
+        rejected. ``request_id`` names the form explicitly (hosts and tests).
         """
         child = await self._registry.open_child(self._session, child_id)
         source = _parent_source(self._session)
         if channel != "user_messages":
             return await child.submit(as_data(item), channel=channel, source=source)
+        if request_id is None and _is_form_response(item):
+            question = self._registry.pending_question(self._session, child_id)
+            if question is not None and question.request_kind == "form":
+                if question.request_id is None:
+                    raise ValueError(
+                        "Legacy child form has no request ownership token; request a fresh form."
+                    )
+                request_id = question.request_id
+        if request_id is not None:
+            # Validate against the child's form before the question is cleared.
+            receipt = await child.submit(as_data(item), source=source, request_id=request_id)
+            self._registry.clear_question(self._session, child_id)
+            return receipt
         # A message answers a pending question, as the turn it starts would.
         self._registry.clear_question(self._session, child_id)
         if isinstance(item, str):

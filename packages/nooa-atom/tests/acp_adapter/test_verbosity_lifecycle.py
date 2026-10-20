@@ -65,7 +65,16 @@ async def test_stop_cancels_all_concurrent_local_pickers(
 async def test_stop_cancels_agent_question_and_local_picker_together(
     make_adapter, workspace, client, monkeypatch
 ):
-    models = ScriptedModels({None: [cell("return_result(NeedInput(question='Which branch?'))")]})
+    models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    "return_result(NeedInputForm(heading='Which branch?', "
+                    "questions=[TextQuestion(id='answer', label='Branch')]))"
+                )
+            ]
+        }
+    )
     adapter = await make_adapter(models, client_info=POOL)
     session_id = (await adapter.new_session(str(workspace))).session_id
     forms = GatedForms()
@@ -180,7 +189,16 @@ async def test_external_prompt_cancellation_survives_client_swallowing_cancel(
 async def test_stop_before_agent_form_registration_does_not_open_or_resume_question(
     make_adapter, workspace, client, monkeypatch
 ):
-    models = ScriptedModels({None: [cell("return_result(NeedInput(question='Which branch?'))")]})
+    models = ScriptedModels(
+        {
+            None: [
+                cell(
+                    "return_result(NeedInputForm(heading='Which branch?', "
+                    "questions=[TextQuestion(id='answer', label='Branch')]))"
+                )
+            ]
+        }
+    )
     adapter = await make_adapter(models, client_info=POOL)
     session_id = (await adapter.new_session(str(workspace))).session_id
     bridge = adapter.bridge(session_id)

@@ -416,7 +416,7 @@ class SessionRegistry:
         if parent is None or parent.closing:
             return
         kind = update.outcome_kind
-        if kind not in ("done", "need_input", "error", "cancelled"):
+        if kind not in ("done", "need_input", "need_input_form", "error", "cancelled"):
             return
         ref = self.child_ref(child)
         source = f"child:{child.name or child.id}"
@@ -448,7 +448,7 @@ class SessionRegistry:
                 else:
                     error = (
                         "a one-shot worker cannot ask questions, but it asked: "
-                        f"{update.outcome.get('question', '')!r}"
+                        f"{update.outcome.get('heading', update.outcome.get('question', ''))!r}"
                     )
                 if waiter is not None:
                     waiter.set_exception(ChildFailedError(error))
@@ -553,7 +553,7 @@ class SessionRegistry:
             elif event_type == "TurnEnded":
                 replies += 1
                 asked = None
-                if raw.get("outcome_kind") == "need_input":
+                if raw.get("outcome_kind") in ("need_input", "need_input_form"):
                     with suppress(ValueError):
                         asked = json.loads(str(raw.get("result_json") or "{}"))
                         asked.setdefault("question_id", question_id(child_id, replies))
@@ -869,6 +869,24 @@ class SessionRegistry:
         That includes steers no model call saw (on ``user_messages``); a
         steer a model call saw was marked consumed.
         """
+        ownership = self.store.load_rows(
+            session.id, frozenset(("TurnEnded", "TurnStarted", "ItemAdmitted"))
+        )
+        pending = None
+        for event_type, raw in ownership:
+            if event_type == "TurnEnded":
+                pending = raw
+            elif event_type == "TurnStarted" or (
+                event_type == "ItemAdmitted" and raw.get("channel") == "user_messages"
+            ):
+                pending = None
+        if pending and pending.get("outcome_kind") in ("need_input", "need_input_form"):
+            # Other outcomes need no descriptor restoration (and may have no JSON).
+            try:
+                data = json.loads(pending.get("result_json", ""))
+            except (ValueError, TypeError):
+                data = None
+            session.restore_input_request(str(pending["outcome_kind"]), data)
         rows = self.store.load_rows(
             session.id,
             frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn", "ItemDiscarded")),
@@ -1029,17 +1047,29 @@ def _rebuild_done(update: TurnEndedUpdate) -> Done:
 
 
 def _question_from_outcome(ref: ChildRef, outcome: dict[str, Any]) -> ChildQuestion:
-    """A child's ``need_input`` outcome as a ``ChildQuestion``.
+    """A child's ``need_input``/``need_input_form`` outcome as a ``ChildQuestion``.
 
     The id is the one the child's session stored in the outcome
     (``question_id``), so the question read back from the record after a
     reload has the same id.
     """
+    from nooa.interactive import migrate_form_question
+
+    form = (
+        outcome.get("kind") == "form"
+        or outcome.get("presentation") == "form"
+        or outcome.get("answer_schema") is not None
+    )
+    questions = outcome.get("questions")
     return ChildQuestion(
         id=str(outcome.get("question_id") or question_id(ref.id, 0)),
         child=ref,
-        question=str(outcome.get("question", "")),
-        options=outcome.get("options"),
+        question=str(outcome.get("heading", outcome.get("question", ""))),
+        request_kind="form" if form else "question",
         reason=outcome.get("reason"),
+        questions=[migrate_form_question(q) for q in questions]
+        if isinstance(questions, list)
+        else None,
+        request_id=outcome.get("request_id"),
         answer_schema=outcome.get("answer_schema"),
     )

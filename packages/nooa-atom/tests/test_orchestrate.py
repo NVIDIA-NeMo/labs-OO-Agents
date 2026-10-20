@@ -36,8 +36,9 @@ ORCHESTRATOR_TEXT = (
 UNCHANGED_PROMPTS = {
     # handle() as on dev/atom after #447 and #451 (#451's "or from your parent
     # agent if you are a child" line and #447's NeedInput free-text wording),
-    # plus the regular progress-update guidance.
-    "handle": "4b8cac52ffa8278c0fbf5ea358df39b57b029b3cc7a555df016211e5e77d6e43",
+    # plus the regular progress-update guidance. Re-pinned for the explicit
+    # NeedInput / NeedInputForm (FormResponse) guidance (#432).
+    "handle": "71a88cadf990b617962bd7675327aeeed4869ee06206952ebc4ad93f3103930c",
     "handle_batch": "9124c2874abd30f61a26f313abacbdc925f02a20efac8b4d7e3319a22ab545f0",
 }
 
@@ -69,14 +70,14 @@ def test_handle_orchestrate_has_the_orchestrator_prompt():
 def test_handle_orchestrate_returns_only_done_or_waiting():
     import typing
 
-    from nooa.interactive import Done, NeedInput, Waiting
+    from nooa.interactive import Done, NeedInput, NeedInputForm, Waiting
 
     def returns(method):
         return typing.get_type_hints(getattr(AtomAgent, method))["return"]
 
     assert returns("handle_orchestrate") == Done | Waiting
-    # handle() and handle_batch() keep their return types.
-    assert returns("handle") == Done | NeedInput | Waiting
+    # handle() may also ask (InputRequest: NeedInput | NeedInputForm); handle_batch() may not.
+    assert returns("handle") == Done | NeedInput | NeedInputForm | Waiting
     assert returns("handle_batch") == Done | Waiting
 
 
@@ -84,7 +85,7 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
     """Return-type validation turns a NeedInput into feedback the model sees."""
     llm = CellLLM(
         [
-            cell("return_result(NeedInput(question='which one?', options=['a', 'b']))"),
+            cell("return_result(NeedInput(question='which one?'))"),
             cell(RESULT),
         ]
     )
@@ -95,7 +96,8 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
         feedback = str(llm.calls[1].messages)
         assert "return_result validation error" in feedback
         assert "Expected return type: nooa.interactive.Done | nooa.interactive.Waiting" in feedback
-        assert "Got: NeedInput(question=" in feedback
+        # NeedInput's repr starts with its ``kind`` discriminator.
+        assert "Got: NeedInput(kind=" in feedback and "which one?" in feedback
     finally:
         await agent.aclose()
 

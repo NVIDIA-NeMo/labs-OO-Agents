@@ -11,7 +11,7 @@ queues and re-enters ``handle()`` once per notification. It provides:
 * ``self.v`` — snapshot-backed persistent variables that survive turns
   and sessions,
 * ``message()`` — send a Markdown message to the user,
-* the turn protocol: ``handle()`` returns ``Done``, ``NeedInput`` or
+* the turn protocol: ``handle()`` returns ``Done``, ``NeedInput``, ``NeedInputForm`` or
   ``Waiting``; ``handle_batch()`` runs unattended turns and returns ``Done`` or ``Waiting``;
   ``handle_work()`` is a child session's worker turn, whose ``Done`` carries a ``TaskResult``,
 * token-budget history summarization (``install_summarizer`` /
@@ -137,57 +137,177 @@ class Done(BaseModel):
 
 
 class NeedInput(BaseModel):
-    """Turn result: a question the agent cannot continue without.
+    """Conversational question, answered by the person's next message; never a dialog.
 
-    ``question`` is the question itself; the host shows it to the person,
-    so do not also send it with ``self.message()``. Omit ``options`` for a
-    free-text answer. Set ``options`` only for a single choice among fixed values, or ``answer_type`` (a pydantic model class whose fields
-    are simple values: str, int, float, bool, or a list of str) for a typed
-    answer, or neither for free text. The host turns ``answer_type`` into a
-    form and the answer arrives in the next notification as an instance of
-    it. ``reason`` optionally says in one sentence why progress is not
-    possible or not desirable without the answer.
+    The answer arrives as a plain ``str``. Put any suggested answers in the
+    question text; use NeedInputForm when you want pickers or several fields.
     """
 
-    question: str = Field(description="The question to show the person")
-    reason: str | None = Field(
-        default=None, description="Why progress is not possible or not desirable without it"
-    )
-    options: list[str] | None = Field(
-        default=None, min_length=1, description="Choices for a single choice"
-    )
-    answer_type: type[BaseModel] | None = Field(
-        default=None,
-        description="Pydantic model class with simple fields; the answer comes back as an instance",
-    )
+    model_config = {"extra": "forbid"}
+    kind: Literal["question"] = "question"
+    question: str
+    reason: str | None = None
 
     _check_question = field_validator("question")(_non_blank)
 
-    @field_validator("options", mode="before")
+
+class FormChoice(BaseModel):
+    """A stored string value and the label shown in a picker."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    value: str
+    title: str
+    _check_value = field_validator("value")(_non_blank)
+    _check_title = field_validator("title")(_non_blank)
+
+
+class _FormQuestionBase(BaseModel):
+    """Fields shared by every form question."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    id: str
+    label: str
+    help: str | None = None
+    required: bool = True
+    _check_id = field_validator("id")(_non_blank)
+    _check_label = field_validator("label")(_non_blank)
+
+
+class TextQuestion(_FormQuestionBase):
+    """One text input. Optional omitted/blank answers become the empty string."""
+
+    kind: Literal["text"] = "text"
+
+
+class PickOneQuestion(_FormQuestionBase):
+    """Choose one listed value (its ``value``, not its title), or type another string.
+
+    ``allow_other=True`` (default) lets the person type a different answer;
+    set ``allow_other=False`` only when the answer must be one of ``choices``.
+    Pickers must be ``required=True``; for an optional answer use a
+    ``TextQuestion`` and list the suggestions in ``help``.
+    """
+
+    kind: Literal["pick_one"] = "pick_one"
+    choices: list[FormChoice] = Field(min_length=1)
+    allow_other: bool = True
+
+    @field_validator("required")
     @classmethod
-    def _options_not_empty(cls, value: Any) -> Any:
-        if isinstance(value, list | tuple) and not value:
+    def _required_picker(cls, required: bool) -> bool:
+        # Pool 1.0.16 rejects optional non-text fields and aborts the whole form.
+        if not required:
             raise ValueError(
-                "options=[] is empty: omit options for a free-text answer, e.g. "
-                'NeedInput(question="..."), or list at least one choice'
+                "Picker questions must be required. For an optional answer, use a "
+                "TextQuestion with the suggestions in help."
             )
-        return value
+        return required
 
-    @field_validator("options")
+    @field_validator("choices")
     @classmethod
-    def _options_not_blank(cls, value: list[str] | None) -> list[str] | None:
-        return None if value is None else [_non_blank(option) for option in value]
+    def _unique_values(cls, choices: list[FormChoice]) -> list[FormChoice]:
+        if len({choice.value for choice in choices}) != len(choices):
+            raise ValueError("choice values must be unique")
+        return choices
 
-    @field_serializer("answer_type", when_used="json")
-    def _serialize_answer_type(self, value: type[BaseModel] | None) -> str | None:
-        """A class cannot be JSON-encoded; record it as ``module:qualname``."""
-        return None if value is None else f"{value.__module__}:{value.__qualname__}"
+
+FormQuestion = Annotated[TextQuestion | PickOneQuestion, Field(discriminator="kind")]
+
+
+class FormResponse(BaseModel):
+    """Form outcome; accepted content is a string dictionary keyed by question id.
+
+    Decline and cancel carry no content. If the person stops the turn (e.g.
+    Esc) while the form is open, no FormResponse arrives: the turn just ends
+    and the next turn starts with whatever they type next.
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    action: Literal["accept", "decline", "cancel"]
+    content: dict[str, str] | None = None
 
     @model_validator(mode="after")
-    def _one_answer_shape(self) -> "NeedInput":
-        if self.options is not None and self.answer_type is not None:
-            raise ValueError("set options or answer_type, not both")
+    def _content_for_action(self) -> "FormResponse":
+        if self.action == "accept" and self.content is None:
+            raise ValueError("accept requires content")
+        if self.action != "accept" and self.content is not None:
+            raise ValueError("decline/cancel must not carry content")
         return self
+
+
+class NeedInputForm(BaseModel):
+    """An explicit form of ordered questions; answered by a ``FormResponse``.
+
+    If the person's client cannot show a form, the answer arrives as a plain
+    ``str`` instead of a ``FormResponse``: read it as unvalidated free text.
+    Answers are only checked for shape (ids, required, strict choices); range
+    or format checks are yours, with a follow-up form for just the bad fields.
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    kind: Literal["form"] = "form"
+    heading: str
+    reason: str | None = None
+    questions: list[FormQuestion] = Field(min_length=1)
+    _check_heading = field_validator("heading")(_non_blank)
+
+    @field_validator("questions")
+    @classmethod
+    def _unique_ids(cls, questions: list[FormQuestion]) -> list[FormQuestion]:
+        if len({question.id for question in questions}) != len(questions):
+            raise ValueError("question ids must be unique")
+        return questions
+
+    def validate_response(self, response: FormResponse) -> FormResponse:
+        """Check ids, strings, required presence and strict selection, not domain rules.
+
+        Preserve nonblank text verbatim. Missing or whitespace-only optional
+        fields become ""; required blanks fail.
+        """
+        response = FormResponse.model_validate(response)
+        if response.action != "accept":
+            return response
+        content = response.content
+        assert content is not None
+        unknown = content.keys() - {question.id for question in self.questions}
+        if unknown:
+            raise ValueError(f"Unknown answer ids: {sorted(unknown)}")
+        answers: dict[str, str] = {}
+        for question in self.questions:
+            value = content.get(question.id, "")
+            if not value.strip():
+                if question.required:
+                    raise ValueError(f"{question.id}: a nonblank answer is required")
+                value = ""
+            elif (
+                isinstance(question, PickOneQuestion)
+                and not question.allow_other
+                and value not in {choice.value for choice in question.choices}
+            ):
+                raise ValueError(f"{question.id}: choose a listed value")
+            answers[question.id] = value
+        return FormResponse(action="accept", content=answers)
+
+
+def migrate_form_question(value: Any) -> Any:
+    """Map a stored legacy question record onto the current descriptors.
+
+    ``pick_one_or_text`` became ``pick_one`` with ``allow_other=True``; legacy
+    ``pick_one`` records (no ``allow_other`` key) were strict pickers.
+    Only for persisted data: authored dicts get the ``allow_other`` default.
+    """
+    if not isinstance(value, dict):
+        return value
+    kind = value.get("kind")
+    if kind == "pick_one_or_text":
+        return {**value, "kind": "pick_one", "allow_other": True}
+    if kind == "pick_one" and "allow_other" not in value:
+        return {**value, "allow_other": False}
+    return value
+
+
+InputRequest = Annotated[NeedInput | NeedInputForm, Field(discriminator="kind")]
+"""Structured request outputs require kind=question/form; constructors supply it."""
 
 
 class Waiting(BaseModel):
@@ -269,7 +389,7 @@ def require_task_result(agent: Any, result: Any, call: Any) -> None:
     (the parent receives it as one). A one-shot worker may not ask: its
     session port says so (``agent.session.may_ask``).
     """
-    if isinstance(result, NeedInput):
+    if isinstance(result, (NeedInput, NeedInputForm)):
         port = getattr(agent, "session", None)
         if port is not None and not getattr(port, "may_ask", True):
             raise InvariantError(ONE_SHOT_QUESTION)
@@ -609,7 +729,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     async def handle(
         self,
         notification: dict[str, list],
-    ) -> Done | NeedInput | Waiting:
+    ) -> Done | InputRequest | Waiting:
         """Handle one interactive turn.
 
         Called once per inbound notification (or batch). Unpack
@@ -649,14 +769,25 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
           Use ``self.message()`` only for text to show before the turn ends.
 
         - ``NeedInput(question=...)`` — you cannot continue without an
-          answer. ``question`` is the question; the host shows it, so do
-          not also send it with ``message()``. Add ``options=[...]`` for a
-          single choice, or ``answer_type=SomeModel`` (a pydantic class you
-          define with simple fields) for a typed answer. The answer arrives
-          in the next notification. ``reason`` optionally says why you
-          need it::
+          answer. The host shows ``question``, so do not also send it with
+          ``message()``. The next message answers it as plain text; put any
+          suggested answers in the question. ``reason`` optionally says why::
 
-              return_result(NeedInput(question="Which branch should I push to?", options=["main", "dev"]))
+              return_result(NeedInput(question="Which branch should I push to: main or dev?"))
+
+        - ``NeedInputForm(heading=..., questions=[...])`` — an explicit form
+          with ``TextQuestion`` and ``PickOneQuestion`` fields (pickers allow
+          typed answers unless ``allow_other=False``). The answer is a
+          ``FormResponse``: ``accept`` with a string dictionary keyed by
+          question id, or ``decline``/``cancel``. Check ranges and formats
+          yourself and re-ask only the bad fields. If the client has no form
+          support you get plain text instead::
+
+              return_result(NeedInputForm(heading="Release", questions=[
+                  PickOneQuestion(id="branch", label="Branch?", choices=[
+                      FormChoice(value="main", title="Main"), FormChoice(value="dev", title="Dev")]),
+                  TextQuestion(id="notes", label="Release notes?", required=False),
+              ]))
 
         - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
           background job or queue, not on a person. ``message`` is shown to
@@ -716,7 +847,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     async def handle_work(
         self,
         notification: dict[str, list],
-    ) -> Done | NeedInput | Waiting:
+    ) -> Done | InputRequest | Waiting:
         """Work on a task for your parent agent and report back to it.
 
         You are a child session. Your parent is an agent, not a person, and it
@@ -742,9 +873,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
           ``TaskResult`` comes from ``nooa.interactive``, like ``Done``; a dict
           with the same fields is accepted.
-        - ``NeedInput(question=...)`` only if you can ask (a kept child) and
-          cannot go on without your parent's answer; it arrives as your next
-          message. A one-shot worker's question is rejected.
+        - ``NeedInput(question=...)`` (or a ``NeedInputForm``) only if you can
+          ask (a kept child) and cannot go on without your parent's answer; it
+          arrives as your next message. A one-shot worker's question is rejected.
         - ``Waiting(explanation=..., on=[...])`` only while a job you started
           is still running.
 

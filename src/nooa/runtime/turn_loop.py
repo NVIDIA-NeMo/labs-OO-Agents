@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 PrepareTurn = Callable[[], Awaitable[None]]
 CommitTurn = Callable[[dict[str, list[Any]]], None]
 
-TurnKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
+TurnKind = Literal["done", "need_input", "need_input_form", "waiting", "cancelled", "error"]
 
 
 class TurnCancelled(EventBase):
@@ -106,12 +106,14 @@ class TurnLoopEnded(EventBase):
 
 def _settled_from(result: Any) -> TurnSettled:
     """Map a turn method's return value to a ``TurnSettled``."""
-    from nooa.interactive import Done, NeedInput, Waiting
+    from nooa.interactive import Done, NeedInput, NeedInputForm, Waiting
 
     if isinstance(result, Done):
         return TurnSettled(kind="done", result=result)
     if isinstance(result, NeedInput):
         return TurnSettled(kind="need_input", result=result)
+    if isinstance(result, NeedInputForm):
+        return TurnSettled(kind="need_input_form", result=result)
     if isinstance(result, Waiting):
         return TurnSettled(kind="waiting", result=result)
     return TurnSettled(

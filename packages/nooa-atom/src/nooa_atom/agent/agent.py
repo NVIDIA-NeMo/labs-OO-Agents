@@ -12,9 +12,16 @@ from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
     Done,
+    FormChoice,  # noqa: F401 - generation constructor
+    FormQuestion,  # noqa: F401 - generation descriptor union
+    FormResponse,
+    InputRequest,
     InteractiveAgent,
     NeedInput,
+    NeedInputForm,
+    PickOneQuestion,  # noqa: F401 - generation constructor
     SummarizationConfig,
+    TextQuestion,  # noqa: F401 - generation constructor
     Waiting,
     install_summarizer,
 )
@@ -69,6 +76,8 @@ __all__ = [
     "DepthLimitError",
     "Done",
     "NeedInput",
+    "NeedInputForm",
+    "FormResponse",
     "TaskResult",
     "Waiting",
     "session_title_request",
@@ -121,15 +130,13 @@ class AtomAgent(InteractiveAgent):
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
-    check passed without running it. Send each user-facing answer through
-    ``self.message()`` as a complete Markdown document.
+    check passed without running it. Every user-facing reply is a complete Markdown document.
 
-    End every turn with exactly one ``return_result(...)``: ``Done`` after
-    completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=...)`` only when a person must answer (``options=[...]``
-    for fixed choices),
-    and ``Waiting(explanation=..., on=[...])`` only while something you started
-    is still running, naming the channel or job it waits on.
+    End every turn with exactly one ``return_result(...)``:
+    ``Done(message=..., explanation=...)`` when the request is complete;
+    ``NeedInput(question=...)`` or ``NeedInputForm(heading=..., questions=[...])``
+    only when a person must answer; ``Waiting(explanation=..., on=[...])`` only
+    while something you started is still running, naming what it waits on.
     """
 
     # Attributes carrying this agent's own tools. The skill registry refuses
@@ -480,7 +487,7 @@ class AtomAgent(InteractiveAgent):
         notification: Annotated[
             dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
         ],
-    ) -> Done | NeedInput | Waiting:
+    ) -> Done | InputRequest | Waiting:
         """Handle one interactive turn: the newest request and anything else that arrived.
 
         ``notification`` maps a channel name to the items that arrived on it:
@@ -498,19 +505,20 @@ class AtomAgent(InteractiveAgent):
 
         End with exactly one ``return_result(...)``:
 
-        - ``Done(explanation=...)`` when the request is complete. Send the
-          reply with ``self.message()`` first; ``explanation`` is a short
-          status line for the host, not the reply::
+        - ``Done(message=..., explanation=...)`` when the request is complete.
+          ``message`` is the reply; ``explanation`` is a short status line::
 
-              self.message("Fixed the off-by-one in `parse()`; the parser tests pass.")
-              return_result(Done(explanation="fixed parse() and ran its tests"))
+              return_result(Done(message="Fixed `parse()`; its tests pass.", explanation="fixed parse()"))
 
-        - ``NeedInput(question=...)`` when you cannot go on without an
-          answer from the person. The host shows ``question``, so do not also
-          send it with ``self.message()``. Omit ``options`` for a free-text
-          answer; add ``options=[...]`` only for one choice among fixed values
-          (the answer is then just the chosen option). The answer arrives in
-          the next notification.
+        - ``NeedInput(question=...)`` for a quick question; the next message
+          answers as text. Suggest answers in it.
+
+        - ``NeedInputForm(heading=..., questions=[...])`` for a form of
+          ``TextQuestion(id=..., label=...)`` and ``PickOneQuestion(id=..., label=...,
+          choices=[FormChoice(value=..., title=...)])`` (``allow_other=False`` forbids
+          typed answers). A ``FormResponse`` follows: ``accept`` with a string dict
+          keyed by id, or ``decline``/``cancel``. Validate values; re-ask bad
+          fields. Form-less clients send text.
 
         - ``Waiting(explanation=..., on=[...])`` when a job you started is
           still running and nothing else is left to do. ``on`` names what
@@ -663,7 +671,7 @@ class AtomAgent(InteractiveAgent):
         notification: Annotated[
             dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
         ],
-    ) -> Done | NeedInput | Waiting:
+    ) -> Done | InputRequest | Waiting:
         """Work on a task for your parent agent and report back to it.
 
         You are a child session. Your parent is an agent, not a person, and it
@@ -691,8 +699,9 @@ class AtomAgent(InteractiveAgent):
                   ),
               ))
 
-        - ``NeedInput(question=...)`` only if you can ask and cannot go on
-          without your parent's answer; it arrives as your next message.
+        - ``NeedInput(question=...)`` (or a ``NeedInputForm``) only if you can
+          ask and cannot go on without your parent's answer; it arrives as
+          your next message.
         - ``Waiting(explanation=..., on=[...])`` only while a job you started
           is still running.
 
