@@ -70,7 +70,7 @@ qm.spawn(fetch_report(url), channel="reports")             # coroutine: one put 
 
 ```python
 await self.jobs.run("uv run pytest -q", label="tests")       # own bash process; one JobResult (ShellResult + log_path)
-await self.jobs.run_stream("make build", label="build", lines=50)  # JobUpdate batches of StreamEvent lines
+await self.jobs.run("make build", label="build", lines=200, seconds=60)  # + JobUpdate progress batches
 self.jobs.spawn(fetch_report(url), label="report")            # any coroutine or async iterator
 self.jobs.tail("app.log", label="log", seconds=30)            # lines appended from now on
 self.jobs.after(300, label="wakeup")                          # one JobResult after 5 minutes
