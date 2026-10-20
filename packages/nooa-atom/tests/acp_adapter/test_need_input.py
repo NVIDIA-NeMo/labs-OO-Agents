@@ -130,7 +130,8 @@ def test_actions(action):
     "questions",
     [
         [],
-        [{"kind": "integer", "id": "x", "label": "X"}],
+        [{"kind": "multi_select", "id": "x", "label": "X"}],
+        [{"kind": "integer", "id": "x", "label": "X", "minimum": 5, "maximum": 1}],
         [{"kind": "text", "id": "x", "label": "X", "default": "pretend"}],
         [{"kind": "text", "id": 1, "label": "X"}],
         [{"kind": "text", "id": "x", "label": "X"}, {"kind": "text", "id": "x", "label": "Y"}],
@@ -156,7 +157,7 @@ def test_descriptor_json_roundtrip():
 
 @pytest.mark.parametrize("allow_other", [True, False])
 def test_optional_picker_rejected_with_explicit_text_alternative(allow_other):
-    with pytest.raises(ValidationError, match="Picker questions must be required"):
+    with pytest.raises(ValidationError, match="Only text questions can be optional"):
         PickOneQuestion(
             allow_other=allow_other,
             id="choice",
@@ -205,3 +206,58 @@ def test_legacy_question_records_migrate():
     assert [q.allow_other for q in need.questions] == [False, True]
     question = migrate_input_request({"question": "Which?", "options": ["main", "dev"]})
     assert NeedInput.model_validate(question).question == "Which?\n\n- main\n- dev"
+
+
+def test_integer_and_boolean_questions_map_to_typed_schemas_and_answers():
+    from nooa.interactive import BooleanQuestion, IntegerQuestion
+
+    need = NeedInputForm(
+        heading="Deploy",
+        questions=[
+            IntegerQuestion(id="replicas", label="Replicas?", minimum=1, maximum=10),
+            BooleanQuestion(id="dry_run", label="Dry run?", help="No changes"),
+        ],
+    )
+    standard = need_input_schema(need).model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert standard["properties"] == {
+        "replicas": {"type": "integer", "title": "Replicas?", "minimum": 1, "maximum": 10},
+        "dry_run": {"type": "boolean", "title": "Dry run?", "description": "No changes"},
+    }
+    assert pool_form_schema(need)["properties"] == {
+        "replicas": {"title": "Replicas?", "type": "integer", "minimum": 1, "maximum": 10},
+        "dry_run": {"title": "Dry run?", "description": "No changes", "type": "boolean"},
+    }
+    # Typed answers, and text-box strings converted for these questions only.
+    assert answer_from_content(need, {"replicas": 3, "dry_run": True}) == {
+        "replicas": 3,
+        "dry_run": True,
+    }
+    assert answer_from_content(need, {"replicas": " 3 ", "dry_run": "false"}) == {
+        "replicas": 3,
+        "dry_run": False,
+    }
+    for content in (
+        {"replicas": 11, "dry_run": True},
+        {"replicas": 0, "dry_run": True},
+        {"replicas": True, "dry_run": True},
+        {"replicas": "3.5", "dry_run": True},
+        {"replicas": 3, "dry_run": "yes"},
+        {"replicas": 3, "dry_run": 1},
+        {"replicas": 3},
+    ):
+        with pytest.raises(ValueError):
+            answer_from_content(need, content)
+
+
+def test_text_and_picker_answers_must_be_strings():
+    with pytest.raises(ValueError, match="expected text"):
+        answer_from_content(form(), {"branch": "dev", "target": 3})
+
+
+@pytest.mark.parametrize("kind", ["integer", "boolean"])
+def test_typed_questions_must_be_required(kind):
+    from nooa.interactive import BooleanQuestion, IntegerQuestion
+
+    model = IntegerQuestion if kind == "integer" else BooleanQuestion
+    with pytest.raises(ValidationError, match="Only text questions can be optional"):
+        model(id="x", label="X?", required=False)

@@ -11,11 +11,13 @@ from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
+    BooleanQuestion,  # noqa: F401 - generation constructor
     Done,
     FormChoice,  # noqa: F401 - generation constructor
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,
     InputRequest,
+    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
     NeedInput,
     NeedInputForm,
@@ -513,12 +515,11 @@ class AtomAgent(InteractiveAgent):
         - ``NeedInput(question=...)`` for a quick question; the next message
           answers as text. Suggest answers in it.
 
-        - ``NeedInputForm(heading=..., questions=[...])`` for a form of
-          ``TextQuestion(id=..., label=...)`` and ``PickOneQuestion(id=..., label=...,
-          choices=[FormChoice(value=..., title=...)])`` (``allow_other=False`` forbids
-          typed answers). A ``FormResponse`` follows: ``accept`` with a string dict
-          keyed by id, or ``decline``/``cancel``. Validate values; re-ask bad
-          fields. Form-less clients send text.
+        - ``NeedInputForm(heading=..., questions=[...])``: fields ``TextQuestion``,
+          ``PickOneQuestion(choices=[FormChoice(value=, title=)])``
+          (``allow_other=False``: no typing), ``IntegerQuestion(minimum=, maximum=)``,
+          ``BooleanQuestion``. Answer: ``FormResponse``, ``accept`` with checked ``content``
+          by id (str/int/bool), or ``decline``/``cancel``. Form-less clients send text.
 
         - ``Waiting(explanation=..., on=[...])`` when a job you started is
           still running and nothing else is left to do. ``on`` names what

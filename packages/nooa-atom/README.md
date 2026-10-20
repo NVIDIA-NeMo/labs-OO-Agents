@@ -134,7 +134,7 @@ cells and tagged JSON/Predict outputs:
 ```python
 from nooa.interactive import (
     NeedInput, NeedInputForm, FormResponse, TextQuestion,
-    PickOneQuestion, FormChoice,
+    PickOneQuestion, IntegerQuestion, BooleanQuestion, FormChoice,
 )
 
 # Plain question: the next ordinary message answers; never a dialog/permission.
@@ -152,32 +152,39 @@ return_result(NeedInputForm(
         PickOneQuestion(id="target", label="Destination?", choices=[
             FormChoice(value="staging", title="Staging cluster"),
         ]),
+        IntegerQuestion(id="replicas", label="Replicas?", minimum=1, maximum=10),
+        BooleanQuestion(id="dry_run", label="Dry run?"),
         TextQuestion(id="notes", label="Notes?", required=False),
     ],
 ))
 
 # Outcome on notification["user_messages"], or external host/parent submission:
 await session.submit(FormResponse(action="accept", content={
-    "name": "Aurora", "branch": "dev", "target": "another cluster", "notes": "",
+    "name": "Aurora", "branch": "dev", "target": "another cluster",
+    "replicas": 3, "dry_run": True, "notes": "",
 }))
 await child_question.child.send(FormResponse(action="decline"))  # parent replying to a child
 FormResponse(action="cancel")
 ```
 
 `NeedInputForm` has `heading`, optional `reason`, and a nonempty `questions` list.
-`FormQuestion` is a discriminated union (`kind`: `text`, `pick_one`); constructors
-supply tags, JSON descriptors must include them. Each has `id`, `label`, optional
+`FormQuestion` is a discriminated union (`kind`: `text`, `pick_one`, `integer`,
+`boolean`); constructors supply tags, JSON descriptors must include them. Each has `id`, `label`, optional
 `help`, and `required` (default true). `PickOneQuestion.allow_other` (default
 true) also accepts a typed answer; `allow_other=False` is a strict picker. Choice
-values and question ids must be unique and nonblank. Every accepted answer is a
-**dictionary of strings keyed by ids**, live and after JSON roundtrip. Strict
-pickers accept exact **values**, not titles or case/whitespace-normalized matches.
-Optional missing/whitespace-only answers explicitly become `""`; required missing
-or blank answers fail protocol validation. Nonblank text is preserved verbatim.
-The required list is sent to clients, but server-side checks do not assume clients
-enforce it. No native multi-select, integer, boolean, implicit parsing, defaults,
-or domain constraints are promised by this API. Agents validate domain meaning
-and ask targeted follow-ups instead of automatically repeating the entire wizard.
+values and question ids must be unique and nonblank. An accepted answer is a
+**dictionary keyed by ids whose value type is set by the question** (`FormValue`):
+`str` for text and pickers, `int` for `IntegerQuestion` (checked against optional
+`minimum`/`maximum`), `bool` for `BooleanQuestion`, live and after JSON roundtrip.
+Clients that only show text boxes may send an integer's decimal string or a
+boolean's `"true"`/`"false"`; `validate_response()` converts those for that
+question only and rejects anything else. Strict pickers accept exact **values**,
+not titles or case/whitespace-normalized matches. Optional missing/whitespace-only
+text answers become `""`; required missing or blank answers fail validation.
+Nonblank text is preserved verbatim. The required list is sent to clients, but
+server-side checks do not assume clients enforce it. No multi-select, defaults or
+domain constraints beyond these are promised. Agents validate domain meaning and
+ask targeted follow-ups instead of automatically repeating the entire wizard.
 
 `InputRequest` discriminates `kind="question"`/`"form"`; the turn result annotation
 is `Done | InputRequest | Waiting`. Both input results are forbidden in unattended
@@ -190,9 +197,11 @@ tested text (`type: string`), strict picker (`allow_other=False`: `oneOf`
 const/title), and picker or free text (`allow_other=True`: `anyOf` picker/string)
 schemas. These mappings derive from Pool 1.0.16;
 **they are not an inventory of all Pool UI types**. Distinct choice labels are
-preserved. **Pickers must be required.** Pool 1.0.16 automatically declines the
-entire form if any non-text picker is optional; constructors reject
-`PickOneQuestion(required=False)` with actionable guidance before a UI request. Optional text remains supported.
+preserved. **Only text questions can be optional.** Pool 1.0.16 automatically declines the
+entire form if any non-text field is optional; constructors reject
+`required=False` on pickers, integers and booleans with actionable guidance before a UI request.
+Integers and booleans are sent to Pool as `type: integer` (with `minimum`/`maximum`)
+and `type: boolean`. Optional text remains supported.
 If text is appropriate, explicitly author a `TextQuestion(required=False)` with
 choice values/titles in its help. This is a text input, not a strict picker:
 validate any domain restriction yourself. Neither required flags nor picker

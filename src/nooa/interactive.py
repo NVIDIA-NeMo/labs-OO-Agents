@@ -161,6 +161,16 @@ class FormChoice(BaseModel):
     _check_title = field_validator("title")(_non_blank)
 
 
+def _required(required: bool) -> bool:
+    # Pool 1.0.16 rejects optional non-text fields and aborts the whole form.
+    if not required:
+        raise ValueError(
+            "Only text questions can be optional. For an optional answer, use a "
+            "TextQuestion and describe the expected value in help."
+        )
+    return required
+
+
 class _FormQuestionBase(BaseModel):
     """Fields shared by every form question."""
 
@@ -192,16 +202,7 @@ class PickOneQuestion(_FormQuestionBase):
     choices: list[FormChoice] = Field(min_length=1)
     allow_other: bool = True
 
-    @field_validator("required")
-    @classmethod
-    def _required_picker(cls, required: bool) -> bool:
-        # Pool 1.0.16 rejects optional non-text fields and aborts the whole form.
-        if not required:
-            raise ValueError(
-                "Picker questions must be required. For an optional answer, use a "
-                "TextQuestion with the suggestions in help."
-            )
-        return required
+    _required = field_validator("required")(classmethod(lambda cls, value: _required(value)))
 
     @field_validator("choices")
     @classmethod
@@ -211,11 +212,44 @@ class PickOneQuestion(_FormQuestionBase):
         return choices
 
 
-FormQuestion = Annotated[TextQuestion | PickOneQuestion, Field(discriminator="kind")]
+class IntegerQuestion(_FormQuestionBase):
+    """A whole number, optionally between ``minimum`` and ``maximum`` (inclusive).
+
+    The answer is an ``int`` already checked against the range. Must be
+    ``required=True``.
+    """
+
+    kind: Literal["integer"] = "integer"
+    minimum: int | None = None
+    maximum: int | None = None
+
+    _required = field_validator("required")(classmethod(lambda cls, value: _required(value)))
+
+    @model_validator(mode="after")
+    def _ordered_range(self) -> "IntegerQuestion":
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError("minimum must not exceed maximum")
+        return self
+
+
+class BooleanQuestion(_FormQuestionBase):
+    """A yes/no answer, as a ``bool``. Must be ``required=True``."""
+
+    kind: Literal["boolean"] = "boolean"
+
+    _required = field_validator("required")(classmethod(lambda cls, value: _required(value)))
+
+
+FormQuestion = Annotated[
+    TextQuestion | PickOneQuestion | IntegerQuestion | BooleanQuestion,
+    Field(discriminator="kind"),
+]
+FormValue = str | int | bool
+"""An accepted answer: ``str`` for text and pickers, ``int`` for integers, ``bool`` for yes/no."""
 
 
 class FormResponse(BaseModel):
-    """Form outcome; accepted content is a string dictionary keyed by question id.
+    """Form outcome; accepted content maps question ids to answers (see ``FormValue``).
 
     Decline and cancel carry no content. If the person stops the turn (e.g.
     Esc) while the form is open, no FormResponse arrives: the turn just ends
@@ -224,7 +258,7 @@ class FormResponse(BaseModel):
 
     model_config = {"extra": "forbid", "strict": True}
     action: Literal["accept", "decline", "cancel"]
-    content: dict[str, str] | None = None
+    content: dict[str, FormValue] | None = None
 
     @model_validator(mode="after")
     def _content_for_action(self) -> "FormResponse":
@@ -238,7 +272,11 @@ class FormResponse(BaseModel):
         """The response as a person reads it: ``id: answer`` lines, or the action."""
         if self.action != "accept":
             return "Declined the form." if self.action == "decline" else "Cancelled the form."
-        lines = [f"{key}: {value}" for key, value in (self.content or {}).items() if value.strip()]
+        lines = [
+            f"{key}: {_answer_text(value)}"
+            for key, value in (self.content or {}).items()
+            if not (isinstance(value, str) and not value.strip())
+        ]
         return "\n".join(lines) or "Submitted the form."
 
 
@@ -247,8 +285,9 @@ class NeedInputForm(BaseModel):
 
     If the person's client cannot show a form, the answer arrives as a plain
     ``str`` instead of a ``FormResponse``: read it as unvalidated free text.
-    Answers are only checked for shape (ids, required, strict choices); range
-    or format checks are yours, with a follow-up form for just the bad fields.
+    Accepted answers are checked against their questions (required, strict
+    choices, integer range, types); other checks are yours, with a follow-up
+    form for just the bad fields.
     """
 
     model_config = {"extra": "forbid", "strict": True}
@@ -272,14 +311,21 @@ class NeedInputForm(BaseModel):
             line = f"- {question.label}" + (f" ({question.help})" if question.help else "")
             if isinstance(question, PickOneQuestion):
                 line += ": " + ", ".join(choice.title for choice in question.choices)
+            elif isinstance(question, IntegerQuestion):
+                line += ": " + _range_text(question)
+            elif isinstance(question, BooleanQuestion):
+                line += ": yes or no"
             lines.append(line)
         return "\n\n".join(part for part in (self.heading, self.reason, "\n".join(lines)) if part)
 
     def validate_response(self, response: FormResponse) -> FormResponse:
-        """Check ids, strings, required presence and strict selection, not domain rules.
+        """Check an accepted answer against the questions, not domain rules.
 
-        Preserve nonblank text verbatim. Missing or whitespace-only optional
-        fields become ""; required blanks fail.
+        Text and pickers answer a ``str`` (nonblank text kept verbatim; a
+        missing or blank optional text becomes ""). An ``IntegerQuestion``
+        answers an ``int`` in range and a ``BooleanQuestion`` a ``bool``; a
+        client that only shows text boxes may send their decimal or
+        ``true``/``false`` string, which is converted for that question only.
         """
         response = FormResponse.model_validate(response)
         if response.action != "accept":
@@ -289,21 +335,59 @@ class NeedInputForm(BaseModel):
         unknown = content.keys() - {question.id for question in self.questions}
         if unknown:
             raise ValueError(f"Unknown answer ids: {sorted(unknown)}")
-        answers: dict[str, str] = {}
+        answers: dict[str, FormValue] = {}
         for question in self.questions:
-            value = content.get(question.id, "")
-            if not value.strip():
-                if question.required:
-                    raise ValueError(f"{question.id}: a nonblank answer is required")
-                value = ""
-            elif (
-                isinstance(question, PickOneQuestion)
-                and not question.allow_other
-                and value not in {choice.value for choice in question.choices}
-            ):
-                raise ValueError(f"{question.id}: choose a listed value")
-            answers[question.id] = value
+            answers[question.id] = _checked_answer(question, content.get(question.id))
         return FormResponse(action="accept", content=answers)
+
+
+def _checked_answer(question: Any, value: FormValue | None) -> FormValue:
+    """One answer, checked against (and for numbers/booleans converted to) its question."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if question.required:
+            raise ValueError(f"{question.id}: an answer is required")
+        return ""
+    if isinstance(question, IntegerQuestion):
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+            value = int(value.strip())
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{question.id}: enter a whole number")
+        if (question.minimum is not None and value < question.minimum) or (
+            question.maximum is not None and value > question.maximum
+        ):
+            raise ValueError(f"{question.id}: enter {_range_text(question)}")
+        return value
+    if isinstance(question, BooleanQuestion):
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            value = value.strip().lower() == "true"
+        if not isinstance(value, bool):
+            raise ValueError(f"{question.id}: answer yes or no")
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"{question.id}: expected text")
+    if (
+        isinstance(question, PickOneQuestion)
+        and not question.allow_other
+        and value not in {choice.value for choice in question.choices}
+    ):
+        raise ValueError(f"{question.id}: choose a listed value")
+    return value
+
+
+def _range_text(question: "IntegerQuestion") -> str:
+    if question.minimum is not None and question.maximum is not None:
+        return f"a whole number from {question.minimum} to {question.maximum}"
+    if question.minimum is not None:
+        return f"a whole number of at least {question.minimum}"
+    if question.maximum is not None:
+        return f"a whole number of at most {question.maximum}"
+    return "a whole number"
+
+
+def _answer_text(value: FormValue) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
 
 
 @hidden
@@ -816,16 +900,19 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
               return_result(NeedInput(question="Which branch should I push to: main or dev?"))
 
         - ``NeedInputForm(heading=..., questions=[...])`` — an explicit form
-          with ``TextQuestion`` and ``PickOneQuestion`` fields (pickers allow
-          typed answers unless ``allow_other=False``). The answer is a
-          ``FormResponse``: ``accept`` with a string dictionary keyed by
-          question id, or ``decline``/``cancel``. Check ranges and formats
-          yourself and re-ask only the bad fields. If the client has no form
-          support you get plain text instead::
+          of ``TextQuestion``, ``PickOneQuestion`` (typed answers allowed
+          unless ``allow_other=False``), ``IntegerQuestion`` (optional
+          ``minimum``/``maximum``) and ``BooleanQuestion`` fields. The answer is a
+          ``FormResponse``: ``accept`` with ``content`` mapping each question id
+          to its checked answer (``str`` for text and pickers, ``int``, ``bool``),
+          or ``decline``/``cancel``. Re-ask only fields that fail your own checks.
+          If the client has no form support you get plain text instead::
 
               return_result(NeedInputForm(heading="Release", questions=[
                   PickOneQuestion(id="branch", label="Branch?", choices=[
                       FormChoice(value="main", title="Main"), FormChoice(value="dev", title="Dev")]),
+                  IntegerQuestion(id="replicas", label="Replicas?", minimum=1, maximum=10),
+                  BooleanQuestion(id="dry_run", label="Dry run?"),
                   TextQuestion(id="notes", label="Release notes?", required=False),
               ]))
 

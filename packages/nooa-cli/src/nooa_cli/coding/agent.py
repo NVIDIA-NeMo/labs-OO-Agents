@@ -12,11 +12,13 @@ from nooa.agentdoc import doc, spec
 from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
+    BooleanQuestion,  # noqa: F401 - generation constructor
     Done,
     FormChoice,  # noqa: F401 - generation constructor
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,  # noqa: F401 - visible to generated cells
     InputRequest,
+    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
     NeedInput,  # noqa: F401 - visible generation constructor
     NeedInputForm,  # noqa: F401 - visible generation constructor
@@ -215,10 +217,11 @@ class CodingAgent(InteractiveAgent):
           answer. The host shows the question, so do not also send it with
           ``self.message()``; put any suggested answers in it. The answer is plain text.
         - ``NeedInputForm(heading=..., questions=[...])`` — an explicit form of
-          ``TextQuestion`` and ``PickOneQuestion`` (``FormChoice(value=..., title=...)``
-          choices; typed answers allowed unless ``allow_other=False``). Answers
-          arrive as a ``FormResponse`` string dictionary keyed by id, or
-          decline/cancel. Check ranges and formats yourself and re-ask only the bad fields.
+          ``TextQuestion``, ``PickOneQuestion`` (``FormChoice(value=..., title=...)``
+          choices; typed answers allowed unless ``allow_other=False``),
+          ``IntegerQuestion(minimum=..., maximum=...)`` and ``BooleanQuestion``. Answers
+          arrive as a ``FormResponse`` whose ``content`` maps ids to a checked ``str``,
+          ``int`` or ``bool`` (by question), or decline/cancel. Re-ask only bad fields.
         - ``Waiting(message=..., explanation=..., on=[...])`` — a background
           job is still running; ``on`` names the job or channel.
         """

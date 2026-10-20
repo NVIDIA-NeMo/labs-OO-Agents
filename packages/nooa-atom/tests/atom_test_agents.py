@@ -27,10 +27,12 @@ from pydantic import BaseModel, Field
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.interactive import (  # noqa: F401
+    BooleanQuestion,  # noqa: F401 - generation constructor
     Done,
     FormChoice,  # noqa: F401 - generation constructor
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,
+    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
     NeedInput,
     NeedInputForm,

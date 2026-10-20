@@ -128,7 +128,9 @@ class RepoResult:
     lines: Annotated[list[str], spec(description="Display lines: file:line: context")]
     matches: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors; pass an item to self.shell.replace_match()"),
+        spec(
+            description="ShellTools-compatible anchors; pass an item to self.shell.replace_match()"
+        ),
     ] = field(default_factory=list)
     total_matches: Annotated[int, spec(description="Total matches found")] = 0
     truncated: Annotated[bool, spec(description="True if results were capped")] = False
