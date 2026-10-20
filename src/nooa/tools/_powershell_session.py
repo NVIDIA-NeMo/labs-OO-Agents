@@ -36,6 +36,48 @@ logger = logging.getLogger(__name__)
 _MAX_OUTPUT_CHARS = 30_000
 
 
+def _is_app_execution_alias(path: str | Path) -> bool:
+    """True for a Microsoft Store app alias under ``WindowsApps``.
+
+    ``%LOCALAPPDATA%\\Microsoft\\WindowsApps\\pwsh.EXE`` is a reparse point that
+    launches the packaged app through its own process-creation path. A job
+    object does not contain the processes it starts, so a session built on it
+    cannot reap what a command spawns — measured: the host was in the job, its
+    child and grandchild were not, and both survived ``close()``.
+    """
+    return "windowsapps" in str(path).lower()
+
+
+def _resolve_powershell() -> str | None:
+    """Pick a PowerShell that a job object can actually contain.
+
+    Preference: an MSI-installed ``pwsh``, then ``powershell.exe`` (always a
+    plain executable), then the Store alias only if nothing else exists — a
+    session that cannot reap its children is worse than no PowerShell 7, but
+    better than failing to start at all.
+
+    ``shutil.which`` searches the current directory before PATH on Windows
+    unless ``NoDefaultCurrentDirectoryInExePath`` is set, so a repository can
+    ship a ``pwsh.bat`` and have it executed. Only absolute results are
+    accepted here; a relative hit is discarded.
+    """
+    candidates: list[str] = []
+    for name in ("pwsh", "powershell"):
+        found = shutil.which(name)
+        if found and os.path.isabs(found):
+            candidates.append(found)
+    # A known MSI install path beats a Store alias even when the alias wins PATH.
+    msi = (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerShell" / "7" / "pwsh.exe"
+    )
+    if msi.exists():
+        candidates.insert(0, str(msi))
+    for candidate in candidates:
+        if not _is_app_execution_alias(candidate):
+            return candidate
+    return candidates[0] if candidates else None
+
+
 def _shell_environment() -> dict[str, str]:
     """The host's environment, minus credentials this process loaded itself.
 
@@ -271,7 +313,7 @@ class PowerShellSession:
 
         if self._process is not None:
             await self._retire_current()
-        executable = self._executable or shutil.which("pwsh") or shutil.which("powershell")
+        executable = self._executable or _resolve_powershell()
         if not executable:
             raise FileNotFoundError(
                 "PowerShell was not found; install PowerShell 7 (pwsh) or Windows PowerShell 5.1"

@@ -711,9 +711,7 @@ def spawn_in_container(
         startup.lpAttributeList = ctypes.cast(buffer, ctypes.c_void_p)
 
         info = _ProcessInformation()
-        command = ctypes.create_unicode_buffer(
-            " ".join(f'"{arg}"' if " " in arg else arg for arg in argv)
-        )
+        command = ctypes.create_unicode_buffer(_command_line(argv))
         flags = (
             EXTENDED_STARTUPINFO_PRESENT
             | CREATE_SUSPENDED
@@ -740,6 +738,61 @@ def spawn_in_container(
         return Child(info, command.value)
     finally:
         _k32.DeleteProcThreadAttributeList(buffer)
+
+
+def _command_line(argv: list[str]) -> str:
+    """Quote ``argv`` the way ``CommandLineToArgvW`` will split it back.
+
+    Three things the obvious ``' '.join`` gets wrong:
+
+    * an **empty** argument has no space in it, so it was emitted as nothing at
+      all and the neighbouring arguments shifted into its slot — measured with
+      the launcher's own argv, where a missing workspace made the tokenizer
+      cache path land in the crash-log position;
+    * an argument containing a **quote** was passed through unescaped, letting
+      it split into several arguments or end the quoting early;
+    * a trailing backslash before a quote needs doubling, or it escapes the
+      quote that was meant to close the argument.
+
+    The child runs with ``-I`` and a fixed argv shape, so this only has to be
+    correct for the strings the launcher passes — but it is written to the
+    documented rules rather than to those strings.
+
+    The caller must pass a program name first. ``CommandLineToArgvW`` parses
+    the first token with different rules (it may treat it as a path rather than
+    a quoted argument), so quoting a lone argument yields a different split
+    than the same argument in second position — measured: ``'"say \\"hi\\""'``
+    splits into two tokens, while ``'prog "say \\"hi\\""'`` splits into
+    ``['prog', 'say "hi"']``. The launcher always starts with the interpreter
+    path, so this holds by construction.
+    """
+    parts: list[str] = []
+    for arg in argv:
+        if arg and not any(c in arg for c in ' \t"'):
+            parts.append(arg)
+            continue
+        # Backslashes are literal except immediately before a quote, where they
+        # are doubled and the quote escaped. Doubling every backslash corrupts
+        # ordinary paths — verified by round-tripping through
+        # CommandLineToArgvW, which rejected the first version of this.
+        quoted = ['"']
+        backslashes = 0
+        for char in arg:
+            if char == "\\":
+                backslashes += 1
+                continue
+            if char == '"':
+                quoted.append("\\" * (backslashes * 2 + 1))
+                quoted.append('"')
+            else:
+                quoted.append("\\" * backslashes)
+                quoted.append(char)
+            backslashes = 0
+        # Backslashes at the end would escape the closing quote.
+        quoted.append("\\" * (backslashes * 2))
+        quoted.append('"')
+        parts.append("".join(quoted))
+    return " ".join(parts)
 
 
 def _environment_block(env: dict[str, str]) -> ctypes.Array:

@@ -63,9 +63,13 @@ from nooa.runtime.sandbox.win_runtime import AclJournal, RuntimeRoot, default_co
 
 __all__ = ["ContainerProcess", "start_container_worker"]
 
-# 0xC000013A (STATUS_CONTROL_C_EXIT) is what a Job Object returns when it
-# terminates a process for exceeding its time limit. The M0 probe measured it.
-EXIT_JOB_TIME_LIMIT = 0xC000013A
+# What a Job Object returns when it terminates a process for exceeding its
+# per-job time limit. Measured: the M0 probe recorded 3221225540, which is
+# 0xC0000044 (STATUS_QUOTA_EXCEEDED) — see experiments/windows-sandbox-probe/
+# results.json, "cpu_capped_exit_code". The earlier constant here,
+# 0xC000013A (STATUS_CONTROL_C_EXIT), was a transcription error, so a CPU kill
+# was reported as an unexplained worker death.
+EXIT_JOB_TIME_LIMIT = 0xC0000044
 
 _READY_TIMEOUT_S = 180.0
 # The startup handshake is worker -> parent control traffic, not agent data:

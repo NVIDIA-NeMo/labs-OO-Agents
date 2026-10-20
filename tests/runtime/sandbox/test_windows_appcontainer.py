@@ -344,8 +344,13 @@ def test_cpu_limit_kills_and_the_session_recovers(session):
     try:
         result = session.run("while True:\n    pass")
         assert result.error is not None, "the CPU limit did not stop a runaway cell"
-        # The process was killed by the job object; the exact type is
-        # CellTimeoutError, but any reported error is evidence of containment.
+        # The type matters: the job object terminates the process with
+        # 0xC0000044, and the executor maps exactly that code to
+        # CellTimeoutError. Asserting only "an error happened" is how a
+        # mistranscribed exit-code constant went unnoticed — the cell was
+        # killed either way, but the model was told the worker "exited
+        # unexpectedly" and never learned its namespace was gone.
+        assert "cpu-time limit" in str(result.error).lower(), result.error
         followup = session.run("1 + 1")
         assert followup.error is None, followup.error
         assert followup.returned_value == 2
@@ -720,3 +725,47 @@ def test_teardown_revokes_after_the_profile_is_gone(tmp_path):
     assert sid_text not in win_api.read_dacl(str(workspace)), (
         "teardown skipped the revoke because the profile was already gone"
     )
+
+
+def test_empty_workspace_slot_survives_argv(tmp_path):
+    """``workspace=None`` must not shift the child's arguments.
+
+    The launcher passes an empty string in the crash-log slot when there is no
+    workspace, and the old command-line builder dropped it: an empty argument
+    contains no space, so it was emitted as nothing. The tokenizer cache path
+    then landed in the crash-log position and ``TIKTOKEN_CACHE_DIR`` was never
+    set — which breaks importing the LLM stack in a container with no network.
+    """
+
+    from nooa.runtime.sandbox.executor import SandboxedExecutor
+
+    workspace = tmp_path / "unused"
+    workspace.mkdir()
+    # Built directly: _Session always names a workspace, and the point here is
+    # SandboxConfig's default of None.
+    from nooa.runtime.sandbox.config import SandboxConfig
+
+    executor = SandboxedExecutor(
+        _agent_instance(),
+        SandboxConfig(
+            filesystem=True,
+            network=False,
+            start_method="spawn",
+            backend="appcontainer",
+            require=True,
+            runtime_root=str(ROOT) if ROOT else None,
+            # The default: no workspace at all.
+        ),
+        cell_timeout=90,
+        framework_builtins={},
+    )
+    try:
+        result = asyncio.run(
+            executor.run_cell("import os\nos.environ.get('TIKTOKEN_CACHE_DIR')", execution_count=1)
+        )
+        assert result.error is None, result.error
+        assert result.returned_value, "the tokenizer cache path never reached the child"
+        argv = executor._proc.startup_report.get("argv") or []
+        assert "" in argv, f"the empty slot was dropped from argv: {argv}"
+    finally:
+        asyncio.run(executor.aclose())

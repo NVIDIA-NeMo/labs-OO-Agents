@@ -38,6 +38,18 @@ def executable(request):
     path = shutil.which(request.param)
     if not path:
         pytest.skip(f"{request.param} is not installed")
+    if request.param == "pwsh":
+        from nooa.tools._powershell_session import _is_app_execution_alias
+
+        if _is_app_execution_alias(path):
+            # A job object does not contain processes started through the Store
+            # alias, so every process-tree contract below would fail here for a
+            # reason unrelated to this session's code. The resolver skips the
+            # alias for the same reason; this fixture names it explicitly.
+            pytest.skip(
+                f"{path} is a Microsoft Store app alias; a job object cannot "
+                "contain the processes it starts"
+            )
     return path
 
 
