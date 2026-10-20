@@ -458,3 +458,43 @@ async def test_handle_tagged_form_dictionary_and_json_return(as_json):
     code = f"return_result({json.dumps(data)!r})" if as_json else f"return_result({data!r})"
     agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
     assert isinstance(await agent.handle(_NOTIFICATION), NeedInputForm)
+
+
+def test_forms_and_responses_render_as_readable_text():
+    from nooa.interactive import (
+        FormChoice,
+        PickOneQuestion,
+        recorded_form_text,
+        recorded_item_text,
+    )
+
+    form = NeedInputForm(
+        heading="Release",
+        reason="Pick a target.",
+        questions=[
+            PickOneQuestion(
+                id="color",
+                label="Color",
+                allow_other=False,
+                choices=[
+                    FormChoice(value="red", title="Red"),
+                    FormChoice(value="blue", title="Blue"),
+                ],
+            ),
+            TextQuestion(id="note", label="Note", help="optional", required=False),
+        ],
+    )
+    assert form.as_text() == "Release\n\nPick a target.\n\n- Color: Red, Blue\n- Note (optional)"
+    record = {**form.model_dump(mode="json"), "request_id": "r1", "question_id": "q1"}
+    assert recorded_form_text(record) == form.as_text()
+    assert recorded_form_text({"kind": "form", "heading": "H", "questions": "bad"}) is None
+
+    accepted = FormResponse(action="accept", content={"color": "red", "note": " "})
+    assert accepted.as_text() == "color: red"
+    assert FormResponse(action="accept", content={}).as_text() == "Submitted the form."
+    assert FormResponse(action="decline").as_text() == "Declined the form."
+    assert FormResponse(action="cancel").as_text() == "Cancelled the form."
+    assert recorded_item_text(accepted.model_dump_json(), "nooa.interactive:FormResponse") == (
+        "color: red"
+    )
+    assert recorded_item_text('{"action": "accept"}', "builtins:dict") is None

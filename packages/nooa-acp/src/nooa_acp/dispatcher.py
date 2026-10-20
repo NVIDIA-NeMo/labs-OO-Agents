@@ -11,11 +11,9 @@ from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
 
 from nooa.interactive import (
     Done,
-    FormQuestion,
     InputRequest,
     NeedInput,
     NeedInputForm,
-    PickOneQuestion,
     Waiting,
 )
 from nooa.slash_dispatch import SlashCommandResult
@@ -104,11 +102,7 @@ class InteractiveSessionDispatcher:
         if isinstance(result, NeedInput):
             parts = [result.question, result.reason]
         elif isinstance(result, NeedInputForm):
-            parts = [
-                result.heading,
-                result.reason,
-                "\n".join(_question_line(q) for q in result.questions),
-            ]
+            parts = [result.as_text()]
         else:
             parts = [result.message]
         text = "\n\n".join(part for part in parts if part)
@@ -137,11 +131,3 @@ class InteractiveSessionDispatcher:
     async def close(self) -> None:
         await self.cancel()
         await self.agent.close()
-
-
-def _question_line(question: FormQuestion) -> str:
-    """``- label (help)`` plus the choices of a picker."""
-    line = f"- {question.label}" + (f" ({question.help})" if question.help else "")
-    if isinstance(question, PickOneQuestion):
-        line += ": " + ", ".join(c.title for c in question.choices)
-    return line

@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
+from nooa.interactive import recorded_form_text, recorded_item_text
 from nooa.runtime.event_manager import EventManager
 from nooa.storage import read_lock_owner
 from nooa.storage.sqlite import (
@@ -146,8 +147,11 @@ def _connect_read_only(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _item_text(item_json: str) -> str:
-    """Text of an admitted item: the string itself, else its JSON."""
+def _item_text(item_json: str, item_type: str = "") -> str:
+    """Text of an admitted item: the string itself, a form answer as text, else its JSON."""
+    answer = recorded_item_text(item_json, item_type)
+    if answer is not None:
+        return answer
     try:
         value = json.loads(item_json)
     except (TypeError, json.JSONDecodeError):
@@ -782,7 +786,9 @@ class SessionStore:
                 entries.append(
                     TranscriptEntry(
                         role="user",
-                        content=_item_text(str(raw.get("item_json", ""))),
+                        content=_item_text(
+                            str(raw.get("item_json", "")), str(raw.get("item_type", ""))
+                        ),
                         item_id=item_id,
                         timestamp=timestamp,
                     )
@@ -808,28 +814,8 @@ class SessionStore:
                         request = json.loads(str(raw.get("result_json", "{}")))
                     except (ValueError, TypeError):
                         request = {}
-                    if not isinstance(request, dict):
-                        request = {}
-                    content += (
-                        "\n\nExplicit form request: FormResponse with action accept and validated "
-                        "content, decline, or cancel. Raw text remains unvalidated."
-                    )
-                    if request.get("reason"):
-                        content += "\n\n" + str(request["reason"])
-                    options = request.get("options")
-                    if isinstance(options, list) and all(isinstance(o, str) for o in options):
-                        if options:
-                            content += "\n\nChoices: " + ", ".join(options)
-                    if request.get("questions") or request.get("answer_schema"):
-                        content += (
-                            "\n\nQuestion descriptors (legacy schema if unavailable):\n```json\n"
-                        )
-                        content += json.dumps(
-                            request.get("questions", request.get("answer_schema")),
-                            indent=2,
-                            ensure_ascii=False,
-                        )
-                        content += "\n```"
+                    if isinstance(request, dict):
+                        content = recorded_form_text(request) or content
                 entries.append(
                     TranscriptEntry(role="question", content=content, timestamp=timestamp)
                 )

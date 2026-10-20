@@ -53,7 +53,14 @@ from acp.schema import (
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput, Summary
-from nooa.interactive import AgentMessage, Done, NeedInput, NeedInputForm, Waiting
+from nooa.interactive import (
+    AgentMessage,
+    Done,
+    NeedInput,
+    NeedInputForm,
+    Waiting,
+    recorded_form_text,
+)
 from nooa_atom.agent.activity import (
     FileEdit,
     TerminalCommandFinished,
@@ -640,17 +647,7 @@ class ACPEventBridge:
             reason = update.outcome.get("reason")
             text = question_text(question, str(reason) if reason else None)
             if update.outcome_kind == "need_input_form":
-                import json
-
-                text += (
-                    "\n\nExplicit form request. Submit FormResponse(action='accept', content={id: string}), "
-                    "or decline/cancel. Client-reported decline does not tell us whether the form "
-                    "was dismissed or could not render; these questions remain visible as text. "
-                    "Optional blank answers are empty strings. Raw text is not "
-                    "an accepted form response; it remains unvalidated. Domain validation belongs to the agent. Questions:\n```json\n"
-                    + json.dumps(update.outcome.get("questions", []), indent=2, ensure_ascii=False)
-                    + "\n```"
-                )
+                text = recorded_form_text(update.outcome) or text
             self._enqueue(update_agent_message(text_block(text)))
         elif update.outcome_kind == "error":
             # A turn ending on an error does not always write the PythonOutput

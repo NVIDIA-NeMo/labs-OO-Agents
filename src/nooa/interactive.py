@@ -234,6 +234,13 @@ class FormResponse(BaseModel):
             raise ValueError("decline/cancel must not carry content")
         return self
 
+    def as_text(self) -> str:
+        """The response as a person reads it: ``id: answer`` lines, or the action."""
+        if self.action != "accept":
+            return "Declined the form." if self.action == "decline" else "Cancelled the form."
+        lines = [f"{key}: {value}" for key, value in (self.content or {}).items() if value.strip()]
+        return "\n".join(lines) or "Submitted the form."
+
 
 class NeedInputForm(BaseModel):
     """An explicit form of ordered questions; answered by a ``FormResponse``.
@@ -257,6 +264,16 @@ class NeedInputForm(BaseModel):
         if len({question.id for question in questions}) != len(questions):
             raise ValueError("question ids must be unique")
         return questions
+
+    def as_text(self) -> str:
+        """The form as a person reads it: heading, reason, one line per question."""
+        lines = []
+        for question in self.questions:
+            line = f"- {question.label}" + (f" ({question.help})" if question.help else "")
+            if isinstance(question, PickOneQuestion):
+                line += ": " + ", ".join(choice.title for choice in question.choices)
+            lines.append(line)
+        return "\n\n".join(part for part in (self.heading, self.reason, "\n".join(lines)) if part)
 
     def validate_response(self, response: FormResponse) -> FormResponse:
         """Check ids, strings, required presence and strict selection, not domain rules.
@@ -287,6 +304,29 @@ class NeedInputForm(BaseModel):
                 raise ValueError(f"{question.id}: choose a listed value")
             answers[question.id] = value
         return FormResponse(action="accept", content=answers)
+
+
+@hidden
+def recorded_form_text(record: dict[str, Any]) -> str | None:
+    """A recorded form request as readable text; ``None`` if it no longer validates."""
+    data = {k: v for k, v in record.items() if k not in ("request_id", "question_id")}
+    if isinstance(data.get("questions"), list):
+        data["questions"] = [migrate_form_question(q) for q in data["questions"]]
+    try:
+        return NeedInputForm.model_validate(data).as_text()
+    except ValueError:
+        return None
+
+
+@hidden
+def recorded_item_text(item_json: str, item_type: str = "") -> str | None:
+    """A recorded ``FormResponse`` item as readable text; ``None`` for anything else."""
+    if not item_type.endswith(":FormResponse"):
+        return None
+    try:
+        return FormResponse.model_validate_json(item_json).as_text()
+    except ValueError:
+        return None
 
 
 def migrate_form_question(value: Any) -> Any:

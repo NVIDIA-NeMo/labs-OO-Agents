@@ -3,7 +3,6 @@
 """Pool explicit descriptors: string answers, one-shot failure, actions and Stop."""
 
 import asyncio
-import json
 
 import pytest
 from acp import RequestError, text_block
@@ -84,7 +83,7 @@ async def test_pool_accept_has_validated_content_and_order(
         assert params["_meta"] == {"poolside/field_order": ["target", "replicas", "dry_run"]}
         assert all(p["type"] == "string" for p in params["requestedSchema"]["properties"].values())
     [echo] = client.texts(UserMessageChunk, sid)
-    assert json.loads(echo) == {"action": "accept", "content": expected}
+    assert echo == FormResponse(action="accept", content=expected).as_text()
     assert len(models.llms[None].calls) == 2
     assert not any(e[0] == "permission" for e in client.log)
 
@@ -99,21 +98,20 @@ async def test_pool_actions_survive_transport_and_replay(make_adapter, workspace
     assert len(_requests(client)) == 1
     visible = "".join(client.texts(AgentMessageChunk, sid))
     assert "Details?" in visible and "Safety." in visible
-    for field in ("target", "replicas", "dry_run"):
-        assert f'"id": "{field}"' in visible
-    assert "Client-reported decline does not tell us" in visible
-    assert "questions remain visible as text" in visible
+    for label in ("Target?", "Replicas?", "Dry run?"):
+        assert f"- {label}" in visible
+    assert "{" not in visible
     assert "user declined" not in visible.lower()
     assert len(models.llms[None].calls) == 2
     [echo] = client.texts(UserMessageChunk, sid)
-    assert json.loads(echo) == {"action": action, "content": None}
+    assert echo == FormResponse(action=action).as_text()
     client.log.clear()
     await adapter.load_session(str(workspace), sid)
-    assert json.loads(client.texts(UserMessageChunk, sid)[-1])["action"] == action
+    assert client.texts(UserMessageChunk, sid)[-1] == FormResponse(action=action).as_text() + "\n"
     replayed = "".join(client.texts(AgentMessageChunk, sid))
     assert "Details?" in replayed
-    for field in ("target", "replicas", "dry_run"):
-        assert f'"id": "{field}"' in replayed
+    for label in ("Target?", "Replicas?", "Dry run?"):
+        assert f"- {label}" in replayed
     assert not _requests(client)
 
 
@@ -151,7 +149,8 @@ async def test_pool_unsupported_or_invalid_never_manufactures_response(
     assert response.stop_reason == "end_turn"
     assert client.updates(sid, UserMessageChunk) == []
     assert len(models.llms[None].calls) == 1
-    assert "Explicit form request" in "".join(client.texts(AgentMessageChunk, sid))
+    text = "".join(client.texts(AgentMessageChunk, sid))
+    assert "- Replicas?" in text and "Explicit form request" not in text
 
 
 async def test_pool_stop_never_submits_pending_response(make_adapter, workspace, client):

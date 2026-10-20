@@ -111,7 +111,7 @@ async def test_standard_accept_is_structured_validated_and_echoed_once(
     assert isinstance(answer, FormResponse) and answer.action == "accept"
     assert answer.content == expected
     [echo] = client.texts(UserMessageChunk, session_id)
-    assert json.loads(echo) == {"action": "accept", "content": expected}
+    assert echo == FormResponse(action="accept", content=expected).as_text()
     [(_, _, mode)] = [e for e in client.log if e[0] == "elicitation"]
     assert list(mode.requested_schema.properties) == (list(content) if typed else ["answer"])
     assert not any(e[0] == "permission" for e in client.log)
@@ -143,7 +143,7 @@ async def test_standard_decline_and_cancel_remain_distinct(
     session = adapter.session(session_id)
     assert session._agent.v.answer == FormResponse(action=action)
     [echo] = client.texts(UserMessageChunk, session_id)
-    assert json.loads(echo) == {"action": action, "content": None}
+    assert echo == FormResponse(action=action).as_text()
     from nooa_atom.session.events import ItemAdmitted
 
     [event] = [
@@ -154,7 +154,10 @@ async def test_standard_decline_and_cancel_remain_distinct(
     assert json.loads(event.item_json)["action"] == action
     client.log.clear()
     await adapter.load_session(str(workspace), session_id)
-    assert json.loads(client.texts(UserMessageChunk, session_id)[-1])["action"] == action
+    assert (
+        client.texts(UserMessageChunk, session_id)[-1]
+        == FormResponse(action=action).as_text() + "\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -212,12 +215,14 @@ async def test_fallback_preserves_form_intent_and_does_not_validate_raw_text(
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
     [text] = client.texts(AgentMessageChunk, session_id)
-    assert "Explicit form request" in text and "unvalidated" in text and '"replicas"' in text
+    # The form is shown as readable text: heading, reason, one line per question.
+    assert text.startswith("Details?\n\nSafety.\n\n- Target?\n- Replicas?\n- Dry run?")
+    assert "{" not in text and "Explicit form request" not in text
     assert len(models.llms[None].calls) == 1
     client.log.clear()
     await adapter.load_session(str(workspace), session_id)
-    assert "Explicit form request" in client.texts(AgentMessageChunk, session_id)[-1]
-    assert "unvalidated" in client.texts(AgentMessageChunk, session_id)[-1]
+    replayed = client.texts(AgentMessageChunk, session_id)[-1]
+    assert "- Replicas?" in replayed and "{" not in replayed
     assert len(models.llms[None].calls) == 1
     await adapter.prompt(session_id, [text_block('{"target":"prod","replicas":3,"dry_run":false}')])
     assert isinstance(adapter.session(session_id)._agent.v.answer, str)

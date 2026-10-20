@@ -164,6 +164,15 @@ _closing_sessions: contextvars.ContextVar[tuple[str, ...]] = contextvars.Context
 )
 
 
+def _item_display_text(item: Any, item_json: str) -> str:
+    """What the person sees of an admitted item: text, a form answer, else its JSON."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, FormResponse):
+        return item.as_text()
+    return item_json
+
+
 def _is_form_response(item: Any) -> bool:
     """Only a ``FormResponse`` answers a form; any other item is ordinary input."""
     return isinstance(item, FormResponse)
@@ -739,7 +748,7 @@ class Session:
                 item_id=event.item_id,
                 source=source,
                 preview=_preview(item),
-                text=item if isinstance(item, str) else event.item_json,
+                text=_item_display_text(item, event.item_json),
             )
         )
         return Receipt(
