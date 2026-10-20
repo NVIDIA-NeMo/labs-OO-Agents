@@ -44,7 +44,9 @@ _user = ctypes.WinDLL("userenv", use_last_error=True)
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 WAIT_TIMEOUT = 0x00000102
 WAIT_OBJECT_0 = 0x00000000
+INFINITE = 0xFFFFFFFF
 STILL_ACTIVE = 259
+ERROR_ACCESS_DENIED = 5
 
 # --- process creation -------------------------------------------------------
 EXTENDED_STARTUPINFO_PRESENT = 0x00080000
@@ -79,6 +81,10 @@ FILE_GENERIC_READ = 0x00120089
 FILE_GENERIC_EXECUTE = 0x001200A0
 FILE_GENERIC_WRITE = 0x00120116
 FILE_ALL_ACCESS = 0x001F01FF
+DELETE = 0x00010000
+DELETE_CHILD = 0x00000040
+WRITE_DAC = 0x00040000
+WRITE_OWNER = 0x00080000
 READ_EXECUTE = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
 # What a cell gets on its workspace: modify, without the two rights that change
 # who may access the object. FILE_ALL_ACCESS includes WRITE_DAC and
@@ -86,7 +92,15 @@ READ_EXECUTE = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
 # ALL APPLICATION PACKAGES — and that ACE outlives the session, because revoke
 # only removes the ACE for the container's own SID. Measured: after one
 # session's cell ran icacls, a second session could write into its workspace.
-MODIFY = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | 0x00000001  # 0x001201BF
+#
+# DELETE is part of the standard mask (winnt.h MODIFY is 0x001301BF). Dropping
+# it along with the two ACL rights breaks ordinary editing: unlink, rmtree,
+# os.replace and every git operation that rewrites an index file fail with
+# WinError 5. FILE_DELETE_CHILD is deliberately absent — a child is deleted
+# through the DELETE right the inheritable ACE puts on the child itself, and
+# granting the parent's right instead would let a cell delete files it cannot
+# otherwise touch.
+MODIFY = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE  # 0x001301BF
 
 # --- job objects ------------------------------------------------------------
 JobObjectBasicLimitInformation = 2
@@ -272,6 +286,10 @@ _k32.ResumeThread.argtypes = [wintypes.HANDLE]
 _k32.ResumeThread.restype = wintypes.DWORD
 _k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 _k32.WaitForSingleObject.restype = wintypes.DWORD
+_k32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+_k32.CreateMutexW.restype = wintypes.HANDLE
+_k32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+_k32.ReleaseMutex.restype = wintypes.BOOL
 _k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
 _k32.GetExitCodeProcess.restype = wintypes.BOOL
 _k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
@@ -446,12 +464,58 @@ def capability_sid(name: str) -> ctypes.c_void_p:
 # is that concurrent edits to unrelated directories wait for each other; an
 # edit takes milliseconds, so that is cheaper than the bookkeeping a finer lock
 # would need.
+#
+# A thread lock alone is not enough. Two editors each run their own process
+# against the same runtime root, and an interleaved grant/revoke between them
+# loses an ACE exactly as it does between threads. The named mutex below is
+# what makes the read-modify-write atomic across processes; the thread lock
+# stays because a mutex is not reentrant across threads and taking the same
+# named mutex twice from one process would deadlock.
 _DACL_LOCK = threading.RLock()
+_DACL_MUTEX_NAME = "Global\\nooa-sandbox-dacl"
+_DACL_MUTEX: int | None = None
+_DACL_MUTEX_GUARD = threading.Lock()
+
+
+def _dacl_mutex() -> int | None:
+    """The cross-process mutex, created on first use. ``None`` if unavailable.
+
+    ``Global\\`` needs SeCreateGlobalPrivilege, which an ordinary user does not
+    hold; fall back to the per-session namespace, where it still covers every
+    process of the same logged-in user — the case that matters, since two
+    editors run as that user. If neither namespace can be created, return
+    ``None`` and keep the in-process lock rather than failing the grant.
+    """
+    global _DACL_MUTEX
+    if _DACL_MUTEX is not None:
+        return _DACL_MUTEX
+    with _DACL_MUTEX_GUARD:
+        if _DACL_MUTEX is not None:
+            return _DACL_MUTEX
+        for name in (_DACL_MUTEX_NAME, "Local\\nooa-sandbox-dacl"):
+            handle = _k32.CreateMutexW(None, False, name)
+            if handle:
+                _DACL_MUTEX = handle
+                return handle
+            if ctypes.get_last_error() == ERROR_ACCESS_DENIED:
+                # The name exists and we may not open it; the other process is
+                # already serialising, which is the goal, so keep going unlocked
+                # rather than deadlock on a handle we cannot wait on.
+                return None
+        return None
 
 
 def _set_entry(path: str, sid: ctypes.c_void_p, access: int, mode: int, inheritance: int) -> None:
     with _DACL_LOCK:
-        _set_entry_locked(path, sid, access, mode, inheritance)
+        mutex = _dacl_mutex()
+        if mutex:
+            _k32.WaitForSingleObject(mutex, INFINITE)
+            try:
+                _set_entry_locked(path, sid, access, mode, inheritance)
+            finally:
+                _k32.ReleaseMutex(mutex)
+        else:
+            _set_entry_locked(path, sid, access, mode, inheritance)
 
 
 def _set_entry_locked(

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Repository navigation works with native shells and editable UTF-8 anchors."""
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -289,7 +290,15 @@ async def test_tree_sitter_navigation_uses_native_files_and_ignores_strings(tmp_
         ("./a.py", False),
         ("sub/x.py", False),
         ("../outside/secret.py", True),
-        ("C:foo", True),
+        # Drive-relative only exists on Windows: on POSIX "C:foo" is an ordinary
+        # filename that stays inside the root, so there is nothing to refuse.
+        pytest.param(
+            "C:foo",
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform != "win32", reason="drive-relative is Windows-only"
+            ),
+        ),
         ("/outside-absolute.py", True),  # rewritten below per tmp_path
         (str(Path("absolute-inside.py")), False),  # rewritten below per tmp_path
     ],

@@ -615,6 +615,35 @@ def test_teardown_removes_the_session_profile(tmp_path):
 
 
 # --- grant scope -------------------------------------------------------------
+# SDDL renders an access mask either as hex or as a two-letter alias. Comparing
+# the text for "0x1f01ff" therefore misses FILE_ALL_ACCESS, which comes back as
+# "FA" — the assertion passes for the very value it exists to forbid.
+_SDDL_RIGHTS = {
+    "FA": 0x001F01FF,  # FILE_ALL_ACCESS
+    "FR": 0x00120089,  # FILE_GENERIC_READ
+    "FW": 0x00120116,  # FILE_GENERIC_WRITE
+    "FX": 0x001200A0,  # FILE_GENERIC_EXECUTE
+    "GA": 0x10000000,  # GENERIC_ALL
+    "GR": 0x80000000,  # GENERIC_READ
+    "GW": 0x40000000,  # GENERIC_WRITE
+    "GE": 0x20000000,  # GENERIC_EXECUTE
+}
+
+
+def _ace_mask(ace: str) -> int:
+    """Access mask of one SDDL ACE such as ``A;OICI;0x1301bf;;;S-1-15-2-...``."""
+    rights = ace.split(";")[2]
+    if rights.lower().startswith("0x"):
+        return int(rights, 16)
+    mask = 0
+    for index in range(0, len(rights), 2):
+        alias = rights[index : index + 2].upper()
+        if alias not in _SDDL_RIGHTS:
+            raise AssertionError(f"unhandled SDDL right {alias!r} in {ace!r}")
+        mask |= _SDDL_RIGHTS[alias]
+    return mask
+
+
 def test_workspace_grant_cannot_rewrite_acls(tmp_path):
     """A cell must not hold WRITE_DAC on its workspace.
 
@@ -636,9 +665,45 @@ def test_workspace_grant_cannot_rewrite_acls(tmp_path):
         session.close()
     container_aces = [ace for ace in sddl.split(")(") if "S-1-15-2-" in ace and "SY" not in ace]
     assert container_aces, "no container ACE on the workspace, so this test proves nothing"
-    assert not any("0x1f01ff" in ace.lower() for ace in container_aces), (
-        f"the workspace grant is FILE_ALL_ACCESS (WRITE_DAC included): {container_aces}"
+    for ace in container_aces:
+        mask = _ace_mask(ace)
+        assert not mask & win_api.WRITE_DAC, f"the workspace grant carries WRITE_DAC: {ace}"
+        assert not mask & win_api.WRITE_OWNER, f"the workspace grant carries WRITE_OWNER: {ace}"
+    # The point of the two above: FILE_ALL_ACCESS would set both. Say so in a
+    # form that fails if the mask ever goes back to it, whatever SDDL prints.
+    assert not any(_ace_mask(ace) == win_api.FILE_ALL_ACCESS for ace in container_aces), (
+        f"the workspace grant is FILE_ALL_ACCESS: {container_aces}"
     )
+
+
+def test_cell_can_delete_and_rename_inside_the_workspace(tmp_path):
+    """Editing code means removing and renaming files, not only writing them.
+
+    The first version of the MODIFY mask dropped DELETE along with WRITE_DAC
+    and WRITE_OWNER. Cells then failed on ``unlink``, ``rmtree`` and
+    ``os.replace`` with WinError 5, and so did git, which rewrites its index
+    through a rename. That is a broken sandbox, not a tightened one.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace)
+    try:
+        code = (
+            "import os, shutil\n"
+            "open('a.txt','w').write('x')\n"
+            "os.rename('a.txt','b.txt')\n"
+            "os.replace('b.txt','c.txt')\n"
+            "os.unlink('c.txt')\n"
+            "os.mkdir('d')\n"
+            "open('d/e.txt','w').write('x')\n"
+            "shutil.rmtree('d')\n"
+            "'ok'\n"
+        )
+        result = session.run(code)
+    finally:
+        session.close()
+    assert result.error is None, result.error
+    assert result.returned_value == "ok"
 
 
 def test_nested_runtime_root_is_refused(tmp_path):
@@ -668,6 +733,59 @@ def test_nested_runtime_root_is_refused(tmp_path):
     # pass by rejecting everything.
     _reject_nested_root(RuntimeRoot(outside), str(workspace))
     _reject_nested_root(RuntimeRoot(nested), None)
+
+
+def test_starting_a_session_with_a_nested_root_is_refused(tmp_path, monkeypatch):
+    """The guard must run at the call site, not merely exist as a function.
+
+    ``test_nested_runtime_root_is_refused`` above calls ``_reject_nested_root``
+    directly, so deleting its only caller would leave that test green while the
+    protection was gone. This one calls the launcher itself — the only place
+    that decides whether a worker starts.
+
+    Going through ``SandboxedExecutor`` would test less: ``prepare_root`` runs
+    first and fails on this synthetic root for an unrelated reason, so the
+    assertion could pass without the guard ever being reached.
+    """
+    from nooa.runtime.sandbox.config import resolve_spec
+    from nooa.runtime.sandbox.win_launcher import SandboxUnavailable, start_container_worker
+    from nooa.runtime.sandbox.win_runtime import RuntimeRoot
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    nested = workspace / ".rt"
+    nested.mkdir()
+    (nested / "python.exe").write_bytes(b"")
+
+    spec = resolve_spec(_config(workspace))
+    with pytest.raises(SandboxUnavailable, match="inside the workspace"):
+        start_container_worker({}, spec, RuntimeRoot(nested), workspace=str(workspace))
+
+
+def test_an_unresolvable_workspace_is_refused_rather_than_skipped(tmp_path, monkeypatch):
+    """``_reject_nested_root`` must fail closed when it cannot resolve a path.
+
+    The check is the only thing standing between a root inside the workspace
+    and a cell that inherits write access to its own interpreter. Returning
+    early on ``OSError`` turned "cannot tell" into "nested root is fine".
+    """
+    from nooa.runtime.sandbox import win_launcher
+    from nooa.runtime.sandbox.win_launcher import SandboxUnavailable, _reject_nested_root
+    from nooa.runtime.sandbox.win_runtime import RuntimeRoot
+
+    root = RuntimeRoot(tmp_path / "rt")
+    real_resolve = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        if str(path).endswith("unresolvable-ws"):
+            raise OSError("the path cannot be resolved")
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    assert win_launcher is not None  # the module is imported for its side effects
+
+    with pytest.raises(SandboxUnavailable, match="cannot verify"):
+        _reject_nested_root(root, str(tmp_path / "unresolvable-ws"))
 
 
 # --- teardown ----------------------------------------------------------------

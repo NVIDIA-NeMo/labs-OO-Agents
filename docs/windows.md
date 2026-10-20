@@ -300,13 +300,18 @@ constrain a shell command the model asks the agent to run. Treat `--sandbox`
 as "generated Python cannot escape", not "the model cannot touch the host".
 
 The agent's environment includes every credential `load_secrets_into_env()`
-loaded at startup, and the PowerShell host copies it (`os.environ.copy()`), so
-a model that can call `self.shell.run` can read those variables. Do not run
-this configuration against untrusted instructions unless that is acceptable.
+loaded at startup. The shell hosts drop the ones that came from the secrets
+file, so `self.shell.run` cannot print them back; a variable you exported
+yourself still reaches the shell, because that is the user's own choice. If a
+shell command legitimately needs a loaded credential, export it in the shell
+command instead of relying on the inherited environment.
 
 Each session gets its own workspace grant, taken from the editor's root. That
 grant is a boundary between cell code and other directories — not between
-sessions, because a cell that can rewrite ACLs (see below) can widen it.
+sessions: the grant covers the whole workspace, so two sessions opened on the
+same root can read and write each other's files. Cell code cannot widen the
+grant — it has no WRITE_DAC or WRITE_OWNER — but it can create, rename and
+delete files anywhere inside it, which is what editing code requires.
 
 Point `--sandbox-root` at a directory **outside** every workspace. The default
 (`%LOCALAPPDATA%\nooa\sandbox-runtime`) already is:

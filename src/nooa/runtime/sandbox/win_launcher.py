@@ -320,8 +320,18 @@ def _reject_nested_root(root: RuntimeRoot, workspace: str | None) -> None:
     try:
         root_path = root.root.resolve()
         workspace_path = Path(workspace).resolve()
-    except OSError:
-        return
+    except OSError as exc:
+        # Fail closed. This check is the only thing standing between a root
+        # inside the workspace and a cell that inherits write access to its own
+        # interpreter; "cannot tell" must not read as "nested root is fine".
+        # The comparison below needs resolved paths, so without them the safe
+        # answer is to refuse rather than to guess.
+        raise SandboxUnavailable(
+            f"cannot verify that the sandbox runtime root {root.root} is outside "
+            f"the workspace {workspace}: {exc}. Move the root to a path that "
+            "resolves on this machine — the default is "
+            "%LOCALAPPDATA%\\nooa\\sandbox-runtime."
+        ) from exc
     if root_path == workspace_path or workspace_path in root_path.parents:
         raise SandboxUnavailable(
             f"the sandbox runtime root {root_path} is inside the workspace "
@@ -438,7 +448,9 @@ def start_container_worker(
             grant_path(import_root, READ_EXECUTE)
         # 5. The workspace last, so it is revoked first on teardown. MODIFY, not
         #    FILE_ALL_ACCESS: the latter carries WRITE_DAC, which lets a cell
-        #    grant itself access that survives this session's revoke.
+        #    grant itself access that survives this session's revoke. MODIFY
+        #    still includes DELETE, so ordinary edits and git work inside the
+        #    workspace; it excludes only the two rights that change the ACL.
         if workspace:
             grant_path(str(workspace), MODIFY)
 
