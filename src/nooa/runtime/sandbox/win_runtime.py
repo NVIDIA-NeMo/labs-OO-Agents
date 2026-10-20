@@ -42,6 +42,7 @@ __all__ = [
     "RuntimeRoot",
     "default_container_name",
     "default_runtime_root",
+    "compile_bytecode",
     "prepare_root",
     "recover_stale_grants",
     "resolve_root",
@@ -270,7 +271,67 @@ def build_root(
                 total += os.path.getsize(os.path.join(dirpath, filename))
             except OSError:
                 pass
-    return f"{root.root}: {files} files, {total / 1e6:.1f} MB, {elapsed:.1f}s"
+    compiled = compile_bytecode(root)
+    return f"{root.root}: {files} files, {total / 1e6:.1f} MB, {elapsed:.1f}s; {compiled}"
+
+
+def compile_bytecode(
+    root: RuntimeRoot,
+    *,
+    only: tuple[Path, ...] | None = None,
+) -> str:
+    """Pre-compile the packages a worker imports, with the root's interpreter.
+
+    The copy above deliberately drops ``__pycache__``, so without this every
+    container start recompiles several thousand modules before the first cell
+    can run. Doing it once at build time moves that cost off the startup path.
+
+    The root's own interpreter does the work, not the caller's: a ``.pyc`` is
+    only reusable by the interpreter whose magic number wrote it, and the root
+    is a copy of a possibly different CPython.
+
+    ``only`` limits the work to specific directories — :func:`sync_package`
+    uses it to recompile just the packages it re-copied, rather than the whole
+    tree on every start.
+
+    Best-effort — a compile failure costs startup time, never correctness,
+    because the interpreter compiles on demand anyway.
+    """
+    import subprocess
+
+    if not root.python.exists():
+        return "bytecode not compiled: no interpreter in the root"
+
+    targets = list(only) if only else [root.site_packages, root.root / "Lib"]
+    # ``-j 0`` uses every core. stdin is DEVNULL for the same reason as the
+    # tokenizer warm-up: an ACP host holds this process's stdin open, and a
+    # child that inherits it blocks in process creation.
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            [
+                str(root.python),
+                "-I",
+                "-m",
+                "compileall",
+                "-q",
+                "-j",
+                "0",
+                *(str(path) for path in targets),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"bytecode compile failed ({type(exc).__name__}: {exc})"
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit {completed.returncode}"
+        return f"bytecode compile failed ({tail})"
+    return f"bytecode compiled in {time.perf_counter() - started:.1f}s"
 
 
 def _tree_signature(root: Path) -> dict[str, int]:
@@ -399,6 +460,9 @@ def sync_package(
         target = root.site_packages / name
         shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(path, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        # Re-copying drops the bytecode build_root compiled, and these packages
+        # are the ones the worker imports first. Compile just what changed.
+        compile_bytecode(root, only=(target,))
     elapsed = time.perf_counter() - started
     files = sum(sig["files"] for sig in signatures.values())
     marker.write_text(
