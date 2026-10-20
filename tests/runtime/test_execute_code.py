@@ -251,7 +251,9 @@ async def test_sandbox_cancellation_is_reported_to_after_code_hook(test_agent) -
             exceptions.append(exception)
 
     class CancellingSandbox:
-        async def run_cell(self, code: str, *, execution_count: int = 1):
+        async def run_cell(
+            self, code: str, *, execution_count: int = 1, media_inputs=(), max_attachments=100
+        ):
             raise asyncio.CancelledError
 
     set_hooks(Hooks())  # type: ignore[arg-type]

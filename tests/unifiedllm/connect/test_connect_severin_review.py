@@ -153,7 +153,14 @@ async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings
         client = real_factory(*args, **kwargs)
         assert client._http.async_client is None
         # Simulate a successful legacy fallback; no request traverses our owned pool.
-        client.acall = AsyncMock(return_value=LLMResponse(content="323"))
+        from nooa.strategies.predict import PredictStrategy
+
+        client.acall = AsyncMock(
+            return_value=LLMResponse(
+                content='{"value":323}',
+                parsed=PredictStrategy()._create_response_model(int, "compute")(value=323),
+            )
+        )
         return client
 
     monkeypatch.setattr(registry, "client_from_config", accepted_without_owned_pool)
@@ -162,4 +169,4 @@ async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings
     record = result.entry["provenance"]["probes"]["routing"]
     assert record["outcome"] == "not_confirmed"
     assert record["settings_sent"] is None
-    assert "Could not observe" in record["reason"]
+    assert "not observed" in record["reason"]

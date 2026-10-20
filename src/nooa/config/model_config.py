@@ -20,6 +20,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from nooa.media_inputs import MediaInputs
+
 
 class ModelConfig(BaseModel):
     """One model alias from ``llm_config.yaml`` (e.g. ``claude-opus-4-8``).
@@ -42,6 +44,7 @@ class ModelConfig(BaseModel):
     client_type: str | None = None
     api_style: str | None = None
     context_window: int | None = None
+    media_inputs: MediaInputs = ()
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None

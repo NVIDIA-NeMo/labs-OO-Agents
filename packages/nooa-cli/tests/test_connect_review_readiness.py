@@ -94,6 +94,7 @@ def test_no_probe_can_authenticate_model_discovery(monkeypatch, tmp_path):
 
     mock_http(monkeypatch, handle)
     monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    monkeypatch.setattr(_connect_prompts, "choose_media_inputs", lambda current=(): list(current))
     target = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         cli.command,
