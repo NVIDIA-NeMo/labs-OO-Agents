@@ -284,6 +284,8 @@ class SessionRegistry:
             )
             agent, restored, note = await self._restore_older(agent, options, handle, exc)
             handle.events.add(SnapshotRestoreFailed(error=note))
+            if restored and callable(after_restore := getattr(agent, "after_restore", None)):
+                after_restore()
         agent.event_manager.add(TuiSessionResumed(session_id=handle.id, restored=restored))
         return agent
 

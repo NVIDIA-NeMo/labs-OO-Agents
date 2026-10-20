@@ -104,3 +104,66 @@ async def test_a_resumed_session_reports_jobs_that_did_not_survive(tmp_path, ses
         assert loaded._agent.queue_manager.running_handles() == []
     finally:
         await fresh.close_all()
+
+
+async def test_jobs_lost_is_reported_when_an_older_snapshot_is_restored(tmp_path, sessions_dir):
+    """A damaged latest snapshot falls back to the one before; after_restore still runs."""
+    import sqlite3
+    from contextlib import closing
+
+    from atom_test_agents import ATOM_SPEC, AtomModels
+    from nooa_atom.session.options import SessionOptions
+    from nooa_atom.session.registry import SessionRegistry
+    from nooa_atom.session.store import SessionStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir)
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    root = await registry.create(options)
+    await root._agent.jobs.run("sleep 30", label="build")
+    root._checkpoint()
+    await root.wait_for_checkpoint()
+    await registry.close_all()
+    [path] = sessions_dir.glob(f"{root.id}*.db")
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute(
+            "INSERT INTO snapshots (snapshot_id, created_at, data) VALUES (?, ?, ?)",
+            ("newest", "2099-01-01T00:00:00+00:00", "damaged"),
+        )
+
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    try:
+        loaded = await fresh.load(root.id)
+        assert loaded._agent.event_manager.filter(type="SnapshotRestoreFailed") or any(
+            "older snapshot" in str(getattr(e, "content", "")) for e in loaded.transcript()
+        )
+        [event] = loaded._agent.event_manager.filter(type="JobsLost")
+        assert [job["label"] for job in event.jobs] == ["build"]
+    finally:
+        await fresh.close_all()
+
+
+def _queues_expr(agent) -> str:
+    return dict(agent.context_manager._raw_items())["queues"].expr
+
+
+async def test_the_queues_block_does_not_name_the_queue_manager(tmp_path):
+    from nooa.storage.snapshot import AgentSnapshot
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        assert "queue_manager" not in _queues_expr(agent)
+        assert agent._queue_status() == agent.queue_manager.status()
+        # An older snapshot still carries the old expression; after_restore puts it back.
+        snapshot = AgentSnapshot.from_agent(agent)
+        for block in snapshot.context:
+            if block.key == "queues":
+                block.expr = "self.queue_manager.status()"
+        restored = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+        snapshot.restore(restored)
+        restored.after_restore()
+        assert "queue_manager" not in _queues_expr(restored)
+        await restored.aclose()
+    finally:
+        await agent.aclose()

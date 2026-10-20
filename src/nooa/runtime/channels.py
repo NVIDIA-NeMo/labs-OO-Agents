@@ -934,20 +934,9 @@ class QueueManager:
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
 
-        # Cheat sheet. Jobs get a cancel hint only from the API that owns their
-        # channel (``set_cancel_hint``), never one naming the hidden
-        # queue_manager; owned channels are not offered for removal either.
+        # Cancel hints come only from the API that owns a channel
+        # (``set_cancel_hint``); the status never names the hidden queue_manager.
         owned = self._cancel_hints
-        extra = [
-            n
-            for n, ch in self._channels.items()
-            if n != "user_messages" and n not in owned and (ch.mode != "queue" or not ch.is_empty())
-        ]
-        cleanup_hints = [f".remove_channel('{n}')" for n in extra]
-        if cleanup_hints:
-            hints = " | ".join(cleanup_hints)
-            cheat = f"💡 self.queue_manager{hints} | .shutdown()"
-            body = f"{body}\n{cheat}" if body else cheat
         owned_hints = [
             owned[h.name].format(label=h.label) for h in active_spawns if h.name in owned
         ]

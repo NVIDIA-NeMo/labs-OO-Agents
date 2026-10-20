@@ -459,6 +459,11 @@ class AgentVars:
         return repr(self._agent.vars)
 
 
+# The ``queues`` context block. Its expression is shown to the model, so it
+# goes through a hidden method rather than naming ``self.queue_manager``.
+_QUEUES_EXPR: Annotated[str, hidden] = "self._queue_status()"
+
+
 @hidden
 class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
@@ -527,7 +532,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         # ``QueueManager.status()`` so adding new channels Just Works.
         from nooa import Context
 
-        self.context["queues"] = Context(expr="self.queue_manager.status()")
+        self.context["queues"] = Context(expr=_QUEUES_EXPR)
 
     @hidden
     @no_trace
@@ -560,6 +565,17 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         session stopped (a ``JobsLost`` event); they did not survive.
         """
         self.jobs.after_restore()
+        # A snapshot from before the queues block stopped naming the hidden
+        # queue_manager restores the old expression; put the current one back.
+        from nooa import Context
+
+        self.context["queues"] = Context(expr=_QUEUES_EXPR)
+
+    @hidden
+    @no_trace
+    def _queue_status(self) -> str:
+        """The ``queues`` context block: pending items per channel and running jobs."""
+        return self.queue_manager.status()
 
     @property
     def v(self) -> AgentVars:
