@@ -1572,3 +1572,70 @@ async def test_bootstrap_updates_do_not_interleave_into_a_replay(tmp_path):
     # The replayed turns must be contiguous — nothing wedged between them.
     assert replayed == list(range(replayed[0], replayed[0] + len(replayed))), kinds
     await adapter.close()
+
+
+def _remembering_llm() -> FakeLLMClient:
+    return FakeLLMClient.with_tool_call(
+        "execute_python",
+        {
+            "code": (
+                "self.v.remembered = 'kept across a reload'\n"
+                "self.message('noted')\n"
+                "return_result(Done(explanation='noted'))"
+            )
+        },
+    )
+
+
+async def test_load_session_restores_the_agent_state_from_the_last_turn(tmp_path):
+    first = CodingACPAdapter(_remembering_llm)
+    first.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await first.new_session(str(tmp_path))
+    await first.prompt(created.session_id, [text_block("remember this")])
+    await first.close()
+
+    second = CodingACPAdapter(_completed_llm)
+    second.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    await second.load_session(str(tmp_path), created.session_id)
+    session = await _session(second, created.session_id)
+    assert session.agent.v.remembered == "kept across a reload"
+    await second.close()
+
+
+async def test_an_unchanged_turn_does_not_save_another_snapshot(tmp_path):
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    session = await _session(adapter, created.session_id)
+    saved: list[str] = []
+    original = session.handle.storage.save_snapshot_json
+    session.handle.storage.save_snapshot_json = lambda blob: saved.append(blob) or original(blob)
+    await adapter.prompt(created.session_id, [text_block("one")])
+    digest = session.snapshot_digest
+    CodingACPAdapter._checkpoint(session)
+    assert len(saved) == 1
+    assert session.snapshot_digest == digest
+    await adapter.close()
+
+
+async def test_load_session_with_an_unreadable_snapshot_starts_a_fresh_agent(tmp_path, caplog):
+    first = CodingACPAdapter(_remembering_llm)
+    first.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await first.new_session(str(tmp_path))
+    await first.prompt(created.session_id, [text_block("remember this")])
+    session = await _session(first, created.session_id)
+    session.handle.storage.save_snapshot_json('{"version": 999}')
+    await first.close()
+
+    client = _RecordingClient()
+    second = CodingACPAdapter(_completed_llm)
+    second.on_connect(client)  # type: ignore[arg-type]
+    with caplog.at_level("WARNING", logger="nooa_acp.server"):
+        await second.load_session(str(tmp_path), created.session_id)
+    assert "could not restore its saved state" in caplog.text
+    session = await _session(second, created.session_id)
+    assert "remembered" not in session.agent.v
+    replayed = [u.content.text for u in client.updates if isinstance(u, UserMessageChunk)]
+    assert replayed == ["remember this\n"]
+    await second.prompt(created.session_id, [text_block("still usable")])
+    await second.close()

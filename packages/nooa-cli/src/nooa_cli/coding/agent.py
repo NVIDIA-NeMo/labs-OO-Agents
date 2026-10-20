@@ -20,6 +20,7 @@ from nooa.interactive import (
     install_summarizer,
 )
 from nooa.paths import get_project_dir
+from nooa.runtime.channels import Channel
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
@@ -30,7 +31,6 @@ from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
 
 if TYPE_CHECKING:
-    from nooa.runtime.channels import Channel
     from nooa.unifiedllm import UnifiedLLM
 
 __all__ = ["CodingAgent"]
@@ -60,6 +60,8 @@ class CodingAgent(InteractiveAgent):
     # InteractiveAgent because they are coding-host concepts: slash commands
     # are a UI affordance whose registry is in this package, and
     # system_messages carries host continuations such as keep-going.
+    # Channel is imported at runtime, not under TYPE_CHECKING: snapshots must
+    # resolve these hints to see nosnapshot, or they warn on every checkpoint.
     _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
     slash_commands: Annotated[Any, nosnapshot]
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]
@@ -71,6 +73,8 @@ class CodingAgent(InteractiveAgent):
     skills: Annotated[SkillRegistry, nosnapshot]
     _base_shell: Annotated[ShellTools, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
+    # Set by CodingSlashCommandRegistry; rebuilt with the host, never saved.
+    _command_registry: Annotated[Any, hidden, nosnapshot]
 
     def __init__(
         self,
