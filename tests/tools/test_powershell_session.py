@@ -35,21 +35,25 @@ def _python(code: str) -> str:
 
 @pytest.fixture(params=["pwsh", "powershell"])
 def executable(request):
-    path = shutil.which(request.param)
-    if not path:
-        pytest.skip(f"{request.param} is not installed")
-    if request.param == "pwsh":
-        from nooa.tools._powershell_session import _is_app_execution_alias
+    from nooa.tools._powershell_session import _is_app_execution_alias, _resolve_powershell
 
+    if request.param == "pwsh":
+        # The same resolution the session uses, not shutil.which: an MSI install
+        # lands in Program Files, which only reaches PATH for processes started
+        # after the installer ran, so a which-only fixture skips the very
+        # configuration this suite exists to cover.
+        path = _resolve_powershell()
+        if not path or Path(path).name.lower() not in {"pwsh.exe", "pwsh"}:
+            pytest.skip("PowerShell 7 (pwsh) is not installed")
         if _is_app_execution_alias(path):
-            # A job object does not contain processes started through the Store
-            # alias, so every process-tree contract below would fail here for a
-            # reason unrelated to this session's code. The resolver skips the
-            # alias for the same reason; this fixture names it explicitly.
             pytest.skip(
                 f"{path} is a Microsoft Store app alias; a job object cannot "
                 "contain the processes it starts"
             )
+        return path
+    path = shutil.which(request.param)
+    if not path:
+        pytest.skip(f"{request.param} is not installed")
     return path
 
 
