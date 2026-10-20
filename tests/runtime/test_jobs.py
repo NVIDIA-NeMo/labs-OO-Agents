@@ -543,3 +543,32 @@ async def test_the_status_line_shows_label_state_and_description_or_target(agent
     assert "→ jobs" not in status
     for label in ("tests", "timer", "noisy"):
         await agent.jobs.cancel(label)
+
+
+# ---- timer payloads ----
+
+
+async def test_after_delivers_its_payload(agent):
+    info = agent.jobs.after(0.05, label="check-ci", payload="check CI on PR #462 and report")
+    assert info.payload == "check CI on PR #462 and report"
+    item = await _next(agent)
+    assert isinstance(item, JobResult) and item.result == "check CI on PR #462 and report"
+    assert agent.jobs.get("check-ci").payload == "check CI on PR #462 and report"
+
+
+async def test_every_keeps_ticks_and_exposes_its_payload(agent):
+    payload = {"task": "poll CI", "pr": 462}
+    agent.jobs.every(0.05, label="poll", payload=payload)
+    assert [(await _next(agent)).items for _ in range(2)] == [[1], [2]]
+    assert agent.jobs.get("poll").payload == payload
+    assert agent.jobs.list()[-1].payload == payload
+    await agent.jobs.cancel("poll")
+
+
+async def test_payload_defaults_to_none(agent):
+    assert agent.jobs.every(30, label="e").payload is None
+    assert (await agent.jobs.run("true", label="r")).payload is None
+    agent.jobs.after(0.01, label="a")
+    items = [await _next(agent), await _next(agent)]
+    assert next(i for i in items if i.label == "a").result is None
+    await agent.jobs.cancel("e")

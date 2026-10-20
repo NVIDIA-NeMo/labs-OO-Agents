@@ -79,6 +79,9 @@ class JobInfo(BaseModel):
     state: JobStateName = Field(description="running, done, failed or cancelled")
     target: str = Field(default="", description="What runs: command, file, interval or callable")
     description: str = Field(default="", description="Why it runs, as passed with description=")
+    payload: Any = Field(
+        default=None, description="Value given to after()/every(); after() delivers it as .result"
+    )
     started_at: str = Field(description="Start time (ISO, seconds)")
     finished_at: str | None = Field(default=None, description="End time, None while running")
     log_path: str | None = Field(default=None, description="Full stdout+stderr log (run only)")
@@ -142,6 +145,7 @@ class _Job:
         self.kind = kind
         self.target = target
         self.description = description
+        self.payload: Any = None
         self.streaming = streaming
         self.throttle = throttle
         self.log_path = log_path
@@ -167,6 +171,7 @@ class _Job:
             state=self.state,
             target=self.target,
             description=self.description,
+            payload=self.payload,
             started_at=self.started_at,
             finished_at=self.finished_at,
             log_path=self.log_path,
@@ -775,12 +780,14 @@ class JobsApi(Skill):
         )
         return self._start(job, self._stream_job(job, _tail_lines(handle)))
 
-    def after(self, seconds: float, *, label: str, description: str = "") -> JobInfo:
-        """Deliver one ``JobResult`` (``result`` None) after ``seconds``: a timer.
+    def after(
+        self, seconds: float, *, label: str, payload: Any = None, description: str = ""
+    ) -> JobInfo:
+        """Deliver one ``JobResult`` after ``seconds``: a timer; ``.result`` is ``payload``.
 
         ``cancel(label)`` stops it before it fires.
 
-            self.jobs.after(600, label="check-in")
+            self.jobs.after(600, label="check-ci", payload="check CI on PR #462 and report")
         """
         job = self._new_job(
             label,
@@ -791,14 +798,18 @@ class JobsApi(Skill):
             target=f"after {_seconds(seconds)}",
             description=description,
         )
-        return self._start(job, self._call_job(job, asyncio.sleep(seconds)))
+        job.payload = payload
+        return self._start(job, self._call_job(job, asyncio.sleep(seconds, result=payload)))
 
-    def every(self, seconds: float, *, label: str, description: str = "") -> JobInfo:
+    def every(
+        self, seconds: float, *, label: str, payload: Any = None, description: str = ""
+    ) -> JobInfo:
         """Deliver a tick (1, 2, 3, ...) every ``seconds`` until cancelled.
 
         Ticks are ``JobUpdate`` items; ``throttle(label, ...)`` batches them.
+        ``payload`` is kept on the job (``get(label).payload``).
 
-            self.jobs.every(300, label="poll")
+            self.jobs.every(300, label="poll-ci", payload="check CI and report changes")
         """
         if seconds <= 0:
             raise ValueError("seconds must be positive")
@@ -811,6 +822,7 @@ class JobsApi(Skill):
             target=f"every {_seconds(seconds)}",
             description=description,
         )
+        job.payload = payload
         return self._start(job, self._stream_job(job, _ticks(seconds)))
 
     def throttle(
