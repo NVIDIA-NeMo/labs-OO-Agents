@@ -482,3 +482,64 @@ async def test_undecodable_output_does_not_end_the_stream(agent):
     texts = [e.text for u in updates for e in u.items]
     assert texts == ["first\n", "caf\ufffd\n", "last\n"]
     assert result.result.stdout == "first\ncaf\ufffd\nlast\n"
+
+
+# ---- target and description ----
+
+
+async def test_target_says_what_runs_for_each_kind(agent, tmp_path):
+    log = tmp_path / "t.log"
+    log.write_text("")
+
+    async def fetch_report():
+        await asyncio.sleep(30)
+
+    async def lines_of_work():
+        yield 1
+        await asyncio.sleep(30)
+
+    assert (await agent.jobs.run("sleep 30", label="r")).target == "sleep 30"
+    assert agent.jobs.spawn(fetch_report(), label="c").target.endswith("fetch_report()")
+    assert agent.jobs.spawn(lines_of_work(), label="g").target.endswith("lines_of_work()")
+    assert agent.jobs.tail("t.log", label="rel").target == f"t.log ({log})"
+    assert agent.jobs.tail(str(log), label="abs").target == str(log)
+    assert agent.jobs.after(300, label="a").target == "after 300s"
+    assert agent.jobs.every(0.5, label="e").target == "every 0.5s"
+    assert {job.label: job.target for job in agent.jobs.list()}["a"] == "after 300s"
+    for label in ("r", "c", "g", "rel", "abs", "a", "e"):
+        await agent.jobs.cancel(label)
+
+
+async def test_description_round_trips(agent):
+    info = await agent.jobs.run("sleep 30", label="tests", description="full run before pushing")
+    assert info.description == "full run before pushing"
+    assert agent.jobs.get("tests").description == "full run before pushing"
+    assert agent.jobs.list()[-1].description == "full run before pushing"
+    assert agent.jobs.after(30, label="a").description == ""
+    with pytest.raises(TypeError):
+        agent.jobs.every(1, label="bad", description=3)
+    await agent.jobs.cancel("tests")
+    await agent.jobs.cancel("a")
+    assert agent.jobs.get("tests").description == "full run before pushing"  # kept after it ends
+
+
+async def test_long_targets_are_cut_to_one_short_line(agent):
+    cmd = "echo start\n" + "echo " + "x" * 400
+    info = await agent.jobs.run(cmd, label="long")
+    assert len(info.target) == 200 and info.target.endswith("…")
+    assert "\n" not in info.target and info.target.startswith("echo start echo xxx")
+    await _next(agent)
+
+
+async def test_the_status_line_shows_label_state_and_description_or_target(agent):
+    await agent.jobs.run("sleep 30", label="tests", description="full run before pushing")
+    agent.jobs.after(300, label="timer")
+    await agent.jobs.run("sleep 30 # " + "y" * 300, label="noisy")
+    status = agent.queue_manager.status()
+    assert "  • tests · running · full run before pushing" in status
+    assert "  • timer · running · after 300s" in status
+    noisy = next(line for line in status.splitlines() if "noisy" in line)
+    assert noisy.endswith("…") and len(noisy) <= 4 + 100
+    assert "→ jobs" not in status
+    for label in ("tests", "timer", "noisy"):
+        await agent.jobs.cancel(label)

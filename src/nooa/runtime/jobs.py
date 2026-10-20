@@ -49,6 +49,8 @@ _LOG_CAP_BYTES = 50 * 1024 * 1024
 _KEEP_FINISHED = 100
 # Delivered items remembered per job for get().
 _KEEP_ITEMS = 5
+# Longest JobInfo.target, in characters.
+_TARGET_CHARS = 200
 # How often tail() checks its file for new lines.
 _TAIL_POLL_SECONDS = 0.5
 
@@ -72,13 +74,15 @@ class JobInfo(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    label: str
-    kind: JobKind
-    state: JobStateName
-    started_at: str
-    finished_at: str | None = None
-    log_path: str | None = None
-    throttle: Throttle | None = None
+    label: str = Field(description="Name it was started with; items it delivers carry it")
+    kind: JobKind = Field(description="The method that started it")
+    state: JobStateName = Field(description="running, done, failed or cancelled")
+    target: str = Field(default="", description="What runs: command, file, interval or callable")
+    description: str = Field(default="", description="Why it runs, as passed with description=")
+    started_at: str = Field(description="Start time (ISO, seconds)")
+    finished_at: str | None = Field(default=None, description="End time, None while running")
+    log_path: str | None = Field(default=None, description="Full stdout+stderr log (run only)")
+    throttle: Throttle | None = Field(default=None, description="Current batching, None if off")
     pending: int = Field(default=0, description="Items batched by throttle, not yet delivered")
     last: list[Any] = Field(default_factory=list, description="Most recent delivered items")
 
@@ -131,9 +135,13 @@ class _Job:
         throttle: Throttle | None,
         log_path: str | None,
         streaming: bool,
+        target: str = "",
+        description: str = "",
     ):
         self.label = label
         self.kind = kind
+        self.target = target
+        self.description = description
         self.streaming = streaming
         self.throttle = throttle
         self.log_path = log_path
@@ -157,6 +165,8 @@ class _Job:
             label=self.label,
             kind=self.kind,
             state=self.state,
+            target=self.target,
+            description=self.description,
             started_at=self.started_at,
             finished_at=self.finished_at,
             log_path=self.log_path,
@@ -164,6 +174,26 @@ class _Job:
             pending=self.pending,
             last=list(self.last),
         )
+
+    def status_line(self) -> str:
+        """One short line for the per-turn queue status: label · state · description or target."""
+        about = self.description or self.target
+        return _short(" · ".join(part for part in (self.label, self.state, about) if part), 100)
+
+
+def _short(text: str, limit: int = _TARGET_CHARS) -> str:
+    """``text`` on one line, cut to ``limit`` characters with an ellipsis."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _seconds(value: float) -> str:
+    return f"{value:g}s"
+
+
+def _callable_target(work: Any) -> str:
+    name = getattr(work, "__qualname__", None) or type(work).__name__
+    return f"{name}()"
 
 
 def _throttle(lines: int | None, seconds: float | None) -> Throttle | None:
@@ -253,7 +283,7 @@ class JobsApi(Skill):
     environment. Output arrives as items in ``notification["jobs"]``, each
     with ``.label``.
 
-        await self.jobs.run("uv run pytest -q", label="tests")
+        await self.jobs.run("uv run pytest -q", label="tests", description="full run before pushing")
         return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
         # next turn: r = notification["jobs"][0]  -> JobResult
         # r.result.returncode, r.result.stdout (tail), r.log_path (full log)
@@ -262,7 +292,8 @@ class JobsApi(Skill):
         # -> JobUpdate batches of output lines while it runs, then the JobResult
 
     ``tail(path)`` follows a file, ``after(seconds)`` is a timer and
-    ``every(seconds)`` ticks. Labels are unique among running jobs. ``list()``/``get(label)`` show
+    ``every(seconds)`` ticks. Every start method takes an optional
+    ``description=``; ``JobInfo.target`` says what runs. Labels are unique among running jobs. ``list()``/``get(label)`` show
     state; ``await cancel(label)`` stops a job (and kills its process).
     """
 
@@ -293,15 +324,25 @@ class JobsApi(Skill):
 
     @hidden
     def _new_job(
-        self, label: str, kind: JobKind, throttle: Throttle | None, *, log: bool, streaming: bool
+        self,
+        label: str,
+        kind: JobKind,
+        throttle: Throttle | None,
+        *,
+        log: bool,
+        streaming: bool,
+        target: str = "",
+        description: str = "",
     ) -> _Job:
+        if not isinstance(description, str):
+            raise TypeError("description must be a string")
         self._check_label(label)
         current = self._jobs.get(label)
         log_path = None
         if log:
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)[:60]
             log_path = str(self._logs() / f"{safe}-{uuid.uuid4().hex[:6]}.log")
-        job = _Job(label, kind, throttle, log_path, streaming)
+        job = _Job(label, kind, throttle, log_path, streaming, _short(target), description.strip())
         if current is not None:
             self._finished.append(current)
         self._jobs[label] = job
@@ -319,6 +360,7 @@ class JobsApi(Skill):
     def _start(self, job: _Job, work: Any) -> JobInfo:
         self._channel()
         job.handle = self._queues.spawn(work, channel=JOBS_CHANNEL, label=job.label)
+        job.handle.describe = job.status_line
         return job.info()
 
     @hidden
@@ -643,6 +685,7 @@ class JobsApi(Skill):
         cwd: str | Path | None = None,
         lines: int | None = None,
         seconds: float | None = None,
+        description: str = "",
     ) -> JobInfo:
         """Run a shell command in the background, in its own bash process.
 
@@ -661,7 +704,9 @@ class JobsApi(Skill):
         throttle = _throttle(lines, seconds)
         self._check_label(label)
         context = await self._shell_context()
-        job = self._new_job(label, "run", throttle, log=True, streaming=True)
+        job = self._new_job(
+            label, "run", throttle, log=True, streaming=True, target=cmd, description=description
+        )
         return self._start(job, self._run_job(job, cmd, stdin, timeout, cwd, context))
 
     def spawn(
@@ -671,6 +716,7 @@ class JobsApi(Skill):
         label: str,
         lines: int | None = None,
         seconds: float | None = None,
+        description: str = "",
     ) -> JobInfo:
         """Run a coroutine or async iterator in the background.
 
@@ -682,16 +728,17 @@ class JobsApi(Skill):
             self.jobs.spawn(fetch_report(url), label="report")  # any coroutine
             self.jobs.spawn(watch_queue(), label="watch", seconds=60)  # an async generator
         """
+        about = {"target": _callable_target(work), "description": description}
         if hasattr(work, "__aiter__"):
             job = self._new_job(
-                label, "spawn", _throttle(lines, seconds), log=False, streaming=True
+                label, "spawn", _throttle(lines, seconds), log=False, streaming=True, **about
             )
             return self._start(job, self._stream_job(job, work.__aiter__()))
         if not asyncio.iscoroutine(work) and not isinstance(work, Awaitable):
             raise TypeError("spawn() takes a coroutine or an async iterator")
         if lines is not None or seconds is not None:
             raise ValueError("lines/seconds apply to async iterators only")
-        job = self._new_job(label, "spawn", None, log=False, streaming=False)
+        job = self._new_job(label, "spawn", None, log=False, streaming=False, **about)
         return self._start(job, self._call_job(job, work))
 
     def tail(
@@ -701,6 +748,7 @@ class JobsApi(Skill):
         label: str,
         lines: int | None = None,
         seconds: float | None = None,
+        description: str = "",
     ) -> JobInfo:
         """Deliver lines appended to a file from now on, until cancelled.
 
@@ -712,23 +760,40 @@ class JobsApi(Skill):
         """
         throttle = _throttle(lines, seconds)
         self._check_label(label)
-        resolved = Path(self._shell_dir()) / Path(path)
+        resolved = (Path(self._shell_dir()) / Path(path)).resolve()
         handle = open(resolved, "rb")  # noqa: SIM115 - closed by the generator
         handle.seek(0, os.SEEK_END)
-        job = self._new_job(label, "tail", throttle, log=False, streaming=True)
+        target = str(resolved) if str(resolved) == str(path) else f"{path} ({resolved})"
+        job = self._new_job(
+            label,
+            "tail",
+            throttle,
+            log=False,
+            streaming=True,
+            target=target,
+            description=description,
+        )
         return self._start(job, self._stream_job(job, _tail_lines(handle)))
 
-    def after(self, seconds: float, *, label: str) -> JobInfo:
+    def after(self, seconds: float, *, label: str, description: str = "") -> JobInfo:
         """Deliver one ``JobResult`` (``result`` None) after ``seconds``: a timer.
 
         ``cancel(label)`` stops it before it fires.
 
             self.jobs.after(600, label="check-in")
         """
-        job = self._new_job(label, "after", None, log=False, streaming=False)
+        job = self._new_job(
+            label,
+            "after",
+            None,
+            log=False,
+            streaming=False,
+            target=f"after {_seconds(seconds)}",
+            description=description,
+        )
         return self._start(job, self._call_job(job, asyncio.sleep(seconds)))
 
-    def every(self, seconds: float, *, label: str) -> JobInfo:
+    def every(self, seconds: float, *, label: str, description: str = "") -> JobInfo:
         """Deliver a tick (1, 2, 3, ...) every ``seconds`` until cancelled.
 
         Ticks are ``JobUpdate`` items; ``throttle(label, ...)`` batches them.
@@ -737,7 +802,15 @@ class JobsApi(Skill):
         """
         if seconds <= 0:
             raise ValueError("seconds must be positive")
-        job = self._new_job(label, "every", None, log=False, streaming=True)
+        job = self._new_job(
+            label,
+            "every",
+            None,
+            log=False,
+            streaming=True,
+            target=f"every {_seconds(seconds)}",
+            description=description,
+        )
         return self._start(job, self._stream_job(job, _ticks(seconds)))
 
     def throttle(

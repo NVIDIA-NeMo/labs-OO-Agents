@@ -135,6 +135,9 @@ class JobHandle:
         self.name = name
         self.label = label or name
         self.state: JobState = "running"
+        # Optional one-line summary for ``QueueManager.status()``, set by the
+        # API that owns the job (``self.jobs``); called at render time.
+        self.describe: Callable[[], str] | None = None
         self._task = task
         if buffer is True:
             self._values: list[Any] | deque[Any] = []
@@ -926,7 +929,8 @@ class QueueManager:
         if active_spawns:
             spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
             for h in active_spawns:
-                spawn_lines.append(f"  • {h.label} → {h.name} (running)")
+                line = h.describe() if h.describe is not None else None
+                spawn_lines.append(f"  • {line or f'{h.label} → {h.name} (running)'}")
             spawn_status = "\n".join(spawn_lines)
             body = f"{body}\n{spawn_status}" if body else spawn_status
 
