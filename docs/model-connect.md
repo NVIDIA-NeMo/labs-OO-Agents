@@ -1,14 +1,14 @@
 # Configure a model with NOOA Connect
 
-`nooa connect` sets up a model for NOOA. It finds the model on your endpoint,
-runs a few small test requests, and saves a named entry (an *alias*) in
-`llm_config.yaml`. Your agents then use the model by that alias.
+`nooa connect` configures a model so your agents can run smoothly. It suggests
+and saves a reply/output token limit, records the context window when known
+(or supplied by you), and lists your chosen media formats. It tests the route,
+tools, reasoning, and caching, then saves a named entry (an *alias*) in
+`llm_config.yaml`. Your agents use the model by that alias.
 
-Test requests can cost money. The interactive wizard asks before its first
-test request. Agent-driven stages run without a spending prompt; authorize
-those calls before invoking them. `--yes` approves wizard checks and saving.
-To set up a model without any requests, see [Configure a model without paid
-checks](model-configuration.md).
+The interactive wizard asks before checks and saving. `--yes` confirms both
+without asking. For a reference to the saved settings and configuration files,
+see [Model configuration](model-configuration.md).
 
 ## CLI
 
@@ -41,8 +41,8 @@ uv run nooa connect your-model --as my-model \
   never the key itself. Use `--api-key-env ''` for a local server with no key.
 - `--prompt-key` lets you paste a masked key instead (even with `--yes`). At the
   end Connect offers to save it in NOOA's `secrets.yaml`; persisting a key
-  requires separate approval, not just `--yes`.
-- `--yes` approves the test requests and saving without asking. It needs
+  requires a separate confirmation; `--yes` does not save a newly pasted key.
+- `--yes` confirms the test requests and saving without asking. It needs
   `MODEL`, `--as`, and either `--provider` or `--endpoint` plus `--api-style`.
 
 Run `uv run nooa connect --help` for all options.
@@ -106,11 +106,11 @@ tools, reasoning, conversation, and media checks. Connect may first try the API
 styles if you did not choose one.
 
 `--no-probe` (or `--probe none`) skips model requests and saves an **unverified**
-entry. It can still fetch model lists and catalogue details. To stay offline,
-supply the exact model, endpoint, and API style plus `--no-probe --no-catalogue`.
+entry. It can still fetch model lists and catalogue details. To skip those too,
+supply the exact model, endpoint, and API style plus `--no-catalogue`.
 
-Only a failed connection or text baseline blocks saving. Tool, reasoning,
-caching, or media results that need attention do not.
+In the wizard, only a failed connection or text baseline blocks saving. Tool,
+reasoning, caching, or media results that need attention do not.
 
 ### Configured typed text baseline
 
@@ -121,14 +121,18 @@ cannot return structured output, save it without checks (`--no-probe`) instead.
 ## Token budget and reply limit
 
 - `--budget-tokens N` limits the estimated total tokens for all checks. The
-  default is no limit. It is an estimate, not a spending cap.
+  default is no limit. Actual token use can differ from the estimate.
 - A check that does not fit the remaining budget is skipped. Connect does not
   lower limits or ask for more budget.
 - `--max-tokens N` (also `--reply-tokens`) sets the reply limit saved as
   `max_tokens`. It covers reasoning and the answer. Without it, Connect suggests
-  the published recommendation, or 32,768. It must be less than the context
-  window.
-- `--context-window N` records a known context window.
+  the published recommendation, or 32,768, adjusted to known limits. The cap
+  must stay below the known context window and within the known output limit.
+- `--context-window N` supplies a known context window. Connect uses endpoint
+  or catalogue metadata when available; it does not measure context capacity.
+  Unknown limits remain unknown.
+- `--output-tokens N` sets the smaller cap for interface discovery only; it does
+  not change the saved reply limit.
 
 ## Reasoning levels
 
@@ -152,10 +156,10 @@ public model list. Use `--catalogue-model ID` to pick the entry, or
 
 ## Independent stages for agents
 
-`--stage NAME` runs one step and prints one JSON report to stdout. It does not
-ask for spending approval; obtain permission before paid stages. Only `save`
-writes the registry. Stages normally do not prompt, but `--prompt-key` asks for
-a masked credential on endpoint checks; use `--api-key-env` for unattended use.
+`--stage NAME` runs one step and prints one JSON report to stdout. Check stages
+run requests without confirmation. Only `save` writes the registry. Stages
+normally do not prompt, but `--prompt-key` asks for a masked credential on
+endpoint checks; use `--api-key-env` for unattended use.
 
 | Stage | What it does |
 |---|---|
@@ -185,7 +189,8 @@ export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
 - Pass `--endpoint`, `--api-style`, and `--api-key-env` explicitly.
 - Save `--stage discover` output and reuse it with `--discovery-file` to avoid
   another listing request.
-- `--stage save` needs `--yes` to replace an existing alias.
+- `--stage save` needs `--yes` to replace an existing alias. It can save an
+  unverified plan or a failed result; inspect the report before saving.
 - Exit code `0` means the stage passed, `1` means it failed or was inconclusive,
   and `2` means the options were invalid.
 - The report's `diagnostic_prompt` describes the failure for an agent to fix.
@@ -220,8 +225,8 @@ Add `--show-diagnostics` in the wizard to see full details.
   model. Use `--output FILE` to choose another file.
 - After saving to a custom file, set `NEMO_OO_LLM_CONFIG` to its path or load it
   with `reload_registry(Path(...))`. `-w DIR` saves to `DIR/.nooa/llm_config.yaml`.
-- Editing a saved model runs fresh checks, which may cost money. Keep diagnostic
-  reports separately if you need a record of earlier results.
+- Editing a saved model runs fresh checks. Keep diagnostic reports separately
+  if you need a record of earlier results.
 - To load a config file from another path, add it to `NEMO_OO_LLM_CONFIG`.
 
 ## Choose media inputs during setup
@@ -235,9 +240,9 @@ In the wizard, choose one:
 
 - **Test all media inputs (generated samples).** Connect sends one small
   generated sample per format to check that this model accepts it through this
-  connection. Formats that pass are enabled for this model entry. This uses the
-  budget you already approved. Check the model's answers on your own examples
-  before relying on it.
+  connection. Formats that pass are enabled for this model entry. The checks
+  check that the model accepts each format. Test the model's answers on your
+  own examples before relying on it.
 - **Choose media inputs manually.** No requests. The choice is saved as
   unverified.
 
@@ -255,11 +260,6 @@ Test limits:
 From the command line:
 
 ```sh
-# Set formats by hand (unverified, no requests):
-uv run nooa connect your-model --as vision --endpoint https://gateway.example/v1 \
-  --api-style chat --api-key-env MODEL_KEY --media-inputs image,pdf \
-  --no-probe --no-catalogue --yes
-
 # Test formats and enable those that pass:
 uv run nooa connect your-model --as vision --endpoint https://gateway.example/v1 \
   --api-style chat --api-key-env MODEL_KEY --test-media-inputs image,audio,video,pdf \

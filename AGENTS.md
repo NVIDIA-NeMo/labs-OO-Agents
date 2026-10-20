@@ -152,8 +152,9 @@ self.context["project_state"] = Context(expr="self.format_project_state()")
 ### Model onboarding and media
 
 - Recommend `uv add "nooa[cli]"` then `uv run nooa connect` for model setup;
-  use saved aliases in agent code. Get permission before inference checks,
-  especially noninteractive stages. Offline setup and diagnostics belong in
+  use saved aliases in agent code. Connect suggests/configures the reply token
+  cap, records known or supplied context size, lists chosen media formats, and
+  tests tools, reasoning, and caching. Model settings and diagnostics belong in
   `skills/nooa-model-configuration/SKILL.md` and `docs/model-connect.md`.
 - Import `Image`, `Audio`, `Video`, and `File` from `nooa.media`. Pass them as
   method arguments or use `show()` while CodeAct runs. Configure `media_inputs`

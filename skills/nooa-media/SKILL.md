@@ -15,9 +15,10 @@ See [the media guide](../../docs/media.md), the
 - Identify the registry file, alias, model, endpoint, and API style. Preserve
   unrelated entries and credentials. Load a file explicitly with `reload_registry`
   if needed; see [model configuration](../../docs/model-configuration.md).
-- Confirm what data may be sent and whether billable checks are approved.
-  Without authorization, stay offline. Media bytes and URLs, including signed
-  query strings, may disclose private data.
+- Confirm consent before transmitting user data. Media bytes and URLs,
+  including signed query strings, may disclose private data.
+- Recommend `uv run nooa connect` to configure the reply cap, known or supplied
+  context size, and chosen media formats, and test the route.
 - NOOA assumes models are text-only until configured. Set `media_inputs` on the
   registry entry or client constructor: `image`, `audio`, `video`, `pdf`.
   Omitted/null/empty lists mean text-only. Python also accepts tuples; bare
@@ -84,17 +85,19 @@ shared assistant-response format in the [replay guide](../../docs/assistant-turn
 
 ## Check, migrate, and report
 
-Use manual YAML or Connect `--stage plan --media-inputs image,pdf` for offline setup;
-save separately. Wizard offline setup needs explicit model/endpoint/API style and
-`--no-probe --no-catalogue`. With approval, `--stage media --test-media-inputs image,pdf
---max-tokens 4096 --budget-tokens 32768` runs billable text/sample checks
-without a consent prompt.
-It does not save automatically. Wizard `--yes` approves checks and saving. Review
-failures and skips; audio/video checks currently run only for Chat.
+Use Connect's wizard to choose or test formats. Wizard `--yes` confirms checks
+and saving. For diagnostics, `--stage media --test-media-inputs image,pdf
+--max-tokens 4096 --budget-tokens 32768` runs text and generated-sample checks
+without confirmation or automatic saving. Review failures and skips; audio/video
+checks currently run only for Chat. A pass confirms access, not general accuracy.
+
+For an unsaved proposal, use `--stage plan --media-inputs image,pdf`, then save
+separately. Wizard `--no-probe` skips model checks but may fetch metadata; supply
+exact model/endpoint/API style plus `--no-catalogue` to skip discovery too.
 
 Older aliases need an explicit list; `[]` also silences the missing-list warning.
 Agent method `llm=vision` overrides use the selected client's configured list.
 Switching models via `existing_client.acall(model=...)` makes the request text-only.
 Prefer separate configured aliases; factory model/endpoint changes clear the
 list unless supplied again. Set `media_inputs` in configuration, not call kwargs.
-Report modified files/aliases, offline checks, and any approved live checks.
+Report modified files/aliases, checks run, and anything left unverified.

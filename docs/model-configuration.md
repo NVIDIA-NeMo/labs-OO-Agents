@@ -1,11 +1,12 @@
-# Configure a model without paid checks
+# Model configuration
 
-You can add a model to NOOA by editing `llm_config.yaml` yourself. This sends no
-requests to the model. An agent can do it for you with the
+Start with [nooa connect](model-connect.md) to configure the reply/output token
+limit, known context window, media formats, and other model settings, and test
+your route. This page explains the saved settings and how configuration files
+are loaded.
+
+You can also edit `llm_config.yaml` directly, or use the
 [nooa-model-configuration](../skills/nooa-model-configuration/SKILL.md) skill.
-
-For guided onboarding and approved connection tests, prefer
-[nooa connect](model-connect.md). This page is the offline alternative.
 
 Get the exact model ID, API format, and limits from the endpoint's
 documentation. Leave out anything you do not know.
@@ -31,7 +32,7 @@ models:
 | `client_type` | `completion` or `responses`, see below. |
 | `api_base` | The API base URL, not the full request URL. Leave off `/chat/completions`, `/responses`, or `/messages`. |
 | `api_key_env` | The environment variable that holds the key. Never put the key itself in this file. Use `''` for a local server with no key. |
-| `max_tokens` | The reply limit per request, including reasoning. Use what you need, not the model's maximum. Connect suggests 32,768 when nothing better is known. |
+| `max_tokens` | The reply limit per request, including reasoning. Use what you need, not the model's maximum. Connect suggests a published recommendation or 32,768, adjusted to known limits. |
 | `context_window` | Optional. The model's context window, if documented. |
 | `media_inputs` | Optional. Which media the model can receive. See [below](#explicit-media-inputs-migration). |
 
@@ -93,8 +94,7 @@ assert "my-model" in entries
 print("Model configuration loaded; endpoint and credentials have not been tested.")
 ```
 
-This does not test the key or the endpoint. The first real request will, and it
-may cost money.
+This does not test the key or the endpoint. Use Connect to check the route.
 
 ## Configuration discovery and precedence
 
@@ -123,7 +123,7 @@ export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
 `reload_registry()` without arguments to return to automatic discovery.
 Connect's `--output FILE` chooses where to write, not what Python will load.
 
-## Use Connect without generation calls
+## Skipping checks (reference)
 
 `nooa connect` can write the entry for you without test requests. Add
 `--no-probe` to skip model checks and `--no-catalogue` to skip public model
@@ -149,9 +149,8 @@ exact model, endpoint, and API style avoids model discovery; `--no-catalogue`
 avoids metadata lookup. The entry is saved as **unverified**. Connect still asks
 before saving (skip with `--yes`). See [Connect](model-connect.md) to test the model later.
 
-To ask an agent: "Use the `nooa-model-configuration` skill to configure this
-model without API calls. Keep my other entries, use an environment variable for
-the key, and check the file locally only."
+When asking an agent to change configuration, specify the target alias and file.
+Keep other entries and user settings, and use an environment variable for the key.
 
 ## Explicit media inputs (migration)
 

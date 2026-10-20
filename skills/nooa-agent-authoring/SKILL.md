@@ -43,10 +43,10 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 
 ## LLM clients and cascading
 
-Start model onboarding with `uv add "nooa[cli]"` and `uv run nooa connect`,
-with the user's permission for billable checks, or use the configuration skill
-for offline setup. Use an already configured registry alias with
-`get_llm_client("my-model")`.
+Start model onboarding with `uv add "nooa[cli]"` and `uv run nooa connect`.
+Connect configures the reply token cap, records known or supplied context size,
+lists chosen media formats, and tests tools, reasoning, and caching. Use the
+saved registry alias with `get_llm_client("my-model")`.
 For endpoint setup, credentials, registry edits, reply budgets, reasoning-level
 configuration, caching or Connect diagnostics, use
 [nooa-model-configuration](../nooa-model-configuration/SKILL.md).
