@@ -39,7 +39,7 @@ from nooa.tools.shell_tools import ShellResult
 if TYPE_CHECKING:
     from nooa.runtime.channels import Channel, JobHandle, QueueManager
 
-__all__ = ["JobInfo", "JobResult", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
+__all__ = ["JobInfo", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
 
 JOBS_CHANNEL = "jobs"
 # Output kept in a delivered ShellResult (the full output is in the log).
@@ -81,7 +81,7 @@ class JobInfo(BaseModel):
     target: str = Field(default="", description="What runs: command, file, interval or callable")
     description: str = Field(default="", description="Why it runs, as passed with description=")
     payload: Any = Field(
-        default=None, description="Value given to after()/every(); after() delivers it as .result"
+        default=None, description="Value given to after()/every(); after() delivers it as items[0]"
     )
     started_at: str = Field(description="Start time (ISO, seconds)")
     finished_at: str | None = Field(default=None, description="End time, None while running")
@@ -91,38 +91,27 @@ class JobInfo(BaseModel):
     last: list[Any] = Field(default_factory=list, description="Most recent delivered items")
 
 
-class JobResult(BaseModel):
-    """Delivered once when a ``run`` or a coroutine ``spawn`` job ends.
-
-    ``result`` is a ``ShellResult`` for ``run`` (stdout/stderr hold the
-    output tail; ``log_path`` has all of it), else the coroutine's return
-    value. ``error`` is set when the job raised.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    label: str
-    result: Any = None
-    log_path: str | None = None
-    error: str | None = None
-
-
 class JobUpdate(BaseModel):
-    """Delivered while a job runs: ``tail``, ``every``, async-iterator ``spawn``, or a throttled ``run``.
+    """What a job delivers to ``notification["jobs"]``.
 
-    ``items`` are the new values (``StreamEvent`` lines for ``run``); one per
-    update unless throttled. A ``run`` ends with its ``JobResult``; for other
-    jobs the final batch, if any, has ``final=True`` (``JobInfo.state`` shows
-    the end). ``error`` is set when the job raised.
+    While it runs: new values in ``items`` (``StreamEvent`` lines for a
+    throttled ``run``, yielded values, tail lines, ticks). Every job ends with
+    exactly one ``done=True`` update; its result is ``items[0]``: a
+    ``ShellResult`` for ``run``, the return value of a coroutine ``spawn``,
+    the payload of ``after``. Streams end with their last pending values (or
+    ``[]``). On error ``items`` is ``[]`` and ``error`` is set. A cancelled job
+    delivers nothing more.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    label: str
-    items: list[Any] = Field(default_factory=list)
-    final: bool = False
-    log_path: str | None = None
-    error: str | None = None
+    label: str = Field(description="The job's label")
+    items: list[Any] = Field(
+        default_factory=list, description="New values; result in items[0] when done"
+    )
+    done: bool = Field(default=False, description="True on the one update that ends the job")
+    error: str | None = Field(default=None, description="Why the job failed, on the done update")
+    log_path: str | None = Field(default=None, description="Full stdout+stderr log (run only)")
 
 
 _LOST_KEYS = ("label", "kind", "target", "description", "started_at")
@@ -319,11 +308,11 @@ class JobsApi(Skill):
 
         await self.jobs.run("uv run pytest -q", label="tests", description="full run before pushing")
         return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
-        # next turn: r = notification["jobs"][0]  -> JobResult
-        # r.result.returncode, r.result.stdout (tail), r.log_path (full log)
+        # next turn: u = notification["jobs"][0]  -> JobUpdate with done=True
+        # u.items[0] is the ShellResult (.returncode, .stdout tail); u.log_path the full log
 
         await self.jobs.run("make build", label="build", lines=200, seconds=60)
-        # -> JobUpdate batches of output lines while it runs, then the JobResult
+        # -> JobUpdate batches of output lines while it runs, then the done update
 
     ``tail(path)`` follows a file, ``after(seconds)`` is a timer and
     ``every(seconds)`` ticks. Every start method takes an optional
@@ -622,8 +611,8 @@ class JobsApi(Skill):
         timeout: float | None,
         cwd: str | Path | None,
         context: tuple[str, dict],
-    ) -> AsyncIterator[JobUpdate | JobResult]:
-        """Run one command; yield progress ``JobUpdate``s (if throttled), then its ``JobResult``."""
+    ) -> AsyncIterator[JobUpdate]:
+        """Run one command; yield progress updates (if throttled), then the done update."""
         assert job.log_path is not None
         log = _Log(Path(job.log_path))
         out: list[str] = []
@@ -648,26 +637,25 @@ class JobsApi(Skill):
                 target[:] = [_tail("".join(target))]
             return True
 
-        def finish(error: str | None) -> JobResult:
-            if error is not None:
-                return JobResult(label=job.label, log_path=job.log_path, error=error)
-            result = ShellResult(
-                stdout=_tail("".join(out)),
-                stderr=_tail("".join(err)),
-                returncode=done[0].returncode,
-                timed_out=done[0].timed_out,
-            )
-            return JobResult(label=job.label, result=result, log_path=job.log_path)
+        def finish() -> list[Any]:
+            return [
+                ShellResult(
+                    stdout=_tail("".join(out)),
+                    stderr=_tail("".join(err)),
+                    returncode=done[0].returncode,
+                    timed_out=done[0].timed_out,
+                )
+            ]
 
         async for item in self._stream_job(job, source(), collect=collect, finish=finish):
             yield item
 
     @hidden
-    async def _call_job(self, job: _Job, work: Awaitable[Any]) -> JobResult:
+    async def _call_job(self, job: _Job, work: Awaitable[Any]) -> JobUpdate:
         try:
-            item = JobResult(label=job.label, result=await work)
+            item = JobUpdate(label=job.label, items=[await work], done=True)
         except Exception as exc:
-            item = JobResult(label=job.label, error=f"{type(exc).__name__}: {exc}")
+            item = JobUpdate(label=job.label, done=True, error=f"{type(exc).__name__}: {exc}")
             job.final_state = "failed"
         finally:
             job.finished_at = _now()
@@ -681,14 +669,16 @@ class JobsApi(Skill):
         source: AsyncIterator[Any],
         *,
         collect: Callable[[Any], bool] | None = None,
-        finish: Callable[[str | None], JobResult] | None = None,
-    ) -> AsyncIterator[JobUpdate | JobResult]:
+        finish: Callable[[], list[Any]] | None = None,
+    ) -> AsyncIterator[JobUpdate]:
         """Pump ``source`` and yield ``JobUpdate`` batches per the job's live throttle.
 
         Plain streams deliver every value (batched when throttled) and end with
-        a ``final`` update. With ``finish`` (``run``), values pass ``collect``
-        first, are delivered only while throttled, and the job ends with the
-        ``JobResult`` that ``finish`` builds, after flushing the batch.
+        a done update carrying the last pending values. With ``finish``
+        (``run``), values pass ``collect`` first and are delivered only while
+        throttled; the done update's items are what ``finish`` returns, and
+        values still pending then are dropped (the result covers them). On an
+        error the pending values go out first, then a done update with ``[]``.
         """
         inbox: asyncio.Queue[Any] = asyncio.Queue()
         job.wake = inbox
@@ -707,14 +697,14 @@ class JobsApi(Skill):
         batch: list[Any] = []
         batch_started: float | None = None
 
-        def update(final: bool = False) -> JobUpdate:
+        def update(done: bool = False) -> JobUpdate:
             nonlocal batch, batch_started
             item = JobUpdate(
                 label=job.label,
                 items=batch,
-                final=final,
+                done=done,
                 log_path=job.log_path,
-                error=failure[0] if final and failure else None,
+                error=failure[0] if done and failure else None,
             )
             batch, batch_started = [], None
             job.pending = 0
@@ -744,7 +734,7 @@ class JobsApi(Skill):
                     continue
                 throttle = job.throttle
                 if finish is not None and throttle is None:
-                    continue  # a quiet run: its output goes to the JobResult only
+                    continue  # a quiet run: its output goes to the done update only
                 if not batch:
                     batch_started = time.monotonic()
                 batch.append(value)
@@ -761,16 +751,12 @@ class JobsApi(Skill):
                     yield update()
             if failure:
                 job.final_state = "failed"
-            job.finished_at = _now()
-            if finish is None:
-                if batch:  # nothing extra when nothing is left; JobInfo.state shows the end
-                    yield update(final=True)
-            else:
                 if batch:
                     yield update()
-                result = finish(failure[0] if failure else None)
-                job.last.append(result)
-                yield result
+            elif finish is not None:
+                batch = finish()  # the result replaces any pending progress
+            job.finished_at = _now()
+            yield update(done=True)
         finally:
             job.wake = None
             if job.finished_at is None:
@@ -802,11 +788,11 @@ class JobsApi(Skill):
         Like ``self.shell.run`` (same ``stdin``/``cwd``; ``cwd`` is relative to
         the shell's directory) but returns at once and has no timeout unless
         given. ``cd``/``export`` in ``cmd`` do not affect ``self.shell``. When
-        it ends, one ``JobResult`` arrives in ``notification["jobs"]``:
-        ``.result`` is a ``ShellResult`` (output tail; on timeout returncode
-        124), ``.log_path`` the full stdout+stderr log. With ``lines``/``seconds``
-        it also sends progress while running: ``JobUpdate`` batches of
-        ``StreamEvent`` lines (see ``throttle``).
+        it ends, a ``JobUpdate`` with ``done=True`` arrives in
+        ``notification["jobs"]``: ``items[0]`` is a ``ShellResult`` (output
+        tail; on timeout returncode 124), ``log_path`` the full stdout+stderr
+        log. With ``lines``/``seconds`` it also sends progress while running:
+        ``JobUpdate`` batches of ``StreamEvent`` lines (see ``throttle``).
 
             await self.jobs.run("uv run pytest -q", label="tests")
             return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
@@ -833,10 +819,10 @@ class JobsApi(Skill):
     ) -> JobInfo:
         """Run a coroutine or async iterator in the background.
 
-        A coroutine delivers one ``JobResult`` (``.result`` is its return
-        value, ``.error`` set if it raised). An async iterator delivers one
-        ``JobUpdate`` per yielded value (batched with ``lines``/``seconds``);
-        the final batch, if any, has ``final=True``.
+        A coroutine delivers one done update with ``items == [return value]``
+        (``error`` set if it raised). An async iterator delivers one
+        ``JobUpdate`` per yielded value (batched with ``lines``/``seconds``),
+        then a done update with any values still pending.
 
             self.jobs.spawn(fetch_report(url), label="report")  # any coroutine
             self.jobs.spawn(watch_queue(), label="watch", seconds=60)  # an async generator
@@ -902,7 +888,7 @@ class JobsApi(Skill):
         description: str = "",
         replace: bool = False,
     ) -> JobInfo:
-        """Deliver one ``JobResult`` after ``seconds``: a timer; ``.result`` is ``payload``.
+        """A timer: after ``seconds``, one done update with ``items == [payload]``.
 
         ``cancel(label)`` stops it before it fires.
 
@@ -962,7 +948,7 @@ class JobsApi(Skill):
         Whichever comes first triggers a delivery; the rest is flushed at the
         end. Each call replaces the previous setting (omitted arguments become
         None), first delivering what was already batched. ``throttle(label)``
-        turns batching off: a ``run`` goes quiet until its ``JobResult``, other
+        turns batching off: a ``run`` goes quiet until its done update, other
         jobs deliver every item. Applies at once, without restarting the job.
 
             self.jobs.throttle("build", lines=200)

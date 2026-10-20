@@ -57,7 +57,7 @@ import datetime  # noqa: F401
 import json  # noqa: F401
 import re  # noqa: F401
 
-from nooa.runtime.jobs import JobInfo, JobResult, JobsApi, JobUpdate  # noqa: F401
+from nooa.runtime.jobs import JobInfo, JobsApi, JobUpdate  # noqa: F401
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -708,8 +708,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Recognized ``queue_name`` values:
 
         - ``"user_messages"`` — text from the human; ``item`` is a str.
-        - ``"jobs"`` — output of ``self.jobs`` background jobs; each item
-          (``JobResult`` or ``JobUpdate``) has a ``.label``.
+        - ``"jobs"`` — output of ``self.jobs`` background jobs: ``JobUpdate``
+          items with a ``.label``; the one with ``done=True`` ends the job.
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned

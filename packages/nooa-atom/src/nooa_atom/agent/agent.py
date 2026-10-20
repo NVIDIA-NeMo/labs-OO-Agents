@@ -19,7 +19,7 @@ from nooa.interactive import (
     install_summarizer,
 )
 from nooa.paths import get_project_dir
-from nooa.runtime.jobs import JobInfo, JobResult, JobUpdate  # noqa: F401  (visible to cells)
+from nooa.runtime.jobs import JobInfo, JobUpdate  # noqa: F401  (visible to cells)
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager

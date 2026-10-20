@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from nooa.runtime.channels import QueueManager
-from nooa.runtime.jobs import JobResult, JobsApi, JobUpdate
+from nooa.runtime.jobs import JobsApi, JobUpdate
 from nooa.tools._results import StreamEvent
 from nooa.tools.shell_tools import ShellResult, ShellTools
 
@@ -66,10 +66,10 @@ async def test_run_delivers_a_labelled_shell_result_and_a_log(agent):
     info = await agent.jobs.run("echo out; echo err >&2; exit 3", label="t")
     assert info.state == "running" and info.kind == "run"
     item = await _next(agent)
-    assert isinstance(item, JobResult) and item.label == "t"
-    assert isinstance(item.result, ShellResult)
-    assert item.result.returncode == 3 and item.result.stdout == "out\n"
-    assert item.result.stderr == "err\n"
+    assert (isinstance(item, JobUpdate) and item.done) and item.label == "t"
+    assert isinstance(item.items[0], ShellResult)
+    assert item.items[0].returncode == 3 and item.items[0].stdout == "out\n"
+    assert item.items[0].stderr == "err\n"
     log = Path(item.log_path).read_text()
     assert "out\n" in log and "err\n" in log
     assert agent.jobs.get("t").state == "done"
@@ -81,7 +81,7 @@ async def test_run_starts_in_the_shell_directory_with_its_exports(agent, tmp_pat
     await agent.shell.run("export JOBS_TEST_VAR=from-shell; cd sub")
     await agent.jobs.run('echo "$JOBS_TEST_VAR"; pwd; cd /; export X=1', label="env")
     item = await _next(agent)
-    assert item.result.stdout.splitlines() == ["from-shell", str(tmp_path / "sub")]
+    assert item.items[0].stdout.splitlines() == ["from-shell", str(tmp_path / "sub")]
     # The job's cd/export do not leak into the agent's shell.
     assert (await agent.shell.run("pwd; echo ${X:-unset}")).splitlines() == [
         str(tmp_path / "sub"),
@@ -93,7 +93,7 @@ async def test_run_takes_stdin_and_cwd(agent, tmp_path):
     (tmp_path / "d").mkdir()
     await agent.jobs.run("cat; pwd", label="in", stdin="hello\n", cwd="d")
     item = await _next(agent)
-    assert item.result.stdout == f"hello\n{tmp_path / 'd'}\n"
+    assert item.items[0].stdout == f"hello\n{tmp_path / 'd'}\n"
 
 
 async def test_run_does_not_block_the_shell(agent):
@@ -107,8 +107,8 @@ async def test_run_does_not_block_the_shell(agent):
 async def test_run_timeout_kills_and_reports_124(agent):
     await agent.jobs.run("echo start; sleep 30", label="to", timeout=0.5)
     item = await _next(agent)
-    assert item.result.timed_out and item.result.returncode == 124
-    assert item.result.stdout == "start\n"
+    assert item.items[0].timed_out and item.items[0].returncode == 124
+    assert item.items[0].stdout == "start\n"
 
 
 async def test_cancel_kills_the_process(agent, tmp_path):
@@ -147,25 +147,25 @@ async def test_labels_are_unique_among_running_jobs(agent):
     await agent.jobs.cancel("x")
     await agent.jobs.run("echo again", label="x")  # free once it stopped
     item = await _next(agent)
-    assert item.result.stdout == "again\n"
+    assert item.items[0].stdout == "again\n"
     assert [job.label for job in agent.jobs.list()] == ["x", "x"]
 
 
-async def _collect_run(agent) -> tuple[list[JobUpdate], JobResult]:
-    """Read a run job's progress updates up to and including its JobResult."""
+async def _collect_run(agent) -> tuple[list[JobUpdate], JobUpdate]:
+    """Read a run job's progress updates up to and including its done update."""
     updates = []
     while True:
         item = await _next(agent)
-        if isinstance(item, JobResult):
+        if item.done:
             return updates, item
-        assert isinstance(item, JobUpdate) and not item.final
+        assert isinstance(item, JobUpdate) and not item.done
         updates.append(item)
 
 
 async def test_run_without_lines_or_seconds_is_quiet(agent):
     await agent.jobs.run("for i in 1 2 3; do echo $i; done", label="q")
     updates, result = await _collect_run(agent)
-    assert updates == [] and result.result.stdout == "1\n2\n3\n"
+    assert updates == [] and result.items[0].stdout == "1\n2\n3\n"
 
 
 async def test_run_with_progress_delivers_lines_then_its_result(agent):
@@ -174,8 +174,8 @@ async def test_run_with_progress_delivers_lines_then_its_result(agent):
     assert all(len(u.items) == 1 and isinstance(u.items[0], StreamEvent) for u in updates)
     lines = sorted((u.items[0].kind, u.items[0].text) for u in updates)
     assert lines == [("stderr", "b\n"), ("stdout", "a\n"), ("stdout", "c\n")]
-    assert result.label == "s" and result.result.returncode == 0
-    assert result.result.stdout == "a\nc\n" and result.result.stderr == "b\n"
+    assert result.label == "s" and result.items[0].returncode == 0
+    assert result.items[0].stdout == "a\nc\n" and result.items[0].stderr == "b\n"
     assert "a\n" in Path(result.log_path).read_text()
 
 
@@ -183,8 +183,9 @@ async def test_throttle_by_lines_batches_and_flushes_before_the_result(agent):
     await agent.jobs.run("for i in 1 2 3 4 5; do echo $i; done", label="b", lines=2)
     updates, result = await _collect_run(agent)
     texts = [[e.text for e in u.items] for u in updates]
-    assert texts == [["1\n", "2\n"], ["3\n", "4\n"], ["5\n"]]
-    assert result.result.stdout == "1\n2\n3\n4\n5\n"
+    # "5" is still pending at the end: not sent alone, the ShellResult has it.
+    assert texts == [["1\n", "2\n"], ["3\n", "4\n"]]
+    assert result.items == [result.items[0]] and result.items[0].stdout == "1\n2\n3\n4\n5\n"
 
 
 async def test_run_progress_by_seconds(agent):
@@ -192,9 +193,11 @@ async def test_run_progress_by_seconds(agent):
         "for i in 1 2 3 4 5 6; do echo $i; sleep 0.1; done", label="t", seconds=0.35
     )
     updates, result = await _collect_run(agent)
-    assert [e.text for u in updates for e in u.items] == [f"{i}\n" for i in range(1, 7)]
+    sent = [e.text for u in updates for e in u.items]
+    assert sent == [f"{i}\n" for i in range(1, len(sent) + 1)] and len(sent) >= 2
     assert 1 <= len(updates) <= 3 and len(updates[0].items) >= 2
-    assert result.result.returncode == 0
+    assert result.items[0].returncode == 0
+    assert result.items[0].stdout == "".join(f"{i}\n" for i in range(1, 7))
 
 
 async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
@@ -218,7 +221,7 @@ async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
     (tmp_path / "go2").touch()
     updates, result = await _collect_run(agent)
     assert updates == []
-    assert result.result.stdout == "quiet1\nloud1\nloud2\nquiet2\n"
+    assert result.items[0].stdout == "quiet1\nloud1\nloud2\nquiet2\n"
 
 
 async def test_throttle_by_seconds_batches_slow_output(agent):
@@ -229,7 +232,7 @@ async def test_throttle_by_seconds_batches_slow_output(agent):
 
     agent.jobs.spawn(ticks(), label="tick", seconds=0.35)
     updates = await _stream_updates(agent, "tick")
-    assert updates[-1].final
+    assert updates[-1].done
     flat = [v for u in updates for v in u.items]
     assert flat == list(range(6))
     assert len(updates[0].items) >= 3  # several items per delivery
@@ -253,11 +256,10 @@ async def test_throttle_changes_a_running_job(agent):
     gate.set()
     assert (await _next(agent)).items == [3, 4, 5]
     last = await _next(agent)
-    assert last.items == [6, 7, 8] and not last.final
-    # It ended with nothing batched: no extra empty update, the state says so.
-    await _until(lambda: agent.jobs.get("n").state == "done")
-    await asyncio.sleep(0.05)
-    assert agent.queue_manager.get_channel("jobs").qsize() == 0
+    assert last.items == [6, 7, 8] and not last.done
+    # It ended with nothing batched: the done update is empty.
+    end = await _next(agent)
+    assert end.done and end.items == [] and end.error is None
 
 
 async def test_throttle_off_flushes_pending_items(agent):
@@ -275,7 +277,8 @@ async def test_throttle_off_flushes_pending_items(agent):
     gate.set()
     updates = await _stream_updates(agent, "p")
     assert [item for u in updates for item in u.items] == ["a", "b"]
-    assert not any(u.final for u in updates)  # nothing was left at the end
+    assert [u.done for u in updates] == [False, True]  # one done update ends it
+    assert updates[-1].items == []  # nothing was left at the end
 
 
 async def test_throttle_rejects_non_streaming_jobs(agent):
@@ -298,7 +301,7 @@ async def test_spawn_a_coroutine_delivers_one_result_or_its_error(agent):
 
     agent.jobs.spawn(compute(), label="c")
     item = await _next(agent)
-    assert isinstance(item, JobResult) and item.label == "c" and item.result == 42
+    assert (isinstance(item, JobUpdate) and item.done) and item.label == "c" and item.items[0] == 42
     agent.jobs.spawn(broken(), label="e")
     item = await _next(agent)
     assert item.error == "RuntimeError: boom"
@@ -311,7 +314,7 @@ async def test_get_shows_recent_items(agent):
     agent.jobs.spawn(asyncio.sleep(0, result="v"), label="g")
     await _next(agent)
     info = agent.jobs.get("g")
-    assert info.state == "done" and info.last[-1].result == "v"
+    assert info.state == "done" and info.last[-1].items[0] == "v"
     assert agent.jobs.get("unknown") is None
 
 
@@ -340,7 +343,7 @@ async def test_without_a_shell_jobs_use_the_process_environment(tmp_path, monkey
     jobs = JobsApi(agent)
     await jobs.run('echo "$JOBS_TEST_ENV"', label="np")
     item = await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
-    assert item.result.stdout == "proc\n"
+    assert item.items[0].stdout == "proc\n"
     await agent.queue_manager.shutdown()
 
 
@@ -372,7 +375,7 @@ async def test_each_throttle_call_replaces_the_setting_and_flushes_the_batch(age
     gates[1].set()
     assert (await _next(agent)).items == [10, 11]
     final = await _next(agent)
-    assert final.final and final.items == [12]
+    assert final.done and final.items == [12]
 
 
 # ---- tail / after / every (ported from the removed nooa.runtime.producers tests) ----
@@ -418,7 +421,11 @@ async def test_after_delivers_one_none_result(agent):
     info = agent.jobs.after(0.2, label="timer")
     assert info.kind == "after"
     item = await _next(agent)
-    assert isinstance(item, JobResult) and item.label == "timer" and item.result is None
+    assert (
+        (isinstance(item, JobUpdate) and item.done)
+        and item.label == "timer"
+        and item.items[0] is None
+    )
     assert item.error is None and time.monotonic() - started >= 0.2
     assert agent.jobs.get("timer").state == "done"
 
@@ -459,7 +466,7 @@ async def test_every_supports_throttle(agent):
 async def test_commands_run_in_their_own_process_group(agent):
     await agent.jobs.run("ps -o pgid= -p $$", label="pg")
     item = await _next(agent)
-    assert int(item.result.stdout.strip()) != os.getpgid(os.getpid())
+    assert int(item.items[0].stdout.strip()) != os.getpgid(os.getpid())
 
 
 async def test_cancel_kills_the_whole_process_group(agent, tmp_path):
@@ -476,8 +483,8 @@ async def test_concurrent_jobs_do_not_interfere(agent):
     await agent.jobs.run("echo A1; sleep 0.1; echo A2", label="a")
     await agent.jobs.run("echo B1; sleep 0.1; echo B2", label="b")
     items = {item.label: item for item in [await _next(agent), await _next(agent)]}
-    assert items["a"].result.stdout == "A1\nA2\n"
-    assert items["b"].result.stdout == "B1\nB2\n"
+    assert items["a"].items[0].stdout == "A1\nA2\n"
+    assert items["b"].items[0].stdout == "B1\nB2\n"
 
 
 async def test_cancelling_one_job_leaves_the_other_running(agent):
@@ -485,7 +492,7 @@ async def test_cancelling_one_job_leaves_the_other_running(agent):
     await agent.jobs.run("sleep 0.3; echo survived", label="survivor")
     await agent.jobs.cancel("victim")
     item = await _next(agent)
-    assert item.label == "survivor" and item.result.stdout == "survived\n"
+    assert item.label == "survivor" and item.items[0].stdout == "survived\n"
 
 
 async def test_undecodable_output_does_not_end_the_stream(agent):
@@ -493,7 +500,7 @@ async def test_undecodable_output_does_not_end_the_stream(agent):
     updates, result = await _collect_run(agent)
     texts = [e.text for u in updates for e in u.items]
     assert texts == ["first\n", "caf\ufffd\n", "last\n"]
-    assert result.result.stdout == "first\ncaf\ufffd\nlast\n"
+    assert result.items[0].stdout == "first\ncaf\ufffd\nlast\n"
 
 
 # ---- target and description ----
@@ -564,7 +571,9 @@ async def test_after_delivers_its_payload(agent):
     info = agent.jobs.after(0.05, label="check-ci", payload="check CI on PR #462 and report")
     assert info.payload == "check CI on PR #462 and report"
     item = await _next(agent)
-    assert isinstance(item, JobResult) and item.result == "check CI on PR #462 and report"
+    assert (isinstance(item, JobUpdate) and item.done) and item.items[
+        0
+    ] == "check CI on PR #462 and report"
     assert agent.jobs.get("check-ci").payload == "check CI on PR #462 and report"
 
 
@@ -582,7 +591,7 @@ async def test_payload_defaults_to_none(agent):
     assert (await agent.jobs.run("true", label="r")).payload is None
     agent.jobs.after(0.01, label="a")
     items = [await _next(agent), await _next(agent)]
-    assert next(i for i in items if i.label == "a").result is None
+    assert next(i for i in items if i.label == "a").items[0] is None
     await agent.jobs.cancel("e")
 
 
@@ -600,9 +609,9 @@ async def test_replace_restarts_a_running_run_job(agent, tmp_path):
     assert info.state == "running" and info.target == "echo new"
     await _until(lambda: not _alive(old_pid))
     item = await _next(agent)
-    while isinstance(item, JobUpdate):  # the new job's progress, if any
+    while not item.done:  # the new job's progress, if any
         item = await _next(agent)
-    assert isinstance(item, JobResult) and item.result.stdout == "new\n"
+    assert (isinstance(item, JobUpdate) and item.done) and item.items[0].stdout == "new\n"
     await asyncio.sleep(0.1)
     assert agent.queue_manager.get_channel("jobs").qsize() == 0  # nothing from the old job
     states = [(job.target, job.state) for job in agent.jobs.list()]
@@ -632,7 +641,7 @@ async def test_replace_restarts_a_running_spawn_job_from_sync_code(agent):
 async def test_replace_without_a_running_job_just_starts(agent):
     info = agent.jobs.after(0.01, label="t", replace=True, payload="p")
     assert info.state == "running"
-    assert (await _next(agent)).result == "p"
+    assert (await _next(agent)).items[0] == "p"
 
 
 # ---- cancel hints ----
@@ -700,3 +709,53 @@ async def test_a_job_cancelled_by_the_model_is_not_reported_lost(agent):
     await agent.jobs.run("sleep 30", label="x")
     await agent.jobs.cancel("x")
     assert agent._jobs_running == {}
+
+
+# ---- one done update ends every job ----
+
+
+async def test_a_coroutine_result_is_always_wrapped_in_items(agent):
+    async def none():
+        return None
+
+    async def a_list():
+        return [1, 2]
+
+    agent.jobs.spawn(none(), label="n")
+    update = await _next(agent)
+    assert update.done and update.items == [None]
+    agent.jobs.spawn(a_list(), label="l")
+    update = await _next(agent)
+    assert update.done and update.items == [[1, 2]]
+
+
+async def test_a_quiet_run_ends_with_one_done_update_holding_the_shell_result(agent):
+    await agent.jobs.run("echo hi", label="q")
+    update = await _next(agent)
+    assert update.done and len(update.items) == 1 and isinstance(update.items[0], ShellResult)
+    assert update.error is None and update.log_path
+
+
+async def test_a_failing_stream_sends_its_pending_values_then_an_empty_done_update(agent):
+    async def breaks():
+        yield 1
+        yield 2
+        raise RuntimeError("boom")
+
+    agent.jobs.spawn(breaks(), label="b", lines=10)
+    updates = await _stream_updates(agent, "b")
+    assert [(u.items, u.done, u.error) for u in updates] == [
+        ([1, 2], False, None),
+        ([], True, "RuntimeError: boom"),
+    ]
+    assert agent.jobs.get("b").state == "failed"
+
+
+async def test_a_stream_ends_with_its_last_pending_values(agent):
+    async def three():
+        for i in range(3):
+            yield i
+
+    agent.jobs.spawn(three(), label="s", lines=2)
+    updates = await _stream_updates(agent, "s")
+    assert [(u.items, u.done) for u in updates] == [([0, 1], False), ([2], True)]

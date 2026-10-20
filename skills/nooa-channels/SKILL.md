@@ -66,21 +66,21 @@ qm.spawn(fetch_report(url), channel="reports")             # coroutine: one put 
 
 ## `self.jobs` — the model-facing view (interactive agents)
 
-`InteractiveAgent` registers a `jobs` queue channel and exposes `self.jobs` (`nooa.runtime.jobs.JobsApi`), built on `spawn()`. Every item it delivers (`JobResult` once, or `JobUpdate` per item/batch) carries `.label`, so a turn can end with `Waiting(on=["jobs:<label>"])` and read `notification["jobs"]`.
+`InteractiveAgent` registers a `jobs` queue channel and exposes `self.jobs` (`nooa.runtime.jobs.JobsApi`), built on `spawn()`. Every item it delivers is a `JobUpdate` with `.label`, so a turn can end with `Waiting(on=["jobs:<label>"])` and read `notification["jobs"]`. Exactly one update with `done=True` ends each job; its result is `items[0]` (a `ShellResult` for `run`, a coroutine's return value, `after`'s payload).
 
 ```python
-await self.jobs.run("uv run pytest -q", label="tests")       # own bash process; one JobResult (ShellResult + log_path)
+await self.jobs.run("uv run pytest -q", label="tests")       # own bash process; one done update (items[0] is the ShellResult)
 await self.jobs.run("make build", label="build", lines=200, seconds=60)  # + JobUpdate progress batches
 self.jobs.spawn(fetch_report(url), label="report")            # any coroutine or async iterator
 self.jobs.tail("app.log", label="log", seconds=30)            # lines appended from now on
-self.jobs.after(300, label="wakeup")                          # one JobResult after 5 minutes
+self.jobs.after(300, label="wakeup")                          # one done update after 5 minutes
 self.jobs.every(60, label="tick")                             # ticks 1, 2, 3, ... until cancelled
 self.jobs.throttle("log", lines=100)                          # re-batch a running stream
 await self.jobs.cancel("build")                               # kills the process group
 await self.jobs.run("make serve", label="srv", replace=True)  # restart a running job with that label
 ```
 
-- A streaming job's final batch, if any, has `final=True`; `JobInfo.state` shows that it ended. Jobs do not survive a restart: a resumed session gets one `JobsLost` event listing those that were running.
+- Streams end with a done update carrying their last pending values (or `[]`); on an error `items` is `[]` and `error` is set; a cancelled job delivers nothing more. Jobs do not survive a restart: a resumed session gets one `JobsLost` event listing those that were running.
 - **Who uses what.** `self.jobs` is for the model's own background work. Skills that own a named channel or long-lived infrastructure (e.g. agent_mesh's `mesh` inbox pump, CI monitors) keep using `agent.queue_manager.queue(name, replace=True)` + `spawn(...)`, and call `agent.queue_manager.set_cancel_hint(name, "await self.<skill>.stop({label!r})")` if the model may stop them. Without a hint, `status()` shows the job but no cancel command.
 
 ## Pitfalls

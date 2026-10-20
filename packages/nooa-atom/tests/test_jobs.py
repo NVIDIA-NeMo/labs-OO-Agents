@@ -13,7 +13,7 @@ from nooa_atom.agent.conditions import (
 )
 
 from nooa.interactive import Waiting
-from nooa.runtime.jobs import JobResult, JobsApi
+from nooa.runtime.jobs import JobsApi, JobUpdate
 from nooa.unifiedllm import FakeLLMClient
 
 TIMEOUT = 15.0
@@ -60,7 +60,7 @@ async def test_waiting_on_a_finished_job_with_its_result_buffered_is_accepted(ag
     with pytest.raises(WaitingTargetNotRunning):
         _check(agent, "jobs:other")
     item = channel.drain()[0]
-    assert isinstance(item, JobResult) and item.result.stdout == "done\n"
+    assert (isinstance(item, JobUpdate) and item.done) and item.items[0].stdout == "done\n"
     with pytest.raises(WaitingTargetNotRunning):
         _check(agent, "jobs:quick")
 
@@ -70,7 +70,7 @@ async def test_jobs_use_the_agent_shell_directory_and_exports(agent, tmp_path):
     await agent.shell.run("cd pkg; export ATOM_JOBS_VAR=1")
     await agent.jobs.run('pwd; echo "$ATOM_JOBS_VAR"', label="where")
     item = await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
-    assert item.result.stdout.splitlines() == [str(tmp_path / "pkg"), "1"]
+    assert item.items[0].stdout.splitlines() == [str(tmp_path / "pkg"), "1"]
 
 
 async def test_a_resumed_session_reports_jobs_that_did_not_survive(tmp_path, sessions_dir):
