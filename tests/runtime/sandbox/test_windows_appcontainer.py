@@ -609,6 +609,62 @@ def test_teardown_removes_the_session_profile(tmp_path):
     assert not profile.exists(), "the session's AppContainer profile survived teardown"
 
 
+# --- grant scope -------------------------------------------------------------
+def test_workspace_grant_cannot_rewrite_acls(tmp_path):
+    """A cell must not hold WRITE_DAC on its workspace.
+
+    ``FILE_ALL_ACCESS`` includes WRITE_DAC and WRITE_OWNER, so a cell holding it
+    could add an ACE for any SID — ``icacls <ws> /grant *S-1-15-2-1:(OI)(CI)F``
+    is the concrete form — and that ACE outlives the session, because teardown
+    only revokes the ACE for the container's own SID. Measured: after one
+    session did exactly that, a second session could write into its workspace.
+    """
+    from nooa.runtime.sandbox import win_api
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace)
+    try:
+        assert session.run("1").error is None
+        sddl = win_api.read_dacl(str(workspace))
+    finally:
+        session.close()
+    container_aces = [ace for ace in sddl.split(")(") if "S-1-15-2-" in ace and "SY" not in ace]
+    assert container_aces, "no container ACE on the workspace, so this test proves nothing"
+    assert not any("0x1f01ff" in ace.lower() for ace in container_aces), (
+        f"the workspace grant is FILE_ALL_ACCESS (WRITE_DAC included): {container_aces}"
+    )
+
+
+def test_nested_runtime_root_is_refused(tmp_path):
+    """A root inside the workspace would inherit the workspace's write grant.
+
+    Grants are inheritable and the workspace is granted after the root, so a
+    root below it ends up writable by the container meant to be constrained by
+    it — measured: a file inside such a root carried ``A;ID;FA`` for the
+    container SID. Re-granting the root does not help; inherited and explicit
+    ACEs are unioned.
+    """
+    from nooa.runtime.sandbox.win_launcher import _reject_nested_root
+    from nooa.runtime.sandbox.win_runtime import RuntimeRoot
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    nested = workspace / ".rt"
+    nested.mkdir()
+    outside = tmp_path / "rt"
+    outside.mkdir()
+
+    with pytest.raises(Exception, match="inside the workspace"):
+        _reject_nested_root(RuntimeRoot(nested), str(workspace))
+    with pytest.raises(Exception, match="inside the workspace"):
+        _reject_nested_root(RuntimeRoot(workspace), str(workspace))
+    # The control: an ordinary layout must not be refused, or the check would
+    # pass by rejecting everything.
+    _reject_nested_root(RuntimeRoot(outside), str(workspace))
+    _reject_nested_root(RuntimeRoot(nested), None)
+
+
 # --- teardown ----------------------------------------------------------------
 def test_teardown_revokes_container_grants(tmp_path):
     """After close, the workspace DACL must no longer name the container SID.

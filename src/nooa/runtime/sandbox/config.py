@@ -15,6 +15,12 @@ chosen per platform (see ``guards.py``):
 * cpu      -> ``RLIMIT_CPU`` (Linux) / Job Object limit (Windows)
 * files    -> Landlock path rules (Linux) / AppContainer ACL (Windows)
 * network  -> seccomp ``socket()`` (Linux) / capability omission (Windows)
+
+Scope: every guardrail here applies to code the cell itself runs. A cell's
+``self.*`` calls broker back to the parent's live agent, so a tool or shell
+command it invokes executes outside the sandbox, with the parent's environment
+and permissions. The filesystem and network guardrails do not constrain those
+calls.
 """
 
 from __future__ import annotations

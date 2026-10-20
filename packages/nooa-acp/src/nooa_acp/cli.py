@@ -31,9 +31,10 @@ if TYPE_CHECKING:
     is_flag=True,
     default=False,
     help=(
-        "Run generated code in an OS sandbox (AppContainer on Windows, Landlock on "
-        "Linux) instead of the agent's own process. Requires a built runtime root on "
-        "Windows; see docs/windows.md."
+        "Run generated Python cells in an OS sandbox (AppContainer on Windows, "
+        "Landlock on Linux). Cells only: self.* tool calls, including shell "
+        "commands, still execute in this process with its full environment and "
+        "permissions. Requires a built runtime root on Windows; see docs/windows.md."
     ),
 )
 @click.option(

@@ -288,15 +288,32 @@ provider model name. See [ACP setup](../packages/nooa-acp/README.md) for editor
 configuration.
 
 Add `--sandbox` to run generated code in an AppContainer instead of the agent's
-own process. The agent stays in the parent — cells reach it through the same
-broker the fork path uses — so tools, edits, and shell commands behave
-identically; only the cell code is confined. Each session gets its own
-workspace grant, taken from the editor's root, so one session cannot write into
-another's.
+own process.
+
+**The sandbox covers `execute_python` cells and nothing else.** A cell reaches
+the agent through the same broker the fork path uses, which means every
+`self.*` call — `self.shell.run(...)`, `self.repo.symbols(...)`,
+`self.todo.add(...)` — executes in the **parent** process, with the parent's
+environment, network access and filesystem permissions. `network=False`,
+`env_passthrough` and the workspace grant constrain cell code; they do not
+constrain a shell command the model asks the agent to run. Treat `--sandbox`
+as "generated Python cannot escape", not "the model cannot touch the host".
+
+The agent's environment includes every credential `load_secrets_into_env()`
+loaded at startup, and the PowerShell host copies it (`os.environ.copy()`), so
+a model that can call `self.shell.run` can read those variables. Do not run
+this configuration against untrusted instructions unless that is acceptable.
+
+Each session gets its own workspace grant, taken from the editor's root. That
+grant is a boundary between cell code and other directories — not between
+sessions, because a cell that can rewrite ACLs (see below) can widen it.
+
+Point `--sandbox-root` at a directory **outside** every workspace. The default
+(`%LOCALAPPDATA%\nooa\sandbox-runtime`) already is:
 
 ```powershell
 uv run --no-sync nooa-acp --model my-model-alias --sandbox `
-  --sandbox-root "$PWD\.sandbox-rt"
+  --sandbox-root "$env:LOCALAPPDATA\nooa\sandbox-runtime"
 ```
 
 `--sandbox-root` also reads `NOOA_SANDBOX_RUNTIME`. `--sandbox-network` allows

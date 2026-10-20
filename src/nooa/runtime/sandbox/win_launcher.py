@@ -39,14 +39,15 @@ import multiprocessing as mp
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from nooa.runtime.sandbox import wire
 from nooa.runtime.sandbox.config import ResolvedSpec
 from nooa.runtime.sandbox.errors import SandboxUnavailable
 from nooa.runtime.sandbox.win_api import (
-    FILE_ALL_ACCESS,
     HANDLE_FLAG_INHERIT,
+    MODIFY,
     READ_EXECUTE,
     STILL_ACTIVE,
     WAIT_TIMEOUT,
@@ -292,6 +293,38 @@ class ContainerProcess:
                 _delete_profile_quiet(self._container_name)
 
 
+def _reject_nested_root(root: RuntimeRoot, workspace: str | None) -> None:
+    """Refuse a runtime root inside the workspace it is meant to outlive.
+
+    Grants are inheritable, and the workspace is granted after the root. A root
+    below the workspace therefore inherits the workspace's write ACE and ends up
+    writable by the container it is supposed to constrain — measured: a file
+    inside such a root carried ``A;ID;FA`` for the container SID. Re-granting
+    the root afterwards does not help; inherited and explicit ACEs are unioned.
+
+    Refusing is deliberate rather than adding a deny ACE: a deny would cost
+    another full DACL rewrite of the root on every start (about 7 s for a
+    22k-file root) to correct a configuration that is simply wrong. The default
+    root, ``%LOCALAPPDATA%\\nooa\\sandbox-runtime``, is already outside every
+    project.
+    """
+    if not workspace:
+        return
+    try:
+        root_path = root.root.resolve()
+        workspace_path = Path(workspace).resolve()
+    except OSError:
+        return
+    if root_path == workspace_path or workspace_path in root_path.parents:
+        raise SandboxUnavailable(
+            f"the sandbox runtime root {root_path} is inside the workspace "
+            f"{workspace_path}. The workspace grant would be inherited by the "
+            "root, letting cells rewrite the interpreter they run under. Move "
+            "the root outside the workspace — the default is "
+            "%LOCALAPPDATA%\\nooa\\sandbox-runtime."
+        )
+
+
 def _delete_profile_quiet(name: str) -> None:
     """Remove a session's AppContainer profile. Never raises."""
     from nooa.runtime.sandbox.win_api import delete_profile
@@ -327,6 +360,8 @@ def start_container_worker(
     already picklable by construction.
     """
     from nooa.runtime.sandbox.win_api import create_profile
+
+    _reject_nested_root(root, workspace)
 
     # One profile per session: the name determines the SID, and a shared SID
     # means one session's teardown revokes the other's grants.
@@ -370,7 +405,7 @@ def start_container_worker(
                 continue
             if not os.path.exists(rule.path):
                 raise SandboxUnavailable(f"sandbox allow path does not exist: {rule.path}")
-            grant_path(rule.path, FILE_ALL_ACCESS if rule.write else READ_EXECUTE)
+            grant_path(rule.path, MODIFY if rule.write else READ_EXECUTE)
         # 3. Tokenizer data. The container has no network; importing the LLM
         #    stack makes tiktoken look for cl100k_base and download it when the
         #    cache is missing. The parent warmed this directory in prepare_root,
@@ -394,9 +429,11 @@ def start_container_worker(
         import_roots = _agent_import_roots(init)
         for import_root in import_roots:
             grant_path(import_root, READ_EXECUTE)
-        # 5. The workspace last, so it is revoked first on teardown.
+        # 5. The workspace last, so it is revoked first on teardown. MODIFY, not
+        #    FILE_ALL_ACCESS: the latter carries WRITE_DAC, which lets a cell
+        #    grant itself access that survives this session's revoke.
         if workspace:
-            grant_path(str(workspace), FILE_ALL_ACCESS)
+            grant_path(str(workspace), MODIFY)
 
         # The child runs with ``-I``, which keeps cwd off sys.path and ignores
         # PYTHONPATH, so the granted roots have to be named explicitly.

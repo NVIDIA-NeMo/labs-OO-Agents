@@ -23,6 +23,7 @@ import ctypes
 from ctypes import wintypes
 
 __all__ = [
+    "MODIFY",
     "Child",
     "Job",
     "container_sid",
@@ -78,6 +79,13 @@ FILE_GENERIC_EXECUTE = 0x001200A0
 FILE_GENERIC_WRITE = 0x00120116
 FILE_ALL_ACCESS = 0x001F01FF
 READ_EXECUTE = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+# What a cell gets on its workspace: modify, without the two rights that change
+# who may access the object. FILE_ALL_ACCESS includes WRITE_DAC and
+# WRITE_OWNER, so a cell holding it can add an ACE for any SID — including
+# ALL APPLICATION PACKAGES — and that ACE outlives the session, because revoke
+# only removes the ACE for the container's own SID. Measured: after one
+# session's cell ran icacls, a second session could write into its workspace.
+MODIFY = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | 0x00000001  # 0x001201BF
 
 # --- job objects ------------------------------------------------------------
 JobObjectBasicLimitInformation = 2

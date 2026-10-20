@@ -109,6 +109,9 @@ class CodeActConfig(BaseModel):
     #   * "sandbox" — run each cell in a locked-down worker process with
     #     OS-enforced guardrails (hard timeout, memory/CPU caps, filesystem
     #     confinement, network off). Turns ``cell_timeout`` into a *hard* bound.
+    #     Scope: cell code only. A cell's ``self.*`` calls broker back to the
+    #     live agent, so tools and shell commands run in the parent process with
+    #     its environment and permissions — the guardrails do not apply to them.
     # The ``sandbox`` sub-config below is ignored unless this is "sandbox".
     execution_backend: Literal["inprocess", "sandbox"] = "inprocess"
     sandbox: SandboxConfig = SandboxConfig()
