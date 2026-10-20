@@ -71,8 +71,18 @@ def load_secrets_into_env() -> list[str]:
             continue
         os.environ[key] = str(value)
         applied.append(key)
-    _LOADED_FROM_FILE.update(applied)
+    # Record the name *as the environment stores it*. Windows uppercases every
+    # key on assignment, so a file entry written as ``openai_api_key`` lives in
+    # ``os.environ`` as ``OPENAI_API_KEY``; recording the original spelling
+    # would leave the credential unmatched by a filter that compares names
+    # exactly, and a shell could print it back.
+    _LOADED_FROM_FILE.update(_env_name(key) for key in applied)
     return applied
+
+
+def _env_name(key: str) -> str:
+    """The spelling ``os.environ`` uses for ``key`` on this platform."""
+    return key.upper() if os.name == "nt" else key
 
 
 def names_loaded_from_file() -> frozenset[str]:

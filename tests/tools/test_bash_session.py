@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for persistent bash session."""
 
+import os
+
 import pytest
 
 from nooa.tools._bash_session import BashSession
@@ -128,3 +130,48 @@ class TestBashSession:
         await session.run(f"echo 'test content' > {tmp_path}/test.txt")
         out, _, _ = await session.run(f"cat {tmp_path}/test.txt")
         assert "test content" in out
+
+
+class TestShellEnvironment:
+    """The bash host applies the same credential rule as the PowerShell one."""
+
+    def test_loaded_credentials_are_dropped_and_exported_ones_kept(self, monkeypatch):
+        """A key this process loaded at startup must not be readable from a command.
+
+        Both shells copy ``os.environ`` for the child. Without the filter a
+        model that can call ``self.shell.run`` can print any credential the
+        loader put there. The PowerShell host has its own test; this is the
+        other half of the same fix, and it had none.
+        """
+        from nooa.tools import _bash_session
+
+        monkeypatch.setenv("NOOA_TEST_FILE_SECRET", "from-file")
+        monkeypatch.setenv("NOOA_TEST_USER_EXPORT", "from-shell")
+        monkeypatch.setattr(
+            "nooa.secrets.names_loaded_from_file",
+            lambda: frozenset({"NOOA_TEST_FILE_SECRET"}),
+        )
+
+        env = _bash_session._shell_environment()
+
+        assert "NOOA_TEST_FILE_SECRET" not in env, "a loaded credential reached the shell"
+        assert env["NOOA_TEST_USER_EXPORT"] == "from-shell", "a user export must survive"
+        assert env["TERM"] == "dumb"
+
+    @pytest.mark.skipif(os.name == "nt", reason="BashSession refuses to start on native Windows")
+    async def test_a_loaded_credential_is_not_visible_to_a_command(self, monkeypatch):
+        """The unit above checks the dict; this checks the child actually lacks it."""
+        from nooa.tools._bash_session import BashSession
+
+        monkeypatch.setenv("NOOA_TEST_FILE_SECRET", "from-file")
+        monkeypatch.setattr(
+            "nooa.secrets.names_loaded_from_file",
+            lambda: frozenset({"NOOA_TEST_FILE_SECRET"}),
+        )
+        shell = BashSession()
+        await shell.start()
+        try:
+            out, _, _ = await shell.run('printf "%s" "${NOOA_TEST_FILE_SECRET:-absent}"')
+        finally:
+            await shell.close()
+        assert out.strip() == "absent", "the shell could print a loaded credential"

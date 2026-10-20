@@ -666,3 +666,56 @@ async def test_command_control_flow_stays_inside_the_command(session, command):
     assert code == 0, (stdout, stderr)
     # The session survived and kept its state.
     assert (await session.run("$probe_marker"))[0].strip() == "alive"
+
+
+# --- executable selection ----------------------------------------------------
+def test_resolver_prefers_a_containable_powershell_over_the_store_alias(monkeypatch, tmp_path):
+    """A Store alias cannot be contained by a job object, so it must lose.
+
+    The alias is a reparse point that launches the packaged app through its own
+    process-creation path; the job does not contain what it starts, so a
+    session built on it cannot reap a command's children. The resolver must
+    therefore skip it even when PATH puts it first.
+    """
+    from nooa.tools import _powershell_session
+
+    alias = tmp_path / "Microsoft" / "WindowsApps" / "pwsh.exe"
+    plain = tmp_path / "program-files" / "PowerShell" / "7" / "pwsh.exe"
+    alias.parent.mkdir(parents=True)
+    plain.parent.mkdir(parents=True)
+    alias.write_text("", encoding="utf-8")
+    plain.write_text("", encoding="utf-8")
+
+    # PATH puts the alias first; the MSI probe looks under %ProgramFiles%, which
+    # is redirected here so the result does not depend on what this host has.
+    monkeypatch.setattr(
+        _powershell_session.shutil,
+        "which",
+        lambda name: str(alias) if name == "pwsh" else None,
+    )
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "program-files"))
+    assert _powershell_session._resolve_powershell() == str(plain)
+
+
+def test_resolver_discards_a_relative_which_hit(monkeypatch):
+    """``shutil.which`` searches the current directory on Windows.
+
+    A repository that ships ``pwsh.bat`` would otherwise have it executed.
+    """
+    from nooa.tools import _powershell_session
+
+    monkeypatch.setattr(
+        _powershell_session.shutil,
+        "which",
+        lambda name: "pwsh.bat" if name == "pwsh" else None,
+    )
+    monkeypatch.setattr(_powershell_session.Path, "exists", lambda self: False)
+    assert _powershell_session._resolve_powershell() is None
+
+
+def test_store_alias_is_recognised_by_path_not_by_name(monkeypatch):
+    from nooa.tools._powershell_session import _is_app_execution_alias
+
+    assert _is_app_execution_alias(r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\pwsh.exe")
+    assert _is_app_execution_alias(r"C:\WINDOWSAPPS\pwsh.exe")
+    assert not _is_app_execution_alias(r"C:\Program Files\PowerShell\7\pwsh.exe")

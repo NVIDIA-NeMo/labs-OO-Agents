@@ -153,16 +153,14 @@ def test_non_mapping_env_warns(user_dir, project_dir, caplog):
     assert "not a mapping" in caplog.text
 
 
-def test_loaded_names_are_reported_and_exported_ones_are_not(
-    user_dir, project_dir, monkeypatch
-):
+def test_loaded_names_are_reported_and_exported_ones_are_not(user_dir, project_dir, monkeypatch):
     """The shell needs to tell "this process added it" from "the user set it".
 
     Both look identical in ``os.environ``, so the loader records what it set.
     Without the distinction a child that filters credentials would also drop
     names the user exported on purpose.
     """
-    from nooa.secrets import _LOADED_FROM_FILE, names_loaded_from_file
+    from nooa.secrets import names_loaded_from_file
 
     monkeypatch.delenv(_KEY, raising=False)
     monkeypatch.setenv(_KEY2, "exported")
@@ -176,4 +174,30 @@ def test_loaded_names_are_reported_and_exported_ones_are_not(
     loaded = names_loaded_from_file()
     assert _KEY in loaded
     assert _KEY2 not in loaded, "an exported name must not be reported as file-loaded"
-    assert _KEY in _LOADED_FROM_FILE
+
+
+def test_a_lowercase_file_key_is_recorded_as_the_environment_spells_it(
+    user_dir, project_dir, monkeypatch
+):
+    """Windows stores every env name uppercased, so the record must match that.
+
+    A filter compares names exactly against what ``os.environ`` iterates. If the
+    loader records ``openai_api_key`` while the environment holds
+    ``OPENAI_API_KEY``, the credential is never filtered and a model-driven
+    shell can print it.
+    """
+    from nooa.secrets import _env_name, names_loaded_from_file
+
+    key = "nooa_probe_lowercase_key"
+    stored = _env_name(key)
+    monkeypatch.delenv(stored, raising=False)
+    _write(user_dir, f"env:\n  {key}: from-file\n")
+
+    applied = load_secrets_into_env()
+
+    assert applied == [key]
+    assert os.environ[stored] == "from-file"
+    assert stored in names_loaded_from_file(), (
+        f"the loader recorded {key!r} but the environment stores {stored!r}; "
+        "a shell filtering by the recorded name would keep the credential"
+    )
