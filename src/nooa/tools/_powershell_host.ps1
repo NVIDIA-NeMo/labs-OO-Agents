@@ -81,8 +81,19 @@ while ($null -ne ($__nooa_line = $__nooa_reader.ReadLine())) {
         # Dot sourcing keeps variables, functions, environment, and cd in this
         # session. Finally captures the *last command's* status, including return;
         # inspecting $? after Out-Default would incorrectly turn failures into 0.
+        # The command is dot-sourced, so its control flow is this host's control
+        # flow: a top-level `continue` would skip to the next read of this
+        # while-loop (the session appears to hang until the timeout), and a
+        # top-level `break` would exit the host entirely — reporting success
+        # while silently dropping every variable the session held. A
+        # `continue`/`break` inside a `ForEach-Object` script block does the
+        # same, which is the form a model actually writes.
+        #
+        # Wrapping the command in a `do { } while ($false)` gives those
+        # statements a loop of their own to act on: `continue` ends this
+        # iteration, `break` leaves it, and both return control here.
         $__nooa_block = [scriptblock]::Create(
-            "try {`n" + $__nooa_request.command + "`n} finally {`n" +
+            "try {`n" + "do {`n" + $__nooa_request.command + "`n} while (`$false)`n" + "} finally {`n" +
             '$script:__nooa_success = $?; $script:__nooa_native_exit = $global:LASTEXITCODE; $script:__nooa_last_error = if ($Error.Count -gt 0) { $Error[0] } else { $null }' + "`n}")
         # Leave stderr on its own handle. In Windows PowerShell 5.1, 2>&1
         # converts native diagnostics into terminating NativeCommandError

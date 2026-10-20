@@ -280,3 +280,74 @@ async def test_tree_sitter_navigation_uses_native_files_and_ignores_strings(tmp_
     assert [anchor.start for anchor in references] == [4]
     assert Path(references[0].resolved_path) == source
     session.run.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("path", "refused"),
+    [
+        ("a.py", False),
+        ("./a.py", False),
+        ("sub/x.py", False),
+        ("../outside/secret.py", True),
+        ("C:foo", True),
+        ("/outside-absolute.py", True),  # rewritten below per tmp_path
+        (str(Path("absolute-inside.py")), False),  # rewritten below per tmp_path
+    ],
+)
+def test_paths_cannot_leave_the_repository(tmp_path, path, refused):
+    """The repo tools are the model's view of one repository.
+
+    An absolute path, a ``..`` escape, or a drive-relative path such as
+    ``C:foo`` (which names the process's current directory on that drive, not a
+    path under the root) must not be read. Only relative paths that stay inside
+    are accepted.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("s = 1\n", encoding="utf-8")
+
+    tools = RepoTools(root=root)
+    path = path.replace("absolute-inside.py", str(root / "a.py"))
+    path = path.replace("/outside-absolute.py", str(outside / "secret.py"))
+    if refused:
+        with pytest.raises(ValueError):
+            tools._resolve(path)
+    else:
+        assert tools._resolve(path).is_relative_to(root)
+
+
+def test_walk_does_not_follow_a_link_out_of_the_tree(tmp_path):
+    """A junction inside the repository must not expose files outside it.
+
+    Creating one needs ``mklink /J``, which is available to an unprivileged
+    user; a repository that ships one would otherwise hand the model every file
+    it points at.
+    """
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("NTFS junction creation is Windows-only")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "real.py").write_text("x = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leak.py").write_text("SECRET = 1\n", encoding="utf-8")
+    link = root / "vendor_link"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"could not create a junction: {created.stderr.strip()[:80]}")
+
+    tools = RepoTools(root=root)
+    walked = {path.name for path in tools._iter_source_files(root, max_files=None)}
+    assert "real.py" in walked
+    assert "leak.py" not in walked, "a junction led the walk outside the repository"

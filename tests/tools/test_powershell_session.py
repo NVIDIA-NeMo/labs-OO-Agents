@@ -630,11 +630,35 @@ async def test_credentials_loaded_from_secrets_do_not_reach_the_shell(monkeypatc
     shell = PowerShellSession()
     try:
         stdout, stderr, code = await shell.run(
-            "Write-Output \"file=$env:NOOA_TEST_FILE_SECRET\"; "
-            "Write-Output \"user=$env:NOOA_TEST_USER_EXPORT\""
+            'Write-Output "file=$env:NOOA_TEST_FILE_SECRET"; '
+            'Write-Output "user=$env:NOOA_TEST_USER_EXPORT"'
         )
         assert code == 0, stderr
         assert "from-file" not in stdout, stdout
         assert "from-shell" in stdout, stdout
     finally:
         await shell.close()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Write-Output before; continue; Write-Output after",
+        "Write-Output before; break; Write-Output after",
+        "1..3 | ForEach-Object { if ($_ -eq 2) { continue }; $_ }",
+    ],
+)
+async def test_command_control_flow_stays_inside_the_command(session, command):
+    """``continue`` and ``break`` must not act on the host's own loop.
+
+    The command is dot-sourced, so a top-level ``continue`` used to skip to the
+    host's next request (the call hung until its timeout) and a top-level
+    ``break`` exited the host, reporting success while silently dropping the
+    session's variables. The ``ForEach-Object`` form is the one a model actually
+    writes, and it behaved the same way.
+    """
+    await session.run("$probe_marker = 'alive'")
+    stdout, stderr, code = await session.run(command, timeout=10)
+    assert code == 0, (stdout, stderr)
+    # The session survived and kept its state.
+    assert (await session.run("$probe_marker"))[0].strip() == "alive"

@@ -919,12 +919,45 @@ class RepoTools(Skill):
                 fpath = directory / name
                 if name.startswith(".") or _detect_lang(fpath) == "unknown" or not fpath.is_file():
                     continue
+                # A symlink or NTFS junction inside the tree can point anywhere;
+                # reading through it would hand the model a file the repository
+                # does not contain. Only the resolved location is checked — a
+                # link that stays inside is fine.
+                try:
+                    if self._root.resolve() not in fpath.resolve().parents:
+                        continue
+                except OSError:
+                    continue
                 yield fpath
                 count += 1
                 if max_files is not None and count >= max_files:
                     return
 
     def _resolve(self, path: str) -> Path:
-        """Resolve a path relative to the repo root."""
-        p = Path(path)
-        return p if p.is_absolute() else self._root / p
+        """Resolve a path against the repo root, and keep the result inside it.
+
+        Absolute paths are accepted when they point into the repository: hosts
+        pass anchors and workspace paths that way, and ``refs(path=...)``
+        documents an absolute file as a valid root. What is refused is a path
+        whose *resolved* location is outside the root, which covers the forms
+        that used to slip through:
+
+        * ``..`` segments that walk above the root;
+        * a drive-relative path such as ``C:foo``, which names the process's
+          current directory on that drive rather than a path under the root —
+          it is neither absolute nor relative in the sense this function needs,
+          so it is resolved and then rejected by the containment check;
+        * a path that reaches outside through a symlink or NTFS junction, since
+          ``Path.resolve`` follows both.
+        """
+        candidate = Path(path)
+        # ``C:foo`` has a drive but no root: Windows resolves it against the
+        # process's current directory *on that drive*, which may happen to sit
+        # inside the repository, so the containment check below cannot see it.
+        if candidate.drive and not candidate.root:
+            raise ValueError(f"path {path!r} is drive-relative, not a repository path")
+        resolved = (candidate if candidate.is_absolute() else self._root / candidate).resolve()
+        root = self._root.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise ValueError(f"path {path!r} resolves outside the repository root {root}")
+        return resolved
