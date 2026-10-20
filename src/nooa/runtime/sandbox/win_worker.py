@@ -29,7 +29,16 @@ import sys
 
 
 def _current_rss_bytes() -> int:
-    """Private working set of this process, via psapi (no psutil dependency)."""
+    """Committed private memory of this process, via psapi (no psutil dependency).
+
+    This is ``PrivateUsage`` — what the Job Object's ``ProcessMemoryLimit``
+    actually limits — not ``WorkingSetSize``. The two differ by the paged-out
+    portion of private memory, and for a process that has imported the LLM
+    stack that difference is hundreds of MiB: measured, the same worker
+    reported 242 MB working set and 696 MB committed. Reporting the smaller
+    number made the parent compute a ceiling far below the worker's real
+    footprint, so a ``max_memory_mb`` of 200 failed on a 16 MB allocation.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -69,7 +78,7 @@ def _current_rss_bytes() -> int:
         k32.GetCurrentProcess(), ctypes.byref(counters), ctypes.sizeof(counters)
     ):
         return 0
-    return int(counters.WorkingSetSize)
+    return int(counters.PrivateUsage)
 
 
 def main() -> int:

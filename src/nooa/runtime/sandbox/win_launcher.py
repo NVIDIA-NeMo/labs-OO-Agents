@@ -27,9 +27,12 @@ environment      allowlist (``CONTAINER_ENV`` + ``env_passthrough``)
 ===============  ===================================================
 
 Memory keeps the Linux meaning: ``max_memory_mb`` is *headroom above the
-worker's baseline*, not an absolute ceiling. The baseline is measured from the
-job's peak usage after the worker reports ready, then the limit is set to
-``baseline + headroom``.
+worker's baseline*, not an absolute ceiling. The worker reports its committed
+private memory once its namespace is built — the same quantity the Job Object
+limits — and the ceiling is set to ``baseline + headroom``. The baseline must
+be the committed figure, not the working set: for a worker that has imported
+the LLM stack the two differ by hundreds of MiB, and using the smaller one
+makes the computed ceiling sit below the worker's own footprint.
 """
 
 from __future__ import annotations

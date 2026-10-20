@@ -769,3 +769,32 @@ def test_empty_workspace_slot_survives_argv(tmp_path):
         assert "" in argv, f"the empty slot was dropped from argv: {argv}"
     finally:
         asyncio.run(executor.aclose())
+
+
+def test_memory_baseline_is_committed_not_working_set(tmp_path):
+    """``max_memory_mb`` must leave headroom a real agent can use.
+
+    The Job Object limits committed private memory. The worker used to report
+    its working set, which for an agent that imports the LLM stack is hundreds
+    of MiB smaller — measured: 242 MB working set against 696 MB committed. The
+    parent then computed a ceiling below the worker's own footprint, so a
+    200 MiB headroom failed on a 16 MiB allocation.
+
+    The assertion is deliberately about a small allocation succeeding, not
+    about the reported number: the number is an implementation detail, and a
+    future change to how it is measured should still pass.
+    """
+    from nooa_cli.coding import CodingAgent
+
+    from nooa.unifiedllm import FakeLLMClient
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=str(workspace), libs_dir=tmp_path / "libs")
+    session = _Session(workspace, agent=agent, max_memory_mb=200)
+    try:
+        result = session.run("d = bytearray(16 * 1024 * 1024)\nlen(d)")
+        assert result.error is None, result.error
+        assert result.returned_value == 16 * 1024 * 1024
+    finally:
+        session.close()

@@ -20,6 +20,7 @@ The design decisions encoded here come from ``experiments/windows-sandbox-probe`
 from __future__ import annotations
 
 import ctypes
+import threading
 from ctypes import wintypes
 
 __all__ = [
@@ -432,7 +433,30 @@ def capability_sid(name: str) -> ctypes.c_void_p:
 
 
 # --- DACL -------------------------------------------------------------------
+# A DACL edit is read-modify-write: GetNamedSecurityInfoW, SetEntriesInAclW,
+# SetNamedSecurityInfoW. Two edits that interleave lose one of them, and this
+# process does edit from several threads — grants run on the caller's thread
+# while teardown revokes on a worker (executor._aterminate_worker uses
+# asyncio.to_thread). Measured before the lock: 15 rounds of "grant A, revoke A
+# on one thread while granting B on another" lost B's ACE 10 times.
+#
+# One lock for every path, not one per path: the interleaving that matters is
+# between different SIDs on the *same* object, and a per-path lock would still
+# serialise the whole runtime root (which is what most edits touch). The cost
+# is that concurrent edits to unrelated directories wait for each other; an
+# edit takes milliseconds, so that is cheaper than the bookkeeping a finer lock
+# would need.
+_DACL_LOCK = threading.RLock()
+
+
 def _set_entry(path: str, sid: ctypes.c_void_p, access: int, mode: int, inheritance: int) -> None:
+    with _DACL_LOCK:
+        _set_entry_locked(path, sid, access, mode, inheritance)
+
+
+def _set_entry_locked(
+    path: str, sid: ctypes.c_void_p, access: int, mode: int, inheritance: int
+) -> None:
     sd = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     rc = _adv.GetNamedSecurityInfoW(
