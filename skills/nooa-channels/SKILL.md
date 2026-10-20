@@ -1,6 +1,6 @@
 ---
 name: nooa-channels
-description: Reactive input for NOOA agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, and the bundled producers (monitor a shell command, cron ticks, one-shot timers, file tails). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
+description: Reactive input for NOOA agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, and the model-facing self.jobs API on interactive agents (background commands, file tails, timers, ticks). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
 compatibility: nooa package
 ---
 
@@ -10,7 +10,6 @@ compatibility: nooa package
 
 ```python
 from nooa.runtime.channels import QueueManager
-from nooa.runtime.producers import monitor, cron
 
 class Watcher(Agent, llm=llm):
     def __init__(self, **kw):
@@ -22,7 +21,7 @@ class Watcher(Agent, llm=llm):
         self.notifications = qm.event("notifications")      # fire-and-forget → prompt
 
     async def run(self) -> None:                            # pure-Python dispatcher
-        self.qm.spawn(monitor("make test"), channel="user_messages", buffer=100)
+        self.qm.spawn(watch_ci(), channel="user_messages", buffer=100)  # an async generator
         while True:
             items = await self.qm.race()                    # block until any channel produces
             if items:                                       # [(channel_name, item)] — queue winner
@@ -57,19 +56,28 @@ class Watcher(Agent, llm=llm):
 ## `spawn()` — background jobs feeding channels
 
 ```python
-from nooa.runtime.producers import monitor, after, cron, tail, run_job
-
-handle = qm.spawn(monitor("pytest -q"), channel="ci", buffer=100)  # stream stdout lines
-qm.spawn(after(300), channel="wakeup")                              # one-shot timer → None
-qm.spawn(cron(60), channel="ticks")                                 # yields 1, 2, 3, ... per minute
-qm.spawn(tail("app.log"), channel="logs")                           # new lines as they appear
-qm.spawn(run_job(some_coro(), job_id="batch-7"), channel="jobs")    # {"job_id": ..., "result": ...}
+handle = qm.spawn(watch_ci(), channel="ci", buffer=100)  # async generator: one put per yield
+qm.spawn(fetch_report(url), channel="reports")             # coroutine: one put of its result
 ```
 
 - A **coroutine** job puts its single result on completion; an **async generator** puts each yielded value.
 - Lifecycle events go to the agent's event log: `StreamEnd(channel_name=...)` when a job finishes, `JobError(channel_name, error_type, error_message)` on failure — `JobError` is also put on the data channel so `race()` wakes the agent to react.
 - `JobHandle`: `.state` (`running/done/cancelled/failed`), `await handle.cancel()` (awaits generator `finally` cleanup), `.values` (buffered outputs — `buffer=True` unbounded, `buffer=N` ring of last N, default off).
-- `monitor()` runs the command in its own process group and kills the whole group on cancel — no orphaned children; stderr is merged into stdout.
+
+## `self.jobs` — the model-facing view (interactive agents)
+
+`InteractiveAgent` registers a `jobs` queue channel and exposes `self.jobs` (`nooa.runtime.jobs.JobsApi`), built on `spawn()`. Every item it delivers (`JobResult` once, or `JobUpdate` per item/batch) carries `.label`, so a turn can end with `Waiting(on=["jobs:<label>"])` and read `notification["jobs"]`.
+
+```python
+await self.jobs.run("uv run pytest -q", label="tests")       # own bash process; one JobResult (ShellResult + log_path)
+await self.jobs.run_stream("make build", label="build", lines=50)  # JobUpdate batches of StreamEvent lines
+self.jobs.spawn(fetch_report(url), label="report")            # any coroutine or async iterator
+self.jobs.tail("app.log", label="log", seconds=30)            # lines appended from now on
+self.jobs.after(300, label="wakeup")                          # one JobResult after 5 minutes
+self.jobs.every(60, label="tick")                             # ticks 1, 2, 3, ... until cancelled
+self.jobs.throttle("log", lines=100)                          # re-batch a running stream
+await self.jobs.cancel("build")                               # kills the process group
+```
 
 ## Pitfalls
 

@@ -57,9 +57,7 @@ import datetime  # noqa: F401
 import json  # noqa: F401
 import re  # noqa: F401
 
-from nooa.runtime import producers  # noqa: F401
 from nooa.runtime.jobs import JobInfo, JobResult, JobsApi, JobUpdate  # noqa: F401
-from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: F401
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -471,7 +469,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     **Input queues.** Every ``InteractiveAgent`` has a ``self.user_messages``
     queue (``InputQueue``) that the host feeds when the human types.
     Subclasses may declare additional queues as instance attributes for
-    other producers (long-running job output, monitor streams, etc.).
+    other producers (``self.jobs`` output arrives on ``jobs``).
 
     Each queue is two objects: an ``InputQueue`` (full producer +
     dispatcher API, hidden from the LLM under ``_<name>_in``) and an

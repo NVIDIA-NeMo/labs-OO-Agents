@@ -317,3 +317,127 @@ async def test_each_throttle_call_replaces_the_setting_and_flushes_the_batch(age
     assert (await _next(agent)).items == [10, 11]
     final = await _next(agent)
     assert final.final and final.items == [12]
+
+
+# ---- tail / after / every (ported from the removed nooa.runtime.producers tests) ----
+
+
+async def test_tail_delivers_only_lines_appended_after_the_call(agent, tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text("existing\n")
+    info = agent.jobs.tail("app.log", label="log")  # relative to the shell's directory
+    assert info.kind == "tail" and info.state == "running"
+    with log.open("a") as fh:
+        fh.write("line1\nline2\npart")
+    assert (await _next(agent)).items == ["line1"]
+    assert (await _next(agent)).items == ["line2"]
+    with log.open("a") as fh:
+        fh.write("ial\n")  # a line is delivered only once it is complete
+    assert (await _next(agent)).items == ["partial"]
+    assert await agent.jobs.cancel("log") is True
+    assert agent.jobs.get("log").state == "cancelled"
+
+
+async def test_tail_batches_and_rethrottles(agent, tmp_path):
+    log = tmp_path / "batch.log"
+    log.write_text("")
+    agent.jobs.tail(str(log), label="b", lines=3)
+    with log.open("a") as fh:
+        fh.write("".join(f"{i}\n" for i in range(5)))
+    assert (await _next(agent)).items == ["0", "1", "2"]
+    await _until(lambda: agent.jobs.get("b").pending == 2)
+    agent.jobs.throttle("b")  # off: the pending two are delivered at once
+    assert (await _next(agent)).items == ["3", "4"]
+    await agent.jobs.cancel("b")
+
+
+async def test_tail_of_a_missing_file_raises_at_once(agent):
+    with pytest.raises(FileNotFoundError):
+        agent.jobs.tail("missing.log", label="m")
+    assert agent.jobs.get("m") is None
+
+
+async def test_after_delivers_one_none_result(agent):
+    started = time.monotonic()
+    info = agent.jobs.after(0.2, label="timer")
+    assert info.kind == "after"
+    item = await _next(agent)
+    assert isinstance(item, JobResult) and item.label == "timer" and item.result is None
+    assert item.error is None and time.monotonic() - started >= 0.2
+    assert agent.jobs.get("timer").state == "done"
+
+
+async def test_after_can_be_cancelled(agent):
+    agent.jobs.after(30, label="later")
+    assert await agent.jobs.cancel("later") is True
+    await asyncio.sleep(0.05)
+    assert agent.queue_manager.get_channel("jobs").qsize() == 0
+
+
+async def test_every_ticks_until_cancelled(agent):
+    info = agent.jobs.every(0.05, label="tick")
+    assert info.kind == "every"
+    assert [(await _next(agent)).items for _ in range(3)] == [[1], [2], [3]]
+    assert await agent.jobs.cancel("tick") is True
+    assert agent.jobs.get("tick").state == "cancelled"
+    with pytest.raises(ValueError):
+        agent.jobs.every(0, label="bad")
+
+
+async def test_every_supports_throttle(agent):
+    agent.jobs.every(0.03, label="t")
+    first = await _next(agent)
+    agent.jobs.throttle("t", lines=3)
+    batched = await _next(agent)
+    while not batched.items or len(batched.items) < 3:  # a flush of the old batch may come first
+        batched = await _next(agent)
+    assert len(batched.items) == 3
+    assert batched.items == list(range(batched.items[0], batched.items[0] + 3))
+    assert batched.items[0] > first.items[0]
+    await agent.jobs.cancel("t")
+
+
+# ---- process isolation (ported from the removed monitor() tests) ----
+
+
+async def test_commands_run_in_their_own_process_group(agent):
+    await agent.jobs.run("ps -o pgid= -p $$", label="pg")
+    item = await _next(agent)
+    assert int(item.result.stdout.strip()) != os.getpgid(os.getpid())
+
+
+async def test_cancel_kills_the_whole_process_group(agent, tmp_path):
+    pidfile = tmp_path / "child"
+    await agent.jobs.run_stream(f"sleep 999 & echo $! > {pidfile}; echo ready; wait", label="grp")
+    await _until(lambda: pidfile.exists() and pidfile.read_text().strip())
+    child = int(pidfile.read_text())
+    assert _alive(child)
+    await agent.jobs.cancel("grp")
+    await _until(lambda: not _alive(child))
+
+
+async def test_concurrent_jobs_do_not_interfere(agent):
+    await agent.jobs.run("echo A1; sleep 0.1; echo A2", label="a")
+    await agent.jobs.run("echo B1; sleep 0.1; echo B2", label="b")
+    items = {item.label: item for item in [await _next(agent), await _next(agent)]}
+    assert items["a"].result.stdout == "A1\nA2\n"
+    assert items["b"].result.stdout == "B1\nB2\n"
+
+
+async def test_cancelling_one_job_leaves_the_other_running(agent):
+    await agent.jobs.run("sleep 999", label="victim")
+    await agent.jobs.run("sleep 0.3; echo survived", label="survivor")
+    await agent.jobs.cancel("victim")
+    item = await _next(agent)
+    assert item.label == "survivor" and item.result.stdout == "survived\n"
+
+
+async def test_undecodable_output_does_not_end_the_stream(agent):
+    await agent.jobs.run_stream(r"printf 'first\ncaf\xe9\nlast\n'", label="bytes")
+    texts = []
+    while True:
+        update = await _next(agent)
+        texts.extend(e.text for e in update.items if isinstance(e, StreamEvent))
+        if update.final:
+            break
+    assert texts == ["first\n", "caf\ufffd\n", "last\n"]

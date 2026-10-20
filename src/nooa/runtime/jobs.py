@@ -49,8 +49,10 @@ _LOG_CAP_BYTES = 50 * 1024 * 1024
 _KEEP_FINISHED = 100
 # Delivered items remembered per job for get().
 _KEEP_ITEMS = 5
+# How often tail() checks its file for new lines.
+_TAIL_POLL_SECONDS = 0.5
 
-JobKind = Literal["run", "run_stream", "spawn"]
+JobKind = Literal["run", "run_stream", "spawn", "tail", "after", "every"]
 JobStateName = Literal["running", "done", "failed", "cancelled"]
 
 
@@ -215,6 +217,32 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
             proc.kill()
 
 
+async def _tail_lines(handle: Any) -> AsyncIterator[str]:
+    """Yield complete lines appended to an open binary file, polling for more."""
+    partial = b""
+    try:
+        while True:
+            chunk = handle.readline()
+            if not chunk:
+                await asyncio.sleep(_TAIL_POLL_SECONDS)
+                continue
+            partial += chunk
+            if partial.endswith(b"\n"):
+                yield partial[:-1].decode("utf-8", errors="replace").removesuffix("\r")
+                partial = b""
+    finally:
+        handle.close()
+
+
+async def _ticks(seconds: float) -> AsyncIterator[int]:
+    """Yield 1, 2, 3, ... every ``seconds``."""
+    tick = 0
+    while True:
+        await asyncio.sleep(seconds)
+        tick += 1
+        yield tick
+
+
 class JobsApi(Skill):
     """Background jobs: long commands and async work that report back by label.
 
@@ -233,7 +261,8 @@ class JobsApi(Skill):
         await self.jobs.run_stream("make build", label="build", lines=50, seconds=30)
         # -> JobUpdate items, batched; the last has final=True
 
-    Labels are unique among running jobs. ``list()``/``get(label)`` show
+    ``tail(path)`` follows a file, ``after(seconds)`` is a timer and
+    ``every(seconds)`` ticks. Labels are unique among running jobs. ``list()``/``get(label)`` show
     state; ``await cancel(label)`` stops a job (and kills its process).
     """
 
@@ -293,6 +322,12 @@ class JobsApi(Skill):
         return job.info()
 
     @hidden
+    def _shell_dir(self) -> str:
+        """The agent shell's tracked directory (else the agent's, else this process's)."""
+        shell = getattr(self._agent, "shell", None)
+        return str(getattr(shell, "cwd", None) or getattr(self._agent, "cwd", None) or os.getcwd())
+
+    @hidden
     async def _shell_context(self) -> tuple[str, dict[str, str]]:
         """The agent shell's directory and exported environment, cheaply.
 
@@ -301,7 +336,7 @@ class JobsApi(Skill):
         process's ``os.environ``.
         """
         shell = getattr(self._agent, "shell", None)
-        cwd = str(getattr(shell, "cwd", None) or getattr(self._agent, "cwd", None) or os.getcwd())
+        cwd = self._shell_dir()
         env = dict(os.environ)
         session = getattr(shell, "session", None)
         lock = getattr(session, "_lock", None)
@@ -660,6 +695,50 @@ class JobsApi(Skill):
             raise ValueError("lines/seconds apply to async iterators only")
         job = self._new_job(label, "spawn", None, log=False, streaming=False)
         return self._start(job, self._call_job(job, work))
+
+    def tail(
+        self,
+        path: str | Path,
+        *,
+        label: str,
+        lines: int | None = None,
+        seconds: float | None = None,
+    ) -> JobInfo:
+        """Deliver lines appended to a file from now on, until cancelled.
+
+        Each ``JobUpdate`` item is one line (without its newline); batch with
+        ``lines``/``seconds``. A relative ``path`` is relative to the shell's
+        directory.
+
+            self.jobs.tail("logs/server.log", label="server-log", seconds=60)
+        """
+        throttle = _throttle(lines, seconds)
+        self._check_label(label)
+        resolved = Path(self._shell_dir()) / Path(path)
+        handle = open(resolved, "rb")  # noqa: SIM115 - closed by the generator
+        handle.seek(0, os.SEEK_END)
+        job = self._new_job(label, "tail", throttle, log=False, streaming=True)
+        return self._start(job, self._stream_job(job, _tail_lines(handle)))
+
+    def after(self, seconds: float, *, label: str) -> JobInfo:
+        """Deliver one ``JobResult`` (``result`` None) after ``seconds``: a timer.
+
+        self.jobs.after(600, label="check-in")
+        """
+        job = self._new_job(label, "after", None, log=False, streaming=False)
+        return self._start(job, self._call_job(job, asyncio.sleep(seconds)))
+
+    def every(self, seconds: float, *, label: str) -> JobInfo:
+        """Deliver a tick (1, 2, 3, ...) every ``seconds`` until cancelled.
+
+        Ticks are ``JobUpdate`` items; ``throttle(label, ...)`` batches them.
+
+            self.jobs.every(300, label="poll")
+        """
+        if seconds <= 0:
+            raise ValueError("seconds must be positive")
+        job = self._new_job(label, "every", None, log=False, streaming=True)
+        return self._start(job, self._stream_job(job, _ticks(seconds)))
 
     def throttle(
         self, label: str, *, lines: int | None = None, seconds: float | None = None
