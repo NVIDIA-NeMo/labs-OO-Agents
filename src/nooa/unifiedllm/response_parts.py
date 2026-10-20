@@ -191,7 +191,11 @@ def capture_parts(
 
 
 def project_turn(
-    turn: LLMResponse, scope: str | None, *, native_encrypted_reasoning: bool = False
+    turn: LLMResponse,
+    scope: str | None,
+    *,
+    native_encrypted_reasoning: bool = False,
+    media_inputs=None,
 ) -> list[dict[str, Any]]:
     """Reconstruct ordered Responses wire items, gated by the turn's replay scope.
 
@@ -243,6 +247,9 @@ def project_turn(
             item.update(call_id=part.id, name=part.name, arguments=part.arguments)
         elif isinstance(part, AssistantText):
             if native:
+                from .media_inputs import guard_native_media
+
+                guard_native_media(native, media_inputs)
                 _restore_text(native["content"], part.text, "")
                 item = native
             elif part.text:

@@ -64,7 +64,7 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
     monkeypatch.setattr(_connect_prompts, "edit_model_details", edit)
     result = CliRunner().invoke(
         command,
-        ["--edit-model", *selector, "--no-probe"],
+        ["--edit-model", *selector, "--media-inputs", "", "--no-probe"],
         input=("saved\n" if not selector else "") + "use\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
@@ -90,7 +90,9 @@ def test_edit_cancel_preserves_file(registry, monkeypatch):
     path, _ = registry
     before = path.read_bytes()
     monkeypatch.setattr(_connect_prompts, "edit_model_details", lambda data: data)
-    result = CliRunner().invoke(command, ["--edit-model", "saved", "--no-probe"], input="cancel\n")
+    result = CliRunner().invoke(
+        command, ["--edit-model", "saved", "--media-inputs", "", "--no-probe"], input="cancel\n"
+    )
     assert result.exit_code == 0, result.output
     assert path.read_bytes() == before
     assert not path.with_name("secrets.yaml").exists()
@@ -133,6 +135,8 @@ def test_endpoint_reuses_saved_variable_unless_explicit(registry, explicit):
         "https://api.test/v1/",
         "--api-style",
         "chat",
+        "--media-inputs",
+        "",
         "--no-probe",
         "--no-catalogue",
         "--yes",
@@ -163,6 +167,8 @@ def test_pasted_key_is_saved_only_with_separate_consent(registry, monkeypatch, c
             "--api-key-env",
             "NEW_TEST_KEY",
             "--prompt-key",
+            "--media-inputs",
+            "",
             "--no-probe",
             "--no-catalogue",
         ],
@@ -236,6 +242,8 @@ def test_final_save_cancel_does_not_persist_pasted_key(registry):
             "--api-key-env",
             "NEW_TEST_KEY",
             "--prompt-key",
+            "--media-inputs",
+            "",
             "--no-probe",
             "--no-catalogue",
         ],
@@ -281,6 +289,8 @@ def test_edit_model_with_working_dir_warns_when_source_is_not_the_target(
             "saved",
             "--working-dir",
             str(target),
+            "--media-inputs",
+            "",
             "--no-probe",
             "--yes",
         ],
