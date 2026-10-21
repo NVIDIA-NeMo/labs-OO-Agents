@@ -15,6 +15,23 @@ import click
 from . import _connect_view as view
 
 
+def choose_structured_output_mode(current=None):
+    """Explicit connection profile, never provider catalogue metadata."""
+    view.note(
+        "Native Anthropic structured output is opt-in; gateway acceptance must be tested. None/auto use the existing carrier."
+    )
+    choice = labelled_choice(
+        "Structured output profile",
+        (
+            ("none", "None (legacy carrier)"),
+            ("auto", "Auto (legacy carrier)"),
+            ("anthropic", "Anthropic native (output_config.format)"),
+        ),
+        default=current or "none",
+    )
+    return None if choice == "none" else choice
+
+
 def environment_names(defaults=()):
     """Suggest variable names, including conventional names not yet exported."""
     return sorted(set(os.environ).union(defaults))

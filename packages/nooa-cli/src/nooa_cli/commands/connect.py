@@ -176,6 +176,12 @@ class ConnectCommand(click.Command):
     help="Chat reply limit to save and use for checks. Decision calls have no reply limit.",
 )
 @click.option(
+    "--structured-output-mode",
+    type=click.Choice(["none", "auto", "anthropic"]),
+    default=None,
+    help="Completion-only structured output profile. anthropic uses native output_config.format; none/auto retain the legacy carrier. Omission preserves a same-route saved declaration.",
+)
+@click.option(
     "--media-inputs",
     help="Enable image,audio,video,pdf inputs without testing (comma-separated). The NOOA decision client currently supports image attachments only. Empty or - turns media off.",
 )
@@ -257,6 +263,7 @@ def command(
     reasoning_output_tokens,
     reasoning_level,
     reply_tokens,
+    structured_output_mode,
     media_inputs,
     test_media_inputs,
     decision_image_transport,
@@ -275,6 +282,15 @@ def command(
     MODEL is the exact endpoint model ID, without a LiteLLM routing prefix.
     """
     from ._connect_prompts import parse_media_inputs
+
+    mode_set = structured_output_mode is not None
+    if mode_set and stage in {"discover", "catalogue", "model-info", "interfaces", "decision"}:
+        raise click.UsageError(
+            "--structured-output-mode is a Completion profile control; use a plan/check/save stage"
+        )
+    if mode_set and api_style in {"responses", "systemone", "openai"}:
+        raise click.UsageError("--structured-output-mode requires Completion (chat or anthropic)")
+    mode = None if structured_output_mode == "none" else structured_output_mode
 
     if no_metadata and (catalogue_model or models_url or discovery_file or catalogue_file):
         raise click.UsageError("--no-metadata cannot be combined with metadata mappings/files/URLs")
@@ -350,6 +366,8 @@ def command(
                 reasoning_level=reasoning_level,
                 reply_tokens=reply_tokens,
                 cache_enabled=False if no_cache else None,
+                structured_output_mode=mode,
+                structured_output_mode_set=mode_set,
                 media_inputs=media_inputs,
                 test_media_inputs=test_media_inputs,
                 decision_image_transport=decision_image_transport,
@@ -421,6 +439,8 @@ def command(
             reasoning_output_tokens=reasoning_output_tokens,
             reply_tokens=reply_tokens,
             cache_enabled=False if no_cache else None,
+            structured_output_mode=mode,
+            structured_output_mode_set=mode_set,
             media_inputs=media_inputs,
             test_media_inputs=test_media_inputs,
             decision_image_transport=decision_image_transport,

@@ -48,7 +48,7 @@ class _DocumentAccess(Agent):
         ...
 
 
-async def typed_media(client, kind):
+async def typed_media(client, kind, *, observe_output_model=None):
     """The standard Predict media collector attaches each original argument once."""
     contracts = {
         "image": (_ImageAccess, Image, png_fixture, "image/png"),
@@ -58,4 +58,9 @@ async def typed_media(client, kind):
     }
     cls, media_type, fixture, mime = contracts[kind]
     agent = _probe_agent(cls, llm=client)
-    return await _typed_call(agent, agent.access, media_type.from_bytes(fixture(), media_type=mime))
+    return await _typed_call(
+        agent,
+        agent.access,
+        media_type.from_bytes(fixture(), media_type=mime),
+        observe_output_model=observe_output_model,
+    )

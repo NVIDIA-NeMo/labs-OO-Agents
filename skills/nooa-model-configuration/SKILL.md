@@ -71,6 +71,22 @@ same scope and evidence rules as the headless skill.
   `include: []` is the persisted opt-out for a route that rejects the field;
   unrelated errors are not evidence of rejection. Do not hide these fields or
   reply caps inside `extra_body`.
+- `structured_output_mode` is an explicit Completion profile for `chat` or
+  `anthropic`: `anthropic` sends top-level `output_config.format` with
+  `type: json_schema` and the compiled object-root output-model schema, preserving
+  `output_config.effort`. It excludes generic formats and schema-surrogate tools;
+  ordinary tool calls without an output model are unchanged. `auto` and Python
+  `None` / YAML `null` retain the existing carrier. Connect's CLI spelling is
+  `--structured-output-mode none|auto|anthropic`; omission preserves a saved
+  same-route declaration, explicit `none` clears native mode. Do not infer this
+  field from a model name or catalogue. Do not put it in `extra_body` or levels.
+  Connect rejects explicit controls on Responses/Decision and discovery stages;
+  profile edits invalidate all previous probe/session evidence. Route/model/
+  interface/client/credential changes must not inherit native mode.
+  This is independent of cache opt-out. The official Anthropic SDK 0.109.2 source
+  defines this shape; gateway acceptance and schema-subset support are unknown
+  until checked. A declaration/HTTP 200 is not a typed baseline pass. See
+  [the carrier scope and evidence contract](../../docs/model-connect.md#explicit-native-structured-output-profile).
 - Caching defaults to `auto`: use the default cached renderer's stable boundary,
   not a test-only cache override. Other Chat routes may cache implicitly;
   Responses and recognized Anthropic routes have explicit marker mappings.

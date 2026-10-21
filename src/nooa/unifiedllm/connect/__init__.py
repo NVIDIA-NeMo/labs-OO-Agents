@@ -123,7 +123,44 @@ def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
     return record
 
 
+# Omission preserves a saved declaration; explicit None clears it.
+STRUCTURED_OUTPUT_UNSET = object()
+
+
+def _validate_structured_output(entry: dict, override=STRUCTURED_OUTPUT_UNSET):
+    """Validate route-local declarations before credentials or request construction."""
+    from nooa.unifiedllm.structured_output import validate_structured_output_mode
+
+    def reject_payload(value):
+        if isinstance(value, dict):
+            if "structured_output_mode" in value:
+                raise ValueError(
+                    "structured_output_mode belongs on the connection, not request settings"
+                )
+            for child in value.values():
+                reject_payload(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                reject_payload(child)
+
+    reject_payload(entry.get("extra_body"))
+    reject_payload(entry.get("reasoning_levels"))
+    if "structured_output_mode" in entry:
+        validate_structured_output_mode(entry["structured_output_mode"])
+    if override is not STRUCTURED_OUTPUT_UNSET:
+        validate_structured_output_mode(override)
+    declared = "structured_output_mode" in entry or override is not STRUCTURED_OUTPUT_UNSET
+    if declared and (
+        entry.get("client_type", "completion") != "completion"
+        or entry.get("api_style", "chat") not in {"chat", "anthropic"}
+    ):
+        raise ValueError(
+            "structured_output_mode is a Completion-only profile control (chat or anthropic)"
+        )
+
+
 _RESERVED = {
+    "structured_output_mode",
     "media_inputs",
     "model",
     "messages",
@@ -748,13 +785,20 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
 
 
 def configure_entry(
-    entry: dict, *, reply_tokens: int | None = None, cache_enabled: bool | None = None
+    entry: dict,
+    *,
+    reply_tokens: int | None = None,
+    cache_enabled: bool | None = None,
+    structured_output_mode=STRUCTURED_OUTPUT_UNSET,
 ) -> dict:
     """Apply safe persisted defaults to a detached entry, without doing any I/O.
 
     ``max_tokens`` is the runtime cap on every interface. Published ceilings
     remain provenance, not request allocations. ``include: []`` is an explicit
     opt-out from carrying encrypted reasoning on stateless Responses calls.
+    ``structured_output_mode`` is a Completion-only declaration: omission
+    preserves it, explicit None clears native mode, and 'auto' keeps the legacy
+    carrier. Only explicit 'anthropic' selects output_config.format.
     ``cache_enabled=False`` disables explicit cache options/markers, not provider
     automatic caching. None preserves the entry; True selects the runtime auto policy.
     """
@@ -782,10 +826,55 @@ def configure_entry(
 
     if cache_enabled is not None and not isinstance(cache_enabled, bool):
         raise ValueError("cache_enabled must be a boolean or None")
+    _validate_structured_output(entry, structured_output_mode)
     reject_credentials(entry)
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     result = deepcopy(entry)
+    effective_mode = (
+        entry.get("structured_output_mode")
+        if structured_output_mode is STRUCTURED_OUTPUT_UNSET
+        else structured_output_mode
+    )
+    provenance = result.get("provenance") or {}
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be a mapping")
+    snapshot = provenance.get("structured_output_profile")
+    records = provenance.get("probes") or {}
+    stale = isinstance(snapshot, dict) and snapshot.get("mode") != effective_mode
+    if snapshot is None and effective_mode is not None and provenance.get("session_checks"):
+        stale = True  # Unstamped legacy session evidence cannot prove this profile.
+    # Older records have no profile snapshot. Their bounded mode or baseline
+    # config identifies prior evidence; missing mode means the legacy carrier.
+    stale |= any(
+        record.get(
+            "structured_output_mode",
+            (record.get("baseline_config") or {}).get("structured_output_mode"),
+        )
+        != effective_mode
+        for record in records.values()
+        if isinstance(record, dict)
+    )
+    if stale:
+        provenance["probes"] = {}
+        for field in ("session_checks", "requests_accepted", "reasoning_observed"):
+            provenance.pop(field, None)
+        result["provenance"] = provenance
+    if (
+        "structured_output_mode" in entry
+        or structured_output_mode is not STRUCTURED_OUTPUT_UNSET
+        or snapshot is not None
+    ):
+        result.setdefault("provenance", {})["structured_output_profile"] = {"mode": effective_mode}
+    if structured_output_mode is not STRUCTURED_OUTPUT_UNSET:
+        if result.get("structured_output_mode") != structured_output_mode:
+            provenance = result.setdefault("provenance", {})
+            if not isinstance(provenance, dict):
+                raise ValueError("provenance must be a mapping")
+            provenance["probes"] = {}
+            for field in ("session_checks", "requests_accepted", "reasoning_observed"):
+                provenance.pop(field, None)
+        result["structured_output_mode"] = structured_output_mode
     result["media_inputs"] = list(validate_media_inputs(result.get("media_inputs")))
     for patch in (result.get("reasoning_levels") or {}).values():
         if "media_inputs" in patch or "media_inputs" in (patch.get("extra_body") or {}):
@@ -1244,6 +1333,7 @@ def plan(
     session_checks: bool = False,
     reply_tokens: int | None = None,
     cache_enabled: bool | None = None,
+    structured_output_mode=STRUCTURED_OUTPUT_UNSET,
     media_inputs: list[str] | tuple[str, ...] | None = None,
     test_media_inputs: list[str] | tuple[str, ...] | None = None,
     decision_image_transport: str | None = None,
@@ -1252,6 +1342,10 @@ def plan(
 ) -> ConnectPlan:
     """Prepare requests without reading credentials, files or network resources.
 
+    ``structured_output_mode='anthropic'`` explicitly selects the native carrier
+    for Completion chat/anthropic routes. Omission preserves a same-route saved
+    declaration (including credential identity); explicit None clears it. None
+    and 'auto' retain the existing carrier, never infer or discover native support.
     ``cache_enabled=False`` saves ``cache_breakpoint: null`` (no explicit cache
     options/markers). None preserves the default or same-route existing policy;
     True explicitly selects auto. This does not disable provider automatic caching
@@ -1275,6 +1369,9 @@ def plan(
         raise ValueError("cache_enabled must be a boolean or None")
     if api_style in DECISION_API_STYLES and cache_enabled is not None:
         raise ValueError("Decision models do not configure chat caching")
+    _validate_structured_output({"api_style": api_style}, structured_output_mode)
+    if existing_entry is not None:
+        _validate_structured_output(existing_entry)
     if api_style not in _PATHS:
         raise ValueError("api_style must be chat, responses, anthropic, systemone or openai")
     api_base = normalize_endpoint(api_base)
@@ -1500,6 +1597,11 @@ def plan(
     if existing_entry and same_media_route(existing_entry, entry):
         if "cache_breakpoint" in existing_entry:
             entry["cache_breakpoint"] = deepcopy(existing_entry["cache_breakpoint"])
+        if (
+            existing_entry.get("api_key_env", "") == entry.get("api_key_env", "")
+            and "structured_output_mode" in existing_entry
+        ):
+            entry["structured_output_mode"] = existing_entry["structured_output_mode"]
     provenance: dict[str, Any] = {
         "media_suggestions": media_suggestions,
         "probes": {},
@@ -1664,7 +1766,12 @@ def plan(
                 "source": "catalogue_recommendation",
                 "value": entry["max_tokens"],
             }
-    entry = configure_entry(entry, reply_tokens=reply_tokens, cache_enabled=cache_enabled)
+    entry = configure_entry(
+        entry,
+        reply_tokens=reply_tokens,
+        cache_enabled=cache_enabled,
+        structured_output_mode=structured_output_mode,
+    )
     provenance = entry["provenance"]
     for probe in probes:
         if probe.name.startswith("level:"):
@@ -1672,7 +1779,14 @@ def plan(
     if existing_entry:
         # Each probe is also compared to its exact request in run_steps. Adding
         # a level must not invalidate an unchanged routing or tool check.
-        keys = ("model_name", "api_base", "api_key_env", "api_style")
+        keys = (
+            "model_name",
+            "api_base",
+            "api_key_env",
+            "api_style",
+            "client_type",
+            "structured_output_mode",
+        )
         if all(existing_entry.get(key) == entry.get(key) for key in keys) and existing_entry.get(
             "cache_breakpoint", "auto"
         ) == entry.get("cache_breakpoint", "auto"):
@@ -1777,11 +1891,21 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     schema_completed = False
     schema_value = None
     send_started = False
+    native = typed and entry.get("structured_output_mode") == "anthropic"
+    expected_format = None
+    carrier_evidence = {}
+
+    def capture_output_model(output_model):
+        nonlocal expected_format
+        from nooa.unifiedllm.structured_output import anthropic_output_format
+
+        # The actual Predict-generated contract, including strict fields/titles.
+        expected_format = anthropic_output_format(output_model)
 
     async def capture_status(response):
         nonlocal schema_completed, schema_value
         response_status.append(response.status_code)
-        if typed_media_check and response.is_success:
+        if (typed_media_check or native) and response.is_success:
             # Keep envelope facts even when native schema validation fails.
             # Do not score access or retain reply text. Only correlate a schema
             # carrier with the exact requested output contract; native Predict
@@ -1883,6 +2007,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                         "top_p",
                         "reasoning",
                         "reasoning_effort",
+                        "output_config",
                         "store",
                         "include",
                         *REPLY_CAP_KEYS,
@@ -1897,7 +2022,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                 **(resolved.get("extra_body") or {}),
             }
         wire = json.loads(request.content)
-        if typed_media_check and entry["api_style"] == "anthropic":
+        if typed_media_check and entry["api_style"] == "anthropic" and not native:
             tools = wire.get("tools", [])
             choice = wire.get("tool_choice", {})
             if len(tools) == 1 and choice.get("type") == "tool":
@@ -1912,6 +2037,39 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                 ):
                     schema_carrier = tool["name"]
         observed = settings_on_wire(expected, wire)
+        if native:
+            output = wire.get("output_config")
+            exact = (
+                expected_format is not None
+                and isinstance(output, dict)
+                and output.get("format") == expected_format
+            )
+            # Typed Predict does not request tools: any tools/tool_choice here
+            # would be a schema surrogate. Explicit no-output_model tool probes
+            # remain untouched. A wrapped extra_body is not the native wire shape.
+            conflicts = any(
+                k in wire
+                for k in ("response_format", "text.format", "output_format", "tools", "tool_choice")
+            )
+            conflicts |= isinstance(wire.get("text"), dict) and "format" in wire["text"]
+            conflicts |= isinstance(wire.get("extra_body"), dict) and any(
+                k in wire["extra_body"]
+                for k in (
+                    "output_config",
+                    "output_format",
+                    "response_format",
+                    "tools",
+                    "tool_choice",
+                    "text",
+                )
+            )
+            carrier_evidence.update(
+                structured_output_mode="anthropic",
+                structured_output_carrier="output_config.format" if exact else "unconfirmed",
+                structured_output_schema_observed=bool(exact),
+                structured_output_conflicts_observed=bool(conflicts),
+            )
+            observed = observed and exact and not conflicts
         output_settings_sent.append(observed)
         if probe.name.startswith("media:"):
             from ._media import media_on_wire
@@ -1940,9 +2098,15 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             if typed_media_check:
                 from ._typed_media import typed_media
 
-                response, result = await typed_media(client, probe.name[6:])
+                response, result = await typed_media(
+                    client,
+                    probe.name[6:],
+                    **({"observe_output_model": capture_output_model} if native else {}),
+                )
             else:
-                response, result = await typed_baseline(client)
+                response, result = await typed_baseline(
+                    client, **({"observe_output_model": capture_output_model} if native else {})
+                )
             response.parsed = result  # Transient native method result, never persisted.
         else:
             response = await client.acall(messages=messages, **params)
@@ -1961,6 +2125,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         observed = (len(settings_sent) == 1 and all(settings_sent)) if settings_sent else None
         response.metadata["connect_evidence"] = {
             **reply_evidence,
+            **carrier_evidence,
             "request_accepted": bool(response_status and 200 <= response_status[-1] < 300),
             "attachment_observed": len(attachments_sent) == 1 and all(attachments_sent),
             "output_settings_observed": len(output_settings_sent) == 1
@@ -1970,6 +2135,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     except Exception as exc:
         exc._connect_evidence = {
             **reply_evidence,
+            **carrier_evidence,
             "settings_sent": (len(settings_sent) == 1 and all(settings_sent))
             if settings_sent
             else None,
@@ -2315,6 +2481,7 @@ async def run_steps(
             and previous.get("request") == probe.body
             and previous.get("client") == "unifiedllm"
             and previous.get("settings_sent") is True
+            and previous.get("structured_output_mode") == entry.get("structured_output_mode")
             and (
                 probe.name != "routing"
                 or not probe.uses_configured_cap
@@ -2332,6 +2499,8 @@ async def run_steps(
             )
             continue
         record: dict[str, Any] = {"outcome": "not_probed"}
+        if "structured_output_mode" in entry:
+            record["structured_output_mode"] = entry["structured_output_mode"]
         records[probe.name] = record
         if approved == "none" or approved == "minimal" and probe.name != "routing":
             record["reason"] = "not approved"
@@ -2530,6 +2699,10 @@ async def run_steps(
                     outcome="not_confirmed", reason="Reply not understood (ReasoningReplayError)"
                 )
             if probe.name == "routing" and probe.uses_configured_cap:
+                if entry.get("structured_output_mode") == "anthropic":
+                    # Keep observed carrier/settings/envelope facts even when
+                    # original-model validation or final-stop enforcement fails.
+                    record.update(public_record(getattr(exc, "_connect_evidence", {})))
                 record.update(
                     baseline_kind=TYPED_TEXT_BASELINE,
                     typed_result_validated=False,
@@ -2601,6 +2774,7 @@ async def run_steps(
                 else "Configured reply cap or settings missing from the actual request",
             )
         if probe.name == "routing":
+            record.update(response.metadata.get("connect_evidence", {}))
             if probe.uses_configured_cap:
                 record.update(
                     baseline_kind=TYPED_TEXT_BASELINE,

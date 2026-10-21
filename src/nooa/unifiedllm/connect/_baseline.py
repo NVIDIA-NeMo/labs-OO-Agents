@@ -32,7 +32,7 @@ class _NoHooks:
         return False
 
 
-async def _typed_call(agent, method, *args):
+async def _typed_call(agent, method, *args, observe_output_model=None):
     """Return the same-call response and the actual method's native typed result.
 
     The middleware guards runtime context-window recovery *before* acall, while
@@ -48,6 +48,8 @@ async def _typed_call(agent, method, *args):
         if called:
             raise RuntimeError("Configured typed check permits only one outbound call")
         called = True
+        if observe_output_model is not None:
+            observe_output_model(ctx.params.get("output_model"))
         try:
             ctx = await nxt(ctx)
         except (ValueError, TypeError):
@@ -87,6 +89,6 @@ def _probe_agent(cls, **kwargs):
             return cls(**kwargs)
 
 
-async def typed_baseline(client):
+async def typed_baseline(client, *, observe_output_model=None):
     agent = _probe_agent(_TextBaseline, llm=client)
-    return await _typed_call(agent, agent.compute)
+    return await _typed_call(agent, agent.compute, observe_output_model=observe_output_model)

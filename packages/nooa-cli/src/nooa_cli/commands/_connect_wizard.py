@@ -97,6 +97,8 @@ class WizardState:
     remaining_estimate: Any = None
     reply_tokens: Any = None
     cache_enabled: bool | None = None
+    structured_output_mode: str | None = None
+    structured_output_mode_set: bool = False
     result: Any = None
     server_urls: Any = None
     systemone_endpoint: Any = None
@@ -194,6 +196,7 @@ def select_connection(state: WizardState) -> bool:
             raise click.ClickException(f"Unknown registry model {state.edit_model!r}")
         state.editing, source_path = state.registry[state.edit_model]
         state.editing = deepcopy(state.editing)
+        connect.configure_entry(state.editing)  # Validate saved declarations before credentials.
         if not state.output:
             from nooa.llm_config import bundled_config_paths
 
@@ -331,6 +334,10 @@ def select_connection(state: WizardState) -> bool:
     if state.yes and state.provider and state.provider != "custom":
         state.api_style = state.api_style or state.default_style
     reject_decision_media(state)
+    if state.structured_output_mode_set and state.api_style is None:
+        raise click.UsageError(
+            "--structured-output-mode requires --api-style chat or anthropic, not interface discovery"
+        )
     if state.yes and not all((state.model, state.alias, state.endpoint, state.api_style)):
         raise click.UsageError(
             "With --yes supply MODEL, --as and either --provider or --endpoint plus --api-style."
@@ -433,6 +440,11 @@ def select_connection(state: WizardState) -> bool:
         state.api_style or state.default_style,
         state.endpoint,
         state.api_key_env,
+        **(
+            {"structured_output_mode": state.structured_output_mode}
+            if state.structured_output_mode_set
+            else {}
+        ),
     )
     needs_key = (
         not state.yes
@@ -653,6 +665,11 @@ def select_request_interface(state: WizardState) -> bool:
 
 def check_interfaces(state: WizardState) -> bool:
     """Check interfaces; return False when the user cancels."""
+    if state.structured_output_mode_set and not state.api_style:
+        raise click.UsageError(
+            "--structured-output-mode requires an explicit Completion interface, not interface discovery"
+        )
+    reject_decision_media(state)
     view.step(3, "Connection checks")
     if state.api_style == "responses":
         view.line(scrub_setup(state, connect.ENCRYPTED_REASONING_EXPLANATION), dim=True)
@@ -1386,7 +1403,9 @@ def configure_metadata(state: WizardState) -> bool:
 
 
 def reject_decision_media(state: WizardState) -> None:
-    """Validate image-only permissions once the decision style is known."""
+    """Validate route-local controls once the request style is known."""
+    if state.structured_output_mode_set and state.api_style not in {None, "chat", "anthropic"}:
+        raise click.UsageError("--structured-output-mode requires Completion (chat or anthropic)")
     if state.api_style in connect.DECISION_API_STYLES:
         if state.cache_enabled is not None:
             raise click.UsageError(
@@ -1525,6 +1544,27 @@ def configure_media_inputs(state: WizardState) -> bool:
 
 def configure_checks(state: WizardState) -> bool:
     """Configure checks; return False when the user cancels."""
+    reject_decision_media(state)
+    profile = connect.plan(
+        state.alias or "candidate",
+        state.model,
+        state.api_style,
+        state.endpoint,
+        state.api_key_env,
+        existing_entry=state.editing or state.existing,
+        **(
+            {"structured_output_mode": state.structured_output_mode}
+            if state.structured_output_mode_set
+            else {}
+        ),
+        decision_image_transport=state.decision_image_transport,
+        typesafe_danger_zone_images=state.typesafe_danger_zone_images,
+    ).entry
+    mode_kwargs = (
+        {"structured_output_mode": profile["structured_output_mode"]}
+        if "structured_output_mode" in profile
+        else {}
+    )
     if state.api_style in connect.DECISION_API_STYLES and any(
         (state.levels_file, state.levels, state.reasoning_template, state.reply_tokens)
     ):
@@ -1590,6 +1630,7 @@ def configure_checks(state: WizardState) -> bool:
         and state.api_style not in connect.DECISION_API_STYLES,
         reply_tokens=state.reply_tokens,
         cache_enabled=state.cache_enabled,
+        **mode_kwargs,
     )
     if state.server_details is not None:
         state.proposal.entry["provenance"]["server_details"] = scrub_setup(
@@ -1607,6 +1648,7 @@ def configure_checks(state: WizardState) -> bool:
         # Preserve transport controls, custom parameters and exact level blocks.
         merged = deepcopy(state.editing)
         for field in (
+            "structured_output_mode",
             "media_inputs",
             "decision_image_transport",
             "typesafe_danger_zone_images",
@@ -1632,6 +1674,9 @@ def configure_checks(state: WizardState) -> bool:
             **state.proposal.entry["provenance"],
         }
         merged["provenance"]["probes"] = {}  # Edits must not reuse stale evidence.
+        if state.editing.get("structured_output_mode") != merged.get("structured_output_mode"):
+            for field in ("session_checks", "requests_accepted", "reasoning_observed"):
+                merged["provenance"].pop(field, None)
         state.proposal = replace(state.proposal, entry=merged)
         if state.api_style == "responses":
             for check in state.proposal.probes:
@@ -1683,7 +1728,10 @@ def configure_checks(state: WizardState) -> bool:
             )
         )
     state.configured = connect.configure_entry(
-        state.proposal.entry, reply_tokens=state.reply_tokens, cache_enabled=state.cache_enabled
+        state.proposal.entry,
+        reply_tokens=state.reply_tokens,
+        cache_enabled=state.cache_enabled,
+        **mode_kwargs,
     )
     if state.api_style in connect.DECISION_API_STYLES:
         state.proposal = connect.refresh_plan(replace(state.proposal, entry=state.configured))
@@ -2027,6 +2075,7 @@ def save_model(state: WizardState) -> bool:
         "cache_breakpoint" in state.result.entry and state.result.entry["cache_breakpoint"] is None
     ):
         view.fields([("Caching", "Off")])
+    view.fields(scrub_setup(state, structured_output_rows(state.result.entry)))
     if state.yes or prompts.confirm(f"Write model entry to {state.path}?", default=True):
         save_key = False
         if (
@@ -2066,6 +2115,7 @@ def save_model(state: WizardState) -> bool:
         view.section("Saved model")
         view.fields(scrub_setup(state, [("Alias", state.alias), ("File", state.path)]))
         view.media_settings(state.result.entry)
+        view.fields(scrub_setup(state, structured_output_rows(state.result.entry)))
         if state.api_style in connect.DECISION_API_STYLES:
             view.line(
                 scrub_setup(
@@ -2105,6 +2155,25 @@ def save_model(state: WizardState) -> bool:
     return True
 
 
+def structured_output_rows(entry):
+    """Declaration and observed wire facts are different, bounded review fields."""
+    if "structured_output_mode" not in entry:
+        return []
+    mode = entry["structured_output_mode"]
+    rows = [("Structured output", f"{mode or 'none'} (declared)")]
+    if mode == "anthropic":
+        baseline = entry.get("provenance", {}).get("probes", {}).get("routing", {})
+        observed = (
+            baseline.get("structured_output_schema_observed") is True
+            and baseline.get("structured_output_conflicts_observed") is False
+            and baseline.get("settings_sent") is True
+        )
+        rows.append(
+            ("Native carrier", "output_config.format observed" if observed else "Not confirmed")
+        )
+    return rows
+
+
 def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=False):
     """One concise summary for each current proposal, not stale initial settings."""
     entry = state.proposal.entry
@@ -2136,6 +2205,7 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
         if "cache_breakpoint" in entry and entry["cache_breakpoint"] is None:
             rows.append(("Caching", "Off"))
         rows.append(("Reasoning", ", ".join(entry.get("reasoning_levels", {})) or "Server default"))
+        rows.extend(structured_output_rows(entry))
     else:
         transport = (
             "OpenAI Decisions"
@@ -2215,11 +2285,33 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
     """Consent or edit; edits are re-summarized before the next decision."""
     while True:
         options = (("test", "Test now"),) if not state.no_probe and state.probe != "none" else ()
+        profile_options = (
+            (("structured", "Change structured output profile"),)
+            if state.api_style in {"chat", "anthropic"}
+            and (
+                state.structured_output_mode_set or "structured_output_mode" in state.proposal.entry
+            )
+            else ()
+        )
         action = prompts.labelled_choice(
             "Would you like to test these settings?",
-            (*options, ("save", "Save without testing"), ("change", "Change settings")),
+            (
+                *options,
+                ("save", "Save without testing"),
+                ("change", "Change settings"),
+                *profile_options,
+            ),
             default="test" if options else "save",
         )
+        if action == "structured":
+            state.structured_output_mode = prompts.choose_structured_output_mode(
+                state.proposal.entry.get("structured_output_mode")
+            )
+            state.structured_output_mode_set = True
+            if not configure_checks(state):
+                return None
+            show_guided_proposal(state, deferred_style=deferred_style, updated=True)
+            continue
         if action != "change":
             break
         if state.api_style in connect.DECISION_API_STYLES:
@@ -2280,7 +2372,7 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
                 output_ceiling=state.candidate.get("top_provider", {}).get("max_completion_tokens"),
                 source=entry.get("provenance", {}).get("reply_limit", {}).get("source", "user"),
             )
-            # Existing declarations and explicit test selections remain unchanged.
+            # Profile/media declarations and explicit test selections remain unchanged.
         if not configure_checks(state):
             return None
         show_guided_proposal(state, deferred_style=deferred_style, updated=True)
@@ -2297,6 +2389,10 @@ def guided_setup(state: WizardState) -> bool:
     ):
         return False
     deferred_style = state.api_style is None
+    if deferred_style and state.structured_output_mode_set:
+        raise click.UsageError(
+            "--structured-output-mode requires --api-style chat or anthropic, not interface discovery"
+        )
     explicit_reply_tokens = state.reply_tokens
     # A provider preset is a proposal, never evidence of supported interfaces.
     state.api_style = state.api_style or state.default_style

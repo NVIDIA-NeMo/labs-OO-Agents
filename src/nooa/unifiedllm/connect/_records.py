@@ -58,6 +58,10 @@ class ProbeRecord(TypedDict, total=False):
     access_reported: bool
     attachment_observed: bool
     output_settings_observed: bool
+    structured_output_mode: str | None
+    structured_output_carrier: str
+    structured_output_schema_observed: bool
+    structured_output_conflicts_observed: bool
 
 
 def public_record(record: dict) -> dict:
@@ -78,6 +82,12 @@ def text_baseline_passed(record: dict) -> bool:
         and record.get("final_answer_observed") is True
         and record.get("settings_sent") is True
         and record.get("finish_reason") == "stop"
+        and (
+            record.get("structured_output_mode") != "anthropic"
+            or record.get("structured_output_schema_observed") is True
+            and record.get("structured_output_conflicts_observed") is False
+            and record.get("structured_output_carrier") == "output_config.format"
+        )
     )
 
 

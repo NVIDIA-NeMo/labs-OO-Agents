@@ -430,6 +430,13 @@ def client_from_config(
     if selected_client_type == "decision":
         from nooa.decisions import DecisionClient
 
+        if (
+            overrides.get("structured_output_mode", config.get("structured_output_mode"))
+            is not None
+        ):
+            raise ValueError("Decision routes do not support structured_output_mode")
+        overrides.pop("structured_output_mode", None)
+
         endpoint = overrides.pop("endpoint", config.get("endpoint"))
         if not endpoint:
             raise ValueError(f"Decision model alias {name!r} requires an endpoint")
@@ -522,6 +529,8 @@ def client_from_config(
         "store",
         "include",
         "cache_breakpoint",
+        "structured_output_mode",
+        "output_config",
         "media_inputs",
     ):
         if key in config and key not in overrides:
@@ -556,7 +565,13 @@ def client_from_config(
         or (client_type is not None and client_type != config.get("client_type", "completion"))
         or overrides.get("client") is not None
     ):
-        for key in ("reasoning_levels", "reasoning_default", "reasoning_level", "media_inputs"):
+        for key in (
+            "reasoning_levels",
+            "reasoning_default",
+            "reasoning_level",
+            "media_inputs",
+            "structured_output_mode",
+        ):
             params.pop(key, None)
         if "reasoning_levels" in config:
             logger.warning(

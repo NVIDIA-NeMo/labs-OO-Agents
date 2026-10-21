@@ -232,6 +232,8 @@ def run_stage(
     reasoning_level="medium",
     reply_tokens=None,
     cache_enabled=None,
+    structured_output_mode=None,
+    structured_output_mode_set=False,
     media_inputs=None,
     test_media_inputs=None,
     decision_image_transport=None,
@@ -277,6 +279,18 @@ def run_stage(
     from ._connect_prompts import parse_media_inputs
 
     try:
+        mode_kwargs = (
+            {"structured_output_mode": structured_output_mode} if structured_output_mode_set else {}
+        )
+        if structured_output_mode_set:
+            if stage in {"discover", "catalogue", "model-info", "interfaces", "decision"}:
+                raise click.UsageError(
+                    "--structured-output-mode is a Completion profile control; use a plan/check/save stage"
+                )
+            if api_style in {"responses", "systemone", "openai"}:
+                raise click.UsageError(
+                    "--structured-output-mode requires Completion (chat or anthropic)"
+                )
         if cache_enabled is not None and stage in {
             "discover",
             "catalogue",
@@ -351,6 +365,7 @@ def run_stage(
                         },
                         reply_tokens=reply_tokens,
                         cache_enabled=cache_enabled,
+                        **mode_kwargs,
                     ),
                 )
             except ValueError as exc:
@@ -472,6 +487,7 @@ def run_stage(
                         reasoning_output_tokens=reasoning_output_tokens,
                         reply_tokens=reply_tokens,
                         cache_enabled=cache_enabled,
+                        **mode_kwargs,
                         media_inputs=declared_media,
                         decision_image_transport=decision_image_transport,
                         typesafe_danger_zone_images=typesafe_danger_zone_images,

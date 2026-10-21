@@ -290,6 +290,34 @@ the inference key. Use it only after the user approves those destinations.
 `openai` means **OpenAI Decisions**, not Chat; chat-family styles are `chat`,
 `responses`, and `anthropic`.
 
+## Explicit structured-output profile
+
+Use `--structured-output-mode anthropic` only with an explicitly selected
+Completion interface (`chat` or `anthropic`) and authorization for the configured
+checks. It declares native `output_config.format: {type: json_schema, schema: ...}`;
+it does not prove gateway acceptance or change transport. `none` (Python `None`,
+YAML `null`) and `auto` retain the existing carrier, with no inferred native support
+or fallback. Omission preserves a saved same-route policy; route/model/interface/
+client/credential changes do not inherit it. Connect rejects explicit controls on
+Responses/Decision and metadata/interface discovery stages before credential use.
+Keep this framework setting on the entry, not in `extra_body`, level patches or
+catalogue metadata. Guided review offers Change structured output profile;
+plan/check/save stages carry it.
+
+A mode change invalidates all prior probe/session evidence; a save-time override
+is not freshly verified. Inspect actual typed Predict baseline/media evidence:
+`structured_output_schema_observed`, `structured_output_conflicts_observed`,
+`structured_output_carrier`, and `settings_sent`, alongside typed validation,
+final-stop/correct-answer facts. Native checks compare the exact original generated
+response-model schema on the wire and reject generic/schema-tool surrogates;
+ordinary no-output-model tool checks are unchanged. Format insertion preserves
+`output_config.effort`. `--no-cache` remains independent, not a carrier fix or proof
+of compatibility. The profile adds no extra send, carrier fallback or recovery
+UI; existing retry/cap handling retains its explicit selection or opt-out.
+See [model-connect](../../docs/model-connect.md#explicit-native-structured-output-profile)
+for the official Anthropic SDK 0.109.2 source contract and its limits: gateway
+acceptance is unknown until an authorized actual check succeeds.
+
 ## Keep checks bounded and settings consistent
 
 Always specify `--budget-tokens` for model checks: the default is `10**15`,

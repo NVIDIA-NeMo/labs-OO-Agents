@@ -391,6 +391,77 @@ cannot return structured output, save it without checks (`--no-probe`) instead.
 
 ## Profile controls, token budget and reply limit
 
+### Explicit native structured-output profile
+
+`--structured-output-mode anthropic` is a bounded, opt-in **Completion** profile
+for `--api-style chat` or `anthropic`. It is not inferred from the model ID,
+provider catalogue or a successful discovery ping. Responses and Decision routes
+reject explicit profile controls (including `none` and `auto`) before checks.
+Metadata/interface discovery stages reject the option; select an explicit
+Completion interface for wizard use. Plan, configured check and save stages carry
+it. Once explicitly declared, guided review offers **Change structured output
+profile** as a connection setting, separately from model catalogue details; the
+default wizard choices are unchanged.
+
+The library equivalents are `connect.plan(..., structured_output_mode="anthropic")`
+and `connect.configure_entry(entry, structured_output_mode="anthropic")`.
+Omitting the keyword preserves a saved same-route declaration; Python `None`,
+YAML `null`, and CLI `--structured-output-mode none` explicitly select the existing
+legacy carrier. `auto` also retains that carrier: neither `none` nor `auto`
+discovers native support or retries with a different format. Changing model,
+normalized endpoint, API style, client type or credential identity does not inherit
+a saved native declaration. Changing the declaration invalidates prior probe and
+session evidence, including checks whose generic planned request is unchanged.
+The field belongs on the entry, never in `extra_body` or reasoning-level patches.
+`--no-cache` is an independent control: cache removal does not select or prove a
+structured-output carrier.
+
+For typed calls with an object-root output model, native mode sends the actual
+compiled JSON Schema as **top-level**
+`output_config: {format: {type: "json_schema", schema: ...}}`. A configured
+`output_config.effort` is preserved. It does not send generic `response_format`,
+`text.format`, legacy `output_format` or schema-surrogate tools/tool choice.
+Combining tools/tool choice with a native `output_model` is rejected rather than
+using a schema-tool surrogate. Ordinary tool calls without an output model are
+unaffected. NOOA validates the original output model and requires a final-stop
+answer; this is not a raw-text ping or tool-based replacement for Predict.
+
+The shape agrees with the official Anthropic SDK **0.109.2** source contract
+(`anthropic/types/output_config_param.py`, `json_output_format_param.py`, and
+`resources/messages/messages.py`): format has required `type: json_schema` and
+`schema`, while output config can also carry effort; `create` serializes top-level
+`output_config`, and `parse` merges its transformed schema format with that config.
+This is source-contract evidence, **not** proof that a particular gateway accepts
+the schema or implements the SDK helpers' schema-subset transforms. NOOA's bounded
+compiler preserves the model contract rather than guessing gateway restrictions.
+No universal gateway acceptance is claimed. The runtime verifies the final SDK
+HTTP carrier before send and raises if a downstream adapter changes or drops the
+schema. A native typed call needs a verifiable per-client HTTP transport. For a
+replacement route, construct a separately configured client (registry constructor
+overrides clear an inherited profile unless it is explicitly redeclared). A
+per-call injected SDK client must expose its HTTP transport for this check.
+
+```python
+client = CompletionClient(
+    "openai/your-exact-gateway-model-id",  # no model-name profile inference
+    api_base="https://your-gateway.example/v1",
+    structured_output_mode="anthropic",
+    max_tokens=8192,
+    cache_breakpoint=None,  # independent explicit cache-marker opt-out
+)
+```
+
+The configured typed Predict baseline and media checks compare the actual wire
+format to the schema compiled from that call's original generated response model,
+check absence of conflicting carriers, and still verify configured settings/caps,
+typed validation, correctness (baseline) and final stop. Only bounded carrier,
+schema-observed and conflict flags are retained, not raw schema/request/reply text.
+A declared profile or HTTP 200 alone is not a pass; declaration and observed status
+are shown separately. Save without testing records an unverified profile, not live
+compatibility. Selecting this profile adds no carrier fallback, extra send or
+recovery UI. Existing retry and context-window reply-cap handling retain the
+selected carrier (including an explicit per-call opt-out).
+
 - `--budget-tokens N` limits the estimated total tokens for all checks. The
   default is no limit. It is an estimate, not a spending cap.
 - A check that does not fit the remaining budget is skipped. Connect does not
