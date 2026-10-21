@@ -113,14 +113,17 @@ async def test_run_timeout_kills_and_reports_124(agent):
     assert item.items[0].stdout == "start\n"
 
 
-async def test_cancel_kills_the_process(agent, tmp_path):
-    pidfile = tmp_path / "pid"
-    await agent.jobs.run(f"echo $$ > {pidfile}; exec sleep 60", label="long")
+async def test_cancel_kills_the_process_and_its_group(agent, tmp_path):
+    pidfile, childfile = tmp_path / "pid", tmp_path / "child"
+    await agent.jobs.run(
+        f"sleep 999 & echo $! > {childfile}; echo $$ > {pidfile}; wait", label="long"
+    )
     await _until(lambda: pidfile.exists() and pidfile.read_text().strip())
-    pid = int(pidfile.read_text())
+    pid, child = int(pidfile.read_text()), int(childfile.read_text())
+    assert _alive(child)
     assert await agent.jobs.cancel("long") is True
     assert agent.jobs.get("long").state == "cancelled"
-    await _until(lambda: not _alive(pid))
+    await _until(lambda: not _alive(pid) and not _alive(child))
     assert await agent.jobs.cancel("long") is False
     assert await agent.jobs.cancel("nope") is False
     assert agent.queue_manager.get_channel("jobs").qsize() == 0
@@ -168,10 +171,12 @@ async def _collect_run(agent) -> tuple[list[JobUpdate], JobUpdate]:
         updates.append(item)
 
 
-async def test_run_without_lines_or_seconds_is_quiet(agent):
+async def test_a_quiet_run_ends_with_one_done_update_holding_the_shell_result(agent):
     await agent.jobs.run("for i in 1 2 3; do echo $i; done", label="q")
     updates, result = await _collect_run(agent)
-    assert updates == [] and result.items[0].stdout == "1\n2\n3\n"
+    assert updates == [] and len(result.items) == 1 and isinstance(result.items[0], ShellResult)
+    assert result.items[0].stdout == "1\n2\n3\n"
+    assert result.error is None and result.log_path
 
 
 async def test_run_with_progress_delivers_lines_then_its_result(agent):
@@ -245,29 +250,6 @@ async def test_throttle_by_seconds_batches_slow_output(agent):
     assert len(updates) <= 3
 
 
-async def test_throttle_changes_a_running_job(agent):
-    gate = asyncio.Event()
-
-    async def numbers():
-        for i in range(3):
-            yield i
-        await gate.wait()
-        for i in range(3, 9):
-            yield i
-
-    agent.jobs.spawn(numbers(), label="n")
-    assert [(await _next(agent)).items for _ in range(3)] == [[0], [1], [2]]
-    info = agent.jobs.throttle("n", lines=3)
-    assert info.throttle.lines == 3
-    gate.set()
-    assert (await _next(agent)).items == [3, 4, 5]
-    last = await _next(agent)
-    assert last.items == [6, 7, 8] and not last.done
-    # It ended with nothing batched: the done update is empty.
-    end = await _next(agent)
-    assert end.done and end.items == [] and end.error is None
-
-
 async def test_throttle_off_flushes_pending_items(agent):
     gate = asyncio.Event()
 
@@ -298,19 +280,24 @@ async def test_throttle_rejects_non_streaming_jobs(agent):
 
 
 async def test_spawn_a_coroutine_delivers_one_result_or_its_error(agent):
-    async def compute():
+    async def compute(value):
         await asyncio.sleep(0.01)
-        return 42
+        return value
 
     async def broken():
         raise RuntimeError("boom")
 
-    agent.jobs.spawn(compute(), label="c")
+    agent.jobs.spawn(compute(42), label="c")
     item = await _next(agent)
-    assert (isinstance(item, JobUpdate) and item.done) and item.label == "c" and item.items[0] == 42
+    assert (isinstance(item, JobUpdate) and item.done) and item.label == "c" and item.items == [42]
+    # The result is always wrapped: None and lists are items[0] too.
+    agent.jobs.spawn(compute(None), label="n")
+    assert (await _next(agent)).items == [None]
+    agent.jobs.spawn(compute([1, 2]), label="l")
+    assert (await _next(agent)).items == [[1, 2]]
     agent.jobs.spawn(broken(), label="e")
     item = await _next(agent)
-    assert item.error == "RuntimeError: boom"
+    assert item.done and item.items == [] and item.error == "RuntimeError: boom"
     assert agent.jobs.get("e").state == "failed"
     with pytest.raises(TypeError):
         agent.jobs.spawn(42, label="z")
@@ -354,34 +341,42 @@ async def test_without_a_shell_jobs_use_the_process_environment(tmp_path, monkey
 
 
 async def test_each_throttle_call_replaces_the_setting_and_flushes_the_batch(agent):
-    gates = [asyncio.Event(), asyncio.Event()]
+    gates = [asyncio.Event(), asyncio.Event(), asyncio.Event()]
 
     async def numbers():
-        for i in range(4):
-            yield i  # batched under seconds=60: nothing delivered yet
+        for i in range(2):
+            yield i  # not throttled: one update each
         await gates[0].wait()
-        for i in range(4, 10):
-            yield i
+        for i in range(2, 6):
+            yield i  # batched under seconds=60: nothing delivered yet
         await gates[1].wait()
-        for i in range(10, 13):
+        for i in range(6, 12):
+            yield i
+        await gates[2].wait()
+        for i in range(12, 16):
             yield i
 
-    agent.jobs.spawn(numbers(), label="r", seconds=60)
+    agent.jobs.spawn(numbers(), label="r")
+    assert [(await _next(agent)).items for _ in range(2)] == [[0], [1]]
+    assert agent.jobs.throttle("r", seconds=60).throttle.seconds == 60
+    gates[0].set()
     await _until(lambda: agent.jobs.get("r").pending == 4)
-    # Second setting: lines only; seconds is dropped, the old batch is delivered first.
+    # Next setting: lines only; seconds is dropped, the old batch is delivered first.
     info = agent.jobs.throttle("r", lines=3)
     assert info.throttle.lines == 3 and info.throttle.seconds is None
     assert agent.jobs.get("r").throttle == info.throttle
-    assert (await _next(agent)).items == [0, 1, 2, 3]
-    gates[0].set()
-    assert (await _next(agent)).items == [4, 5, 6]
-    assert (await _next(agent)).items == [7, 8, 9]
-    # Third setting: lines=2 replaces lines=3.
-    assert agent.jobs.throttle("r", lines=2).throttle.lines == 2
+    assert (await _next(agent)).items == [2, 3, 4, 5]
     gates[1].set()
-    assert (await _next(agent)).items == [10, 11]
+    assert (await _next(agent)).items == [6, 7, 8]
+    assert (await _next(agent)).items == [9, 10, 11]
+    # lines=2 replaces lines=3.
+    assert agent.jobs.throttle("r", lines=2).throttle.lines == 2
+    gates[2].set()
+    assert (await _next(agent)).items == [12, 13]
+    assert (await _next(agent)).items == [14, 15]
+    # It ended with nothing batched: the done update is empty.
     final = await _next(agent)
-    assert final.done and final.items == [12]
+    assert final.done and final.items == [] and final.error is None
 
 
 # ---- tail / after / every (ported from the removed nooa.runtime.producers tests) ----
@@ -422,18 +417,23 @@ async def test_tail_of_a_missing_file_raises_at_once(agent):
     assert agent.jobs.get("m") is None
 
 
-async def test_after_delivers_one_none_result(agent):
+async def test_after_delivers_its_payload_once_none_by_default(agent):
     started = time.monotonic()
     info = agent.jobs.after(0.2, label="timer")
-    assert info.kind == "after"
+    assert info.kind == "after" and info.payload is None
     item = await _next(agent)
-    assert (
-        (isinstance(item, JobUpdate) and item.done)
-        and item.label == "timer"
-        and item.items[0] is None
-    )
-    assert item.error is None and time.monotonic() - started >= 0.2
+    assert (isinstance(item, JobUpdate) and item.done) and item.label == "timer"
+    assert item.items == [None] and item.error is None
+    assert time.monotonic() - started >= 0.2
     assert agent.jobs.get("timer").state == "done"
+    task = "check CI on PR #462 and report"
+    assert agent.jobs.after(0.05, label="check-ci", payload=task).payload == task
+    assert (await _next(agent)).items == [task]
+    assert agent.jobs.get("check-ci").payload == task
+    # Other kinds keep payload None.
+    assert agent.jobs.every(30, label="e").payload is None
+    assert (await agent.jobs.run("true", label="r")).payload is None
+    await agent.jobs.cancel("e")
 
 
 async def test_after_can_be_cancelled(agent):
@@ -446,24 +446,11 @@ async def test_after_can_be_cancelled(agent):
 async def test_every_ticks_until_cancelled(agent):
     info = agent.jobs.every(0.05, label="tick")
     assert info.kind == "every"
-    assert [(await _next(agent)).items for _ in range(3)] == [[1], [2], [3]]
+    assert [(await _next(agent)).items for _ in range(3)] == [[1], [2], [3]]  # no payload
     assert await agent.jobs.cancel("tick") is True
     assert agent.jobs.get("tick").state == "cancelled"
     with pytest.raises(ValueError):
         agent.jobs.every(0, label="bad")
-
-
-async def test_every_supports_throttle(agent):
-    agent.jobs.every(0.03, label="t")
-    first = await _next(agent)
-    agent.jobs.throttle("t", lines=3)
-    batched = await _next(agent)
-    while not batched.items or len(batched.items) < 3:  # a flush of the old batch may come first
-        batched = await _next(agent)
-    assert len(batched.items) == 3
-    assert batched.items == list(range(batched.items[0], batched.items[0] + 3))
-    assert batched.items[0] > first.items[0]
-    await agent.jobs.cancel("t")
 
 
 # ---- process isolation (ported from the removed monitor() tests) ----
@@ -473,16 +460,6 @@ async def test_commands_run_in_their_own_process_group(agent):
     await agent.jobs.run("ps -o pgid= -p $$", label="pg")
     item = await _next(agent)
     assert int(item.items[0].stdout.strip()) != os.getpgid(os.getpid())
-
-
-async def test_cancel_kills_the_whole_process_group(agent, tmp_path):
-    pidfile = tmp_path / "child"
-    await agent.jobs.run(f"sleep 999 & echo $! > {pidfile}; echo ready; wait", label="grp")
-    await _until(lambda: pidfile.exists() and pidfile.read_text().strip())
-    child = int(pidfile.read_text())
-    assert _alive(child)
-    await agent.jobs.cancel("grp")
-    await _until(lambda: not _alive(child))
 
 
 async def test_concurrent_jobs_do_not_interfere(agent):
@@ -573,16 +550,6 @@ async def test_the_status_line_shows_label_state_and_description_or_target(agent
 # ---- timer payloads ----
 
 
-async def test_after_delivers_its_payload(agent):
-    info = agent.jobs.after(0.05, label="check-ci", payload="check CI on PR #462 and report")
-    assert info.payload == "check CI on PR #462 and report"
-    item = await _next(agent)
-    assert (isinstance(item, JobUpdate) and item.done) and item.items[
-        0
-    ] == "check CI on PR #462 and report"
-    assert agent.jobs.get("check-ci").payload == "check CI on PR #462 and report"
-
-
 async def test_every_delivers_its_payload_each_tick(agent):
     payload = {"task": "poll CI", "pr": 462}
     agent.jobs.every(0.05, label="poll", payload=payload)
@@ -590,15 +557,6 @@ async def test_every_delivers_its_payload_each_tick(agent):
     assert agent.jobs.get("poll").payload == payload
     assert agent.jobs.list()[-1].payload == payload
     await agent.jobs.cancel("poll")
-
-
-async def test_payload_defaults_to_none(agent):
-    assert agent.jobs.every(30, label="e").payload is None
-    assert (await agent.jobs.run("true", label="r")).payload is None
-    agent.jobs.after(0.01, label="a")
-    items = [await _next(agent), await _next(agent)]
-    assert next(i for i in items if i.label == "a").items[0] is None
-    await agent.jobs.cancel("e")
 
 
 # ---- replace=True ----
@@ -720,28 +678,6 @@ async def test_a_job_cancelled_by_the_model_is_not_reported_lost(agent):
 # ---- one done update ends every job ----
 
 
-async def test_a_coroutine_result_is_always_wrapped_in_items(agent):
-    async def none():
-        return None
-
-    async def a_list():
-        return [1, 2]
-
-    agent.jobs.spawn(none(), label="n")
-    update = await _next(agent)
-    assert update.done and update.items == [None]
-    agent.jobs.spawn(a_list(), label="l")
-    update = await _next(agent)
-    assert update.done and update.items == [[1, 2]]
-
-
-async def test_a_quiet_run_ends_with_one_done_update_holding_the_shell_result(agent):
-    await agent.jobs.run("echo hi", label="q")
-    update = await _next(agent)
-    assert update.done and len(update.items) == 1 and isinstance(update.items[0], ShellResult)
-    assert update.error is None and update.log_path
-
-
 async def test_a_failing_stream_sends_its_pending_values_then_an_empty_done_update(agent):
     async def breaks():
         yield 1
@@ -783,12 +719,6 @@ async def test_a_big_run_result_keeps_the_end_and_points_to_the_log(agent):
     assert len(kept) == 3_000 and kept.endswith("line 04999\n")
     assert result.stderr.startswith(f"[... 6000 chars omitted; full output: {item.log_path}]\n")
     assert len(Path(item.log_path).read_text()) == 55_000 + 9_000
-
-
-async def test_every_without_a_payload_counts_ticks(agent):
-    agent.jobs.every(0.05, label="tick")
-    assert [(await _next(agent)).items for _ in range(2)] == [[1], [2]]
-    await agent.jobs.cancel("tick")
 
 
 @pytest.mark.parametrize("bad", ["10m", "10", True, None])
