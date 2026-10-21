@@ -12,6 +12,8 @@ import sys
 
 import click
 
+from . import _connect_view as view
+
 
 def environment_names(defaults=()):
     """Suggest variable names, including conventional names not yet exported."""
@@ -45,15 +47,18 @@ def prompt(
     if not sys.stdin.isatty():
         if labels:
             for value, label in labels.items():
-                click.echo(f"  {value}: {label}")
+                view.fields([(value, label)])
         while True:
+            label = text
+            if show_default and default is not None and not hide_input:
+                label += f" [{default}]"
             value = click.prompt(
-                text, default=default, hide_input=hide_input, show_default=show_default
+                view.prompt_text(label), default=default, hide_input=hide_input, show_default=False
             )
             if not choices or value in choices:
                 return value
             # Click.Choice includes every model ID in its prompt and error.
-            click.echo(
+            view.note(
                 "Choose an available value; check the spelling of the model or provider name.",
                 err=True,
             )
@@ -187,7 +192,11 @@ def prompt(
 def confirm(text, *, default):
     """Keep approval explicit; completion never submits an answer."""
     if not sys.stdin.isatty():
-        return click.confirm(text, default=default)
+        return click.confirm(
+            view.prompt_text(text + (" [Y/n]" if default else " [y/N]")),
+            default=default,
+            show_default=False,
+        )
     value = prompt(
         text + (" [Y/n]" if default else " [y/N]"),
         default="",
@@ -202,7 +211,7 @@ def edit_model_details(model):
     from copy import deepcopy
 
     edited = deepcopy(model)
-    click.echo(
+    view.note(
         "Edit the settings below. Enter keeps a suggestion; - leaves it unknown. Ctrl-C cancels setup."
     )
 
@@ -213,7 +222,7 @@ def edit_model_details(model):
                 return None
             if value.isascii() and value.isdecimal() and int(value) > 0:
                 return int(value)
-            click.echo("Enter a positive whole number, or - for unknown.", err=True)
+            view.note("Enter a positive whole number, or - for unknown.", err=True)
 
     edited["context_length"] = count("Context window (tokens)", model.get("context_length"))
     edited["top_provider"] = dict(model.get("top_provider") or {})
@@ -230,7 +239,7 @@ def edit_model_details(model):
         levels = [] if value.strip() == "-" else [v.strip() for v in value.split(",")]
         if all(levels) and len(set(levels)) == len(levels):
             break
-        click.echo("Enter distinct level names separated by commas, or - for unknown.", err=True)
+        view.note("Enter distinct level names separated by commas, or - for unknown.", err=True)
     reasoning["supported_efforts"] = levels
     reasoning["default_effort"] = None
     if levels:
@@ -253,8 +262,8 @@ def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="
     never inferred from context window — offered as an explicit "Model
     maximum" choice so picking exactly that value never requires --custom.
     """
-    click.echo("\n  Room for each reply, including thinking and the final answer.")
-    click.echo("  Choose a smaller limit for short replies, or leave more room for thinking.\n")
+    view.note("\n  Room for each reply, including thinking and the final answer.")
+    view.note("  Choose a smaller limit for short replies, or leave more room for thinking.\n")
     origin = {
         "connect_default": "NOOA default",
         "catalogue_recommendation": "catalogue recommendation",
@@ -292,14 +301,14 @@ def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="
     if selected != "custom":
         return {**smaller, **larger, **maximum}.get(selected, suggested)
     if ceiling is not None:
-        click.echo(f"  Known upper limit: {ceiling:,} tokens.")
+        view.note(f"  Known upper limit: {ceiling:,} tokens.")
     while True:
         value = prompt("Maximum tokens per reply", default=str(suggested))
         if value.isascii() and value.isdecimal() and int(value) > 0:
             cap = int(value)
             if ceiling is None or cap <= ceiling:
                 return cap
-        click.echo(
+        view.note(
             f"Enter a positive whole number{f' at most {ceiling:,}' if ceiling else ''}.", err=True
         )
 
@@ -350,7 +359,7 @@ def choose_media_inputs(current=()):
         try:
             return parse_media_inputs(value)
         except ValueError as exc:
-            click.echo(str(exc), err=True)
+            view.note(str(exc), err=True)
 
 
 def choice_label(value):
@@ -370,30 +379,83 @@ def choice_label(value):
 def labelled_choice(message, options, *, default):
     """Show every action immediately; retain numeric and token answers for pipes."""
     if not sys.stdin.isatty():
-        click.echo(message)
+        view.section(message)
         answers = {}
-        for number, (value, label) in enumerate(options, 1):
-            click.echo(f"  {number} ({value}): {label}")
+        view.fields(
+            [(f"{number} ({value})", label) for number, (value, label) in enumerate(options, 1)]
+        )
+        for number, (value, _label) in enumerate(options, 1):
             answers[str(number)] = answers[value] = value
         default_number = str(next(i for i, (value, _) in enumerate(options, 1) if value == default))
         hint = " or ".join(f"{i} ({value})" for i, (value, _) in enumerate(options, 1))
         while True:
-            value = click.prompt("Choice", default=default_number).strip().lower()
+            value = (
+                click.prompt(
+                    view.prompt_text(f"Choice [{default_number}]"),
+                    default=default_number,
+                    show_default=False,
+                )
+                .strip()
+                .lower()
+            )
             if value in answers:
                 return answers[value]
-            click.echo(f"Enter {hint}.", err=True)
+            view.note(f"Enter {hint}.", err=True)
 
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.output import ColorDepth
     from prompt_toolkit.shortcuts.choice_input import ChoiceInput
     from prompt_toolkit.styles import Style
 
+    class ConnectChoiceInput(ChoiceInput):
+        def _create_application(self):
+            app = super()._create_application()
+            if "NO_COLOR" in os.environ:
+                app._color_depth = ColorDepth.DEPTH_1_BIT
+            return app
+
+    def menu_toolbar(help_open):
+        text = (
+            "F1 Close help\nSkip tests: restart with --no-probe\nManual setup: docs/model-configuration.md\nAgent workflow: nooa-connect\n↑↓ Choose · Enter Continue · Ctrl-C Cancel"
+            if help_open
+            else "↑↓ Choose · Enter Continue\nCtrl-C Cancel · F1 Help"
+        )
+        width = max(8, view.shutil.get_terminal_size((80, 24)).columns - 2)
+        return "\n".join(
+            part
+            for line in text.splitlines()
+            for part in view.textwrap.wrap(line, width=width, break_on_hyphens=False)
+        )
+
+    help_open = False
+    bindings = KeyBindings()
+
+    @bindings.add("f1")
+    def toggle_help(event):
+        nonlocal help_open
+        help_open = not help_open
+        chooser.bottom_toolbar = menu_toolbar(help_open)
+        event.app.invalidate()
+
     try:
-        chooser = ChoiceInput(
-            message=message,
+        chooser = ConnectChoiceInput(
+            message=FormattedText([("class:prompt", message)]),
             options=((None, "Choose an option…"), *options) if default is None else options,
             default=default,
             show_frame=True,
-            bottom_toolbar=" ↑↓ Choose   Enter Continue   Ctrl-C Cancel",
-            style=Style.from_dict({}) if "NO_COLOR" in os.environ else None,
+            bottom_toolbar=menu_toolbar(False),
+            key_bindings=bindings,
+            style=Style.from_dict({})
+            if "NO_COLOR" in os.environ
+            else Style.from_dict(
+                {
+                    "prompt": "ansicyan bold",
+                    "selected-option": "ansicyan bold",
+                    "frame.border": "ansibrightblack",
+                    "bottom-toolbar": "noreverse",
+                }
+            ),
         )
         while True:
             value = chooser.prompt()
@@ -429,7 +491,7 @@ def choose_media_mode(*, editing=False):
 
 def choose_decision_images(current=()):
     """Human actions with unchanged image setup tokens and Enter defaults."""
-    click.echo("Image tests use a generated sample.")
+    view.note("Image tests use a generated sample.")
     options = (("keep", "Keep current image settings"),) if current else ()
     return labelled_choice(
         "Should this decision model receive images?",

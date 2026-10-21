@@ -146,7 +146,7 @@ def test_server_decision_type_suggests_systemone_but_keeps_user_choice(
     monkeypatch.setattr(prompts, "prompt", choose)
     assert select_request_interface(state)
     assert state.api_style == (None if answer == "discover" else answer)
-    assert "Model type: decision" in capsys.readouterr().out
+    assert "Model type: Decision" in " ".join(capsys.readouterr().out.split())
 
 
 def test_litellm_detection_and_decision_type_shown_before_interface(monkeypatch, capsys):
@@ -190,7 +190,7 @@ def test_litellm_detection_and_decision_type_shown_before_interface(monkeypatch,
     )
 
     def choose(message, **options):
-        assert "Server: LiteLLM 1.105.1" in capsys.readouterr().out
+        assert "Server: LiteLLM 1.105.1" in " ".join(capsys.readouterr().out.split())
         assert options["default"] == "systemone"
         return "systemone"
 

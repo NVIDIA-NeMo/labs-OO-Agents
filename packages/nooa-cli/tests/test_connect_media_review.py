@@ -101,8 +101,10 @@ def test_pipe_menu_labels_and_compatible_answers(answer, expected, current):
     assert result.exit_code == 0, result.output
     assert selected == [expected]
     assert "How would you like to continue?" in result.output
-    assert "1 (keep): Continue with " + (", ".join(current) or "text only") in result.output
-    assert "2 (manual): Choose media inputs manually" in result.output
+    assert "1 (keep): Continue with " + (", ".join(current) or "text only") in " ".join(
+        result.output.split()
+    )
+    assert "2 (manual): Choose media inputs manually" in " ".join(result.output.split())
 
 
 def review_state(path, current, *, yes=False):
@@ -267,8 +269,8 @@ def test_initial_pipe_menu_defaults_and_compatible_answers(editing, answer, expe
     assert result.exit_code == 0, result.output
     assert selected == [expected or ("manual" if editing else "test")]
     assert "How would you like to configure media inputs?" in result.output
-    assert "1 (test): Test all media inputs (generated samples)" in result.output
-    assert "2 (manual): Choose media inputs manually" in result.output
+    assert "1 (test): Test all media inputs (generated samples)" in " ".join(result.output.split())
+    assert "2 (manual): Choose media inputs manually" in " ".join(result.output.split())
     assert f"Choice [{2 if editing else 1}]" in result.output
 
 
@@ -537,7 +539,7 @@ def test_listed_media_pipe_order_and_default(monkeypatch, answer, action):
 
     result = CliRunner().invoke(choose, input=answer)
     assert result.exit_code == 0, result.output
-    assert "1 (test): Enable listed inputs with test" in result.output
+    assert "1 (test): Enable listed inputs with test" in " ".join(result.output.split())
     assert state.test_media_inputs == (["image"] if action == "test" else None)
     assert (
         state.media_inputs

@@ -347,7 +347,7 @@ def run_stage(
             except ValueError as exc:
                 raise click.UsageError(str(exc)) from None
             if document.get("ok") is False:
-                click.echo("Warning: saving a configuration whose checks did not pass.", err=True)
+                view.warning("Warning: saving a configuration whose checks did not pass.", err=True)
             path = Path(output)
             existing = {}
             if path.exists():
@@ -356,14 +356,14 @@ def run_stage(
             if alias in (existing.get("models") or {}):
                 if not yes:
                     raise click.UsageError("Alias exists; --yes explicitly permits replacement")
-                click.echo(f"Warning: replacing alias {alias!r} in {path}.", err=True)
+                view.warning(f"Warning: replacing alias {alias!r} in {path}.", err=True)
             connect.write(entry, path, alias=alias)
             data = {"alias": alias, "path": str(path), "entry": entry}
             from ._connect_registry import shadowing_source
 
             if shadow := shadowing_source(alias, path, extra_priority=bool(working_dir)):
                 data["shadowed_by"] = shadow
-                click.echo(f"Warning: alias is still resolved from {shadow}.", err=True)
+                view.warning(f"Warning: alias is still resolved from {shadow}.", err=True)
             ok = True
         elif stage == "model-info":
             if not endpoint or not model:

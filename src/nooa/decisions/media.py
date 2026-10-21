@@ -96,7 +96,7 @@ def decision_media_inputs(value: object) -> tuple[MediaInput, ...]:
     permissions = validate_media_inputs(value)
     if any(kind != "image" for kind in permissions):
         raise ValueError(
-            "Decision models accept images only. Use media_inputs: [image], or choose a chat model for audio, video or PDFs."
+            "The NOOA decision client currently supports image attachments only. Use media_inputs: [image], or choose a chat model for audio, video or PDFs."
         )
     return permissions
 

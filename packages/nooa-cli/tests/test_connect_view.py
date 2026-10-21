@@ -74,7 +74,7 @@ def test_model_details_show_published_limits_separately_from_setup_cap():
     assert "Model reply maximum" in result.output
     assert "Published output default" not in result.output
     assert "API discovery reply limit" in result.output
-    assert "Model details from OpenRouter" in result.output
+    assert "Source: OpenRouter" in " ".join(result.output.split())
     assert "not proof" not in result.output
 
 
@@ -142,7 +142,7 @@ def test_reply_ceiling_and_boolean_reasoning_metadata_are_explained():
     assert "Choose a smaller reply limit" in result.output
     assert "Thinking on/off" in result.output
     assert "Thinking on" in result.output
-    assert "Your edited settings" in result.output
+    assert "Source: Your edits" in " ".join(result.output.split())
 
 
 def test_progress_reports_evidence_and_skips_without_payloads(monkeypatch):
@@ -943,11 +943,11 @@ def test_effective_image_settings_evidence_matrix_is_immutable(
 
     result = CliRunner().invoke(command)
     assert result.exit_code == 0, result.output
-    assert result.output.splitlines()[0].strip() == "Images: " + expected
+    assert " ".join(result.output.splitlines()[0].split()) == "Images: " + expected
     assert len(result.output.splitlines()) == (1 if decision else 4)
     if not decision:
         for label in ("Audio", "Video", "PDFs"):
-            assert label + ": off" in result.output
+            assert label + ": off" in " ".join(result.output.split())
     for jargon in (
         "not_probed",
         "inconclusive",
@@ -1025,11 +1025,13 @@ def test_model_details_attribute_actual_limit_source(source, label, edited):
     assert "4,096 tokens" in result.output
     assert (" · " + label in result.output) is (not edited)
     if edited:
-        assert "Your edited settings" in result.output and "OpenRouter" not in result.output
-    else:
         assert (
-            "Model details from " + ("OpenRouter" if source == "catalogue" else "your server")
-            in result.output
+            "Source: Your edits" in " ".join(result.output.split())
+            and "OpenRouter" not in result.output
+        )
+    else:
+        assert "Source: " + ("OpenRouter" if source == "catalogue" else "This server") in " ".join(
+            result.output.split()
         )
     for absent in (
         "Model reply maximum",

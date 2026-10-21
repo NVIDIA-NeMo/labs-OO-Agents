@@ -31,9 +31,7 @@ def metadata(modalities):
 def test_missing_and_unknown_are_manual(value):
     result = connect.advertised_media_suggestions(value)
     assert result["advertised"] == result["suggested"] == []
-    assert result["notes"] == [
-        "Media support isn't listed. You can test inputs or choose them yourself."
-    ]
+    assert result["notes"] == ["No media is listed."]
     assert result["permissions_changed"] is False
 
 

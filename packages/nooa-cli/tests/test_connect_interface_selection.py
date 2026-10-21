@@ -292,7 +292,9 @@ def test_decision_media_has_clear_no_transport_error(monkeypatch, tmp_path, flag
         input="test\n",
     )
     assert result.exit_code == 2, result.output
-    assert "accept images only. Use media_inputs: [image]" in result.output
+    assert "currently supports image attachments only. Use media_inputs: [image]" in " ".join(
+        result.output.split()
+    )
     assert not path.exists()
 
 
@@ -530,7 +532,9 @@ def test_known_decision_missing_model_media_rejected_before_listing(
         input="test\n",
     )
     assert result.exit_code == 2, result.output
-    assert "accept images only. Use media_inputs: [image]" in result.output
+    assert "currently supports image attachments only. Use media_inputs: [image]" in " ".join(
+        result.output.split()
+    )
 
 
 @pytest.mark.parametrize("flag", ["--media-inputs", "--test-media-inputs"])
@@ -572,7 +576,9 @@ def test_discover_selected_decision_media_rejected_after_routing_only(monkeypatc
         input="exact/model\ndiscover\ntest\ncancel\n",
     )
     assert result.exit_code == 2, result.output
-    assert "accept images only. Use media_inputs: [image]" in result.output
+    assert "currently supports image attachments only. Use media_inputs: [image]" in " ".join(
+        result.output.split()
+    )
     assert len(requests) == 5
     assert requests[0].method == "GET"
     assert not path.exists()

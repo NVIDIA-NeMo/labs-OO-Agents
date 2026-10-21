@@ -130,9 +130,9 @@ def test_provider_model_interface_order_and_listing_headers_before_choice(
         input=answers,
     )
     assert result.exit_code == 0, result.output
-    assert reviews and result.output.index("Selected model: exact-model") < result.output.index(
-        "Request interface"
-    ) < result.output.index("Proposed configuration")
+    assert reviews and " ".join(result.output.split()).index("Model: exact-model") < " ".join(
+        result.output.split()
+    ).index("Request interface") < result.output.index("Proposed configuration")
     assert yaml.safe_load(local.read_text())["models"]["local"]["api_style"] == style
     assert "approved-work-key" not in result.output + local.read_text()
     assert sum(

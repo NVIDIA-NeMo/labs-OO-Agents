@@ -129,7 +129,7 @@ def test_wizard_unknown_id_never_assumes_hub_mapping(monkeypatch, capsys):
     current = state()
     assert wizard.prepare_metadata(current)
     assert current.candidate is None
-    assert "No OpenRouter details found for this model" in capsys.readouterr().out
+    assert "No details listed" in capsys.readouterr().out
     assert current.media_hints == {}
     assert not current.no_catalogue
 
@@ -180,8 +180,9 @@ def test_wizard_unknown_offers_explicit_choice_or_continue(monkeypatch, capsys):
         assert wizard.prepare_metadata(current)
         assert (current.candidate is not None) == bool(choice)
     out = capsys.readouterr().out
-    assert "No OpenRouter details found for this model" in out
-    assert "--catalogue-model" in out and "--no-catalogue" in out
+    assert "No details listed" in out
+    assert "No media is listed." in out
+    assert "Reading model details" not in out and "Looking up" not in out
 
 
 @pytest.mark.parametrize("mode", ["skip", "edit"])

@@ -662,7 +662,7 @@ def test_yaml_failure_names_file_and_line_without_echoing_contents(tmp_path):
     path.write_text("models: [\n  secret-value: }\n")
     result = CliRunner().invoke(command, [*args(path), "--yes"])
     assert result.exit_code == 1
-    assert str(path) in result.output
+    assert str(path) in result.output.replace("\n", "").replace("  ", "")
     assert "line 2" in result.output
     assert "secret-value" not in result.output
     assert "--show-diagnostics" in result.output
@@ -680,7 +680,7 @@ def test_write_failure_keeps_path_and_actionable_reason(tmp_path, monkeypatch):
     monkeypatch.setattr(connect, "write", denied)
     result = CliRunner().invoke(command, [*args(path), "--yes"])
     assert result.exit_code == 1
-    assert str(path) in result.output
+    assert str(path) in result.output.replace("\n", "").replace("  ", "")
     assert "Permission denied" in result.output
     assert "--show-diagnostics" in result.output
     assert "Agent diagnostic prompt" not in result.output
@@ -707,7 +707,7 @@ def test_existing_hand_written_alias_is_replaced_with_warning(tmp_path):
     assert result.exit_code == 0, result.output
     assert "Warning:" in result.output
     assert "local" in result.output
-    assert str(path) in result.output
+    assert str(path) in result.output.replace("\n", "").replace("  ", "")
     assert yaml.safe_load(path.read_text())["models"]["local"]["model_name"] == "openai/wire/model"
     assert path.read_text().startswith("# My models\n")
 
@@ -1187,9 +1187,7 @@ def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(
         assert "No catalogue match" not in result.output
     else:
         assert "context_window" not in entry
-        assert "No catalogue match; model limits and reasoning levels remain unknown." in (
-            result.output
-        )
+        assert "No details listed" in (result.output)
 
 
 def test_no_exact_catalogue_match_is_not_guessed_under_yes(
@@ -1206,7 +1204,7 @@ def test_no_exact_catalogue_match_is_not_guessed_under_yes(
     result = CliRunner().invoke(command, options)
     assert result.exit_code == 0, result.output
     assert "Model not found; did you mean" not in result.output
-    assert "No catalogue match; model limits and reasoning levels remain unknown." in result.output
+    assert "No details listed" in result.output
 
 
 @pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
@@ -1379,7 +1377,7 @@ def test_declining_initial_approval_makes_no_calls_or_writes(tmp_path, monkeypat
     result = CliRunner().invoke(command, [*flags, "--media-inputs", ""], input="save\nn\n")
     assert result.exit_code == 0, result.output
     assert "Would you like to test these settings?" in result.output
-    assert "1 (test): Test now" in result.output
+    assert "1 (test): Test now" in " ".join(result.output.split())
     assert "Approve setup" not in result.output
     assert not path.exists()
 

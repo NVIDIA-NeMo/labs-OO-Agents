@@ -85,7 +85,7 @@ def advertised_media_suggestions(
     advertised = [kind for kind in FORMATS if kind in advertised]
     notes = []
     if not evidence:
-        notes.append("Media support isn't listed. You can test inputs or choose them yourself.")
+        notes.append("No media is listed.")
     if any(isinstance(v, list) and "file" in v for v in evidence.values()):
         pdf_known = "capabilities.pdf_input.supported" in evidence or any(
             isinstance(v, list) and "pdf" in v for v in evidence.values()
@@ -103,7 +103,7 @@ def advertised_media_suggestions(
     for kind in advertised:
         if decision and kind != "image":
             unavailable[kind] = (
-                "Decision models can receive images only. Use a chat model for this input format."
+                "The NOOA decision client currently supports image attachments only. Use a chat model for this input format."
             )
         elif api_style in {"anthropic", "responses"} and kind in {"audio", "video"}:
             unavailable[kind] = (

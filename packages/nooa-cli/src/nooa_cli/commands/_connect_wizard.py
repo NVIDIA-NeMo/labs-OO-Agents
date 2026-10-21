@@ -64,6 +64,8 @@ class WizardState:
     levels: Any = None
     levels_file: Any = None
     metadata_prepared: bool = False
+    metadata_displayed: bool = False
+    public_details_status: str | None = None
     guided: bool = False
     guided_media_explicit: bool = False
     guided_media_revised: bool = False
@@ -227,7 +229,12 @@ def select_connection(state: WizardState) -> bool:
             state.api_key_env = state.editing.get("api_key_env", "")
         state.explicit_key_env = True
         state.no_catalogue = True
-        view.line(f"Editing {state.edit_model} from {source_path}. No model discovery is needed.")
+        view.line(
+            scrub_setup(
+                state,
+                f"Editing {state.edit_model} from {source_path}. No model discovery is needed.",
+            )
+        )
         # --working-dir only redirects entries() to the target's own file
         # when that file already exists (it cannot read a file that isn't
         # there yet) — otherwise this alias was found via the general
@@ -237,8 +244,11 @@ def select_connection(state: WizardState) -> bool:
         # elsewhere into a project that never had this alias.
         if state.working_dir and source_path.resolve() != state.path.resolve():
             view.line(
-                f"{state.path} does not define {state.edit_model!r} yet; copying it in from "
-                f"{source_path} rather than editing it in place there.",
+                scrub_setup(
+                    state,
+                    f"{state.path} does not define {state.edit_model!r} yet; copying it in from "
+                    f"{source_path} rather than editing it in place there.",
+                ),
                 fg="yellow",
             )
     state.data = {}
@@ -339,17 +349,26 @@ def select_connection(state: WizardState) -> bool:
             state.api_key_env = saved_names[0]
             announced = True
             if not state.api_key_env:
-                view.line("Using this endpoint without authentication, as saved.")
+                view.line(
+                    scrub_setup(state, "Using this endpoint without authentication, as saved.")
+                )
             elif os.environ.get(state.api_key_env):
-                view.line(f"Using saved key variable {state.api_key_env} for this endpoint.")
+                view.line(
+                    scrub_setup(
+                        state, f"Using saved key variable {state.api_key_env} for this endpoint."
+                    )
+                )
             else:
                 # credential_names only remembers which variable NAME this
                 # endpoint used last time, not whether a value is still set —
                 # saying "using" here when we're about to prompt for the same
                 # key again reads as broken, not reassuring.
                 view.line(
-                    f"This endpoint previously used key variable {state.api_key_env}, "
-                    "but it has no value set."
+                    scrub_setup(
+                        state,
+                        f"This endpoint previously used key variable {state.api_key_env}, "
+                        "but it has no value set.",
+                    )
                 )
         elif len(saved_names) > 1:
             if state.yes:
@@ -439,7 +458,7 @@ def select_connection(state: WizardState) -> bool:
     if state.api_key and not asked and not announced:
         # A preset's variable is used silently otherwise; a stale key there
         # then looks like a broken provider.
-        view.line(f"Using the key in {state.api_key_env}.")
+        view.line(scrub_setup(state, f"Using the key in {state.api_key_env}."))
     return True
 
 
@@ -485,7 +504,7 @@ def select_model(state: WizardState) -> bool:
             raise click.UsageError("--no-metadata requires an exact MODEL")
         state.model = prompts.prompt("Exact model ID (metadata is disabled; Ctrl-C to cancel)")
     while not state.model:
-        click.echo("Connecting to the server and listing models...")
+        view.note(scrub_setup(state, "Connecting to the server and listing models..."))
         try:
             from ._connect_stages import listing_key
 
@@ -515,9 +534,14 @@ def select_model(state: WizardState) -> bool:
         except connect.DiscoveryError as exc:
             state.discovery_succeeded = False
             state.discovery_endpoint = state.endpoint
-            click.echo(f"Could not list models: {exc}", err=True)
+            view.note(scrub_setup(state, f"Could not list models: {exc}"), err=True)
             if exc.status_code in {401, 403}:
-                view.line("Model listing unavailable. Continue with an exact model ID or cancel.")
+                view.line(
+                    scrub_setup(
+                        state,
+                        "Model listing unavailable. Continue with an exact model ID or cancel.",
+                    )
+                )
             if state.yes:
                 raise click.ClickException(
                     "Authentication failed. Supply an exact MODEL or check the listing key."
@@ -534,7 +558,11 @@ def select_model(state: WizardState) -> bool:
             state.listing_api_base = found.api_base
             state.endpoint_models_url = found.models_url
             names = [item["id"] for item in found.models]
-            click.echo(f"Found {len(names)} models. Type part of a name, then Tab to select.")
+            view.note(
+                scrub_setup(
+                    state, f"Found {len(names)} models. Type part of a name, then Tab to select."
+                )
+            )
             state.model = prompts.prompt(
                 "Search available models (type to search; Tab to select)",
                 choices=names,
@@ -545,9 +573,10 @@ def select_model(state: WizardState) -> bool:
 
 def select_request_interface(state: WizardState) -> bool:
     """Choose after the selected model/metadata, before any inference consent."""
+    if not state.metadata_displayed:
+        show_model_metadata(state)
     if state.api_style or state.yes or state.editing is not None:
         return True
-    view.line(scrub_setup(state, f"Selected model: {state.model}"), bold=True)
     choices = ("discover", "chat", "responses", "anthropic", "systemone", "openai")
     # Use declared output type, not the model name, to suggest an interface.
     metadata = state.selected_endpoint_model or state.candidate or {}
@@ -558,17 +587,9 @@ def select_request_interface(state: WizardState) -> bool:
     decision_hint = decision_output or any(
         metadata.get(field) == "decision" for field in ("model_type", "client_type")
     )
-    if decision_hint:
-        view.line("Model type: decision")
     suggested = (
         "systemone" if decision_hint and "systemone" in state.interface_endpoints else "discover"
     )
-    hints = metadata.get("supported_interfaces")
-    if hints:
-        view.line(
-            "Server lists interfaces: "
-            + ", ".join(prompts.choice_label(s) for s in hints if s in choices)
-        )
     choice = prompts.prompt(
         "Request interface",
         choices=choices,
@@ -633,7 +654,7 @@ def check_interfaces(state: WizardState) -> bool:
     """Check interfaces; return False when the user cancels."""
     view.step(3, "Connection checks")
     if state.api_style == "responses":
-        view.line(connect.ENCRYPTED_REASONING_EXPLANATION, dim=True)
+        view.line(scrub_setup(state, connect.ENCRYPTED_REASONING_EXPLANATION), dim=True)
     if not state.api_style:
         available = ("chat", "responses", "anthropic", *state.interface_endpoints)
         if state.approval != "none":
@@ -695,9 +716,12 @@ def check_interfaces(state: WizardState) -> bool:
                     and all(r.get("timeout_kind") for r in failed_checks.values())
                 )
                 view.line(
-                    "Model listing succeeded, but model responses timed out; the route may be slow."
-                    if slow
-                    else "Connection check failed. Review the key, server URL and API format, then try again.",
+                    scrub_setup(
+                        state,
+                        "Model listing succeeded, but model responses timed out; the route may be slow."
+                        if slow
+                        else "Connection check failed. Review the key, server URL and API format, then try again.",
+                    ),
                     fg="yellow",
                 )
                 if state.show_diagnostics:
@@ -734,7 +758,10 @@ def check_interfaces(state: WizardState) -> bool:
                     )
                 else:
                     view.line(
-                        "For troubleshooting details, rerun with --show-diagnostics.", dim=True
+                        scrub_setup(
+                            state, "For troubleshooting details, rerun with --show-diagnostics."
+                        ),
+                        dim=True,
                     )
                 if state.yes:
                     raise click.ClickException(
@@ -743,10 +770,13 @@ def check_interfaces(state: WizardState) -> bool:
                 remaining = max(0, state.budget_tokens - state.interface_spent)
                 if remaining < state.output_tokens + 512:
                     view.line(
-                        "Check budget used up. Nothing was saved. Restart with a larger --budget-tokens value."
+                        scrub_setup(
+                            state,
+                            "Check budget used up. Nothing was saved. Restart with a larger --budget-tokens value.",
+                        )
                     )
                     return False
-                view.line("Change the connection settings and try again.")
+                view.line(scrub_setup(state, "Change the connection settings and try again."))
                 action = prompts.prompt(
                     "Next step",
                     choices=("key", "server", "retry", "longer", "cancel"),
@@ -760,7 +790,7 @@ def check_interfaces(state: WizardState) -> bool:
                     },
                 )
                 if action == "cancel":
-                    click.echo("Setup cancelled. Nothing was saved.")
+                    view.note(scrub_setup(state, "Setup cancelled. Nothing was saved."))
                     return False
                 if action == "longer":
                     retry_styles = (
@@ -793,7 +823,10 @@ def check_interfaces(state: WizardState) -> bool:
                         state.api_key = os.environ.get(source)
                         if not state.api_key:
                             view.line(
-                                "That variable is unset or empty. You can paste a temporary key instead."
+                                scrub_setup(
+                                    state,
+                                    "That variable is unset or empty. You can paste a temporary key instead.",
+                                )
                             )
                             state.api_key = prompts.prompt(
                                 "API key (used only for this setup)", hide_input=True
@@ -815,29 +848,45 @@ def check_interfaces(state: WizardState) -> bool:
                         state.endpoint_models = ()
                         state.discovery_endpoint = state.endpoint_models_url = None
                         view.line(
-                            "Server/model changed; previous metadata no longer applies. Explicit settings are retained."
+                            scrub_setup(
+                                state,
+                                "Server/model changed; previous metadata no longer applies. Explicit settings are retained.",
+                            )
                         )
-            click.echo(
-                "Working API formats: "
-                + ", ".join(prompts.choice_label(style) for style in available)
+            view.note(
+                scrub_setup(
+                    state,
+                    "Working API formats: "
+                    + ", ".join(prompts.choice_label(style) for style in available),
+                )
             )
-            click.echo(
-                "Accepted client types: " + ", ".join(state.interfaces.accepted_client_types)
+            view.note(
+                scrub_setup(
+                    state,
+                    "Accepted client types: " + ", ".join(state.interfaces.accepted_client_types),
+                )
             )
             observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
-            click.echo(
-                "API formats that returned reasoning: "
-                + (
-                    ", ".join(prompts.choice_label(style) for style in observed)
-                    if observed
-                    else "none"
+            view.note(
+                scrub_setup(
+                    state,
+                    "API formats that returned reasoning: "
+                    + (
+                        ", ".join(prompts.choice_label(style) for style in observed)
+                        if observed
+                        else "none"
+                    ),
                 )
             )
         if state.interfaces and len(available) == 1:
             state.api_style = available[0]
-            click.echo(f"Using {prompts.choice_label(state.api_style)} for {state.model}.")
+            view.note(
+                scrub_setup(
+                    state, f"Using {prompts.choice_label(state.api_style)} for {state.model}."
+                )
+            )
         else:
-            click.echo(f"Choose the request interface for {state.model}:")
+            view.note(scrub_setup(state, f"Choose the request interface for {state.model}:"))
             state.api_style = prompts.prompt(
                 "API format",
                 choices=available,
@@ -845,7 +894,7 @@ def check_interfaces(state: WizardState) -> bool:
                 default=state.default_style if state.default_style in available else available[0],
             )
         if state.api_style == "responses":
-            view.line(connect.ENCRYPTED_REASONING_EXPLANATION, dim=True)
+            view.line(scrub_setup(state, connect.ENCRYPTED_REASONING_EXPLANATION), dim=True)
         if state.interfaces:
             selected = state.interfaces.results[state.api_style].entry
             selected_endpoint = selected.get("endpoint") or selected["api_base"]
@@ -872,7 +921,10 @@ def check_interfaces(state: WizardState) -> bool:
         )
     ):
         view.line(
-            "This decision interface can receive images only. The provisional media selection includes unsupported inputs; nothing will be silently dropped."
+            scrub_setup(
+                state,
+                "The NOOA decision client currently supports image attachments only. Review audio, video and PDF selections before continuing.",
+            )
         )
         action = prompts.labelled_choice(
             "Review media for the selected decision interface",
@@ -964,7 +1016,6 @@ def prepare_metadata(state: WizardState) -> bool:
             if state.endpoint == state.discovery_endpoint and state.discovery_succeeded is not False
             else None
         )
-        view.line("Reading model details from this server...")
         state.server_details = (
             connect.ModelDetails(state.model, {"id": state.model})
             if state.discovery_succeeded is False and state.endpoint == state.discovery_endpoint
@@ -983,16 +1034,6 @@ def prepare_metadata(state: WizardState) -> bool:
                 )
             )
         )
-        for record in state.server_details.records:
-            product = record.get("product") or {}
-            if product.get("title") == "LiteLLM API":
-                version = product.get("version")
-                view.line(
-                    scrub_setup(state, "Server: LiteLLM" + (" " + version if version else ""))
-                )
-                break
-        for notice in state.server_details.notices:
-            view.line(scrub_setup(state, notice), fg="yellow")
         if state.server_details.records:
             state.selected_endpoint_model = state.server_details.model
             if listing is None:
@@ -1009,13 +1050,10 @@ def prepare_metadata(state: WizardState) -> bool:
             listing_key(
                 state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
             )
-            click.echo("Looking up OpenRouter model details (metadata only)...")
             try:
                 models = public_models_for_setup(state)
             except (httpx.HTTPError, TimeoutError, ValueError, KeyError):
-                view.line(
-                    "Public model details unavailable; continuing with server details or manual settings."
-                )
+                state.public_details_status = "Unavailable"
                 models = []
             selected_id = state.catalogue_model or state.model
             matches = [item for item in models if item.get("id") == selected_id]
@@ -1024,10 +1062,6 @@ def prepare_metadata(state: WizardState) -> bool:
             if len(matches) == 1:
                 state.candidate = matches[0]
             else:
-                click.echo("No OpenRouter details found for this model")
-                click.echo(
-                    "Use --catalogue-model with an explicit OpenRouter ID, or continue without details (--no-catalogue)."
-                )
                 if not state.yes and models and not state.catalogue_model:
                     selected = prompts.prompt(
                         "Explicit OpenRouter match (blank continues without details)",
@@ -1050,6 +1084,7 @@ def prepare_metadata(state: WizardState) -> bool:
         )
         if state.media_hints.get("media_source") == "endpoint listing":
             state.media_hints["media_source"] = state.endpoint_models_url or "endpoint listing"
+        show_model_metadata(state)
         return True
     if state.editing is not None:
         state.candidate = {
@@ -1075,28 +1110,24 @@ def prepare_metadata(state: WizardState) -> bool:
             state.discovery_api_key = listing_key(
                 state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
             )
-        click.echo("Looking up public model information...")
         try:
             models = public_models_for_setup(state)
         except (httpx.HTTPError, TimeoutError, ValueError, KeyError):
-            click.echo(
-                "Public catalogue unavailable; continuing with server details or manual settings.",
-                err=True,
-            )
+            state.public_details_status = "Unavailable"
             models = []
         matches = (
             [item for item in models if item.get("id") == state.catalogue_model]
             if state.catalogue_model
             else [item for item in models if item.get("id") == state.model]
         )
-        if state.catalogue_model and not matches:
-            view.line(
-                "Requested OpenRouter model details unavailable; continuing with server details or manual settings."
-            )
         if len(matches) == 1:
             state.candidate = matches[0]
         elif matches:
-            click.echo("Possible catalogue models: " + ", ".join(item["id"] for item in matches))
+            view.note(
+                scrub_setup(
+                    state, "Possible catalogue models: " + ", ".join(item["id"] for item in matches)
+                )
+            )
             if state.yes:
                 raise click.ClickException(
                     "Ambiguous match: choose --catalogue-model or --no-catalogue."
@@ -1121,9 +1152,12 @@ def prepare_metadata(state: WizardState) -> bool:
                 else connect.fuzzy_match_models(state.model, models)
             )
             if fuzzy:
-                click.echo(
-                    "Model not found; did you mean one of these? "
-                    + ", ".join(item["id"] for item in fuzzy)
+                view.note(
+                    scrub_setup(
+                        state,
+                        "Model not found; did you mean one of these? "
+                        + ", ".join(item["id"] for item in fuzzy),
+                    )
                 )
                 selected = prompts.prompt(
                     "Catalogue model (blank leaves it unknown)",
@@ -1135,15 +1169,6 @@ def prepare_metadata(state: WizardState) -> bool:
                     state.candidate = next((item for item in fuzzy if item["id"] == selected), None)
                     if state.candidate is None:
                         raise click.ClickException("Choose one of the displayed model IDs.")
-            if state.candidate is None:
-                if state.selected_endpoint_model and len(state.selected_endpoint_model) > 1:
-                    click.echo(
-                        "No OpenRouter details found; continuing with model details from this server."
-                    )
-                else:
-                    click.echo(
-                        "No catalogue match; model limits and reasoning levels remain unknown."
-                    )
     if (
         state.candidate is not None
         and (
@@ -1189,7 +1214,114 @@ def prepare_metadata(state: WizardState) -> bool:
         )
         if combined.get("endpoint_limits"):
             state.candidate = combined
+    show_model_metadata(state)
     return True
+
+
+def show_model_metadata(state: WizardState):
+    """One selected-model summary, before interface/media choices and model calls."""
+    state.metadata_displayed = True
+    model = state.media_hints or state.candidate or state.selected_endpoint_model or {}
+    report = connect.advertised_media_suggestions(model)
+    endpoint = state.selected_endpoint_model or {}
+    view.section("Model details")
+    rows = [("Model", state.model)]
+    records = state.server_details.records if state.server_details else ()
+    server_facts = any(
+        record.get("schema") != "openrouter.fallback" and len(record.get("facts") or {}) > 1
+        for record in records
+    ) or any(key != "id" for key in endpoint)
+    if state.edited_settings:
+        rows.append(("Source", "Your edits"))
+    elif server_facts:
+        rows.append(("Source", "This server"))
+        if state.candidate and (
+            "catalogue" in (state.candidate.get("limit_sources") or {}).values()
+            or model.get("media_source") == connect.CATALOGUE_URL
+        ):
+            rows.append(("Additional details", "OpenRouter"))
+    elif (
+        report["advertised"]
+        and model.get("media_source") == connect.CATALOGUE_URL
+        or state.candidate
+        and any(
+            key not in {"id", "limit_sources", "media_source", "media_model_id"}
+            for key in state.candidate
+        )
+    ):
+        rows.append(("Source", "OpenRouter"))
+    else:
+        rows.append(
+            (
+                "Status",
+                "Details not requested"
+                if state.no_catalogue or state.no_metadata
+                else "No details listed",
+            )
+        )
+    if state.public_details_status:
+        rows.append(("OpenRouter", state.public_details_status))
+    for record in records:
+        product = record.get("product") or {}
+        if product.get("title") == "LiteLLM API":
+            rows.append(
+                ("Server", "LiteLLM" + (" " + product["version"] if product.get("version") else ""))
+            )
+            break
+    for key, label in (("display_name", "Name"), ("description", "Description")):
+        value = endpoint.get(key) or model.get(key)
+        if value:
+            rows.append((label, value))
+    outputs = (endpoint.get("architecture") or {}).get("output_modalities") or endpoint.get(
+        "output_modalities", []
+    )
+    if (isinstance(outputs, list) and "decisions" in outputs and "text" not in outputs) or any(
+        endpoint.get(field) == "decision" for field in ("model_type", "client_type")
+    ):
+        rows.append(("Model type", "Decision"))
+    interfaces = endpoint.get("supported_interfaces") or []
+    if interfaces:
+        rows.append(
+            ("Interfaces listed", ", ".join(prompts.choice_label(style) for style in interfaces))
+        )
+    report = connect.advertised_media_suggestions(model)
+    if report["advertised"]:
+        rows.append(
+            ("Media listed", ", ".join(view.media_label(kind) for kind in report["advertised"]))
+        )
+        source = model.get("media_source")
+        if source:
+            rows.append(
+                (
+                    "Media source",
+                    "OpenRouter"
+                    if source == connect.CATALOGUE_URL
+                    else "This server"
+                    if source == "endpoint listing" or source == state.endpoint_models_url
+                    else source,
+                )
+            )
+    if (
+        state.candidate
+        and state.api_style not in connect.DECISION_API_STYLES
+        and not any(value == "Decision" for key, value in rows if key == "Model type")
+    ):
+        rows.extend(
+            view.model_details(
+                state.candidate,
+                output_tokens=state.output_tokens,
+                edited=bool(state.edited_settings),
+                heading=False,
+                attribution=False,
+                render=False,
+            )
+        )
+    view.fields(scrub_setup(state, rows))
+    if not report["advertised"]:
+        view.note("No media is listed.")
+    if state.server_details:
+        for notice in state.server_details.notices:
+            view.warning(scrub_setup(state, notice))
 
 
 def configure_metadata(state: WizardState) -> bool:
@@ -1203,9 +1335,12 @@ def configure_metadata(state: WizardState) -> bool:
         state.candidate = prompts.edit_model_details(state.candidate)
     if state.candidate is not None:
         while True:
-            view.model_details(
-                state.candidate, output_tokens=state.output_tokens, edited=state.edited_settings
-            )
+            if state.edited_settings:
+                view.model_details(
+                    scrub_setup(state, state.candidate),
+                    output_tokens=state.output_tokens,
+                    edited=True,
+                )
             action = (
                 "use"
                 if state.yes
@@ -1223,16 +1358,19 @@ def configure_metadata(state: WizardState) -> bool:
                 )
             )
             if action == "cancel":
-                click.echo("Setup cancelled. Nothing saved.")
+                view.note(scrub_setup(state, "Setup cancelled. Nothing saved."))
                 return False
             if action == "skip":
                 if state.editing is not None:
-                    click.echo("Edits discarded. Nothing saved.")
+                    view.note(scrub_setup(state, "Edits discarded. Nothing saved."))
                     return False
                 state.candidate = None
                 state.edited_settings = False
-                click.echo(
-                    "Continuing without the published model settings. Explicit command-line settings still apply."
+                view.note(
+                    scrub_setup(
+                        state,
+                        "Continuing without the published model settings. Explicit command-line settings still apply.",
+                    )
                 )
                 break
             if action == "use":
@@ -1306,12 +1444,15 @@ def configure_media_inputs(state: WizardState) -> bool:
             and not state.yes
         ):
             view.line(
-                "TypeSafe multipart is selected, but experimental image opt-in is missing; image requests are blocked until you confirm it."
-                if state.decision_image_transport == "typesafe_multipart"
-                and not state.typesafe_danger_zone_images
-                else "Image testing isn't available with System One JSON. Use direct TypeSafe multipart with experimental image requests, or leave images off."
-                if state.decision_image_transport == "json"
-                else "TypeSafe multipart image requests require the explicit confirmations below."
+                scrub_setup(
+                    state,
+                    "TypeSafe multipart is selected, but experimental image opt-in is missing; image requests are blocked until you confirm it."
+                    if state.decision_image_transport == "typesafe_multipart"
+                    and not state.typesafe_danger_zone_images
+                    else "Image testing isn't available with System One JSON. Use direct TypeSafe multipart with experimental image requests, or leave images off."
+                    if state.decision_image_transport == "json"
+                    else "TypeSafe multipart image requests require the explicit confirmations below.",
+                )
             )
             if prompts.confirm("Use direct TypeSafe multipart for images?", default=False):
                 state.decision_image_transport = "typesafe_multipart"
@@ -1319,7 +1460,10 @@ def configure_media_inputs(state: WizardState) -> bool:
                     "Opt into experimental TypeSafe image requests?", default=False
                 )
         view.line(
-            "Decision models can receive images only. Audio, video and PDF inputs are not available."
+            scrub_setup(
+                state,
+                "The NOOA decision client currently supports image attachments only. Use Chat for audio, video or PDFs.",
+            )
         )
         return True
     if state.media_inputs is not None:
@@ -1367,7 +1511,7 @@ def configure_media_inputs(state: WizardState) -> bool:
         state.inherit_media_inputs = True
         state.media_inputs = list(previous)
         if not state.guided:
-            view.line("Media tests: " + ", ".join(state.test_media_inputs))
+            view.line(scrub_setup(state, "Media tests: " + ", ".join(state.test_media_inputs)))
     else:
         state.inherit_media_inputs = bool(state.yes)
         state.media_inputs = list(previous) if state.yes else prompts.choose_media_inputs(previous)
@@ -1526,8 +1670,11 @@ def configure_checks(state: WizardState) -> bool:
         and state.api_style not in connect.DECISION_API_STYLES
         and "context_window" not in state.proposal.entry
     ):
-        click.echo(
-            "Context limit unknown; NOOA will use its default. Set --context-window if you know the server limit."
+        view.note(
+            scrub_setup(
+                state,
+                "Context limit unknown; NOOA will use its default. Set --context-window if you know the server limit.",
+            )
         )
     state.configured = connect.configure_entry(
         state.proposal.entry, reply_tokens=state.reply_tokens
@@ -1536,7 +1683,7 @@ def configure_checks(state: WizardState) -> bool:
         state.proposal = connect.refresh_plan(replace(state.proposal, entry=state.configured))
         state.remaining_estimate = state.proposal.token_estimate
         if not state.guided:
-            view.line("Decision calls have no reply limit.")
+            view.line(scrub_setup(state, "Decision calls have no reply limit."))
         return True
     if state.reply_tokens is None and not state.yes and not state.guided:
         output_ceiling = (
@@ -1569,11 +1716,17 @@ def configure_checks(state: WizardState) -> bool:
     state.remaining_estimate = state.proposal.token_estimate
     if not state.guided:
         view.line(
-            f"Saved reply limit: {state.configured['max_tokens']:,} tokens, shared by reasoning and the answer."
+            scrub_setup(
+                state,
+                f"Saved reply limit: {state.configured['max_tokens']:,} tokens, shared by reasoning and the answer.",
+            )
         )
     for label, limit in state.configured["provenance"].get("level_reply_limits", {}).items():
         view.line(
-            f"Reasoning level {label}: reply limit raised to {limit['value']:,} tokens to leave room for its thinking budget.",
+            scrub_setup(
+                state,
+                f"Reasoning level {label}: reply limit raised to {limit['value']:,} tokens to leave room for its thinking budget.",
+            ),
             fg="yellow",
         )
     return True
@@ -1593,12 +1746,15 @@ def baseline_allows_save(state: WizardState) -> bool:
         return True
     reason = view.connection_detail(record)
     # Only sanitized display facts: never echo raw provider errors or replies.
-    click.echo(
-        "Nothing was saved. Connection: " + reason.rstrip(".") + ". "
-        "Review the server URL and settings, or increase --budget-tokens if checks were skipped. "
-        "Rerun with --no-probe to save without testing. "
-        "Add --no-catalogue and an explicit model ID to avoid listing/metadata requests. "
-        "See docs/model-configuration.md. No model entry or key was written.",
+    view.note(
+        scrub_setup(
+            state,
+            "Nothing was saved. Connection: " + reason.rstrip(".") + ". "
+            "Review the server URL and settings, or increase --budget-tokens if checks were skipped. "
+            "Rerun with --no-probe to save without testing. "
+            "Add --no-catalogue and an explicit model ID to avoid listing/metadata requests. "
+            "See docs/model-configuration.md. No model entry or key was written.",
+        ),
         err=True,
     )
     return False
@@ -1619,13 +1775,15 @@ def run_checks(state: WizardState) -> bool:
     if state.proposal.session_checks:
         checks.append("conversation")
     view.line(
-        "Checking " + ", ".join(checks[:-1]) + " and " + checks[-1] + "…",
+        scrub_setup(state, "Checking " + ", ".join(checks[:-1]) + " and " + checks[-1] + "…"),
         fg="bright_cyan",
         bold=True,
     )
     if state.remaining_estimate > state.proposal.budget_tokens:
-        click.echo(
-            "Some tests will be skipped. Increase --budget-tokens to run them all.",
+        view.note(
+            scrub_setup(
+                state, "Some tests will be skipped. Increase --budget-tokens to run them all."
+            ),
             err=True,
         )
     state.result = asyncio.run(
@@ -1645,10 +1803,13 @@ def run_checks(state: WizardState) -> bool:
         if record.get("reason") == "budget exhausted"
     ]
     if skipped:
-        click.echo(
-            "Warning: setup is incomplete; check budget used up before "
-            + ", ".join(view.check_label(name) for name in skipped)
-            + ". These settings have not been checked.",
+        view.note(
+            scrub_setup(
+                state,
+                "Warning: setup is incomplete; check budget used up before "
+                + ", ".join(view.check_label(name) for name in skipped)
+                + ". These settings have not been checked.",
+            ),
             err=True,
         )
     if state.test_media_inputs:
@@ -1696,12 +1857,18 @@ def run_checks(state: WizardState) -> bool:
                 )
             )
         else:
-            view.line("For troubleshooting details, rerun with --show-diagnostics.", dim=True)
+            view.line(
+                scrub_setup(state, "For troubleshooting details, rerun with --show-diagnostics."),
+                dim=True,
+            )
     if state.unobserved:
-        click.echo(
-            "Warning: no reasoning information was returned for: "
-            + ", ".join(state.unobserved)
-            + ". Reasoning may still be active. Try another API format or review the server settings.",
+        view.note(
+            scrub_setup(
+                state,
+                "Warning: no reasoning information was returned for: "
+                + ", ".join(state.unobserved)
+                + ". Reasoning may still be active. Try another API format or review the server settings.",
+            ),
             err=True,
         )
     return baseline_allows_save(state)
@@ -1713,21 +1880,24 @@ def save_model(state: WizardState) -> bool:
         return False
     view.step(4, "Save model")
     if state.no_probe or state.approval == "none":
-        view.line("Connection: not tested (manual setup)", fg="yellow")
+        view.line(scrub_setup(state, "Connection: not tested (manual setup)"), fg="yellow")
     if state.api_style in connect.DECISION_API_STYLES:
         view.line(
-            "Image requests: "
-            + (
-                "OpenAI Decisions"
-                if state.api_style == "openai"
-                else "TypeSafe multipart"
-                if state.result.entry["decision_image_transport"] == "typesafe_multipart"
-                else "System One JSON"
-            )
-            + (
-                " · experimental images on"
-                if state.result.entry["typesafe_danger_zone_images"]
-                else ""
+            scrub_setup(
+                state,
+                "Image requests: "
+                + (
+                    "OpenAI Decisions"
+                    if state.api_style == "openai"
+                    else "TypeSafe multipart"
+                    if state.result.entry["decision_image_transport"] == "typesafe_multipart"
+                    else "System One JSON"
+                )
+                + (
+                    " · experimental images on"
+                    if state.result.entry["typesafe_danger_zone_images"]
+                    else ""
+                ),
             )
         )
     if "media_inputs" in state.result.entry:
@@ -1740,16 +1910,22 @@ def save_model(state: WizardState) -> bool:
             if facts.get(f"media:{kind}", {}).get("outcome") == "unavailable"
         ]
         if unavailable:
-            view.line("Not available in this test: " + ", ".join(unavailable))
+            view.line(scrub_setup(state, "Not available in this test: " + ", ".join(unavailable)))
             view.line(
-                "Keep these settings, or choose another model or API format to try the unavailable inputs.",
+                scrub_setup(
+                    state,
+                    "Keep these settings, or choose another model or API format to try the unavailable inputs.",
+                ),
                 dim=True,
             )
     tested_media_inputs = list(state.result.entry.get("media_inputs", []))
     if not state.yes and state.test_media_inputs:
         action = prompts.review_media_inputs(state.result.entry["media_inputs"])
         if action == "manual":
-            view.line("Inputs enabled manually will be saved as not tested.", fg="yellow")
+            view.line(
+                scrub_setup(state, "Inputs enabled manually will be saved as not tested."),
+                fg="yellow",
+            )
             state.result.entry["media_inputs"] = prompts.choose_media_inputs(
                 state.result.entry["media_inputs"]
             )
@@ -1790,39 +1966,56 @@ def save_model(state: WizardState) -> bool:
             existing=tuple(state.data.get("models", {})),
         )
         if not state.alias.strip():
-            click.echo("Enter a non-empty model name.", err=True)
+            view.note(scrub_setup(state, "Enter a non-empty model name."), err=True)
     if state.alias in state.data.get("models", {}):
-        click.echo(
-            f"Warning: saving will overwrite model {state.alias!r} in {state.path}.", err=True
+        view.note(
+            scrub_setup(
+                state, f"Warning: saving will overwrite model {state.alias!r} in {state.path}."
+            ),
+            err=True,
         )
         if not state.yes and not prompts.confirm("Replace this model?", default=False):
             return False
     state.result = replace(state.result, alias=state.alias)
-    view.line(f"{state.alias} · {state.model} · {prompts.choice_label(state.api_style)}", bold=True)
+    view.line(
+        scrub_setup(
+            state, f"{state.alias} · {state.model} · {prompts.choice_label(state.api_style)}"
+        ),
+        bold=True,
+    )
     if state.show_config:
         preview = scrub_setup(state, {"models": {state.alias: state.result.entry}})
         click.echo(yaml.safe_dump(preview, sort_keys=False))
     else:
         view.line(
-            "Use --show-config to preview the full YAML settings.",
+            scrub_setup(state, "Use --show-config to preview the full YAML settings."),
             dim=True,
         )
     if shadow := shadowing_source(state.alias, state.path, extra_priority=bool(state.working_dir)):
         view.line(
-            f"Warning: {shadow} currently defines this alias and takes precedence over this destination. Update that file or explicitly load {state.path} to use this entry.",
+            scrub_setup(
+                state,
+                f"Warning: {shadow} currently defines this alias and takes precedence over this destination. Update that file or explicitly load {state.path} to use this entry.",
+            ),
             fg="yellow",
         )
     if state.api_style in connect.DECISION_API_STYLES:
-        view.line(f"Save summary: {prompts.choice_label(state.api_style)}")
+        view.line(scrub_setup(state, f"Save summary: {prompts.choice_label(state.api_style)}"))
     else:
         view.line(
-            f"Save summary: {prompts.choice_label(state.result.entry['api_style'])} · reply limit {state.result.entry['max_tokens']:,} tokens"
+            scrub_setup(
+                state,
+                f"Save summary: {prompts.choice_label(state.result.entry['api_style'])} · reply limit {state.result.entry['max_tokens']:,} tokens",
+            )
         )
         view.line(
-            "Reasoning levels: "
-            + (", ".join(state.result.entry.get("reasoning_levels", {})) or "none configured")
-            + "; default: "
-            + str(state.result.entry.get("reasoning_default", "server default"))
+            scrub_setup(
+                state,
+                "Reasoning levels: "
+                + (", ".join(state.result.entry.get("reasoning_levels", {})) or "none configured")
+                + "; default: "
+                + str(state.result.entry.get("reasoning_default", "server default")),
+            )
         )
     if state.yes or prompts.confirm(f"Write model entry to {state.path}?", default=True):
         save_key = False
@@ -1833,7 +2026,10 @@ def save_model(state: WizardState) -> bool:
         ):
             secrets_path = paths.get_user_dir("secrets.yaml")
             view.line(
-                f"This setup used a new key. It can be saved in {secrets_path} with owner-only permissions (plain text, not encrypted). Existing values are preserved; YAML formatting may change."
+                scrub_setup(
+                    state,
+                    f"This setup used a new key. It can be saved in {secrets_path} as plain text (not encrypted), readable only by your account.",
+                )
             )
             save_key = not state.yes and prompts.confirm(
                 "Save this key for future NOOA runs?", default=True
@@ -1843,36 +2039,58 @@ def save_model(state: WizardState) -> bool:
 
                 write_secret_env(secrets_path, state.api_key_env, state.api_key)
                 view.line(
-                    f"Saved key as {state.api_key_env}. Existing secret values are preserved; YAML formatting may change."
+                    scrub_setup(
+                        state,
+                        f"Saved key as {state.api_key_env}. Existing secret values are preserved.",
+                    )
                 )
                 if os.environ.get(state.api_key_env):
                     view.line(
-                        f"Your current environment still overrides this file. Unset or update {state.api_key_env} before starting NOOA again.",
+                        scrub_setup(
+                            state,
+                            f"Your current environment still overrides this file. Unset or update {state.api_key_env} before starting NOOA again.",
+                        ),
                         fg="yellow",
                     )
         connect.write(state.result.entry, state.path, alias=state.alias)
-        click.echo(f"Saved {state.alias} to {state.path}.")
+        view.section("Saved model")
+        view.fields(scrub_setup(state, [("Alias", state.alias), ("File", state.path)]))
         view.media_settings(state.result.entry)
         if state.api_style in connect.DECISION_API_STYLES:
             view.line(
-                f"API format: {prompts.choice_label(state.api_style)} · decision model: {state.result.entry['model_name']}"
+                scrub_setup(
+                    state,
+                    f"API format: {prompts.choice_label(state.api_style)} · decision model: {state.result.entry['model_name']}",
+                )
             )
         if state.api_style not in connect.DECISION_API_STYLES:
             view.line(
-                f"API format: {prompts.choice_label(state.api_style)} · reply limit: {state.result.entry['max_tokens']:,} tokens"
+                scrub_setup(
+                    state,
+                    f"API format: {prompts.choice_label(state.api_style)} · reply limit: {state.result.entry['max_tokens']:,} tokens",
+                )
             )
         if state.api_key and not save_key and state.api_key != os.environ.get(state.api_key_env):
-            click.echo(
-                f"The key was not saved. Set {state.api_key_env} (or add it to your NOOA secrets file) before using this alias."
+            view.note(
+                scrub_setup(
+                    state,
+                    f"The key was not saved. Set {state.api_key_env} (or add it to your NOOA secrets file) before using this alias.",
+                )
             )
-        click.echo(
-            f'Use it in Python: get_decision_model("{state.alias}")'
-            if state.api_style in connect.DECISION_API_STYLES
-            else f'Use it in Python: get_llm_client("{state.alias}")'
+        view.note(
+            scrub_setup(
+                state,
+                f'Use it in Python: get_decision_model("{state.alias}")'
+                if state.api_style in connect.DECISION_API_STYLES
+                else f'Use it in Python: get_llm_client("{state.alias}")',
+            )
         )
         if state.output and not state.working_dir:
-            click.echo(
-                "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path)."
+            view.note(
+                scrub_setup(
+                    state,
+                    "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path).",
+                )
             )
     return True
 
@@ -1919,7 +2137,7 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             rows.append(("Image option", "experimental images on"))
     view.fields(scrub_setup(state, rows))
     if state.edited_settings:
-        view.fields([("Model details", "Your edits")])
+        view.fields(scrub_setup(state, [("Model details", "Your edits")]))
     elif (
         state.candidate is not None
         and state.editing is None
@@ -1941,11 +2159,11 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             state.api_style in connect.DECISION_API_STYLES and endpoint_media
         )
         if server_details:
-            view.fields([("Model details", "This server")])
+            view.fields(scrub_setup(state, [("Model details", "This server")]))
             if "catalogue" in sources:
-                view.fields([("Additional details", "OpenRouter")])
+                view.fields(scrub_setup(state, [("Additional details", "OpenRouter")]))
         elif state.candidate:
-            view.fields([("Model details", "OpenRouter")])
+            view.fields(scrub_setup(state, [("Model details", "OpenRouter")]))
     view.section("Media inputs")
     enabled = entry.get("media_inputs", [])
     selected = state.test_media_inputs or []
@@ -1966,10 +2184,10 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             else "Off"
         )
         media_rows.append((view.media_label(kind), value))
-    view.fields(media_rows)
+    view.fields(scrub_setup(state, media_rows))
     view.section("Tests")
     if state.no_probe or state.probe == "none":
-        view.fields([("Status", "Off")])
+        view.fields(scrub_setup(state, [("Status", "Off")]))
     else:
         test_rows = []
         if selected:
@@ -1978,7 +2196,7 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             test_rows.append(("Check budget", view.format_budget(state.budget_tokens) + " tokens"))
         if not test_rows:
             test_rows.append(("Status", "Optional — choose Test now to run"))
-        view.fields(test_rows)
+        view.fields(scrub_setup(state, test_rows))
 
 
 def review_guided_proposal(state: WizardState, *, deferred_style=False):
@@ -2168,5 +2386,8 @@ def run_wizard(**options):
                 err=True,
             )
         else:
-            view.line("For troubleshooting details, rerun with --show-diagnostics.", dim=True)
+            view.line(
+                scrub_setup(state, "For troubleshooting details, rerun with --show-diagnostics."),
+                dim=True,
+            )
         raise click.ClickException(detail) from None

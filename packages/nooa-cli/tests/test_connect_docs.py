@@ -55,5 +55,5 @@ def test_connect_help_distinguishes_native_decision_limits():
     result = CliRunner().invoke(command, ["--help"])
     assert result.exit_code == 0
     text = " ".join(result.output.split())
-    assert "Decision models accept images only" in text
+    assert "NOOA decision client currently supports image attachments only" in text
     assert "Decision calls have no reply limit" in text

@@ -100,7 +100,9 @@ def test_failed_configured_baseline_stops_before_save(monkeypatch, tmp_path, edi
     )
     assert result.exit_code == 0, result.output
     assert "Nothing was saved" in result.output
-    assert "--no-probe" in result.output and "save without testing" in result.output
+    assert "--no-probe" in result.output and "save without testing" in " ".join(
+        result.output.split()
+    )
     assert "Write model entry" not in result.output
     assert "Save this key" not in result.output and "Save model" not in result.output
     assert "PRIVATE-ANSWER" not in result.output and "PRIVATE-KEY" not in result.output
@@ -205,4 +207,7 @@ def test_explicit_manual_offline_save_remains_available(monkeypatch, tmp_path, f
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["media_inputs"] == ["image", "pdf"]
     assert "provenance" not in entry
-    assert "Saved local" in result.output and "not tested (manual setup)" in result.output
+    assert (
+        "Alias: local" in " ".join(result.output.split())
+        and "not tested (manual setup)" in result.output
+    )

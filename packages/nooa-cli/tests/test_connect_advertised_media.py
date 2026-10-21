@@ -91,7 +91,7 @@ def test_yes_shows_suggestions_without_adopting_or_testing(monkeypatch, capsys):
     assert wizard.configure_media_inputs(current)
     assert current.media_inputs == [] and current.test_media_inputs is None
     output = capsys.readouterr().out
-    assert "Model details from OpenRouter" in output
+    assert "Source: OpenRouter" in " ".join(output.split())
     assert "Advertisements are unverified" not in output
     assert "PDF support isn't listed. Test a generated PDF or leave PDFs off." in output
 
@@ -510,7 +510,7 @@ def test_missing_or_empty_media_lists_omit_source_advertisements(monkeypatch, ca
     previous = ["image"]
     assert offer_suggestions(current, previous) is False
     output = capsys.readouterr().out
-    assert "support isn't listed" in output and "Current media inputs: image" in output
+    assert "No media is listed." in output and "Current inputs: Images" in " ".join(output.split())
     for absent in (
         "OpenRouter",
         connect.CATALOGUE_URL,
@@ -540,10 +540,9 @@ def test_media_suggestions_render_actual_source_without_changing_permissions(
     before = deepcopy(current.media_hints)
     assert offer_suggestions(current, []) is False
     output = capsys.readouterr().out
-    assert "Listed media inputs: image" in output
-    assert (
-        "Model details from " + ("OpenRouter" if source == connect.CATALOGUE_URL else source)
-        in output
-    )
+    assert "Media listed: Images" in " ".join(output.split())
+    assert "Media source: " + (
+        "OpenRouter" if source == connect.CATALOGUE_URL else source
+    ) in " ".join(output.split())
     assert current.media_inputs is None and current.test_media_inputs is None
     assert current.media_hints == before

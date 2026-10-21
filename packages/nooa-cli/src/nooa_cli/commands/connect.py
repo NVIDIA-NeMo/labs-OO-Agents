@@ -7,7 +7,27 @@ import click
 from ._connect_stages import STAGES
 
 
-@click.command()
+class ConnectCommand(click.Command):
+    """Keep Click's command contract; present help in the Connect design language."""
+
+    def get_help(self, ctx):
+        from . import _connect_view as view
+
+        rendered = []
+        width = max(8, view.shutil.get_terminal_size((80, 24)).columns - 2)
+        for row in super().get_help(ctx).splitlines():
+            if not row:
+                rendered.append("")
+                continue
+            heading = not row.startswith(" ") and (row.startswith("Usage:") or row.endswith(":"))
+            for part in view.textwrap.wrap(row.strip(), width=width, break_on_hyphens=False):
+                if "NO_COLOR" not in view.os.environ:
+                    part = click.style(part, bold=heading, fg="bright_cyan" if heading else None)
+                rendered.append("  " + part)
+        return "\n".join(rendered)
+
+
+@click.command(cls=ConnectCommand)
 @click.argument("model", required=False)
 @click.option(
     "--edit-model",
@@ -152,7 +172,7 @@ from ._connect_stages import STAGES
 )
 @click.option(
     "--media-inputs",
-    help="Enable image,audio,video,pdf inputs without testing (comma-separated). Decision models accept images only. Empty or - turns media off.",
+    help="Enable image,audio,video,pdf inputs without testing (comma-separated). The NOOA decision client currently supports image attachments only. Empty or - turns media off.",
 )
 @click.option(
     "--test-media-inputs",

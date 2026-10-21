@@ -292,12 +292,28 @@ def local_failure(exc, *, api_key=None, api_key_env=None):
     return detail[:1000]
 
 
-def line(text, *, fg=None, bold=False, dim=False):
-    width = max(24, min(84, shutil.get_terminal_size((80, 24)).columns - 4))
+def line(text, *, fg=None, bold=False, dim=False, err=False):
+    width = max(8, min(84, shutil.get_terminal_size((80, 24)).columns - 2))
     for part in textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]:
         if "NO_COLOR" not in os.environ:
-            part = click.style(part, fg=fg, bold=bold, dim=dim)
-        click.echo("  " + part)
+            part = click.style(part, fg=fg, bold=bold or None, dim=dim or None)
+        click.echo("  " + part, err=err)
+
+
+def note(text, *, err=False):
+    line(text.strip(), dim=not err, fg="yellow" if err else None, err=err)
+
+
+def warning(text, *, err=False):
+    line(text.removeprefix("Warning: "), fg="yellow", err=err)
+
+
+def prompt_text(text, *, suffix=": "):
+    """Responsive pipe prompt label; input widgets own editing on a real TTY."""
+    width = max(8, shutil.get_terminal_size((80, 24)).columns - 2 - len(suffix))
+    parts = textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]
+    label = "\n".join("  " + part for part in parts)
+    return label  # Click prompt writes directly; pipe labels must not leak ANSI.
 
 
 def fields(rows):
@@ -308,7 +324,7 @@ def fields(rows):
     columns = max(12, shutil.get_terminal_size((80, 24)).columns)
     width = min(100, columns - 4)
     label_width = max(len(label) for label, _ in rows)
-    value_width = width - label_width - 2
+    value_width = width - label_width - 1
     stacked = value_width < 16
     for label, value in rows:
         if stacked:
@@ -324,7 +340,7 @@ def fields(rows):
                 key = label.ljust(label_width) if index == 0 else " " * label_width
                 if "NO_COLOR" not in os.environ and index == 0:
                     key = click.style(key, bold=True)
-                click.echo("    " + key + "  " + part)
+                click.echo("    " + key + " " + part)
 
 
 def section(title):
@@ -596,6 +612,7 @@ def media_settings(entry):
     kinds = (
         ("image",) if entry.get("client_type") == "decision" else ("image", "audio", "video", "pdf")
     )
+    rows = []
     for kind in kinds:
         record = facts.get("media:" + kind, {})
         state = (
@@ -607,10 +624,13 @@ def media_settings(entry):
             if record.get("outcome") in {"inconclusive", "rejected", "unavailable", "not_confirmed"}
             else "enabled (not tested)"
         )
-        line(f"{media_label(kind)}: {state}")
+        rows.append((media_label(kind), state))
+    fields(rows)
 
 
-def model_details(model, *, output_tokens, edited=False):
+def model_details(
+    model, *, output_tokens, edited=False, heading=True, attribution=True, render=True
+):
     """Show available facts only; unknown fields remain editable and unknown internally."""
 
     def tokens(value):
@@ -647,12 +667,16 @@ def model_details(model, *, output_tokens, edited=False):
         if value
     ]
     if not rows:
+        if not render:
+            return []
         line(
             "No model settings listed. Enter known limits or continue with NOOA defaults.", dim=True
         )
         return
-    click.echo()
-    line(f"Model details · {model['id']}", fg="bright_cyan", bold=True)
+    if heading and render:
+        section("Model details")
+        fields([("Model", model["id"])])
+    displayed = []
     for label, value in rows:
         source_key = {
             "Context window": "context_length",
@@ -664,20 +688,28 @@ def model_details(model, *, output_tokens, edited=False):
             "endpoint": "your server",
             "endpoint_input_limit": "server input limit",
         }.get(source, source)
-        line(f"{label:<25} {value}" + (f" · {source_label}" if source_label and not edited else ""))
-    line(
-        "Your edited settings."
-        if edited
-        else "Model details from your server, with OpenRouter details where needed."
-        if model.get("endpoint_limits")
-        else "Model details from OpenRouter. Check your server's limits if they differ.",
-        dim=True,
-    )
-    line(f"API discovery reply limit: {output_tokens:,} tokens.", dim=True)
-    line(
-        "Choose your reply limit next. Input, thinking and the answer share the context window.",
-        dim=True,
-    )
+        displayed.append(
+            (
+                "Input limit (context bound)" if source == "endpoint_input_limit" else label,
+                value + (f" · {source_label}" if source_label and not edited else ""),
+            )
+        )
+    if attribution:
+        displayed.append(
+            (
+                "Source",
+                "Your edits"
+                if edited
+                else "This server"
+                if model.get("endpoint_limits")
+                else "OpenRouter",
+            )
+        )
+    displayed.append(("API discovery reply limit", f"{output_tokens:,} tokens"))
+    if not render:
+        return displayed
+    fields(displayed)
+    note("Choose your reply limit next. Input, thinking and the answer share the context window.")
     context = model.get("context_length")
     ceiling = (model.get("top_provider") or {}).get("max_completion_tokens")
     if (
