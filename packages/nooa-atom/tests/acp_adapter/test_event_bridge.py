@@ -885,6 +885,63 @@ async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
     assert _messages(client) == ["Which branch?\n\n- main\n- dev\n\n"]
 
 
+@pytest.mark.parametrize(
+    ("kind", "outcome", "line"),
+    [
+        ("done", {"explanation": "fixed parse()"}, "> **Done:** fixed parse()"),
+        ("done", {"explanation": ""}, "> **Done.**"),
+        (
+            "waiting",
+            {"explanation": "tests running", "on": ["jobs", "delegates"]},
+            "> **Waiting:** tests running",
+        ),
+        ("waiting", {"explanation": "tests running", "on": []}, "> **Waiting:** tests running"),
+    ],
+)
+async def test_a_done_or_waiting_turn_ends_with_a_status_line(bridged, kind, outcome, line):
+    _agent, session, client, bridge = bridged
+    session.emit(TurnEndedUpdate(session_id="session-1", outcome_kind=kind, outcome=outcome))
+    await bridge.flush()
+    assert _messages(client) == [f"{line}\n\n"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "line"), [("done", "> **Done:** answered"), ("waiting", "> **Waiting:** answered")]
+)
+async def test_a_status_line_follows_the_turns_messages(bridged, kind, line):
+    agent, session, client, bridge = bridged
+    session.emit(SimpleNamespace(kind="turn_started", session_id="session-1"))
+    agent.event_manager.add(AgentMessage(content="Here is the answer."))
+    session.emit(
+        TurnEndedUpdate(
+            session_id="session-1", outcome_kind=kind, outcome={"explanation": "answered"}
+        )
+    )
+    await bridge.flush()
+    assert _messages(client) == ["Here is the answer.\n\n", f"{line}\n\n"]
+
+
+async def test_each_turn_ends_with_its_own_status_line(bridged):
+    agent, session, client, bridge = bridged
+    agent.event_manager.add(AgentMessage(content="Started the job."))
+    session.emit(
+        TurnEndedUpdate(
+            session_id="session-1",
+            outcome_kind="waiting",
+            outcome={"explanation": "job running", "on": ["jobs"]},
+        )
+    )
+    session.emit(
+        TurnEndedUpdate(session_id="session-1", outcome_kind="done", outcome={"explanation": "ok"})
+    )
+    await bridge.flush()
+    assert _messages(client) == [
+        "Started the job.\n\n",
+        "> **Waiting:** job running\n\n",
+        "> **Done:** ok\n\n",
+    ]
+
+
 async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):
     agent, session, client, bridge = bridged
     agent.event_manager.add(
@@ -1608,16 +1665,14 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
     thoughts = [u.content.text for u in updates if isinstance(u, AgentThoughtChunk)]
     cards = [u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
     assert [u.content.text for u in updates if isinstance(u, AgentMessageChunk)] == [
-        "User-facing answer\nStill visible\n\n"
+        "User-facing answer\nStill visible\n\n",
+        "> **Done:** Task completed\n> More details\n\n",
     ]
     if level == "silent":
         assert thoughts == []
         assert cards == []
     elif level == "concise":
-        assert thoughts == [
-            "Summarized context (1..2).\n\n",
-            "Returned done: Task completed\n\n",
-        ]
+        assert thoughts == ["Summarized context (1..2).\n\n"]
         assert [type(card) for card in cards] == [ToolCallStart, ToolCallProgress]
         assert [card.status for card in cards] == ["in_progress", "completed"]
         for card in cards:
@@ -1631,8 +1686,7 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
         assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
         assert thoughts[0] == "Long reasoning"
         assert "Full recap\nMore recap" in thoughts[1]
-        assert "all details" in thoughts[2]
-        assert "More details" in thoughts[2]
+        assert len(thoughts) == 2  # the turn's return is not a thought
     await bridge.close()
     await agent.aclose()
 
@@ -1709,17 +1763,12 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
     session.emit(TurnEndedUpdate(session_id=session.id, outcome_kind=kind, outcome=outcome))
     await bridge.flush()
     thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
-    if level == "silent":
-        assert thoughts == []
-    elif level == "concise":
-        line = "Waiting for review" if kind == "waiting" else "Which target?"
-        assert thoughts == [f"Returned {kind}: {line}\n\n"]
-    else:
-        assert len(thoughts) == 1
-        assert "delegates" in thoughts[0] if kind == "waiting" else "second" in thoughts[0]
+    assert thoughts == []  # the return is shown as agent text, never as a thought
     answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
     assert answers == (
-        ["Which target?\nFull question\n\n- first\n- second\n\n"] if kind == "need_input" else []
+        ["Which target?\nFull question\n\n- first\n- second\n\n"]
+        if kind == "need_input"
+        else ["> **Waiting:** Waiting for review\n> More detail\n\n"]
     )
     await bridge.close()
     await agent.aclose()
