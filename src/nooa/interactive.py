@@ -189,14 +189,14 @@ TextFormat = Literal["email", "uri", "date", "date-time"]
 class TextQuestion(_FormQuestionBase):
     """Free text; the answer is a ``str`` ("" when optional and left empty)."""
 
-    kind: Literal["text"] = "text"
+    kind: Literal["text"] = Field(default="text", description="Set for you")
+    default: str | None = Field(default=None, description="Prefilled answer")
     min_length: int | None = Field(default=None, ge=0, description="Fewest characters")
     max_length: int | None = Field(default=None, ge=1, description="Most characters")
     pattern: str | None = Field(default=None, description="Regex the whole answer must match")
     format: TextFormat | None = Field(
         default=None, description="email, uri, date (YYYY-MM-DD) or date-time (ISO 8601)"
     )
-    default: str | None = Field(default=None, description="Prefilled answer")
 
     @model_validator(mode="before")
     @classmethod
@@ -214,12 +214,12 @@ class TextQuestion(_FormQuestionBase):
 class PickOneQuestion(_FormQuestionBase):
     """Pick one of ``choices``; the answer is the chosen ``value`` (a ``str``)."""
 
-    kind: Literal["pick_one"] = "pick_one"
+    kind: Literal["pick_one"] = Field(default="pick_one", description="Set for you")
+    default: str | None = Field(default=None, description="Preselected value")
     choices: list[FormChoice] = Field(min_length=1, description="The options, in order")
     allow_other: bool = Field(
         default=True, description="True also accepts a typed answer that is not listed"
     )
-    default: str | None = Field(default=None, description="Preselected value")
 
     _unique = field_validator("choices")(classmethod(lambda cls, value: _unique_choices(value)))
 
@@ -227,11 +227,11 @@ class PickOneQuestion(_FormQuestionBase):
 class PickManyQuestion(_FormQuestionBase):
     """Pick any of ``choices``; the answer is a ``list[str]`` of chosen values."""
 
-    kind: Literal["pick_many"] = "pick_many"
+    kind: Literal["pick_many"] = Field(default="pick_many", description="Set for you")
+    default: list[str] | None = Field(default=None, description="Preselected values")
     choices: list[FormChoice] = Field(min_length=1, description="The options, in order")
     min_items: int | None = Field(default=None, ge=0, description="Fewest options to pick")
     max_items: int | None = Field(default=None, ge=1, description="Most options to pick")
-    default: list[str] | None = Field(default=None, description="Preselected values")
 
     _unique = field_validator("choices")(classmethod(lambda cls, value: _unique_choices(value)))
 
@@ -249,10 +249,10 @@ class PickManyQuestion(_FormQuestionBase):
 class NumberQuestion(_FormQuestionBase):
     """A number; the answer is a ``float``."""
 
-    kind: Literal["number"] = "number"
+    kind: Literal["number"] = Field(default="number", description="Set for you")
+    default: float | None = Field(default=None, description="Prefilled answer")
     minimum: float | None = Field(default=None, description="Smallest allowed value")
     maximum: float | None = Field(default=None, description="Largest allowed value")
-    default: float | None = Field(default=None, description="Prefilled answer")
 
     @model_validator(mode="before")
     @classmethod
@@ -265,10 +265,10 @@ class NumberQuestion(_FormQuestionBase):
 class IntegerQuestion(_FormQuestionBase):
     """A whole number; the answer is an ``int``."""
 
-    kind: Literal["integer"] = "integer"
+    kind: Literal["integer"] = Field(default="integer", description="Set for you")
+    default: int | None = Field(default=None, description="Prefilled answer")
     minimum: int | None = Field(default=None, description="Smallest allowed value")
     maximum: int | None = Field(default=None, description="Largest allowed value")
-    default: int | None = Field(default=None, description="Prefilled answer")
 
     @model_validator(mode="before")
     @classmethod
@@ -281,7 +281,7 @@ class IntegerQuestion(_FormQuestionBase):
 class BooleanQuestion(_FormQuestionBase):
     """Yes or no; the answer is a ``bool``."""
 
-    kind: Literal["boolean"] = "boolean"
+    kind: Literal["boolean"] = Field(default="boolean", description="Set for you")
     default: bool | None = Field(default=None, description="Preselected answer")
 
 
@@ -350,6 +350,20 @@ class FormResponse(BaseModel):
 
 class NeedInputForm(BaseModel):
     """Ask the person to fill in a form; the answer is a ``FormResponse``.
+
+    Most questions need only ``id``, ``label`` and maybe ``default``::
+
+        NeedInputForm(heading="Release", questions=[
+            TextQuestion(id="branch", label="Which branch should I use?", default="main"),
+            BooleanQuestion(id="dry_run", label="Dry run first?", default=True),
+        ])
+
+    Add constraints only when the task needs them, and say the rule in words
+    in ``help`` (a regex means nothing to a person)::
+
+        TextQuestion(id="slug", label="Project slug", min_length=3, max_length=24,
+                     pattern=r"^[a-z0-9-]+$",
+                     help="3-24 characters: lowercase letters, digits or hyphens.")
 
     Answers are checked against each question's constraints. When the client
     can't show the form, or the answers fail the checks, you get a plain
