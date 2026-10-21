@@ -242,9 +242,10 @@ class ShellResult(str):
 
     String operations (``"x" in r``, ``r.splitlines()``, ``r.strip()``) act on
     stdout, so existing code keeps working. But ``repr(r)`` / ``print(r)`` show
-    a structured ``BashOutput(...)`` view that surfaces stderr and a non-zero
-    return code as named fields — so failures can't be missed (a crashing
-    command with empty stdout no longer prints as blank).
+    a structured ``ShellResult(returncode=..., stdout=..., stderr=...)`` view
+    that uses the attribute names and always shows the return code, so
+    failures can't be missed (a crashing command with empty stdout no longer
+    prints as blank) and the printed names work as attributes.
 
     ``.matches`` is a ``list[Match]`` when the command was a pure search and the
     anchors are trustworthy; otherwise ``None``.
@@ -275,12 +276,13 @@ class ShellResult(str):
         return obj
 
     def __repr__(self) -> str:
-        parts = [f"stdout={self.stdout!r}"]
+        parts = [f"returncode={self.returncode}"]
+        if self.timed_out:
+            parts.append("timed_out=True")
+        parts.append(f"stdout={self.stdout!r}")
         if self.stderr:
             parts.append(f"stderr={self.stderr!r}")
-        if self.returncode != 0:
-            parts.append(f"return_code={self.returncode}")
-        return f"BashOutput({', '.join(parts)})"
+        return f"ShellResult({', '.join(parts)})"
 
     def __str__(self) -> str:
         return self.__repr__()
