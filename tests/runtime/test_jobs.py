@@ -483,6 +483,14 @@ async def test_cancel_withdraws_the_jobs_queued_updates_only(agent):
     assert [(u.label, u.items) for u in channel.snapshot()] == [("other", ["keep"])]
 
 
+async def test_a_cancelled_job_has_nothing_pending(agent):
+    agent.jobs.every(0.01, label="tick")
+    agent.jobs.throttle("tick", items=1000)
+    await _until(lambda: agent.jobs.get("tick").pending >= 2)
+    assert await agent.jobs.cancel("tick") is True
+    assert agent.jobs.get("tick").pending == 0
+
+
 # ---- process isolation (ported from the removed monitor() tests) ----
 
 

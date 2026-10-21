@@ -106,8 +106,20 @@ class JobInfo(BaseModel):
     finished_at: str | None = Field(default=None, description="End time, None while running")
     log_path: str | None = Field(default=None, description="Full stdout+stderr log (run only)")
     throttle: Throttle | None = Field(default=None, description="Current batching, None if off")
-    pending: int = Field(default=0, description="Items batched by throttle, not yet delivered")
-    last: list[Any] = Field(default_factory=list, description="Most recent delivered items")
+    pending: int = Field(
+        default=0,
+        description=(
+            "Values held back by the throttle for the next update (an items= batch waits"
+            " for N values or the end; seconds= bounds the wait). 0 once the job ends"
+        ),
+    )
+    last: list["JobUpdate"] = Field(
+        default_factory=list,
+        description=(
+            "Its latest updates (up to 5) as sent to the jobs queue: the newest may not"
+            " have reached notification['jobs'] yet"
+        ),
+    )
 
 
 class JobUpdate(BaseModel):
@@ -813,6 +825,7 @@ class JobsApi(Skill):
             yield update(done=True)
         finally:
             job.wake = None
+            job.pending = 0  # ended (or cancelled): nothing more is batched
             if job.finished_at is None:
                 job.finished_at = _now()
             reader.cancel()
@@ -1013,7 +1026,7 @@ class JobsApi(Skill):
         return [job.info() for job in jobs]
 
     def get(self, label: str) -> JobInfo | None:
-        """The latest job with ``label`` (``.last`` holds its recent items), or None."""
+        """The latest job with ``label`` (``.last`` holds its recent updates), or None."""
         job = self._jobs.get(label)
         return None if job is None else job.info()
 
@@ -1033,3 +1046,6 @@ class JobsApi(Skill):
     def __repr__(self) -> str:
         running = sum(1 for job in self._jobs.values() if job.state == "running")
         return f"<JobsApi({running} running)>"
+
+
+JobInfo.model_rebuild()
