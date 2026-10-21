@@ -6,23 +6,28 @@ Pool (1.0.16) asks forms with ``_poolside/elicitation`` instead of standard
 ACP ``elicitation/create``, and shows only part of the standard schema. What
 was checked against Pool:
 
-- it renders ``type: string``, a strict picker (``type: string`` + ``oneOf`` of
-  ``{const, title}``) and a picker-or-text (``anyOf: [{oneOf: ...}, {type:
-  string}]``), and honours ``required`` and ``_meta["poolside/field_order"]``;
+- it shows one question per page, renders ``type: string`` as a text box
+  (multi-line descriptions are fine) and a required ``type: string`` +
+  ``oneOf`` of ``{const, title}`` as a radio picker, and honours ``required``
+  and ``_meta["poolside/field_order"]``;
+- a picker-or-text (``anyOf: [{oneOf: ...}, {type: string}]``) shows as a bare
+  text box without the choices, so it is not used;
 - it declines the whole form at once (``{"action": "decline"}``) when a
   property is ``type: integer`` or ``type: boolean``, or when a non-text field
-  is optional.
+  is optional;
+- in one 9-question form every picker showed as a text box (cause not found).
 
 ``number``, ``array``, ``minLength``/``maxLength``, ``pattern``, ``format`` and
 ``default`` are untested, so they are treated as unsupported. Only the checked
-keys are sent (``title``, ``description``, ``type: string``, ``oneOf``,
-``anyOf`` and the top-level ``required``); every other question type or
+keys are sent (``title``, ``description``, ``type: string``, ``oneOf`` and
+the top-level ``required``); every other question type or
 constraint is downgraded to a string whose description says what to enter:
 
 - text constraints, formats and defaults -> hints in the description;
 - integer / number -> a string with the range ("A whole number from 1 to 10.");
 - boolean -> a strict Yes/No picker when required, a "yes or no" string when optional;
-- an optional picker -> a string listing the choices;
+- a picker that allows other answers, or an optional picker -> a string
+  listing the choices;
 - pick many -> a comma-separated string listing the choices;
 - a default -> "Default: x." in the description, used when the field is left blank.
 
@@ -79,11 +84,8 @@ def _property(question: Any) -> dict[str, Any]:
     kind = question.kind
     choices = getattr(question, "choices", [])
     picker = {"oneOf": [{"const": c.value, "title": c.title} for c in choices]}
-    if kind == "pick_one" and question.required:
-        if question.allow_other:
-            prop["anyOf"] = [picker, {"type": "string"}]
-        else:
-            prop.update(type="string", **picker)
+    if kind == "pick_one" and question.required and not question.allow_other:
+        prop.update(type="string", **picker)
     elif kind == "boolean" and question.required:
         prop.update(type="string", oneOf=[*_YES_NO])
     else:

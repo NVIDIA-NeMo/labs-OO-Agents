@@ -215,7 +215,9 @@ async def test_pool_literal_or_text_field_explicitly_accepts_alternative(
     client.ext_answers = [{"action": "accept", "content": {"name": "release"}}]
     adapter = await make_adapter(models, client_info=POOL)
     sid, _ = await _run(adapter, workspace)
-    assert "anyOf" in _requests(client)[0]["requestedSchema"]["properties"]["name"]
+    sent = _requests(client)[0]["requestedSchema"]["properties"]["name"]
+    # Pool shows anyOf as a bare text box, so the choices go in the description.
+    assert "anyOf" not in sent and sent["description"] == "For example: Main branch."
     assert adapter.session(sid)._agent.v.answer.content["name"] == "release"
 
 

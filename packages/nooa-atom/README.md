@@ -240,22 +240,25 @@ uses `_poolside/elicitation`. All Pool-specific elicitation code lives in
 heading + reason, `requestedSchema`, `_meta["poolside/field_order"]` when there
 is more than one field) and `pool_content()` decodes Pool's string answers.
 
-Verified against Pool 1.0.16: it renders `type: string`, a strict picker
-(`type: string` + `oneOf` const/title) and a picker-or-text (`anyOf: [{oneOf},
-{type: string}]`), and honours `required` and the field order. It
+Verified against Pool 1.0.16: it shows one question per page, renders `type:
+string` as a text box (multi-line descriptions are fine) and a required strict
+picker (`type: string` + `oneOf` const/title) as a radio list, and honours
+`required` and the field order. A picker-or-text (`anyOf: [{oneOf}, {type:
+string}]`) shows as a bare text box without the choices, so it is not used. In
+one 9-question form every picker showed as a text box; the cause is not known. It
 **automatically declines** the whole form (wire `{"action": "decline"}` within
 milliseconds, indistinguishable from a person pressing Escape) when any property
 is `type: integer` or `type: boolean`, and when a non-text field is optional.
 `number`, `array`, `minLength`/`maxLength`, `pattern`, `format` and `default` are
 untested and treated as unsupported. So only `title`, `description`, `type:
-string`, `oneOf`, `anyOf` and the top-level `required` are sent, and the rest is
+string`, `oneOf` and the top-level `required` are sent, and the rest is
 downgraded:
 
 | Question | Sent to Pool |
 |---|---|
 | text constraints / format | string; hints in the description ("2 to 5 characters; matching [a-z]+.", "An email address.") |
-| required picker | strict `oneOf`, or `anyOf` picker-or-text when `allow_other` |
-| optional picker | string listing the choices ("One of: A, B." / "For example: A, B.") |
+| required strict picker | `oneOf` (a radio list) |
+| `allow_other` or optional picker | string listing the choices ("For example: A, B." / "One of: A, B.") |
 | `PickManyQuestion` | string, "Comma-separated; choose from: A, B." |
 | `NumberQuestion` / `IntegerQuestion` | string, "A number from 0 to 1." / "A whole number from 1 to 10." |
 | required `BooleanQuestion` | strict Yes/No picker (`"true"`/`"false"`) |

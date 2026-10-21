@@ -26,7 +26,7 @@ ONE_OF = {
     "oneOf": [{"const": "main", "title": "Main branch"}, {"const": "dev", "title": "Development"}]
 }
 YES_NO = [{"const": "true", "title": "Yes"}, {"const": "false", "title": "No"}]
-SENT_KEYS = {"title", "description", "type", "oneOf", "anyOf"}
+SENT_KEYS = {"title", "description", "type", "oneOf"}
 
 
 def _props(*questions):
@@ -54,7 +54,11 @@ def test_tested_shapes_and_required():
         "properties": {
             "notes": {"type": "string", "title": "Notes?", "description": "Free text"},
             "branch": {"type": "string", "title": "Branch?", "description": "Choose", **ONE_OF},
-            "target": {"title": "Target?", "anyOf": [ONE_OF, {"type": "string"}]},
+            "target": {
+                "type": "string",
+                "title": "Target?",
+                "description": "For example: Main branch, Development.",
+            },
         },
     }
     assert pool_form_schema(NeedInput(question="Why?")) is None
