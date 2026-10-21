@@ -14,8 +14,7 @@ was checked against Pool:
   text box without the choices, so it is not used;
 - it declines the whole form at once (``{"action": "decline"}``) when a
   property is ``type: integer`` or ``type: boolean``, or when a non-text field
-  is optional;
-- in one 9-question form every picker showed as a text box (cause not found).
+  is optional.
 
 ``number``, ``array``, ``minLength``/``maxLength``, ``pattern``, ``format`` and
 ``default`` are untested, so they are treated as unsupported. Only the checked

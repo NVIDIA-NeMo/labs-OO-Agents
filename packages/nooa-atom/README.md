@@ -244,8 +244,7 @@ Verified against Pool 1.0.16: it shows one question per page, renders `type:
 string` as a text box (multi-line descriptions are fine) and a required strict
 picker (`type: string` + `oneOf` const/title) as a radio list, and honours
 `required` and the field order. A picker-or-text (`anyOf: [{oneOf}, {type:
-string}]`) shows as a bare text box without the choices, so it is not used. In
-one 9-question form every picker showed as a text box; the cause is not known. It
+string}]`) shows as a bare text box without the choices, so it is not used. It
 **automatically declines** the whole form (wire `{"action": "decline"}` within
 milliseconds, indistinguishable from a person pressing Escape) when any property
 is `type: integer` or `type: boolean`, and when a non-text field is optional.
