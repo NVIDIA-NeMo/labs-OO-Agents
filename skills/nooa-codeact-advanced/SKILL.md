@@ -44,10 +44,11 @@ class Notifier(Agent, llm=llm):
 | `max_consecutive_text_only` | `3` | Consecutive no-tool-call text replies before hard abort; `0` disables. Any real tool call resets the counter. |
 | `cell_timeout` | `None` | Per-cell `asyncio.wait_for` limit in seconds; `None` = unlimited. Cannot interrupt a truly blocking sync syscall — that's what the blocking-call AST validation is for. |
 | `max_tokens` / `temperature` / `top_p` | `None` | Passed to every generation call when set (model defaults otherwise). On empty responses with `finish_reason="length"` CodeAct aborts and tells you to raise `max_tokens` (16384+ for reasoning models). |
-| `translate_tool_calls` | `False` | When a weak model calls an agent method directly as a tool (instead of via `execute_python`), rewrite it into equivalent code and run it — teaching the right pattern. Off = error listing the two valid tools. |
+| `translate_tool_calls` | `False` | When a weak model calls an agent method directly as a tool (instead of via `execute_python`), rewrite it into equivalent code and run it — teaching the right pattern. Off = an error naming the valid tools and showing the rejected name as Python-cell code: the equivalent call for a public callable on `self`, `doc(self.name)` for an attribute object, or `doc(self)` when the name does not resolve. |
 | `restrictions` | `RestrictionsConfig()` | See Restrictions below. |
 | `prefill` | `InspectInputsPrefill()` | See Prefill above. |
 | `max_tool_calls` | `None` | **Dead — declared but never read.** Setting it does nothing. |
+| `loop_guard` | `None` | Opt-in `LoopGuardConfig()` (defaults `repeat_threshold=7`, `window=15`, `max_outcome_chars=500`). A call (tool name + normalized arguments; comments and formatting ignored) whose last `repeat_threshold - 1` runs in the window failed identically is not run again; one that produced identical output `repeat_threshold` times runs with a warning. Repeating either within the window after the warning raises `LoopDetectedError`. Messages are fixed templates; a `LoopGuardTriggered` event records each warning or stop. |
 
 `tool_choice` is hardcoded `"auto"`.
 
@@ -118,7 +119,7 @@ Coercion before validation, in order: bare values wrapped to the schema; string 
 
 - **exec_globals** = the agent module's namespace across the full MRO (minus `hidden` names) + method parameters as variables + auto-injected symbols: `self`, `asyncio`, `typing` (+`Annotated/Any/Literal/Optional/Union`), `doc`, `pprint`, `show`, media classes, `strategy` + all strategy classes, `reasoning`, `return_result`. `help` is shadowed to `doc` so nothing blocks on stdin.
 - **REPL state persists** across cells (globals-declared wrapper); helper functions defined in cells persist as REPL locals — they are never attached to the agent, and attaching callables to `self` is validator-rejected. Return-type names are re-injected if the model clobbers them. `Out[n]` gives Jupyter-style access to prior cell values.
-- **Media**: `show(obj)` attaches images/files to the cell's output, capped by `truncation.media_capture.max_attachments_per_execution` (default 5, **per cell**).
+- **Media**: `show(obj)` attaches images, audio, video, PDFs, PIL images, or matplotlib figures while a cell runs. The normal runtime keeps the first 5 attachments per cell; adjust `truncation.media_capture.max_attachments_per_execution`. Configure the model's `media_inputs` with accepted formats. See [nooa-media](../nooa-media/SKILL.md) for examples and size limits.
 - **Custom error formatting**: `CodeActStrategy(config=..., error_formatter=obj)` where `obj.format(error, code=None, *, line_offset=0) -> str`. Default is the IPython-style formatter (cell/line references, framework frames filtered, signature hint on call-shape TypeErrors).
 
 ## Truncation tuning (`TruncationConfig`)

@@ -19,16 +19,18 @@ Type names follow "Type Names are Prompts" - no redundant "Event" suffix.
 """
 
 from collections.abc import Callable
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_serializer
 from pydantic_core import PydanticSerializationError, to_json
 
+from nooa._immutable_json import NativeJSON
 from nooa.agentdoc import spec
 from nooa.context_blocks import EventBase as EventBase
 from nooa.context_blocks import ResultStatus as ResultStatus
 from nooa.context_blocks.models import Role
 from nooa.llm_types import LLMResponse as LLMResponse
+from nooa.llm_types import LLMUsage as LLMUsage
 
 # Sentinel value to distinguish "no return" from "return None"
 _NO_RETURN = object()
@@ -149,6 +151,29 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     consecutive_text_only: Annotated[
         int, Field(description="Count of consecutive text-only turns including this one")
     ] = 0
+
+
+class LoopGuardTriggered(EventBase):  # type: ignore[misc]
+    """The CodeAct loop guard detected a repeated tool call.
+
+    ``content`` is the fixed-template message shown to the model. The other
+    fields are structured trace data and are not rendered.
+    """
+
+    _role: ClassVar[Role] = Role.USER
+
+    content: Annotated[str, Field(description="Loop-guard message shown to the model")]
+    action: Annotated[
+        str,
+        Field(description="'blocked', 'nudged' or 'stopped'", repr=False),
+    ] = ""
+    tool_name: Annotated[str, Field(description="Repeated tool name", repr=False)] = ""
+    tool_call_id: Annotated[str, Field(description="Triggering tool call id", repr=False)] = ""
+    repeats: Annotated[
+        int, Field(description="Identical calls in the window, including this one", repr=False)
+    ] = 0
+    window: Annotated[int, Field(description="Tool calls compared", repr=False)] = 0
+    fingerprint: Annotated[str, Field(description="Hash of the normalized action", repr=False)] = ""
 
 
 _PLAIN_JSON_SCALARS = (int, float, bool)
@@ -484,6 +509,57 @@ class LLMCallEnd(EventBase):  # type: ignore[misc]
     )
 
 
+class DecisionCallStart(EventBase):  # type: ignore[misc]
+    """Emitted immediately before a decision-client round-trip."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    method_name: str
+    generation_id: str
+    question_count: int
+    model: str
+
+
+class DecisionCallEnd(EventBase):  # type: ignore[misc]
+    """Emitted after a decision-client round-trip succeeds or fails."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    method_name: str
+    generation_id: str
+    question_count: int
+    model: str
+    success: bool = True
+    exception_type: str | None = None
+
+
+class DecisionRecord(EventBase):  # type: ignore[misc]
+    """Durable record of one logical decision-model call.
+
+    Unlike the transient decision lifecycle events, this metadata event is
+    persisted for inspection and replay but never rendered into a later model
+    prompt.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    decision_call_id: str
+    method_name: str
+    generation_id: str
+    state: Any
+    questions: dict[str, Any]
+    answers: dict[str, Any] | None = None
+    decision_source: Literal["native", "llm"] = "native"
+    question_digest: str | None = None
+    requested_model: str
+    resolved_model: str | None = None
+    response_id: str | None = None
+    usage: LLMUsage | None = None
+    raw_response: NativeJSON | None = Field(default=None, repr=False)
+    success: bool = False
+    exception_type: str | None = None
+
+
 class Notification(EventBase):  # type: ignore[misc]
     """Generic "something happened" signal rendered into the LLM context.
 
@@ -641,6 +717,7 @@ Event = (
     | TuiSessionCleared
     | SystemPrompt
     | TextOnlyReply
+    | LoopGuardTriggered
 )
 
 

@@ -29,9 +29,19 @@ def prompt(
     labels=None,
     open_menu=False,
     existing=(),
+    searchable=False,
 ):
-    """Read one editable answer with a scrolling, single-column completion menu."""
+    """Use labelled menus for finite TTY choices, completion for searchable/editable input.
+
+    Line input retains its original defaults, token answers and validation.
+    """
     choices = tuple(choices)
+    if choices and not searchable and not hide_input and sys.stdin.isatty():
+        return labelled_choice(
+            text,
+            tuple((value, (labels or {}).get(value, choice_label(value))) for value in choices),
+            default=default,
+        )
     if not sys.stdin.isatty():
         if labels:
             for value, label in labels.items():
@@ -182,6 +192,7 @@ def confirm(text, *, default):
         text + (" [Y/n]" if default else " [y/N]"),
         default="",
         choices=("yes", "no", "y", "n", ""),
+        searchable=True,
     )
     return default if not value else value in {"yes", "y"}
 
@@ -207,7 +218,7 @@ def edit_model_details(model):
     edited["context_length"] = count("Context window (tokens)", model.get("context_length"))
     edited["top_provider"] = dict(model.get("top_provider") or {})
     edited["top_provider"]["max_completion_tokens"] = count(
-        "Reported reply ceiling (tokens; metadata, not a per-reply budget)",
+        "Reported reply ceiling (tokens; not your reply limit)",
         edited["top_provider"].get("max_completion_tokens"),
     )
     reasoning = edited["reasoning"] = dict(model.get("reasoning") or {})
@@ -263,7 +274,7 @@ def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="
         else {}
     )
     selected = prompt(
-        "Reply budget",
+        "Reply limit",
         choices=("recommended", *larger, *maximum, *smaller, "custom"),
         default="recommended",
         open_menu=True,
@@ -291,3 +302,121 @@ def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="
         click.echo(
             f"Enter a positive whole number{f' at most {ceiling:,}' if ceiling else ''}.", err=True
         )
+
+
+def parse_media_inputs(value):
+    """Parse an explicit CLI declaration, never a catalogue capability."""
+    from nooa.unifiedllm.media_inputs import validate_media_inputs
+
+    if value is None:
+        return None
+    return list(
+        validate_media_inputs(
+            []
+            if not value.strip() or value.strip() == "-"
+            else [item.strip() for item in value.split(",")]
+        )
+    )
+
+
+def choose_media_inputs(current=()):
+    """User-declared formats; no network or model metadata involved."""
+    if sys.stdin.isatty():
+        from itertools import combinations
+
+        formats = ("image", "audio", "video", "pdf")
+        values = [subset for size in range(5) for subset in combinations(formats, size)]
+        selected = labelled_choice(
+            "Choose media inputs manually (unverified)",
+            tuple(
+                (
+                    ",".join(subset) or "-",
+                    ", ".join("PDF" if kind == "pdf" else kind.capitalize() for kind in subset)
+                    or "Text only",
+                )
+                for subset in values
+            ),
+            default=",".join(kind for kind in formats if kind in current) or "-",
+        )
+        parsed = parse_media_inputs(selected)
+        return list(current) if set(parsed) == set(current) else parsed
+    while True:
+        value = prompt(
+            "Enable media inputs manually (unverified; image,audio,video,pdf; - for text-only)",
+            default=",".join(current) or "-",
+        )
+        try:
+            return parse_media_inputs(value)
+        except ValueError as exc:
+            click.echo(str(exc), err=True)
+
+
+def choice_label(value):
+    """Human labels for finite choices; custom reasoning names remain verbatim."""
+    return {
+        "chat": "OpenAI-compatible Chat",
+        "responses": "OpenAI Responses",
+        "anthropic": "Anthropic Messages",
+        "-": "Unknown / not configured",
+        "": "Continue without catalogue settings",
+    }.get(value, value)
+
+
+def labelled_choice(message, options, *, default):
+    """Show every action immediately; retain numeric and token answers for pipes."""
+    if not sys.stdin.isatty():
+        click.echo(message)
+        answers = {}
+        for number, (value, label) in enumerate(options, 1):
+            click.echo(f"  {number} ({value}): {label}")
+            answers[str(number)] = answers[value] = value
+        default_number = str(next(i for i, (value, _) in enumerate(options, 1) if value == default))
+        hint = " or ".join(f"{i} ({value})" for i, (value, _) in enumerate(options, 1))
+        while True:
+            value = click.prompt("Choice", default=default_number).strip().lower()
+            if value in answers:
+                return answers[value]
+            click.echo(f"Enter {hint}.", err=True)
+
+    from prompt_toolkit.shortcuts.choice_input import ChoiceInput
+    from prompt_toolkit.styles import Style
+
+    try:
+        chooser = ChoiceInput(
+            message=message,
+            options=((None, "Choose an option…"), *options) if default is None else options,
+            default=default,
+            show_frame=True,
+            bottom_toolbar=" ↑↓ Choose   Enter Continue   Ctrl-C Cancel",
+            style=Style.from_dict({}) if "NO_COLOR" in os.environ else None,
+        )
+        while True:
+            value = chooser.prompt()
+            if value is not None:
+                return value
+    except (EOFError, KeyboardInterrupt):
+        raise click.Abort() from None
+
+
+def review_media_inputs(current=()):
+    """Offer labelled actions, not editable internal tokens, after media checks."""
+    return labelled_choice(
+        "How would you like to continue?",
+        (
+            ("keep", "Continue with " + (", ".join(current) or "text only")),
+            ("manual", "Choose media inputs manually"),
+        ),
+        default="keep",
+    )
+
+
+def choose_media_mode(*, editing=False):
+    """Offer generated tests or manual declarations with a visible Enter default."""
+    return labelled_choice(
+        "How would you like to configure media inputs?",
+        (
+            ("test", "Test all media inputs (generated samples)"),
+            ("manual", "Choose media inputs manually"),
+        ),
+        default="manual" if editing else "test",
+    )

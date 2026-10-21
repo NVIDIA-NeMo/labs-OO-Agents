@@ -10,7 +10,13 @@ Architecture:
   stdin  -> bash (commands only)
   stdout <- pure command output (no sentinel parsing)
   stderr <- pure command stderr (no sentinel parsing)
-  fd 3   <- exit code + cwd + sentinel (control channel)
+  fd 3   <- exit code + cwd + background job PIDs + sentinel (control channel)
+
+Background jobs (``server &``) started by earlier commands are spared when a
+later command times out. With ``keep_background_on_close=True``, close() ends
+only bash itself and hands the output pipes to a detached drainer, so such jobs
+outlive the session (e.g. servers a benchmark verifier checks after the agent
+exits).
 """
 
 import asyncio
@@ -19,6 +25,8 @@ import logging
 import os
 import secrets
 import signal
+import subprocess
+import sys
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -33,6 +41,21 @@ _BOUNDED_CHUNK_CHARS = 65_536  # Pieces fed to the truncating buffer by _bounded
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
+
+# Reads the inherited pipe fds (argv) until every writer has exited, so
+# background jobs never write into a pipe without a reader after close().
+# The fds stay non-blocking (shared with asyncio), hence select().
+_DRAIN_SCRIPT = (
+    "import os, select, sys\n"
+    "fds = [int(a) for a in sys.argv[1:]]\n"
+    "while fds:\n"
+    "    for fd in select.select(fds, [], [])[0]:\n"
+    "        try:\n"
+    "            if not os.read(fd, 65536):\n"
+    "                fds.remove(fd)\n"
+    "        except BlockingIOError:\n"
+    "            pass\n"
+)
 
 
 def _bounded(text: str) -> str:
@@ -49,6 +72,14 @@ def _bounded(text: str) -> str:
     for start in range(0, len(text), _BOUNDED_CHUNK_CHARS):
         buffer.write(text[start : start + _BOUNDED_CHUNK_CHARS])
     return buffer.getvalue()
+
+
+def _process_start_time(pid: int) -> str | None:
+    """Linux process identity, so escalation cannot signal a reused PID."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
 
 
 class BashSession:
@@ -68,8 +99,17 @@ class BashSession:
         await session.close()
     """
 
-    def __init__(self, cwd: str | Path = ".", init_command: str | None = None) -> None:
+    def __init__(
+        self,
+        cwd: str | Path = ".",
+        init_command: str | None = None,
+        *,
+        keep_background_on_close: bool = False,
+    ) -> None:
         self._cwd = Path(cwd).resolve()
+        self._keep_background_on_close = keep_background_on_close
+        # PIDs of background jobs as of the last completed command.
+        self._background_pids: frozenset[int] = frozenset()
         # Optional shell snippet run once every time the session (re)starts —
         # before any user command — to set up the environment (e.g. activating a
         # conda env). Re-run on reset() because a fresh bash loses prior env.
@@ -84,6 +124,10 @@ class BashSession:
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
+        from nooa.tools.shell_lifecycle import _current_scope
+
+        if scope := _current_scope.get():
+            scope.adopt(self)
 
     @property
     def cwd(self) -> Path:
@@ -97,8 +141,12 @@ class BashSession:
             try:
                 # During interpreter shutdown, module globals (os, signal) may
                 # be None, causing TypeError. Broad except handles all cases.
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
+                if self._keep_background_on_close:
+                    _spawn_output_drainer(proc)
+                    proc.kill()
+                else:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
             except Exception:
                 try:
                     proc.kill()
@@ -255,7 +303,7 @@ class BashSession:
         The payload travels in a here-string so command length is bounded by memory
         rather than ARG_MAX.
         """
-        protocol = f"_nemo_ec=$?\necho $_nemo_ec >&3\npwd >&3\necho {sentinel} >&3\n"
+        protocol = f"_nemo_ec=$?\necho $_nemo_ec >&3\npwd >&3\njobs -p >&3\necho {sentinel} >&3\n"
         # b64encode, not encodebytes: the latter wraps at 76 characters, and a
         # newline inside the here-string would split the payload across lines.
         blob = base64.b64encode(command.encode()).decode()
@@ -322,6 +370,10 @@ class BashSession:
                 candidate = ctrl_lines[1].strip()
                 if candidate.startswith("/"):
                     self._cwd = Path(candidate)
+            if not timed_out:
+                self._background_pids = frozenset(
+                    int(line) for line in ctrl_lines[2:] if line.strip().isdigit()
+                )
 
         stdout, stderr = _bounded(stdout), _bounded(stderr)
 
@@ -452,6 +504,10 @@ class BashSession:
                 candidate = ctrl_lines[1].strip()
                 if candidate.startswith("/"):
                     self._cwd = Path(candidate)
+            if not timed_out:
+                self._background_pids = frozenset(
+                    int(line) for line in ctrl_lines[2:] if line.strip().isdigit()
+                )
 
         if timed_out:
             exit_code = 124
@@ -585,9 +641,10 @@ class BashSession:
         sentinel: str,
         original_timeout: float,
     ) -> bool:
-        """Kill child processes and wait for sentinel on control fd.
+        """Kill the current command tree and wait for its control sentinel.
 
-        Graduated: SIGTERM children -> 5s -> SIGINT bash -> 2s.
+        Capture descendants before TERM can orphan them. Earlier background
+        jobs and their entire subtrees are excluded from timeout cleanup.
         """
         ctrl = self._control_reader
         assert ctrl is not None
@@ -603,38 +660,88 @@ class BashSession:
                 if sentinel in raw.decode("utf-8", errors="replace"):
                     return True
 
-        async def kill_children(sig: int) -> None:
-            killed_any = False
+        async def snapshot_children() -> dict[int, str | None]:
             try:
-                pgrep = await asyncio.create_subprocess_exec(
-                    "pgrep",
-                    "-P",
-                    str(proc.pid),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
+                children: dict[int, list[tuple[int, str | None]]] = {}
+                if sys.platform == "linux":
+                    # Minimal benchmark images often have /proc but no procps.
+                    # Read PPID and start time from the same stat record.
+                    for entry in Path("/proc").iterdir():
+                        if not entry.name.isdecimal():
+                            continue
+                        try:
+                            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                            parent, identity = int(fields[1]), fields[19]
+                        except (OSError, IndexError, ValueError):
+                            # Processes may exit between enumeration and read.
+                            continue
+                        children.setdefault(parent, []).append((int(entry.name), identity))
+                else:
+                    process_list = await asyncio.create_subprocess_exec(
+                        "ps",
+                        "-eo",
+                        "pid=,ppid=",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    try:
+                        stdout, _ = await asyncio.wait_for(process_list.communicate(), timeout=2.0)
+                    except TimeoutError:
+                        process_list.kill()
+                        await process_list.communicate()
+                        raise
+                    if process_list.returncode:
+                        raise OSError(f"ps exited with status {process_list.returncode}")
+                    for line in stdout.decode().splitlines():
+                        pid, parent = map(int, line.split())
+                        children.setdefault(parent, []).append((pid, None))
+                descendants: dict[int, str | None] = {}
+                pending = list(children.get(proc.pid, []))
+                while pending:
+                    pid, identity = pending.pop()
+                    if pid in self._background_pids or pid in descendants:
+                        continue
+                    descendants[pid] = identity
+                    pending.extend(children.get(pid, []))
+                return descendants
+            except (TimeoutError, OSError, ValueError) as error:
+                logger.warning(
+                    "Could not snapshot command descendants for timeout cleanup (%s): %s",
+                    type(error).__name__,
+                    error,
                 )
-                stdout, _ = await asyncio.wait_for(pgrep.communicate(), timeout=2.0)
-                if stdout:
-                    for pid_str in stdout.decode().split():
-                        if pid_str.strip():
-                            try:
-                                os.kill(int(pid_str), sig)
-                                killed_any = True
-                            except (ProcessLookupError, OSError):
-                                pass
-            except (TimeoutError, OSError, FileNotFoundError):
-                pass
-            if not killed_any:
-                # SIGINT to bash (like Ctrl-C) to break pending reads.
+                return {}
+
+        def kill_children(targets: dict[int, str | None], sig: int) -> bool:
+            killed_any = False
+            # Signal descendants before their parents. Keep the captured PIDs
+            # through escalation even if the shell sentinel has already arrived.
+            for pid, identity in reversed(list(targets.items())):
+                if sys.platform == "linux" and (
+                    identity is None or _process_start_time(pid) != identity
+                ):
+                    continue
                 try:
-                    os.kill(proc.pid, signal.SIGINT)
+                    os.kill(pid, sig)
+                    killed_any = True
                 except (ProcessLookupError, OSError):
                     pass
+            return killed_any
 
-        await kill_children(signal.SIGTERM)
-        if await try_drain(_SIGTERM_GRACE):
+        targets = await snapshot_children()
+        if not kill_children(targets, signal.SIGTERM):
+            # A shell builtin may be waiting without any command children.
+            try:
+                os.kill(proc.pid, signal.SIGINT)
+            except (ProcessLookupError, OSError):
+                pass
+        recovered = await try_drain(_SIGTERM_GRACE)
+        # Refresh reachable descendants, but retain orphaned original targets.
+        for pid, identity in (await snapshot_children()).items():
+            targets.setdefault(pid, identity)
+        kill_children(targets, signal.SIGKILL)
+        if recovered:
             return True
-        await kill_children(signal.SIGKILL)
         if await try_drain(_SIGKILL_GRACE):
             return True
         return False
@@ -671,7 +778,13 @@ class BashSession:
             self._control_transport = None
         self._control_reader = None
 
-        if self._process is not None and self._process.returncode is None:
+        if (
+            self._keep_background_on_close
+            and self._process is not None
+            and self._process.returncode is None
+        ):
+            await self._close_keeping_background(self._process)
+        elif self._process is not None and self._process.returncode is None:
             same_loop = self._started_on_loop is asyncio.get_running_loop()
             if same_loop:
                 # Graceful shutdown: SIGTERM → wait → SIGKILL on timeout
@@ -702,6 +815,50 @@ class BashSession:
                     except Exception:
                         pass
         self._process = None
+        self._background_pids = frozenset()
         self._started = False
         self._started_on_loop = None
         self._lock = asyncio.Lock()
+
+    async def _close_keeping_background(self, proc: asyncio.subprocess.Process) -> None:
+        """End bash only; its background jobs keep running with drained output."""
+        _spawn_output_drainer(proc)
+        same_loop = self._started_on_loop is asyncio.get_running_loop()
+        if same_loop and proc.stdin is not None:
+            # A non-interactive bash exits at EOF without signalling its jobs.
+            try:
+                proc.stdin.close()
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+                return
+            except (TimeoutError, OSError):
+                pass
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        if same_loop:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except TimeoutError:
+                pass
+
+
+def _spawn_output_drainer(proc: asyncio.subprocess.Process) -> None:
+    """Keep reading bash's stdout/stderr pipes in a detached process.
+
+    Background jobs inherit these pipes; once this process exits they would get
+    EPIPE/SIGPIPE on their next write. Best-effort: failures are only logged.
+    """
+    try:
+        transport = proc._transport  # type: ignore[attr-defined]
+        fds = [transport.get_pipe_transport(fd).get_extra_info("pipe").fileno() for fd in (1, 2)]
+        subprocess.Popen(
+            [sys.executable, "-c", _DRAIN_SCRIPT, *map(str, fds)],
+            pass_fds=fds,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        logger.warning("Could not start the background-output drainer", exc_info=True)

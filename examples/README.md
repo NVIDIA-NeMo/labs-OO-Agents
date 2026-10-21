@@ -16,8 +16,9 @@ uv run python examples/quickstart/01_first_generation_method.py
 Most quickstarts use the model selector in
 [`nooa.util.quickstart`](../src/nooa/util/quickstart.py), which chooses a default
 from the provider credentials in your environment. See the root README's
-[Choose a model](../README.md#1-choose-a-model) section when adapting an example
-to use an explicit model. For local LLM setup, see
+[Connect a model](../README.md#1-connect-a-model) section when adapting an example.
+The [multimodal quickstart](quickstart/13_multimodal.py) uses a saved alias
+instead: configure `vision` with `nooa connect` and enable image inputs. For local LLM setup, see
 [Running NOOA With Local Models](../docs/local-models.md).
 
 NOOA can execute LLM-generated Python. Run code-executing agents in an OS-level
@@ -42,9 +43,10 @@ features. Each file is standalone and includes its exact run command.
 | 10 | [`10_skills.py`](quickstart/10_skills.py) | Direct `TextSkill` attachment and model-facing `SkillRegistry` activation | — |
 | 11 | [`11_mcp.py`](quickstart/11_mcp.py) | A local wiki MCP server exposed as an agent tool | `uv sync --extra mcp` |
 | 12 | [`12_memory.py`](quickstart/12_memory.py) | Offline long-term memory, recall, reflection, and forgetting | `uv sync --extra memory` |
-| 13 | [`13_multimodal.py`](quickstart/13_multimodal.py) | Image inputs with CodeAct and Predict | A vision-capable model |
+| 13 | [`13_multimodal.py`](quickstart/13_multimodal.py) | Image inputs with CodeAct and Predict | A saved alias (`vision` by default) with `media_inputs: [image]` |
 | 14 | [`14_atif_trajectory.py`](quickstart/14_atif_trajectory.py) | Exporting ATIF trajectories for evals and downstream tooling | — |
 | 15 | [`15_nemo_relay.py`](quickstart/15_nemo_relay.py) | NeMo Relay intercepts, guardrails, events, and nested generation | `uv sync --extra nemo-relay` |
+| 16 | [`16_decisions.py`](quickstart/16_decisions.py) | A decision-only agent: choice, thresholded abstention, and batched questions with `DecideStrategy` | A decisions endpoint, e.g. `OPENROUTER_API_KEY` |
 
 If you are new to NOOA, run examples 1–6 in order. After that, choose by the
 capability you need rather than treating the remaining files as required steps.

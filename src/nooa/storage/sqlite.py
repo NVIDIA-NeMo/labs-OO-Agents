@@ -30,6 +30,7 @@ from nooa.context_blocks.events import _EVENT_REGISTRY
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
+    DecisionRecord,
     Error,
     Feedback,
     Message,
@@ -88,6 +89,7 @@ for _cls in (
     Summary,
     BeforeTurn,
     AfterTurn,
+    DecisionRecord,
     TuiSessionResumed,
     TuiSessionCleared,
 ):

@@ -7,7 +7,11 @@ import yaml
 from click.testing import CliRunner
 from nooa_cli.commands.connect import command
 
+from nooa.unifiedllm.connect import DISCOVERY_OUTPUT_TOKENS
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
+
+# Each interface discovery probe reserves its reply cap plus 512 input tokens.
+PER_PROBE = DISCOVERY_OUTPUT_TOKENS + 512
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +25,9 @@ def sdk_credentials(monkeypatch):
     monkeypatch.setattr(
         _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
     )
+    monkeypatch.setattr(_connect_prompts, "choose_media_inputs", lambda current=(): list(current))
+    # Media choice has focused UI tests; these legacy scenarios select manual.
+    monkeypatch.setattr(_connect_prompts, "choose_media_mode", lambda **kw: "manual")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -345,7 +352,7 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
     assert len(sent) == (0 if mode == "unprobed" else 5 if mode == "rejected" else 7)
     if mode == "missing":
         assert result.output.index(warning) < result.output.index("Write model entry")
-        assert "Try another API format or review the server's reasoning settings" in result.output
+        assert "Try another API format or review the server settings" in result.output
         entry = yaml.safe_load(path.read_text())["models"]["local"]
         assert "provenance" not in entry  # evidence stays in the session
 
@@ -368,7 +375,13 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
     def handle(request):
         sent.append(request)
         if request.url.host == "new.example" and request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json=response_body("chat"))
+            return httpx.Response(
+                200,
+                json=response_body(
+                    "chat",
+                    '{"value":323}' if "response_format" in json.loads(request.content) else "323",
+                ),
+            )
         return httpx.Response(404)
 
     mock_http(monkeypatch, handle)
@@ -388,6 +401,9 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
             "minimal",
             "--max-tokens",
             "200",
+            # Small discovery cap so reasoning checks never fit this budget.
+            "--output-tokens",
+            "200",
             "--budget-tokens",
             "6000",
             "--output",
@@ -396,7 +412,9 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
         input="y\nserver\nhttps://new.example/v1\nnew-model\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 3
+    assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 4
+    assert "response_format" not in json.loads(sent[3].content)  # Plain discovery acceptance.
+    assert "response_format" in json.loads(sent[-1].content)  # Fresh configured baseline.
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["api_base"] == "https://new.example/v1"
     assert entry["model_name"] == "openai/new-model"
@@ -564,7 +582,7 @@ def test_a_rejected_key_is_asked_for_again_and_the_listing_retried(tmp_path, mon
         input="fresh-private-key\n",
     )
     assert "The server rejected the key in CONNECT_TEST_KEY" in result.output
-    assert "Server listed 1 model(s)" in result.output
+    assert "Found 1 models" in result.output
     assert [auth for _, auth in sent] == ["Bearer stale-private-key", "Bearer fresh-private-key"]
     assert "private-key" not in result.output
     assert not path.exists()
@@ -631,7 +649,8 @@ def test_yaml_failure_names_file_and_line_without_echoing_contents(tmp_path):
     assert str(path) in result.output
     assert "line 2" in result.output
     assert "secret-value" not in result.output
-    assert "Agent diagnostic prompt" in result.output
+    assert "--show-diagnostics" in result.output
+    assert "Agent diagnostic prompt" not in result.output
 
 
 def test_write_failure_keeps_path_and_actionable_reason(tmp_path, monkeypatch):
@@ -647,7 +666,8 @@ def test_write_failure_keeps_path_and_actionable_reason(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert str(path) in result.output
     assert "Permission denied" in result.output
-    assert "Agent diagnostic prompt" in result.output
+    assert "--show-diagnostics" in result.output
+    assert "Agent diagnostic prompt" not in result.output
     assert not path.exists()
 
 
@@ -788,7 +808,15 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
             200,
             json={
                 "choices": [
-                    {"message": {"content": "323", "reasoning_content": "private test reasoning"}}
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": '{"value":323}'
+                            if "response_format" in json.loads(request.content)
+                            else "323",
+                            "reasoning_content": "private test reasoning",
+                        },
+                    }
                 ]
             },
         )
@@ -816,13 +844,13 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
-    assert "reasoning returned" in result.output
+    assert "API formats that returned reasoning: OpenAI-compatible Chat" in result.output
     assert "acceptance alone" not in result.output
     assert "private test reasoning" not in result.output
-    assert result.output.index("Chat interface — checking") < result.output.index(
-        "Chat interface: Connected"
+    assert result.output.index("OpenAI-compatible Chat — checking") < result.output.index(
+        "OpenAI-compatible Chat: Passed"
     )
-    assert result.output.index("Chat interface: Connected") < result.output.index(
+    assert result.output.index("OpenAI-compatible Chat: Passed") < result.output.index(
         "Tool use — checking"
     )
     assert result.output.index("Tool use — checking") < result.output.index("Save this model as")
@@ -850,7 +878,13 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
         if responses_ok and request.url.path.endswith("responses"):
             return httpx.Response(200, json=response_body("responses"))
         if responses_ok and request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+            return httpx.Response(
+                200,
+                json=response_body(
+                    "chat",
+                    '{"value":323}' if "response_format" in json.loads(request.content) else "323",
+                ),
+            )
         return httpx.Response(401)
 
     monkeypatch.setattr(_connect_prompts, "prompt", prompt)
@@ -917,6 +951,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--api-key-env",
             "CONNECT_BAD",
             "--no-catalogue",
+            "--show-diagnostics",
             "--probe",
             "minimal",
             "--output",
@@ -925,7 +960,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
         input="y\nkey\nCONNECT_GOOD\ny\n" if recover else "y\ncancel\n",
     )
     assert result.exit_code == 0, result.output
-    assert result.output.count("Approve API checks") == 1
+    assert result.output.count("Approve setup and optional media checks") == 1
     assert "Key rejected by this server" in result.output
     assert "Give Feedback" not in result.output
     assert "Provider List" not in result.output
@@ -936,7 +971,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     context = details["run_context"]
     assert context["target_file"] == str(path.resolve())
     assert context["alias"] == "local"
-    assert context["remaining_budget_tokens"] == connect.DEFAULT_CHECK_BUDGET - 3 * 712
+    assert context["remaining_budget_tokens"] == connect.DEFAULT_CHECK_BUDGET - 3 * PER_PROBE
     assert context["interface_timeout_seconds"] == 30
     assert "--stage interfaces" in context["rerun_command"]
     assert "skills/nooa-model-configuration/SKILL.md" in handoff
@@ -977,7 +1012,7 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
             "",
             "--no-catalogue",
             "--budget-tokens",
-            "2848",
+            str(4 * PER_PROBE),
             "--output",
             str(path),
         ],
@@ -986,7 +1021,7 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert len(sent) == 4
     assert "budget is exhausted" in result.output
-    assert result.output.count("Approve API checks") == 1
+    assert result.output.count("Approve setup and optional media checks") == 1
     assert not path.exists()
 
 
@@ -1013,7 +1048,13 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     def handle(request):
         sent.append(request)
         if request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+            return httpx.Response(
+                200,
+                json=response_body(
+                    "chat",
+                    '{"value":323}' if "response_format" in json.loads(request.content) else "323",
+                ),
+            )
         return httpx.Response(404)
 
     mock_http(monkeypatch, handle)
@@ -1029,6 +1070,10 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--api-key-env",
             "",
             "--no-catalogue",
+            # Small discovery cap so the three routing probes (3 x 712) spend
+            # the budget and no reasoning check fits.
+            "--output-tokens",
+            "200",
             "--budget-tokens",
             "2136",
             "--output",
@@ -1038,12 +1083,14 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
-    entry = yaml.safe_load(path.read_text())["models"]["local"]
-    assert "provenance" not in entry
+    assert not path.exists()  # Discovery consumed approval; no typed baseline ran.
+    assert "Nothing was saved" in result.output
+    assert "--no-probe" in result.output
+    assert "Write model entry" not in result.output
     assert "approved budget is too small" in result.output
     assert "setup is incomplete; budget exhausted before routing" in result.output
     assert result.output.index("approved budget is too small") < result.output.index(
-        "Connection: budget exhausted"
+        "Connection: Not tested: token budget exhausted"
     )
 
 
@@ -1194,7 +1241,13 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     def handle(request):
         bodies.append(json.loads(request.content))
         if request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+            return httpx.Response(
+                200,
+                json=response_body(
+                    "chat",
+                    '{"value":323}' if "response_format" in json.loads(request.content) else "323",
+                ),
+            )
         return httpx.Response(404)
 
     mock_http(monkeypatch, handle)
@@ -1231,7 +1284,7 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     # check_interfaces also probes the first level (max) per interface, cheaply,
     # to recommend which interface actually surfaces reasoning. Routing is then
     # rechecked at the configured cap; tools and all six levels run for real.
-    # The session seed is also attempted; this minimal mock lacks a finish reason.
+    # The session seed returns no tools, so its follow-on replies do not run.
     assert len(bodies) == 12
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert "provenance" not in entry  # outcomes were checked on the wire; see bodies
@@ -1242,7 +1295,13 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
 
     def handle(request):
         if request.url.path.endswith("chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+            return httpx.Response(
+                200,
+                json=response_body(
+                    "chat",
+                    '{"value":323}' if "response_format" in json.loads(request.content) else "323",
+                ),
+            )
         return httpx.Response(404)
 
     mock_http(monkeypatch, handle)
@@ -1264,7 +1323,9 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
         input="y\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert "budget remaining: unlimited" in result.output
+    assert "Shared token budget: unlimited" in result.output
+    assert "budget remaining:" not in result.output
+    assert "Estimated tokens:" not in result.output
     assert "too small for all checks" not in result.output
     assert "The approved check budget is exhausted" not in result.output
 
@@ -1286,7 +1347,7 @@ def test_declining_initial_approval_makes_no_calls_or_writes(tmp_path, monkeypat
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(command, ["--output", str(path)], input="n\n")
     assert result.exit_code == 0, result.output
-    assert "Approve API checks" in result.output
+    assert "Approve setup and optional media checks" in result.output
     assert not path.exists()
 
 
@@ -1322,7 +1383,7 @@ def test_initial_approval_defaults_to_yes(tmp_path, monkeypatch):
         input="\nn\n",
     )
     assert result.exit_code == 0, result.output
-    assert "Approve API checks within this budget? [Y/n]" in result.output
+    assert "Approve setup and optional media checks with this token budget? [Y/n]" in result.output
     assert len(requests) == 1
     assert not path.exists()  # Saving remains a separate choice.
 
@@ -1372,7 +1433,7 @@ def test_provider_menu_fills_connection_defaults(
     assert "preset-test-key" not in result.output
     assert "Model server URL:" not in result.output
     assert "Key environment variable" not in result.output
-    assert result.output.index("Model:") < result.output.index("API format [")
+    assert result.output.index("Search advertised model IDs") < result.output.index("API format [")
 
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
@@ -1407,7 +1468,7 @@ def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeyp
     )
     assert result.exit_code == 0, result.output
     assert len(seen) == 1
-    assert result.output.index("Model:") < result.output.index("API format [")
+    assert result.output.index("Search advertised model IDs") < result.output.index("API format [")
     entry = yaml.safe_load(path.read_text())["models"]["selected"]
     assert entry["api_style"] == style
     assert entry["model_name"].endswith("/vendor-b/model")
@@ -1447,7 +1508,7 @@ def test_large_model_list_and_invalid_choice_do_not_flood_terminal(tmp_path, mon
         command, args(tmp_path / "models.yaml")[1:], input="wrong\nvendor/model-42\ny\n"
     )
     assert result.exit_code == 0, result.output
-    assert "1000 model(s)" in result.output
+    assert "Found 1000 models" in result.output
     assert "vendor/model-999" not in result.output
     assert "vendor/model-998" not in result.output
     assert len(result.output) < 6000
@@ -1505,3 +1566,93 @@ def test_server_url_suggestions_include_existing_file_without_credentials(
     assert "https://first.example/v1/" not in seen
     assert "secret" not in str(seen) and "do-not-complete" not in str(seen)
     assert path.read_text() == original
+
+
+@pytest.mark.parametrize("diagnostics", [False, True])
+def test_local_failure_diagnostics_are_explicit_and_retrievable(tmp_path, diagnostics):
+    path = tmp_path / "invalid.yaml"
+    path.write_text("models: [\n  PRIVATE-CONTENT: }\n")
+    result = CliRunner().invoke(
+        command, [*args(path), "--yes", *(["--show-diagnostics"] if diagnostics else [])]
+    )
+    assert result.exit_code == 1
+    assert "Invalid YAML" in result.output and "line 2" in result.output
+    assert "PRIVATE-CONTENT" not in result.output
+    assert ("Agent diagnostic prompt" in result.output) is diagnostics
+    if diagnostics:
+        assert '"run_context"' in result.output
+        assert "nooa-model-configuration" in result.output
+    else:
+        assert "--show-diagnostics" in result.output
+        assert len(result.output) < 500
+
+
+def test_connect_does_not_print_the_otel_tracing_line(tmp_path, monkeypatch, capsys):
+    """Tracing still auto-enables during checks, but its banner stays out of the wizard."""
+    import httpx
+
+    import nooa.agent
+    import nooa.tracing
+
+    class Exporter:
+        def describe(self):
+            return "journal:http://viewer.test:5001"
+
+    announced = []
+
+    def enable_tracing(*args, **kwargs):
+        # Stand-in for the auto-probe finding a viewer: print the real banner.
+        announced.append(True)
+        nooa.tracing._print_trace_target([Exporter()], None)
+
+    monkeypatch.setattr(nooa.tracing, "enable_tracing", enable_tracing)
+    monkeypatch.setattr(nooa.agent, "_auto_tracing_attempted", False)
+
+    def handle(request):
+        if request.url.path.endswith("chat/completions"):
+            body = json.loads(request.content)
+            text = '{"value":323}' if "response_format" in body else "323"
+            return httpx.Response(200, json=response_body("chat", text))
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            "chat",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--max-tokens",
+            "2048",
+            "--output",
+            str(path),
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert announced, "the checks should have reached the tracing auto-probe"
+    assert "OTel tracing enabled" not in result.output
+    # Outside connect the banner is unchanged.
+    capsys.readouterr()
+    nooa.tracing._print_trace_target([Exporter()], None)
+    assert "OTel tracing enabled: journal:http://viewer.test:5001" in capsys.readouterr().out
+
+
+def test_cli_and_diagnostic_defaults_match_the_discovery_constant():
+    """The CLI writes the value out (no nooa.unifiedllm import at load); keep it equal."""
+    import inspect
+
+    from nooa_cli.commands._connect_registry import diagnostic_context
+
+    option = next(p for p in command.params if p.name == "output_tokens")
+    assert option.default == DISCOVERY_OUTPUT_TOKENS
+    default = inspect.signature(diagnostic_context).parameters["output_tokens"].default
+    assert default == DISCOVERY_OUTPUT_TOKENS

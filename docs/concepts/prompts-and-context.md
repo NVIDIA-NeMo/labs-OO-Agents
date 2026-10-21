@@ -11,6 +11,7 @@ home.
 | Agent-wide role and stable constraints | Short class docstring |
 | Instructions for one task | Method name and docstring |
 | Data for the current call | Method parameters |
+| Images, audio, video, and PDFs | Typed Media parameters, or captured CodeAct `show()`; [media guide](../media.md) |
 | Trusted instance configuration | `{self.attribute}` in a docstring |
 | Cross-call facts that should stay visible | Context blocks |
 | Chronological interaction history | Events |
@@ -37,6 +38,10 @@ class Translator(Agent, llm=llm):
 The class docstring applies to every agentic method. Keep it short. The method
 docstring describes only the current task. `{self.language}` is appropriate
 because it is trusted configuration not present in the method signature.
+
+Pass `Image`, `Audio`, `Video`, or PDF `File` objects as method arguments.
+CodeAct can also use `show()` while generated code runs. Set the model's
+`media_inputs` to the formats it accepts. See [media inputs](../media.md).
 
 The `text` parameter is already rendered by the strategy. Do not repeat it as
 `{text}` in the docstring.

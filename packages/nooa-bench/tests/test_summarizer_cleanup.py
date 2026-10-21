@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Agent shutdown drains installed background summaries before releasing resources."""
+"""Agent shutdown drains blocking summaries before releasing resources."""
 
 import asyncio
 from unittest.mock import AsyncMock
@@ -72,9 +72,10 @@ async def test_close_drains_pending_summary_before_shell_and_shared_client(
         request.response = LLMResponse(content="parent", usage=LLMUsage(input_tokens=1000))
         return request
 
+    parent_call = asyncio.create_task(agent.event_manager.run_middleware("llm_call", ctx, complete))
     try:
-        await agent.event_manager.run_middleware("llm_call", ctx, complete)
         await asyncio.wait_for(entered.wait(), 2)
+        assert not parent_call.done(), "parent advanced before summary completed"
         closer = asyncio.create_task(getattr(agent, close_method)())
         await asyncio.wait_for(cleaning.wait(), 2)
         try:
@@ -92,6 +93,8 @@ async def test_close_drains_pending_summary_before_shell_and_shared_client(
                 await closer
         else:
             await closer
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(parent_call, 2)
         assert cancelled.is_set()
         llm.aclose.assert_not_awaited()  # Only the caller owns the shared client.
         await llm.aclose()
@@ -99,4 +102,6 @@ async def test_close_drains_pending_summary_before_shell_and_shared_client(
     finally:
         release.set()
         await agent.aclose()
+        parent_call.cancel()
+        await asyncio.gather(parent_call, return_exceptions=True)
         await original_shell_close()

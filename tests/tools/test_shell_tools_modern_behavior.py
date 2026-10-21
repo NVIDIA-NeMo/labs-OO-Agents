@@ -103,6 +103,19 @@ def test_shell_result_timeout_flag_preserves_positional_matches_argument():
     assert result.timed_out is True
 
 
+def test_shell_result_prints_its_class_and_attribute_names():
+    # Models copy names from what they see: the printout must name the real
+    # class and attributes, and always show the return code.
+    assert repr(ShellResult("ok\n")) == "ShellResult(returncode=0, stdout='ok\\n')"
+    failed = ShellResult("", "boom\n", 3)
+    assert str(failed) == "ShellResult(returncode=3, stdout='', stderr='boom\\n')"
+    assert failed.returncode == 3 and failed.stderr == "boom\n"
+    timed_out = ShellResult("", "", 124, timed_out=True, timeout_seconds=30.0)
+    assert repr(timed_out) == (
+        "ShellResult(returncode=124, timed_out=True, timeout_seconds=30.0, stdout='')"
+    )
+
+
 @pytest.mark.asyncio
 async def test_write_file_then_read(sh, tmp_path):
     await sh.write_file("f.txt", "line1\nline2\nline3\n")

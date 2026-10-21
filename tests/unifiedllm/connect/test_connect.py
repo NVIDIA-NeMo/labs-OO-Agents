@@ -119,7 +119,7 @@ async def test_run_transient_or_no_key_never_changes_environment(monkeypatch, ke
 
     async def post(self, url, **kwargs):
         requests.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     result = await connect.run(proposal, approved="minimal", api_key=key)
@@ -199,17 +199,10 @@ async def test_minimal_approval_posts_exact_plan_once(monkeypatch, style, suffix
     assert len(requests) == 1
     url, kwargs = requests[0]
     assert url.endswith(suffix)
-    expected = deepcopy(proposal.probes[0].body)
-    if style == "responses":
-        expected["truncation"] = "disabled"
-        expected["input"][0]["content"] = [
-            {"type": "input_text", "text": expected["input"][0]["content"]}
-        ]
-    elif style == "anthropic":
-        expected["messages"][0]["content"] = [
-            {"type": "text", "text": expected["messages"][0]["content"]}
-        ]
-    assert kwargs["json"] == expected
+    # Configured routing is a native typed generation, not the discovery
+    # prompt's exact wire body. Its generated schema enforces an integer.
+    assert "Compute 17 * 19" in json.dumps(kwargs["json"])
+    assert '"type": "integer"' in json.dumps(kwargs["json"])
     assert kwargs["json"][token_key] == 32768
     assert kwargs["json"]["model"] == "wire/model"
     assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
@@ -245,7 +238,7 @@ async def test_budget_stops_before_second_call_and_reconnect_skips_accepted(monk
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": "323"}}],
+                "choices": [{"message": {"content": '{"value":323}'}}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 10},
             },
         )
@@ -356,13 +349,17 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
         (
             "chat",
             {"reasoning_effort": "high"},
-            {"choices": [{"message": {"content": "323", "reasoning_content": "reason"}}]},
+            {"choices": [{"message": {"content": '{"value":323}', "reasoning_content": "reason"}}]},
         ),
-        ("chat", {"thinking": {"type": "enabled"}}, {"choices": [{"message": {"content": "323"}}]}),
+        (
+            "chat",
+            {"thinking": {"type": "enabled"}},
+            {"choices": [{"message": {"content": '{"value":323}'}}]},
+        ),
         (
             "chat",
             {"chat_template_kwargs": {"enable_thinking": True}},
-            {"choices": [{"message": {"content": "323"}}]},
+            {"choices": [{"message": {"content": '{"value":323}'}}]},
         ),
         (
             "responses",
@@ -428,7 +425,7 @@ async def test_budget_template_cannot_raise_approved_output_cap(monkeypatch):
 
     async def post(self, url, **kwargs):
         bodies.append(kwargs["json"])
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     proposal = make_plan(
@@ -448,7 +445,7 @@ async def test_alternate_cap_cannot_bypass_budget(monkeypatch):
 
     async def post(self, url, **kwargs):
         bodies.append(kwargs["json"])
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     result = await connect.run(
@@ -608,7 +605,7 @@ async def test_probe_cannot_multiply_generations_or_stream(monkeypatch, settings
 
     async def post(self, url, **kwargs):
         calls.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     result = await connect.run(
@@ -649,6 +646,8 @@ async def test_reconnect_keeps_observed_tools_without_spending_again(monkeypatch
     async def post(self, url, **kwargs):
         calls.append(kwargs)
         data = response_body("chat")
+        if len(calls) == 1:
+            return httpx.Response(200, json=data)
         data["choices"][0]["finish_reason"] = "tool_calls"
         data["choices"][0]["message"]["tool_calls"] = [
             {
@@ -688,7 +687,7 @@ async def test_progress_events_arrive_before_and_after_each_request(monkeypatch)
     async def post(self, url, **kwargs):
         assert events[-1].outcome["outcome"] == "running"
         calls.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     async for event in connect.run_steps(make_plan(), approved="all", api_key="test-key"):
