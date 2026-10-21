@@ -126,208 +126,46 @@ cells and truncation without a summary do not produce activity lines. Changing
 levels finalizes any already-visible open cards (including mirrored child
 cards); subsequent activity uses the new level.
 
-### Questions and explicit forms
+### Questions and forms
 
-Module-visible constructors from `nooa.interactive` work in generated CodeAct
-cells and tagged JSON/Predict outputs:
+`NeedInput(question=...)` is a plain question: the host shows it as text and
+the person's next message is the answer. `NeedInputForm(heading=...,
+questions=[...])` asks a form; the answer is a `FormResponse` (`accept` with
+`content` by question id, `decline` or `cancel`). `doc(NeedInputForm)` shows
+the question types and their fields.
 
-```python
-from nooa.interactive import (
-    NeedInput, NeedInputForm, FormResponse, FormChoice, TextQuestion,
-    PickOneQuestion, PickManyQuestion, NumberQuestion, IntegerQuestion, BooleanQuestion,
-)
-
-# Plain question: the next ordinary message answers; never a dialog/permission.
-return_result(NeedInput(question="Which branch: main or dev?"))
-
-# Explicit ordered questions; ids are stable, unique answer keys.
-return_result(NeedInputForm(
-    heading="Release details", reason="Choose the destination before deploying.",
-    questions=[
-        TextQuestion(id="name", label="Release name?", min_length=3, max_length=40),
-        PickOneQuestion(id="branch", label="Branch?", allow_other=False, default="main",
-                        choices=[FormChoice(value="main", title="Main branch"),
-                                 FormChoice(value="dev", title="Development branch")]),
-        PickManyQuestion(id="regions", label="Regions?", min_items=1,
-                         choices=[FormChoice(value="us", title="US"),
-                                  FormChoice(value="eu", title="EU")]),
-        IntegerQuestion(id="replicas", label="Replicas?", minimum=1, maximum=10),
-        NumberQuestion(id="canary", label="Canary share?", minimum=0, maximum=1, required=False),
-        BooleanQuestion(id="dry_run", label="Dry run?", default=True),
-        TextQuestion(id="contact", label="Contact?", format="email", required=False),
-    ],
-))
-
-# Outcome on notification["user_messages"], or external host/parent submission:
-await session.submit(FormResponse(action="accept", content={
-    "name": "Aurora", "branch": "dev", "regions": ["us"], "replicas": 3,
-    "canary": None, "dry_run": True, "contact": "",
-}))
-await child_question.child.send(FormResponse(action="decline"))  # parent replying to a child
-FormResponse(action="cancel")
-```
-
-The agent learns the interface in three steps: the `handle` prompt names the form
-and its field types in one line; `doc(NeedInputForm)` / `doc(<Question>)` show
-each class's one-sentence purpose and a description of every field; this README
-has the protocol mapping.
-
-**Fields.** Every question has `id`, `label`, optional `help`, `required`
-(default true; any type may be optional) and an optional `default`, which must
-satisfy the question's own constraints (checked at construction, like
-`min <= max`, valid regexes and unique choice values).
-
-| Question | Constraints | Answer (`FormValue`) |
-|---|---|---|
-| `TextQuestion` | `min_length`, `max_length`, `pattern` (full match), `format` (`email`, `uri`, `date`, `date-time`) | `str` (verbatim) |
-| `PickOneQuestion` | `choices`, `allow_other` (default true: a typed answer is also accepted) | `str`, the choice **value** |
-| `PickManyQuestion` | `choices`, `min_items`, `max_items` | `list[str]` of unique values |
-| `NumberQuestion` | `minimum`, `maximum` | `float` (an `int` is accepted and returned as float) |
-| `IntegerQuestion` | `minimum`, `maximum` | `int` |
-| `BooleanQuestion` | — | `bool` |
-
-`FormQuestion` is a discriminated union on `kind` (`text`, `pick_one`,
-`pick_many`, `number`, `integer`, `boolean`); constructors supply the tag, JSON
-descriptors must include it.
-
-**Checks.** `NeedInputForm.validate_response()` is strict: no string-to-number
-or string-to-bool conversion, `bool` is not a number, strict pickers accept exact
-values only (not titles or case/whitespace variants). It checks every
-constraint and raises one `ValueError` naming every failing field
-(`replicas: enter a whole number from 1 to 10; email: enter an email address`).
-Every question id is in the checked content: a missing/blank optional text
-answer becomes `""`, any other missing optional answer (`None`, blank, `[]`)
-becomes `None`; required answers must be present. Unknown ids fail. Defaults are
-prefills for the client; the adapter does not substitute them (except for Pool,
-below). Domain meaning is the agent's job: it asks targeted follow-ups for just
-the bad fields instead of repeating the whole form.
-
-**Answers that fail the checks** are not re-asked. The adapter admits the
-person's answers (`FormResponse.as_text()`) as an ordinary text message, with
-nothing added, echoed once like any user message; the agent reads it as unchecked text
-and decides what to do. A malformed envelope (unknown action, accept without
-content, content values that are not a `FormValue`) is different: the person gets
-one notice ("Your form answer wasn't used: ...") and nothing is admitted.
-
-`InputRequest` discriminates `kind="question"`/`"form"`; the turn result annotation
-is `Done | InputRequest | Waiting`. Both input results are forbidden in unattended
-`handle_batch`. The host renders requests, so do not also send them via `message()`.
-
-### Standard ACP mapping
-
-`nooa_atom.acp.need_input.need_input_schema()` maps a form to a standard
-`elicitation/create` form request (`requestedSchema`, `required` = the required
-ids) when the client advertises `elicitation.form`:
+ACP clients that advertise `elicitation.form` get a standard
+`elicitation/create` form request (`need_input.need_input_schema()`):
 
 | Question | Property schema |
 |---|---|
 | `TextQuestion` | `string` + `minLength`/`maxLength`/`pattern`/`format`/`default` |
-| `PickOneQuestion(allow_other=False)` | `string` + `oneOf: [{const, title}]` (+ `default`) |
-| `PickOneQuestion(allow_other=True)` | plain `string`; the description adds "For example: v1, v2." (standard ACP has no select-or-text property) |
-| `PickManyQuestion` | `array` + `items.anyOf: [{const, title}]` + `minItems`/`maxItems`/`default` |
-| `NumberQuestion` / `IntegerQuestion` | `number` / `integer` + `minimum`/`maximum`/`default` |
-| `BooleanQuestion` | `boolean` + `default` |
+| `PickOneQuestion(allow_other=False)` | `string` + `oneOf: [{const, title}]` |
+| `PickOneQuestion(allow_other=True)` | `string`; the description lists the choices |
+| `PickManyQuestion` | `array` + `items.anyOf: [{const, title}]` + `minItems`/`maxItems` |
+| `NumberQuestion` | `number`, or `integer` when `whole=True`; `minimum`/`maximum` |
+| `BooleanQuestion` | `boolean` |
 
-Clients without form elicitation (and no Pool extension) get the request as
-visible text (`NeedInputForm.as_text()`, with the constraint hints), and the
-person's next message arrives as plain text.
+Rules:
 
-### Pool adapter
+- The client checks answers against `requestedSchema`. The adapter does not:
+  the agent gets exactly what the person entered and handles unexpected values.
+- A malformed answer envelope is not admitted; the person sees one notice.
+- A client without form support gets the form as text (`NeedInputForm.as_text()`),
+  and the next message is the answer, as plain text.
+- An answer is admitted only while its form is current
+  (`Session.answer_form`); a stop submits nothing. A parent answers a child's
+  form with `child.send(FormResponse(...))`.
 
-Pool (`clientInfo.name="pool"`) does not implement standard ACP elicitation; it
-uses `_poolside/elicitation`. All Pool-specific elicitation code lives in
-`nooa_atom/acp/pool.py`: `pool_form_params()` builds the request (message =
-heading + reason, `requestedSchema`, `_meta["poolside/field_order"]` when there
-is more than one field) and `pool_content()` decodes Pool's string answers.
-
-Verified against Pool 1.0.16: it shows one question per page, renders `type:
-string` as a text box (multi-line descriptions are fine) and a required strict
-picker (`type: string` + `oneOf` const/title) as a radio list, and honours
-`required` and the field order. A picker-or-text (`anyOf: [{oneOf}, {type:
-string}]`) shows as a bare text box without the choices, so it is not used.
-Given a schema with a `type: integer` or `type: boolean` property, or an
-optional property that is not a plain string, Pool declines the whole form
-itself (wire `{"action": "decline"}`, indistinguishable from Escape). `number`,
-`array`, `minLength`/`maxLength`, `pattern`, `format` and `default` are
-untested. The adapter therefore never sends any of these: every property it
-sends is `type: string` (a `oneOf` picker only when required), with only
-`title`, `description`, `oneOf` and the top-level `required`. Every Atom
-question is shown; the others are downgraded to strings:
-
-| Question | Sent to Pool |
-|---|---|
-| text constraints / format | string; hints in the description ("2 to 5 characters; matching [a-z]+.", "An email address.") |
-| required strict picker | `oneOf` (a radio list) |
-| `allow_other` or optional picker | string listing the choices ("For example: A, B." / "One of: A, B.") |
-| `PickManyQuestion` | string, "Comma-separated; choose from: A, B." |
-| `NumberQuestion` / `IntegerQuestion` | string, "A number from 0 to 1." / "A whole number from 1 to 10." |
-| required `BooleanQuestion` | strict Yes/No picker (`"true"`/`"false"`) |
-| optional `BooleanQuestion` | string, "Yes or no." |
-| any `default` | "Default: x." in the description |
-
-`pool_content()` turns the strings back into typed answers before the same
-strict checks: a blank answer takes the question's default if it has one and is
-otherwise omitted; numbers and whole numbers parse to `float`/`int`;
-`true`/`false`/`yes`/`no` (any case) become `bool`; a comma-separated list
-becomes `list[str]`, and a picker answer that names a choice's value or title
-(ignoring case) becomes that value. Anything that does not parse stays the
-person's string, so the checks report it and the answer reaches the agent as text.
-
-If a Pool request fails at the transport level the adapter stops using the
-extension for that connection. When Pool supports standard ACP elicitation,
-delete `pool.py`, its branch in `AtomACPAgent._ask` and the `_pool_forms` flag;
-nothing else changes.
-
-### Capabilities and failure guarantees
-
-Accept, decline, and cancel retain their separate `FormResponse` actions. Only
-accept carries content. A Pool automatic unsupported-schema decline and a user's
-Escape decline return the same `{"action":"decline"}` without a reason. The
-adapter cannot infer intent from this wire action and does not label it a user
-decision or reinterpret it as a pending request. The original heading/reason and
-complete descriptors are rendered as visible text before asking, and preserved
-on replay; decline is still admitted once as the actual client-reported outcome.
-No automatic reask of the whole form is performed. Stop is transport/prompt cancellation and submits no
-answer, even if a client swallows cancellation. Ownership is checked without an
-await before admission; superseded dialogs cannot admit stale responses. Successful
-user-message admission claims/invalidates the form once, even before dispatch starts.
-Withdrawal does not resurrect the dialog. ChildQuestion carries an internal durable
-request token; `child.send(FormResponse(...))` answers the child's current form with it
-and rejects superseded same-id forms. Manual session
-submit targets the current request; hosts retaining a request can supply request_id. Responses
-are recorded before queueing, echoed once, and replayed without reopening dialogs.
-Unsupported/text-only hosts preserve an explicit request with descriptors and
-response guidance; raw text stays raw, not an accepted form outcome. No URL-mode
-elicitation or nested-object widget support is claimed.
-
-`FormResponse` validates its envelope and `FormValue` content shape. The owning
-request's `validate_response()` additionally checks ids, required answers, and
-every constraint. External hosts should use `session.submit()`; `admit()` is
-record-before-queue plumbing, not an external form-validation API. Child requests
-carry descriptors as data; the owning child validates at submission.
-
-### Migration and durable records
-
-Replace draft `NeedInputForm(question=..., answer_type=Model/options=...)` with
-`NeedInputForm(heading=..., questions=[...])`. Old typed authoring and presentation
-switches are rejected. No dynamic Pydantic answer class is needed or restored.
-
-New durable forms store `outcome_kind="need_input_form"`, `kind="form"`, heading,
-reason, ordered descriptors, and an internal ownership token directly; JSON roundtrips preserve them.
-Questions retain `need_input`. Recovery preserves request intent without reopening
-historical dialogs, and does not restore forms superseded by later admission or
-an unfinished turn. Legacy child forms without ownership tokens require a fresh
-request before a parent's `child.send(FormResponse(...))` can answer them. Old explicitly untyped text/choice forms migrate to one
-`answer` descriptor with string-dictionary content. Old records containing an
-answer class or JSON answer schema remain unavailable original data: acceptance
-is refused and the agent must request a new descriptor form, even if the old class
-is importable. This does not claim recovery of old custom validators. Decline,
-cancel, or explanatory raw text remain possible. Old options-only/auto question
-records remain conversational; `NeedInput.options` was removed, and legacy option
-lists are folded into the question text. Legacy `pick_one_or_text` descriptors
-load as `pick_one` with `allow_other=True`; legacy `pick_one` records (no
-`allow_other` key) load as strict pickers. Old ChildQuestion schema data is retained only as
-legacy display data. Historical decline markers cannot recover lost action intent.
+**Pool** (`clientInfo.name="pool"`) uses `_poolside/elicitation`
+(`acp/pool.py`). Pool declines the whole form itself when a property is
+`integer` or `boolean`, or when an optional property is not a plain string, so
+the adapter sends every question as a `type: string` property: a `oneOf`
+picker for required pickers and required booleans (Yes/No), otherwise a text
+box whose description says what to enter ("A whole number from 1 to 10.",
+"Comma-separated; choose from: A, B.", "Default: x."). Answers reach the agent
+as the strings typed. If a Pool request fails, the connection falls back to
+standard ACP or text.
 
 ## Skills and MCP servers
 
