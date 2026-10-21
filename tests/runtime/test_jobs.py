@@ -324,7 +324,8 @@ async def test_get_shows_recent_items(agent):
 async def test_status_names_self_jobs_not_the_queue_manager(agent):
     await agent.jobs.run("sleep 5", label="build")
     status = agent.queue_manager.status()
-    assert "build" in status and "self.jobs.cancel('build')" in status
+    assert "build" in status
+    assert status.endswith("\nCancel a job: await self.jobs.cancel('<label>')")
     assert "queue_manager" not in status
 
 
@@ -642,8 +643,10 @@ async def test_status_has_no_queue_manager_cancel_hint_for_skill_channels():
     await asyncio.sleep(0)
     status = qm.status()
     assert "inbox" in status and "cancel" not in status
-    qm.set_cancel_hint("mesh", "await self.mesh.stop()  # {label}")
-    assert "💡 await self.mesh.stop()  # inbox" in qm.status()
+    qm.set_cancel_hint("mesh", "Stop the inbox: await self.mesh.stop()")
+    qm.spawn(pump(), channel="mesh", label="outbox")
+    await asyncio.sleep(0)
+    assert qm.status().count("Stop the inbox: await self.mesh.stop()") == 1
     await qm.shutdown()
 
 

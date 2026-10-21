@@ -338,7 +338,9 @@ class JobsApi(Skill):
         self._jobs: dict[str, _Job] = {}
         self._finished: deque[_Job] = deque(maxlen=_KEEP_FINISHED)
         self._log_dir: Path | None = None
-        self._queues.set_cancel_hint(JOBS_CHANNEL, "await self.jobs.cancel({label!r})")
+        self._queues.set_cancel_hint(
+            JOBS_CHANNEL, "Cancel a job: await self.jobs.cancel('<label>')"
+        )
 
     # ---- internals -------------------------------------------------------
 

@@ -716,17 +716,21 @@ class QueueManager:
         # TUI) react to puts — such as (re)starting its dispatcher — via a
         # supported API instead of monkey-patching _set_notify.
         self._notify_callback: Callable[[], None] | None = None
-        # channel name -> status() cancel hint template with ``{label}``.
+        # channel name -> one status() line saying how to cancel its jobs.
         self._cancel_hints: dict[str, str] = {}
 
-    def set_cancel_hint(self, channel: str, template: str) -> None:
-        """Show ``template.format(label=...)`` as the cancel hint for jobs on ``channel``.
+    def set_cancel_hint(self, channel: str, hint: str) -> None:
+        """Show ``hint`` once under "Background work" while jobs on ``channel`` run.
+
+        One plain line naming the call with a placeholder, e.g.
+        ``"Cancel a job: await self.jobs.cancel('<label>')"``; the labels
+        are already in the list above it.
 
         For channels owned by a model-facing API (``self.jobs``): ``status()``
         then names that API instead of the hidden ``queue_manager`` and does
         not offer the channel for removal.
         """
-        self._cancel_hints[channel] = template
+        self._cancel_hints[channel] = hint
 
     def set_notify_callback(self, callback: Callable[[], None] | None) -> None:
         """Register an extra callback fired after each channel ``put()``.
@@ -941,13 +945,11 @@ class QueueManager:
 
         # Cancel hints come only from the API that owns a channel
         # (``set_cancel_hint``); the status never names the hidden queue_manager.
+        # Each hint shows once, however many of its jobs are running.
         owned = self._cancel_hints
-        owned_hints = [
-            owned[h.name].format(label=h.label) for h in active_spawns if h.name in owned
-        ]
-        if owned_hints:
-            cheat = "💡 " + " | ".join(owned_hints)
-            body = f"{body}\n{cheat}" if body else cheat
+        hints = "\n".join(dict.fromkeys(owned[h.name] for h in active_spawns if h.name in owned))
+        if hints:
+            body = f"{body}\n{hints}" if body else hints
 
         return body or "(nothing queued)"
 

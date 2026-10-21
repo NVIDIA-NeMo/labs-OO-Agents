@@ -77,7 +77,7 @@ async def test_the_status_lists_jobs_and_live_children_together(tmp_path, sessio
     assert "  • tests · job · running · full run before pushing" in status
     assert "  • Review PR 462 · child · running" in status
     assert "  • Fix flaky test · child · retained" in status
-    assert "await self.jobs.cancel('tests')" in status
+    assert status.endswith("\nCancel a job: await self.jobs.cancel('<label>')")
 
 
 async def test_waiting_on_a_child_name_or_a_job_label_is_accepted(tmp_path, sessions_dir):

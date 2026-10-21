@@ -81,7 +81,7 @@ await self.jobs.run("make serve", label="srv", replace=True)  # restart a runnin
 ```
 
 - Streams end with a done update carrying their last pending values (or `[]`); on an error `items` is `[]` and `error` is set; a cancelled job delivers nothing more. Jobs do not survive a restart: a resumed session gets one `JobsLost` event listing those that were running.
-- **Who uses what.** `self.jobs` is for the model's own background work. Skills that own a named channel or long-lived infrastructure (e.g. agent_mesh's `mesh` inbox pump, CI monitors) keep using `agent.queue_manager.queue(name, replace=True)` + `spawn(...)`, and call `agent.queue_manager.set_cancel_hint(name, "await self.<skill>.stop({label!r})")` if the model may stop them. Without a hint, `status()` shows the job but no cancel command.
+- **Who uses what.** `self.jobs` is for the model's own background work. Skills that own a named channel or long-lived infrastructure (e.g. agent_mesh's `mesh` inbox pump, CI monitors) keep using `agent.queue_manager.queue(name, replace=True)` + `spawn(...)`, and call `agent.queue_manager.set_cancel_hint(name, "Stop a monitor: await self.<skill>.stop('<label>')")` if the model may stop them. Without a hint, `status()` shows the job but no cancel command.
 
 ## Pitfalls
 
