@@ -66,7 +66,7 @@ qm.spawn(fetch_report(url), channel="reports")             # coroutine: one put 
 
 ## `self.jobs` — the model-facing view (interactive agents)
 
-`InteractiveAgent` registers a `jobs` queue channel and exposes `self.jobs` (`nooa.runtime.jobs.JobsApi`), built on `spawn()`. Every item it delivers is a `JobUpdate` with `.label`, so a turn can end with `Waiting(on=["jobs:<label>"])` and read `notification["jobs"]`. Exactly one update with `done=True` ends each job; its result is `items[0]` (a `ShellResult` for `run`, a coroutine's return value, `after`'s payload).
+`InteractiveAgent` registers a `jobs` queue channel and exposes `self.jobs` (`nooa.runtime.jobs.JobsApi`), built on `spawn()`. Every item it delivers is a `JobUpdate` with `.label`, so a turn can end with `Waiting(on=["jobs:<label>"])` and read `notification["jobs"]`. In Atom one name works for both kinds of background work: `Waiting(on=["<name>"])` takes a running job's label or a child session's name (a name that is both is rejected; use `jobs:<label>` or the child's id), and the per-turn status lists jobs and live children together under "Background work". Exactly one update with `done=True` ends each job; its result is `items[0]` (a `ShellResult` for `run`, a coroutine's return value, `after`'s payload).
 
 ```python
 await self.jobs.run("uv run pytest -q", label="tests")       # own bash process; one done update (items[0] is the ShellResult)

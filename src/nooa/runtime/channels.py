@@ -21,7 +21,7 @@ import inspect
 import logging
 import threading
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from functools import wraps
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -905,16 +905,20 @@ class QueueManager:
 
     # ---- composite status block -----------------------------------------
 
-    def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
+    def status(
+        self, *, max_items: int = 3, max_chars: int = 80, more_work: Sequence[str] = ()
+    ) -> str:
         """Composite ``status`` across queue-mode channels and active spawns.
 
         Wired into a dynamic context block (``queues``) so the LLM
         sees pending counts every turn. Event-mode channels skip —
         they don't accumulate.
 
-        Also shows active spawned jobs so the LLM knows background
-        producers are still running even when queues are empty.
-        Returns ``"(nothing queued)"`` when there is no status to show.
+        Also lists the running spawned jobs under "Background work:", so the
+        LLM knows background producers are still running even when queues
+        are empty. ``more_work`` adds a host's own lines to that list (Atom's
+        child sessions). Returns ``"(nothing queued)"`` when there is no
+        status to show.
         """
         parts = [
             ch.status(max_items=max_items, max_chars=max_chars)
@@ -926,13 +930,14 @@ class QueueManager:
         # Show active spawns — tells the LLM "monitors are running"
         # even when no items are pending (items were already delivered).
         active_spawns = [h for h in self._handles if h.state == "running"]
-        if active_spawns:
-            spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
-            for h in active_spawns:
-                line = h.describe() if h.describe is not None else None
-                spawn_lines.append(f"  • {line or f'{h.label} → {h.name} (running)'}")
-            spawn_status = "\n".join(spawn_lines)
-            body = f"{body}\n{spawn_status}" if body else spawn_status
+        work = [
+            (h.describe() if h.describe is not None else None) or f"{h.label} → {h.name} (running)"
+            for h in active_spawns
+        ]
+        work += [line for line in more_work if line]
+        if work:
+            work_status = "\n".join(["Background work:", *(f"  • {line}" for line in work)])
+            body = f"{body}\n{work_status}" if body else work_status
 
         # Cancel hints come only from the API that owns a channel
         # (``set_cancel_hint``); the status never names the hidden queue_manager.

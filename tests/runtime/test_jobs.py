@@ -538,8 +538,8 @@ async def test_the_status_line_shows_label_state_and_description_or_target(agent
     agent.jobs.after(300, label="timer")
     await agent.jobs.run("sleep 30 # " + "y" * 300, label="noisy")
     status = agent.queue_manager.status()
-    assert "  • tests · running · full run before pushing" in status
-    assert "  • timer · running · after 300s" in status
+    assert "  • tests · job · running · full run before pushing" in status
+    assert "  • timer · job · running · after 300s" in status
     noisy = next(line for line in status.splitlines() if "noisy" in line)
     assert noisy.endswith("…") and len(noisy) <= 4 + 100
     assert "→ jobs" not in status

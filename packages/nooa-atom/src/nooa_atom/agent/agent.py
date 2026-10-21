@@ -125,7 +125,8 @@ class AtomAgent(InteractiveAgent):
     check passed without running it. Run anything that may take more than a
     minute or two (test suites, builds, long scripts) with ``self.jobs.run(...)``
     instead of blocking a cell, and if nothing else is left end the turn with
-    ``Waiting(explanation=..., on=["jobs:<label>"])``. Send each user-facing answer
+    ``Waiting(explanation=..., on=["<label>"])``; ``on`` takes a job's label or a
+    child's name alike. Send each user-facing answer
     through ``self.message()`` as a complete Markdown document.
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
@@ -377,6 +378,14 @@ class AtomAgent(InteractiveAgent):
     def children(self) -> list[ChildRef]:
         """Handles on the child sessions you started, with live status and any unanswered question."""
         return self._port().children()
+
+    @hidden
+    @no_trace
+    def _queue_status(self) -> str:
+        """The ``queues`` block: pending items, then jobs and live children as "Background work"."""
+        from nooa_atom.agent.background import child_status_lines
+
+        return self.queue_manager.status(more_work=child_status_lines(self))
 
     @hidden
     def after_restore(self) -> None:

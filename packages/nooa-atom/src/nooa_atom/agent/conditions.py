@@ -11,6 +11,7 @@ from nooa.interactive import (  # noqa: F401  (re-exported)
     require_task_result,
 )
 from nooa.strategy_validation import InvariantError
+from nooa_atom.agent.background import live_children
 
 
 def require_result(agent: Any, result: Any, call: Any) -> None:
@@ -85,9 +86,13 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
     - a child's name or id: that child is running, ``working`` (its last
       turn ended Waiting on its own job) or has queued input.
 
+    A plain name works for a job's label and a child's name alike; one that
+    is both is rejected as ambiguous (use ``"jobs:<label>"`` or the child's id).
+
     - any channel with an item already buffered on it (a job that finished
       during the turn with its result queued, by its channel name), and
-      ``"jobs:<label>"`` when a ``self.jobs`` item with that label is buffered.
+      ``"jobs:<label>"`` (or the label) when a ``self.jobs`` item with that
+      label is buffered.
 
     The person (``"user_messages"``) is never a valid target. Anything else
     raises ``WaitingTargetNotRunning``, which the strategy shows the model
@@ -96,13 +101,20 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
     if not isinstance(result, Waiting):
         return
     running = _running_names(agent)
-    unmet = [name for name in result.on if not _is_running(name, running)]
+    unmet = [
+        name for name in result.on if name in running["ambiguous"] or not _is_running(name, running)
+    ]
     if not unmet:
         return
     reasons = []
     for name in unmet:
         if name in PERSON_NAMES:
             reasons.append(f"Waiting on {name!r}, but the person is not a job.")
+        elif name in running["ambiguous"]:
+            reasons.append(
+                f"Waiting on {name!r} is ambiguous: it names both a job and a child. Use "
+                f"'jobs:{name}' for the job, or the child's id {running['ambiguous'][name]!r}."
+            )
         elif name == "delegates":
             reasons.append(
                 "Waiting on 'delegates', but no child is running and nothing is queued "
@@ -127,8 +139,10 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
             )
         else:
             reasons.append(
-                f"Waiting on {name!r}, but it is not a running job, 'delegates', or a "
-                "child's name or id, so nothing will arrive."
+                f"Waiting on {name!r}, but no running job or child has that name (nor is it "
+                "'jobs' or 'delegates'), so nothing will arrive. If it was a job, it may have "
+                f"finished already (see self.jobs.get({name!r})), or start it with "
+                f"self.jobs.run(..., label={name!r})."
             )
     now = sorted(running["now"])
     raise WaitingTargetNotRunning(
@@ -145,7 +159,8 @@ def _running_names(agent: Any) -> dict[str, Any]:
     ``children`` maps every child's name and id to whether it is running,
     working or has queued input; ``jobs`` holds every running job's channel name and
     label; ``known_jobs`` every job's, running or not; ``now`` the names
-    that are accepted.
+    that are accepted; ``ambiguous`` maps a name that is both a ``self.jobs``
+    label and a live child's name to that child's id.
     """
     children: dict[str, bool] = {}
     port = getattr(agent, "session", None)
@@ -172,17 +187,28 @@ def _running_names(agent: Any) -> dict[str, Any]:
     channels = queues.channels()
     now |= {name for name, channel in channels.items() if channel.qsize() > 0}
     # A ``self.jobs`` job that already delivered: its labelled item is buffered.
+    job_labels = {handle.label for handle in handles if handle.name == "jobs"}
     if "jobs" in channels:
         for item in channels["jobs"].snapshot():
             label = getattr(item, "label", None)
             if isinstance(label, str) and label:
-                now.add(f"jobs:{label}")
+                now |= {f"jobs:{label}", label}
+                job_labels.add(label)
     if any(children.values()):
         now.add("delegates")
     if handles:
         now.add("jobs")
     now -= PERSON_NAMES
-    return {"children": children, "jobs": jobs, "known_jobs": known_jobs, "now": now}
+    # A name that is both a self.jobs label and a live child's name could mean either.
+    live = {child.name: child.id for child in live_children(agent) if child.name}
+    ambiguous = {label: live[label] for label in job_labels if label in live}
+    return {
+        "children": children,
+        "jobs": jobs,
+        "known_jobs": known_jobs,
+        "now": now,
+        "ambiguous": ambiguous,
+    }
 
 
 def _is_running(name: str, running: dict[str, Any]) -> bool:

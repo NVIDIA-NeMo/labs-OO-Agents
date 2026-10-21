@@ -344,7 +344,7 @@ async def test_waiting_on_an_unknown_name_is_rejected_and_lists_what_is_running(
     )
     assert len(calls) == 3
     assert "Waiting on 'user_messages', but the person is not a job." in calls[1]
-    assert "Waiting on 'ci', but it is not a running job, 'delegates', or a child's" in calls[1]
+    assert "Waiting on 'ci', but no running job or child has that name" in calls[1]
     assert "Waiting is only for running jobs or background agents." in calls[1]
     # handle_orchestrate cannot return NeedInput, so the hint does not offer it.
     assert "NeedInput" not in calls[1]

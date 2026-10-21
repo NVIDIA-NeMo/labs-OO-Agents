@@ -82,7 +82,7 @@ async def test_waiting_on_mesh_without_a_pump_is_rejected(tmp_path, sessions_dir
         ],
     )
     assert len(calls) == 2
-    assert "Waiting on 'mesh', but it is not a running job" in calls[1]
+    assert "Waiting on 'mesh', but no running job or child has that name" in calls[1]
     assert HINT in calls[1]
     assert "Running right now: nothing." in calls[1]
 

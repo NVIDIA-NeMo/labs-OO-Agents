@@ -201,9 +201,11 @@ class _Job:
         }
 
     def status_line(self) -> str:
-        """One short line for the per-turn queue status: label · state · description or target."""
+        """One short line for the per-turn status: label · job · state · description or target."""
         about = self.description or self.target
-        return _short(" · ".join(part for part in (self.label, self.state, about) if part), 100)
+        return _short(
+            " · ".join(part for part in (self.label, "job", self.state, about) if part), 100
+        )
 
 
 def _short(text: str, limit: int = _TARGET_CHARS) -> str:
@@ -316,7 +318,7 @@ class JobsApi(Skill):
     arrives as items in ``notification["jobs"]``, each with ``.label``.
 
         await self.jobs.run("uv run pytest -q", label="tests", description="full run before pushing")
-        return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
+        return_result(Waiting(explanation="tests running", on=["tests"]))  # or "jobs:tests"
         # next turn: u = notification["jobs"][0]  -> JobUpdate with done=True
         # u.items[0] is the ShellResult (.returncode, .stdout tail); u.log_path the full log
 

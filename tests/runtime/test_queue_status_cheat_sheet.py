@@ -96,7 +96,7 @@ async def test_active_spawns_shown_when_queues_empty():
     await asyncio.sleep(0.05)
 
     status = qm.status()
-    assert "active background job" in status
+    assert "Background work:" in status
     assert "ci_monitor" in status
     assert "running" in status
 
@@ -109,4 +109,4 @@ def test_no_active_spawns_shown_when_none_running():
     qm = QueueManager()
     qm.queue("user_messages")
     status = qm.status()
-    assert "active background job" not in status
+    assert "Background work:" not in status
