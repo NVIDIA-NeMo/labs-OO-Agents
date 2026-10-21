@@ -21,7 +21,9 @@ async def test_compact_is_advertised(atom_adapter, workspace, client):
     await client.wait_for(lambda: client.updates(session_id, AvailableCommandsUpdate))
     [commands] = client.updates(session_id, AvailableCommandsUpdate)[-1:]
     [compact] = [c for c in commands.available_commands if c.name == "compact"]
-    assert "self.events.collapse()" in compact.description
+    assert compact.description == (
+        "Summarize older conversation history to free up context while preserving key details."
+    )
 
 
 async def test_compact_sends_the_directive_to_the_agent(atom_adapter, workspace, client):
