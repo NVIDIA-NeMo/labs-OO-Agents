@@ -313,8 +313,9 @@ async def test_waiting_on_jobs_needs_a_running_job(tmp_path, sessions_dir):
         ],
     )
     assert len(calls) == 4
-    assert "Waiting on 'jobs', but no such job is running." in calls[1]
-    assert "Waiting on 'jobs:ci-42', but no such job is running." in calls[2]
+    assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
+    assert "Waiting on 'jobs:ci-42', but no job labelled 'ci-42' is running" in calls[2]
+    assert "self.jobs.get('ci-42')" in calls[2] and "label='ci-42'" in calls[2]
     assert not _rejected(calls[3])
 
 

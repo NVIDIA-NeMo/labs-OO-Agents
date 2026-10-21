@@ -113,8 +113,18 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
                 f"Waiting on child {name!r}, but it is not running and has nothing "
                 "queued, so nothing will arrive from it."
             )
-        elif name == "jobs" or name.startswith("jobs:") or name in running["known_jobs"]:
-            reasons.append(f"Waiting on {name!r}, but no such job is running.")
+        elif name == "jobs":
+            reasons.append(
+                "Waiting on 'jobs', but no job is running and nothing is queued; "
+                "see self.jobs.list() for finished ones."
+            )
+        elif name.startswith("jobs:") or name in running["known_jobs"]:
+            label = name.removeprefix("jobs:")
+            reasons.append(
+                f"Waiting on {name!r}, but no job labelled {label!r} is running: it may "
+                f"have finished already (see self.jobs.get({label!r})), or start it with "
+                f"self.jobs.run(..., label={label!r})."
+            )
         else:
             reasons.append(
                 f"Waiting on {name!r}, but it is not a running job, 'delegates', or a "

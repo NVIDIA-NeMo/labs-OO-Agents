@@ -4,6 +4,7 @@
 
 import asyncio
 import os
+import re
 import time
 from pathlib import Path
 
@@ -138,7 +139,11 @@ def _alive(pid: int) -> bool:
 
 async def test_labels_are_unique_among_running_jobs(agent):
     await agent.jobs.run("sleep 5", label="x")
-    with pytest.raises(ValueError, match="already running"):
+    hint = (
+        "a job labelled 'x' is already running; pass replace=True to restart it, "
+        "or await self.jobs.cancel('x')"
+    )
+    with pytest.raises(ValueError, match=re.escape(hint)):
         await agent.jobs.run("true", label="x")
     with pytest.raises(ValueError, match="already running"):
         agent.jobs.spawn(asyncio.sleep(0), label="x")
@@ -577,10 +582,10 @@ async def test_after_delivers_its_payload(agent):
     assert agent.jobs.get("check-ci").payload == "check CI on PR #462 and report"
 
 
-async def test_every_keeps_ticks_and_exposes_its_payload(agent):
+async def test_every_delivers_its_payload_each_tick(agent):
     payload = {"task": "poll CI", "pr": 462}
     agent.jobs.every(0.05, label="poll", payload=payload)
-    assert [(await _next(agent)).items for _ in range(2)] == [[1], [2]]
+    assert [(await _next(agent)).items for _ in range(2)] == [[payload], [payload]]
     assert agent.jobs.get("poll").payload == payload
     assert agent.jobs.list()[-1].payload == payload
     await agent.jobs.cancel("poll")
@@ -759,3 +764,75 @@ async def test_a_stream_ends_with_its_last_pending_values(agent):
     agent.jobs.spawn(three(), label="s", lines=2)
     updates = await _stream_updates(agent, "s")
     assert [(u.items, u.done) for u in updates] == [([0, 1], False), ([2], True)]
+
+
+# ---- model-facing behaviour: result size, errors ------------------------
+
+
+async def test_a_big_run_result_keeps_the_end_and_points_to_the_log(agent):
+    await agent.jobs.run(
+        "python3 -c \"import sys; [print(f'line {i:05d}') for i in range(5000)];"
+        " sys.stderr.write('e' * 9000)\"",
+        label="big",
+    )
+    item = await _next(agent)
+    result = item.items[0]
+    marker, _, kept = result.stdout.partition("\n")
+    assert marker == f"[... {55_000 - 3_000} chars omitted; full output: {item.log_path}]"
+    assert len(kept) == 3_000 and kept.endswith("line 04999\n")
+    assert result.stderr.startswith(f"[... 6000 chars omitted; full output: {item.log_path}]\n")
+    assert len(Path(item.log_path).read_text()) == 55_000 + 9_000
+
+
+async def test_every_without_a_payload_counts_ticks(agent):
+    agent.jobs.every(0.05, label="tick")
+    assert [(await _next(agent)).items for _ in range(2)] == [[1], [2]]
+    await agent.jobs.cancel("tick")
+
+
+@pytest.mark.parametrize("bad", ["10m", "10", True, None])
+async def test_seconds_must_be_a_number(agent, bad):
+    expected = TypeError
+    with pytest.raises(expected, match=re.escape("seconds must be a number of seconds (e.g. 600")):
+        agent.jobs.after(bad, label="a")
+    with pytest.raises(expected, match="seconds must be a number of seconds"):
+        agent.jobs.every(bad, label="e")
+    if bad is not None:  # None turns throttle's seconds off
+        agent.jobs.every(30, label="t")
+        with pytest.raises(expected, match="seconds must be a number of seconds"):
+            agent.jobs.throttle("t", seconds=bad)
+        await agent.jobs.cancel("t")
+
+
+@pytest.mark.parametrize("bad", ["200", 2.5, True])
+async def test_lines_must_be_a_whole_number(agent, bad):
+    agent.jobs.every(30, label="t")
+    with pytest.raises(TypeError, match="lines must be a whole number"):
+        agent.jobs.throttle("t", lines=bad)
+    with pytest.raises(TypeError, match="lines must be a whole number"):
+        await agent.jobs.run("true", label="r", lines=bad)
+    await agent.jobs.cancel("t")
+
+
+async def test_after_rejects_negative_seconds_and_fires_at_once_on_zero(agent):
+    with pytest.raises(ValueError, match="0 or more"):
+        agent.jobs.after(-1, label="a")
+    with pytest.raises(ValueError, match="positive"):
+        agent.jobs.every(0, label="e")
+    agent.jobs.after(0, label="now", payload="go")
+    item = await _next(agent)
+    assert item.done and item.items == ["go"]
+
+
+async def test_spawn_of_an_uncalled_async_function_says_to_call_it(agent):
+    async def compute():
+        return 1
+
+    async def numbers():
+        yield 1
+
+    with pytest.raises(TypeError, match=re.escape("pass compute(), not compute")):
+        agent.jobs.spawn(compute, label="c")
+    with pytest.raises(TypeError, match=re.escape("pass numbers(), not numbers")):
+        agent.jobs.spawn(numbers, label="n")
+    assert agent.jobs.list() == []

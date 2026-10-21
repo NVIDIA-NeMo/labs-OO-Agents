@@ -168,8 +168,8 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
     )
     # The strategy allows three rejected results per turn; this uses two.
     assert len(calls) == 3
-    assert "Waiting on 'jobs:ci-1', but no such job is running." in calls[1]
-    assert "Waiting on 'build', but no such job is running." in calls[2]
+    assert "Waiting on 'jobs:ci-1', but no job labelled 'ci-1' is running: it may" in calls[1]
+    assert "Waiting on 'build', but no job labelled 'build' is running" in calls[2]
     for text in calls[1:]:
         assert HINT in text
 
@@ -181,5 +181,5 @@ async def test_waiting_on_jobs_without_a_running_job_is_rejected(tmp_path, sessi
         [cell("return_result(Waiting(explanation='w', on=['jobs']))"), cell(DONE)],
     )
     assert len(calls) == 2
-    assert "Waiting on 'jobs', but no such job is running." in calls[1]
+    assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
     assert HINT in calls[1]

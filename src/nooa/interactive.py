@@ -33,7 +33,10 @@ from pydantic import (
 )
 
 from nooa import hidden, strategy
-from nooa.agentdoc import doc  # noqa: F401  # visible in the REPL, as on base
+from nooa.agentdoc import (
+    doc,  # noqa: F401  # visible in the REPL, as on base
+    spec,
+)
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.storage.markers import nosnapshot
@@ -472,15 +475,15 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     agent. ``message()`` is provided for free.
 
     **Input queues.** Every ``InteractiveAgent`` has a ``self.user_messages``
-    queue (``InputQueue``) that the host feeds when the human types.
-    Subclasses may declare additional queues as instance attributes for
-    other producers (``self.jobs`` output arrives on ``jobs``).
+    queue that the host feeds when the human types. Subclasses may declare
+    additional queues as instance attributes for other producers
+    (``self.jobs`` output arrives on ``jobs``).
 
-    Each queue is two objects: an ``InputQueue`` (full producer +
-    dispatcher API, hidden from the LLM under ``_<name>_in``) and an
-    ``OutputQueue`` reader facade exposed under the public name. The
-    LLM can ``await self.user_messages.get()`` to dequeue mid-turn;
-    everything else (put, snapshot, qsize, etc.) is dispatcher-only.
+    Each queue is two objects: a ``Channel`` (full producer + dispatcher
+    API, hidden from the LLM under ``_<name>_in``) and a ``ChannelReader``
+    facade exposed under the public name. The LLM can
+    ``await self.user_messages.get()`` to dequeue mid-turn; everything else
+    (put, snapshot, etc.) is dispatcher-only.
 
     ``handle()`` runs *per turn* — the outer dispatcher calls it with
     the next notification (a ``dict[str, list]``). Use ``self.v`` for
@@ -505,7 +508,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # Background jobs (``self.jobs``): the model-facing view of
     # ``queue_manager.spawn``. Their results arrive on the ``jobs`` channel.
     _jobs_in: Annotated[Channel, hidden, nosnapshot]
-    jobs: Annotated[JobsApi, nosnapshot]
+    jobs: Annotated[
+        JobsApi,
+        nosnapshot,
+        spec(description='Background commands and timers; results arrive in notification["jobs"]'),
+    ]
     # label -> small record of each running job, saved with the snapshot so a
     # resumed session can report the jobs that did not survive (JobsApi).
     _jobs_running: Annotated[dict, hidden]
@@ -713,8 +720,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned
-        prompts such as keep-going continuations); a harness might add
-        ``"job_outputs"``. The
+        prompts such as keep-going continuations). The
         ``<queue_status>`` context block lists the pending count per
         queue each turn. After any result, the dispatcher races every
         declared queue/event and re-enters with the first arrival.
