@@ -171,6 +171,7 @@ async def test_a_child_with_an_unread_question_says_so_until_it_is_read(tmp_path
     )
     asked = calls[1].split("ASKED<<", 1)[1].split(">>", 1)[0]
     read = calls[1].split("READ<<", 1)[1].split(">>", 1)[0]
+    assert "delegates: 1 pending\n  1. Asker asks: Which branch?\n" in asked
     assert "Background work:\n  • Asker · child · has a question for you" in asked
     # Once read, the question is no longer buffered: the kept child shows as retained.
     assert "has a question for you" not in read

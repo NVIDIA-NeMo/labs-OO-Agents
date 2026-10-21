@@ -180,15 +180,19 @@ ChannelMode = Literal["queue", "event"]
 def _preview_item(item: Any, max_chars: int) -> str:
     """Single-line bounded preview for the queue ``status()`` block.
 
-    Strings render as-is; non-strings go through ``pformat`` so deeply
+    Strings render as-is; an item with a ``status_preview()`` method shows
+    what it returns; anything else goes through ``pformat`` so deeply
     nested dicts/lists come out bounded by default. Newlines and tabs
     flatten to single chars so previews stay one line, then the whole
     thing is clipped to ``max_chars`` with an ellipsis when needed.
     """
     from nooa.agentdoc import pformat
 
+    preview = getattr(item, "status_preview", None)
     if isinstance(item, str):
         text = item
+    elif callable(preview):
+        text = str(preview())
     else:
         text = pformat(item, max_length=max_chars, max_string=max_chars, max_depth=2)
     text = text.replace("\r\n", "\n").replace("\n", "↵").replace("\t", " ")

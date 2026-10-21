@@ -214,6 +214,10 @@ class ChildQuestion(BaseModel):
             answer_schema=schema,
         )
 
+    def status_preview(self) -> str:
+        """One line for the pending ``delegates`` list: who asks what."""
+        return f"{self.child.name} asks: {self.question}"
+
 
 class ChildFailed(BaseModel):
     """A child's turn failed or the child ended without a result."""
