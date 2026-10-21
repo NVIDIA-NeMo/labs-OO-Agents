@@ -1639,3 +1639,22 @@ async def test_load_session_with_an_unreadable_snapshot_starts_a_fresh_agent(tmp
     assert replayed == ["remember this\n"]
     await second.prompt(created.session_id, [text_block("still usable")])
     await second.close()
+
+
+async def test_a_reloaded_session_does_not_save_its_unchanged_state_again(tmp_path):
+    first = CodingACPAdapter(_remembering_llm)
+    first.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await first.new_session(str(tmp_path))
+    await first.prompt(created.session_id, [text_block("remember this")])
+    await first.close()
+
+    second = CodingACPAdapter(_remembering_llm)
+    second.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    await second.load_session(str(tmp_path), created.session_id)
+    session = await _session(second, created.session_id)
+    assert session.snapshot_digest is not None
+    saved: list[str] = []
+    session.handle.storage.save_snapshot_json = saved.append
+    CodingACPAdapter._checkpoint(session)
+    assert saved == []
+    await second.close()

@@ -407,10 +407,11 @@ class CodingACPAdapter:
         try:
             mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers)
             agent = self._build_agent(llm, root, handle)
+            restored = False
             if restore:
                 # Before MCP tools are registered, so a restored skill list
                 # cannot drop them.
-                agent = await self._restore_agent(agent, root, handle)
+                agent, restored = await self._restore_agent(agent, root, handle)
             registration_warnings: list[str] = []
             for name, tool in mcp.items():
                 registry_name = f"mcp.{name}"
@@ -435,6 +436,12 @@ class CodingACPAdapter:
                 commands,
                 startup_warnings=(*mcp_warnings, *registration_warnings),
             )
+            if restored:
+                # The state just restored is already saved: without a digest
+                # the first unchanged turn would write a copy of it. A fresh
+                # agent keeps none, so its first turn replaces a bad snapshot.
+                with suppress(Exception):
+                    value.snapshot_digest = self._snapshot_blob(agent)[1]
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
@@ -471,20 +478,22 @@ class CodingACPAdapter:
 
     async def _restore_agent(
         self, agent: CodingAgent, root: Path, handle: SessionHandle
-    ) -> CodingAgent:
+    ) -> tuple[CodingAgent, bool]:
         """Restore the session's latest saved state into ``agent``.
 
-        A snapshot that cannot be restored (from an older agent class, or
+        Returns the agent to use and whether a snapshot was restored. A
+        snapshot that cannot be restored (from an older agent class, or
         damaged) does not stop the load: a warning is logged and the session
         goes on with a newly built agent, since the failed restore may have
         changed part of the first one. The transcript is kept either way.
         """
         try:
-            if handle.storage.restore_latest_snapshot(agent):
+            restored = handle.storage.restore_latest_snapshot(agent)
+            if restored:
                 after_restore = getattr(agent, "after_restore", None)
                 if callable(after_restore):
                     after_restore()
-            return agent
+            return agent, restored
         except Exception:
             logger.warning(
                 "Session %s: could not restore its saved state; starting a fresh agent",
@@ -493,7 +502,7 @@ class CodingACPAdapter:
             )
         # close() also closes the agent's LLM client, so the new agent gets its own.
         await agent.close()
-        return self._build_agent(self._llm_factory(), root, handle)
+        return self._build_agent(self._llm_factory(), root, handle), False
 
     @staticmethod
     @asynccontextmanager
@@ -505,6 +514,12 @@ class CodingACPAdapter:
             CodingACPAdapter._checkpoint(session)
 
     @staticmethod
+    def _snapshot_blob(agent: CodingAgent) -> tuple[str, str]:
+        """The agent's snapshot as JSON text, and its SHA-256 digest."""
+        blob = json.dumps(snapshot_to_json(agent), sort_keys=True)
+        return blob, hashlib.sha256(blob.encode()).hexdigest()
+
+    @staticmethod
     def _checkpoint(session: _ACPSession) -> None:
         """Save the agent's state if it changed since the last checkpoint.
 
@@ -512,8 +527,7 @@ class CodingACPAdapter:
         again.
         """
         try:
-            blob = json.dumps(snapshot_to_json(session.agent), sort_keys=True)
-            digest = hashlib.sha256(blob.encode()).hexdigest()
+            blob, digest = CodingACPAdapter._snapshot_blob(session.agent)
             if digest == session.snapshot_digest:
                 return
             session.handle.storage.save_snapshot_json(blob)
