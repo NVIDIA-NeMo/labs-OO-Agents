@@ -32,6 +32,19 @@ def sdk_credentials(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
 
+@pytest.fixture
+def unavailable_endpoint_limits(monkeypatch):
+    """These catalogue UI scenarios deliberately have no endpoint metadata."""
+    import httpx
+
+    def handle(request):
+        assert request.method == "GET"
+        assert str(request.url) == "https://api.test/v1/models"
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
+
+
 def args(path):
     return [
         "wire/model",
@@ -409,7 +422,7 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
             "--output",
             str(path),
         ],
-        input="y\nserver\nhttps://new.example/v1\nnew-model\ny\n",
+        input="y\ndiscover\nserver\nhttps://new.example/v1\nnew-model\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 4
@@ -579,7 +592,7 @@ def test_a_rejected_key_is_asked_for_again_and_the_listing_retried(tmp_path, mon
             str(path),
         ],
         # The new key; then input ends at the model choice, which cancels.
-        input="fresh-private-key\n",
+        input="discover\nfresh-private-key\n",
     )
     assert "The server rejected the key in CONNECT_TEST_KEY" in result.output
     assert "Found 1 models" in result.output
@@ -831,7 +844,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         command,
         [],
         input=(
-            "y\ncustom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
+            "y\ncustom\ndiscover\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
             "example-model\nmy-model\ny\nn\n"
         ),
     )
@@ -904,7 +917,7 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
             "--output",
             str(path),
         ],
-        input="y\nresponses\ny\n" if responses_ok else "y\ncancel\n",
+        input="y\ndiscover\nresponses\ny\n" if responses_ok else "y\ndiscover\ncancel\n",
     )
     if responses_ok:
         assert result.exit_code == 0, result.output
@@ -957,7 +970,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--output",
             str(path),
         ],
-        input="y\nkey\nCONNECT_GOOD\ny\n" if recover else "y\ncancel\n",
+        input="y\ndiscover\nkey\nCONNECT_GOOD\ny\n" if recover else "y\ndiscover\ncancel\n",
     )
     assert result.exit_code == 0, result.output
     assert result.output.count("Approve setup and optional media checks") == 1
@@ -1016,7 +1029,7 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="y\nretry\n",
+        input="y\ndiscover\nretry\n",
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 4
@@ -1026,13 +1039,11 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
 
 
 def test_no_probe_points_to_manual_skill_and_does_no_http(tmp_path, monkeypatch):
-    import httpx
-
-    def forbidden(*args, **kwargs):
+    def forbidden(request):
         raise AssertionError("Manual setup must not use HTTP")
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", forbidden)
-    monkeypatch.setattr(httpx.AsyncClient, "get", forbidden)
+    # Covers stream/send as well as post/get, without weakening the no-I/O claim.
+    mock_http(monkeypatch, forbidden)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(command, [*args(path), "--yes"])
     assert result.exit_code == 0, result.output
@@ -1079,7 +1090,7 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="y\ny\n",
+        input="y\ndiscover\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
@@ -1101,7 +1112,9 @@ def test_script_mode_requires_missing_options_without_prompting():
 
 
 @pytest.mark.parametrize("ambiguous", [False, True])
-def test_model_details_appear_before_accepting_published_settings(tmp_path, monkeypatch, ambiguous):
+def test_model_details_appear_before_accepting_published_settings(
+    tmp_path, monkeypatch, ambiguous, unavailable_endpoint_limits
+):
     from nooa.unifiedllm import connect
 
     model_info = {
@@ -1130,7 +1143,9 @@ def test_model_details_appear_before_accepting_published_settings(tmp_path, monk
 
 
 @pytest.mark.parametrize("select", [True, False])
-def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(tmp_path, monkeypatch, select):
+def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(
+    tmp_path, monkeypatch, select, unavailable_endpoint_limits
+):
     from nooa.unifiedllm import connect
 
     # "gateway/wired-model" is close to "wire/model" but not an exact or
@@ -1183,7 +1198,9 @@ def test_no_exact_catalogue_match_is_not_guessed_under_yes(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
-def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch, action):
+def test_model_settings_can_be_edited_skipped_or_cancelled(
+    tmp_path, monkeypatch, action, unavailable_endpoint_limits
+):
     from nooa.unifiedllm import connect
 
     published = {
@@ -1273,7 +1290,7 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
             "--output",
             str(path),
         ],
-        input="y\ny\n",
+        input="y\ndiscover\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [body["reasoning_effort"] for body in bodies if "reasoning_effort" in body] == [
@@ -1320,7 +1337,7 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
             "--output",
             str(path),
         ],
-        input="y\ny\n",
+        input="y\ndiscover\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Shared token budget: unlimited" in result.output
@@ -1419,7 +1436,9 @@ def test_provider_menu_fills_connection_defaults(
     monkeypatch.setattr(connect, "discover", discover)
     monkeypatch.setenv(key_env, "preset-test-key")
     result = CliRunner().invoke(
-        command, ["--no-catalogue", "--no-probe"], input=f"{provider}\ntest-model\n\nmy-model\ny\n"
+        command,
+        ["--no-catalogue", "--no-probe"],
+        input=f"{provider}\ndiscover\ntest-model\n\nmy-model\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert seen == [(base, {"api_style": style, "api_key": "preset-test-key"})]
@@ -1464,7 +1483,7 @@ def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeyp
             "--output",
             str(path),
         ],
-        input=f"vendor-b/model\n{style}\nselected\ny\n",
+        input=f"discover\nvendor-b/model\n{style}\nselected\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(seen) == 1
@@ -1542,6 +1561,9 @@ def test_server_url_suggestions_include_existing_file_without_credentials(
     seen = []
 
     def prompt(text, **kwargs):
+        if text == "Request interface":
+            assert kwargs["default"] == "discover"
+            return "discover"
         assert text == "Model server URL"
         assert kwargs.get("open_menu") is True
         seen.extend(kwargs["suggestions"])

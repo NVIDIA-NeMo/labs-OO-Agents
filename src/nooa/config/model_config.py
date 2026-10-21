@@ -16,9 +16,9 @@ dicts (see ``unifiedllm/registry.py``); this model is the first step.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from nooa.media_inputs import MediaInputs
 
@@ -45,6 +45,8 @@ class ModelConfig(BaseModel):
     api_style: str | None = None
     context_window: int | None = None
     media_inputs: MediaInputs = ()
+    decision_image_transport: Literal["json", "typesafe_multipart"] = "json"
+    typesafe_danger_zone_images: StrictBool = False
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None

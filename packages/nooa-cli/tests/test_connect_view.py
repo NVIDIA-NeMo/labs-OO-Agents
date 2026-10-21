@@ -11,7 +11,9 @@ from nooa_cli.commands import _connect_view as view
 
 
 def test_intro_is_wrapped_and_keeps_cost_notice_and_manual_routes(monkeypatch):
-    monkeypatch.setattr(view.shutil, "get_terminal_size", lambda *args: os.terminal_size((58, 24)))
+    monkeypatch.setattr(
+        view.shutil, "get_terminal_size", lambda *args, **kwargs: os.terminal_size((58, 24))
+    )
 
     @click.command()
     def command():
@@ -133,7 +135,9 @@ def test_reply_ceiling_and_boolean_reasoning_metadata_are_explained():
 
 def test_progress_reports_evidence_and_skips_without_payloads(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setattr(view.shutil, "get_terminal_size", lambda *args: os.terminal_size((58, 24)))
+    monkeypatch.setattr(
+        view.shutil, "get_terminal_size", lambda *args, **kwargs: os.terminal_size((58, 24))
+    )
 
     @click.command()
     def command():
@@ -775,7 +779,8 @@ def test_intro_has_one_plain_spend_warning_and_visible_call_caps():
     assert output.count("Checks may incur charges.") == 1
     assert "The token budget is an estimate, not a spending cap." in output
     assert "Shared token budget: 100,000" in output
-    assert "200 output tokens per call" in output
+    assert "chat replies capped at 200 output tokens" in output
+    assert "Decision calls have no reply-token cap." in output
     assert "4,096 output tokens per call" in output
     for jargon in ("baseline", "native", "wire", "capacity probes", "billing limits"):
         assert jargon not in output
@@ -788,8 +793,8 @@ def test_local_media_skip_explains_api_format_without_claiming_unsupported(kind)
     _, _, reason = media_content(kind, "responses")
     detail = view.media_test_detail(kind, {"outcome": "not_probed", "reason": reason})
     assert "Skipped" in detail
-    assert f"{kind.capitalize()} samples cannot be tested with this API format" in detail
-    assert "Manual selection is unverified" in detail
+    assert f"{kind.capitalize()} testing not implemented for this route/input format" in detail
+    assert "manually as unverified" in detail
     assert "native" not in detail and "unsupported" not in detail
 
 

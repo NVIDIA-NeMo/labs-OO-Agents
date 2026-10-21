@@ -40,8 +40,13 @@ class WizardState:
     data: Any = None
     default_style: Any = None
     discovery_endpoint: Any = None
+    endpoint_models_url: Any = None
     discovery_file: Any = None
     discovery_style: Any = None
+    models_url: Any = None
+    listing_style: Any = None
+    discovery_api_key_env: Any = None
+    discovery_api_key: Any = None
     discovery_succeeded: Any = None
     edit_model: Any = None
     edited_settings: Any = None
@@ -51,12 +56,18 @@ class WizardState:
     existing: Any = None
     explicit_key_env: Any = None
     interface_spent: Any = None
+    share_interface_key: bool = False
     interfaces: Any = None
     levels: Any = None
     levels_file: Any = None
+    metadata_prepared: bool = False
+    selected_endpoint_model: Any = None
+    media_hints: Any = None
     media_inputs: Any = None
     inherit_media_inputs: bool = False
     test_media_inputs: Any = None
+    decision_image_transport: Any = None
+    typesafe_danger_zone_images: Any = None
     model: Any = None
     no_catalogue: Any = None
     no_probe: Any = None
@@ -76,11 +87,27 @@ class WizardState:
     reply_tokens: Any = None
     result: Any = None
     server_urls: Any = None
+    systemone_endpoint: Any = None
+    interface_endpoints: Any = None
     show_config: Any = None
     show_diagnostics: Any = False
     unobserved: Any = None
     working_dir: Any = None
     yes: Any = None
+
+
+def scrub_setup(state: WizardState, value):
+    """Protect both active credentials in previews and troubleshooting output."""
+    from nooa.unifiedllm.connect._diagnostics import scrub_report
+
+    value = scrub_report(value, api_key=state.api_key, api_key_env=state.api_key_env)
+    return scrub_report(
+        value, api_key=state.discovery_api_key, api_key_env=state.discovery_api_key_env
+    )
+
+
+def setup_diagnostic(state: WizardState, *args, **kwargs):
+    return scrub_setup(state, connect.diagnostic_prompt(*args, **kwargs))
 
 
 async def show_checks(
@@ -261,20 +288,53 @@ def select_connection(state: WizardState) -> bool:
             },
             open_menu=True,
         )
+    # Choose the inference operation before listing/auth; listing remains independent.
+    explicit_endpoint = state.endpoint
+    if not state.api_style and not state.yes and state.editing is None:
+        choice = prompts.prompt(
+            "Request interface",
+            choices=("discover", "chat", "responses", "anthropic", "systemone", "openai"),
+            default="discover",
+            open_menu=True,
+            labels={
+                style: prompts.choice_label(style)
+                for style in ("discover", "chat", "responses", "anthropic", "systemone", "openai")
+            },
+        )
+        state.api_style = None if choice == "discover" else choice
+    state.interface_endpoints = {}
+    if state.systemone_endpoint:
+        state.interface_endpoints["systemone"] = connect.normalize_endpoint(
+            state.systemone_endpoint
+        )
+    elif state.provider == "hub":
+        state.interface_endpoints["systemone"] = connect.PROVIDERS["hub"].api_base + "/systemone"
     if state.provider and state.provider != "custom":
         preset = connect.PROVIDERS[state.provider]
-        state.endpoint = state.endpoint or preset.api_base
+        if state.api_style in connect.DECISION_API_STYLES and not explicit_endpoint:
+            state.endpoint = state.interface_endpoints.get(state.api_style)
+            if not state.endpoint and state.yes:
+                raise click.UsageError(
+                    "Decision styles require a full --endpoint URL for this provider"
+                )
+        else:
+            state.endpoint = state.endpoint or preset.api_base
         state.default_style = preset.api_style
         if state.api_key_env is None:
             state.api_key_env = preset.api_key_env
     if state.yes and state.provider and state.provider != "custom":
         state.api_style = state.api_style or state.default_style
+    reject_decision_media(state)
     if state.yes and not all((state.model, state.alias, state.endpoint, state.api_style)):
         raise click.UsageError(
             "With --yes supply MODEL, --as and either --provider or --endpoint plus --api-style."
         )
     state.endpoint = state.endpoint or prompts.prompt(
-        "Model server URL", suggestions=state.server_urls, open_menu=True
+        "Full decision request URL"
+        if state.api_style in connect.DECISION_API_STYLES
+        else "Model server URL",
+        suggestions=state.server_urls,
+        open_menu=True,
     )
     state.endpoint = connect.normalize_endpoint(state.endpoint)
     announced = False
@@ -311,11 +371,20 @@ def select_connection(state: WizardState) -> bool:
                 state.api_key_env = ""
     # Listing/authentication conventions do not choose the selected model's
     # generation interface. A mixed server can list all models via /models.
-    state.discovery_style = state.api_style or state.default_style
+    state.discovery_style = state.listing_style or (
+        state.api_style
+        if state.api_style in {"chat", "responses", "anthropic"}
+        else state.default_style
+    )
+    if state.provider == "hub":
+        # Hub's shared catalogue is independent of the full decision POST URL.
+        state.models_url = state.models_url or connect.PROVIDERS["hub"].api_base + "/models"
+    if state.models_url:
+        connect.validate_models_url(state.models_url)
     if state.api_key_env is None:
         default_env = (
             "DECISION_MODEL_API_KEY"
-            if state.discovery_style in connect.DECISION_API_STYLES
+            if state.api_style in connect.DECISION_API_STYLES
             else "ANTHROPIC_API_KEY"
             if state.discovery_style == "anthropic"
             else "OPENAI_API_KEY"
@@ -344,13 +413,18 @@ def select_connection(state: WizardState) -> bool:
     connect.plan(
         state.alias or "candidate",
         state.model or "candidate",
-        state.discovery_style,
+        state.api_style or state.default_style,
         state.endpoint,
         state.api_key_env,
     )
     needs_key = (
         not state.yes
-        and (state.approval != "none" or not state.model)
+        and (
+            state.approval != "none"
+            or (
+                not state.model and not state.discovery_file and state.discovery_api_key_env is None
+            )
+        )
         and state.api_key_env
         and not os.environ.get(state.api_key_env)
     )
@@ -399,24 +473,52 @@ def select_model(state: WizardState) -> bool:
     state.discovery_succeeded = None
     state.discovery_endpoint = None
     state.endpoint_models = ()
+    state.endpoint_models_url = None
     if state.discovery_file:
-        if state.discovery_style in connect.DECISION_API_STYLES:
-            raise click.UsageError(
-                f"--discovery-file does not apply to --api-style {state.discovery_style}"
-            )
-        from ._connect_stages import read_discovery
+        if state.api_style in connect.DECISION_API_STYLES and not state.models_url:
+            raise click.UsageError("--discovery-file for decision routes requires --models-url")
+        from ._connect_stages import read_discovery_listing
 
-        state.endpoint_models = read_discovery(state.discovery_file, state.endpoint)
+        listing = read_discovery_listing(
+            state.discovery_file, state.endpoint, models_url=state.models_url
+        )
+        state.endpoint_models = listing.models
+        state.endpoint_models_url = listing.models_url
         state.discovery_endpoint = state.endpoint
-    if not state.model and state.discovery_style in connect.DECISION_API_STYLES:
-        # Decision endpoints do not list decision models, so ask for the exact ID.
+    if (
+        not state.model
+        and state.api_style in connect.DECISION_API_STYLES
+        and not (state.models_url or state.discovery_file)
+    ):
+        # Unknown catalogue contract: never append /models to a decision POST URL.
         state.model = prompts.prompt("Exact decision model ID (Ctrl-C to cancel)")
+    if not state.model and state.endpoint_models:
+        state.model = prompts.prompt(
+            "Search advertised model IDs (type to search; Tab to select)",
+            choices=[item["id"] for item in state.endpoint_models],
+            searchable=True,
+        )
     while not state.model:
         click.echo("Connecting to the server and listing models...")
         try:
+            from ._connect_stages import listing_key
+
+            key = listing_key(
+                state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
+            )
+            state.discovery_api_key = key
             found = asyncio.run(
                 connect.discover(
-                    state.endpoint, api_style=state.discovery_style, api_key=state.api_key
+                    state.endpoint,
+                    api_style=state.api_style
+                    if state.api_style in connect.DECISION_API_STYLES
+                    else state.discovery_style,
+                    api_key=key,
+                    **(
+                        {"models_url": state.models_url, "listing_style": state.discovery_style}
+                        if state.models_url
+                        else {}
+                    ),
                 )
             )
         except connect.DiscoveryError as exc:
@@ -424,18 +526,20 @@ def select_model(state: WizardState) -> bool:
             state.discovery_endpoint = state.endpoint
             click.echo(f"Could not list models: {exc}", err=True)
             if exc.status_code in {401, 403}:
-                if state.yes:
+                if state.yes or state.discovery_api_key_env is not None:
                     raise click.ClickException(
-                        "Authentication failed. Check the key and try again."
+                        "Authentication failed. Check the listing key and try again."
                     ) from None
                 ask_for_rejected_key(state)
                 continue
             state.model = prompts.prompt("Exact model ID (if known; Ctrl-C to cancel)")
         else:
-            state.endpoint = found.api_base
+            if not state.models_url and state.api_style not in connect.DECISION_API_STYLES:
+                state.endpoint = found.api_base
             state.discovery_succeeded = True
             state.discovery_endpoint = state.endpoint
             state.endpoint_models = found.models
+            state.endpoint_models_url = found.models_url
             names = [item["id"] for item in found.models]
             click.echo(f"Found {len(names)} models. Type part of a name, then Tab to select.")
             state.model = prompts.prompt(
@@ -452,10 +556,10 @@ def check_interfaces(state: WizardState) -> bool:
     if state.api_style == "responses":
         view.line(connect.ENCRYPTED_REASONING_EXPLANATION, dim=True)
     if not state.api_style:
-        available = ("chat", "responses", "anthropic")
+        available = ("chat", "responses", "anthropic", *state.interface_endpoints)
         if state.approval != "none":
             state.interface_spent = 0
-            retry_styles = ("chat", "responses", "anthropic")
+            retry_styles = available
             interface_timeout = 30
             while True:
                 # Always test reasoning per interface, not just connectivity --
@@ -479,6 +583,8 @@ def check_interfaces(state: WizardState) -> bool:
                             output_tokens=state.output_tokens,
                             api_key=state.api_key,
                             styles=retry_styles,
+                            endpoints=state.interface_endpoints,
+                            allow_cross_origin_credentials=state.share_interface_key,
                             timeout_seconds=interface_timeout,
                             reasoning_template=state.reasoning_template or "effort",
                             reasoning_level=reasoning_level,
@@ -518,7 +624,8 @@ def check_interfaces(state: WizardState) -> bool:
                 if state.show_diagnostics:
                     click.echo(
                         "Agent diagnostic prompt:\n"
-                        + connect.diagnostic_prompt(
+                        + setup_diagnostic(
+                            state,
                             "interfaces",
                             {
                                 "model_name": state.model,
@@ -582,17 +689,17 @@ def check_interfaces(state: WizardState) -> bool:
                     retry_styles = (
                         prompts.prompt(
                             "Interface to retry",
-                            choices=("chat", "responses", "anthropic"),
+                            choices=tuple(state.interfaces.results),
                             labels={
                                 style: prompts.choice_label(style)
-                                for style in ("chat", "responses", "anthropic")
+                                for style in state.interfaces.results
                             },
                             default=state.default_style,
                         ),
                     )
                     interface_timeout = 120
                     continue
-                retry_styles = ("chat", "responses", "anthropic")
+                retry_styles = ("chat", "responses", "anthropic", *state.interface_endpoints)
                 interface_timeout = 30
                 if action == "key":
                     source = prompts.prompt(
@@ -615,6 +722,8 @@ def check_interfaces(state: WizardState) -> bool:
                                 "API key (used only for this setup)", hide_input=True
                             )
                 elif action == "server":
+                    state.interface_endpoints = {}  # Never carry decision routes to another server.
+                    retry_styles = ("chat", "responses", "anthropic")
                     state.endpoint = connect.normalize_endpoint(
                         prompts.prompt(
                             "Model server URL",
@@ -627,6 +736,9 @@ def check_interfaces(state: WizardState) -> bool:
             click.echo(
                 "Working API formats: "
                 + ", ".join(prompts.choice_label(style) for style in available)
+            )
+            click.echo(
+                "Accepted client types: " + ", ".join(state.interfaces.accepted_client_types)
             )
             observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
             click.echo(
@@ -650,11 +762,36 @@ def check_interfaces(state: WizardState) -> bool:
             )
         if state.api_style == "responses":
             view.line(connect.ENCRYPTED_REASONING_EXPLANATION, dim=True)
+        if state.interfaces:
+            selected = state.interfaces.results[state.api_style].entry
+            selected_endpoint = selected.get("endpoint") or selected["api_base"]
+            if (
+                state.api_style == "anthropic"
+                and state.endpoint == state.discovery_endpoint
+                and selected_endpoint == state.endpoint.removesuffix("/v1")
+            ):
+                # Messages adds /v1/messages at runtime: this is the same route,
+                # not a new server. Keep its listing limits associated with it.
+                # A shared models_url alone never authorizes unrelated routes.
+                state.discovery_endpoint = selected_endpoint
+            state.endpoint = selected_endpoint
+        elif state.api_style in state.interface_endpoints:
+            state.endpoint = state.interface_endpoints[state.api_style]
+    # Discover can only reject unsupported media once a valid route is selected.
+    reject_decision_media(state)
     return True
 
 
-def configure_metadata(state: WizardState) -> bool:
-    """Configure metadata; return False when the user cancels."""
+def prepare_metadata(state: WizardState) -> bool:
+    """Fetch allowed metadata before media choice, without settings prompts."""
+    state.metadata_prepared = True
+    state.selected_endpoint_model = (
+        next(
+            (item for item in (state.endpoint_models or ()) if item.get("id") == state.model), None
+        )
+        if state.endpoint == state.discovery_endpoint
+        else None
+    )
     # An explicit --as can reuse its previous evidence. Otherwise checks use
     # a temporary label; the user names the entry only when ready to save.
     state.existing = state.editing or (
@@ -666,7 +803,8 @@ def configure_metadata(state: WizardState) -> bool:
         if state.catalogue_model:
             raise click.UsageError("Decision models do not use --catalogue-model")
         state.no_catalogue = True
-        click.echo("Decision models skip chat catalogue and endpoint model discovery.")
+        click.echo("Decision models skip chat catalogue settings; listing hints remain unverified.")
+        state.media_hints = state.selected_endpoint_model
         return True
     if state.editing is not None:
         state.candidate = {
@@ -681,12 +819,17 @@ def configure_metadata(state: WizardState) -> bool:
                 "default_effort": state.editing.get("reasoning_default"),
             },
         }
-        if not state.yes:
-            state.candidate = prompts.edit_model_details(state.candidate)
         state.edited_settings = True
     if state.no_catalogue and state.catalogue_model:
         raise click.UsageError("--catalogue-model cannot be used with --no-catalogue")
     if not state.no_catalogue:
+        if state.editing is None and not state.endpoint_models:
+            # Validate explicit catalogue credential configuration before any lookup.
+            from ._connect_stages import listing_key
+
+            state.discovery_api_key = listing_key(
+                state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
+            )
         click.echo("Looking up public model information...")
         try:
             models = asyncio.run(connect.catalogue())
@@ -745,7 +888,9 @@ def configure_metadata(state: WizardState) -> bool:
             if state.candidate is None:
                 click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
     endpoint_model = (
-        next((item for item in state.endpoint_models if item.get("id") == state.model), None)
+        next(
+            (item for item in (state.endpoint_models or ()) if item.get("id") == state.model), None
+        )
         if state.endpoint == state.discovery_endpoint
         else None
     )
@@ -758,7 +903,16 @@ def configure_metadata(state: WizardState) -> bool:
         # Explicit MODEL skips the picker, not the endpoint's own limit metadata.
         try:
             limits_listing = asyncio.run(
-                connect.discover(state.endpoint, api_style=state.api_style, api_key=state.api_key)
+                connect.discover(
+                    state.endpoint,
+                    api_style=state.discovery_style,
+                    api_key=state.discovery_api_key,
+                    **(
+                        {"models_url": state.models_url, "listing_style": state.discovery_style}
+                        if state.models_url
+                        else {}
+                    ),
+                )
             )
         except connect.DiscoveryError:
             view.line(
@@ -766,13 +920,34 @@ def configure_metadata(state: WizardState) -> bool:
                 fg="yellow",
             )
         else:
+            state.endpoint_models_url = limits_listing.models_url
             endpoint_model = next(
                 (item for item in limits_listing.models if item.get("id") == state.model), None
             )
+    state.selected_endpoint_model = endpoint_model
+    state.media_hints = deepcopy(state.candidate)
+    if state.media_hints is not None and state.editing is None:
+        state.media_hints.setdefault("media_source", connect.CATALOGUE_URL)
     if endpoint_model is not None and state.editing is None:
         combined = connect.model_metadata(state.model, state.candidate, endpoint_model)
+        state.media_hints = combined
+        state.media_hints.setdefault(
+            "media_source", connect.CATALOGUE_URL if state.candidate else "endpoint listing"
+        )
         if combined.get("endpoint_limits"):
             state.candidate = combined
+    return True
+
+
+def configure_metadata(state: WizardState) -> bool:
+    """Review settings after media choice, retaining the existing prompt order."""
+    if not state.metadata_prepared:
+        if not prepare_metadata(state):
+            return False
+    if state.api_style in connect.DECISION_API_STYLES:
+        return True
+    if state.editing is not None and not state.yes:
+        state.candidate = prompts.edit_model_details(state.candidate)
     if state.candidate is not None:
         while True:
             view.model_details(
@@ -818,12 +993,93 @@ def configure_metadata(state: WizardState) -> bool:
     return True
 
 
+def reject_decision_media(state: WizardState) -> None:
+    """Validate image-only permissions once the decision style is known."""
+    if state.api_style in connect.DECISION_API_STYLES:
+        from nooa.decisions.media import decision_media_inputs
+
+        try:
+            decision_media_inputs(prompts.parse_media_inputs(state.media_inputs))
+            decision_media_inputs(prompts.parse_media_inputs(state.test_media_inputs))
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from None
+
+
 def configure_media_inputs(state: WizardState) -> bool:
     """Declaration belongs to this connection, not optional published metadata."""
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
+    from ._connect_advertised_media import offer_suggestions
+
+    if state.api_style in connect.DECISION_API_STYLES:
+        reject_decision_media(state)
+        previous_entry = state.editing or (
+            (state.data or {}).get("models", {}).get(state.alias) if state.alias else None
+        )
+        route = connect.plan(
+            state.alias or "candidate",
+            state.model,
+            state.api_style,
+            state.endpoint,
+            state.api_key_env or "",
+            existing_entry=previous_entry,
+            decision_image_transport=state.decision_image_transport,
+            typesafe_danger_zone_images=state.typesafe_danger_zone_images,
+        ).entry
+        previous = route.get("media_inputs", [])
+        state.decision_image_transport = route["decision_image_transport"]
+        state.typesafe_danger_zone_images = route["typesafe_danger_zone_images"]
+        if offer_suggestions(state, previous):
+            return True
+        if state.test_media_inputs is not None:
+            state.test_media_inputs = prompts.parse_media_inputs(state.test_media_inputs)
+        if state.media_inputs is not None:
+            state.media_inputs = prompts.parse_media_inputs(state.media_inputs)
+        elif state.test_media_inputs:
+            state.media_inputs = list(previous)
+            state.inherit_media_inputs = True
+        elif state.yes or state.no_probe or state.approval != "all" or state.budget_tokens < 2048:
+            state.media_inputs = list(previous)
+            state.inherit_media_inputs = True
+        else:
+            mode = prompts.prompt(
+                "Decision image setup (text/manual/test)",
+                default="keep" if previous else "text",
+                choices=("keep", "text", "manual", "test")
+                if previous
+                else ("text", "manual", "test"),
+            )
+            state.media_inputs = (
+                list(previous) if mode == "keep" else ["image"] if mode == "manual" else []
+            )
+            state.test_media_inputs = ["image"] if mode == "test" else None
+        if (
+            state.api_style == "systemone"
+            and (state.media_inputs or state.test_media_inputs)
+            and not state.yes
+        ):
+            view.line(
+                "System One JSON images are unverified. Direct TypeSafe images require explicit multipart transport and experimental opt-in."
+            )
+            if prompts.confirm(
+                "Use verified direct TypeSafe multipart image transport?", default=False
+            ):
+                state.decision_image_transport = "typesafe_multipart"
+                state.typesafe_danger_zone_images = prompts.confirm(
+                    "Opt into experimental TypeSafe image requests?", default=False
+                )
+        view.line("Decision media: image only; other input formats are not implemented.")
+        return True
     if state.media_inputs is not None:
+        previous = ()
+        try:
+            previous = validate_media_inputs((state.editing or {}).get("media_inputs"))
+        except ValueError:
+            pass  # An explicit choice can repair an invalid legacy declaration.
+        offer_suggestions(state, previous)
         state.media_inputs = prompts.parse_media_inputs(state.media_inputs)
+        if state.test_media_inputs is not None:
+            state.test_media_inputs = prompts.parse_media_inputs(state.test_media_inputs)
         return True
     previous_entry = state.editing or (
         (state.data or {}).get("models", {}).get(state.alias) if state.alias else None
@@ -841,11 +1097,10 @@ def configure_media_inputs(state: WizardState) -> bool:
         previous = validate_media_inputs(route.get("media_inputs"))
     elif state.editing:
         previous = validate_media_inputs(state.editing.get("media_inputs"))
+    if offer_suggestions(state, previous):
+        return True
     if state.test_media_inputs is not None:
         state.test_media_inputs = prompts.parse_media_inputs(state.test_media_inputs)
-    elif state.api_style in connect.DECISION_API_STYLES:
-        state.media_inputs = []  # Decision models take no media.
-        return True
     elif not state.yes and state.approval == "all":
         mode = prompts.choose_media_mode(editing=bool(state.editing))
         if mode == "test":
@@ -884,6 +1139,8 @@ def configure_checks(state: WizardState) -> bool:
             state.endpoint,
             state.api_key_env,
             existing_entry=state.existing,
+            decision_image_transport=state.decision_image_transport,
+            typesafe_danger_zone_images=state.typesafe_danger_zone_images,
         ).entry
         state.media_inputs = previous.get("media_inputs", [])
     if state.levels_file and (state.levels or state.reasoning_template):
@@ -917,8 +1174,12 @@ def configure_checks(state: WizardState) -> bool:
         state.endpoint,
         state.api_key_env,
         catalogue=state.candidate,
+        endpoint_model=state.selected_endpoint_model,
+        endpoint_models_url=state.endpoint_models_url,
         media_inputs=state.media_inputs,
         test_media_inputs=state.test_media_inputs,
+        decision_image_transport=state.decision_image_transport,
+        typesafe_danger_zone_images=state.typesafe_danger_zone_images,
         reasoning_levels=state.patches,
         budget_tokens=state.budget_tokens,
         output_tokens=state.output_tokens,
@@ -930,11 +1191,21 @@ def configure_checks(state: WizardState) -> bool:
         and state.api_style not in connect.DECISION_API_STYLES,
         reply_tokens=state.reply_tokens,
     )
+    if state.interfaces:
+        state.proposal.entry["provenance"]["interface_endpoint"] = deepcopy(
+            state.interfaces.results[state.api_style]
+            .entry["provenance"]
+            .get("interface_endpoint", {})
+        )
+    if "advertised_model" in state.proposal.entry.get("provenance", {}) and state.models_url:
+        state.proposal.entry["provenance"]["models_url"] = state.models_url
     if state.editing is not None:
         # Preserve transport controls, custom parameters and exact level blocks.
         merged = deepcopy(state.editing)
         for field in (
             "media_inputs",
+            "decision_image_transport",
+            "typesafe_danger_zone_images",
             "context_window",
             "max_output_tokens",
             "reasoning_levels",
@@ -1079,7 +1350,9 @@ def baseline_allows_save(state: WizardState) -> bool:
 def run_checks(state: WizardState) -> bool:
     """Run checks; return False when the user cancels."""
     if state.api_style in connect.DECISION_API_STYLES:
-        checks = ["the decision interface"]
+        checks = ["decision interface acceptance", "fresh typed decisions"]
+        if state.test_media_inputs:
+            checks.append("native image access and known color")
     else:
         checks = ["connection", "tools"]
         if state.proposal.entry.get("reasoning_levels"):
@@ -1141,7 +1414,8 @@ def run_checks(state: WizardState) -> bool:
         if state.show_diagnostics:
             click.echo(
                 "Agent diagnostic prompt:\n"
-                + connect.diagnostic_prompt(
+                + setup_diagnostic(
+                    state,
                     "checks",
                     state.result.entry,
                     checks,
@@ -1183,7 +1457,18 @@ def save_model(state: WizardState) -> bool:
     view.step(4, "Save model")
     if state.no_probe or state.approval == "none":
         view.line("Connection: Unverified (manual setup; no model checks)", fg="yellow")
-    if state.api_style not in connect.DECISION_API_STYLES:
+    if state.api_style in connect.DECISION_API_STYLES:
+        view.line(
+            "Decision image transport: "
+            + (
+                "OpenAI input_image"
+                if state.api_style == "openai"
+                else state.result.entry["decision_image_transport"]
+            )
+            + "; TypeSafe opt-in: "
+            + str(state.result.entry["typesafe_danger_zone_images"])
+        )
+    if "media_inputs" in state.result.entry:
         view.line(
             "Enabled media inputs: "
             + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
@@ -1259,7 +1544,8 @@ def save_model(state: WizardState) -> bool:
     state.result = replace(state.result, alias=state.alias)
     view.line(f"{state.alias} · {state.model} · {prompts.choice_label(state.api_style)}", bold=True)
     if state.show_config:
-        click.echo(yaml.safe_dump({"models": {state.alias: state.result.entry}}, sort_keys=False))
+        preview = scrub_setup(state, {"models": {state.alias: state.result.entry}})
+        click.echo(yaml.safe_dump(preview, sort_keys=False))
     else:
         view.line(
             "Use --show-config to preview the full YAML settings.",
@@ -1346,9 +1632,10 @@ def run_wizard(**options):
     try:
         for step in (
             select_connection,
-            configure_media_inputs,
             select_model,
             check_interfaces,
+            prepare_metadata,
+            configure_media_inputs,
             configure_metadata,
             configure_checks,
             run_checks,
@@ -1357,11 +1644,14 @@ def run_wizard(**options):
             if not step(state):
                 return
     except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
-        detail = view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
+        detail = scrub_setup(
+            state, view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
+        )
         if state.show_diagnostics:
             click.echo(
                 "Agent diagnostic prompt:\n"
-                + connect.diagnostic_prompt(
+                + setup_diagnostic(
+                    state,
                     "setup",
                     {},
                     {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},

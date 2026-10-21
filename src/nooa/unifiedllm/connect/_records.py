@@ -52,6 +52,7 @@ class ProbeRecord(TypedDict, total=False):
     request: dict[str, Any]
     baseline_kind: str
     typed_result_validated: bool
+    typed_result: Any
     final_answer_observed: bool
     request_accepted: bool
     access_reported: bool

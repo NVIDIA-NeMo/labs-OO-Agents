@@ -30,7 +30,16 @@ from ._connect_stages import STAGES
     help="Connection preset: nvidia, hub (NVIDIA Inference Hub), openai, anthropic, google, openrouter, or custom.",
 )
 @click.option("--as", "alias", help="Local model alias to save (otherwise prompted).")
-@click.option("--endpoint", help="API base URL (otherwise prompted).")
+@click.option("--endpoint", help="API base URL, or full decision request URL (otherwise prompted).")
+@click.option(
+    "--systemone-endpoint",
+    help="Full System One POST URL for mixed interface discovery; never inferred for custom servers.",
+)
+@click.option(
+    "--share-interface-key",
+    is_flag=True,
+    help="Explicitly allow mixed interface checks to share the inference key across origins.",
+)
 @click.option(
     "--api-style",
     type=click.Choice(["chat", "responses", "anthropic", "systemone", "openai"]),
@@ -43,11 +52,30 @@ from ._connect_stages import STAGES
     "--api-key-env",
     help="Environment variable name, never the key itself (otherwise prompted).",
 )
-@click.option("--catalogue-model", help="Explicit OpenRouter model ID to use as metadata.")
+@click.option(
+    "--catalogue-model", help="Explicit OpenRouter metadata ID; stages require --catalogue-file."
+)
+@click.option(
+    "--catalogue-file",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Read a saved OpenRouter catalogue offline for plan/check stages; exact mapping only.",
+)
 @click.option(
     "--discovery-file",
     type=click.Path(exists=True, dir_okay=False),
     help="JSON output from --stage discover; reuse endpoint limits without another request.",
+)
+@click.option(
+    "--models-url", help="Full shared catalogue GET URL; required for custom decision listing."
+)
+@click.option(
+    "--listing-style",
+    type=click.Choice(["chat", "responses", "anthropic"]),
+    help="Catalogue auth/pagination convention, independent of --api-style.",
+)
+@click.option(
+    "--discovery-api-key-env",
+    help="Catalogue key variable; - for no authentication. Required for a different origin.",
 )
 @click.option("--prompt-key", is_flag=True, help="Read a masked key; offer to save it at the end.")
 @click.option("--no-catalogue", is_flag=True, help="Do not fetch public model metadata.")
@@ -87,7 +115,7 @@ from ._connect_stages import STAGES
     # the CLI need not import nooa.unifiedllm at load; a test keeps them equal.
     default=2048,
     show_default=True,
-    help="Cap for interface discovery only, before the saved reply budget is chosen.",
+    help="Chat-family interface discovery cap only, before the saved reply budget is chosen; no cap for native decisions.",
 )
 @click.option(
     "--reasoning-output-tokens",
@@ -109,15 +137,25 @@ from ._connect_stages import STAGES
     "--reply-tokens",
     "reply_tokens",
     type=click.IntRange(min=1),
-    help="Reply token limit to save and use for checks.",
+    help="Chat-family reply token limit to save and use for checks; native decisions have no reply cap.",
 )
 @click.option(
     "--media-inputs",
-    help="Manually declare comma-separated image,audio,video,pdf inputs (unverified). Empty or - means text-only.",
+    help="Manually declare comma-separated image,audio,video,pdf inputs (unverified); native decisions support image only. Empty or - means text-only.",
 )
 @click.option(
     "--test-media-inputs",
-    help="Test selected image,audio,video,pdf formats with generated samples in the approved budget.",
+    help="Test selected image,audio,video,pdf formats with generated samples in the approved budget; native decisions support image only with a valid transport.",
+)
+@click.option(
+    "--decision-image-transport",
+    type=click.Choice(["json", "typesafe_multipart"]),
+    help="Explicit native decision image transport; never inferred from the endpoint.",
+)
+@click.option(
+    "--typesafe-danger-zone-images/--no-typesafe-danger-zone-images",
+    default=None,
+    help="Explicit experimental TypeSafe multipart image opt-in.",
 )
 @click.option("--show-config", is_flag=True, help="Show full YAML details before saving.")
 @click.option(
@@ -157,11 +195,17 @@ def command(
     provider,
     alias,
     endpoint,
+    systemone_endpoint,
+    share_interface_key,
     api_style,
     api_key_env,
     prompt_key,
     catalogue_model,
+    catalogue_file,
     discovery_file,
+    models_url,
+    listing_style,
+    discovery_api_key_env,
     no_catalogue,
     reasoning_template,
     levels,
@@ -176,6 +220,8 @@ def command(
     reply_tokens,
     media_inputs,
     test_media_inputs,
+    decision_image_transport,
+    typesafe_danger_zone_images,
     show_config,
     show_diagnostics,
     output,
@@ -241,6 +287,8 @@ def command(
                 model=model,
                 alias=alias,
                 endpoint=endpoint,
+                systemone_endpoint=systemone_endpoint,
+                share_interface_key=share_interface_key,
                 api_style=api_style,
                 api_key_env=api_key_env,
                 budget_tokens=budget_tokens,
@@ -251,20 +299,27 @@ def command(
                 reply_tokens=reply_tokens,
                 media_inputs=media_inputs,
                 test_media_inputs=test_media_inputs,
+                decision_image_transport=decision_image_transport,
+                typesafe_danger_zone_images=typesafe_danger_zone_images,
                 levels_file=levels_file,
                 context_window=context_window,
                 input_file=input_file,
                 output=output,
                 yes=yes,
                 prompt_key=prompt_key,
+                catalogue_file=catalogue_file,
+                catalogue_model=catalogue_model,
                 discovery_file=discovery_file,
+                models_url=models_url,
+                listing_style=listing_style,
+                discovery_api_key_env=discovery_api_key_env,
                 invalid_options=[
                     name
                     for name, used in {
                         "--no-probe": no_probe,
                         "--probe": probe != "all",
                         "--provider": provider,
-                        "--catalogue-model": catalogue_model,
+                        "--catalogue-model": catalogue_model and not catalogue_file,
                         "--reasoning-template": reasoning_template and stage != "interfaces",
                         "--reasoning-level": reasoning_level and stage != "interfaces",
                         "--levels": levels,
@@ -278,6 +333,8 @@ def command(
             raise click.exceptions.Exit(code)
         if input_file:
             raise click.UsageError("--input requires --stage save")
+        if catalogue_file:
+            raise click.UsageError("--catalogue-file requires a plan/check --stage")
         from ._connect_wizard import run_wizard
 
         run_wizard(
@@ -286,11 +343,16 @@ def command(
             provider=provider,
             alias=alias,
             endpoint=endpoint,
+            systemone_endpoint=systemone_endpoint,
+            share_interface_key=share_interface_key,
             api_style=api_style,
             api_key_env=api_key_env,
             prompt_key=prompt_key,
             catalogue_model=catalogue_model,
             discovery_file=discovery_file,
+            models_url=models_url,
+            listing_style=listing_style,
+            discovery_api_key_env=discovery_api_key_env,
             no_catalogue=no_catalogue,
             reasoning_template=reasoning_template,
             reasoning_level=reasoning_level,
@@ -305,6 +367,8 @@ def command(
             reply_tokens=reply_tokens,
             media_inputs=media_inputs,
             test_media_inputs=test_media_inputs,
+            decision_image_transport=decision_image_transport,
+            typesafe_danger_zone_images=typesafe_danger_zone_images,
             show_config=show_config,
             show_diagnostics=show_diagnostics,
             output=output,

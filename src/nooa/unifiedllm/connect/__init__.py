@@ -35,6 +35,7 @@ import yaml
 
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 
+from ._advertised_media import advertised_media_suggestions, media_metadata
 from ._records import (
     TYPED_TEXT_BASELINE,
     ProbeRecord,
@@ -228,6 +229,13 @@ class InterfaceResult:
         )
 
     @property
+    def accepted_client_types(self) -> tuple[str, ...]:
+        """Distinct accepted runtime client types, in accepted interface order."""
+        return tuple(
+            dict.fromkeys(self.results[style].entry["client_type"] for style in self.accepted)
+        )
+
+    @property
     def reasoning_observed(self) -> dict[str, bool]:
         """Which interfaces put a reasoning item on the wire, not merely accepted a call.
 
@@ -246,11 +254,14 @@ class InterfaceResult:
 
     @property
     def recommended_style(self) -> str | None:
-        """The accepted interface to prefer: the first (by ``styles`` order) that
-        actually showed reasoning, or else the first accepted interface, or
-        None if nothing was accepted.
+        """Prefer accepted order when decision and chat-family clients both accept.
+
+        For chat-family-only comparisons, prefer observed reasoning, then order.
+        No interface is recommended if nothing was accepted.
         """
         accepted = self.accepted
+        if "decision" in self.accepted_client_types and len(self.accepted_client_types) > 1:
+            return accepted[0]
         observed = self.reasoning_observed
         for style in accepted:
             if observed.get(style):
@@ -300,10 +311,15 @@ def verdict(entry: dict) -> Verdict:
 
 @dataclass(frozen=True)
 class Discovery:
-    """Models advertised by the selected endpoint, not a public catalogue."""
+    """Advertised models, not verified interface support.
+
+    ``api_base`` remains the inference base (legacy root discovery may resolve /v1).
+    ``models_url`` records the actual listing source, independent of inference.
+    """
 
     api_base: str
     models: tuple[dict[str, Any], ...]
+    models_url: str | None = None
 
 
 class DiscoveryError(ValueError):
@@ -338,26 +354,46 @@ def _headers(style: str, key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
+def validate_models_url(models_url: str) -> str:
+    """Validate an explicit full catalogue GET URL, without rewriting its path."""
+    normalize_endpoint(models_url)  # Same HTTPS/credential/query restrictions.
+    return models_url.strip()
+
+
 async def discover(
-    endpoint: str, *, api_style: str = "chat", api_key: str | None = None
+    endpoint: str,
+    *,
+    api_style: str = "chat",
+    api_key: str | None = None,
+    models_url: str | None = None,
+    listing_style: str | None = None,
 ) -> Discovery:
     """List endpoint models without saving credentials or making generation calls.
 
+    ``models_url`` is an explicit full GET URL, required for decision routes.
+    It never changes the inference endpoint and gets no root-path fallback.
+    ``listing_style`` chooses listing authentication/pagination, not inference.
+    ``api_key`` authenticates listing only; callers must choose its source explicitly.
     Root URLs try /models, then /v1/models only on 404. Anthropic pagination
     uses the same fetcher. Limits apply to the whole discovery: 30 seconds,
     5 MiB and 5,000 entries. Redirects and automatic retries are disabled.
     """
-    if api_style in DECISION_API_STYLES:
+    if api_style in DECISION_API_STYLES and models_url is None:
         raise ValueError(
-            "Decision endpoints do not list decision models; supply the exact decision model ID"
+            "Decision endpoints do not list decision models themselves; supply models_url "
+            "for a shared catalogue or the exact decision model ID"
         )
     if api_style not in _PATHS:
-        raise ValueError("api_style must be chat, responses or anthropic")
+        raise ValueError("Unknown api_style")
+    style = listing_style or ("chat" if api_style in DECISION_API_STYLES else api_style)
+    if style not in {"chat", "responses", "anthropic"}:
+        raise ValueError("listing_style must be chat, responses or anthropic")
     base = normalize_endpoint(endpoint)
-    root = not urlsplit(base).path
+    url = validate_models_url(models_url) if models_url is not None else base + "/models"
+    root = models_url is None and not urlsplit(base).path
     models: dict[str, dict] = {}
     cursors: set[str] = set()
-    params = {"limit": "100"} if api_style == "anthropic" else {}
+    params = {"limit": "100"} if style == "anthropic" else {}
     size = 0
     count = 0
     try:
@@ -367,10 +403,11 @@ async def discover(
         ):
             while True:
                 async with client.stream(
-                    "GET", base + "/models", headers=_headers(api_style, api_key), params=params
+                    "GET", url, headers=_headers(style, api_key), params=params
                 ) as response:
                     if response.status_code == 404 and root:
                         base += "/v1"
+                        url = base + "/models"
                         root = False
                         continue
                     if not response.is_success:
@@ -410,7 +447,12 @@ async def discover(
                                 "max_model_len",
                             ),
                         ),
-                        ("max_output_tokens", ("max_output_tokens", "max_completion_tokens")),
+                        (
+                            "max_output_tokens",
+                            ("max_output_tokens", "max_completion_tokens", "max_tokens")
+                            if style == "anthropic"
+                            else ("max_output_tokens", "max_completion_tokens"),
+                        ),
                         ("max_input_tokens", ("max_input_tokens",)),
                     ):
                         for candidate in candidates:
@@ -418,8 +460,61 @@ async def discover(
                             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                                 model[field] = value
                                 break
+                    # Advertised hints only: do not enable interfaces or media from these.
+                    for field in ("name", "description", "client_type", "model_type"):
+                        value = item.get(field)
+                        if (
+                            isinstance(value, str)
+                            and len(value) <= 4096
+                            and not any(ord(c) < 32 and c not in "\n\t" for c in value)
+                        ):
+                            model[field] = value
+                    for field in (
+                        "supported_interfaces",
+                        "input_modalities",
+                        "output_modalities",
+                        "supported_parameters",
+                    ):
+                        value = item.get(field)
+                        if (
+                            isinstance(value, list)
+                            and len(value) <= 100
+                            and all(
+                                isinstance(v, str)
+                                and len(v) <= 200
+                                and not any(ord(c) < 32 for c in v)
+                                for v in value
+                            )
+                        ):
+                            model[field] = value
+                    architecture = item.get("architecture")
+                    if isinstance(architecture, dict):
+                        hints = {
+                            k: v
+                            for k, v in architecture.items()
+                            if k in {"input_modalities", "output_modalities"}
+                            and isinstance(v, list)
+                            and len(v) <= 100
+                            and all(
+                                isinstance(s, str)
+                                and len(s) <= 200
+                                and not any(ord(c) < 32 for c in s)
+                                for s in v
+                            )
+                        }
+                        if hints:
+                            model["architecture"] = hints
+                    media = media_metadata(item)
+                    if "architecture" in media:
+                        media["architecture"] = {
+                            **model.get("architecture", {}),
+                            **media["architecture"],
+                        }
+                    model.update(media)
+                    if media:
+                        model["media_source"] = url
                     models[name] = model
-                if api_style != "anthropic" or not payload.get("has_more"):
+                if style != "anthropic" or not payload.get("has_more"):
                     break
                 cursor = payload.get("last_id")
                 if (
@@ -437,7 +532,7 @@ async def discover(
         raise DiscoveryError("Model discovery did not return valid JSON") from None
     if not models:
         raise DiscoveryError("Endpoint advertised no usable model IDs; supply a model explicitly")
-    return Discovery(base, tuple(models[name] for name in sorted(models)))
+    return Discovery(base, tuple(models[name] for name in sorted(models)), url)
 
 
 async def catalogue() -> list[dict]:
@@ -450,9 +545,14 @@ async def catalogue() -> list[dict]:
         if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
             raise ValueError("Catalogue response must contain a list of model objects")
         for item in data:
+            # Attribution is ours, not provider-supplied model information.
+            for key in ("media_source", "media_model_id", "limit_sources", "endpoint_limits"):
+                item.pop(key, None)
+            if media_metadata(item):
+                item["media_source"] = CATALOGUE_URL
             if not isinstance(item.get("id"), str) or not item["id"].strip():
                 raise ValueError("Catalogue models must have a non-empty string id")
-            for field in ("top_provider", "reasoning"):
+            for field in ("top_provider", "reasoning", "default_parameters"):
                 if not isinstance(item.get(field), dict):
                     item[field] = {}
             reasoning = item["reasoning"]
@@ -629,17 +729,27 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     result = deepcopy(entry)
-    if result.get("client_type") == "decision":
-        if result.get("media_inputs"):
-            raise ValueError("Decision models do not take media inputs")
-        result.pop("media_inputs", None)
-    else:
-        result["media_inputs"] = list(validate_media_inputs(result.get("media_inputs")))
+    result["media_inputs"] = list(validate_media_inputs(result.get("media_inputs")))
     for patch in (result.get("reasoning_levels") or {}).values():
         if "media_inputs" in patch or "media_inputs" in (patch.get("extra_body") or {}):
             raise ValueError("media_inputs belongs on the connection, not a reasoning level")
     result.setdefault("transport", "direct")
     if result.get("client_type") == "decision":
+        from nooa.decisions.media import decision_media_inputs
+
+        result["media_inputs"] = list(decision_media_inputs(result["media_inputs"]))
+        result.setdefault("decision_image_transport", "json")
+        result.setdefault("typesafe_danger_zone_images", False)
+        image_transport = result["decision_image_transport"]
+        optin = result["typesafe_danger_zone_images"]
+        if image_transport not in {"json", "typesafe_multipart"}:
+            raise ValueError("decision_image_transport must be json or typesafe_multipart")
+        if not isinstance(optin, bool):
+            raise ValueError("typesafe_danger_zone_images must be an explicit boolean")
+        if image_transport == "typesafe_multipart" and result.get("api_style") != "systemone":
+            raise ValueError("typesafe_multipart requires api_style=systemone")
+        if optin and image_transport != "typesafe_multipart":
+            raise ValueError("typesafe_danger_zone_images requires typesafe_multipart transport")
         if result.get("api_style") not in DECISION_API_STYLES:
             raise ValueError("Decision entries require api_style: systemone or openai")
         if not isinstance(result.get("endpoint"), str) or not result["endpoint"].strip():
@@ -795,6 +905,9 @@ def model_metadata(
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             sources.setdefault(field, "catalogue")
     endpoint_model = endpoint_model or {}
+    # Legacy callers may omit the ID; an explicit neighbour is never evidence.
+    if "id" in endpoint_model and endpoint_model["id"] != model:
+        endpoint_model = {}
     reported = {}
     for key in ("context_window", "context_length", "max_input_tokens", "max_output_tokens"):
         value = endpoint_model.get(key)
@@ -817,12 +930,32 @@ def model_metadata(
         sources["max_completion_tokens"] = "endpoint"
     if reported:
         result["endpoint_limits"] = reported
+    # Keep input advertisements separate from limits/settings; endpoint facts win
+    # only for the exact selected model, never a neighbour on a shared hub.
+    media = media_metadata(endpoint_model) if endpoint_model.get("id") == model else {}
+    if media:
+        for key in ("architecture", "input_modalities", "capabilities"):
+            result.pop(key, None)
+        result.update(media)
+        result["media_source"] = endpoint_model.get("media_source", "endpoint listing")
+        result["media_model_id"] = endpoint_model["id"]
     return result
 
 
 def entry_warnings(entry: dict) -> list[str]:
     """Configuration warnings shared by the wizard, library and stage reports."""
     if entry.get("client_type") == "decision":
+        if (
+            "image" in entry.get("media_inputs", [])
+            and entry.get("api_style") == "systemone"
+            and not (
+                entry.get("decision_image_transport") == "typesafe_multipart"
+                and entry.get("typesafe_danger_zone_images") is True
+            )
+        ):
+            return [
+                "Image permission is declared, but System One JSON image transport is unverified and will reject images before sending."
+            ]
         return []
     warnings = (
         []
@@ -853,7 +986,11 @@ def same_media_route(previous: dict, entry: dict) -> bool:
         style = value.get("api_style") or (
             "responses" if value.get("client_type") == "responses" else "chat"
         )
-        endpoint = value.get("api_base")
+        endpoint = (
+            value.get("endpoint")
+            if value.get("client_type") == "decision"
+            else value.get("api_base")
+        )
         if not endpoint or not value.get("model_name"):
             return None
         endpoint = normalize_endpoint(endpoint)
@@ -864,6 +1001,8 @@ def same_media_route(previous: dict, entry: dict) -> bool:
             endpoint,
             style,
             value.get("client_type", "responses" if style == "responses" else "completion"),
+            value.get("decision_image_transport", "json"),
+            value.get("typesafe_danger_zone_images", False),
         )
 
     old = route(previous)
@@ -941,6 +1080,7 @@ def plan(
     *,
     catalogue: dict | None = None,
     endpoint_model: dict | None = None,
+    endpoint_models_url: str | None = None,
     reasoning_levels: dict | None = None,
     budget_tokens: int = DEFAULT_CHECK_BUDGET,
     output_tokens: int = DISCOVERY_OUTPUT_TOKENS,
@@ -950,19 +1090,26 @@ def plan(
     reply_tokens: int | None = None,
     media_inputs: list[str] | tuple[str, ...] | None = None,
     test_media_inputs: list[str] | tuple[str, ...] | None = None,
+    decision_image_transport: str | None = None,
+    typesafe_danger_zone_images: bool | None = None,
+    decision_checks: bool = True,
 ) -> ConnectPlan:
     """Prepare requests without reading credentials, files or network resources.
 
     ``model`` is the exact endpoint model ID, without a LiteLLM prefix. The
     returned entry adds the prefix needed by today's runtime. Each request reserves
     its output cap plus 512 estimated input tokens (4,096 for selected generated
-    media samples). Reported usage can increase that charge. Servers can ignore
+    media samples). ``endpoint_models_url`` is the verified listing source,
+    independent of record media hints; omitted sources use the legacy /models URL.
+    Reported usage can increase that charge. Servers can ignore
     caps, so this is not a billing limit. Media facts never change declarations.
     Non-Chat video and audio remain transparently not tested.
     """
     if api_style not in _PATHS:
         raise ValueError("api_style must be chat, responses, anthropic, systemone or openai")
     api_base = normalize_endpoint(api_base)
+    if endpoint_models_url is not None:
+        endpoint_models_url = validate_models_url(endpoint_models_url)
     if (
         not alias.strip()
         or not model.strip()
@@ -979,8 +1126,42 @@ def plan(
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     tested_media = validate_media_inputs(test_media_inputs)
+    selected_media_model = (
+        endpoint_model
+        if endpoint_model is not None
+        and endpoint_model.get("id") == model
+        and media_metadata(endpoint_model)
+        else catalogue
+        if api_style not in DECISION_API_STYLES
+        else None
+    )
+    endpoint_media_selected = selected_media_model is endpoint_model and endpoint_model is not None
+    if endpoint_media_selected:
+        # Internal attribution keys in a record are never a listing contract.
+        selected_media_model = {
+            **selected_media_model,
+            "media_model_id": model,
+            "media_source": endpoint_models_url or "endpoint listing",
+        }
+    media_suggestions = advertised_media_suggestions(
+        selected_media_model,
+        source=(selected_media_model or {}).get(
+            "media_source",
+            "endpoint listing"
+            if endpoint_media_selected
+            else CATALOGUE_URL
+            if selected_media_model
+            else "unknown",
+        ),
+        api_style=api_style,
+        decision_image_transport=decision_image_transport
+        or (existing_entry or {}).get("decision_image_transport", "json"),
+        typesafe_danger_zone_images=typesafe_danger_zone_images
+        if typesafe_danger_zone_images is not None
+        else (existing_entry or {}).get("typesafe_danger_zone_images", False),
+    )
     if api_style in DECISION_API_STYLES:
-        if catalogue is not None or endpoint_model is not None:
+        if catalogue is not None:
             raise ValueError("Decision models do not use chat model catalogue metadata")
         if reasoning_levels:
             raise ValueError("Decision models do not configure reasoning levels")
@@ -988,15 +1169,23 @@ def plan(
             raise ValueError("Decision models are stateless and do not use session checks")
         if reply_tokens is not None:
             raise ValueError("Decision models do not use reply-token budgets")
-        if tested_media:
-            raise ValueError("Decision models do not take media inputs")
+        from nooa.decisions.media import decision_media_inputs
+
+        decision_media_inputs(tested_media)
+        decision_media_inputs(media_inputs)
         entry = {
             "model_name": model,
             "client_type": "decision",
+            "media_inputs": list(decision_media_inputs(media_inputs)),
+            "decision_image_transport": decision_image_transport or "json",
+            "typesafe_danger_zone_images": typesafe_danger_zone_images
+            if typesafe_danger_zone_images is not None
+            else False,
             "api_style": api_style,
             "endpoint": api_base,
             "api_key_env": api_key_env,
             "provenance": {
+                "media_suggestions": media_suggestions,
                 "probes": {},
                 "requests_accepted": [],
                 "not_probed": [
@@ -1008,26 +1197,81 @@ def plan(
                 ],
             },
         }
-        body = {
-            "model": model,
-            "state": {"statement": "The support request requires a decision."},
-            "questions": {
-                "supported": {
-                    "type": "noul",
-                    "instructions": "Does the state contain a support request?",
-                }
-            },
-        }
+        # Inherit permissions and controls only for the identical normalized route.
+        if existing_entry:
+            candidate = {**entry}
+            if decision_image_transport is None:
+                candidate["decision_image_transport"] = existing_entry.get(
+                    "decision_image_transport", "json"
+                )
+            if typesafe_danger_zone_images is None:
+                candidate["typesafe_danger_zone_images"] = existing_entry.get(
+                    "typesafe_danger_zone_images", False
+                )
+            if same_media_route(existing_entry, candidate):
+                entry = candidate
+                if media_inputs is None:
+                    entry["media_inputs"] = list(
+                        decision_media_inputs(existing_entry.get("media_inputs"))
+                    )
+        entry["provenance"]["media_suggestions"] = advertised_media_suggestions(
+            selected_media_model,
+            source=media_suggestions["source"],
+            api_style=api_style,
+            decision_image_transport=entry["decision_image_transport"],
+            typesafe_danger_zone_images=entry["typesafe_danger_zone_images"],
+        )
+        if (
+            tested_media
+            and api_style == "systemone"
+            and not (
+                entry["decision_image_transport"] == "typesafe_multipart"
+                and entry["typesafe_danger_zone_images"] is True
+            )
+        ):
+            raise ValueError(
+                "Unverified System One JSON image transport; image testing requires explicit typesafe_multipart and typesafe_danger_zone_images opt-in"
+            )
+        if endpoint_model is not None and endpoint_model.get("id") == model:
+            # Preserve catalogue facts as advertised evidence, never chat configuration.
+            entry["provenance"]["advertised_model"] = deepcopy(endpoint_model)
+        from ._decision import planned_body
+
+        body = {"model": model, **planned_body("routing")}
+        probes = [Probe("routing", body, 512, uses_configured_cap=False)]
+        if decision_checks:
+            probes.extend(
+                Probe(name, planned_body(name), 512, uses_configured_cap=False)
+                for name in ("decision:typed", "decision:positive", "decision:negative")
+            )
+        if tested_media:
+            probes.append(
+                Probe(
+                    "media:image",
+                    planned_body("media:image"),
+                    4096,
+                    uses_configured_cap=False,
+                    input_reservation=4096,
+                )
+            )
         proposal = ConnectPlan(
             alias,
             configure_entry(entry),
-            (Probe("routing", body, 512, uses_configured_cap=False),),
+            tuple(probes),
             budget_tokens,
-            512,
+            sum(p.token_estimate for p in probes),
             None,
         )
         if existing_entry:
-            keys = ("model_name", "endpoint", "api_key_env", "client_type", "api_style")
+            keys = (
+                "model_name",
+                "endpoint",
+                "api_key_env",
+                "client_type",
+                "api_style",
+                "decision_image_transport",
+                "typesafe_danger_zone_images",
+            )
             if all(existing_entry.get(key) == proposal.entry.get(key) for key in keys):
                 previous = existing_entry.get("provenance", {}).get("probes", {})
                 if "routing" in previous:
@@ -1035,6 +1279,8 @@ def plan(
                         previous["routing"]
                     )
         return proposal
+    if decision_image_transport is not None or typesafe_danger_zone_images is not None:
+        raise ValueError("Decision image transport options require a decision interface")
     vendor = "anthropic" if api_style == "anthropic" else "openai"
     entry: dict[str, Any] = {
         "model_name": f"{vendor}/{model}",
@@ -1048,6 +1294,7 @@ def plan(
     if media_inputs is None and existing_entry and same_media_route(existing_entry, entry):
         entry["media_inputs"] = list(validate_media_inputs(existing_entry.get("media_inputs")))
     provenance: dict[str, Any] = {
+        "media_suggestions": media_suggestions,
         "probes": {},
         "requests_accepted": [],
         "reasoning_observed": [],
@@ -1065,8 +1312,8 @@ def plan(
         provenance["limit_sources"] = deepcopy(catalogue.get("limit_sources", {}))
         if catalogue.get("endpoint_limits"):
             provenance["endpoint_limits"] = {
-                "url": api_base + "/models",
                 **catalogue["endpoint_limits"],
+                "url": endpoint_models_url or api_base + "/models",
             }
         if any(
             v == "catalogue" for v in catalogue.get("limit_sources", {}).values()
@@ -1533,53 +1780,102 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         await client.aclose()
 
 
-async def _run_decision_probe(
-    alias: str,
-    entry: dict,
-    probe: Probe,
-    api_key: str | None,
-):
-    """Run one System One probe through the configured decision-client factory."""
-    from nooa.decisions import DecisionClient
-    from nooa.decisions.client import BooleanQuestion, DecisionRequest
+async def _run_decision_probe(alias: str, entry: dict, probe: Probe, api_key: str | None):
+    """One native typed call; only sanitized facts leave this function."""
+    import json
+    from email import policy
+    from email.parser import BytesParser
+
     from nooa.unifiedllm import RetryConfig
     from nooa.unifiedllm.registry import client_from_config
 
-    response_status: list[int] = []
+    from ._decision import typed_decision
+    from ._media import png_fixture
 
-    async def capture_status(response: httpx.Response) -> None:
-        response_status.append(response.status_code)
+    statuses = []
+    observed_usage = {}
+    wire = {"attachment_observed": False}
+    sent = False
+
+    async def capture_request(request):
+        nonlocal sent
+        if sent:
+            raise RuntimeError("Decision check permits only one outbound request")
+        sent = True
+        if probe.name != "media:image":
+            return
+        body = await request.aread()
+        if entry["api_style"] == "openai":
+            from ._media import _data_url
+
+            payload = json.loads(body)
+            blocks = payload.get("input", [{}])[0].get("content", [])
+            wire["attachment_observed"] = any(
+                block.get("type") == "input_image"
+                and block.get("image_url") == _data_url("image/png", png_fixture())
+                for block in blocks
+            )
+        else:
+            message = BytesParser(policy=policy.default).parsebytes(
+                ("Content-Type: " + request.headers.get("content-type", "") + "\r\n\r\n").encode()
+                + body
+            )
+            parts = list(message.iter_parts())
+            wire["attachment_observed"] = request.headers.get(
+                "TypeSafe-Danger-Zone-Images"
+            ) == "true" and any(
+                part.get_content_type() == "image/png"
+                and part.get_payload(decode=True) == png_fixture()
+                for part in parts
+            )
+
+    async def capture_status(response):
+        statuses.append(response.status_code)
+        # Usage is independent of schema validity. Read locally, retain only counts.
+        await response.aread()
+        try:
+            usage = response.json().get("usage", {})
+            if isinstance(usage, dict):
+                for field in ("input_tokens", "output_tokens"):
+                    value = usage.get(field)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        observed_usage[field] = value
+        except (ValueError, AttributeError):
+            pass
 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     http_client = httpx.AsyncClient(
         timeout=probe.timeout_seconds,
         headers=headers,
-        event_hooks={"response": [capture_status]},
+        event_hooks={"request": [capture_request], "response": [capture_status]},
     )
-    client = cast(
-        DecisionClient,
-        client_from_config(
+    client = None
+    try:
+        client = client_from_config(
             alias,
-            entry,
+            {**entry, **({"media_inputs": ["image"]} if probe.name == "media:image" else {})},
             api_key=api_key,
             client=http_client,
+            media_inputs=["image"]
+            if probe.name == "media:image"
+            else entry.get("media_inputs", []),
+            decision_image_transport=entry.get("decision_image_transport", "json"),
+            typesafe_danger_zone_images=entry.get("typesafe_danger_zone_images", False),
             retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
-        ),
-    )
-    question = probe.body["questions"]["supported"]
-    request = DecisionRequest(
-        state=probe.body["state"],
-        questions={"supported": BooleanQuestion(question["instructions"])},
-    )
-    try:
-        response = await client.adecide(request)
-        return response, response_status[-1] if response_status else None
+        )
+        response, facts = await typed_decision(client, probe.name)
+        if probe.name == "media:image":
+            facts.update(wire)
+        return response, statuses[-1] if statuses else None, facts
     except Exception as exc:
-        if response_status:
-            exc._connect_http_status = response_status[-1]  # type: ignore[attr-defined]
+        if statuses:
+            exc._connect_http_status = statuses[-1]
+        exc._connect_usage = observed_usage
+        exc._connect_wire = wire if probe.name == "media:image" else {}
         raise
     finally:
-        await client.aclose()
+        if client is not None:
+            await client.aclose()
         await http_client.aclose()
 
 
@@ -1601,14 +1897,21 @@ async def check_stage(
 ) -> ConnectResult:
     """Run one selected check afresh, without prompts or registry writes.
 
-    Stages are routing, tools, reasoning, session, or all. Calling this function
+    Stages are routing, decision, tools, reasoning, media, session, or all. Calling this function
     explicitly approves that stage within the plan's existing limits. Results
     retain other stages' provenance, but selected checks never reuse old evidence.
     """
-    if stage not in {"routing", "tools", "reasoning", "media", "session", "all"}:
+    if stage not in {"routing", "tools", "reasoning", "media", "decision", "session", "all"}:
         raise ValueError("Unknown check stage")
-    if proposal.entry.get("client_type") == "decision" and stage not in {"routing", "all"}:
-        raise ValueError("Decision models only support the routing check")
+    if proposal.entry.get("client_type") == "decision" and stage not in {
+        "routing",
+        "decision",
+        "media",
+        "all",
+    }:
+        raise ValueError("Decision models support routing, decision, media and all checks")
+    if stage == "decision" and proposal.entry.get("client_type") != "decision":
+        raise ValueError("Decision stage requires a native decision model")
     # A selected level already present in the approved plan can supply the
     # routing/media cap. Never reapprove an edited cap merely by running a stage;
     # callers must explicitly refresh/review such edits first.
@@ -1631,11 +1934,20 @@ async def check_stage(
         for p in proposal.probes
         if stage == "all"
         or p.name == stage
+        or stage == "decision"
+        and (p.name == "routing" or p.name.startswith("decision:"))
         or stage == "reasoning"
         and p.name.startswith("level:")
         or stage == "media"
-        and (p.name == "routing" or p.name.startswith("media:"))
+        and (
+            p.name == "routing"
+            or p.name.startswith("media:")
+            or proposal.entry.get("client_type") == "decision"
+            and p.name.startswith("decision:")
+        )
     )
+    if stage == "decision" and not any(p.name.startswith("decision:") for p in probes):
+        raise ValueError("Decision stage requires a fresh typed decision plan")
     if stage == "media" and not any(p.name.startswith("media:") for p in probes):
         raise ValueError("Media stage requires explicit test_media_inputs")
     if stage == "reasoning" and not probes:
@@ -1648,7 +1960,10 @@ async def check_stage(
         if not api_key:
             raise ValueError("The configured credential variable is unset or empty")
     selected = replace(
-        proposal, entry=entry, probes=probes, session_checks=stage in {"session", "all"}
+        proposal,
+        entry=entry,
+        probes=probes,
+        session_checks=stage in {"session", "all"} and entry.get("client_type") != "decision",
     )
     return await run(selected, approved="all", api_key=api_key)
 
@@ -1693,7 +2008,8 @@ def diagnostic_prompt(
     outcomes = {name: public_record(record) for name, record in checks.items()}
     text = (
         f"Diagnose and fix NOOA Connect stage {stage!r}. "
-        "First read the nooa-model-configuration skill and companion docs located by the "
+        "First read the nooa-connect skill for permission and headless operation, then "
+        "the model-configuration reference and companion docs located by the "
         "installation references below. "
         "Inspect the configuration, credential lookup, and actual request construction. "
         "Model listing alone does not validate credentials. Distinguish rejection, missing "
@@ -1702,7 +2018,8 @@ def diagnostic_prompt(
         "then rerun the affected checks within configured limits. Never print or copy key "
         "values, reasoning text, opaque state, or raw error bodies. Preserve unrelated aliases "
         "and inspect layer precedence before editing the target file. This handoff does not "
-        "authorize additional paid calls; confirm the remaining allowance before rerunning. "
+        "authorize additional paid calls, model configuration or writes; confirm the scope and "
+        "remaining allowance before rerunning. "
         "Report the cause, fix, and evidence.\n"
         + json.dumps(
             {
@@ -2179,118 +2496,141 @@ async def run_steps(
 
 
 async def _run_decision_steps(
-    proposal: ConnectPlan,
-    *,
-    approved: Literal["all", "minimal", "none"],
-    api_key: str | None,
+    proposal: ConnectPlan, *, approved: Literal["all", "minimal", "none"], api_key: str | None
 ) -> AsyncIterator[ProbeUpdate | ConnectResult]:
-    """Execute the single bounded decision-interface probe."""
+    """Share reservations across bounded stateless cases, with no retries."""
+    from ._diagnostics import timeout_details
+
     entry = configure_entry(proposal.entry)
     records = entry["provenance"]["probes"]
-    probe = proposal.probes[0]
-    previous = records.get(probe.name, {})
-    if (
-        previous.get("outcome") == "accepted"
-        and previous.get("request") == probe.body
-        and previous.get("client") == "decision"
-    ):
-        yield ProbeUpdate(probe.name, {**deepcopy(previous), "reason": "previous result reused"})
-        yield ConnectResult(proposal.alias, entry)
-        return
-
-    record: dict[str, Any] = {"outcome": "not_probed"}
-    records[probe.name] = record
-    if approved == "none":
-        record["reason"] = "not approved"
-        yield ProbeUpdate(probe.name, deepcopy(record))
-        entry["provenance"]["requests_accepted"] = []
-        entry["provenance"]["tokens_charged_to_budget"] = 0
-        yield ConnectResult(proposal.alias, entry)
-        return
-    if proposal.budget_tokens < probe.token_estimate:
-        record["reason"] = "budget exhausted"
-        yield ProbeUpdate(probe.name, deepcopy(record))
-        entry["provenance"]["requests_accepted"] = []
-        entry["provenance"]["tokens_charged_to_budget"] = 0
-        yield ConnectResult(proposal.alias, entry)
-        return
-
-    key = api_key
-    if key is None and entry.get("api_key_env"):
-        key = os.environ.get(entry["api_key_env"])
-        if not key:
-            raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
-
-    yield ProbeUpdate(probe.name, {"outcome": "running"})
-    started = time.monotonic()
-    deadline = asyncio.timeout(probe.timeout_seconds)
-    record["request_shape"] = {
-        "api_style": entry.get("api_style", "systemone"),
-        "timeout_seconds": probe.timeout_seconds,
-        "question_count": 1,
-    }
-    try:
-        async with deadline:
-            response, status = await _run_decision_probe(proposal.alias, entry, probe, key)
-        from nooa.decisions.client import BooleanAnswer
-
-        answer = response.answers["supported"]
-        if not isinstance(answer, BooleanAnswer):
-            raise TypeError("Decision probe did not return a boolean answer")
-        probability = answer.probability_true
-        if not math.isfinite(probability) or not 0 <= probability <= 1:
-            raise ValueError("Decision probe returned a probability outside [0, 1]")
-        usage = response.usage
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        reported = sum(
-            value
-            for value in (input_tokens, output_tokens)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
-        )
-    except Exception as exc:
-        from nooa.unifiedllm.connect._diagnostics import timeout_details
-
-        status = getattr(exc, "_connect_http_status", None)
-        record.update(
-            error=type(exc).__name__,
-            elapsed_seconds=round(time.monotonic() - started, 3),
-            outcome="not_probed",
-        )
-        if isinstance(status, int):
-            record["status_code"] = status
-            record["outcome"] = "rejected" if status in {400, 422} else "not_probed"
-            if 200 <= status < 300:
-                record.update(
-                    outcome="not_confirmed",
-                    reason="Reply not understood by the decision client",
+    charged = 0
+    accepted = []
+    baseline_ok = False
+    for probe in proposal.probes:
+        previous = records.get(probe.name, {})
+        # Only routing acceptance may be reused; all accuracy/media cases are fresh.
+        if (
+            probe.name == "routing"
+            and previous.get("outcome") == "accepted"
+            and previous.get("request") == probe.body
+            and previous.get("client") == "decision"
+        ):
+            accepted.append(probe.name)
+            baseline_ok = True
+            yield ProbeUpdate(
+                probe.name, {**deepcopy(previous), "reason": "previous result reused"}
+            )
+            continue
+        record = {"outcome": "not_probed"}
+        records[probe.name] = record
+        reason = None
+        if approved == "none" or approved == "minimal" and probe.name != "routing":
+            reason = "not approved"
+        elif probe.skip_reason:
+            reason = probe.skip_reason
+        elif charged + probe.token_estimate > proposal.budget_tokens:
+            reason = "budget exhausted"
+        elif probe.name != "routing" and not baseline_ok:
+            reason = "Decision baseline not accepted; fresh checks not tested"
+        elif probe.name == "media:image" and any(
+            records.get(name, {}).get("answer_correct") is not True
+            for name in ("decision:typed", "decision:positive", "decision:negative")
+        ):
+            reason = "Typed decision baseline did not pass; image not tested"
+        if reason:
+            record["reason"] = reason
+            yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
+        key = api_key
+        if key is None and entry.get("api_key_env"):
+            key = os.environ.get(entry["api_key_env"])
+            if not key:
+                raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
+        yield ProbeUpdate(probe.name, {"outcome": "running"})
+        charged += probe.token_estimate
+        started = time.monotonic()
+        deadline = asyncio.timeout(probe.timeout_seconds)
+        record["request_shape"] = {
+            "api_style": entry["api_style"],
+            "timeout_seconds": probe.timeout_seconds,
+            "question_count": len(probe.body["questions"]),
+            "image_transport": "openai_input_image"
+            if entry["api_style"] == "openai"
+            else entry["decision_image_transport"],
+        }
+        try:
+            async with deadline:
+                response, status, facts = await _run_decision_probe(
+                    proposal.alias, entry, probe, key
                 )
-        record.update(timeout_details(exc, deadline_expired=deadline.expired()))
+            record.update(facts)
+            usage = response.usage
+            reported = 0
+            for field in ("input_tokens", "output_tokens"):
+                value = usage.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    record[field] = value
+                    reported += value
+            record.update(
+                request_accepted=True,
+                client="decision",
+                transport="httpx",
+                resolved_model=response.model,
+                reported_tokens=reported,
+                status_code=status,
+                checked_at=datetime.now(UTC).isoformat(),
+            )
+            charged += max(0, reported - probe.token_estimate)
+            record["tokens_charged_to_budget"] = max(probe.token_estimate, reported)
+            if probe.name == "routing":
+                record.update(outcome="accepted", request=deepcopy(probe.body))
+                baseline_ok = True
+            elif probe.name.startswith("decision:"):
+                record["outcome"] = "accepted" if facts["answer_correct"] else "not_confirmed"
+                if not facts["answer_correct"]:
+                    record["reason"] = "Native typed response accepted but fixture answer incorrect"
+            else:
+                passed = (
+                    facts["attachment_observed"]
+                    and facts["access_reported"]
+                    and facts["answer_correct"]
+                )
+                record["outcome"] = "passed" if passed else "not_confirmed"
+                if not passed:
+                    record["reason"] = (
+                        "Image access, known color accuracy and actual wire attachment must all be confirmed"
+                    )
+            if record["request_accepted"]:
+                accepted.append(probe.name)
+        except Exception as exc:
+            status = getattr(exc, "_connect_http_status", None)
+            usage = getattr(exc, "_connect_usage", {})
+            reported = sum(usage.values())
+            record.update(usage)
+            record.update(getattr(exc, "_connect_wire", {}))
+            record["reported_tokens"] = reported
+            charged += max(0, reported - probe.token_estimate)
+            record.update(
+                error=type(exc).__name__,
+                outcome="not_probed",
+                tokens_charged_to_budget=max(probe.token_estimate, reported),
+            )
+            if isinstance(status, int):
+                record["status_code"] = status
+                record["outcome"] = "rejected" if status in {400, 422} else "not_probed"
+                if 200 <= status < 300:
+                    record.update(
+                        outcome="not_confirmed",
+                        request_accepted=True,
+                        reason="Reply not understood by the decision client",
+                        typed_result_validated=False,
+                    )
+            record.update(timeout_details(exc, deadline_expired=deadline.expired()))
+        record["elapsed_seconds"] = round(time.monotonic() - started, 3)
         yield ProbeUpdate(probe.name, deepcopy(record))
-        entry["provenance"]["requests_accepted"] = []
-        entry["provenance"]["tokens_charged_to_budget"] = probe.token_estimate
-        yield ConnectResult(proposal.alias, entry)
-        return
-
-    record.update(
-        outcome="accepted",
-        elapsed_seconds=round(time.monotonic() - started, 3),
-        client="decision",
-        transport="httpx",
-        request=deepcopy(probe.body),
-        resolved_model=response.model,
-        probability_true=probability,
-        input_tokens=input_tokens if isinstance(input_tokens, int) else None,
-        output_tokens=output_tokens if isinstance(output_tokens, int) else None,
-        reported_tokens=reported,
-        checked_at=datetime.now(UTC).isoformat(),
+    entry["provenance"].update(
+        requests_accepted=accepted, tokens_charged_to_budget=charged, warnings=entry_warnings(entry)
     )
-    if isinstance(status, int):
-        record["status_code"] = status
-    entry["provenance"]["requests_accepted"] = [probe.name]
-    entry["provenance"]["tokens_charged_to_budget"] = max(probe.token_estimate, reported)
-    yield ProbeUpdate(probe.name, deepcopy(record))
-    entry["provenance"]["warnings"] = entry_warnings(entry)
     yield ConnectResult(proposal.alias, entry)
 
 
@@ -2304,6 +2644,8 @@ async def check_interfaces(
     output_tokens: int = DISCOVERY_OUTPUT_TOKENS,
     api_key: str | None = None,
     styles: tuple[str, ...] = ("chat", "responses", "anthropic"),
+    endpoints: Mapping[str, str] | None = None,
+    allow_cross_origin_credentials: bool = False,
     timeout_seconds: float = 30,
     reasoning_template: str | None = None,
     reasoning_level: str = "medium",
@@ -2333,10 +2675,17 @@ async def check_interfaces(
     anthropic-only comparison needs a matching template (adaptive/budget/
     thinking) passed explicitly.
 
-    Pass one decision style, ``("systemone",)`` or ``("openai",)``, alone to send
-    the single decision probe; a
-    decision endpoint is a different client type, so it is never mixed with
-    chat interfaces.
+    ``endpoints`` overrides ``api_base`` per style. Decision endpoints are full
+    URLs, never inferred from a chat base or by appending a suffix. Mixed styles
+    require an explicit mapping entry for every decision style; a single decision
+    style can still use ``api_base``. All supplied endpoints are validated before
+    any request. With a nonempty ``api_key`` or configured ``api_key_env``,
+    mapped endpoints on a different origin (scheme, host, effective port) require
+    explicit ``allow_cross_origin_credentials=True``. CLI callers opt in with
+    ``--share-interface-key``. No credential is shared across origins by default;
+    unauthenticated comparisons and same-origin path differences are permitted.
+    Reasoning templates apply only to chat-family interfaces and
+    are ignored in a decision-only comparison.
     """
     if (
         not styles
@@ -2344,31 +2693,56 @@ async def check_interfaces(
         or not 1 <= timeout_seconds <= 120
     ):
         raise ValueError("Choose supported interfaces and a timeout between 1 and 120 seconds")
-    decision_styles = [style for style in styles if style in DECISION_API_STYLES]
-    if decision_styles and len(set(styles)) != 1:
-        raise ValueError(
-            f"{decision_styles[0]} is a decision interface and cannot be mixed with other styles"
-        )
-    if decision_styles and reasoning_template:
-        raise ValueError(f"{decision_styles[0]} decision models have no reasoning levels to probe")
+    api_base = normalize_endpoint(api_base)
+    if endpoints is not None and not isinstance(endpoints, Mapping):
+        raise ValueError("endpoints must map API styles to endpoint URLs")
+    selected_endpoints = {}
+    for style, endpoint in (endpoints or {}).items():
+        if style not in _PATHS or not isinstance(endpoint, str):
+            raise ValueError("endpoints must map supported API styles to endpoint URLs")
+        selected_endpoints[style] = normalize_endpoint(endpoint)
+    unique_styles = tuple(dict.fromkeys(styles))
+    if len(unique_styles) > 1:
+        for style in unique_styles:
+            if style in DECISION_API_STYLES and style not in selected_endpoints:
+                raise ValueError(
+                    f"Mixed interfaces require an explicit endpoints entry for {style}"
+                )
+
+    def origin(endpoint: str) -> tuple[str, str | None, int | None]:
+        parsed = urlsplit(endpoint)
+        scheme = parsed.scheme.lower()
+        port = parsed.port if parsed.port is not None else {"https": 443, "http": 80}.get(scheme)
+        return (scheme, parsed.hostname, port)
+
+    if (api_key or api_key_env) and not allow_cross_origin_credentials:
+        source_origin = origin(api_base)
+        for style in unique_styles:
+            if origin(selected_endpoints.get(style, api_base)) != source_origin:
+                raise ValueError(
+                    "Cross-origin interface credentials require "
+                    "allow_cross_origin_credentials=True (--share-interface-key in the CLI)"
+                )
     results = {}
     spent = 0
-    for style in dict.fromkeys(styles):
+    proposals = {}
+    for style in unique_styles:
         style_reasoning_levels = (
             {reasoning_level: reasoning_settings(reasoning_template, style, reasoning_level)}
-            if reasoning_template
+            if reasoning_template and style not in DECISION_API_STYLES
             else None
         )
         proposal = plan(
             alias,
             model,
             style,
-            api_base,
+            selected_endpoints.get(style, api_base),
             api_key_env,
             budget_tokens=budget_tokens,
             output_tokens=output_tokens,
             reasoning_levels=style_reasoning_levels,
             reasoning_output_tokens=reasoning_output_tokens,
+            decision_checks=False,
         )
         if style in DECISION_API_STYLES:
             # The decision probe has no reply-token field to cap.
@@ -2403,11 +2777,14 @@ async def check_interfaces(
                 if p.name.startswith("level:")
             )
             probes = (routing, *level_probes)
-        proposal = replace(
-            proposal,
-            probes=probes,
-            budget_tokens=max(0, budget_tokens - spent),
-        )
+        proposal.entry["provenance"]["interface_endpoint"] = {
+            "api_style": style,
+            "endpoint": proposal.entry.get("endpoint", proposal.entry.get("api_base")),
+            "source": "endpoints" if style in selected_endpoints else "api_base",
+        }
+        proposals[style] = replace(proposal, probes=probes)
+    for style, proposal in proposals.items():
+        proposal = replace(proposal, budget_tokens=max(0, budget_tokens - spent))
         async with aclosing(run_steps(proposal, approved="all", api_key=api_key)) as steps:
             async for event in steps:
                 if isinstance(event, ConnectResult):

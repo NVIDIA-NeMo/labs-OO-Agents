@@ -436,6 +436,30 @@ def client_from_config(
         params: dict[str, Any] = {"model": model, "endpoint": endpoint}
         if "api_style" in config and "api_style" not in overrides:
             params["api_style"] = config["api_style"]
+        # Permissions/encoding describe this exact route, not a replacement.
+        route_changed = (
+            overrides.get("model", model) != model
+            or endpoint != config.get("endpoint")
+            or (
+                "api_style" in overrides
+                and overrides["api_style"] != config.get("api_style", "systemone")
+            )
+            or overrides.get("client") is not None
+            or (
+                "decision_image_transport" in overrides
+                and overrides["decision_image_transport"]
+                != config.get("decision_image_transport", "json")
+            )
+            or (
+                "typesafe_danger_zone_images" in overrides
+                and overrides["typesafe_danger_zone_images"]
+                != config.get("typesafe_danger_zone_images", False)
+            )
+            or (client_type is not None and client_type != config.get("client_type", "completion"))
+        )
+        for key in ("media_inputs", "decision_image_transport", "typesafe_danger_zone_images"):
+            if not route_changed and key in config and key not in overrides:
+                params[key] = config[key]
         if "api_key" not in overrides:
             api_key = resolve_api_key_from_config(name, config)
             if api_key is not None:

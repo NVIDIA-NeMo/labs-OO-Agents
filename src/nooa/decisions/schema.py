@@ -26,6 +26,7 @@ from nooa.decisions.client import (
     ScoreAnswer,
     ScoreQuestion,
 )
+from nooa.decisions.media import collect_decision_attachments, reject_nested_media
 from nooa.decisions.types import (
     BooleanDecision,
     ChoiceDecision,
@@ -36,6 +37,7 @@ from nooa.decisions.types import (
     ScoreDecision,
     Threshold,
 )
+from nooa.media import Media
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,17 +90,21 @@ class DecisionSchema:
         *,
         context: Mapping[str, Any] | None = None,
         events: Sequence[Any] | None = None,
+        media_inputs: object = (),
     ) -> DecisionRequest:
         """Build a decision request from arguments and explicitly selected state."""
+        references, attachments = collect_decision_attachments(parameters, media_inputs)
         state = render_decision_state(
             parameters,
             self.shared_guidance,
             context=context,
             events=events,
+            attachment_references=references,
         )
         return DecisionRequest(
             state=state,
             questions={output.name: output.question() for output in self.outputs},
+            attachments=attachments,
         )
 
     def reconstruct(self, response: DecisionResponse, *, include_raw_response: bool = False) -> Any:
@@ -353,12 +359,16 @@ def render_decision_state(
     *,
     context: Mapping[str, Any] | None = None,
     events: Sequence[Any] | None = None,
+    attachment_references: Mapping[str, str] | None = None,
 ) -> dict[str, JsonValue]:
     """Render arguments, guidance, and opted-in state as deterministic JSON."""
     inputs: dict[str, JsonValue] = {}
     for name, value in parameters.items():
         try:
-            inputs[name] = _json_value(value)
+            if isinstance(value, Media) and attachment_references and name in attachment_references:
+                inputs[name] = attachment_references[name]
+            else:
+                inputs[name] = _json_value(value)
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"Decision input parameter {name!r} is not JSON-compatible: {exc}"
@@ -391,6 +401,10 @@ def render_decision_state(
 
 def _json_value(value: Any) -> JsonValue:
     """Convert supported Python values recursively into JSON-compatible values."""
+    if isinstance(value, Media):
+        raise TypeError(
+            "Native Media requires a permitted top-level named Image input; nested/context/event Media is unsupported"
+        )
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
@@ -400,6 +414,9 @@ def _json_value(value: Any) -> JsonValue:
     if isinstance(value, Enum):
         return _json_value(value.value)
     if isinstance(value, BaseModel):
+        # Inspect declared fields before custom serializers can textualize a
+        # nested Image. This does not collect it or traverse arbitrary slots.
+        reject_nested_media(value)
         return _json_value(value.model_dump(mode="python"))
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return _json_value(dataclasses.asdict(value))

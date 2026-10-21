@@ -69,11 +69,20 @@ def openai_payload(model: str, request: DecisionRequest) -> dict[str, Any]:
                 }
             )
     state = request.state
-    return {
-        "model": model,
-        "input": state if isinstance(state, str) else json.dumps(state, ensure_ascii=False),
-        "questions": questions,
-    }
+    text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+    input_value: Any = text
+    if request.attachments:
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": text}]
+        for attachment in request.attachments:
+            # The text immediately before each image associates its alias with
+            # the named references in the state, including repeated inputs.
+            content.append({"type": "input_text", "text": attachment.alias})
+            image: dict[str, Any] = {"type": "input_image", "image_url": attachment.image_url}
+            if attachment.detail is not None:
+                image["detail"] = attachment.detail
+            content.append(image)
+        input_value = [{"role": "user", "content": content}]
+    return {"model": model, "input": input_value, "questions": questions}
 
 
 def parse_openai_response(

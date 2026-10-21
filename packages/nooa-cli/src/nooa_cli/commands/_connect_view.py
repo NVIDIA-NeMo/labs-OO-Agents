@@ -174,8 +174,8 @@ def check_reason(reason):
     reason = reason or ""
     replacements = {
         "budget exhausted": "token budget exhausted",
-        "This interface has no native video input mapping here; select video manually as unverified.": "Video samples cannot be tested with this API format. Manual selection is unverified.",
-        "This interface has no portable inline WAV input shape here; select audio manually as unverified.": "Audio samples cannot be tested with this API format. Manual selection is unverified.",
+        "This interface has no native video input mapping here; select video manually as unverified.": "Video testing not implemented for this route/input format. Manual selection is unverified.",
+        "This interface has no portable inline WAV input shape here; select audio manually as unverified.": "Audio testing not implemented for this route/input format. Manual selection is unverified.",
         "Configured reply cap changed after planning; make a new plan": "Reply limit changed after planning; restart setup",
         "probe timeout must be between 1 and 120 seconds": "Check timeout must be 1–120 seconds",
         "selected reasoning level changes the approved reply cap": "Selected reasoning level needs a different reply limit; restart setup",
@@ -209,6 +209,8 @@ def media_test_detail(kind, record, *, media_inputs=None):
     """Display effective permissions separately from unchanged test evidence."""
     outcome = record.get("outcome")
     if outcome == "passed":
+        if record.get("client") == "decision":
+            return "Passed · Native image sent, typed access and known color confirmed"
         return "Passed · Model reported access to this input"
     if outcome == "unavailable":
         setting = (
@@ -316,6 +318,9 @@ def check_label(name):
         "responses": "OpenAI Responses",
         "anthropic": "Anthropic Messages",
         "routing": "Connection",
+        "decision:typed": "Typed decisions (boolean, choice, score)",
+        "decision:positive": "Decision positive case",
+        "decision:negative": "Decision negative case",
         "tools": "Tool use",
         "session:seed": "Conversation (1/3)",
         "session:replay": "Conversation (2/3)",
@@ -360,10 +365,11 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
             dim=True,
         )
         line(
-            f"API format checks: up to 3 calls, {output_tokens:,} output tokens per call.", dim=True
+            f"Interface discovery: one routing call per candidate; chat replies capped at {output_tokens:,} output tokens. Decision calls have no reply-token cap.",
+            dim=True,
         )
         line(
-            f"Each API format may also get a reasoning check: {reasoning_output_tokens:,} output tokens per call.",
+            f"Each chat API format may also get a reasoning check: {reasoning_output_tokens:,} output tokens per call.",
             dim=True,
         )
         line(
@@ -471,7 +477,11 @@ class CheckProgress:
         from nooa.unifiedllm.connect._records import check_status
 
         status = check_status(name, record, missing_reasoning=missing_reasoning)
-        if name == "routing" and record.get("baseline_kind") != "interface_acceptance":
+        if (
+            name == "routing"
+            and record.get("client") != "decision"
+            and record.get("baseline_kind") != "interface_acceptance"
+        ):
             detail = connection_detail(record)
         icon, color = {
             "passed": ("✓", "green"),
@@ -483,7 +493,11 @@ class CheckProgress:
         )
         headline = check_outcome(name, record, status)
         # Accepted requests and finished replies are evidence, not additional outcomes.
-        if headline == "Passed" and name not in {"cache", "encrypted_reasoning"}:
+        if (
+            headline == "Passed"
+            and name not in {"cache", "encrypted_reasoning"}
+            and not (name == "media:image" and record.get("client") == "decision")
+        ):
             detail = ""
             if record.get("reason") == "previous result reused":
                 detail = "Already checked with these settings"
@@ -499,7 +513,7 @@ class CheckProgress:
                     else ""
                 )
                 detail = " · ".join(filter(None, (_reasoning_tokens_label(record), correctness)))
-        if name == "routing" and status != "passed":
+        if name == "routing" and record.get("client") != "decision" and status != "passed":
             detail = connection_detail(record)
         if detail:
             for prefix in (

@@ -45,7 +45,7 @@ def test_target_and_effective_source_are_distinct(tmp_path, monkeypatch):
 
     skill_path = Path(context["reference_paths"][0])
     name, _, _ = _parse_skill_md(skill_path.parent)
-    assert name == "nooa-model-configuration"
+    assert name == "nooa-connect"
     assert str(skill_path) in prompt
     assert "nooa-agent-authoring" not in prompt
     assert context["target_in_registry_chain"] is False

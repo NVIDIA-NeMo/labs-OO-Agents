@@ -24,6 +24,8 @@ models:
 
 Replace placeholders with your provider's settings; keep the key in `MODEL_KEY`.
 See [model configuration](model-configuration.md) and [Connect](model-connect.md).
+Agents follow the canonical [headless Connect skill](../skills/nooa-connect/SKILL.md):
+get permission for configuration, network checks, media samples and writes.
 
 ## Run an image example
 

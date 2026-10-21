@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native typed baseline; transient replies never enter the agent history."""
 
+import io
+from contextlib import redirect_stderr, redirect_stdout
+
 from opentelemetry.trace import INVALID_SPAN, use_span
 
 from nooa import Agent, no_trace
@@ -73,6 +76,17 @@ async def _typed_call(agent, method, *args):
         agent.event_manager.clear()
 
 
+def _probe_agent(cls, **kwargs):
+    """Keep synchronous tracing setup announcements out of headless JSON.
+
+    Do not redirect across an await: other tasks must retain their own output.
+    Probe calls themselves run without caller instrumentation in _typed_call.
+    """
+    with hooks_scope(_NoHooks(), compose=False), use_span(INVALID_SPAN):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return cls(**kwargs)
+
+
 async def typed_baseline(client):
-    agent = _TextBaseline(llm=client)
+    agent = _probe_agent(_TextBaseline, llm=client)
     return await _typed_call(agent, agent.compute)

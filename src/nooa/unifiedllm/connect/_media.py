@@ -85,13 +85,13 @@ def media_content(kind, style):
         return (
             None,
             None,
-            "This interface has no native video input mapping here; select video manually as unverified.",
+            "Video testing not implemented for this route/input format; select video manually as unverified.",
         )
     if kind == "audio" and style != "chat":
         return (
             None,
             None,
-            "This interface has no portable inline WAV input shape here; select audio manually as unverified.",
+            "Audio testing not implemented for this route/input format; select audio manually as unverified.",
         )
     if kind == "image":
         block = {"type": "image_url", "image_url": {"url": _data_url("image/png", png_fixture())}}

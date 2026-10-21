@@ -293,9 +293,9 @@ async def test_unsupported_portable_probe_is_honestly_not_tested(monkeypatch, st
     assert result.entry["provenance"]["probes"][f"media:{kind}"] == {
         "outcome": "not_probed",
         "reason": (
-            "This interface has no native video input mapping here; select video manually as unverified."
+            "Video testing not implemented for this route/input format; select video manually as unverified."
             if kind == "video"
-            else "This interface has no portable inline WAV input shape here; select audio manually as unverified."
+            else "Audio testing not implemented for this route/input format; select audio manually as unverified."
         ),
     }
 

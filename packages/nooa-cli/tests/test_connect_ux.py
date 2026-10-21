@@ -98,8 +98,8 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         command,
         ["--output", str(path)],
         input=(
-            "y\ncustom\nhttps://api.test/v1\nnew\nUX_KEY\ntemporary-secret\n"
-            "test\nmodel\nuse\nrecommended\nkeep\nlocal\n" + ("y\nn\n" if save else "n\n")
+            "y\ncustom\ndiscover\nhttps://api.test/v1\nnew\nUX_KEY\ntemporary-secret\n"
+            "model\ntest\nuse\nrecommended\nkeep\nlocal\n" + ("y\nn\n" if save else "n\n")
         ),
     )
     assert result.exit_code == 0, result.output
@@ -116,9 +116,9 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         "Model server URL",
         "Key environment variable",
         "API key",
-        "configure media inputs",
         "Search advertised model IDs",
         "OpenAI-compatible Chat: Passed",
+        "configure media inputs",
         "Model details",
         "Model settings",
         "Reply limit",

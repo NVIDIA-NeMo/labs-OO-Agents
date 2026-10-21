@@ -86,6 +86,8 @@ def test_no_probe_can_authenticate_model_discovery(monkeypatch, tmp_path):
         return httpx.Response(200, json={"data": [{"id": "model"}]})
 
     def prompt(label, **kwargs):
+        if label == "Request interface":
+            return "discover"
         if label.startswith("API key"):
             assert kwargs["hide_input"]
             return "discovery-secret"

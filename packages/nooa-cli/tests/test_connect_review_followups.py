@@ -187,7 +187,7 @@ def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeyp
             "--output",
             str(target),
         ],
-        input="y\n-\nmodel\nlonger\nchat\ny\n",
+        input="y\ndiscover\nmodel\nlonger\nchat\n-\ny\n",
     )
     assert result.exit_code == 0, result.output
     # Configured-cap routing is distinct from interface discovery;

@@ -354,6 +354,9 @@ def choose_media_inputs(current=()):
 def choice_label(value):
     """Human labels for finite choices; custom reasoning names remain verbatim."""
     return {
+        "discover": "Discover request interfaces",
+        "systemone": "System One Decisions",
+        "openai": "OpenAI Decisions",
         "chat": "OpenAI-compatible Chat",
         "responses": "OpenAI Responses",
         "anthropic": "Anthropic Messages",
