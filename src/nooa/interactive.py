@@ -325,7 +325,7 @@ class FormResponse(BaseModel):
     )
     content: dict[str, FormValue] | None = Field(
         default=None,
-        description="On accept: question id -> answer (None if optional and left empty)",
+        description='On accept: question id -> answer (left-empty optional: "" for text, None otherwise)',
     )
 
     @model_validator(mode="after")
