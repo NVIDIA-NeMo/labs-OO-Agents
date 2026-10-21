@@ -473,6 +473,16 @@ async def test_every_ticks_until_cancelled(agent):
         agent.jobs.every(0, label="bad")
 
 
+async def test_cancel_withdraws_the_jobs_queued_updates_only(agent):
+    channel = agent.queue_manager.get_channel("jobs")
+    agent.jobs.after(0, label="other", payload="keep")
+    agent.jobs.every(0.01, label="tick")
+    await _until(lambda: sum(u.label == "tick" for u in channel.snapshot()) >= 2)
+    assert await agent.jobs.cancel("tick") is True
+    await asyncio.sleep(0.05)
+    assert [(u.label, u.items) for u in channel.snapshot()] == [("other", ["keep"])]
+
+
 # ---- process isolation (ported from the removed monitor() tests) ----
 
 

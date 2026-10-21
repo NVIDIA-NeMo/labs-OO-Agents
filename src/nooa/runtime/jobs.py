@@ -451,8 +451,9 @@ class JobsApi(Skill):
     def _stop_now(self, label: str) -> None:
         """Stop a running job without awaiting it (``replace=True``).
 
-        Kills a ``run`` command's process group at once and requests the
-        task's cancellation, so the old job delivers nothing more.
+        Kills a ``run`` command's process group at once, requests the task's
+        cancellation and withdraws its queued updates, so the old job
+        delivers nothing more.
         """
         job = self._jobs.get(label)
         if job is None or job.handle is None or job.state != "running":
@@ -460,6 +461,13 @@ class JobsApi(Skill):
         if job.proc is not None:
             _kill_group(job.proc)
         job.handle._task.cancel()
+        # Withdraw its updates still waiting on the channel: none is delivered
+        # after the stop. (Once the task is cancelled it puts nothing more.)
+        channel = self._queues.channels().get(JOBS_CHANNEL)
+        if channel is not None:
+            for queued in channel.snapshot():
+                if isinstance(queued, JobUpdate) and queued.label == label:
+                    channel.remove(queued)
         job.handle.state = "cancelled"
         job.final_state = "cancelled"
         job.finished_at = job.finished_at or _now()
@@ -1010,7 +1018,11 @@ class JobsApi(Skill):
         return None if job is None else job.info()
 
     async def cancel(self, label: str) -> bool:
-        """Stop a running job (killing its process); True if it was running."""
+        """Stop a running job (killing its process); True if it was running.
+
+        Its updates still queued are dropped; ones already handed to the
+        current turn (in ``notification["jobs"]``) are not taken back.
+        """
         job = self._jobs.get(label)
         if job is None or job.handle is None or job.state != "running":
             return False
