@@ -130,35 +130,16 @@ async def test_pool_malformed_answer_fails_closed_once(make_adapter, workspace, 
     assert "form answer wasn't used" in client.texts(AgentMessageChunk, sid)[-1]
 
 
-@pytest.mark.parametrize(
-    "invalid,reason",
-    [
-        ({}, "answer: an answer is required"),
-        ({"answer": " "}, "answer: an answer is required"),
-        ({"answer": 2}, "answer: enter text"),
-        ({"answer": "unlisted"}, "answer: choose a listed option"),
-    ],
-)
-async def test_pool_answer_failing_checks_reaches_agent_as_text(
-    make_adapter, workspace, client, invalid, reason
-):
+@pytest.mark.parametrize("content", [{}, {"answer": " "}, {"answer": 2}, {"answer": "unlisted"}])
+async def test_pool_answer_reaches_agent_as_entered(make_adapter, workspace, client, content):
     models = ScriptedModels({None: [_ask(False, ["main", "dev"]), _inspect()]})
-    client.ext_answers = [
-        {"action": "accept", "content": invalid},
-        {"action": "accept", "content": {"answer": "dev"}},
-    ]
+    client.ext_answers = [{"action": "accept", "content": content}]
     adapter = await make_adapter(models, client_info=POOL)
     sid, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
     assert len(_requests(client)) == 1  # never re-asked
-    assert len(models.llms[None].calls) == 2
     answer = adapter.session(sid)._agent.v.answer
-    assert isinstance(answer, str)
-    assert "checks" not in answer  # only what the person entered, nothing added
-    if invalid.get("answer") in (2, "unlisted"):
-        assert f"answer: {invalid['answer']}" in answer
-    [echo] = client.texts(UserMessageChunk, sid)
-    assert echo == answer
+    assert answer == FormResponse(action="accept", content=content)
     assert not any("form answer wasn't used" in t for t in client.texts(AgentMessageChunk, sid))
 
 
@@ -221,7 +202,7 @@ async def test_pool_literal_or_text_field_explicitly_accepts_alternative(
     assert adapter.session(sid)._agent.v.answer.content["name"] == "release"
 
 
-async def test_pool_string_answers_reach_the_agent_typed(make_adapter, workspace, client):
+async def test_pool_string_answers_reach_the_agent_unchanged(make_adapter, workspace, client):
     form = (
         "return_result(NeedInputForm(heading='Deploy', questions=["
         "IntegerQuestion(id='replicas', label='Replicas?', minimum=1, maximum=10), "
@@ -239,4 +220,4 @@ async def test_pool_string_answers_reach_the_agent_typed(make_adapter, workspace
     props = params["requestedSchema"]["properties"]
     assert all(prop["type"] == "string" for prop in props.values())
     answer = adapter.session(sid)._agent.v.answer
-    assert answer.content == {"replicas": 3, "dry_run": False, "regions": ["us", "eu"]}
+    assert answer.content == {"replicas": "3", "dry_run": "false", "regions": "us, EU"}

@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Pool adapter: downgraded schemas for every question type and decoded answers."""
+"""Pool adapter: downgraded schemas for every question type ."""
 
-import pytest
-from nooa_atom.acp.pool import POOL_FORM_METHOD, pool_content, pool_form_params, pool_form_schema
+from nooa_atom.acp.pool import POOL_FORM_METHOD, pool_form_params, pool_form_schema
 
 from nooa.interactive import (
     BooleanQuestion,
     FormChoice,
-    FormResponse,
     IntegerQuestion,
     NeedInput,
     NeedInputForm,
@@ -173,64 +171,3 @@ ALL = NeedInputForm(
         BooleanQuestion(id="b", label="B", required=False),
     ],
 )
-
-
-def test_content_decodes_strings_to_typed_answers():
-    content = pool_content(
-        ALL,
-        {
-            "t": " hi ",
-            "p": "development",
-            "m": "main, Development",
-            "r": "0.5",
-            "i": " 3 ",
-            "b": "Yes",
-        },
-    )
-    assert content == {
-        "t": " hi ",
-        "p": "dev",
-        "m": ["main", "dev"],
-        "r": 0.5,
-        "i": 3,
-        "b": True,
-    }
-    assert ALL.validate_response(FormResponse(action="accept", content=content)).content == content
-
-
-@pytest.mark.parametrize(
-    "raw,expected",
-    [("true", True), ("FALSE", False), ("no", False), ("yes", True), ("maybe", "maybe")],
-)
-def test_content_booleans(raw, expected):
-    assert pool_content(ALL, {"b": raw}) == {"b": expected}
-
-
-def test_blank_answers_are_omitted_or_take_the_default():
-    content = pool_content(ALL, {"t": "", "p": " ", "m": "", "r": "", "i": "", "b": ""})
-    assert content == {"i": 7}
-    checked = ALL.validate_response(FormResponse(action="accept", content=content)).content
-    assert checked == {"t": "", "p": None, "m": None, "r": None, "i": 7, "b": None}
-
-
-def test_unparseable_answers_stay_raw_and_fail_the_checks():
-    content = pool_content(ALL, {"r": "half", "i": "3.5", "p": "other", "m": "main, other"})
-    assert content == {"r": "half", "i": "3.5", "p": "other", "m": ["main", "other"]}
-    with pytest.raises(ValueError) as error:
-        ALL.validate_response(FormResponse(action="accept", content=content))
-    assert str(error.value) == (
-        "p: choose a listed option; m: choose only listed options; "
-        "r: enter a number; i: enter a whole number"
-    )
-
-
-def test_huge_whole_numbers_parse_or_stay_raw():
-    assert pool_content(ALL, {"i": "1" + "0" * 400}) == {"i": 10**400}
-    digits = "1" * 5000  # past Python's int-from-text digit limit
-    assert pool_content(ALL, {"i": digits}) == {"i": digits}
-
-
-def test_content_passes_through_non_strings_and_malformed_payloads():
-    assert pool_content(ALL, None) is None
-    assert pool_content(ALL, ["x"]) == ["x"]
-    assert pool_content(ALL, {"i": 3, "unknown": "x"}) == {"i": 3, "unknown": "x"}

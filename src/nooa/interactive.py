@@ -173,15 +173,6 @@ class _FormQuestionBase(BaseModel):
     _check_id = field_validator("id")(_non_blank)
     _check_label = field_validator("label")(_non_blank)
 
-    @model_validator(mode="after")
-    def _check_default(self) -> Any:
-        default = getattr(self, "default", None)
-        if default is not None:
-            problem = _problem(self, default)
-            if problem:
-                raise ValueError(f"default {default!r} is invalid: {problem}")
-        return self
-
 
 TextFormat = Literal["email", "uri", "date", "date-time"]
 
@@ -365,9 +356,8 @@ class NeedInputForm(BaseModel):
                      pattern=r"^[a-z0-9-]+$",
                      help="3-24 characters: lowercase letters, digits or hyphens.")
 
-    Answers are checked against each question's constraints. When the client
-    can't show the form, or the answers fail the checks, you get a plain
-    ``str`` instead (what the person entered): read it as unchecked text.
+    The client checks answers; you get exactly what the person entered, so
+    handle unexpected values. A client that can't show forms sends a plain ``str``.
     """
 
     model_config = {"extra": "forbid", "strict": True}
@@ -395,39 +385,6 @@ class NeedInputForm(BaseModel):
             lines.append(line)
         return "\n\n".join(part for part in (self.heading, self.reason, "\n".join(lines)) if part)
 
-    @hidden
-    def validate_response(self, response: FormResponse) -> FormResponse:
-        """Check accepted answers; raise one ``ValueError`` naming every failing field.
-
-        Types are strict (no conversion). Every question id is in the result:
-        an empty optional text answer is "", any other empty optional answer None.
-        """
-        response = FormResponse.model_validate(response)
-        if response.action != "accept":
-            return response
-        content = response.content
-        assert content is not None
-        errors = []
-        unknown = content.keys() - {question.id for question in self.questions}
-        if unknown:
-            errors.append(f"unknown answer ids {sorted(unknown)}")
-        answers: dict[str, FormValue] = {}
-        for question in self.questions:
-            value = content.get(question.id)
-            if _empty(value):
-                if question.required:
-                    errors.append(f"{question.id}: an answer is required")
-                answers[question.id] = "" if question.kind == "text" else None
-                continue
-            problem = _problem(question, value)
-            if problem:
-                errors.append(f"{question.id}: {problem}")
-            else:
-                answers[question.id] = float(value) if question.kind == "number" else value
-        if errors:
-            raise ValueError("; ".join(errors))
-        return FormResponse(action="accept", content=answers)
-
 
 def _empty(value: Any) -> bool:
     """No answer: missing, blank text, or nothing picked."""
@@ -440,76 +397,6 @@ _FORMAT_TEXT = {
     "date": "a date (YYYY-MM-DD)",
     "date-time": "a date and time (YYYY-MM-DDThh:mm)",
 }
-
-
-def _problem(question: Any, value: Any) -> str | None:
-    """Why ``value`` does not answer ``question`` (a person-readable phrase), or None."""
-    kind = question.kind
-    if kind == "boolean":
-        return None if isinstance(value, bool) else "answer yes or no"
-    if kind in ("integer", "number"):
-        whole = kind == "integer"
-        if isinstance(value, bool) or not isinstance(value, int if whole else (int, float)):
-            return f"enter {_range_text(question)}"
-        if not _finite(value, whole) or not _in_range(value, question.minimum, question.maximum):
-            return f"enter {_range_text(question)}"
-        return None
-    if kind == "pick_many":
-        values = {choice.value for choice in question.choices}
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            return "choose from the list"
-        if len(set(value)) != len(value):
-            return "choose each option at most once"
-        if not set(value) <= values:
-            return "choose only listed options"
-        if not _in_range(len(value), question.min_items, question.max_items):
-            return f"choose {_count_text(question)}"
-        return None
-    if not isinstance(value, str):
-        return "enter text"
-    if kind == "pick_one":
-        if not question.allow_other and value not in {c.value for c in question.choices}:
-            return "choose a listed option"
-        return None
-    if not _in_range(len(value), question.min_length, question.max_length):
-        return f"enter {_length_text(question)}"
-    if question.format and not _has_format(value, question.format):
-        return f"enter {_FORMAT_TEXT[question.format]}"
-    if question.pattern and re.fullmatch(question.pattern, value) is None:
-        return f"enter text matching {question.pattern}"
-    return None
-
-
-def _finite(value: int | float, whole: bool) -> bool:
-    """Whether ``value`` is a usable number; a number answer must also fit a float."""
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if whole:
-        return True
-    try:
-        float(value)
-    except OverflowError:
-        return False
-    return True
-
-
-def _in_range(value: float, low: float | None, high: float | None) -> bool:
-    return (low is None or value >= low) and (high is None or value <= high)
-
-
-def _has_format(value: str, kind: str) -> bool:
-    if kind == "email":
-        return re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value) is not None
-    if kind == "uri":
-        return re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*:[^\s]+", value) is not None
-    try:
-        if kind == "date":
-            datetime.date.fromisoformat(value)
-            return re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is not None
-        datetime.datetime.fromisoformat(value)
-        return re.fullmatch(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}.*", value) is not None
-    except ValueError:
-        return False
 
 
 def _number_text(value: float) -> str:

@@ -365,12 +365,8 @@ def test_explicit_input_roundtrip_and_extra_rejection():
 def test_question_rejects_typed_answer_and_form_response_actions():
     with pytest.raises(ValidationError):
         NeedInput(question="How many?", answer_type=BaseModel)
-    form = NeedInputForm(heading="How many?", questions=[TextQuestion(id="count", label="Count?")])
-    assert form.validate_response(
-        FormResponse(action="accept", content={"count": "bad"})
-    ).content == {"count": "bad"}
     for action in ("decline", "cancel"):
-        assert form.validate_response(FormResponse(action=action)).action == action
+        assert FormResponse(action=action).action == action
         with pytest.raises(ValidationError):
             FormResponse(action=action, content={"count": "1"})
     with pytest.raises(ValidationError):
@@ -409,14 +405,6 @@ def test_untagged_request_dicts_are_not_guessed():
 def test_form_response_rejects_opaque_content(value):
     with pytest.raises(ValidationError):
         FormResponse(action="accept", content=value)
-
-
-@pytest.mark.parametrize("value", [1, {}, ["answer"], {"answer": 2}])
-def test_form_rejects_invalid_content(value):
-    with pytest.raises(ValueError):
-        NeedInputForm(
-            heading="Name?", questions=[TextQuestion(id="answer", label="Name?")]
-        ).validate_response(FormResponse(action="accept", content=value))
 
 
 @pytest.mark.parametrize("strategy_name", ["codeact", "predict"])

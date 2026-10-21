@@ -29,28 +29,22 @@ to enter:
 - a picker that allows other answers, or an optional picker -> a string
   listing the choices;
 - pick many -> a comma-separated string listing the choices;
-- a default -> "Default: x." in the description, used when the field is left blank.
+- a default -> "Default: x." in the description.
 
-``pool_content`` turns Pool's string answers back into typed values. What does
-not parse stays as the person's string, so the form's own checks reject it.
+Pool's answers reach the agent as the strings the person typed.
 
 Delete this module (and its branch in ``AtomACPAgent._ask``) once Pool
 supports standard ACP elicitation.
 """
 
-import math
-import re
-from contextlib import suppress
 from typing import Any
 
-from nooa.interactive import FormValue, NeedInput, NeedInputForm, form_hints
+from nooa.interactive import NeedInput, NeedInputForm, form_hints
 
 POOL_FORM_METHOD = "poolside/elicitation"
 """Pool's form request; ``ext_method`` sends it as ``_poolside/elicitation``."""
 
 _YES_NO = ({"const": "true", "title": "Yes"}, {"const": "false", "title": "No"})
-_TRUE = ("true", "yes")
-_FALSE = ("false", "no")
 
 
 def pool_form_params(session_id: str, need: NeedInputForm) -> dict[str, Any]:
@@ -129,57 +123,4 @@ def _default(question: Any) -> str:
     return titles.get(default, str(default))
 
 
-def pool_content(need: NeedInputForm, content: Any) -> Any:
-    """Pool's string answers as the typed values ``need`` expects, where they parse."""
-    if not isinstance(content, dict):
-        return content
-    questions = {question.id: question for question in need.questions}
-    typed: dict[str, Any] = {}
-    for key, value in content.items():
-        question = questions.get(key)
-        if question is None or not isinstance(value, str):
-            typed[key] = value
-            continue
-        if not value.strip():
-            if getattr(question, "default", None) is not None:
-                typed[key] = question.default
-            continue
-        typed[key] = _decoded(question, value.strip(), value)
-    return typed
-
-
-def _decoded(question: Any, text: str, raw: str) -> FormValue:
-    kind = question.kind
-    if kind == "integer":
-        if re.fullmatch(r"[+-]?\d+", text):
-            with suppress(ValueError):  # past Python's int-from-text digit limit
-                return int(text)
-        return raw
-    if kind == "number":
-        if re.fullmatch(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", text):
-            number = float(text)
-            return number if math.isfinite(number) else raw
-        return raw
-    if kind == "boolean":
-        if text.lower() in _TRUE:
-            return True
-        return False if text.lower() in _FALSE else raw
-    if kind == "pick_many":
-        return [_choice_value(question, part.strip()) for part in text.split(",") if part.strip()]
-    if kind == "pick_one":
-        return _choice_value(question, raw)
-    return raw
-
-
-def _choice_value(question: Any, text: str) -> str:
-    """The choice whose value or title ``text`` names (ignoring case), else ``text``."""
-    if any(choice.value == text for choice in question.choices):
-        return text
-    wanted = text.strip().casefold()
-    for choice in question.choices:
-        if wanted in (choice.value.casefold(), choice.title.casefold()):
-            return choice.value
-    return text
-
-
-__all__ = ["POOL_FORM_METHOD", "pool_content", "pool_form_params", "pool_form_schema"]
+__all__ = ["POOL_FORM_METHOD", "pool_form_params", "pool_form_schema"]

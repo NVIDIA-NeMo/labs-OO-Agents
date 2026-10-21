@@ -867,7 +867,7 @@ async def test_need_input_intent_is_durable(make_session, kind):
 
 
 @pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
-async def test_explicit_form_external_submission_is_validated(make_session, action):
+async def test_explicit_form_external_submission_is_admitted_unchanged(make_session, action):
     session, _ = make_session(
         cell(
             "return_result(NeedInputForm(heading='Deploy?', questions=[TextQuestion(id='target', label='Target?'), TextQuestion(id='replicas', label='Replicas?'), TextQuestion(id='dry_run', label='Dry run?')]))"
@@ -877,9 +877,6 @@ async def test_explicit_form_external_submission_is_validated(make_session, acti
         ),
     )
     await asyncio.wait_for(session.prompt("go"), TIMEOUT)
-    if action == "accept":
-        with pytest.raises(ValueError):
-            await session.submit(FormResponse(action="accept", content={"replicas": "bad"}))
     content = {"target": "prod", "replicas": "3", "dry_run": "no"} if action == "accept" else None
     receipt = await session.submit(FormResponse(action=action, content=content))
     await asyncio.wait_for(session.outcome(receipt.item_id), TIMEOUT)
@@ -940,9 +937,6 @@ def test_saved_legacy_input_migrates_only_at_loader_boundary():
         loaded = load_typed(type_name, record)
         assert isinstance(loaded, NeedInputForm)
         assert loaded.questions[0].id == "answer"
-        assert loaded.validate_response(
-            FormResponse(action="accept", content={"answer": "main"})
-        ).content == {"answer": "main"}
 
 
 @pytest.mark.parametrize("action", ["accept", "decline", "cancel"])

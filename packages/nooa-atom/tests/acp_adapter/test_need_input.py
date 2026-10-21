@@ -1,15 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Standard ACP form schemas for every question type, and checked answers."""
+"""Standard ACP form schemas for every question type."""
 
 import pytest
-from nooa_atom.acp.need_input import answer_from_content, need_input_schema
+from nooa_atom.acp.need_input import need_input_schema
 from pydantic import ValidationError
 
 from nooa.interactive import (
     BooleanQuestion,
     FormChoice,
-    FormResponse,
     IntegerQuestion,
     NeedInput,
     NeedInputForm,
@@ -129,46 +128,6 @@ def test_standard_schema_for_every_type_and_constraint():
     assert _schema(need)["required"] == ["name", "one", "other", "many", "ratio", "count", "dry"]
 
 
-def test_string_response_no_conversion_and_explicit_optional_blank():
-    assert answer_from_content(form(), {"branch": "dev", "target": "  custom  "}) == {
-        "notes": "",
-        "branch": "dev",
-        "target": "  custom  ",
-    }
-    assert answer_from_content(form(), {"notes": "  ", "branch": "main", "target": "2, yes"}) == {
-        "notes": "",
-        "branch": "main",
-        "target": "2, yes",
-    }
-
-
-@pytest.mark.parametrize(
-    "content",
-    [
-        {},
-        {"branch": "DEV", "target": "x"},
-        {"branch": "Development", "target": "x"},
-        {"branch": " dev ", "target": "x"},
-        {"branch": "dev", "target": True},
-        {"branch": "dev", "target": ["x"]},
-        {"branch": "dev", "target": "x", "unknown": "y"},
-    ],
-)
-def test_invalid_answers_are_never_converted(content):
-    with pytest.raises(ValueError):
-        answer_from_content(form(), content)
-
-
-def test_malformed_envelope_is_a_validation_error():
-    with pytest.raises(ValidationError):
-        answer_from_content(form(), None)
-
-
-@pytest.mark.parametrize("action", ["decline", "cancel"])
-def test_actions(action):
-    assert form().validate_response(FormResponse(action=action)) == FormResponse(action=action)
-
-
 @pytest.mark.parametrize(
     "questions",
     [
@@ -201,13 +160,6 @@ def test_descriptor_json_roundtrip():
 def test_pick_one_allows_other_by_default():
     question = PickOneQuestion(id="x", label="X?", choices=[FormChoice(value="a", title="A")])
     assert question.allow_other is True
-    need = NeedInputForm(heading="H", questions=[question])
-    assert answer_from_content(need, {"x": "typed"}) == {"x": "typed"}
-    strict = NeedInputForm(
-        heading="H", questions=[question.model_copy(update={"allow_other": False})]
-    )
-    with pytest.raises(ValueError, match="choose a listed option"):
-        answer_from_content(strict, {"x": "typed"})
 
 
 def test_legacy_question_records_migrate():
@@ -229,8 +181,3 @@ def test_legacy_question_records_migrate():
     assert [q.allow_other for q in need.questions] == [False, True]
     question = migrate_input_request({"question": "Which?", "options": ["main", "dev"]})
     assert NeedInput.model_validate(question).question == "Which?\n\n- main\n- dev"
-
-
-def test_text_and_picker_answers_must_be_strings():
-    with pytest.raises(ValueError, match="target: enter text"):
-        answer_from_content(form(), {"branch": "dev", "target": 3})

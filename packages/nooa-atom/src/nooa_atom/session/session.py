@@ -530,11 +530,7 @@ class Session:
                     raise ValueError(
                         "Stored corrupt or legacy typed form cannot be restored; ask for a new descriptor form."
                     )
-                item = (
-                    self._pending_form.validate_response(response)
-                    if self._pending_form
-                    else response
-                )
+                item = response
             # Raw text remains raw: the agent must not treat it as a validated form outcome.
         elif channel == "user_messages" and is_response:
             raise ValueError("No pending form request to validate this response.")

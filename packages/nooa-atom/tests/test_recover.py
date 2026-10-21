@@ -356,8 +356,6 @@ async def test_recover_after_descriptor_form_preserves_questions_without_reopeni
         assert not loaded._agent.llm.calls  # history does not reopen a form/turn
         from nooa.interactive import FormResponse
 
-        with pytest.raises(ValueError):
-            await loaded.submit(FormResponse(action="accept", content={"replicas": "bad"}))
         receipt = await loaded.submit(
             FormResponse(
                 action="accept",

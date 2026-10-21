@@ -161,23 +161,17 @@ async def test_standard_decline_and_cancel_remain_distinct(
 
 
 @pytest.mark.parametrize(
-    "typed,content,reason",
+    "typed,content",
     [
-        (False, {}, "answer: an answer is required"),
-        (False, {"answer": ""}, "answer: an answer is required"),
-        (False, {"answer": " "}, "answer: an answer is required"),
-        (False, {"answer": 2}, "answer: enter text"),
-        (False, {"answer": "unlisted"}, "answer: choose a listed option"),
-        (
-            True,
-            {"target": "prod"},
-            "replicas: an answer is required; dry_run: an answer is required",
-        ),
-        (True, {"target": "prod", "replicas": "bad", "dry_run": False}, "dry_run: enter text"),
+        (False, {}),
+        (False, {"answer": " "}),
+        (False, {"answer": 2}),
+        (False, {"answer": "unlisted"}),
+        (True, {"target": "prod", "replicas": "bad", "dry_run": False}),
     ],
 )
-async def test_standard_content_failing_checks_reaches_agent_as_text(
-    make_adapter, workspace, client, typed, content, reason
+async def test_standard_content_reaches_agent_as_entered(
+    make_adapter, workspace, client, typed, content
 ):
     models = ScriptedModels(
         {None: [_form(typed, ["main", "dev"] if not typed else None), _inspect_answer()]}
@@ -186,18 +180,9 @@ async def test_standard_content_failing_checks_reaches_agent_as_text(
     adapter = await make_adapter(models, capabilities=FORMS)
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
-    assert len(models.llms[None].calls) == 2
     answer = adapter.session(session_id)._agent.v.answer
-    assert isinstance(answer, str)
-    assert "checks" not in answer  # only what the person entered, nothing added
-    if content.get("target"):
-        assert answer.startswith("target: prod")
-    [echo] = client.texts(UserMessageChunk, session_id)
-    assert echo == answer
+    assert answer == FormResponse(action="accept", content=content)
     assert len([e for e in client.log if e[0] == "elicitation"]) == 1  # never re-asked
-    assert not any(
-        "form answer wasn't used" in t for t in client.texts(AgentMessageChunk, session_id)
-    )
 
 
 @pytest.mark.parametrize(

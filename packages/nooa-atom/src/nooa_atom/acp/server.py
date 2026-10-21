@@ -902,15 +902,12 @@ class AtomACPAgent:
                 if isinstance(response, dict)
                 else response.model_dump(mode="json", exclude_none=True)
             )
-            content = envelope.get("content")
-            if via_pool:
-                content = pool.pool_content(need, content)
-            # SDK/protocol metadata belongs to transport, not the strict answer.
-            outcome = FormResponse(action=envelope.get("action"), content=content)
+            # SDK/protocol metadata belongs to transport, not the answer.
+            outcome = FormResponse(action=envelope.get("action"), content=envelope.get("content"))
         except (ValidationError, ValueError, AttributeError, TypeError) as exc:
             await self._form_failure(bridge, exc)
             return None
-        return _checked_or_text(need, outcome)
+        return outcome, FORM_ANSWER_SOURCE
 
     def _client_shows_forms(self) -> bool:
         """Whether the client advertised standard ACP form elicitation."""
@@ -1594,18 +1591,6 @@ def _trace_scope(session: Session) -> AbstractContextManager[object]:
     except ImportError:
         return nullcontext()
     return session_scope(session.id)
-
-
-def _checked_or_text(need: NeedInputForm, response: FormResponse) -> tuple[Any, str]:
-    """The checked answer; or, if it fails the form's checks, the answers as text.
-
-    No re-asking: the agent gets exactly what the person entered, as an ordinary
-    unchecked text message, and decides what to do next.
-    """
-    try:
-        return need.validate_response(response), FORM_ANSWER_SOURCE
-    except ValueError:
-        return response.as_text(), FORM_ANSWER_SOURCE
 
 
 def _failure_reason(exc: Exception) -> str:

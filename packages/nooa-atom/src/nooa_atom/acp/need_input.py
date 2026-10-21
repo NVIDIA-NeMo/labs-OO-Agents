@@ -32,7 +32,7 @@ from acp.schema import (
     TitledMultiSelectItems,
 )
 
-from nooa.interactive import FormResponse, FormValue, NeedInput, NeedInputForm
+from nooa.interactive import NeedInput, NeedInputForm
 
 
 def need_input_schema(need: NeedInputForm | NeedInput) -> ElicitationSchema | None:
@@ -104,13 +104,4 @@ def _options(question: Any) -> list[EnumOption]:
     return [EnumOption(const=c.value, title=c.title) for c in question.choices]
 
 
-def answer_from_content(
-    need: NeedInputForm, content: dict[str, Any] | None
-) -> dict[str, FormValue]:
-    """An accepted form's content, checked against the form."""
-    response = need.validate_response(FormResponse(action="accept", content=content))
-    assert response.content is not None
-    return response.content
-
-
-__all__ = ["answer_from_content", "need_input_schema"]
+__all__ = ["need_input_schema"]
