@@ -1599,16 +1599,13 @@ def _trace_scope(session: Session) -> AbstractContextManager[object]:
 def _checked_or_text(need: NeedInputForm, response: FormResponse) -> tuple[Any, str]:
     """The checked answer; or, if it fails the form's checks, the answers as text.
 
-    No re-asking: the agent gets what the person entered, with the reason, as an
-    ordinary unvalidated text message, and decides what to do next.
+    No re-asking: the agent gets exactly what the person entered, as an ordinary
+    unchecked text message, and decides what to do next.
     """
     try:
         return need.validate_response(response), FORM_ANSWER_SOURCE
-    except ValueError as exc:
-        return (
-            f"{response.as_text()}\n\nThese answers didn't pass the form's checks: {exc}.",
-            FORM_ANSWER_SOURCE,
-        )
+    except ValueError:
+        return response.as_text(), FORM_ANSWER_SOURCE
 
 
 def _failure_reason(exc: Exception) -> str:

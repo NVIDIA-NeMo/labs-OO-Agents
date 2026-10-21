@@ -353,7 +353,7 @@ class NeedInputForm(BaseModel):
 
     Answers are checked against each question's constraints. When the client
     can't show the form, or the answers fail the checks, you get a plain
-    ``str`` instead (with the reason): read it as unchecked text.
+    ``str`` instead (what the person entered): read it as unchecked text.
     """
 
     model_config = {"extra": "forbid", "strict": True}

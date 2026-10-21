@@ -189,7 +189,7 @@ async def test_standard_content_failing_checks_reaches_agent_as_text(
     assert len(models.llms[None].calls) == 2
     answer = adapter.session(session_id)._agent.v.answer
     assert isinstance(answer, str)
-    assert answer.endswith(f"These answers didn't pass the form's checks: {reason}.")
+    assert "checks" not in answer  # only what the person entered, nothing added
     if content.get("target"):
         assert answer.startswith("target: prod")
     [echo] = client.texts(UserMessageChunk, session_id)

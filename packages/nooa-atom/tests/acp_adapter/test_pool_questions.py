@@ -154,7 +154,7 @@ async def test_pool_answer_failing_checks_reaches_agent_as_text(
     assert len(models.llms[None].calls) == 2
     answer = adapter.session(sid)._agent.v.answer
     assert isinstance(answer, str)
-    assert f"didn't pass the form's checks: {reason}." in answer
+    assert "checks" not in answer  # only what the person entered, nothing added
     if invalid.get("answer") in (2, "unlisted"):
         assert f"answer: {invalid['answer']}" in answer
     [echo] = client.texts(UserMessageChunk, sid)

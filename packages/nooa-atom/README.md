@@ -203,8 +203,8 @@ below). Domain meaning is the agent's job: it asks targeted follow-ups for just
 the bad fields instead of repeating the whole form.
 
 **Answers that fail the checks** are not re-asked. The adapter admits the
-person's answers (`FormResponse.as_text()`) plus the reason as an ordinary text
-message, echoed once like any user message; the agent reads it as unchecked text
+person's answers (`FormResponse.as_text()`) as an ordinary text message, with
+nothing added, echoed once like any user message; the agent reads it as unchecked text
 and decides what to do. A malformed envelope (unknown action, accept without
 content, content values that are not a `FormValue`) is different: the person gets
 one notice ("Your form answer wasn't used: ...") and nothing is admitted.
