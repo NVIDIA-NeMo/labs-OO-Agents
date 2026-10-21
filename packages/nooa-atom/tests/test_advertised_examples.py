@@ -92,7 +92,7 @@ async def test_skills_block_examples_run(agent):
     rendered = agent.skills.status()
     calls = _calls(rendered)
     assert any(call.startswith("await self.skills.activate(") for call in calls), rendered
-    assert len(calls) == 3, calls
+    assert len(calls) == 4, calls
     owner = _owner()
     for call in calls:
         await _run(call, owner)

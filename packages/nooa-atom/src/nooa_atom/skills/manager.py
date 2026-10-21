@@ -204,6 +204,7 @@ class SkillManager(Skill):
             order = [label for label in _KIND_LABELS.values() if label in rest_kinds]
             lines.append(
                 f"{rest} more ({', '.join(order)}): self.skills.search('query') (sync); "
+                "self.skills.doc('name') (sync) for one skill's full docs; "
                 "await self.skills.activate(['name']) (async); "
                 "self.skills.read('name') (sync) for text skills"
             )
