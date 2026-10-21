@@ -119,3 +119,82 @@ def test_explicit_interface_is_preserved(monkeypatch):
     state = WizardState(model=JEV["id"], api_style="chat", selected_endpoint_model=JEV)
     assert select_request_interface(state)
     assert state.api_style == "chat"
+
+
+@pytest.mark.parametrize("field", ["model_type", "client_type"])
+@pytest.mark.parametrize("answer", ["systemone", "discover", "chat"])
+def test_server_decision_type_suggests_systemone_but_keeps_user_choice(
+    monkeypatch, capsys, field, answer
+):
+    from nooa_cli.commands import _connect_prompts as prompts
+    from nooa_cli.commands._connect_wizard import WizardState, select_request_interface
+
+    state = WizardState(
+        model="nvidia/alexwortega/openjev-4b",
+        provider="hub",
+        endpoint="https://inference-api.nvidia.com/v1",
+        api_key_env="",
+        selected_endpoint_model={"id": "nvidia/alexwortega/openjev-4b", field: "decision"},
+        interface_endpoints={"systemone": "https://inference-api.nvidia.com/v1/systemone"},
+        server_urls=[],
+    )
+
+    def choose(message, **options):
+        assert options["default"] == "systemone"
+        return answer
+
+    monkeypatch.setattr(prompts, "prompt", choose)
+    assert select_request_interface(state)
+    assert state.api_style == (None if answer == "discover" else answer)
+    assert "Model type: decision" in capsys.readouterr().out
+
+
+def test_litellm_detection_and_decision_type_shown_before_interface(monkeypatch, capsys):
+    from nooa_cli.commands import _connect_prompts as prompts
+    from nooa_cli.commands._connect_wizard import (
+        WizardState,
+        prepare_metadata,
+        select_request_interface,
+    )
+
+    details = connect.ModelDetails(
+        "model",
+        {"id": "model", "model_type": "decision"},
+        records=(
+            {
+                "source": "https://inference-api.nvidia.com/model_group/info",
+                "schema": "litellm.model_group.info",
+                "product": {"title": "LiteLLM API", "version": "1.105.1"},
+            },
+        ),
+    )
+
+    async def server(*args, **options):
+        assert options["litellm"] is True
+        return details
+
+    async def catalogue():
+        return []
+
+    monkeypatch.setattr(connect, "server_details", server)
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    state = WizardState(
+        model="model",
+        provider="hub",
+        endpoint="https://inference-api.nvidia.com/v1",
+        api_key_env="",
+        data={},
+        server_urls=[],
+        interface_endpoints={"systemone": "https://inference-api.nvidia.com/v1/systemone"},
+        endpoint_models=[],
+    )
+
+    def choose(message, **options):
+        assert "Server: LiteLLM 1.105.1" in capsys.readouterr().out
+        assert options["default"] == "systemone"
+        return "systemone"
+
+    monkeypatch.setattr(prompts, "prompt", choose)
+    assert prepare_metadata(state)
+    assert select_request_interface(state)
+    assert state.api_style == "systemone"

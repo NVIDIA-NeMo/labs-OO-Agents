@@ -1139,7 +1139,8 @@ def test_model_details_appear_before_accepting_published_settings(
         command, options, input=("wire/model\n" if ambiguous else "") + "save\ny\n"
     )
     assert result.exit_code == 0, result.output
-    for text in ("128,000", "8,192", "Model details from OpenRouter"):
+    assert "8,192" not in result.output  # This is another provider's reply ceiling.
+    for text in ("128,000", "Model details from OpenRouter"):
         assert result.output.index(text) < result.output.index(
             "Would you like to test these settings?"
         )

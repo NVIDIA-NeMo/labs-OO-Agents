@@ -227,9 +227,9 @@ def test_offline_catalogue_plan_and_save_are_zero_http(monkeypatch, tmp_path, fu
     entry = report["data"]["entry"]
     assert entry["model_name"] == "openai/native-model"
     assert entry["context_window"] == 16384
-    assert entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 4096
-    assert "max_output_tokens" not in entry  # Ceiling is not a request allocation.
-    assert entry["max_tokens"] == 4096  # Default allocation is clipped to the fallback ceiling.
+    assert "max_completion_tokens" not in entry["provenance"]["catalogue_limits"]
+    assert "max_output_tokens" not in entry
+    assert entry["max_tokens"] == 8192  # Conservative default within the general model context.
     assert not entry.get("reasoning_levels") and "reasoning_default" not in entry
     assert entry["media_inputs"] == []
     assert entry["provenance"]["media_suggestions"]["suggested"] == ["image"]
@@ -370,10 +370,7 @@ def test_catalogue_file_cannot_forge_internal_attribution(monkeypatch, tmp_path)
     result = CliRunner().invoke(command, plan_args(path))
     assert result.exit_code == 0, result.output
     provenance = json.loads(result.output)["data"]["entry"]["provenance"]
-    assert provenance["limit_sources"] == {
-        "context_length": "catalogue",
-        "max_completion_tokens": "catalogue",
-    }
+    assert provenance["limit_sources"] == {"context_length": "catalogue"}
     assert "endpoint_limits" not in provenance
     assert provenance["media_suggestions"]["model_id"] == "openai/model"
     assert provenance["media_suggestions"]["source"] == connect.CATALOGUE_URL

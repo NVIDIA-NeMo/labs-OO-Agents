@@ -488,6 +488,22 @@ stage mode. The canonical [Connect skill](../skills/nooa-connect/SKILL.md) cover
 permissions, manual suggestions versus generated checks, source validation and
 headless review. Full checks remain available for unknown shared hubs.
 
+
+### Native NVIDIA model details
+
+NVIDIA's hosted `/v1/models` list provides model IDs. The Build catalogue and
+per-model API references provide additional specifications; Connect does not yet
+read those documents automatically. Use the server's limits or enter a published
+value manually. OpenRouter's general model context can fill a missing value,
+but its provider-specific input/output limits are used only for OpenRouter.
+
+For example, NVIDIA documents Nemotron 3 Ultra with up to **1,048,576** context
+tokens. Its distributed configuration defaults to **262,144**, with instructions
+for a larger deployment. The hosted chat API documents a **32,768** reply maximum.
+OpenRouter's BaseTen deployment has different limits (**202,800 / 182,520**).
+See [NVIDIA model specifications](https://build.nvidia.com/nvidia/nemotron-3-ultra-550b-a55b.md)
+and the [hosted API reference](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-ultra-550b-a55b-infer.md).
+
 ## OpenRouter decision models
 
 Connect requests both text and decision-output models from OpenRouter using

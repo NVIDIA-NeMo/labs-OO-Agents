@@ -26,9 +26,9 @@ async def test_reported_reply_ceiling_is_metadata_not_a_request_default(monkeypa
     mock_http(monkeypatch, handle)
     proposal = connect.plan(
         "local",
-        "gpt-5.1",
+        "example/model",
         "chat",
-        "https://api.test/v1",
+        "https://openrouter.ai/api/v1",
         "",
         catalogue={
             "id": "example/model",

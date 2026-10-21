@@ -27,8 +27,8 @@ CATALOGUE = {
             "endpoint_input_limit",
         ),
         ({"context_window": 120000, "max_output_tokens": 24000}, 120000, 24000, "endpoint"),
-        ({"max_input_tokens": 100000}, 100000, 180000, "endpoint_input_limit"),
-        ({"max_input_tokens": True, "max_output_tokens": -1}, 200000, 180000, "catalogue"),
+        ({"max_input_tokens": 100000}, 100000, None, "endpoint_input_limit"),
+        ({"max_input_tokens": True, "max_output_tokens": -1}, 200000, None, "catalogue"),
     ],
 )
 def test_plan_prefers_endpoint_limits(endpoint, window, ceiling, source):
@@ -43,9 +43,9 @@ def test_plan_prefers_endpoint_limits(endpoint, window, ceiling, source):
         endpoint_model=endpoint,
     ).entry
     assert entry["context_window"] == window
-    assert entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == ceiling
+    assert entry["provenance"]["catalogue_limits"].get("max_completion_tokens") == ceiling
     assert entry["provenance"]["limit_sources"]["context_length"] == source
-    assert entry["max_tokens"] <= min(window, ceiling)
+    assert entry["max_tokens"] <= min(window, ceiling) if ceiling else entry["max_tokens"] <= window
     assert CATALOGUE == before
 
 

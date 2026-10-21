@@ -1236,8 +1236,12 @@ def plan(
         # Published OpenRouter records fill facts, not unrelated route profiles.
         # ID-less dictionaries remain explicit hand-authored legacy settings.
         catalogue = deepcopy(catalogue)
-        for field in ("reasoning", "default_parameters", "pricing"):
+        for field in ("reasoning", "default_parameters", "pricing", "top_provider"):
             catalogue.pop(field, None)
+        # General model context remains a fallback; OpenRouter deployment
+        # input/output ceilings belong to the OpenRouter route only.
+        if isinstance(catalogue.get("limit_sources"), dict):
+            catalogue["limit_sources"].pop("max_completion_tokens", None)
     if endpoint_models_url is not None:
         endpoint_models_url = validate_models_url(endpoint_models_url)
     if (

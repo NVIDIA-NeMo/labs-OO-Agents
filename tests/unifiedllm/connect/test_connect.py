@@ -319,8 +319,8 @@ def test_catalogue_metadata_is_not_claimed_as_probe_evidence():
         }
     )
     assert proposal.entry["context_window"] == 128000
-    assert proposal.entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 8192
-    assert proposal.entry["max_tokens"] == 8192
+    assert "max_completion_tokens" not in proposal.entry["provenance"]["catalogue_limits"]
+    assert proposal.entry["max_tokens"] == 32768
     assert "context_window" in proposal.entry["provenance"]["not_probed"]
 
 

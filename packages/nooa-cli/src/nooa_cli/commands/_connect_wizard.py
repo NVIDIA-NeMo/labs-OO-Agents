@@ -555,10 +555,13 @@ def select_request_interface(state: WizardState) -> bool:
         "output_modalities", []
     )
     decision_output = isinstance(outputs, list) and "decisions" in outputs and "text" not in outputs
-    if decision_output:
-        view.line("Model output: structured decisions")
+    decision_hint = decision_output or any(
+        metadata.get(field) == "decision" for field in ("model_type", "client_type")
+    )
+    if decision_hint:
+        view.line("Model type: decision")
     suggested = (
-        "systemone" if decision_output and "systemone" in state.interface_endpoints else "discover"
+        "systemone" if decision_hint and "systemone" in state.interface_endpoints else "discover"
     )
     hints = metadata.get("supported_interfaces")
     if hints:
@@ -963,7 +966,7 @@ def prepare_metadata(state: WizardState) -> bool:
             if state.endpoint == state.discovery_endpoint and state.discovery_succeeded is not False
             else None
         )
-        view.line("Model details from this server (metadata only)...")
+        view.line("Reading model details from this server...")
         state.server_details = (
             connect.ModelDetails(state.model, {"id": state.model})
             if state.discovery_succeeded is False and state.endpoint == state.discovery_endpoint
@@ -982,6 +985,14 @@ def prepare_metadata(state: WizardState) -> bool:
                 )
             )
         )
+        for record in state.server_details.records:
+            product = record.get("product") or {}
+            if product.get("title") == "LiteLLM API":
+                version = product.get("version")
+                view.line(
+                    scrub_setup(state, "Server: LiteLLM" + (" " + version if version else ""))
+                )
+                break
         for notice in state.server_details.notices:
             view.line(scrub_setup(state, notice), fg="yellow")
         if state.server_details.records:
@@ -1150,6 +1161,9 @@ def prepare_metadata(state: WizardState) -> bool:
         state.candidate.pop("reasoning", None)
         state.candidate.pop("default_parameters", None)
         state.candidate.pop("pricing", None)
+        state.candidate.pop("top_provider", None)
+        if isinstance(state.candidate.get("limit_sources"), dict):
+            state.candidate["limit_sources"].pop("max_completion_tokens", None)
         if state.server_details is not None:
             state.server_details = replace(
                 state.server_details,
