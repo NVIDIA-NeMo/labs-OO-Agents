@@ -27,7 +27,7 @@ def test_intro_is_wrapped_and_keeps_cost_notice_and_manual_routes(monkeypatch):
     assert "--no-probe" in result.output
     assert "F1" in result.output
     assert "docs/model-configuration.md" in result.output
-    assert "nooa-model-configuration" in result.output
+    assert "nooa-connect" in result.output
 
 
 def test_no_color_keeps_readable_titles_and_warning(monkeypatch):
@@ -71,10 +71,10 @@ def test_model_details_show_published_limits_separately_from_setup_cap():
         "200",
     ):
         assert text in result.output
-    assert "Reported reply ceiling" in result.output
+    assert "Model reply maximum" in result.output
     assert "Published output default" not in result.output
-    assert "Interface discovery limit" in result.output
-    assert "Source: OpenRouter" in result.output
+    assert "API discovery reply limit" in result.output
+    assert "Model details from OpenRouter" in result.output
     assert "not proof" not in result.output
 
 
@@ -92,7 +92,19 @@ def test_missing_model_details_stay_unknown_instead_of_becoming_recommendations(
 
     result = CliRunner().invoke(command)
     assert result.exit_code == 0, result.output
-    assert result.output.count("Not listed") == 4
+    assert (
+        "No model settings listed. Enter known limits or continue with NOOA defaults."
+        in " ".join(result.output.split())
+    )
+    for absent in (
+        "Context window",
+        "Model reply maximum",
+        "Reasoning levels",
+        "Default reasoning",
+        "OpenRouter",
+        "Source:",
+    ):
+        assert absent not in result.output
     assert "0 tokens" not in result.output.replace("200 tokens", "")
 
 
@@ -127,7 +139,7 @@ def test_reply_ceiling_and_boolean_reasoning_metadata_are_explained():
     result = CliRunner().invoke(command)
     assert result.exit_code == 0, result.output
     assert "26,215" in result.output
-    assert "metadata, not your per-reply budget" in result.output
+    assert "Choose a smaller reply limit" in result.output
     assert "Thinking on/off" in result.output
     assert "Thinking on" in result.output
     assert "Your edited settings" in result.output
@@ -159,7 +171,7 @@ def test_progress_reports_evidence_and_skips_without_payloads(monkeypatch):
     assert "Tool use — checking" in result.output
     assert "No tool call returned" in result.output
     assert "No reasoning details returned" in result.output
-    assert "budget exhausted" in result.output
+    assert "check budget used up" in result.output
     assert "Reused 90%" in result.output
     assert "2 passed · 0 not available · 2 failed · 1 skipped" in " ".join(result.output.split())
     assert "SECRET" not in result.output
@@ -605,8 +617,8 @@ def test_media_labels_keep_classification_and_safe_reasons(outcome, label, statu
     assert result.exit_code == 0, result.output
     expected = {
         "passed": "Passed",
-        "rejected": "Failed · Server rejected the media request; image support not confirmed.",
-        "not_probed": "Skipped · token budget exhausted",
+        "rejected": "Failed · Server rejected the media request; Images: not confirmed.",
+        "not_probed": "Skipped · Image check skipped: check budget used up",
     }.get(
         outcome,
         "Failed · "
@@ -615,7 +627,7 @@ def test_media_labels_keep_classification_and_safe_reasons(outcome, label, statu
             if reason.startswith("Timed out")
             else "Service returned HTTP 400"
         )
-        + "; image support not confirmed.",
+        + "; Images: not confirmed.",
     )
     assert f"Image input: {expected}" in " ".join(result.output.split())
     assert record == before
@@ -625,8 +637,8 @@ def test_media_labels_keep_classification_and_safe_reasons(outcome, label, statu
 @pytest.mark.parametrize(
     "enabled,setting",
     [
-        ([], "image support disabled"),
-        (["image"], "image input remains enabled (not confirmed by this test)"),
+        ([], "Images: off"),
+        (["image"], "Images: enabled (not confirmed by this test)"),
     ],
 )
 def test_failed_media_label_setting_is_display_only(enabled, setting):
@@ -692,10 +704,12 @@ def test_false_access_is_clear_and_keeps_effective_permission(kind, enabled):
     rendered = " ".join(result.output.split())
     assert result.exit_code == 0, result.output
     assert f"{view.check_label('media:' + kind)}: Not available" in rendered
-    assert "Model cannot access this input" in rendered
+    assert "The model reported no access to this sample" in rendered
     assert "Wrong answer" not in rendered and "✓" not in rendered
     assert (
-        f"{kind} input remains enabled (manual choice)" if enabled else f"{kind} input disabled"
+        f"{view.media_label(kind)}: enabled (not tested)"
+        if enabled
+        else f"{view.media_label(kind)}: off"
     ) in rendered
     assert "Request failed" not in rendered and "unsupported" not in rendered
     assert record == original
@@ -711,7 +725,7 @@ def test_false_access_is_clear_and_keeps_effective_permission(kind, enabled):
         ({"settings_sent": False}, "selected settings were not observed"),
         (
             {"outcome": "not_probed", "reason": "budget exhausted"},
-            "Skipped · token budget exhausted",
+            "Skipped · check budget used up",
         ),
         (
             {"outcome": "rejected", "error": "AuthenticationError", "status_code": 401},
@@ -763,7 +777,7 @@ def test_media_request_errors_are_not_mismatched_answers(kind):
     result = CliRunner().invoke(command)
     output = " ".join(result.output.split())
     assert "Failed · Service returned HTTP 400" in output
-    assert f"{kind} support disabled" in output
+    assert f"{view.media_label(kind)}: off" in output
     assert "answer did not match" not in output
 
 
@@ -778,9 +792,9 @@ def test_intro_has_one_plain_spend_warning_and_visible_call_caps():
     output = " ".join(result.output.split())
     assert output.count("Checks may incur charges.") == 1
     assert "The token budget is an estimate, not a spending cap." in output
-    assert "Shared token budget: 100,000" in output
-    assert "chat replies capped at 200 output tokens" in output
-    assert "Decision calls have no reply-token cap." in output
+    assert "Check budget: 100,000" in output
+    assert "chat reply limit 200 tokens" in output
+    assert "Decision calls have no reply limit." in output
     assert "4,096 output tokens per call" in output
     for jargon in ("baseline", "native", "wire", "capacity probes", "billing limits"):
         assert jargon not in output
@@ -792,9 +806,9 @@ def test_local_media_skip_explains_api_format_without_claiming_unsupported(kind)
 
     _, _, reason = media_content(kind, "responses")
     detail = view.media_test_detail(kind, {"outcome": "not_probed", "reason": reason})
-    assert "Skipped" in detail
-    assert f"{kind.capitalize()} testing not implemented for this route/input format" in detail
-    assert "manually as unverified" in detail
+    assert "check skipped" in detail
+    assert f"{kind.capitalize()} testing isn't available for this API format" in detail
+    assert "Use Chat to test" in detail and "enable it without testing" in detail
     assert "native" not in detail and "unsupported" not in detail
 
 
@@ -883,3 +897,204 @@ def test_general_line_retains_its_existing_width_cap(monkeypatch):
     assert result.exit_code == 0
     assert len(result.output.splitlines()) > 1
     assert max(map(len, result.output.splitlines())) <= 86
+
+
+@pytest.mark.parametrize("decision", [False, True])
+@pytest.mark.parametrize(
+    "enabled,outcome,expected",
+    [
+        (False, None, "off"),
+        (False, "passed", "off"),
+        (True, None, "enabled (not tested)"),
+        (True, "passed", "enabled (test passed)"),
+        (True, "inconclusive", "enabled (not confirmed by this test)"),
+        (True, "not_confirmed", "enabled (not confirmed by this test)"),
+        (True, "rejected", "enabled (not confirmed by this test)"),
+        (True, "unavailable", "enabled (not confirmed by this test)"),
+        (True, "not_probed", "enabled (not tested)"),
+    ],
+)
+def test_effective_image_settings_evidence_matrix_is_immutable(
+    decision, enabled, outcome, expected
+):
+    from copy import deepcopy
+
+    entry = {
+        "client_type": "decision" if decision else "completion",
+        "media_inputs": ["image"] if enabled else [],
+        "provenance": {
+            "probes": {
+                "media:image": {
+                    "outcome": outcome,
+                    "reason": "budget exhausted",
+                    "access_reported": False,
+                    "private_body": "DO_NOT_DISPLAY",
+                }
+            }
+        },
+    }
+    before = deepcopy(entry)
+
+    @click.command()
+    def command():
+        view.media_settings(entry)
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[0].strip() == "Images: " + expected
+    assert len(result.output.splitlines()) == (1 if decision else 4)
+    if not decision:
+        for label in ("Audio", "Video", "PDFs"):
+            assert label + ": off" in result.output
+    for jargon in (
+        "not_probed",
+        "inconclusive",
+        "unavailable",
+        "rejected",
+        "DO_NOT_DISPLAY",
+        "budget exhausted",
+    ):
+        assert jargon not in result.output
+    assert entry == before
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"id": "model"},
+        {"id": "model", "reasoning": {"supported_efforts": []}},
+        {"id": "model", "context_length": False, "top_provider": {"max_completion_tokens": 0}},
+    ],
+)
+def test_empty_model_details_omit_fields_sources_and_jargon(metadata):
+    from copy import deepcopy
+
+    before = deepcopy(metadata)
+
+    @click.command()
+    def command():
+        view.model_details(metadata, output_tokens=200)
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert "No model settings listed" in result.output
+    for text in (
+        "OpenRouter",
+        "Source:",
+        "your server",
+        "Model details",
+        "Context window",
+        "Reasoning levels",
+        "API discovery",
+        "Not listed",
+        "unverified",
+        "metadata",
+    ):
+        assert text not in result.output
+    assert metadata == before
+
+
+@pytest.mark.parametrize(
+    "source,label",
+    [
+        ("catalogue", "OpenRouter"),
+        ("endpoint", "your server"),
+        ("endpoint_input_limit", "server input limit"),
+    ],
+)
+@pytest.mark.parametrize("edited", [False, True])
+def test_model_details_attribute_actual_limit_source(source, label, edited):
+    from copy import deepcopy
+
+    metadata = {
+        "id": "model",
+        "context_length": 4096,
+        "limit_sources": {"context_length": source},
+        "endpoint_limits": {"context_window": 4096} if source != "catalogue" else {},
+    }
+    before = deepcopy(metadata)
+
+    @click.command()
+    def command():
+        view.model_details(metadata, output_tokens=200, edited=edited)
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert "4,096 tokens" in result.output
+    assert (" · " + label in result.output) is (not edited)
+    if edited:
+        assert "Your edited settings" in result.output and "OpenRouter" not in result.output
+    else:
+        assert (
+            "Model details from " + ("OpenRouter" if source == "catalogue" else "your server")
+            in result.output
+        )
+    for absent in (
+        "Model reply maximum",
+        "Reasoning levels",
+        "Default reasoning",
+        "wire",
+        "native",
+        "unverified",
+    ):
+        assert absent not in result.output
+    assert metadata == before
+
+
+@pytest.mark.parametrize(
+    "reason,expected",
+    [
+        (
+            "Decision baseline not accepted; fresh checks not tested",
+            "Decision connection check did not pass; later checks skipped",
+        ),
+        (
+            "Typed decision baseline did not pass; image not tested",
+            "Decision answer checks did not pass; image check skipped",
+        ),
+        (
+            "Native typed response accepted but fixture answer incorrect",
+            "Answer format accepted, but the sample answer was incorrect. Try another model.",
+        ),
+    ],
+)
+def test_real_decision_reasons_have_plain_display_labels(reason, expected):
+    assert view.check_reason(reason) == expected
+
+
+@pytest.mark.parametrize(
+    "facts,expected",
+    [
+        (
+            {"attachment_observed": False},
+            "Image was not sent as planned. Review image request settings",
+        ),
+        (
+            {"attachment_observed": True, "access_reported": False},
+            "The model reported no access to the sample. Try another connection or leave images off",
+        ),
+        (
+            {"attachment_observed": True, "access_reported": True, "answer_correct": False},
+            "The model did not identify the sample color. Try another model or leave images off",
+        ),
+        (
+            {},
+            "Could not confirm image delivery and the sample answer. Review image settings or try another connection",
+        ),
+    ],
+)
+def test_decision_image_failure_explains_one_sample_failure_and_action(facts, expected):
+    from copy import deepcopy
+
+    record = {
+        "client": "decision",
+        "outcome": "not_confirmed",
+        "reason": "Image access, known color accuracy and actual wire attachment must all be confirmed",
+        **facts,
+    }
+    before = deepcopy(record)
+    detail = view.media_test_detail("image", record, media_inputs=["image"])
+    assert expected in detail
+    assert "Images: enabled (not confirmed by this test)" in detail
+    assert "wire" not in detail and "Native" not in detail
+    assert record == before

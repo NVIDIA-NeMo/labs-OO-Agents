@@ -122,7 +122,7 @@ def prompt(
                         "class:help",
                         " No paid calls: restart with --no-probe\n"
                         " Manual setup: docs/model-configuration.md\n"
-                        " Agent skill: nooa-model-configuration\n"
+                        " Agent workflow: nooa-connect\n"
                         " Enter uses the suggested default. Typing replaces it. Right Arrow edits it.\n"
                         " Arrow keys / Home / End edit. Ctrl-U clears. F1 closes help.",
                     )
@@ -218,7 +218,7 @@ def edit_model_details(model):
     edited["context_length"] = count("Context window (tokens)", model.get("context_length"))
     edited["top_provider"] = dict(model.get("top_provider") or {})
     edited["top_provider"]["max_completion_tokens"] = count(
-        "Reported reply ceiling (tokens; not your reply limit)",
+        "Model reply maximum (tokens)",
         edited["top_provider"].get("max_completion_tokens"),
     )
     reasoning = edited["reasoning"] = dict(model.get("reasoning") or {})
@@ -254,7 +254,7 @@ def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="
     maximum" choice so picking exactly that value never requires --custom.
     """
     click.echo("\n  Room for each reply, including thinking and the final answer.")
-    click.echo("  Short replies use fewer tokens; this limit does not make replies longer.\n")
+    click.echo("  Choose a smaller limit for short replies, or leave more room for thinking.\n")
     origin = {
         "connect_default": "NOOA default",
         "catalogue_recommendation": "catalogue recommendation",
@@ -281,7 +281,7 @@ def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="
         labels={
             "recommended": f"Recommended — {suggested:,} tokens ({origin})",
             **{
-                name: f"{'High' if name == 'high' else 'Extended'} reasoning budget — {cap:,} tokens"
+                name: f"{'High' if name == 'high' else 'Extended'} reply limit — {cap:,} tokens"
                 for name, cap in larger.items()
             },
             **{name: f"Model maximum — {cap:,} tokens" for name, cap in maximum.items()},
@@ -310,6 +310,8 @@ def parse_media_inputs(value):
 
     if value is None:
         return None
+    if isinstance(value, (list, tuple)):
+        return list(validate_media_inputs(value))
     return list(
         validate_media_inputs(
             []
@@ -327,7 +329,7 @@ def choose_media_inputs(current=()):
         formats = ("image", "audio", "video", "pdf")
         values = [subset for size in range(5) for subset in combinations(formats, size)]
         selected = labelled_choice(
-            "Choose media inputs manually (unverified)",
+            "Choose media inputs without testing",
             tuple(
                 (
                     ",".join(subset) or "-",
@@ -342,7 +344,7 @@ def choose_media_inputs(current=()):
         return list(current) if set(parsed) == set(current) else parsed
     while True:
         value = prompt(
-            "Enable media inputs manually (unverified; image,audio,video,pdf; - for text-only)",
+            "Enable media inputs manually (not tested; image,audio,video,pdf; - to turn all off)",
             default=",".join(current) or "-",
         )
         try:
@@ -422,4 +424,22 @@ def choose_media_mode(*, editing=False):
             ("manual", "Choose media inputs manually"),
         ),
         default="manual" if editing else "test",
+    )
+
+
+def choose_decision_images(current=()):
+    """Human actions with unchanged image setup tokens and Enter defaults."""
+    click.echo(
+        "Image tests use a small generated sample and the approved check budget. No user files are used."
+    )
+    options = (("keep", "Keep current image settings"),) if current else ()
+    return labelled_choice(
+        "Should this decision model receive images?",
+        (
+            *options,
+            ("text", "Leave images off"),
+            ("manual", "Enable images without testing"),
+            ("test", "Test images before enabling"),
+        ),
+        default="keep" if current else "text",
     )

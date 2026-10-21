@@ -89,8 +89,9 @@ def test_yes_shows_suggestions_without_adopting_or_testing(monkeypatch, capsys):
     assert wizard.configure_media_inputs(current)
     assert current.media_inputs == [] and current.test_media_inputs is None
     output = capsys.readouterr().out
-    assert connect.CATALOGUE_URL in output and "Advertisements are unverified" in output
-    assert "Generic file" in output
+    assert "Model details from OpenRouter" in output
+    assert "Advertisements are unverified" not in output
+    assert "PDF support isn't listed. Test a generated PDF or leave PDFs off." in output
 
 
 @pytest.mark.parametrize("approval,no_probe", [("none", True), ("minimal", False), ("all", True)])
@@ -139,7 +140,9 @@ def test_systemone_suggestions_do_not_guess_transport(monkeypatch, capsys):
     assert current.decision_image_transport == "json"
     assert current.typesafe_danger_zone_images is False
     assert current.test_media_inputs is None
-    assert "unverified and not testable" in capsys.readouterr().out
+    assert "Image testing isn't available for this connection" in " ".join(
+        capsys.readouterr().out.split()
+    )
 
 
 def test_cached_metadata_only_model_does_not_add_settings_prompt(monkeypatch):
@@ -403,11 +406,11 @@ def test_missing_decision_metadata_keeps_existing_images_by_default(monkeypatch)
     current.media_hints = None
     current.api_style = "openai"
 
-    def choose(label, **kwargs):
-        assert kwargs["default"] == "keep"
+    def choose(previous):
+        assert previous == ["image"]
         return "keep"
 
-    monkeypatch.setattr(prompts, "prompt", choose)
+    monkeypatch.setattr(prompts, "choose_decision_images", choose)
     assert wizard.configure_media_inputs(current)
     assert current.media_inputs == ["image"]
     assert current.test_media_inputs is None
@@ -478,3 +481,69 @@ def test_discovery_file_attribution_comes_from_verified_selection(monkeypatch, t
     assert report["source"] == BASE + "/models"
     assert report["model_id"] == "model"
     assert report["suggested"] == ["image"]
+
+
+@pytest.mark.parametrize("style", ["chat", "openai"])
+@pytest.mark.parametrize(
+    "hints",
+    [
+        None,
+        {},
+        {"id": "model"},
+        {"id": "model", "input_modalities": []},
+        {"id": "model", "architecture": {"input_modalities": []}},
+    ],
+)
+def test_missing_or_empty_media_lists_omit_source_advertisements(monkeypatch, capsys, style, hints):
+    from nooa_cli.commands._connect_advertised_media import offer_suggestions
+
+    mock_http(monkeypatch, lambda request: pytest.fail("Rendering missing metadata is local"))
+    monkeypatch.setattr(
+        prompts, "labelled_choice", lambda *a, **k: pytest.fail("No suggestions to choose")
+    )
+    current = state()
+    current.api_style = style
+    current.media_hints = deepcopy(hints)
+    if current.media_hints is not None:
+        current.media_hints["media_source"] = connect.CATALOGUE_URL
+    before = deepcopy(current.media_hints)
+    previous = ["image"]
+    assert offer_suggestions(current, previous) is False
+    output = capsys.readouterr().out
+    assert "support isn't listed" in output and "Current media inputs: image" in output
+    for absent in (
+        "OpenRouter",
+        connect.CATALOGUE_URL,
+        "Listed media inputs",
+        "Model details from",
+        "advertisement",
+        "unverified",
+        "unmapped",
+        "native",
+        "wire",
+    ):
+        assert absent not in output
+    assert current.media_inputs is None and current.test_media_inputs is None
+    assert previous == ["image"] and current.media_hints == before
+
+
+@pytest.mark.parametrize("source", [connect.CATALOGUE_URL, "https://server.test/models"])
+def test_media_suggestions_render_actual_source_without_changing_permissions(
+    monkeypatch, capsys, source
+):
+    from nooa_cli.commands._connect_advertised_media import offer_suggestions
+
+    mock_http(monkeypatch, lambda request: pytest.fail("Suggestion rendering must not send HTTP"))
+    current = state()
+    current.yes = True
+    current.media_hints = {"id": "model", "input_modalities": ["image"], "media_source": source}
+    before = deepcopy(current.media_hints)
+    assert offer_suggestions(current, []) is False
+    output = capsys.readouterr().out
+    assert "Listed media inputs: image" in output
+    assert (
+        "Model details from " + ("OpenRouter" if source == connect.CATALOGUE_URL else source)
+        in output
+    )
+    assert current.media_inputs is None and current.test_media_inputs is None
+    assert current.media_hints == before

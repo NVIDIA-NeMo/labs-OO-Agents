@@ -85,29 +85,29 @@ def advertised_media_suggestions(
     advertised = [kind for kind in FORMATS if kind in advertised]
     notes = []
     if not evidence:
-        notes.append("Media information unknown; choose inputs manually if needed.")
+        notes.append("Media support isn't listed. You can test inputs or choose them yourself.")
     if any(isinstance(v, list) and "file" in v for v in evidence.values()):
         pdf_known = "capabilities.pdf_input.supported" in evidence or any(
             isinstance(v, list) and "pdf" in v for v in evidence.values()
         )
         notes.append(
-            "Generic file input alone does not establish PDF support."
+            "Files are listed separately from PDFs; use the PDF setting for PDF inputs."
             if pdf_known
-            else "Generic file input is advertised; PDF support is unknown without specific PDF evidence."
+            else "PDF support isn't listed. Test a generated PDF or leave PDFs off."
         )
     if unknown:
-        notes.append("Unmapped input categories: " + ", ".join(dict.fromkeys(unknown)) + ".")
+        notes.append("Inputs unavailable in Connect: " + ", ".join(dict.fromkeys(unknown)) + ".")
     decision = api_style in {"systemone", "openai"}
     suggested = [kind for kind in advertised if not decision or kind == "image"]
     unavailable = {}
     for kind in advertised:
         if decision and kind != "image":
             unavailable[kind] = (
-                "Native decisions implement image inputs only; this format is not testable."
+                "Decision models can receive images only. Use a chat model for this input format."
             )
         elif api_style in {"anthropic", "responses"} and kind in {"audio", "video"}:
             unavailable[kind] = (
-                "Generated audio/video checks are unavailable on this interface; advertised support is not verified."
+                "Audio/video testing isn't available for this API format. Use Chat to test these inputs, or choose them without testing."
             )
         elif (
             api_style == "systemone"
@@ -118,15 +118,13 @@ def advertised_media_suggestions(
             )
         ):
             unavailable[kind] = (
-                "System One JSON image mapping is unverified and not testable; no transport is selected from metadata."
+                "Image testing isn't available for this connection. Use OpenAI Decisions or direct TypeSafe multipart with experimental images enabled, or leave images off."
             )
     source = (
         source
         if isinstance(source, str) and len(source) <= 2048 and not any(ord(c) < 32 for c in source)
         else "unknown"
     )
-    if source == "https://openrouter.ai/api/v1/models":
-        notes.append("OpenRouter facts describe its route, not verified native API behavior.")
     model_id = (
         metadata.get("media_model_id", metadata.get("id")) if isinstance(metadata, dict) else None
     )

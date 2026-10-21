@@ -229,7 +229,7 @@ def test_bounded_images_and_dedup(monkeypatch):
     "options, transform, match",
     [
         ({}, lambda r: r, "explicit media_inputs"),
-        ({"media_inputs": ["image"]}, lambda r: r, "Unverified System One JSON"),
+        ({"media_inputs": ["image"]}, lambda r: r, "System One JSON blocks image requests"),
         (
             {"media_inputs": ["image"], "decision_image_transport": "typesafe_multipart"},
             lambda r: r,
@@ -275,7 +275,10 @@ async def test_client_preflight_zero_sends_including_direct_requests(options, tr
         (Image.from_url("https://host/image"), "not fetched"),
         (Image.from_bytes(b"GIF89a", media_type="image/gif"), "PNG/JPEG"),
         (Image.from_bytes(JPEG, media_type="image/png"), "signature"),
-        (Image.from_bytes(PNG, media_type="image/png", detail="high"), "detail contract"),
+        (
+            Image.from_bytes(PNG, media_type="image/png", detail="high"),
+            "cannot send an image detail setting",
+        ),
     ],
 )
 @pytest.mark.asyncio

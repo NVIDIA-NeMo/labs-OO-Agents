@@ -62,12 +62,6 @@ async def test_anthropic_normalized_inference_base_does_not_rewrite_listing(monk
 @pytest.mark.parametrize("style", ["chat", "anthropic", "openai", "systemone"])
 @pytest.mark.parametrize("catalogue", [None, {"id": "mapped/model", "context_length": 9876}])
 def test_mismatched_model_cannot_contribute_limits_or_media(style, catalogue):
-    if catalogue and style in connect.DECISION_API_STYLES:
-        with pytest.raises(ValueError, match="do not use chat model catalogue"):
-            connect.plan(
-                "local", "requested", style, "https://inference.example/v1", "", catalogue=catalogue
-            )
-        return
     entry = connect.plan(
         "local",
         "requested",
@@ -84,7 +78,9 @@ def test_mismatched_model_cannot_contribute_limits_or_media(style, catalogue):
         endpoint_models_url=SOURCE,
     ).entry
     assert "endpoint_limits" not in entry["provenance"]
-    assert entry.get("context_window") == (9876 if catalogue else None)
+    assert entry.get("context_window") == (
+        9876 if catalogue and style not in connect.DECISION_API_STYLES else None
+    )
     assert "max_output_tokens" not in entry
     assert "image" not in entry.get("media_inputs", [])
 

@@ -96,7 +96,7 @@ def decision_media_inputs(value: object) -> tuple[MediaInput, ...]:
     permissions = validate_media_inputs(value)
     if any(kind != "image" for kind in permissions):
         raise ValueError(
-            "Native decisions support only media_inputs: [image]; audio, video and PDF contracts are unverified"
+            "Decision models accept images only. Use media_inputs: [image], or choose a chat model for audio, video or PDFs."
         )
     return permissions
 

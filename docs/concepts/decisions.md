@@ -738,7 +738,7 @@ Use `nooa connect MODEL --stage decision --endpoint FULL_URL --api-style openai`
 (or `systemone`) to run fresh bounded fixtures through an actual Agent
 `DecideStrategy`. One composite result checks boolean, literal choice and
 ordinal score reconstruction; positive and negative boolean fixtures check
-simple semantics. Acceptance is not the same as answering correctly. Schema
+simple semantics. Review answer correctness alongside request acceptance. Schema
 validation includes finite normalized distributions and weighted score
 consistency. There are no retries, and each request has a deadline and shares
 the approved reservation budget.
@@ -748,10 +748,11 @@ generated red PNG through a named `Image` parameter. Passing requires actual
 wire attachment evidence, typed access, and the correct known color. OpenAI
 Decisions uses `input_image`. Direct TypeSafe requires explicit
 `--decision-image-transport typesafe_multipart --typesafe-danger-zone-images`;
-System One JSON proxy image testing is rejected as unverified. Native decision
-audio, video and PDF transports are not implemented.
+System One JSON blocks image requests before sending. Use OpenAI Decisions or
+an approved direct TypeSafe multipart connection, or leave images off. Decision
+audio, video and PDF inputs are unavailable.
 
-`--media-inputs image` is a manual permission declaration, not a test. Connect
+`--media-inputs image` enables images without testing. Connect
 saves permission, image transport and explicit TypeSafe opt-in in runtime YAML,
 separately from sanitized case outcomes and usage. It never saves encoded
 images, raw responses or test questions there. See [Connect](../model-connect.md).

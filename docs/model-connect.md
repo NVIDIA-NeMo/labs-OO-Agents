@@ -18,12 +18,45 @@ Run the guided setup:
 uv run nooa connect
 ```
 
-It asks for a provider (NVIDIA, NVIDIA Inference Hub, OpenAI, Anthropic,
-Google, OpenRouter, or a custom endpoint), your API key, and the model. It then tests the model and asks
-before saving.
+Choose a provider (NVIDIA, NVIDIA Inference Hub, OpenAI, Anthropic,
+Google, OpenRouter, or a custom endpoint), a known request interface or
+**Discover request interfaces**, your key, and the model. Connect first reads
+available model metadata using GET requests, not model calls. It fills in a
+proposal while retaining your explicit limits, reasoning settings and media
+choices, then shows one concise **Proposed configuration** summary for the current
+proposal and asks:
+
+**Would you like to test these settings?**
+
+- **Test now** approves the selected checks with the displayed token budget.
+  If the request style is unknown, bounded interface discovery runs first;
+  metadata alone never proves an interface works. A known style is tested too.
+- **Save without testing** skips interface discovery and all model calls. If
+  the style is still unknown, choose a provider preset/manual interface before
+  saving an explicitly not-tested entry. Saving still needs final confirmation.
+- **Change settings** opens the current settings editor, including the reply
+  limit chooser for chat models, then returns directly to this decision. It
+  shows an updated summary before the next test/save decision. It does not
+  fetch metadata again or discard explicit media declarations or custom
+  reasoning-level request blocks.
+
+If deferred discovery selects an image-only decision route after a provisional
+all-media choice, explicitly review image-only inputs/tests, turn media off, or
+cancel. The revised proposal is shown before another test/save decision; no
+unsupported inputs are silently dropped. Explicit incompatible declarations
+require an affirmative correction or their existing validation errors prevent
+saving; known-style and headless validation remains unchanged.
+
+No inference POST is sent before **Test now**. Media advertisements never
+silently enable inputs: keep the current/default choices or explicitly choose
+formats/tests. `--no-probe` removes **Test now**, skips all model calls, and still
+allows metadata GETs. For an entirely offline exact-ID setup, also supply
+`--no-catalogue` and the endpoint/interface; editing an existing alias does not
+fetch metadata. Omitting the model ID requests the model-list picker (a GET),
+even with `--no-catalogue`, which skips public and automatic limit lookups.
 
 To prefill the connection details, pass the answers as flags. The wizard still
-asks about checks, optional settings, and saving unless you use `--yes`:
+asks about media choices, testing, changes, and saving unless you use `--yes`:
 
 ```sh
 uv run nooa connect your-model --as my-model \
@@ -39,9 +72,10 @@ uv run nooa connect your-model --as my-model \
   `systemone` (System One Decisions), or `openai` (OpenAI Decisions, not Chat).
   An explicit style checks only that style. In guided setup, omit it to choose
   **Discover request interfaces** or a known interface before model listing.
-  Discover compares chat interfaces plus System One when a known or explicit
-  decision endpoint is available. It sends the exact same model ID to every
-  candidate; it never translates a completion model into a decision model.
+  After **Test now**, Discover compares chat interfaces plus System One when
+  a known or explicit decision endpoint is available. It sends the exact same
+  model ID to every candidate; it never translates a completion model into a
+  decision model.
 - `--api-key-env` is the name of the environment variable that holds the key,
   never the key itself. Use `--api-key-env ''` for a local server with no key.
 - `--prompt-key` lets you paste a masked key instead (even with `--yes`). At the
@@ -89,21 +123,20 @@ boolean cases. These use the actual Agent `DecideStrategy`, including schema
 validation and typed reconstruction. A valid response and a correct answer
 are recorded separately. Finite probabilities, normalized distributions and
 a score consistent with its weighted distribution are part of the contract.
-Add `--no-probe` to save an explicitly unverified connection without requests.
+Add `--no-probe` to save the connection as not tested, without model requests.
 
 Native decision media checks support **image only**. OpenAI/Hub Decisions
 send a named `Image` parameter as native `input_image` content. Direct TypeSafe
 needs explicit `--decision-image-transport typesafe_multipart` and
 `--typesafe-danger-zone-images` as well as image permission. The hostname never
-selects the transport. System One JSON proxies have no verified image mapping;
-image testing is rejected before requests, while a manual image declaration is
-clearly unverified and will reject image calls before sending. Decision audio,
+selects the transport. System One JSON blocks image requests before sending. To test images, use
+OpenAI Decisions or an approved direct TypeSafe multipart connection, or leave
+images off. Enabling images manually on System One JSON still blocks image calls. Decision audio,
 video and PDF are not implemented.
 
 Image checks run after text/state decision checks, using a generated red PNG.
 A pass requires the attachment on the actual HTTP request, a native typed
-access result, and the correct known color. Self-reported access alone does
-not pass. Each fresh test makes at most one request, with no retries and a
+access result, and the correct known color. A reported-access answer with the wrong color fails the check. Each fresh test makes at most one request, with no retries and a
 30-second deadline, sharing the approved token reservations. Routing acceptance
 can be reused during setup; fresh accuracy and image tests cannot.
 
@@ -256,8 +289,12 @@ its request settings. Quote names like `"off"`. See
 [reasoning levels](reasoning-levels.md).
 
 Model details such as context window and reasoning levels come from OpenRouter's
-public model list. Use `--catalogue-model ID` to pick the entry, or
-`--no-catalogue` to skip it.
+public model list and exact endpoint listing facts, with server facts taking
+priority. Use `--catalogue-model ID` to pick the public entry, or `--no-catalogue`
+to skip public and automatic limit lookups. Missing limits stay unknown in the
+proposal; continue with NOOA defaults or choose **Change settings** to enter
+known limits. The proposal names its source; edits are your settings, not
+verified capabilities.
 
 ## Known routes: configure from metadata without model calls
 
@@ -284,23 +321,33 @@ uv run nooa connect --stage save --input model-plan.json --output llm_config.yam
 ```
 
 These IDs are examples, not universal profiles. `--catalogue-file` is opt-in and
-works in chat-family plan/check stages. It accepts a successful version-1
-catalogue report (`data.source` and `data.models`) or an explicitly sourced raw
+works in plan/check stages, including decision routing, decision and media checks.
+It accepts a successful version-1 catalogue report (`data.source` and `data.models`) or an explicitly sourced raw
 object: `{"source": "https://openrouter.ai/api/v1/models", "models": [...]}`.
 The source must be that OpenRouter URL. Without `--catalogue-model`, the exact
 inference ID must occur once in the file; there is no fuzzy or suffix guessing.
 A native ID different from the OpenRouter ID needs an explicit mapping.
 
-Review context limits, any initialized reasoning settings, the published ceiling
+For native decision models, mapped OpenRouter details are metadata only: bounded
+model descriptions, media advertisements and explicit source/ID provenance.
+Exact endpoint media facts take priority. They never initialize chat caps,
+context, reasoning, tools, sessions, store/include settings, image permissions or
+transport opt-ins, and add no inference checks. `typesafe/jev-router` is not an
+implicit match for Hub `nvidia/alexwortega/openjev-4b`. The wizard uses an exact
+OpenRouter ID or a match you explicitly select; `--no-catalogue` skips lookup,
+and editing and stage `plan` never fetch metadata.
+
+For chat-family models, review context limits, any initialized reasoning settings,
+the published ceiling
 in `provenance.catalogue_limits`, and the proposed `max_tokens` reply cap. The
 recommendation is conservatively clipped to known limits; the ceiling is not an
 allocation. `--max-tokens` overrides the proposed cap explicitly. Pricing,
 supported-parameter lists and miscellaneous default parameters are not copied
-into requests. OpenRouter top-provider facts describe its route, not proof of
-native API behavior. Cached `--discovery-file` metadata from the selected native
+into requests. Check your server's limits if they differ from OpenRouter's.
+Cached `--discovery-file` metadata from the selected native
 endpoint/model takes preference for reported limits. Missing limits remain
-unknown. `provenance.media_suggestions` reports advertisements and source, not
-permissions: accept/change the manual media choice explicitly before saving.
+unknown. Review `provenance.media_suggestions` for listed formats and their
+source, then explicitly choose which inputs to enable before saving.
 
 Checks are optional. With permission for those calls, repeat the same metadata
 and settings options for the chosen check stage; do not automatically run `all`.
@@ -360,7 +407,7 @@ export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
 | Problem | What to do |
 |---|---|
 | No API style works | Check the endpoint URL, key, and model ID. The wizard offers to change them, retry with a 120-second timeout, or cancel. |
-| Timeout | The route may be slow. Retry, or check the endpoint. A timeout does not mean the key is wrong. |
+| Timeout | Completion is unknown. Check the endpoint and server status; approve a retry within the remaining budget. |
 | Text baseline fails | Make sure the endpoint supports structured output. Otherwise save with `--no-probe`. |
 | Endpoint rejects `include` or `encrypted_content` (Responses) | Set `include: []` in the entry, then rerun the checks. Saving stays blocked until the baseline passes. |
 | Reply cut off | Raise `--max-tokens` and rerun the affected stage. |
@@ -400,26 +447,36 @@ public/cached model information **before** offering media configuration. It show
 advertised formats and the source for only the selected model/route. OpenRouter
 uses `architecture.input_modalities`; Anthropic uses the exact boolean flags
 `capabilities.image_input.supported` and `capabilities.pdf_input.supported`.
-Generic `file` input is **not** evidence of PDF support. Names, descriptions and
-unknown nested flags are not interpreted as capabilities.
+For PDFs, use the specific PDF flag or a generated PDF check; a generic `file`
+listing leaves PDF support unknown. Connect reads only the allowlisted fields,
+not names, descriptions or arbitrary nested flags.
 
-When suggestions are available, choose **Keep current inputs** (the default),
-**Enable suggested inputs manually (unverified)**, **Change inputs manually**, or
-**Use no media**. An optional **Test suggested inputs** choice appears only when
-generated checks were approved and implemented for that interface. Suggestions
-never enable anything themselves, never replace explicit current choices, and
+When suggestions are available, choose **Keep current media settings** (the default),
+**Enable listed inputs without testing**, **Change inputs manually**, or
+**Turn all media inputs off**. An optional **Test listed inputs before enabling**
+choice appears only when
+generated checks are selected and implemented for that interface. The guided
+wizard still waits for **Test now** before sending any of those requests.
+Suggestions never enable anything themselves, never replace explicit current choices, and
 `--yes` never accepts suggestions without explicit media options. Missing/custom
 metadata uses the existing manual/test choice without an extra suggestion prompt.
-Settings review still follows media selection. `--no-probe --no-catalogue` with
-an exact model/interface remains offline; editing does not fetch new metadata or
+The proposed configuration and test/save/change decision follow media selection.
+`--no-probe --no-catalogue` with an exact model/interface remains offline; editing does not fetch new metadata or
 replace existing settings.
 
-Native decision suggestions allow **image only**, even if the shared catalogue
-advertises other inputs. System One JSON image mapping remains unverified and is
-reported as **not testable**; no transport is guessed. Direct TypeSafe requires
-explicit multipart transport and experimental opt-in. Responses/Anthropic audio
-and video advertisements can be shown, but checks are unavailable here: this is
-not a claim that the route supports them.
+Decision suggestions allow **image only**, even if a shared model list includes
+other inputs. System One JSON reports that image testing is unavailable; use
+OpenAI Decisions, or direct TypeSafe with explicit multipart transport and
+experimental opt-in, or leave images off. Responses/Anthropic audio and video
+listings can be shown; use Chat to test those formats, or enable them without
+testing. No transport is chosen from a model listing.
+
+The decision image menu offers **Leave images off** (the new-entry default),
+**Enable images without testing**, and **Test images before enabling**. An entry
+with existing images defaults to **Keep current image settings**. TTY menus use
+arrows and Enter; piped input accepts displayed numbers or `text`, `manual`,
+`test`, and `keep` when available. Image tests use a small generated sample,
+no user files, and the approved check budget.
 
 When there is no advertised suggestion, chat setup keeps its existing choices:
 
@@ -432,16 +489,18 @@ When there is no advertised suggestion, chat setup keeps its existing choices:
   unverified.
 
 Before saving, you can keep the result or change it by hand. A failed retest
-does not remove a format you enabled before.
+keeps a previously enabled format. The summary shows **Images: off**,
+**enabled (test passed)**, **enabled (not confirmed by this test)** for retained
+failed inputs, or **enabled (not tested)** for manual/skipped inputs. These
+settings are separate from the recorded check outcome.
 
 Test limits:
 
 - For chat-family interfaces, image and PDF are tested on all three API styles.
 - Connect tests audio and video only with `--api-style chat`. Elsewhere it says
-  “testing not implemented for this route/input format,” not that the model
-  does not support them. The official OpenAI Cookbook discusses Responses
-  audio, but the exact current request mapping is unresolved here; Connect
-  does not invent one. Native decision checks remain image-only.
+  “testing isn't available for this API format.” Use Chat to test those inputs,
+  or enable them without testing. Responses audio request mapping remains
+  unresolved here. Decision checks remain image-only.
 - **Not available** means the check did not show that this model accepts that
   format through this connection.
 
@@ -524,4 +583,5 @@ async for event in connect.check_interfaces(
 Each result retains its actual `endpoint` (decision) or `api_base` (chat), plus
 transient `provenance.interface_endpoint` describing the selected style/URL and
 whether it came from `endpoints` or the base argument. Accepted interfaces
-are routing evidence, not proof of advertised modalities or model quality.
+record which connections passed. Test media separately and review answers on
+your own examples before relying on the model.

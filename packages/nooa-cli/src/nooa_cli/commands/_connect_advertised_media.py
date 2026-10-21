@@ -20,20 +20,27 @@ def offer_suggestions(state, previous):
         decision_image_transport=state.decision_image_transport or "json",
         typesafe_danger_zone_images=state.typesafe_danger_zone_images,
     )
-    view.line("Advertised media inputs: " + (", ".join(report["advertised"]) or "none known"))
-    view.line(
-        "Media information source: "
-        + report["source"]
-        + (" (" + report["model_id"] + ")" if report["model_id"] else "")
-    )
-    for note in report["notes"]:
-        view.line(note)
-    for kind, reason in report["unavailable_checks"].items():
-        view.line(kind + ": " + reason)
-    view.line(
-        "Advertisements are unverified suggestions, not permission. Current inputs: "
-        + (", ".join(previous) or "none (text-only)")
-    )
+    if any(report["evidence"].values()):
+        if report["advertised"]:
+            view.line("Listed media inputs: " + ", ".join(report["advertised"]))
+        source = report["source"]
+        if source == connect.CATALOGUE_URL:
+            view.line("Model details from OpenRouter")
+        elif source not in {"", "unknown", "published model information", "endpoint listing"}:
+            view.line("Model details from " + source)
+        elif source == "endpoint listing" and state.endpoint_models_url:
+            view.line("Model details from " + state.endpoint_models_url)
+        for note in report["notes"]:
+            view.line(note)
+        for kind, reason in report["unavailable_checks"].items():
+            view.line(("PDF" if kind == "pdf" else kind.capitalize()) + ": " + reason)
+    else:
+        view.line(
+            "Image support isn't listed. You can test it or leave images off."
+            if state.api_style in connect.DECISION_API_STYLES
+            else "Media support isn't listed. You can test inputs or choose them yourself."
+        )
+    view.line("Current media inputs: " + (", ".join(previous) or "off"))
     if (
         state.media_inputs is not None
         or state.test_media_inputs is not None
@@ -42,23 +49,27 @@ def offer_suggestions(state, previous):
     ):
         return False
     options = [
-        ("keep", "Keep current inputs: " + (", ".join(previous) or "text only")),
+        ("keep", "Keep current media settings: " + (", ".join(previous) or "text only")),
         (
             "suggested",
-            "Enable suggested inputs manually (unverified): " + ", ".join(report["suggested"]),
+            "Enable listed inputs without testing: " + ", ".join(report["suggested"]),
         ),
     ]
     if not state.no_probe and state.approval == "all" and report["checkable"]:
         options.append(
             (
                 "test",
-                "Test suggested inputs with generated samples, using the approved budget: "
+                (
+                    "Test listed inputs before enabling (generated samples; selected check budget): "
+                    if getattr(state, "guided", False)
+                    else "Test listed inputs before enabling (generated samples; approved check budget): "
+                )
                 + ", ".join(report["checkable"]),
             )
         )
-    options.extend((("manual", "Change inputs manually"), ("none", "Use no media (text only)")))
+    options.extend((("manual", "Change inputs manually"), ("none", "Turn all media inputs off")))
     action = prompts.labelled_choice(
-        "Review advertised media suggestions", tuple(options), default="keep"
+        "Choose how to use the listed media inputs", tuple(options), default="keep"
     )
     if action == "test":
         state.test_media_inputs = list(report["checkable"])

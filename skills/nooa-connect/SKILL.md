@@ -282,8 +282,9 @@ uv run nooa connect --stage save --input model-plan.json --output llm_config.yam
 ```
 
 These model IDs are placeholders, not asserted API profiles. Select a current
-catalogue ID yourself. `--catalogue-file` works only in chat-family plan/check
-stages. There is **no network on plan or save**, and nothing is silently fuzzy
+catalogue ID yourself. `--catalogue-file` works in plan/check stages, including
+decision routing, decision and media checks. There is **no network on plan or
+save**, and nothing is silently fuzzy
 matched: without `--catalogue-model`, the inference ID must occur exactly once in
 the file. The file must be a successful version-1 `catalogue` report with
 `data.source: https://openrouter.ai/api/v1/models` and `data.models`, or the
@@ -291,13 +292,23 @@ explicit raw form `{"source": "https://openrouter.ai/api/v1/models", "models": [
 Other sources, failed reports, duplicate matches and mismatched IDs are rejected.
 Do not repurpose a gateway's model list as an OpenRouter catalogue file.
 
-Review initialized context bounds, the published output **ceiling** in
+For native decision models, mapped OpenRouter details are metadata only: bounded
+model descriptions, media advertisements and explicit source/ID provenance.
+Exact endpoint media facts take priority. They never initialize chat caps,
+context, reasoning, tools, sessions, store/include settings, image permissions or
+transport opt-ins, and add no inference checks. `typesafe/jev-router` is not an
+implicit match for Hub `nvidia/alexwortega/openjev-4b`. The wizard uses an exact
+OpenRouter ID or a match you explicitly select; `--no-catalogue` skips lookup,
+and editing and stage `plan` never fetch metadata.
+
+For chat-family models, review initialized context bounds, the published output
+**ceiling** in
 `data.entry.provenance.catalogue_limits`, the proposed `max_tokens` request cap,
 and any reasoning settings. The recommendation is clipped to known limits;
 `--max-tokens` explicitly selects a different cap. Pricing, supported parameter
 lists and miscellaneous default parameters are not copied into requests.
-OpenRouter's top-provider facts describe its own route; they do **not** prove a
-native OpenAI/Anthropic route behaves identically. Native Models API metadata can
+Check your server's limits if they differ from OpenRouter's top-provider facts.
+Models API metadata from the actual endpoint can
 be saved with `--stage discover` and supplied through `--discovery-file`; its
 reported limits take preference when it belongs to the selected endpoint/model.
 Anthropic's exact advertised output `max_tokens` and `max_input_tokens` are
@@ -305,8 +316,8 @@ retained. Missing native OpenAI limits remain unknown, not inferred from names.
 
 The proposal's `data.entry.provenance.media_suggestions` reports the selected
 model/source, advertised formats, constrained suggestions, checkable formats,
-unavailable checks and raw allowlisted evidence. **These are not permissions.**
-A generic `file` category is not specific PDF evidence. Review suggestions with
+unavailable checks and raw allowlisted evidence. Choose permissions explicitly.
+For PDFs, use the specific PDF flag or an approved generated PDF check. Review suggestions with
 the user; only an explicitly approved `--media-inputs image,pdf` (or reviewed
 entry change) makes a manual, unverified permission. Existing explicit choices,
 including text-only, must not be overwritten by a suggestion.
@@ -328,18 +339,30 @@ Full interface/media/decision checks remain available for unknown shared hubs.
 Media tests send generated samples to the selected route. Get permission for
 those calls and formats. Use `--test-media-inputs image,audio,video,pdf` to test
 selected formats in **plan**, **media** or **all**. Use `--media-inputs` only for
-manual unverified declarations; do not combine the two. Only passing tests add
+manual declarations saved as not tested; do not combine the two. Only passing tests add
 permissions in stage results. Supported formats depend on the actual transport:
 
 - Chat-family image/PDF checks exist. Audio/video testing for Responses and
-  Anthropic is not implemented here; a local skip is not a failed model test.
+  Anthropic is unavailable here. Use Chat to test audio/video, or enable those
+  inputs without testing; retain the local `not_probed` outcome.
 - Native decisions support named **Image** inputs only. OpenAI/Hub Decisions
   (`--api-style openai`) uses native `input_image` blocks.
 - Direct TypeSafe System One requires
   `--decision-image-transport typesafe_multipart` and
   `--typesafe-danger-zone-images`; obtain permission for the experimental opt-in.
-- System One JSON proxies have no verified image mapping. Suggestions report images as not testable for this transport and never choose multipart automatically. Do not infer multipart support from a hostname. Native decision audio/video/PDF are not implemented.
-- Published OpenRouter `architecture.input_modalities` and exact Anthropic `capabilities.image_input.supported` / `capabilities.pdf_input.supported` flags are advertisements only. Missing/custom metadata falls back to manual choice. Responses/Anthropic audio/video advertisements can be reported with a check-unavailable notice; they are not verified support.
+- System One JSON blocks image requests before sending. Use OpenAI Decisions or
+  an approved direct TypeSafe multipart connection, or turn images off. A manual
+  permission still cannot send images through System One JSON. Choose multipart
+  and experimental opt-in explicitly, never from the hostname or listing.
+  Decision audio/video/PDF are unavailable.
+- Read listed formats from OpenRouter `architecture.input_modalities` and exact
+  Anthropic `capabilities.image_input.supported` / `capabilities.pdf_input.supported`
+  flags. With missing metadata, explicitly choose inputs or approve generated
+  checks. Empty lists omit the source/advertisement block in the wizard.
+- Review effective permissions separately from check evidence. The wizard shows
+  Images off, enabled (test passed), enabled (not confirmed by this test) for
+  failed-retained inputs, or enabled (not tested) for manual/skipped inputs.
+  Preserve the raw outcomes and reasons in headless reports.
 
 ```sh
 uv run nooa connect decision-model --stage media --as decisions \
@@ -352,8 +375,8 @@ Use the same arguments with `--stage plan` first to inspect the five-request
 routing/smoke/image plan. A fresh `--stage decision` runs routing plus three
 smoke cases (boolean, literal choice, ordinal score); image testing follows the
 decision baseline. Native image passing requires the image on the actual request,
-a validated typed result and the expected color. These small fixtures do not
-establish general accuracy or calibration.
+a validated typed result and the expected color. Review answers on the user's
+actual examples before relying on accuracy or calibration.
 
 For TypeSafe, use its full System One endpoint and the explicit transport/opt-in
 flags above. Do not pass chat reply caps or reasoning settings to native decisions.
@@ -363,13 +386,15 @@ only for the selected connection.
 ## Diagnose and hand off
 
 Read `checks`, `error`, `warnings`, `run_context` and `diagnostic_prompt` after a
-failure. A sanitized suggested rerun is guidance, not additional permission.
+failure. Confirm permission for additional paid calls, configuration or writes
+and check the remaining allowance before following a suggested rerun.
 Distinguish authentication, timeout, rejection, malformed response, missing usage,
 and skipped budget/transport checks. Stop on authentication failures and ask the
 user to repair credentials locally; do not try unrelated keys or endpoints.
 
 Request acceptance, schema validity, correctness, reasoning observed and cache
-reuse are separate evidence. Save success proves persistence, not capability.
+reuse are separate evidence. After saving, inspect the effective registry alias
+and review the affected check results before using the model.
 Never print raw error bodies, reasoning, encrypted state or credential values.
 After a fix, rerun only the affected stage within the remaining allowance.
 

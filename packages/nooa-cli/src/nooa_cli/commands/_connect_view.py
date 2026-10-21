@@ -143,7 +143,7 @@ def connection_detail(record):
         return "Passed"
     if record.get("outcome") == "not_probed":
         return (
-            "Not tested: token budget exhausted"
+            "Not tested: check budget used up"
             if record.get("reason") == "budget exhausted"
             else "Not tested"
         )
@@ -173,9 +173,13 @@ def check_reason(reason):
     """Short terminal wording; library records and diagnostic detail stay intact."""
     reason = reason or ""
     replacements = {
-        "budget exhausted": "token budget exhausted",
-        "This interface has no native video input mapping here; select video manually as unverified.": "Video testing not implemented for this route/input format. Manual selection is unverified.",
-        "This interface has no portable inline WAV input shape here; select audio manually as unverified.": "Audio testing not implemented for this route/input format. Manual selection is unverified.",
+        "budget exhausted": "check budget used up",
+        "Decision baseline not accepted; fresh checks not tested": "Decision connection check did not pass; later checks skipped",
+        "Typed decision baseline did not pass; image not tested": "Decision answer checks did not pass; image check skipped",
+        "Native typed response accepted but fixture answer incorrect": "Answer format accepted, but the sample answer was incorrect. Try another model.",
+        "Image access, known color accuracy and actual wire attachment must all be confirmed": "Could not confirm image delivery and the sample answer. Review image settings or try another connection.",
+        "This interface has no native video input mapping here; select video manually as unverified.": "Video testing isn't available for this API format. Use Chat to test video, or enable it without testing.",
+        "This interface has no portable inline WAV input shape here; select audio manually as unverified.": "Audio testing isn't available for this API format. Use Chat to test audio, or enable it without testing.",
         "Configured reply cap changed after planning; make a new plan": "Reply limit changed after planning; restart setup",
         "probe timeout must be between 1 and 120 seconds": "Check timeout must be 1–120 seconds",
         "selected reasoning level changes the approved reply cap": "Selected reasoning level needs a different reply limit; restart setup",
@@ -200,6 +204,10 @@ def check_reason(reason):
         "No cache markers or cache reads observed; check the runtime's cache defaults and server support": "Caching was not requested and no reuse was reported. Review the client and server caching settings.",
         "A message from an earlier turn rendered differently once replayed as history; explicit cache breakpoints will not accumulate hits across turns until the renderer keeps that message's wire shape stable": "Earlier messages changed when sent again, preventing cache reuse. Review the client settings.",
     }
+    if reason.startswith("Video testing not implemented"):
+        return "Video testing isn't available for this API format. Use Chat to test video, or enable it without testing."
+    if reason.startswith("Audio testing not implemented"):
+        return "Audio testing isn't available for this API format. Use Chat to test audio, or enable it without testing."
     if reason.startswith("Text baseline") or "; media not tested" in reason:
         return "Connection check did not pass; media not tested"
     return replacements.get(reason, reason)
@@ -210,18 +218,31 @@ def media_test_detail(kind, record, *, media_inputs=None):
     outcome = record.get("outcome")
     if outcome == "passed":
         if record.get("client") == "decision":
-            return "Passed · Native image sent, typed access and known color confirmed"
+            return "Passed · Image sent; access and sample color confirmed"
         return "Passed · Model reported access to this input"
     if outcome == "unavailable":
         setting = (
-            f"{kind} input remains enabled (manual choice)"
+            f"{media_label(kind)}: enabled (not tested)"
             if media_inputs is not None and kind in media_inputs
-            else f"{kind} input disabled"
+            else f"{media_label(kind)}: off"
         )
-        return f"Not available · Model cannot access this input; {setting}."
+        return f"Not available · The model reported no access to this sample; {setting}."
     if outcome == "not_probed":
-        return "Skipped" + (" · " + check_reason(record["reason"]) if record.get("reason") else "")
+        return f"{media_label(kind).removesuffix('s')} check skipped" + (
+            ": " + check_reason(record["reason"]) if record.get("reason") else ""
+        )
     reason = record.get("reason", "").removesuffix(f"; {kind} support was not confirmed")
+    if record.get("client") == "decision" and not record.get("error"):
+        if record.get("attachment_observed") is False:
+            reason = "Image was not sent as planned. Review image request settings"
+        elif record.get("access_reported") is False:
+            reason = "The model reported no access to the sample. Try another connection or leave images off"
+        elif record.get("answer_correct") is False:
+            reason = (
+                "The model did not identify the sample color. Try another model or leave images off"
+            )
+        else:
+            reason = check_reason(reason)
     if outcome == "rejected":
         detail = "Server rejected the media request"
     elif record.get("timeout_kind") or reason.startswith("Timed out"):
@@ -241,11 +262,11 @@ def media_test_detail(kind, record, *, media_inputs=None):
             "Reply not understood by the runtime": "Could not read the reply",
         }.get(reason, reason or f"Could not confirm {kind} from the sample")
     setting = (
-        f"{kind} input remains enabled (not confirmed by this test)"
+        f"{media_label(kind)}: enabled (not confirmed by this test)"
         if media_inputs is not None and kind in media_inputs
-        else f"{kind} support disabled"
+        else f"{media_label(kind)}: off"
         if media_inputs is not None
-        else f"{kind} support not confirmed"
+        else f"{media_label(kind)}: not confirmed"
     )
     return f"Failed · {detail.rstrip('.')}; {setting}."
 
@@ -359,13 +380,13 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
             fg="yellow",
         )
         line(
-            f"Shared token budget: {format_budget(budget_tokens)}"
+            f"Check budget: {format_budget(budget_tokens)}"
             if budget_tokens is not None
-            else "Shared token budget: unlimited",
+            else "Check budget: unlimited",
             dim=True,
         )
         line(
-            f"Interface discovery: one routing call per candidate; chat replies capped at {output_tokens:,} output tokens. Decision calls have no reply-token cap.",
+            f"API discovery: one connection call per candidate; chat reply limit {output_tokens:,} tokens. Decision calls have no reply limit.",
             dim=True,
         )
         line(
@@ -386,13 +407,13 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
         )
     else:
         line(
-            "Connection unverified: model checks are off. Model lists and public details may still be fetched.",
+            "Connection: not tested. Model lists and public details may still be fetched.",
             dim=True,
         )
     line("Skip paid checks: --no-probe    Help: F1", dim=True)
     if not sys.stdin.isatty():
         line("Manual setup: docs/model-configuration.md", dim=True)
-        line("Agent skill: nooa-model-configuration", dim=True)
+        line("Agent workflow: nooa-connect", dim=True)
 
 
 def step(number, title):
@@ -560,66 +581,99 @@ class CheckProgress:
             click.echo()
 
 
+def media_label(kind):
+    return {"image": "Images", "audio": "Audio", "video": "Video", "pdf": "PDFs"}.get(
+        kind, kind.capitalize()
+    )
+
+
+def media_settings(entry):
+    """Show saved permissions separately from the evidence, without raw enum values."""
+    enabled = entry.get("media_inputs", [])
+    facts = entry.get("provenance", {}).get("probes", {})
+    kinds = (
+        ("image",) if entry.get("client_type") == "decision" else ("image", "audio", "video", "pdf")
+    )
+    for kind in kinds:
+        record = facts.get("media:" + kind, {})
+        state = (
+            "off"
+            if kind not in enabled
+            else "enabled (test passed)"
+            if record.get("outcome") == "passed"
+            else "enabled (not confirmed by this test)"
+            if record.get("outcome") in {"inconclusive", "rejected", "unavailable", "not_confirmed"}
+            else "enabled (not tested)"
+        )
+        line(f"{media_label(kind)}: {state}")
+
+
 def model_details(model, *, output_tokens, edited=False):
-    """Show published model information without changing any request settings."""
+    """Show available facts only; unknown fields remain editable and unknown internally."""
 
     def tokens(value):
         return (
             f"{value:,} tokens"
             if isinstance(value, int) and not isinstance(value, bool) and value > 0
-            else "Not listed"
+            else None
         )
 
     reasoning = model.get("reasoning") or {}
     levels = reasoning.get("supported_efforts") or []
-    level_text = ", ".join(levels) if levels else "Not listed"
-    default_text = reasoning.get("default_effort") or "Not listed"
+    level_text = ", ".join(levels) if levels else None
+    default_text = reasoning.get("default_effort")
     if not levels and isinstance(reasoning.get("default_enabled"), bool):
         level_text = (
             "Always on"
             if reasoning.get("mandatory") is True
-            else "Thinking on/off; no named levels listed"
+            else "Thinking on/off"
             if reasoning.get("mandatory") is False
-            else "Thinking available; named levels not listed"
+            else "Thinking available"
         )
         default_text = "Thinking on" if reasoning["default_enabled"] else "Thinking off"
+    rows = [
+        (label, value)
+        for label, value in (
+            ("Context window", tokens(model.get("context_length"))),
+            (
+                "Model reply maximum",
+                tokens((model.get("top_provider") or {}).get("max_completion_tokens")),
+            ),
+            ("Reasoning levels", level_text),
+            ("Default reasoning", default_text),
+        )
+        if value
+    ]
+    if not rows:
+        line(
+            "No model settings listed. Enter known limits or continue with NOOA defaults.", dim=True
+        )
+        return
     click.echo()
     line(f"Model details · {model['id']}", fg="bright_cyan", bold=True)
-    for label, value in (
-        ("Context window", tokens(model.get("context_length"))),
-        (
-            "Reported reply ceiling",
-            tokens((model.get("top_provider") or {}).get("max_completion_tokens")),
-        ),
-        ("Reasoning levels", level_text),
-        ("Default reasoning", default_text),
-        (
-            "Interface discovery limit",
-            f"{output_tokens:,} tokens per reply (not reasoning checks)",
-        ),
-    ):
+    for label, value in rows:
         source_key = {
             "Context window": "context_length",
-            "Reported reply ceiling": "max_completion_tokens",
+            "Model reply maximum": "max_completion_tokens",
         }.get(label)
         source = (model.get("limit_sources") or {}).get(source_key)
         source_label = {
-            "catalogue": "catalogue",
-            "endpoint": "endpoint",
-            "endpoint_input_limit": "endpoint input limit; conservative bound",
+            "catalogue": "OpenRouter",
+            "endpoint": "your server",
+            "endpoint_input_limit": "server input limit",
         }.get(source, source)
-        line(f"{label:<25} {value}" + (f" · {source_label}" if source_label else ""))
+        line(f"{label:<25} {value}" + (f" · {source_label}" if source_label and not edited else ""))
     line(
         "Your edited settings."
         if edited
-        else "Sources: endpoint limits take priority; catalogue information fills gaps."
+        else "Model details from your server, with OpenRouter details where needed."
         if model.get("endpoint_limits")
-        else "Source: OpenRouter model listing. Your server may use different limits.",
+        else "Model details from OpenRouter. Check your server's limits if they differ.",
         dim=True,
     )
-    line("Setup checks do not measure maximum limits.", dim=True)
+    line(f"API discovery reply limit: {output_tokens:,} tokens.", dim=True)
     line(
-        "The reply ceiling is metadata, not your per-reply budget. Input, reasoning and the answer share the context window.",
+        "Choose your reply limit next. Input, thinking and the answer share the context window.",
         dim=True,
     )
     context = model.get("context_length")
@@ -631,9 +685,9 @@ def model_details(model, *, output_tokens, edited=False):
         and ceiling >= context * 0.8
     ):
         line(
-            f"A reply using this whole ceiling would leave only {max(0, context - ceiling):,} tokens for input. Do not use it as an everyday reply budget."
+            f"A reply using the model maximum would leave only {max(0, context - ceiling):,} tokens for input. Choose a smaller reply limit."
             if ceiling < context
-            else "This ceiling meets or exceeds the context window. Verify the server limits before using it as a reply budget.",
+            else "The model reply maximum reaches the context window. Check your server limits and choose a smaller reply limit to leave room for input.",
             fg="yellow",
         )
     click.echo()

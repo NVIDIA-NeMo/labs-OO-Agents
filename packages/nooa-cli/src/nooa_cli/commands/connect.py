@@ -33,7 +33,7 @@ from ._connect_stages import STAGES
 @click.option("--endpoint", help="API base URL, or full decision request URL (otherwise prompted).")
 @click.option(
     "--systemone-endpoint",
-    help="Full System One POST URL for mixed interface discovery; never inferred for custom servers.",
+    help="Full System One request URL to include in API discovery for a custom server.",
 )
 @click.option(
     "--share-interface-key",
@@ -50,7 +50,7 @@ from ._connect_stages import STAGES
 )
 @click.option(
     "--api-key-env",
-    help="Environment variable name, never the key itself (otherwise prompted).",
+    help="Name of the environment variable holding your key (otherwise prompted).",
 )
 @click.option(
     "--catalogue-model", help="Explicit OpenRouter metadata ID; stages require --catalogue-file."
@@ -71,7 +71,7 @@ from ._connect_stages import STAGES
 @click.option(
     "--listing-style",
     type=click.Choice(["chat", "responses", "anthropic"]),
-    help="Catalogue auth/pagination convention, independent of --api-style.",
+    help="How the model list authenticates and pages results; choose separately from --api-style.",
 )
 @click.option(
     "--discovery-api-key-env",
@@ -93,7 +93,7 @@ from ._connect_stages import STAGES
 @click.option(
     "--context-window",
     type=click.IntRange(min=1),
-    help="User-supplied context limit, not a request allocation.",
+    help="Known context window size to save (tokens).",
 )
 @click.option(
     "--probe",
@@ -106,7 +106,7 @@ from ._connect_stages import STAGES
 @click.option(
     "--budget-tokens",
     type=click.IntRange(min=1),
-    help="Estimated token budget for checks (default: unlimited); not a spending cap.",
+    help="Estimated check budget in tokens (default: unlimited). Checks may cost money; charges can exceed this estimate.",
 )
 @click.option(
     "--output-tokens",
@@ -115,14 +115,14 @@ from ._connect_stages import STAGES
     # the CLI need not import nooa.unifiedllm at load; a test keeps them equal.
     default=2048,
     show_default=True,
-    help="Chat-family interface discovery cap only, before the saved reply budget is chosen; no cap for native decisions.",
+    help="Reply limit for chat API discovery, before choosing the saved reply limit. Decision calls have no reply limit.",
 )
 @click.option(
     "--reasoning-output-tokens",
     type=click.IntRange(1, 32768),
     default=4096,
     show_default=True,
-    help="Deprecated compatibility option; reasoning checks now use the configured reply cap.",
+    help="Deprecated compatibility option; reasoning checks use the saved reply limit.",
 )
 @click.option(
     "--reasoning-level",
@@ -137,25 +137,25 @@ from ._connect_stages import STAGES
     "--reply-tokens",
     "reply_tokens",
     type=click.IntRange(min=1),
-    help="Chat-family reply token limit to save and use for checks; native decisions have no reply cap.",
+    help="Chat reply limit to save and use for checks. Decision calls have no reply limit.",
 )
 @click.option(
     "--media-inputs",
-    help="Manually declare comma-separated image,audio,video,pdf inputs (unverified); native decisions support image only. Empty or - means text-only.",
+    help="Enable image,audio,video,pdf inputs without testing (comma-separated). Decision models accept images only. Empty or - turns media off.",
 )
 @click.option(
     "--test-media-inputs",
-    help="Test selected image,audio,video,pdf formats with generated samples in the approved budget; native decisions support image only with a valid transport.",
+    help="Test image,audio,video,pdf inputs with generated samples and the approved check budget. No user files are used. Decision models can test images only.",
 )
 @click.option(
     "--decision-image-transport",
     type=click.Choice(["json", "typesafe_multipart"]),
-    help="Explicit native decision image transport; never inferred from the endpoint.",
+    help="Choose how to send decision images: json or typesafe_multipart. System One image testing requires direct TypeSafe multipart and experimental opt-in.",
 )
 @click.option(
     "--typesafe-danger-zone-images/--no-typesafe-danger-zone-images",
     default=None,
-    help="Explicit experimental TypeSafe multipart image opt-in.",
+    help="Approve experimental TypeSafe multipart image requests.",
 )
 @click.option("--show-config", is_flag=True, help="Show full YAML details before saving.")
 @click.option(

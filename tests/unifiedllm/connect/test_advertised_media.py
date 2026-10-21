@@ -31,7 +31,9 @@ def metadata(modalities):
 def test_missing_and_unknown_are_manual(value):
     result = connect.advertised_media_suggestions(value)
     assert result["advertised"] == result["suggested"] == []
-    assert result["notes"] == ["Media information unknown; choose inputs manually if needed."]
+    assert result["notes"] == [
+        "Media support isn't listed. You can test inputs or choose them yourself."
+    ]
     assert result["permissions_changed"] is False
 
 
@@ -87,15 +89,15 @@ def test_openrouter_categories_file_is_not_pdf(modalities, expected):
     if "file" in modalities:
         assert any(
             (
-                "alone does not establish PDF support"
+                "Files are listed separately from PDFs"
                 if "pdf" in modalities
-                else "PDF support is unknown"
+                else "PDF support isn't listed"
             )
             in note
             for note in result["notes"]
         )
     if "unknown" in modalities:
-        assert any("Unmapped" in note for note in result["notes"])
+        assert any("Inputs unavailable in Connect" in note for note in result["notes"])
 
 
 @pytest.mark.parametrize("bad", [["image"] * 101, ["image", 4], "image", ["image\n"], ["x" * 201]])
@@ -134,7 +136,13 @@ def test_decision_transport_limits(style, transport, optin, checkable):
     assert result["suggested"] == ["image"]
     assert result["checkable"] == checkable
     if not checkable:
-        assert "unverified" in result["unavailable_checks"]["image"]
+        assert (
+            "Image testing isn't available for this connection"
+            in result["unavailable_checks"]["image"]
+        )
+        assert (
+            "OpenAI Decisions or direct TypeSafe multipart" in result["unavailable_checks"]["image"]
+        )
 
 
 @pytest.mark.parametrize("permissions", [None, [], ["pdf"], ["audio", "video"]])
@@ -240,5 +248,5 @@ def test_file_note_respects_specific_pdf_flags(supported):
         {"input_modalities": ["file"], "capabilities": {"pdf_input": {"supported": supported}}}
     )
     assert result["suggested"] == (["pdf"] if supported else [])
-    assert not any("PDF support is unknown" in note for note in result["notes"])
-    assert any("file input alone" in note for note in result["notes"])
+    assert not any("PDF support isn't listed" in note for note in result["notes"])
+    assert any("Files are listed separately from PDFs" in note for note in result["notes"])

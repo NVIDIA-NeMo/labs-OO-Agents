@@ -12,11 +12,11 @@ verified. Keep model configuration separate from agent prompts and strategies.
 
 - For a diagnostic handoff, inspect its running package/version, target file,
   effective alias source, registry chain, credential source and remaining budget.
-  A suggested rerun is not permission for additional paid calls.
+  Confirm permission and the remaining allowance before any suggested rerun.
 - Use `nooa.llm_config.llm_config_chain()` to inspect active sources and
   `nooa.unifiedllm.registry.reload_registry(Path(...))` to load a specific file.
-  An explicit output file is not necessarily in the runtime's discovery chain;
-  a higher-priority alias can shadow the saved entry.
+  If the saved alias has no effect, register the explicit output path and check
+  for a higher-priority entry shadowing it.
 - Confirm the target alias/file and preserve other aliases and unknown fields.
   Prefer Connect's edit/write path over rebuilding a registry from selected entries.
 - Keep keys in environment variables or NOOA's layered `secrets.yaml`, never in
@@ -39,8 +39,8 @@ workflow here. Install it alongside this skill when copying skill bundles.
 This skill covers registry semantics and manual configuration. See
 [manual configuration](../../docs/model-configuration.md) for the reference.
 For library automation, `nooa.unifiedllm.connect` exposes proposal/check/write
-operations but never grants user permission; use the same scope and evidence
-rules as the headless skill.
+operations; obtain permission for configuration, checks and writes using the
+same scope and evidence rules as the headless skill.
 
 ## Keep settings truthful
 
@@ -53,13 +53,14 @@ rules as the headless skill.
 - New Connect entries carry `transport: direct`. Runtimes with direct SDK support
   use it to bypass LiteLLM; older runtimes ignore it. Preserve explicit transport
   choices when editing. Check the installed runtime before describing probes as
-  direct-transport validation: the saved field alone is not evidence.
+  direct-transport validation: inspect the actual request path used by the checks.
 - Explicit user choices win; endpoint-reported limits take precedence over
   public catalogue suggestions. Do not add input/output limits to invent a total
   context window. Record unknown context capacity as unverified.
 - The saved reply cap is `max_tokens` for the three chat-family interfaces; Responses maps
-  it to `max_output_tokens` on the wire. Catalogue output ceilings are metadata,
-  not recommendations. Keep the selected cap below the known context window.
+  it to `max_output_tokens` in the request. Choose a reply limit below the known
+  context window to leave room for input; check server limits if they differ
+  from the published model reply maximum.
   Configured checks send this cap, including a selected level’s override; only
   initial interface discovery uses a smaller cap. Insufficient approved budget
   skips checks rather than lowering their caps. If no check sent the saved cap, report it
@@ -96,25 +97,32 @@ implemented native media transports: OpenAI/Hub Decisions image parts, or direct
 TypeSafe multipart with explicit experimental opt-in. Route changes clear
 inherited image permissions. See [nooa-connect](../nooa-connect/SKILL.md#media-and-native-decisions)
 for headless checks, permission/transport options, evidence and save behavior.
+System One JSON blocks image requests before sending, even with manual image
+permission. Use OpenAI Decisions or an approved direct TypeSafe multipart
+connection, or turn images off. Review Images off/enabled separately from the
+check outcome; failed or skipped retests retain previously enabled inputs.
 
 ## Interpret failures and evidence separately
 
-Model listing may be public: it does not validate inference credentials.
-A timeout or server error does not prove an unsupported API. A truncated reply
-is inconclusive. To test a larger limit, explicitly change the configuration,
+Test the inference key with a connection check, even when model listing works.
+For a timeout or server error, review the endpoint and server status before an
+approved retry. For a truncated reply, check the reply limit and finish reason.
+To test a larger limit, explicitly change the configuration,
 rebuild the plan, and rerun within the approved allowance and known ceiling.
 Connect does not silently retry with a different cap than the saved configuration.
 
 For reasoning, distinguish request acceptance, settings reaching the wire,
 reasoning observed in the reply, and state replayed in the next request. An
-accepted effort field may be ignored; a correct puzzle answer alone does not
-prove reasoning support. A route that exposes no reasoning is unconfirmed, not
-necessarily non-reasoning. Session checks must retain both settings and available
+accepted effort field may be ignored; inspect the returned reasoning evidence
+as well as the answer. If reasoning is hidden, check server settings or another
+API format and keep support unconfirmed until evidence is available. Session
+checks must retain both settings and available
 state. Never print reasoning text, signatures, encrypted state or raw error bodies.
 
 For caching, compare a stable prefix and continuation cache-read usage. A later
-miss does not erase a successful continuation hit; implicit provider cache misses
-are warnings, not proof that an otherwise working entry is broken. Report missing
+miss leaves a successful continuation hit in the evidence. For implicit cache
+misses, inspect provider caching settings and usage before changing a working
+entry. Report missing
 markers separately from markers sent with no reported reuse.
 
 After a fix, rerun only affected checks within the existing allowance. Hand off
@@ -179,7 +187,7 @@ finally:
   Construct a new client when changing routes rather than reusing its level map.
 - Use provider documentation or catalogues as candidates, then check the actual
   route's outgoing HTTP fields: SDKs and gateways may reject or silently drop
-  settings. HTTP acceptance alone does not prove a level was honored. Leave
+  settings. Inspect fields sent and reasoning returned for each level. Leave
   unverified choices unknown rather than inventing mappings.
 - This controls effort, not retention of stored reasoning. Changing effort may
   invalidate the cached prefix; labels are not comparable across providers.

@@ -98,8 +98,8 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         command,
         ["--output", str(path)],
         input=(
-            "y\ncustom\ndiscover\nhttps://api.test/v1\nnew\nUX_KEY\ntemporary-secret\n"
-            "model\ntest\nuse\nrecommended\nkeep\nlocal\n" + ("y\nn\n" if save else "n\n")
+            "custom\ndiscover\nhttps://api.test/v1\nnew\nUX_KEY\ntemporary-secret\n"
+            "model\ntest\ntest\nkeep\nlocal\n" + ("y\nn\n" if save else "n\n")
         ),
     )
     assert result.exit_code == 0, result.output
@@ -111,17 +111,15 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
     (tmp_path / "transcript-normalized.txt").write_text(plain + "\n")
     checkpoints = [
         "NOOA / CONNECT",
-        "Approve setup",
         "Choose a provider",
         "Model server URL",
         "Key environment variable",
         "API key",
-        "Search advertised model IDs",
-        "OpenAI-compatible Chat: Passed",
+        "Search available models",
         "configure media inputs",
-        "Model details",
-        "Model settings",
-        "Reply limit",
+        "Proposed configuration",
+        "Would you like to test these settings?",
+        "OpenAI-compatible Chat: Passed",
         "Connection: Passed",
         "Tool use: Passed",
         "Reasoning (low): Passed",
@@ -137,7 +135,7 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         "Reasoning retention: Passed",
         "Results",
         "Save model",
-        "Enabled media inputs",
+        "Images: enabled (test passed)",
         "How would you like to continue?",
         "Save this model as",
         "Save summary",
@@ -277,7 +275,7 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
     elif case == "reply":
         for label in (
             "Recommended — 32,768 tokens",
-            "High reasoning budget — 65,536 tokens",
+            "High reply limit — 65,536 tokens",
             "Custom…",
         ):
             assert label in " ".join(screens[0].split())

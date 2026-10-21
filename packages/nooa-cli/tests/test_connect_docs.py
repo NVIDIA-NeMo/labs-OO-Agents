@@ -55,5 +55,5 @@ def test_connect_help_distinguishes_native_decision_limits():
     result = CliRunner().invoke(command, ["--help"])
     assert result.exit_code == 0
     text = " ".join(result.output.split())
-    assert "native decisions support image only" in text
-    assert "native decisions have no reply cap" in text
+    assert "Decision models accept images only" in text
+    assert "Decision calls have no reply limit" in text

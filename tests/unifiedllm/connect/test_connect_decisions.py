@@ -552,7 +552,7 @@ async def test_reused_decision_evidence_charges_zero_for_current_run(monkeypatch
 @pytest.mark.parametrize("style", connect.DECISION_API_STYLES)
 @pytest.mark.parametrize("field", ["media_inputs", "test_media_inputs"])
 def test_decision_plan_rejects_unverified_non_image_media(style, field):
-    with pytest.raises(ValueError, match="only media_inputs"):
+    with pytest.raises(ValueError, match="accept images only"):
         connect.plan("decisions", "exact-model", style, ENDPOINTS[style], "", **{field: ["audio"]})
 
 

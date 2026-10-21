@@ -61,7 +61,7 @@ def test_wizard_saves_endpoint_limits_not_catalogue(tmp_path, monkeypatch):
     entry = yaml.safe_load(target.read_text())["models"]["local"]
     assert entry["context_window"] == 100000
     assert entry["max_tokens"] == 16000
-    assert "endpoint input limit" in result.output
+    assert "server input limit" in result.output
     assert "provenance" not in entry
 
 
@@ -99,7 +99,7 @@ def test_stage_cache_miss_does_not_fail_working_entry(monkeypatch, cached):
     report = json.loads(result.stdout)
     assert report["checks"]["cache"]["outcome"] == ("confirmed" if cached[0] else "warning")
     assert report["diagnostic_prompt"] is None
-    assert "Context window unknown" in report["warnings"][0]
+    assert "Context window not listed" in report["warnings"][0]
 
 
 def test_stage_plan_reuses_discovery_without_http(tmp_path, monkeypatch):
@@ -135,7 +135,9 @@ def test_stage_plan_reuses_discovery_without_http(tmp_path, monkeypatch):
     entry = json.loads(result.stdout)["data"]["entry"]
     assert entry["context_window"] == 100000
     assert entry["max_tokens"] == 16000
-    assert "unverified" in json.loads(result.stdout)["warnings"][0]
+    assert (
+        "Reply limit not tested with the saved settings" in json.loads(result.stdout)["warnings"][0]
+    )
     result = CliRunner().invoke(
         command,
         [
@@ -187,13 +189,14 @@ def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeyp
             "--output",
             str(target),
         ],
-        input="y\ndiscover\nmodel\nlonger\nchat\n-\ny\n",
+        input="discover\nmodel\n-\ntest\nlonger\nchat\ny\n",
     )
     assert result.exit_code == 0, result.output
     # Configured-cap routing is distinct from interface discovery;
     # check_interfaces now also probes reasoning by default for chat.
     assert len(posts) == 6
-    assert result.output.count("Approve setup and optional media checks") == 1
+    assert result.output.count("Would you like to test these settings?") == 1
+    assert "Approve setup" not in result.output
     assert result.output.count("Results ·") == 1
     assert "route may be slow" in result.output
     assert "private server detail" not in result.output

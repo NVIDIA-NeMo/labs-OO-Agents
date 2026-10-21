@@ -78,4 +78,26 @@ async def test_discovery_keeps_input_and_context_distinct(monkeypatch):
 
 def test_unknown_context_is_visible_in_library_plan():
     entry = connect.plan("local", "model", "chat", "https://models.example/v1", "").entry
-    assert "Context window unknown" in entry["provenance"]["warnings"][0]
+    assert "Context window not listed" in entry["provenance"]["warnings"][0]
+
+
+@pytest.mark.parametrize("context", [None, 8192])
+def test_unknown_context_warning_has_a_concrete_action_and_preserves_entry(context):
+    from copy import deepcopy
+
+    entry = connect.plan("local", "model", "chat", "https://models.example/v1", "").entry
+    entry["context_window"] = context
+    before = deepcopy(entry)
+    warnings = connect.entry_warnings(entry)
+    if context is None:
+        assert warnings[0] == (
+            "Context window not listed. NOOA will use its default; supply --context-window "
+            "or your server model details if you know the limit."
+        )
+    else:
+        assert not any("Context window not listed" in warning for warning in warnings)
+    assert (
+        "Reply limit not tested with the saved settings. Run a connection check to test it."
+        in warnings
+    )
+    assert entry == before

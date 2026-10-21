@@ -201,4 +201,4 @@ def test_diagnostics_point_to_canonical_headless_skill():
     assert context["reference_paths"][0] == str(SKILL.resolve())
     handoff = connect.diagnostic_prompt("routing", {}, {})
     assert "First read the nooa-connect skill" in handoff
-    assert "does not authorize additional paid calls, model configuration or writes" in handoff
+    assert "Confirm permission for additional paid calls, model configuration or writes" in handoff

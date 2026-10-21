@@ -284,10 +284,13 @@ def test_save_reload_and_route_reset_safe(monkeypatch, tmp_path, style):
 
 
 def test_json_proxy_image_tests_reject_preflight_and_manual_is_unverified():
-    with pytest.raises(ValueError, match="Unverified System One JSON image transport"):
+    with pytest.raises(ValueError, match="Image testing isn't available with System One JSON"):
         connect.plan("x", "x", "systemone", ENDPOINT, "", test_media_inputs=["image"])
     plan = connect.plan("x", "x", "systemone", ENDPOINT, "", media_inputs=["image"])
-    assert "unverified" in connect.entry_warnings(plan.entry)[0]
+    assert (
+        "System One JSON blocks image requests before sending"
+        in connect.entry_warnings(plan.entry)[0]
+    )
 
 
 @pytest.mark.asyncio
@@ -326,3 +329,44 @@ async def test_fresh_decision_stage_requires_fixture_plan(monkeypatch):
     mock_http(monkeypatch, lambda request: pytest.fail("No incomplete stage inference"))
     with pytest.raises(ValueError, match="fresh typed decision plan"):
         await connect.check_stage(proposal(decision_checks=False), "decision")
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "transport,optin,blocked",
+    [
+        ("json", False, True),
+        ("typesafe_multipart", False, True),
+        ("typesafe_multipart", True, False),
+    ],
+)
+def test_image_transport_warning_is_actionable_and_display_only(enabled, transport, optin, blocked):
+    from copy import deepcopy
+
+    entry = connect.plan(
+        "x",
+        "x",
+        "systemone",
+        ENDPOINT,
+        "",
+        media_inputs=["image"] if enabled else [],
+        decision_image_transport=transport,
+        typesafe_danger_zone_images=optin,
+    ).entry
+    before = deepcopy(entry)
+    warnings = connect.entry_warnings(entry)
+    if enabled and blocked:
+        assert len(warnings) == 1
+        assert "Images are enabled" in warnings[0] and "before sending" in warnings[0]
+        assert (
+            "Use OpenAI Decisions or an approved direct TypeSafe multipart connection, or turn images off."
+            in warnings[0]
+        )
+        if transport == "json":
+            assert "System One JSON blocks image requests" in warnings[0]
+        else:
+            assert "TypeSafe multipart requires explicit experimental image opt-in" in warnings[0]
+            assert "System One JSON blocks" not in warnings[0]
+    else:
+        assert warnings == []
+    assert entry == before

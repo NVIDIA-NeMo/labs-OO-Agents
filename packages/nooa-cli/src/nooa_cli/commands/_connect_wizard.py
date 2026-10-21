@@ -50,6 +50,7 @@ class WizardState:
     discovery_succeeded: Any = None
     edit_model: Any = None
     edited_settings: Any = None
+    edited_level_patches: Any = None
     editing: Any = None
     endpoint: Any = None
     endpoint_models: Any = None
@@ -61,6 +62,9 @@ class WizardState:
     levels: Any = None
     levels_file: Any = None
     metadata_prepared: bool = False
+    guided: bool = False
+    guided_media_explicit: bool = False
+    guided_media_revised: bool = False
     selected_endpoint_model: Any = None
     media_hints: Any = None
     media_inputs: Any = None
@@ -266,12 +270,6 @@ def select_connection(state: WizardState) -> bool:
         budget_tokens=state.budget_tokens,
         reasoning_output_tokens=state.reasoning_output_tokens,
     )
-    if state.approval != "none" and not state.yes:
-        if not prompts.confirm(
-            "Approve setup and optional media checks with this token budget?", default=True
-        ):
-            click.echo("Checks not approved. Run with --no-probe for manual setup.")
-            return False
     if state.editing is None:
         view.step(1, "Connection")
     if state.provider and state.provider not in (*connect.PROVIDERS, "custom"):
@@ -494,7 +492,7 @@ def select_model(state: WizardState) -> bool:
         state.model = prompts.prompt("Exact decision model ID (Ctrl-C to cancel)")
     if not state.model and state.endpoint_models:
         state.model = prompts.prompt(
-            "Search advertised model IDs (type to search; Tab to select)",
+            "Search available models (type to search; Tab to select)",
             choices=[item["id"] for item in state.endpoint_models],
             searchable=True,
         )
@@ -543,7 +541,7 @@ def select_model(state: WizardState) -> bool:
             names = [item["id"] for item in found.models]
             click.echo(f"Found {len(names)} models. Type part of a name, then Tab to select.")
             state.model = prompts.prompt(
-                "Search advertised model IDs (type to search; Tab to select)",
+                "Search available models (type to search; Tab to select)",
                 choices=names,
                 searchable=True,
             )
@@ -618,7 +616,7 @@ def check_interfaces(state: WizardState) -> bool:
                 view.line(
                     "Model listing succeeded, but model responses timed out; the route may be slow."
                     if slow
-                    else "Could not confirm a working connection. Listing models does not validate the key.",
+                    else "Connection check failed. Review the key, server URL and API format, then try again.",
                     fg="yellow",
                 )
                 if state.show_diagnostics:
@@ -733,6 +731,13 @@ def check_interfaces(state: WizardState) -> bool:
                         )
                     )
                     state.model = prompts.prompt("Exact model ID", default=state.model)
+                    if state.guided:
+                        state.candidate = state.media_hints = state.selected_endpoint_model = None
+                        state.endpoint_models = ()
+                        state.discovery_endpoint = state.endpoint_models_url = None
+                        view.line(
+                            "Server/model changed; previous metadata no longer applies. Explicit settings are retained."
+                        )
             click.echo(
                 "Working API formats: "
                 + ", ".join(prompts.choice_label(style) for style in available)
@@ -777,7 +782,41 @@ def check_interfaces(state: WizardState) -> bool:
             state.endpoint = selected_endpoint
         elif state.api_style in state.interface_endpoints:
             state.endpoint = state.interface_endpoints[state.api_style]
-    # Discover can only reject unsupported media once a valid route is selected.
+    # A default all-media choice made against a provisional chat route must be
+    # reviewed explicitly when discovery selects an image-only decision route.
+    if (
+        state.guided
+        and state.api_style in connect.DECISION_API_STYLES
+        and any(
+            kind != "image"
+            for kind in (*(state.media_inputs or []), *(state.test_media_inputs or []))
+        )
+    ):
+        view.line(
+            "This decision interface can receive images only. The provisional media selection includes unsupported inputs; nothing will be silently dropped."
+        )
+        action = prompts.labelled_choice(
+            "Review media for the selected decision interface",
+            (
+                ("image", "Use only the selected image inputs/tests"),
+                ("off", "Leave media inputs and tests off"),
+                ("cancel", "Cancel without saving"),
+            ),
+            default="cancel",
+        )
+        if action == "cancel":
+            if state.guided_media_explicit:
+                reject_decision_media(state)
+            return False
+        state.media_inputs = (
+            ["image"] if action == "image" and "image" in (state.media_inputs or []) else []
+        )
+        state.test_media_inputs = (
+            ["image"] if action == "image" and "image" in (state.test_media_inputs or []) else None
+        )
+        state.inherit_media_inputs = False
+        state.guided_media_revised = True
+    # Corrections above are explicit; headless and known-style validation is unchanged.
     reject_decision_media(state)
     return True
 
@@ -800,11 +839,85 @@ def prepare_metadata(state: WizardState) -> bool:
     state.candidate = None
     state.edited_settings = False
     if state.api_style in connect.DECISION_API_STYLES:
-        if state.catalogue_model:
-            raise click.UsageError("Decision models do not use --catalogue-model")
-        state.no_catalogue = True
-        click.echo("Decision models skip chat catalogue settings; listing hints remain unverified.")
-        state.media_hints = state.selected_endpoint_model
+        if state.no_catalogue and state.catalogue_model:
+            raise click.UsageError("--catalogue-model cannot be used with --no-catalogue")
+        if not state.no_catalogue and state.editing is None:
+            from ._connect_stages import listing_key
+
+            if state.models_url and not state.endpoint_models:
+                # An exact decision ID skips the picker, not an explicitly supplied
+                # metadata GET URL. Never derive that URL from a decision POST route.
+                state.discovery_api_key = listing_key(
+                    state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
+                )
+                try:
+                    listing = asyncio.run(
+                        connect.discover(
+                            state.endpoint,
+                            api_style=state.api_style,
+                            api_key=state.discovery_api_key,
+                            models_url=state.models_url,
+                            listing_style=state.discovery_style,
+                        )
+                    )
+                except connect.DiscoveryError:
+                    view.line(
+                        "Endpoint metadata unavailable; continuing with public details.",
+                        fg="yellow",
+                    )
+                else:
+                    state.endpoint_models = listing.models
+                    state.endpoint_models_url = listing.models_url
+                    state.discovery_endpoint = state.endpoint
+                    state.selected_endpoint_model = next(
+                        (item for item in listing.models if item.get("id") == state.model), None
+                    )
+            # Validate explicit credential configuration before any public lookup.
+            listing_key(
+                state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
+            )
+            click.echo("Looking up OpenRouter model details (metadata only)...")
+            try:
+                models = asyncio.run(connect.catalogue())
+            except (httpx.HTTPError, ValueError, KeyError):
+                if state.catalogue_model:
+                    raise click.ClickException(
+                        "Could not load the requested catalogue entry."
+                    ) from None
+                models = []
+            selected_id = state.catalogue_model or state.model
+            matches = [item for item in models if item.get("id") == selected_id]
+            if state.catalogue_model and len(matches) != 1:
+                raise click.ClickException("Requested catalogue model must match exactly once.")
+            if len(matches) == 1:
+                state.candidate = matches[0]
+            else:
+                click.echo("No OpenRouter details found for this model")
+                click.echo(
+                    "Use --catalogue-model with an explicit OpenRouter ID, or continue without details (--no-catalogue)."
+                )
+                if not state.yes and models:
+                    selected = prompts.prompt(
+                        "Explicit OpenRouter match (blank continues without details)",
+                        default="",
+                        show_default=False,
+                        choices=[""] + [item["id"] for item in models],
+                        searchable=True,
+                    )
+                    if selected:
+                        matches = [item for item in models if item["id"] == selected]
+                        if len(matches) != 1:
+                            raise click.ClickException("Choose one explicit OpenRouter model ID.")
+                        state.candidate = matches[0]
+            # Keep the same bounded facts for the suggestion UI and library plan.
+            if state.candidate is not None:
+                state.candidate = connect.decision_metadata(state.model, state.candidate)
+                state.candidate.setdefault("id", selected_id)
+        state.media_hints = connect.decision_metadata(
+            state.model, state.candidate, state.selected_endpoint_model
+        )
+        if state.media_hints.get("media_source") == "endpoint listing":
+            state.media_hints["media_source"] = state.endpoint_models_url or "endpoint listing"
         return True
     if state.editing is not None:
         state.candidate = {
@@ -896,7 +1009,8 @@ def prepare_metadata(state: WizardState) -> bool:
     )
     if (
         endpoint_model is None
-        and state.candidate is not None
+        and not state.no_catalogue
+        and (state.guided or state.candidate is not None)
         and state.editing is None
         and not state.endpoint_models
     ):
@@ -1042,13 +1156,7 @@ def configure_media_inputs(state: WizardState) -> bool:
             state.media_inputs = list(previous)
             state.inherit_media_inputs = True
         else:
-            mode = prompts.prompt(
-                "Decision image setup (text/manual/test)",
-                default="keep" if previous else "text",
-                choices=("keep", "text", "manual", "test")
-                if previous
-                else ("text", "manual", "test"),
-            )
+            mode = prompts.choose_decision_images(previous)
             state.media_inputs = (
                 list(previous) if mode == "keep" else ["image"] if mode == "manual" else []
             )
@@ -1059,16 +1167,21 @@ def configure_media_inputs(state: WizardState) -> bool:
             and not state.yes
         ):
             view.line(
-                "System One JSON images are unverified. Direct TypeSafe images require explicit multipart transport and experimental opt-in."
+                "TypeSafe multipart is selected, but experimental image opt-in is missing; image requests are blocked until you confirm it."
+                if state.decision_image_transport == "typesafe_multipart"
+                and not state.typesafe_danger_zone_images
+                else "Image testing isn't available with System One JSON. Use direct TypeSafe multipart with experimental image requests, or leave images off."
+                if state.decision_image_transport == "json"
+                else "TypeSafe multipart image requests require the explicit confirmations below."
             )
-            if prompts.confirm(
-                "Use verified direct TypeSafe multipart image transport?", default=False
-            ):
+            if prompts.confirm("Use direct TypeSafe multipart for images?", default=False):
                 state.decision_image_transport = "typesafe_multipart"
                 state.typesafe_danger_zone_images = prompts.confirm(
                     "Opt into experimental TypeSafe image requests?", default=False
                 )
-        view.line("Decision media: image only; other input formats are not implemented.")
+        view.line(
+            "Decision models can receive images only. Audio, video and PDF inputs are not available."
+        )
         return True
     if state.media_inputs is not None:
         previous = ()
@@ -1145,7 +1258,7 @@ def configure_checks(state: WizardState) -> bool:
         state.media_inputs = previous.get("media_inputs", [])
     if state.levels_file and (state.levels or state.reasoning_template):
         raise click.UsageError("Use either --levels-file or --reasoning-template with --levels.")
-    state.patches = None
+    state.patches = deepcopy(state.edited_level_patches)
     if state.editing is not None and state.api_style not in connect.DECISION_API_STYLES:
         labels = state.candidate.get("reasoning", {}).get("supported_efforts", [])
         original_levels = state.editing.get("reasoning_levels", {})
@@ -1268,7 +1381,8 @@ def configure_checks(state: WizardState) -> bool:
             "template": state.reasoning_template,
         }
     if (
-        state.api_style not in connect.DECISION_API_STYLES
+        not state.guided
+        and state.api_style not in connect.DECISION_API_STYLES
         and "context_window" not in state.proposal.entry
     ):
         click.echo(
@@ -1280,9 +1394,10 @@ def configure_checks(state: WizardState) -> bool:
     if state.api_style in connect.DECISION_API_STYLES:
         state.proposal = connect.refresh_plan(replace(state.proposal, entry=state.configured))
         state.remaining_estimate = state.proposal.token_estimate
-        view.line("Decision models have no reply-token or reasoning configuration.")
+        if not state.guided:
+            view.line("Decision calls have no reply limit.")
         return True
-    if state.reply_tokens is None and not state.yes:
+    if state.reply_tokens is None and not state.yes and not state.guided:
         output_ceiling = (
             state.configured["provenance"].get("catalogue_limits", {}).get("max_completion_tokens")
         )
@@ -1311,9 +1426,10 @@ def configure_checks(state: WizardState) -> bool:
         state.configured = connect.configure_entry(state.configured, reply_tokens=chosen_cap)
     state.proposal = connect.refresh_plan(replace(state.proposal, entry=state.configured))
     state.remaining_estimate = state.proposal.token_estimate
-    view.line(
-        f"Saved reply limit: {state.configured['max_tokens']:,} tokens, shared by reasoning and the answer."
-    )
+    if not state.guided:
+        view.line(
+            f"Saved reply limit: {state.configured['max_tokens']:,} tokens, shared by reasoning and the answer."
+        )
     for label, limit in state.configured["provenance"].get("level_reply_limits", {}).items():
         view.line(
             f"Reasoning level {label}: reply limit raised to {limit['value']:,} tokens to leave room for its thinking budget.",
@@ -1339,7 +1455,7 @@ def baseline_allows_save(state: WizardState) -> bool:
     click.echo(
         "Nothing was saved. Connection: " + reason.rstrip(".") + ". "
         "Review the server URL and settings, or increase --budget-tokens if checks were skipped. "
-        "Rerun with --no-probe for manual, unverified setup. "
+        "Rerun with --no-probe to save without testing. "
         "Add --no-catalogue and an explicit model ID to avoid listing/metadata requests. "
         "See docs/model-configuration.md. No model entry or key was written.",
         err=True,
@@ -1350,9 +1466,9 @@ def baseline_allows_save(state: WizardState) -> bool:
 def run_checks(state: WizardState) -> bool:
     """Run checks; return False when the user cancels."""
     if state.api_style in connect.DECISION_API_STYLES:
-        checks = ["decision interface acceptance", "fresh typed decisions"]
+        checks = ["decision connection", "boolean, choice and score answers"]
         if state.test_media_inputs:
-            checks.append("native image access and known color")
+            checks.append("image access and sample color")
     else:
         checks = ["connection", "tools"]
         if state.proposal.entry.get("reasoning_levels"):
@@ -1389,8 +1505,8 @@ def run_checks(state: WizardState) -> bool:
     ]
     if skipped:
         click.echo(
-            "Warning: setup is incomplete; budget exhausted before "
-            + ", ".join(skipped)
+            "Warning: setup is incomplete; check budget used up before "
+            + ", ".join(view.check_label(name) for name in skipped)
             + ". These settings have not been checked.",
             err=True,
         )
@@ -1456,23 +1572,25 @@ def save_model(state: WizardState) -> bool:
         return False
     view.step(4, "Save model")
     if state.no_probe or state.approval == "none":
-        view.line("Connection: Unverified (manual setup; no model checks)", fg="yellow")
+        view.line("Connection: not tested (manual setup)", fg="yellow")
     if state.api_style in connect.DECISION_API_STYLES:
         view.line(
-            "Decision image transport: "
+            "Image requests: "
             + (
-                "OpenAI input_image"
+                "OpenAI Decisions"
                 if state.api_style == "openai"
-                else state.result.entry["decision_image_transport"]
+                else "TypeSafe multipart"
+                if state.result.entry["decision_image_transport"] == "typesafe_multipart"
+                else "System One JSON"
             )
-            + "; TypeSafe opt-in: "
-            + str(state.result.entry["typesafe_danger_zone_images"])
+            + (
+                " · experimental images on"
+                if state.result.entry["typesafe_danger_zone_images"]
+                else ""
+            )
         )
     if "media_inputs" in state.result.entry:
-        view.line(
-            "Enabled media inputs: "
-            + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
-        )
+        view.media_settings(state.result.entry)
     if state.test_media_inputs:
         facts = state.result.entry["provenance"]["probes"]
         unavailable = [
@@ -1483,22 +1601,19 @@ def save_model(state: WizardState) -> bool:
         if unavailable:
             view.line("Not available in this test: " + ", ".join(unavailable))
             view.line(
-                "Continue with enabled inputs. For unavailable inputs, choose another model or API; choose manually only if you know this connection supports them.",
+                "Keep these settings, or choose another model or API format to try the unavailable inputs.",
                 dim=True,
             )
     tested_media_inputs = list(state.result.entry.get("media_inputs", []))
     if not state.yes and state.test_media_inputs:
         action = prompts.review_media_inputs(state.result.entry["media_inputs"])
         if action == "manual":
-            view.line("Manual choices are unverified.", fg="yellow")
+            view.line("Inputs enabled manually will be saved as not tested.", fg="yellow")
             state.result.entry["media_inputs"] = prompts.choose_media_inputs(
                 state.result.entry["media_inputs"]
             )
     if tested_media_inputs != state.result.entry.get("media_inputs", []):
-        view.line(
-            "Media inputs to save: "
-            + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
-        )
+        view.media_settings(state.result.entry)
     if state.test_media_inputs:
         facts = state.result.entry["provenance"]["probes"]
         for kind in state.test_media_inputs:
@@ -1557,7 +1672,7 @@ def save_model(state: WizardState) -> bool:
             fg="yellow",
         )
     if state.api_style in connect.DECISION_API_STYLES:
-        view.line(f"Save summary: {state.api_style} decision interface")
+        view.line(f"Save summary: {prompts.choice_label(state.api_style)}")
     else:
         view.line(
             f"Save summary: {prompts.choice_label(state.result.entry['api_style'])} · reply limit {state.result.entry['max_tokens']:,} tokens"
@@ -1596,12 +1711,11 @@ def save_model(state: WizardState) -> bool:
                     )
         connect.write(state.result.entry, state.path, alias=state.alias)
         click.echo(f"Saved {state.alias} to {state.path}.")
-        view.line(
-            f"Interface: {state.api_style} · decision model: {state.result.entry['model_name']}"
-            if state.api_style in connect.DECISION_API_STYLES
-            else "Enabled media inputs: "
-            + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
-        )
+        view.media_settings(state.result.entry)
+        if state.api_style in connect.DECISION_API_STYLES:
+            view.line(
+                f"API format: {prompts.choice_label(state.api_style)} · decision model: {state.result.entry['model_name']}"
+            )
         if state.api_style not in connect.DECISION_API_STYLES:
             view.line(
                 f"API format: {prompts.choice_label(state.api_style)} · reply limit: {state.result.entry['max_tokens']:,} tokens"
@@ -1622,6 +1736,207 @@ def save_model(state: WizardState) -> bool:
     return True
 
 
+def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=False):
+    """One concise summary for each current proposal, not stale initial settings."""
+    entry = state.proposal.entry
+    maximum = entry.get("provenance", {}).get("catalogue_limits", {}).get("max_completion_tokens")
+    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
+        maximum = None
+    view.line("Proposed configuration" + (" (updated)" if updated else ""), bold=True)
+    view.line(scrub_setup(state, f"{state.model} · {state.endpoint}"))
+    view.line(
+        "Request style: "
+        + prompts.choice_label(state.api_style)
+        + (" (preset; discovery deferred until testing)" if deferred_style else "")
+    )
+    if state.api_style not in connect.DECISION_API_STYLES:
+        view.line(
+            "Context: "
+            + (f"{entry['context_window']:,}" if entry.get("context_window") else "unknown")
+            + f" · reply limit: {entry['max_tokens']:,} tokens"
+            + (f" · model reply maximum: {maximum:,}" if maximum else "")
+            + " · reasoning: "
+            + (", ".join(entry.get("reasoning_levels", {})) or "server default")
+        )
+    if state.api_style in connect.DECISION_API_STYLES:
+        transport = (
+            "OpenAI Decisions"
+            if state.api_style == "openai"
+            else "TypeSafe multipart"
+            if state.decision_image_transport == "typesafe_multipart"
+            else "System One JSON"
+        )
+        view.line(
+            "Image requests: "
+            + transport
+            + (" · experimental images on" if state.typesafe_danger_zone_images else "")
+        )
+    if state.edited_settings:
+        view.line("Your edited settings.")
+    elif (
+        state.candidate is not None
+        and state.editing is None
+        and (
+            state.candidate.get("context_length")
+            or (state.candidate.get("top_provider") or {}).get("max_completion_tokens")
+            or (state.candidate.get("reasoning") or {}).get("supported_efforts")
+            or isinstance((state.candidate.get("reasoning") or {}).get("default_enabled"), bool)
+            or state.candidate.get("description")
+            or any(connect.media_metadata(state.candidate).values())
+        )
+    ):
+        sources = set((state.candidate.get("limit_sources") or {}).values())
+        endpoint_facts = bool(state.candidate.get("endpoint_limits"))
+        endpoint_media = bool(state.endpoint_models_url) and (
+            (state.media_hints or {}).get("media_source") == state.endpoint_models_url
+        )
+        server_details = endpoint_facts or (
+            state.api_style in connect.DECISION_API_STYLES and endpoint_media
+        )
+        if server_details:
+            source = state.endpoint_models_url or "your server"
+            view.line("Model details from " + source)
+            if "catalogue" in sources:
+                view.line("Additional model details from OpenRouter")
+        elif state.candidate:
+            view.line("Model details from OpenRouter")
+    view.media_settings(entry)
+    if state.no_probe or state.probe == "none":
+        view.line("Testing is disabled; save without model calls.")
+    else:
+        view.line("Test now approves the selected checks within the displayed check budget.")
+    if state.test_media_inputs:
+        view.line("Selected media tests: " + ", ".join(state.test_media_inputs))
+
+
+def review_guided_proposal(state: WizardState, *, deferred_style=False):
+    """Consent or edit; edits are re-summarized before the next decision."""
+    while True:
+        options = (("test", "Test now"),) if not state.no_probe and state.probe != "none" else ()
+        action = prompts.labelled_choice(
+            "Would you like to test these settings?",
+            (*options, ("save", "Save without testing"), ("change", "Change settings")),
+            default="test" if options else "save",
+        )
+        if action != "change":
+            break
+        if state.api_style in connect.DECISION_API_STYLES:
+            # Decision metadata never becomes chat/reasoning request parameters.
+            mode = prompts.choose_decision_images(state.media_inputs)
+            if mode == "text":
+                state.media_inputs, state.test_media_inputs = [], None
+                state.inherit_media_inputs = False
+            elif mode == "manual":
+                state.media_inputs, state.test_media_inputs = ["image"], None
+                state.inherit_media_inputs = False
+            elif mode == "test":
+                state.test_media_inputs = ["image"]
+            if not configure_media_inputs(state):
+                return None
+        else:
+            current = deepcopy(state.candidate or {})
+            current.setdefault("id", state.model)
+            entry = state.proposal.entry
+            current["context_length"] = entry.get("context_window")
+            current["top_provider"] = {
+                "max_completion_tokens": entry.get("max_output_tokens")
+                or entry.get("provenance", {})
+                .get("catalogue_limits", {})
+                .get("max_completion_tokens")
+            }
+            maximum = current["top_provider"]["max_completion_tokens"]
+            if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
+                current["top_provider"]["max_completion_tokens"] = None
+            current["reasoning"] = {
+                "supported_efforts": list(entry.get("reasoning_levels", {})),
+                "default_effort": entry.get("reasoning_default"),
+            }
+            state.candidate = prompts.edit_model_details(current)
+            state.context_window = state.candidate.get("context_length")
+            state.levels_file = state.levels = state.reasoning_template = None
+            state.edited_settings = True
+            labels = state.candidate.get("reasoning", {}).get("supported_efforts", [])
+            original = entry.get("reasoning_levels", {})
+            state.edited_level_patches = {
+                label: deepcopy(original[label])
+                if label in original
+                else connect.reasoning_settings("effort", state.api_style, label)
+                for label in labels
+            } or None
+            limits = [
+                v
+                for v in (
+                    state.context_window - 1 if state.context_window else None,
+                    state.candidate.get("top_provider", {}).get("max_completion_tokens"),
+                )
+                if isinstance(v, int) and not isinstance(v, bool) and v > 0
+            ]
+            ceiling = min(limits) if limits else None
+            state.reply_tokens = prompts.choose_reply_limit(
+                min(entry["max_tokens"], ceiling) if ceiling else entry["max_tokens"],
+                ceiling,
+                output_ceiling=state.candidate.get("top_provider", {}).get("max_completion_tokens"),
+                source=entry.get("provenance", {}).get("reply_limit", {}).get("source", "user"),
+            )
+            # Existing declarations and explicit test selections remain unchanged.
+        if not configure_checks(state):
+            return None
+        show_guided_proposal(state, deferred_style=deferred_style, updated=True)
+    return action
+
+
+def guided_setup(state: WizardState) -> bool:
+    """Prepare a proposal using GETs only; the action below is model-call consent."""
+    if not select_connection(state) or not select_model(state) or not prepare_metadata(state):
+        return False
+    deferred_style = state.api_style is None
+    explicit_reply_tokens = state.reply_tokens
+    # A provider preset is a proposal, never evidence of supported interfaces.
+    state.api_style = state.api_style or state.default_style
+    if not configure_media_inputs(state) or not configure_checks(state):
+        return False
+    show_guided_proposal(state, deferred_style=deferred_style)
+    action = review_guided_proposal(state, deferred_style=deferred_style)
+    if action is None:
+        return False
+    state.approval = state.probe if action == "test" else "none"
+    if action == "save":
+        state.test_media_inputs = None
+    if deferred_style:
+        if state.api_style not in connect.DECISION_API_STYLES:
+            state.reply_tokens = state.proposal.entry["max_tokens"]
+        state.api_style = None
+        if not check_interfaces(state):
+            return False
+        if state.api_style in connect.DECISION_API_STYLES:
+            state.reply_tokens = explicit_reply_tokens
+            state.candidate = (
+                connect.decision_metadata(
+                    state.model, state.candidate, state.selected_endpoint_model
+                )
+                or None
+            )
+            if not configure_media_inputs(state):
+                return False
+        # Rebuild only the request plan after interface selection, not prompt rounds.
+        if not configure_checks(state):
+            return False
+    elif action == "save":
+        if not configure_checks(state):
+            return False
+    if state.guided_media_revised:
+        show_guided_proposal(state, updated=True)
+        action = review_guided_proposal(state)
+        if action is None:
+            return False
+        state.approval = state.probe if action == "test" else "none"
+        if action == "save":
+            state.test_media_inputs = None
+        if not configure_checks(state):
+            return False
+    return run_checks(state) and save_model(state)
+
+
 def run_wizard(**options):
     """Run ordered steps with one shared budget and an explicit save decision."""
     state = WizardState(**options)
@@ -1630,6 +1945,13 @@ def run_wizard(**options):
     state.explicit_key_env = state.api_key_env is not None
     state.editing = None
     try:
+        if not state.yes:
+            state.guided = True
+            state.guided_media_explicit = (
+                state.media_inputs is not None or state.test_media_inputs is not None
+            )
+            guided_setup(state)
+            return
         for step in (
             select_connection,
             select_model,

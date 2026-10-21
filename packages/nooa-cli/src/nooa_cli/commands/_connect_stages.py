@@ -140,6 +140,7 @@ def read_catalogue(path, model, *, catalogue_model=None):
         if key
         in {
             "id",
+            "description",
             "context_length",
             "top_provider",
             "reasoning",
@@ -150,8 +151,9 @@ def read_catalogue(path, model, *, catalogue_model=None):
             "pricing",
         }
     }
-    # Same safe shaping as the public catalogue reader. Only plan's allowlisted
-    # limits/reasoning/reply recommendation become settings; no arbitrary params.
+    # Same safe shaping as the public catalogue reader. Chat plan uses only
+    # allowlisted limits/reasoning/reply recommendations; decision plan keeps
+    # bounded descriptive/media facts only. Neither copies arbitrary parameters.
     for key in ("top_provider", "reasoning", "default_parameters"):
         if not isinstance(selected.get(key), dict):
             selected[key] = {}
@@ -269,6 +271,7 @@ def run_stage(
         if catalogue_file and stage not in {
             "plan",
             "routing",
+            "decision",
             "tools",
             "reasoning",
             "media",
@@ -278,8 +281,6 @@ def run_stage(
             raise click.UsageError("--catalogue-file is only for plan/check stages")
         if catalogue_model and not catalogue_file:
             raise click.UsageError("--catalogue-model in stage mode requires --catalogue-file")
-        if catalogue_file and api_style in connect.DECISION_API_STYLES:
-            raise click.UsageError("Decision models do not use chat catalogue metadata")
         if systemone_endpoint:
             connect.normalize_endpoint(systemone_endpoint)
             if stage != "interfaces":
@@ -291,9 +292,8 @@ def run_stage(
             )
         if invalid_options:
             raise click.UsageError(
-                "Stage mode does not use "
+                "For this stage, use --endpoint, --api-style and --levels-file. These wizard options are unavailable: "
                 + ", ".join(invalid_options)
-                + "; provide explicit stage options (--endpoint, --api-style, --levels-file)."
             )
         if stage != "save" and (input_file or output):
             raise click.UsageError(
@@ -448,13 +448,15 @@ def run_stage(
                 else None
             )
             if stage not in {"plan", "discover"} and key_env and not key:
-                raise click.UsageError("Configured credential variable is unset or empty")
+                raise click.UsageError("Set the configured key variable before running this check")
             if stage not in {"discover", "plan"} and not model:
                 raise click.UsageError("Stage requires MODEL")
             if stage == "discover":
                 discovery_key = listing_key(models_url, endpoint, key, discovery_api_key_env)
                 if key_env and not discovery_key and discovery_api_key_env is None:
-                    raise click.UsageError("Configured credential variable is unset or empty")
+                    raise click.UsageError(
+                        "Set the configured key variable before running this check"
+                    )
                 data = asdict(
                     asyncio.run(
                         connect.discover(

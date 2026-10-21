@@ -942,6 +942,54 @@ def model_metadata(
     return result
 
 
+def decision_metadata(
+    model: str, catalogue: dict | None = None, endpoint_model: dict | None = None
+) -> dict:
+    """Bounded descriptive/media facts only; a supplied catalogue is an explicit mapping.
+
+    Never interpret descriptions as capabilities or copy chat settings. Attribution
+    is constructed here, not accepted from provider records. Exact endpoint media
+    facts take priority over the mapped OpenRouter route's advertisements.
+    """
+    result = {}
+    for record, source in (
+        (catalogue, CATALOGUE_URL),
+        (
+            endpoint_model if endpoint_model and endpoint_model.get("id") == model else None,
+            "endpoint listing",
+        ),
+    ):
+        if not isinstance(record, dict):
+            continue
+        name = record.get("id")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or len(name) > 500
+            or any(ord(c) < 32 for c in name)
+        ):
+            raise ValueError("Decision metadata requires a bounded explicit model ID")
+        result.setdefault("id", name)
+        result.setdefault("media_source", source)
+        result.setdefault("media_model_id", name)
+        description = record.get("description")
+        if (
+            isinstance(description, str)
+            and len(description) <= 4096
+            and not any(ord(c) < 32 for c in description)
+        ):
+            result["description"] = description
+        media = media_metadata(record)
+        if media:
+            for key in ("architecture", "input_modalities", "capabilities"):
+                result.pop(key, None)
+            result.update(media)
+            result["media_source"] = source
+            result["media_model_id"] = name
+            result["id"] = name
+    return result
+
+
 def entry_warnings(entry: dict) -> list[str]:
     """Configuration warnings shared by the wizard, library and stage reports."""
     if entry.get("client_type") == "decision":
@@ -953,15 +1001,20 @@ def entry_warnings(entry: dict) -> list[str]:
                 and entry.get("typesafe_danger_zone_images") is True
             )
         ):
+            reason = (
+                "TypeSafe multipart requires explicit experimental image opt-in before sending"
+                if entry.get("decision_image_transport") == "typesafe_multipart"
+                else "System One JSON blocks image requests before sending"
+            )
             return [
-                "Image permission is declared, but System One JSON image transport is unverified and will reject images before sending."
+                f"Images are enabled, but {reason}. Use OpenAI Decisions or an approved direct TypeSafe multipart connection, or turn images off."
             ]
         return []
     warnings = (
         []
         if entry.get("context_window")
         else [
-            "Context window unknown: runtime fallback applies; supply --context-window or endpoint discovery metadata."
+            "Context window not listed. NOOA will use its default; supply --context-window or your server model details if you know the limit."
         ]
     )
     cap = entry.get("max_tokens")
@@ -974,7 +1027,7 @@ def entry_warnings(entry: dict) -> list[str]:
         for r in records
     ):
         warnings.append(
-            "Saved reply budget unverified: no accepted check sent this configured cap on the wire."
+            "Reply limit not tested with the saved settings. Run a connection check to test it."
         )
     return warnings
 
@@ -1103,7 +1156,9 @@ def plan(
     independent of record media hints; omitted sources use the legacy /models URL.
     Reported usage can increase that charge. Servers can ignore
     caps, so this is not a billing limit. Media facts never change declarations.
-    Non-Chat video and audio remain transparently not tested.
+    Non-Chat video and audio remain transparently not tested. For decisions, a
+    supplied ``catalogue`` is an explicit OpenRouter ID mapping: only bounded
+    descriptions, media facts and provenance are retained, never chat settings.
     """
     if api_style not in _PATHS:
         raise ValueError("api_style must be chat, responses, anthropic, systemone or openai")
@@ -1126,16 +1181,27 @@ def plan(
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     tested_media = validate_media_inputs(test_media_inputs)
-    selected_media_model = (
-        endpoint_model
-        if endpoint_model is not None
-        and endpoint_model.get("id") == model
-        and media_metadata(endpoint_model)
-        else catalogue
-        if api_style not in DECISION_API_STYLES
+    decision_facts = (
+        decision_metadata(model, catalogue, endpoint_model)
+        if api_style in DECISION_API_STYLES
         else None
     )
-    endpoint_media_selected = selected_media_model is endpoint_model and endpoint_model is not None
+    selected_media_model = (
+        decision_facts
+        if api_style in DECISION_API_STYLES
+        else (
+            endpoint_model
+            if endpoint_model is not None
+            and endpoint_model.get("id") == model
+            and media_metadata(endpoint_model)
+            else catalogue
+        )
+    )
+    endpoint_media_selected = (
+        endpoint_model is not None
+        and endpoint_model.get("id") == model
+        and bool(media_metadata(endpoint_model))
+    )
     if endpoint_media_selected:
         # Internal attribution keys in a record are never a listing contract.
         selected_media_model = {
@@ -1161,8 +1227,6 @@ def plan(
         else (existing_entry or {}).get("typesafe_danger_zone_images", False),
     )
     if api_style in DECISION_API_STYLES:
-        if catalogue is not None:
-            raise ValueError("Decision models do not use chat model catalogue metadata")
         if reasoning_levels:
             raise ValueError("Decision models do not configure reasoning levels")
         if session_checks:
@@ -1197,6 +1261,15 @@ def plan(
                 ],
             },
         }
+        if catalogue is not None:
+            entry["provenance"]["catalogue"] = {
+                "url": CATALOGUE_URL,
+                "id": catalogue["id"],
+                "model_id": model,
+            }
+            entry["provenance"]["catalogue_metadata"] = decision_metadata(model, catalogue)
+        if decision_facts and "description" in decision_facts:
+            entry["provenance"]["model_description"] = decision_facts["description"]
         # Inherit permissions and controls only for the identical normalized route.
         if existing_entry:
             candidate = {**entry}
@@ -1230,7 +1303,7 @@ def plan(
             )
         ):
             raise ValueError(
-                "Unverified System One JSON image transport; image testing requires explicit typesafe_multipart and typesafe_danger_zone_images opt-in"
+                "Image testing isn't available with System One JSON. Use --decision-image-transport typesafe_multipart and --typesafe-danger-zone-images for an approved direct TypeSafe connection, or leave images off"
             )
         if endpoint_model is not None and endpoint_model.get("id") == model:
             # Preserve catalogue facts as advertised evidence, never chat configuration.
@@ -2012,13 +2085,13 @@ def diagnostic_prompt(
         "the model-configuration reference and companion docs located by the "
         "installation references below. "
         "Inspect the configuration, credential lookup, and actual request construction. "
-        "Model listing alone does not validate credentials. Distinguish rejection, missing "
-        "evidence, and unsupported features; do not infer support from an HTTP success alone. "
+        "Test the key with a connection check. Distinguish rejection, missing "
+        "evidence, and unsupported features by reviewing the answer and settings sent. "
         "Use nooa.unifiedllm.connect library functions or nooa connect --stage to isolate the failure, "
         "then rerun the affected checks within configured limits. Never print or copy key "
         "values, reasoning text, opaque state, or raw error bodies. Preserve unrelated aliases "
-        "and inspect layer precedence before editing the target file. This handoff does not "
-        "authorize additional paid calls, model configuration or writes; confirm the scope and "
+        "and inspect layer precedence before editing the target file. Confirm permission for "
+        "additional paid calls, model configuration or writes, and confirm the scope and "
         "remaining allowance before rerunning. "
         "Report the cause, fix, and evidence.\n"
         + json.dumps(

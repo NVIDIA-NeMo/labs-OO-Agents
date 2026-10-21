@@ -90,7 +90,7 @@ def test_wizard_native_images_save_transport_reload_and_recheck(monkeypatch, tmp
     )
     assert result.exit_code == 0, result.output
     assert len(seen) == 5
-    assert "known color confirmed" in result.output
+    assert "sample color confirmed" in result.output
     entry = yaml.safe_load(path.read_text())["models"]["fixture"]
     assert entry["media_inputs"] == ["image"]
     assert entry["decision_image_transport"] == (
@@ -158,7 +158,7 @@ def test_systemone_json_proxy_image_test_preflight(monkeypatch):
         command, [*options("systemone"), "--stage", "media", "--test-media-inputs", "image"]
     )
     assert result.exit_code != 0
-    assert "Unverified System One JSON image transport" in result.stdout
+    assert "Image testing isn't available with System One JSON" in result.stdout
 
 
 @pytest.mark.parametrize("key", [None, "same-origin-key"])

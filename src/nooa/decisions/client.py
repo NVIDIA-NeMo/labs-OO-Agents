@@ -314,7 +314,7 @@ class DecisionClient(DecisionModel):
             if self.api_style == "systemone":
                 if self.decision_image_transport != "typesafe_multipart":
                     raise ValueError(
-                        "Unverified System One JSON image transport; configure typesafe_multipart only for a verified direct TypeSafe route"
+                        "System One JSON blocks image requests before sending. Use typesafe_multipart for an approved direct TypeSafe connection, or leave images off."
                     )
                 if not self.typesafe_danger_zone_images:
                     raise ValueError(
@@ -352,7 +352,9 @@ class DecisionClient(DecisionModel):
                         "TypeSafe multipart images must have matching PNG/JPEG MIME and file signature"
                     )
                 if attachment.detail is not None:
-                    raise ValueError("TypeSafe multipart has no verified image detail contract")
+                    raise ValueError(
+                        "TypeSafe multipart cannot send an image detail setting. Leave detail unset."
+                    )
                 name = f"asset-{index}"
                 assets[attachment.alias] = {"type": "image", "part": name}
                 image_parts.append((name, (name, data, attachment.media_type)))

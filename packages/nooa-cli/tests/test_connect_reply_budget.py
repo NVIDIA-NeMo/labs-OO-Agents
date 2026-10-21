@@ -44,7 +44,7 @@ def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, exp
             "--output",
             str(path),
         ],
-        input="-\n" + choice + "\ny\n",
+        input="-\nchange\n\n\n\n" + choice + "\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -74,7 +74,7 @@ def test_reply_dialog_offers_recommendation_smaller_and_custom(monkeypatch, caps
     )
     menu = calls[0][1]
     assert menu["choices"] == ("recommended", "high", "smaller", "short", "custom")
-    assert menu["labels"]["high"] == "High reasoning budget — 65,536 tokens"
+    assert menu["labels"]["high"] == "High reply limit — 65,536 tokens"
     assert menu["default"] == "recommended"
     assert menu["open_menu"] is True
     assert menu["labels"]["recommended"] == "Recommended — 32,768 tokens (catalogue recommendation)"
@@ -160,7 +160,7 @@ def test_boolean_catalogue_output_limit_is_not_treated_as_one_token(tmp_path, mo
             "--output",
             str(path),
         ],
-        input="-\ny\n",
+        input="-\nchange\n\n\n\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert chosen["output_ceiling"] is None

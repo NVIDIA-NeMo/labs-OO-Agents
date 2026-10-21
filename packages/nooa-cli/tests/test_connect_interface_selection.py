@@ -93,7 +93,7 @@ def test_early_known_interface_skips_comparison(monkeypatch, tmp_path, style):
     monkeypatch.setattr(connect, "check_interfaces", lambda *a, **kw: pytest.fail("No comparison"))
     mock_http(monkeypatch, handle)
     result = CliRunner().invoke(
-        command, [*options(path), "--probe", "minimal"], input=f"y\n{style}\ny\n"
+        command, [*options(path), "--probe", "minimal"], input=f"{style}\ntest\ny\n"
     )
     assert result.exit_code == 0, result.output
     assert menu_seen == ["Request interface"]
@@ -127,7 +127,9 @@ def test_explicit_edit_and_yes_bypass_early_menu(monkeypatch, tmp_path, mode):
         monkeypatch.setattr(wizard, "entries", lambda *a, **kw: {"local": (entry, path)})
         monkeypatch.setattr(prompts, "edit_model_details", lambda current: current)
         flags = ["--edit-model", "local", "--no-probe", "--api-key-env", "", "--output", str(path)]
-    result = CliRunner().invoke(command, flags, input="use\ny\ny\n" if mode == "edit" else "y\ny\n")
+    result = CliRunner().invoke(
+        command, flags, input="save\ny\ny\n" if mode == "edit" else "save\ny\n"
+    )
     assert result.exit_code == 0, result.output
     assert "Request interface" not in result.output
     assert yaml.safe_load(path.read_text())["models"]["local"]["api_style"] == "chat"
@@ -149,7 +151,7 @@ def test_menu_order_provider_interface_url_key_model(monkeypatch, tmp_path):
     result = CliRunner().invoke(
         command,
         ["--as", "local", "--no-probe", "--no-catalogue", "--output", str(path)],
-        input=f"custom\nchat\n{BASE}\n-\nexact/model\ny\n",
+        input=f"custom\nchat\n{BASE}\n-\nexact/model\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert sequence[:4] == [
@@ -158,7 +160,7 @@ def test_menu_order_provider_interface_url_key_model(monkeypatch, tmp_path):
         "Model server URL",
         "Key environment variable (new to enter a key; - for no authentication)",
     ]
-    assert sequence[4] == "Search advertised model IDs (type to search; Tab to select)"
+    assert sequence[4] == "Search available models (type to search; Tab to select)"
     assert "API format" not in sequence
 
 
@@ -199,7 +201,7 @@ def test_hub_shared_listing_and_default_full_systemone_url(monkeypatch, tmp_path
             "--output",
             str(path),
         ],
-        input=f"y\n{choice}\nexact/model\ny\n",
+        input=f"{choice}\nexact/model\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -255,7 +257,7 @@ def test_custom_discovery_never_guesses_decision_url_and_reuses_selected_request
         flags += ["--reply-tokens", "200"]
     if candidate:
         flags += ["--systemone-endpoint", candidate]
-    result = CliRunner().invoke(command, flags, input="y\ndiscover\ny\n")
+    result = CliRunner().invoke(command, flags, input="discover\ntest\ny\n")
     assert result.exit_code == 0, result.output
     assert path.exists(), result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -287,10 +289,10 @@ def test_decision_media_has_clear_no_transport_error(monkeypatch, tmp_path, flag
             flag,
             "audio",
         ],
-        input="y\n",
+        input="test\n",
     )
     assert result.exit_code == 2, result.output
-    assert "only media_inputs: [image]" in result.output
+    assert "accept images only. Use media_inputs: [image]" in result.output
     assert not path.exists()
 
 
@@ -301,11 +303,11 @@ def test_known_decision_cannot_save_without_budgeted_baseline(monkeypatch, tmp_p
     result = CliRunner().invoke(
         command,
         [*options(path), "--api-style", "systemone", "--budget-tokens", str(budget)],
-        input="y\n",
+        input="test\n",
     )
     assert result.exit_code == 0, result.output
     assert "Nothing was saved" in result.output
-    assert "budget exhausted" in result.output
+    assert "check budget used up" in result.output
     assert not path.exists()
 
 
@@ -374,7 +376,7 @@ def test_rejected_decision_key_does_not_save_or_repeat_request(monkeypatch, tmp_
             "minimal",
             "--show-diagnostics",
         ],
-        input="y\n",
+        input="test\n",
     )
     assert result.exit_code == 0, result.output
     assert len(requests) == 1
@@ -417,7 +419,7 @@ def test_user_selects_decision_among_multiple_successes_and_reuses_full_route(
             "--budget-tokens",
             "20000",
         ],
-        input="y\ndiscover\nsystemone\ny\n",
+        input="discover\ntest\nsystemone\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Working API formats: OpenAI-compatible Chat, System One Decisions" in result.output
@@ -460,7 +462,7 @@ def test_custom_cross_origin_interface_key_requires_explicit_flag(monkeypatch, t
     ]
     if opt_in:
         flags += ["--share-interface-key"]
-    result = CliRunner().invoke(command, flags, input="y\ndiscover\ny\n")
+    result = CliRunner().invoke(command, flags, input="discover\ntest\ny\n")
     assert "interface-secret-canary" not in result.output
     if opt_in:
         assert result.exit_code == 0, result.output
@@ -493,7 +495,7 @@ def test_hub_overridden_chat_base_refuses_auto_mapped_key(monkeypatch, tmp_path)
             "--output",
             str(path),
         ],
-        input="y\ndiscover\n",
+        input="discover\ntest\n",
     )
     assert result.exit_code != 0
     assert "--share-interface-key" in result.output
@@ -525,10 +527,10 @@ def test_known_decision_missing_model_media_rejected_before_listing(
             "--output",
             str(tmp_path / "models.yaml"),
         ],
-        input="y\n",
+        input="test\n",
     )
     assert result.exit_code == 2, result.output
-    assert "only media_inputs: [image]" in result.output
+    assert "accept images only. Use media_inputs: [image]" in result.output
 
 
 @pytest.mark.parametrize("flag", ["--media-inputs", "--test-media-inputs"])
@@ -567,10 +569,10 @@ def test_discover_selected_decision_media_rejected_after_routing_only(monkeypatc
             "--output",
             str(path),
         ],
-        input="y\ndiscover\nexact/model\n",
+        input="discover\nexact/model\ntest\ncancel\n",
     )
     assert result.exit_code == 2, result.output
-    assert "only media_inputs: [image]" in result.output
+    assert "accept images only. Use media_inputs: [image]" in result.output
     assert len(requests) == 5
     assert requests[0].method == "GET"
     assert not path.exists()
@@ -683,7 +685,7 @@ def test_picker_discover_anthropic_retains_endpoint_limits(
         flags += ["--no-catalogue"]
     if listing_url:
         flags += ["--models-url", listing_url, "--discovery-api-key-env", "-"]
-    result = CliRunner().invoke(command, flags, input="y\ndiscover\nexact/model\nuse\ny\n")
+    result = CliRunner().invoke(command, flags, input="discover\nexact/model\ntest\ny\n")
     assert result.exit_code == 0, result.output
     assert "Found 1 models" in result.output
     assert path.exists(), result.output
