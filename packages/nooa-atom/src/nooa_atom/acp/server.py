@@ -960,9 +960,8 @@ class AtomACPAgent:
         bridge.publish(
             update_agent_message(
                 text_block(
-                    f"Form response was not accepted: {exc}\n\n"
-                    "No automatic retry was made. Submit a FormResponse with a string dictionary "
-                    "keyed by the question ids, decline/cancel, or ask the agent for a targeted follow-up."
+                    f"Your form answer wasn't used: {_failure_reason(exc)}.\n\n"
+                    "Reply here with the answer instead."
                 )
             ),
         )
@@ -1628,6 +1627,13 @@ def _trace_scope(session: Session) -> AbstractContextManager[object]:
     except ImportError:
         return nullcontext()
     return session_scope(session.id)
+
+
+def _failure_reason(exc: Exception) -> str:
+    """A short reason a person can read: a field check, or a malformed answer."""
+    if isinstance(exc, ValidationError) or not str(exc):
+        return "the form came back incomplete or malformed"
+    return str(exc)
 
 
 def _slash_invocation(text: str) -> tuple[str, str] | None:

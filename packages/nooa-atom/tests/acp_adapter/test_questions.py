@@ -183,7 +183,8 @@ async def test_invalid_standard_content_is_not_admitted(
     assert response.stop_reason == "end_turn"
     assert client.updates(session_id, UserMessageChunk) == []
     assert len(models.llms[None].calls) == 1
-    assert "not accepted" in client.texts(AgentMessageChunk, session_id)[-1]
+    notice = client.texts(AgentMessageChunk, session_id)[-1]
+    assert "form answer wasn't used" in notice and "pydantic" not in notice
 
 
 async def test_stop_open_standard_form_never_injects_an_answer(make_adapter, workspace, client):
@@ -437,7 +438,7 @@ async def test_malformed_transport_envelope_fails_closed_once(
     assert response.stop_reason == "end_turn"
     assert not client.texts(UserMessageChunk, sid)
     assert len(models.llms[None].calls) == 1
-    assert sum("No automatic retry" in t for t in client.texts(AgentMessageChunk, sid)) == 1
+    assert sum("form answer wasn't used" in t for t in client.texts(AgentMessageChunk, sid)) == 1
 
 
 @pytest.mark.parametrize("pool", [False, True])
@@ -632,7 +633,7 @@ async def test_form_failure_uses_ordered_bridge_and_revocable_flush(
         if text.startswith("before failure"):
             entered.set()
             await release.wait()
-        if operation == "fail" and "No automatic retry" in text:
+        if operation == "fail" and "form answer wasn't used" in text:
             raise RuntimeError("notice transport failed")
         await original(session_id, update, **kwargs)
 
@@ -657,7 +658,9 @@ async def test_form_failure_uses_ordered_bridge_and_revocable_flush(
             closing = asyncio.create_task(adapter.close_session(sid))
         else:
             # A direct send would overtake the blocked predecessor.
-            assert not any("No automatic retry" in t for t in client.texts(AgentMessageChunk, sid))
+            assert not any(
+                "form answer wasn't used" in t for t in client.texts(AgentMessageChunk, sid)
+            )
             release.set()
         if operation == "fail":
             with pytest.raises(RuntimeError, match="notice transport failed"):
@@ -672,7 +675,7 @@ async def test_form_failure_uses_ordered_bridge_and_revocable_flush(
         if operation == "deliver":
             texts = client.texts(AgentMessageChunk, sid)
             assert texts[-2] == "before failure\n\n"
-            assert "No automatic retry" in texts[-1]
+            assert "form answer wasn't used" in texts[-1]
         assert client.updates(sid, UserMessageChunk) == []
     finally:
         release.set()

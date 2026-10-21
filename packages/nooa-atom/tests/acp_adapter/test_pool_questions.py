@@ -129,7 +129,7 @@ async def test_pool_invalid_choice_fails_closed_once(make_adapter, workspace, cl
     assert len(_requests(client)) == 1
     assert len(models.llms[None].calls) == 1
     assert not client.texts(UserMessageChunk, sid)
-    assert "No automatic retry" in client.texts(AgentMessageChunk, sid)[-1]
+    assert "form answer wasn't used" in client.texts(AgentMessageChunk, sid)[-1]
 
 
 @pytest.mark.parametrize("failure", ["bad-content", "unknown-action", "client-error"])
