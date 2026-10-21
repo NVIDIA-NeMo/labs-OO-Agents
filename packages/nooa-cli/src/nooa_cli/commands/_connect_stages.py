@@ -10,6 +10,7 @@ STAGES = (
     "routing",
     "tools",
     "reasoning",
+    "media",
     "session",
     "all",
     "save",
@@ -54,6 +55,8 @@ def run_stage(
     reasoning_template=None,
     reasoning_level="medium",
     reply_tokens=None,
+    media_inputs=None,
+    test_media_inputs=None,
     levels_file,
     context_window,
     input_file,
@@ -84,7 +87,14 @@ def run_stage(
     ok = False
     failure_code = 1
     key = None
+    from ._connect_prompts import parse_media_inputs
+
     try:
+        declared_media = parse_media_inputs(media_inputs)
+        if media_inputs is not None and stage in {"discover", "catalogue", "interfaces"}:
+            raise click.UsageError(
+                "--media-inputs is a connection declaration; use a plan or save stage"
+            )
         if invalid_options:
             raise click.UsageError(
                 "Stage mode does not use "
@@ -110,7 +120,17 @@ def run_stage(
             try:
                 alias, entry = (
                     data["alias"],
-                    connect.configure_entry(data["entry"], reply_tokens=reply_tokens),
+                    connect.configure_entry(
+                        {
+                            **data["entry"],
+                            **(
+                                {"media_inputs": declared_media}
+                                if declared_media is not None
+                                else {}
+                            ),
+                        },
+                        reply_tokens=reply_tokens,
+                    ),
                 )
             except ValueError as exc:
                 raise click.UsageError(str(exc)) from None
@@ -179,6 +199,8 @@ def run_stage(
                 output_tokens=output_tokens,
                 reasoning_output_tokens=reasoning_output_tokens,
                 reply_tokens=reply_tokens,
+                media_inputs=declared_media,
+                test_media_inputs=parse_media_inputs(test_media_inputs),
                 reasoning_levels=levels,
                 session_checks=stage in {"session", "all"}
                 and style not in connect.DECISION_API_STYLES,
@@ -252,6 +274,15 @@ def run_stage(
                 with view.quiet_provider_messages():
                     result = asyncio.run(connect.check_stage(proposal, stage, api_key=key))
                 entry = result.entry
+                if test_media_inputs is not None:
+                    retained = list(entry.get("media_inputs", []))
+                    entry["media_inputs"] = retained + [
+                        kind
+                        for kind in parse_media_inputs(test_media_inputs)
+                        if kind not in retained
+                        and entry["provenance"]["probes"].get(f"media:{kind}", {}).get("outcome")
+                        == "passed"
+                    ]
                 data = asdict(result)
                 checks = {
                     **entry["provenance"]["probes"],
@@ -305,6 +336,21 @@ def run_stage(
     from nooa.unifiedllm.connect._diagnostics import scrub_report
     from nooa.unifiedllm.connect._records import public_record
 
+    # Public results retain safe media facts, not inline generated payloads.
+    # Plan previews intentionally include their proposed synthetic request bodies.
+    if stage != "plan" and isinstance(data, dict):
+
+        def hide_media_requests(value):
+            if not isinstance(value, dict):
+                return
+            for name, child in value.items():
+                if name == "probes" and isinstance(child, dict):
+                    for probe_name, record in child.items():
+                        if probe_name.startswith("media:"):
+                            record.pop("request", None)
+                hide_media_requests(child)
+
+        hide_media_requests(data)
     report = {
         "version": 1,
         "stage": stage,

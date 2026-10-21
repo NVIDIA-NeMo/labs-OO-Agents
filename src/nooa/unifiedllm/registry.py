@@ -70,6 +70,8 @@ if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
 
 logger = logging.getLogger(__name__)
+# Aliases already warned about a missing media_inputs setting (warn once each).
+_warned_text_only: set[str] = set()
 
 # Serializes the (_loaded, MODELS) check-and-mutate so concurrent
 # ensure_loaded() / reload_registry() calls — possible when async agent
@@ -202,6 +204,28 @@ MODELS: dict[str, dict[str, Any]] = {}
 _loaded = False
 
 
+def load_model_entries(*paths: Path) -> dict[str, dict[str, Any]]:
+    """Read whole-alias layers without mutating the global registry."""
+    fresh: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        logger.debug("Loading LLM registry config from: %s", path)
+        for name, cfg in _load_models_from_yaml(path).items():
+            if cfg is None:
+                fresh.pop(name, None)
+            elif isinstance(cfg, dict):
+                fresh[name] = cfg
+            else:
+                logger.warning(
+                    "Ignoring model %r in %s: expected mapping or null, got %s",
+                    name,
+                    path,
+                    type(cfg).__name__,
+                )
+                fresh.pop(name, None)
+
+    return fresh
+
+
 def reload_registry(*paths: Path) -> dict[str, dict[str, Any]]:
     """Reload ``MODELS`` from YAML files, last-wins.
 
@@ -234,22 +258,7 @@ def reload_registry(*paths: Path) -> dict[str, dict[str, Any]]:
 
         paths = tuple(llm_config_chain())
 
-    fresh: dict[str, dict[str, Any]] = {}
-    for path in paths:
-        logger.debug("Loading LLM registry config from: %s", path)
-        for name, cfg in _load_models_from_yaml(path).items():
-            if cfg is None:
-                fresh.pop(name, None)
-            elif isinstance(cfg, dict):
-                fresh[name] = cfg
-            else:
-                logger.warning(
-                    "Ignoring model %r in %s: expected mapping or null, got %s",
-                    name,
-                    path,
-                    type(cfg).__name__,
-                )
-                fresh.pop(name, None)
+    fresh = load_model_entries(*paths)
 
     with _registry_lock:
         MODELS.clear()
@@ -489,6 +498,7 @@ def client_from_config(
         "store",
         "include",
         "cache_breakpoint",
+        "media_inputs",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]
@@ -522,7 +532,7 @@ def client_from_config(
         or (client_type is not None and client_type != config.get("client_type", "completion"))
         or overrides.get("client") is not None
     ):
-        for key in ("reasoning_levels", "reasoning_default", "reasoning_level"):
+        for key in ("reasoning_levels", "reasoning_default", "reasoning_level", "media_inputs"):
             params.pop(key, None)
         if "reasoning_levels" in config:
             logger.warning(
@@ -532,6 +542,14 @@ def client_from_config(
             )
 
     params.update(overrides)
+    if config and "media_inputs" not in params and name not in _warned_text_only:
+        _warned_text_only.add(name)
+        logger.warning(
+            "Model %r has no media_inputs setting, so it is text-only: images, audio, "
+            "video and PDFs are not sent to it. Add media_inputs: [...] to its "
+            "llm_config.yaml entry (or media_inputs: [] to silence this warning).",
+            name,
+        )
 
     # Select client class: explicit param > YAML config > default
     client = (

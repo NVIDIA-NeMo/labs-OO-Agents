@@ -221,6 +221,25 @@ def question_text(question: str, options: list[str] | None, reason: str | None =
     return text
 
 
+def result_text(kind: str, outcome: dict[str, Any]) -> str | None:
+    """The status line that ends a ``Done``/``Waiting`` turn, else ``None``.
+
+    A Markdown blockquote, so it reads as a status and not as chat text:
+    ``> **Done:** <explanation>`` or ``> **Waiting:** <explanation>``. Every
+    line of a longer explanation stays inside the quote.
+    """
+    explanation = str(outcome.get("explanation") or "").strip()
+    if kind == "done":
+        label = "Done"
+    elif kind == "waiting":
+        label = "Waiting"
+    else:
+        return None
+    first, *rest = explanation.splitlines() or [""]
+    head = f"**{label}:** {first}" if first else f"**{label}.**"
+    return "\n".join(f"> {line}" if line else ">" for line in [head, *rest])
+
+
 def end_line(update: Any) -> Any:
     """``update``, with its text ending in a blank line when it is a whole agent message.
 
@@ -646,18 +665,16 @@ class ACPEventBridge:
                     text_block(question_text(question, options, str(reason) if reason else None))
                 )
             )
+        elif update.outcome_kind in {"done", "waiting"}:
+            # The chat says the turn ended, and what it waits on.
+            text = result_text(update.outcome_kind, update.outcome)
+            if text:
+                self._enqueue(update_agent_message(text_block(text)))
         elif update.outcome_kind == "error":
             # A turn ending on an error does not always write the PythonOutput
             # for a cell it announced; close its card rather than leave it
             # spinning.
             self.fail_open_tools("Did not finish.", title="Unfinished")
-        if self.verbosity != "silent" and update.outcome_kind in {"done", "waiting", "need_input"}:
-            self._activity_text(
-                f"Returned {update.outcome_kind}: "
-                + pformat(update.outcome, max_string=None, unquote_strings=True),
-                f"Returned {update.outcome_kind}: "
-                + str(update.outcome.get("explanation") or update.outcome.get("question", "")),
-            )
         self._publish_plan()
 
     def _on_child_created(self, update: ChildCreatedUpdate) -> None:

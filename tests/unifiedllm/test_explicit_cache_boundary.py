@@ -616,11 +616,16 @@ async def test_multimodal_breakpoint_reaches_provider_http(provider, with_text, 
             api_key="test",
             api_base="https://example.test/v1",
             cache_breakpoint="openai",
+            media_inputs=["image", "pdf"],
         )
         block = (
             {"type": "input_image", "image_url": png}
             if media == "image"
-            else {"type": "input_file", "file_id": "file-test"}
+            else {
+                "type": "input_file",
+                "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK",
+                "filename": "test.pdf",
+            }
         )
         marker = "prompt_cache_breakpoint"
     else:
@@ -629,6 +634,7 @@ async def test_multimodal_breakpoint_reaches_provider_http(provider, with_text, 
             api_key="test",
             api_base="https://example.test",
             cache_breakpoint="anthropic",
+            media_inputs=["image", "pdf"],
         )
         block = (
             {"type": "image_url", "image_url": {"url": png}}

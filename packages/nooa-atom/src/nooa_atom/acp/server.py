@@ -1550,8 +1550,8 @@ def _trace_as(session: Session) -> None:
     a loop hook, and also in the calling request's context. The loop's
     context is a fresh one, so the tracing hooks (kept in a context variable
     where tracing was enabled) are registered there too; without that the
-    turns produce no spans at all. A subagent's session has no hook and so
-    no trace session of its own yet.
+    turns produce no spans at all. A child session is not traced here: the
+    registry continues its creator's trace (``session.tracing``).
     """
     try:
         import nooa.tracing as tracing

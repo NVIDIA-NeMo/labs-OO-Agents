@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -63,6 +65,7 @@ from nooa_cli.sessions import (
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
+from nooa.storage.json_snapshot import snapshot_to_json
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
 from nooa.unifiedllm import UnifiedLLM
 from nooa_acp._runtime import (
@@ -80,6 +83,12 @@ _SESSION_PAGE_SIZE = 50
 _GENERATION_LIMIT_PREFIX = MAX_ITERATIONS_MESSAGE.partition("{")[0]
 
 
+def _snapshot_blob(agent: CodingAgent) -> tuple[str, str]:
+    """The agent's snapshot as JSON text, and its SHA-256 digest."""
+    blob = json.dumps(snapshot_to_json(agent), sort_keys=True)
+    return blob, hashlib.sha256(blob.encode()).hexdigest()
+
+
 @dataclass(slots=True)
 class _ACPSession:
     """Live resources owned by one ACP session runtime."""
@@ -94,9 +103,45 @@ class _ACPSession:
     cancel_complete: asyncio.Event = field(default_factory=asyncio.Event)
     notification_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     commands_sent_on_prompt: bool = False
+    snapshot_digest: str | None = None
 
     def __post_init__(self) -> None:
         self.cancel_complete.set()
+
+    def checkpoint(self) -> None:
+        """Save the agent's state if it changed since the last save.
+
+        A failure is logged and the turn is not affected; the next turn tries
+        again.
+        """
+        try:
+            blob, digest = _snapshot_blob(self.agent)
+            if digest == self.snapshot_digest:
+                return
+            self.handle.storage.save_snapshot_json(blob)
+            self.snapshot_digest = digest
+        except Exception:
+            logger.warning(
+                "Session %s: could not save the agent's state", self.handle.id, exc_info=True
+            )
+
+    @asynccontextmanager
+    async def saving_state(self) -> AsyncIterator[None]:
+        """Save the agent's state when the turn ends, unless it was cancelled.
+
+        A cancel can stop a cell halfway, so its state is not saved; the
+        session keeps the last turn that finished. ``cancel()`` sets
+        ``cancel_complete``, which each turn clears when it starts.
+        """
+        cancelled = False
+        try:
+            yield
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if not cancelled and not self.cancel_complete.is_set():
+                self.checkpoint()
 
     async def close(self) -> None:
         for task in self.notification_tasks:
@@ -268,7 +313,7 @@ class CodingACPAdapter:
         runtime = await self._get_runtime(session_id)
         text = self._prompt_text(prompt)
         try:
-            async with runtime.turn():
+            async with runtime.turn(), runtime.value.saving_state():
                 session = runtime.value
                 session.handle.record_user_message(text)
                 session.cancel_complete.clear()
@@ -399,15 +444,10 @@ class CodingACPAdapter:
         value: _ACPSession | None = None
         try:
             mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers)
-            agent = CodingAgent(
-                llm=llm,
-                cwd=root,
-                storage=handle.storage,
-                # Same anchoring as the session store above: one ACP process
-                # serves many workspaces, so project-local paths follow the
-                # session's workspace rather than the process.
-                libs_dir=root / ".nooa" / "libs",
-                skills_dirs=load_coding_skills_dirs(root),
+            # Restored before MCP tools are registered, so a restored skill
+            # list cannot drop them. A new session has nothing to restore.
+            agent, restored = await self._restore_agent(
+                self._build_agent(llm, root, handle), root, handle
             )
             registration_warnings: list[str] = []
             for name, tool in mcp.items():
@@ -433,6 +473,12 @@ class CodingACPAdapter:
                 commands,
                 startup_warnings=(*mcp_warnings, *registration_warnings),
             )
+            if restored:
+                # The state just restored is already saved: without a digest
+                # the first unchanged turn would write a copy of it. A fresh
+                # agent keeps none, so its first turn replaces a bad snapshot.
+                with suppress(Exception):
+                    value.snapshot_digest = _snapshot_blob(agent)[1]
             commands.set_on_change(
                 lambda available: bridge.publish(_available_commands_update(available)),
             )
@@ -453,6 +499,46 @@ class CodingACPAdapter:
             else:
                 await llm.aclose()
             raise
+
+    @staticmethod
+    def _build_agent(llm: UnifiedLLM, root: Path, handle: SessionHandle) -> CodingAgent:
+        return CodingAgent(
+            llm=llm,
+            cwd=root,
+            storage=handle.storage,
+            # Same anchoring as the session store above: one ACP process
+            # serves many workspaces, so project-local paths follow the
+            # session's workspace rather than the process.
+            libs_dir=root / ".nooa" / "libs",
+            skills_dirs=load_coding_skills_dirs(root),
+        )
+
+    async def _restore_agent(
+        self, agent: CodingAgent, root: Path, handle: SessionHandle
+    ) -> tuple[CodingAgent, bool]:
+        """Restore the latest snapshot; return the agent to use and whether one was restored.
+
+        If it cannot be restored (damaged, or from an older agent class), log
+        it and return a fresh agent: the failed restore may have half-changed
+        this one.
+        """
+        try:
+            restored = handle.storage.restore_latest_snapshot(agent)
+        except Exception:
+            logger.warning(
+                "Session %s: could not restore its saved state; starting a fresh agent",
+                handle.id,
+                exc_info=True,
+            )
+            # close() also closes the agent's LLM client, so the new agent gets its own.
+            await agent.close()
+            return self._build_agent(self._llm_factory(), root, handle), False
+        # InteractiveAgent.after_restore() (with self.jobs) reports jobs lost
+        # in the previous process.
+        after_restore = getattr(agent, "after_restore", None)
+        if restored and callable(after_restore):
+            after_restore()
+        return agent, restored
 
     async def _create_mcp_tools(
         self,

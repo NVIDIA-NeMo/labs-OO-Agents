@@ -157,7 +157,10 @@ class SkillManager(Skill):
         return (type(skill).__doc__ or "").split("\n---\n", 1)[-1].strip()
 
     def doc(self, name: str) -> str:
-        """The full description of one skill of any kind, with an MCP server's tools."""
+        """The full description of one skill of any kind, with an MCP server's tools.
+
+        An unconnected MCP skill returns a connection-status message instead of its tools.
+        """
         entry = self._one(name)
         if entry.kind == "text":
             attr = _leaf(entry.key)
@@ -204,6 +207,8 @@ class SkillManager(Skill):
             order = [label for label in _KIND_LABELS.values() if label in rest_kinds]
             lines.append(
                 f"{rest} more ({', '.join(order)}): self.skills.search('query') (sync); "
+                "self.skills.doc('name') (sync) for one skill's full docs "
+                "(an unconnected MCP skill returns its connection status); "
                 "await self.skills.activate(['name']) (async); "
                 "self.skills.read('name') (sync) for text skills"
             )
