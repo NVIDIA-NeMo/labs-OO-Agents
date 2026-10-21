@@ -1665,10 +1665,7 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
         assert thoughts == []
         assert cards == []
     elif level == "concise":
-        assert thoughts == [
-            "Summarized context (1..2).\n\n",
-            "Returned done: Task completed\n\n",
-        ]
+        assert thoughts == ["Summarized context (1..2).\n\n"]
         assert [type(card) for card in cards] == [ToolCallStart, ToolCallProgress]
         assert [card.status for card in cards] == ["in_progress", "completed"]
         for card in cards:
@@ -1682,8 +1679,7 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
         assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
         assert thoughts[0] == "Long reasoning"
         assert "Full recap\nMore recap" in thoughts[1]
-        # The short form: the explanation, not the whole outcome.
-        assert thoughts[2] == "Returned done: Task completed\nMore details\n\n"
+        assert len(thoughts) == 2  # the turn's return is not a thought
     await bridge.close()
     await agent.aclose()
 
@@ -1760,18 +1756,7 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
     session.emit(TurnEndedUpdate(session_id=session.id, outcome_kind=kind, outcome=outcome))
     await bridge.flush()
     thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
-    if level == "silent":
-        assert thoughts == []
-    elif level == "concise":
-        line = "Waiting for review" if kind == "waiting" else "Which target?"
-        assert thoughts == [f"Returned {kind}: {line}\n\n"]
-    else:
-        text = (
-            "Waiting for review\nMore detail"
-            if kind == "waiting"
-            else "Which target?\nFull question"
-        )
-        assert thoughts == [f"Returned {kind}: {text}\n\n"]
+    assert thoughts == []  # the return is shown as agent text, never as a thought
     answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
     assert answers == (
         ["Which target?\nFull question\n\n- first\n- second\n\n"]

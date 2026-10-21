@@ -676,12 +676,6 @@ class ACPEventBridge:
             # for a cell it announced; close its card rather than leave it
             # spinning.
             self.fail_open_tools("Did not finish.", title="Unfinished")
-        if self.verbosity != "silent" and update.outcome_kind in {"done", "waiting", "need_input"}:
-            # The short form at every level; the whole outcome is in the trace.
-            self._activity_text(
-                f"Returned {update.outcome_kind}: "
-                + str(update.outcome.get("explanation") or update.outcome.get("question", ""))
-            )
         self._turn_spoke = False
         self._publish_plan()
 
