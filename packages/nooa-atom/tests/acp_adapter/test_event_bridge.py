@@ -1682,8 +1682,8 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
         assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
         assert thoughts[0] == "Long reasoning"
         assert "Full recap\nMore recap" in thoughts[1]
-        assert "all details" in thoughts[2]
-        assert "More details" in thoughts[2]
+        # The short form: the explanation, not the whole outcome.
+        assert thoughts[2] == "Returned done: Task completed\nMore details\n\n"
     await bridge.close()
     await agent.aclose()
 
@@ -1766,8 +1766,12 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
         line = "Waiting for review" if kind == "waiting" else "Which target?"
         assert thoughts == [f"Returned {kind}: {line}\n\n"]
     else:
-        assert len(thoughts) == 1
-        assert "delegates" in thoughts[0] if kind == "waiting" else "second" in thoughts[0]
+        text = (
+            "Waiting for review\nMore detail"
+            if kind == "waiting"
+            else "Which target?\nFull question"
+        )
+        assert thoughts == [f"Returned {kind}: {text}\n\n"]
     answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
     assert answers == (
         ["Which target?\nFull question\n\n- first\n- second\n\n"]
