@@ -192,7 +192,7 @@ async def test_loading_a_session_twice_sends_each_later_update_once(
     await adapter.bridge(response.session_id).flush()
     assert client.texts(AgentMessageChunk, response.session_id) == [
         "Second answer.\n\n",
-        "Done: answered\n\n",
+        "> **Done:** answered\n\n",
     ]
 
 

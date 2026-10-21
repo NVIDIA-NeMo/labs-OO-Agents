@@ -224,7 +224,9 @@ def question_text(question: str, options: list[str] | None, reason: str | None =
 def result_text(kind: str, outcome: dict[str, Any]) -> str | None:
     """The status line that ends a ``Done``/``Waiting`` turn, else ``None``.
 
-    ``Done: <explanation>`` or ``Waiting: <explanation>``.
+    A Markdown blockquote, so it reads as a status and not as chat text:
+    ``> **Done:** <explanation>`` or ``> **Waiting:** <explanation>``. Every
+    line of a longer explanation stays inside the quote.
     """
     explanation = str(outcome.get("explanation") or "").strip()
     if kind == "done":
@@ -233,7 +235,9 @@ def result_text(kind: str, outcome: dict[str, Any]) -> str | None:
         label = "Waiting"
     else:
         return None
-    return f"{label}: {explanation}" if explanation else f"{label}."
+    first, *rest = explanation.splitlines() or [""]
+    head = f"**{label}:** {first}" if first else f"**{label}.**"
+    return "\n".join(f"> {line}" if line else ">" for line in [head, *rest])
 
 
 def end_line(update: Any) -> Any:

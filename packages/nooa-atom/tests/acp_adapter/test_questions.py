@@ -70,7 +70,7 @@ async def test_a_form_answer_goes_to_the_agent_and_the_same_prompt_continues(
     assert client.texts(AgentMessageChunk, session_id)[-3:] == [
         "Which branch?\n\n- main\n- dev\n\n",
         "Using dev.\n\n",
-        "Done: answered\n\n",
+        "> **Done:** answered\n\n",
     ]
     assert "dev" in str(models.llms[None].calls[1].messages[-2:])
     assert client.texts(UserMessageChunk, session_id) == ["dev"]
@@ -81,7 +81,7 @@ async def test_a_form_answer_goes_to_the_agent_and_the_same_prompt_continues(
     ]
     assert isinstance(conversation[-3], UserMessageChunk)
     assert conversation[-2].content.text == "Using dev.\n\n"
-    assert conversation[-1].content.text == "Done: answered\n\n"
+    assert conversation[-1].content.text == "> **Done:** answered\n\n"
     assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
         "push it",
         "dev",
@@ -195,7 +195,7 @@ async def test_a_done_message_reaches_the_client_before_the_prompt_answers(
     adapter = await make_adapter(models)
     session_id, response = await _run(adapter, workspace)
     client.log.append(("response", "prompt", response))
-    assert client.texts(AgentMessageChunk, session_id) == ["All set.\n\n", "Done: x\n\n"]
+    assert client.texts(AgentMessageChunk, session_id) == ["All set.\n\n", "> **Done:** x\n\n"]
     kinds = [
         "message" if entry[0] == "update" and isinstance(entry[2], AgentMessageChunk) else entry[0]
         for entry in client.log
@@ -263,7 +263,7 @@ async def test_a_typed_standard_form_echoes_serialized_validated_answer(
     ]
     assert isinstance(conversation[-3], UserMessageChunk)
     assert conversation[-2].content.text == "Deploying.\n\n"
-    assert conversation[-1].content.text == "Done: answered\n\n"
+    assert conversation[-1].content.text == "> **Done:** answered\n\n"
     assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
         "push it",
         echo,

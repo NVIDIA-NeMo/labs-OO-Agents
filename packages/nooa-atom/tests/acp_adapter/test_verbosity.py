@@ -63,7 +63,7 @@ async def test_concise_python_is_full_tool_card_not_message(make_adapter, worksp
     assert response.stop_reason == "end_turn"
     assert client.texts(AgentMessageChunk, session_id) == [
         "User-facing answer\n\n",
-        "Done: Checked repository\nExtra detail\n\n",
+        "> **Done:** Checked repository\n> Extra detail\n\n",
     ]
     assert client.texts(AgentThoughtChunk, session_id) == []
     [start] = client.updates(session_id, ToolCallStart)

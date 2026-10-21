@@ -74,7 +74,7 @@ async def test_choosing_a_model_switches_the_next_turn(make_adapter, workspace, 
     assert result.stop_reason == "end_turn"
     assert client.texts(AgentMessageChunk, session_id)[-2:] == [
         "From the smart model.\n\n",
-        "Done: answered\n\n",
+        "> **Done:** answered\n\n",
     ]
 
 

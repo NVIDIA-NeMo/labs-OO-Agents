@@ -38,5 +38,5 @@ async def test_compact_sends_the_directive_to_the_agent(atom_adapter, workspace,
     assert "keep the API notes" in sent
     assert client.texts(AgentMessageChunk, session_id)[-2:] == [
         "Compacted.\n\n",
-        "Done: answered\n\n",
+        "> **Done:** answered\n\n",
     ]

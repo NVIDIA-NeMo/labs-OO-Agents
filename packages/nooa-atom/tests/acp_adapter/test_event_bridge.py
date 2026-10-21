@@ -888,14 +888,14 @@ async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
 @pytest.mark.parametrize(
     ("kind", "outcome", "line"),
     [
-        ("done", {"explanation": "fixed parse()"}, "Done: fixed parse()"),
-        ("done", {"explanation": ""}, "Done."),
+        ("done", {"explanation": "fixed parse()"}, "> **Done:** fixed parse()"),
+        ("done", {"explanation": ""}, "> **Done.**"),
         (
             "waiting",
             {"explanation": "tests running", "on": ["jobs", "delegates"]},
-            "Waiting: tests running",
+            "> **Waiting:** tests running",
         ),
-        ("waiting", {"explanation": "tests running", "on": []}, "Waiting: tests running"),
+        ("waiting", {"explanation": "tests running", "on": []}, "> **Waiting:** tests running"),
     ],
 )
 async def test_a_done_or_waiting_turn_ends_with_a_status_line(bridged, kind, outcome, line):
@@ -906,7 +906,7 @@ async def test_a_done_or_waiting_turn_ends_with_a_status_line(bridged, kind, out
 
 
 @pytest.mark.parametrize(
-    ("kind", "line"), [("done", "Done: answered"), ("waiting", "Waiting: answered")]
+    ("kind", "line"), [("done", "> **Done:** answered"), ("waiting", "> **Waiting:** answered")]
 )
 async def test_a_status_line_follows_the_turns_messages(bridged, kind, line):
     agent, session, client, bridge = bridged
@@ -937,8 +937,8 @@ async def test_each_turn_ends_with_its_own_status_line(bridged):
     await bridge.flush()
     assert _messages(client) == [
         "Started the job.\n\n",
-        "Waiting: job running\n\n",
-        "Done: ok\n\n",
+        "> **Waiting:** job running\n\n",
+        "> **Done:** ok\n\n",
     ]
 
 
@@ -1666,7 +1666,7 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
     cards = [u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
     assert [u.content.text for u in updates if isinstance(u, AgentMessageChunk)] == [
         "User-facing answer\nStill visible\n\n",
-        "Done: Task completed\nMore details\n\n",
+        "> **Done:** Task completed\n> More details\n\n",
     ]
     if level == "silent":
         assert thoughts == []
@@ -1768,7 +1768,7 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
     assert answers == (
         ["Which target?\nFull question\n\n- first\n- second\n\n"]
         if kind == "need_input"
-        else ["Waiting: Waiting for review\nMore detail\n\n"]
+        else ["> **Waiting:** Waiting for review\n> More detail\n\n"]
     )
     await bridge.close()
     await agent.aclose()
