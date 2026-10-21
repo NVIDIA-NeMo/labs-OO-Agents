@@ -593,11 +593,10 @@ For PDFs, use the specific PDF flag or a generated PDF check; a generic `file`
 listing leaves PDF support unknown. Connect reads only the allowlisted fields,
 not names, descriptions or arbitrary nested flags.
 
-When suggestions are available, choose **Keep current media settings** (the default),
-**Enable listed inputs without testing**, **Change inputs manually**, or
-**Turn all media inputs off**. An optional **Test listed inputs before enabling**
-choice appears only when
-generated checks are selected and implemented for that interface. The guided
+When suggestions are available, choose **Enable listed inputs with test** (the default
+when tests are available), **Enable listed inputs without testing**,
+**Select media inputs manually**, or **Turn media inputs off**. The test option
+appears only when checks are enabled and implemented for that interface. The guided
 wizard still waits for **Test now** before sending any of those requests.
 Suggestions never enable anything themselves, never replace explicit current choices, and
 `--yes` never accepts suggestions without explicit media options. Missing/custom

@@ -40,7 +40,7 @@ def state(**kwargs):
 @pytest.mark.parametrize(
     "action,expected",
     [
-        ("keep", ["pdf"]),
+        ("test", ["pdf"]),
         ("suggested", ["image", "audio", "video"]),
         ("manual", ["audio"]),
         ("none", []),
@@ -55,8 +55,9 @@ def test_explicit_suggestion_review_preserves_or_changes_only_on_choice(
 
     def choose(label, options, *, default):
         seen.append(options)
-        assert default == "keep"
-        assert "image, audio, video" in dict(options)["suggested"]
+        assert default == "test"
+        assert list(dict(options)) == ["test", "suggested", "manual", "none"]
+        assert dict(options)["suggested"] == "Enable listed inputs without testing"
         return action
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
@@ -64,7 +65,8 @@ def test_explicit_suggestion_review_preserves_or_changes_only_on_choice(
     assert wizard.configure_media_inputs(current)
     assert current.media_inputs == expected
     assert previous["media_inputs"] == ["pdf"]
-    assert current.test_media_inputs is None and len(seen) == 1
+    assert current.test_media_inputs == (["image", "audio", "video"] if action == "test" else None)
+    assert len(seen) == 1
 
 
 @pytest.mark.parametrize("choice", ["-", "pdf"])
@@ -101,7 +103,8 @@ def test_optional_tests_require_wizard_approval(monkeypatch, approval, no_probe)
 
     def choose(label, options, **kw):
         assert "test" not in dict(options)
-        return "keep"
+        assert kw["default"] == "manual"
+        return "none"
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
     assert wizard.configure_media_inputs(current)
@@ -113,7 +116,7 @@ def test_suggested_checks_are_selected_explicitly_and_unavailable_not_claimed(mo
     current.api_style = "responses"
 
     def choose(label, options, **kw):
-        assert dict(options)["test"].endswith("image")
+        assert dict(options)["test"] == "Enable listed inputs with test"
         return "test"
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
@@ -128,7 +131,7 @@ def test_systemone_suggestions_do_not_guess_transport(monkeypatch, capsys):
 
     def choose(label, options, **kw):
         assert "test" not in dict(options)
-        assert dict(options)["suggested"].endswith("image")
+        assert dict(options)["suggested"] == "Enable listed inputs without testing"
         return "suggested"
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
@@ -157,7 +160,7 @@ def test_cached_metadata_only_model_does_not_add_settings_prompt(monkeypatch):
     assert wizard.prepare_metadata(current)
     assert current.candidate is None
     assert current.media_hints["architecture"] == META["architecture"]
-    monkeypatch.setattr(prompts, "labelled_choice", lambda *a, **kw: "keep")
+    monkeypatch.setattr(prompts, "labelled_choice", lambda *a, **kw: "none")
     assert wizard.configure_media_inputs(current)
     monkeypatch.setattr(
         prompts, "prompt", lambda *a, **kw: pytest.fail("No new model settings prompt")

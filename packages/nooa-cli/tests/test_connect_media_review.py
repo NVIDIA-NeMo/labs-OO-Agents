@@ -465,3 +465,81 @@ def test_decision_image_wizard_token_mapping(monkeypatch, tmp_path, previous, ac
     assert state.test_media_inputs == (["image"] if action == "test" else None)
     assert existing == original
     assert not state.path.exists()
+
+
+@pytest.mark.parametrize(
+    "keys,action",
+    [
+        ("\r", "test"),
+        ("\x1b[B\r", "suggested"),
+        ("\x1b[B\x1b[B\r", "manual"),
+        ("\x1b[B\x1b[B\x1b[B\r", "none"),
+    ],
+)
+def test_listed_media_menu_requested_order_and_default(terminal_menu, monkeypatch, keys, action):
+    from nooa_cli.commands._connect_advertised_media import offer_suggestions
+
+    state = wizard.WizardState(
+        model="model",
+        api_style="chat",
+        approval="all",
+        guided=True,
+        media_hints={"id": "model", "input_modalities": ["image"]},
+    )
+    monkeypatch.setattr(prompts, "choose_media_inputs", lambda previous: ["video"])
+    accepted, screens = terminal_menu(keys, lambda: offer_suggestions(state, []))
+    assert accepted is True
+    labels = [
+        "Enable listed inputs with test",
+        "Enable listed inputs without testing",
+        "Select media inputs manually",
+        "Turn media inputs off",
+    ]
+    initial = screens[0]
+    assert [initial.index(label) for label in labels] == sorted(
+        initial.index(label) for label in labels
+    )
+    assert ">  1. Enable listed inputs with test" in initial
+    assert "Keep current media" not in initial
+    assert state.test_media_inputs == (["image"] if action == "test" else None)
+    assert (
+        state.media_inputs
+        == {"test": [], "suggested": ["image"], "manual": ["video"], "none": []}[action]
+    )
+
+
+@pytest.mark.parametrize(
+    "answer,action",
+    [
+        ("\n", "test"),
+        ("1\n", "test"),
+        ("test\n", "test"),
+        ("2\n", "suggested"),
+        ("3\n", "manual"),
+        ("4\n", "none"),
+    ],
+)
+def test_listed_media_pipe_order_and_default(monkeypatch, answer, action):
+    from nooa_cli.commands._connect_advertised_media import offer_suggestions
+
+    state = wizard.WizardState(
+        model="model",
+        api_style="chat",
+        approval="all",
+        guided=True,
+        media_hints={"id": "model", "input_modalities": ["image"]},
+    )
+    monkeypatch.setattr(prompts, "choose_media_inputs", lambda previous: ["video"])
+
+    @click.command()
+    def choose():
+        assert offer_suggestions(state, [])
+
+    result = CliRunner().invoke(choose, input=answer)
+    assert result.exit_code == 0, result.output
+    assert "1 (test): Enable listed inputs with test" in result.output
+    assert state.test_media_inputs == (["image"] if action == "test" else None)
+    assert (
+        state.media_inputs
+        == {"test": [], "suggested": ["image"], "manual": ["video"], "none": []}[action]
+    )

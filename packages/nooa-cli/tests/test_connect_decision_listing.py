@@ -195,7 +195,7 @@ def test_wizard_lists_decisions_and_saves_unverified_hints(monkeypatch, tmp_path
         discovery.write_text(json.dumps(asdict(connect.Discovery(ENDPOINT, (MODEL,), MODELS_URL))))
         options += ["--discovery-file", str(discovery)]
         mock_http(monkeypatch, lambda request: pytest.fail("File picker must not fetch again"))
-    result = CliRunner().invoke(command, options, input=MODEL["id"] + "\nkeep\nsave\ny\n")
+    result = CliRunner().invoke(command, options, input=MODEL["id"] + "\nnone\nsave\ny\n")
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["endpoint"] == ENDPOINT
@@ -285,7 +285,7 @@ def test_hub_preset_uses_shared_listing_for_decision_route(monkeypatch, tmp_path
             "--output",
             str(path),
         ],
-        input=MODEL["id"] + "\nkeep\nsave\ny\n",
+        input=MODEL["id"] + "\nnone\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Found 2 models" in result.output
@@ -391,7 +391,7 @@ def test_wizard_preview_redacts_echoed_catalogue_credentials(monkeypatch, tmp_pa
             "--output",
             str(path),
         ],
-        input=MODEL["id"] + "\nkeep\nsave\ny\n",
+        input=MODEL["id"] + "\nnone\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "inference-secret-canary" not in result.output

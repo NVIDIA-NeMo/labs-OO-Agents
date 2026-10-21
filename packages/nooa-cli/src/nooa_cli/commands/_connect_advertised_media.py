@@ -48,28 +48,21 @@ def offer_suggestions(state, previous):
         or not report["suggested"]
     ):
         return False
-    options = [
-        ("keep", "Keep current media settings: " + (", ".join(previous) or "text only")),
+    options = []
+    can_test = not state.no_probe and state.approval == "all" and bool(report["checkable"])
+    if can_test:
+        options.append(("test", "Enable listed inputs with test"))
+    options.extend(
         (
-            "suggested",
-            "Enable listed inputs without testing: " + ", ".join(report["suggested"]),
-        ),
-    ]
-    if not state.no_probe and state.approval == "all" and report["checkable"]:
-        options.append(
-            (
-                "test",
-                (
-                    "Test listed inputs before enabling (generated samples; selected check budget): "
-                    if getattr(state, "guided", False)
-                    else "Test listed inputs before enabling (generated samples; approved check budget): "
-                )
-                + ", ".join(report["checkable"]),
-            )
+            ("suggested", "Enable listed inputs without testing"),
+            ("manual", "Select media inputs manually"),
+            ("none", "Turn media inputs off"),
         )
-    options.extend((("manual", "Change inputs manually"), ("none", "Turn all media inputs off")))
+    )
     action = prompts.labelled_choice(
-        "Choose how to use the listed media inputs", tuple(options), default="keep"
+        "Choose how to use the listed media inputs",
+        tuple(options),
+        default="test" if can_test else "manual",
     )
     if action == "test":
         state.test_media_inputs = list(report["checkable"])
@@ -77,12 +70,11 @@ def offer_suggestions(state, previous):
         state.inherit_media_inputs = True
     else:
         state.media_inputs = (
-            list(previous)
-            if action == "keep"
-            else list(report["suggested"])
+            list(report["suggested"])
             if action == "suggested"
             else prompts.choose_media_inputs(previous)
             if action == "manual"
             else []
         )
+        state.inherit_media_inputs = False
     return True
