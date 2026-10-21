@@ -315,7 +315,9 @@ class ActivityShellTools(Skill):
         stdin: Annotated[
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
-        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        timeout: Annotated[
+            float | None, spec(description="Max seconds; None uses the shell's default_timeout")
+        ] = None,
         cwd: Annotated[
             str | Path | None, spec(description="Directory for this command only")
         ] = None,
@@ -383,7 +385,9 @@ class ActivityShellTools(Skill):
         stdin: Annotated[
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
-        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        timeout: Annotated[
+            float | None, spec(description="Max seconds; None uses the shell's default_timeout")
+        ] = None,
         cwd: Annotated[
             str | Path | None, spec(description="Directory for this command only")
         ] = None,
