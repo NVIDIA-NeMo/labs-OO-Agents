@@ -173,11 +173,6 @@ def _item_display_text(item: Any, item_json: str) -> str:
     return item_json
 
 
-def _is_form_response(item: Any) -> bool:
-    """Only a ``FormResponse`` answers a form; any other item is ordinary input."""
-    return isinstance(item, FormResponse)
-
-
 class Session:
     """One agent, its turn loop and its durable record.
 
@@ -456,49 +451,48 @@ class Session:
         """Whether this exact live form still owns the answer intent."""
         return self._pending_form is request and not self.closing and self.info.status != "running"
 
-    def admit_form_response(
-        self, request: NeedInputForm, response: FormResponse | str, *, source: str
-    ) -> Receipt | None:
-        """Admit an adapter-checked answer only while its request is current.
+    def answer_form(
+        self,
+        response: Any,
+        *,
+        source: str = "user",
+        owner: NeedInputForm | str | None = None,
+    ) -> Receipt:
+        """Admit ``response`` (a ``FormResponse`` or its data) as the pending form's answer.
 
-        ``response`` is the checked ``FormResponse``, or text with the person's
-        answers when they failed the form's checks. No await separates identity
-        checking and admission; later turns supersede old dialog ownership.
+        ``owner`` names the form being answered: the ``NeedInputForm`` itself
+        (hosts), its ``request_id`` (the parent of a child), or ``None`` for
+        the current form. Raises ``ValueError`` if that form is no longer
+        pending. No await separates the check and the admission.
         """
         self._ensure_external_admission()
-        if not self.form_is_current(request):
-            return None
+        response = FormResponse.model_validate(response)
+        if self._pending_form is None:
+            raise ValueError("No pending form request for this response.")
+        current = (
+            owner is None
+            or (isinstance(owner, str) and owner == self._form_request_id)
+            or (isinstance(owner, NeedInputForm) and self.form_is_current(owner))
+        )
+        if not current:
+            raise ValueError(
+                "Form request was superseded or already answered; ask for the current request."
+            )
         receipt = self.admit(response, source=source)
         self._pending_form = None
         self._form_request_id = None
         return receipt
 
     async def submit(
-        self,
-        item: Any,
-        *,
-        channel: str = "user_messages",
-        source: str = "user",
-        request_id: str | None = None,
+        self, item: Any, *, channel: str = "user_messages", source: str = "user"
     ) -> Receipt:
-        """Record then queue input, validating explicit form responses against their owner.
+        """Record then queue input; a ``FormResponse`` on ``user_messages`` answers the pending form.
 
-        A ``FormResponse`` on ``user_messages`` must answer the pending form;
-        other items are ordinary input. ``request_id`` marks the item as a
-        response (it may be serialized data) and must match the current request.
+        Any other item is ordinary input, and on ``user_messages`` it ends the pending form.
         """
         self._ensure_external_admission()
-        if request_id is not None and request_id != self._form_request_id:
-            raise ValueError(
-                "Form request was superseded or already answered; ask for the current request."
-            )
-        is_response = request_id is not None or _is_form_response(item)
-        if channel == "user_messages" and self._pending_form is not None:
-            if is_response:
-                item = FormResponse.model_validate(item)
-            # Raw text remains raw: the agent must not treat it as a validated form outcome.
-        elif channel == "user_messages" and is_response:
-            raise ValueError("No pending form request to validate this response.")
+        if channel == "user_messages" and isinstance(item, FormResponse):
+            return self.answer_form(item, source=source)
         receipt = self.admit(item, channel=channel, source=source)
         if channel == "user_messages":
             # Successful admission claims/invalidates the decision before dispatch can yield.

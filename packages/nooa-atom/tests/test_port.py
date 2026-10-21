@@ -732,7 +732,7 @@ async def test_idle_child_steer_withdraw_and_reload_cannot_revive_form(
     response = FormResponse(
         action=action, content={"answer": "old"} if action == "accept" else None
     )
-    with pytest.raises(ValueError, match="superseded"):
+    with pytest.raises(ValueError, match="No pending"):
         await root._agent.session.send_child(
             child.id, response, channel="user_messages", request_id=request_id
         )

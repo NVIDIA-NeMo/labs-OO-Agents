@@ -849,8 +849,9 @@ class AtomACPAgent:
             if answer is None:
                 return PromptResponse(stop_reason="end_turn")
             value, source = answer
-            receipt = session.admit_form_response(outcome, value, source=source)
-            if receipt is None:
+            try:
+                receipt = session.answer_form(value, source=source, owner=outcome)
+            except ValueError:  # superseded while the client answered
                 return PromptResponse(stop_reason="end_turn")
             item_id = receipt.item_id
 

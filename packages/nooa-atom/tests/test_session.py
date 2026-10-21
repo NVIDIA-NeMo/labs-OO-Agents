@@ -903,9 +903,9 @@ async def test_form_claim_is_one_shot_and_withdrawal_does_not_resurrect(make_ses
     )
     need = session._pending_form
     response = FormResponse(action=action, content={"answer": "a"} if action == "accept" else None)
-    receipt = session.admit_form_response(need, response, source="acp:form-answer")
-    assert receipt is not None
-    assert session.admit_form_response(need, response, source="acp:form-answer") is None
+    receipt = session.answer_form(response, source="acp:form-answer", owner=need)
+    with pytest.raises(ValueError, match="No pending"):
+        session.answer_form(response, source="acp:form-answer", owner=need)
     with pytest.raises(ValueError, match="No pending"):
         await session.submit(response)
     assert session.withdraw(receipt)
@@ -926,18 +926,18 @@ async def test_raw_submission_and_request_tokens_supersede_old_forms(make_sessio
     receipt = await getattr(session, admission)("never mind")
     assert session.withdraw(receipt)
     assert not session.form_is_current(need)
-    assert (
-        session.admit_form_response(need, FormResponse(action="cancel"), source="acp:form-answer")
-        is None
-    )
+    with pytest.raises(ValueError, match="No pending"):
+        session.answer_form(FormResponse(action="cancel"), owner=need)
     session.restore_pending_form({**data, "heading": "B", "request_id": "b"})
     for action in ("accept", "decline", "cancel"):
         response = FormResponse(
             action=action, content={"answer": "a"} if action == "accept" else None
         )
         with pytest.raises(ValueError, match="superseded"):
-            await session.submit(response, request_id="a")
-    await session.submit(FormResponse(action="accept", content={"answer": "b"}), request_id="b")
+            session.answer_form(response, owner="a")
+    with pytest.raises(ValueError, match="superseded"):
+        session.answer_form(FormResponse(action="cancel"), owner=need)
+    session.answer_form(FormResponse(action="accept", content={"answer": "b"}), owner="b")
 
 
 async def test_a_form_response_without_a_pending_form_is_rejected(make_session):
@@ -999,7 +999,7 @@ async def test_request_token_declares_response_intent_even_for_ambiguous_data(ma
     )
     owner = session._pending_form
     with pytest.raises(ValueError):
-        await session.submit(item, request_id="current")
+        session.answer_form(item, owner="current")
     assert session._pending_form is owner and session._form_request_id == "current"
     assert _rows(session, "ItemAdmitted") == []
 
