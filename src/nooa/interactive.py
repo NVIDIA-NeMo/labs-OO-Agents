@@ -363,7 +363,7 @@ class NeedInputForm(BaseModel):
         lines = []
         for question in self.questions:
             line = f"- {question.label}" + (f" ({question.help})" if question.help else "")
-            hints = _hints(question)
+            hints = form_hints(question)
             if hints:
                 line += ": " + "; ".join(hints)
             lines.append(line)
@@ -431,18 +431,16 @@ def _answer_text(value: FormValue) -> str:
 
 
 @hidden
-def form_hints(question: Any) -> list[str]:
-    """Readable constraint hints for one question (shared by text renderers)."""
-    return _hints(question)
-
-
-def _hints(question: Any) -> list[str]:
+def form_hints(question: Any, *, choices: bool = True, default: bool = True) -> list[str]:
+    """Readable hints for one question; ``choices``/``default`` include those parts."""
     kind = question.kind
     hints: list[str] = []
     if kind == "pick_one":
-        hints.append(", ".join(choice.title for choice in question.choices))
+        if choices:
+            hints.append(", ".join(choice.title for choice in question.choices))
     elif kind == "pick_many":
-        hints.append("choose any of: " + ", ".join(choice.title for choice in question.choices))
+        if choices:
+            hints.append("choose any of: " + ", ".join(c.title for c in question.choices))
         if _count_text(question):
             hints.append(_count_text(question))
     elif kind == "number":
@@ -456,13 +454,15 @@ def _hints(question: Any) -> list[str]:
             hints.append(_FORMAT_TEXT[question.format])
         if question.pattern:
             hints.append(f"matching {question.pattern}")
-    default = getattr(question, "default", None)
-    if default is not None:
-        hints.append(f"default: {_default_text(question, default)}")
+    if default and getattr(question, "default", None) is not None:
+        hints.append(f"default: {form_default_text(question)}")
     return hints
 
 
-def _default_text(question: Any, default: Any) -> str:
+@hidden
+def form_default_text(question: Any) -> str:
+    """A question's default as a person reads it (choice titles, yes/no)."""
+    default = question.default
     titles = {choice.value: choice.title for choice in getattr(question, "choices", [])}
     if isinstance(default, list):
         return ", ".join(titles.get(value, value) for value in default)
