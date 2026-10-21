@@ -1,23 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Map a ``NeedInputForm`` to a standard ACP form elicitation and read the answer back.
-
-Each question becomes one property of ``requestedSchema``; required questions
-are listed in ``required``:
-
-- ``TextQuestion``: ``string`` with ``minLength``/``maxLength``/``pattern``/
-  ``format``/``default``.
-- ``PickOneQuestion(allow_other=False)``: ``string`` with ``oneOf`` of
-  ``{const, title}``. With ``allow_other=True`` (standard ACP has no
-  select-or-text property) a plain ``string`` whose description gives examples.
-- ``PickManyQuestion``: ``array`` whose ``items.anyOf`` lists ``{const, title}``,
-  with ``minItems``/``maxItems``/``default``.
-- ``NumberQuestion`` / ``IntegerQuestion``: ``number`` / ``integer`` with
-  ``minimum``/``maximum``/``default``.
-- ``BooleanQuestion``: ``boolean`` with ``default``.
-
-Clients that use another form protocol have their own adapter module.
-"""
+"""Map a ``NeedInputForm`` to a standard ACP form elicitation schema (``requestedSchema``)."""
 
 from typing import Any
 

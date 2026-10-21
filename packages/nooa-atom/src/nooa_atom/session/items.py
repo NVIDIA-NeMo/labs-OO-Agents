@@ -433,6 +433,10 @@ class TurnStartedUpdate(_Update):
     item_ids: list[str] = Field(default_factory=list)
 
 
+INPUT_KINDS = ("need_input", "need_input_form")
+"""Outcome kinds that wait for the person: a question or a form."""
+
+
 class TurnEndedUpdate(_Update):
     """A turn ended.
 

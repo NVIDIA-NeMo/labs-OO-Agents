@@ -36,6 +36,7 @@ from nooa_atom.session.events import (
     SessionTitleUpdated,
 )
 from nooa_atom.session.items import (
+    INPUT_KINDS,
     USAGE_FIELDS,
     InUseSession,
     SessionInfo,
@@ -804,10 +805,7 @@ class SessionStore:
                         role="agent", content=str(raw.get("content", "")), timestamp=timestamp
                     )
                 )
-            elif event_type == "TurnEnded" and raw.get("outcome_kind") in (
-                "need_input",
-                "need_input_form",
-            ):
+            elif event_type == "TurnEnded" and raw.get("outcome_kind") in INPUT_KINDS:
                 content = str(raw.get("explanation", ""))
                 if raw.get("outcome_kind") == "need_input_form":
                     try:

@@ -56,7 +56,6 @@ from acp.schema import (
     SseMcpServer,
     UnstructuredCommandInput,
 )
-from pydantic import ValidationError
 
 from nooa.errors import GenerationError
 from nooa.interactive import FormChoice, FormResponse, NeedInputForm, PickOneQuestion
@@ -905,8 +904,8 @@ class AtomACPAgent:
             )
             # SDK/protocol metadata belongs to transport, not the answer.
             outcome = FormResponse(action=envelope.get("action"), content=envelope.get("content"))
-        except (ValidationError, ValueError, AttributeError, TypeError) as exc:
-            await self._form_failure(bridge, exc)
+        except Exception:  # a malformed envelope from the client
+            await self._form_failure(bridge)
             return None
         return outcome, FORM_ANSWER_SOURCE
 
@@ -919,12 +918,12 @@ class AtomACPAgent:
             and capabilities.elicitation.form is not None
         )
 
-    async def _form_failure(self, bridge: ACPEventBridge, exc: Exception) -> None:
+    async def _form_failure(self, bridge: ACPEventBridge) -> None:
         """Report a malformed client payload; the owning form wait remains revocable."""
         bridge.publish(
             update_agent_message(
                 text_block(
-                    f"Your form answer wasn't used: {_failure_reason(exc)}.\n\n"
+                    "Your form answer wasn't used: it came back incomplete or malformed.\n\n"
                     "Reply here with the answer instead."
                 )
             ),
@@ -1592,13 +1591,6 @@ def _trace_scope(session: Session) -> AbstractContextManager[object]:
     except ImportError:
         return nullcontext()
     return session_scope(session.id)
-
-
-def _failure_reason(exc: Exception) -> str:
-    """A short reason a person can read: a field check, or a malformed answer."""
-    if isinstance(exc, ValidationError) or not str(exc):
-        return "the form came back incomplete or malformed"
-    return str(exc)
 
 
 def _slash_invocation(text: str) -> tuple[str, str] | None:

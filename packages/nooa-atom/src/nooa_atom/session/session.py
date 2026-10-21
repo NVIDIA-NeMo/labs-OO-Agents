@@ -49,6 +49,7 @@ from nooa_atom.session.events import (
     UsageAttributed,
 )
 from nooa_atom.session.items import (
+    INPUT_KINDS,
     USAGE_FIELDS,
     AgentEventUpdate,
     CancelledUpdate,
@@ -904,7 +905,7 @@ class Session:
         # A failed steer delivery retains its buffer/ledger ownership for recovery.
         usage = _usage_delta(self._usage_before, self.info.usage)
         data, result_type = _outcome_data(outcome, kind)
-        if kind in ("need_input", "need_input_form"):
+        if kind in INPUT_KINDS:
             # Recorded, so the question keeps its id after a reload.
             data["question_id"] = question_id(self.id, self.info.reply_count + 1)
         if self._form_request_id is not None:
@@ -1349,7 +1350,7 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
             return outcome.model_dump(mode="json"), result_type
         except Exception:  # a result that is not data
             return {"explanation": outcome.explanation, "result": repr(result)}, None
-    if kind in ("need_input", "need_input_form"):
+    if kind in INPUT_KINDS:
         return outcome.model_dump(mode="json"), None
     if kind == "waiting":
         return outcome.model_dump(mode="json"), None
@@ -1361,7 +1362,7 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
 def _explanation(outcome: Any, kind: OutcomeKind) -> str:
     if kind in ("done", "waiting"):
         return outcome.explanation
-    if kind in ("need_input", "need_input_form"):
+    if kind in INPUT_KINDS:
         return outcome.heading if isinstance(outcome, NeedInputForm) else outcome.question
     if kind == "cancelled":
         return f"cancelled by {outcome.by}"

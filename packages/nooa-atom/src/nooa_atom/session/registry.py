@@ -28,6 +28,7 @@ from nooa_atom.session.events import (
     SnapshotRestoreFailed,
 )
 from nooa_atom.session.items import (
+    INPUT_KINDS,
     AgentEventUpdate,
     ChildCreatedUpdate,
     ChildFailed,
@@ -553,7 +554,7 @@ class SessionRegistry:
             elif event_type == "TurnEnded":
                 replies += 1
                 asked = None
-                if raw.get("outcome_kind") in ("need_input", "need_input_form"):
+                if raw.get("outcome_kind") in INPUT_KINDS:
                     with suppress(ValueError):
                         asked = json.loads(str(raw.get("result_json") or "{}"))
                         asked.setdefault("question_id", question_id(child_id, replies))

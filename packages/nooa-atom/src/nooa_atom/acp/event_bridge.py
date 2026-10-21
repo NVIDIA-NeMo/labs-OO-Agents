@@ -68,6 +68,7 @@ from nooa_atom.agent.activity import (
     TerminalCommandStarted,
 )
 from nooa_atom.session.items import (
+    INPUT_KINDS,
     USAGE_FIELDS,
     AgentEventUpdate,
     CancelledUpdate,
@@ -640,7 +641,7 @@ class ACPEventBridge:
 
     def _on_turn_ended(self, update: TurnEndedUpdate) -> None:
         self._reset_rolling("Turn ended before this finished.")
-        if update.outcome_kind in ("need_input", "need_input_form"):
+        if update.outcome_kind in INPUT_KINDS:
             # Rendered once per turn, here; the prompt that owns the consumed
             # item decides whether to also open a form.
             question = str(update.outcome.get("heading", update.outcome.get("question", "")))
@@ -654,12 +655,7 @@ class ACPEventBridge:
             # for a cell it announced; close its card rather than leave it
             # spinning.
             self.fail_open_tools("Did not finish.", title="Unfinished")
-        if self.verbosity != "silent" and update.outcome_kind in {
-            "done",
-            "waiting",
-            "need_input",
-            "need_input_form",
-        }:
+        if self.verbosity != "silent" and update.outcome_kind in ("done", "waiting", *INPUT_KINDS):
             self._activity_text(
                 f"Returned {update.outcome_kind}: "
                 + pformat(update.outcome, max_string=None, unquote_strings=True),
