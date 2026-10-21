@@ -885,6 +885,57 @@ async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
     assert _messages(client) == ["Which branch?\n\n- main\n- dev\n\n"]
 
 
+@pytest.mark.parametrize(
+    ("kind", "outcome", "line"),
+    [
+        ("done", {"explanation": "fixed parse()"}, "Done: fixed parse()"),
+        ("done", {"explanation": ""}, "Done."),
+        (
+            "waiting",
+            {"explanation": "tests running", "on": ["jobs", "delegates"]},
+            "Waiting on jobs, delegates: tests running",
+        ),
+        ("waiting", {"explanation": "tests running", "on": []}, "Waiting: tests running"),
+    ],
+)
+async def test_a_silent_done_or_waiting_turn_ends_with_a_status_line(bridged, kind, outcome, line):
+    _agent, session, client, bridge = bridged
+    session.emit(TurnEndedUpdate(session_id="session-1", outcome_kind=kind, outcome=outcome))
+    await bridge.flush()
+    assert _messages(client) == [f"{line}\n\n"]
+
+
+@pytest.mark.parametrize("kind", ["done", "waiting"])
+async def test_a_turn_that_sent_a_message_gets_no_status_line(bridged, kind):
+    agent, session, client, bridge = bridged
+    session.emit(SimpleNamespace(kind="turn_started", session_id="session-1"))
+    agent.event_manager.add(AgentMessage(content="Here is the answer."))
+    session.emit(
+        TurnEndedUpdate(
+            session_id="session-1", outcome_kind=kind, outcome={"explanation": "answered"}
+        )
+    )
+    await bridge.flush()
+    assert _messages(client) == ["Here is the answer.\n\n"]
+
+
+async def test_the_status_line_depends_only_on_the_turn_that_ended(bridged):
+    agent, session, client, bridge = bridged
+    agent.event_manager.add(AgentMessage(content="Started the job."))
+    session.emit(
+        TurnEndedUpdate(
+            session_id="session-1",
+            outcome_kind="waiting",
+            outcome={"explanation": "job running", "on": ["jobs"]},
+        )
+    )
+    session.emit(
+        TurnEndedUpdate(session_id="session-1", outcome_kind="done", outcome={"explanation": "ok"})
+    )
+    await bridge.flush()
+    assert _messages(client) == ["Started the job.\n\n", "Done: ok\n\n"]
+
+
 async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):
     agent, session, client, bridge = bridged
     agent.event_manager.add(
@@ -1719,7 +1770,9 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
         assert "delegates" in thoughts[0] if kind == "waiting" else "second" in thoughts[0]
     answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
     assert answers == (
-        ["Which target?\nFull question\n\n- first\n- second\n\n"] if kind == "need_input" else []
+        ["Which target?\nFull question\n\n- first\n- second\n\n"]
+        if kind == "need_input"
+        else ["Waiting on delegates: Waiting for review\nMore detail\n\n"]
     )
     await bridge.close()
     await agent.aclose()

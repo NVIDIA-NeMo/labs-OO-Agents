@@ -221,6 +221,22 @@ def question_text(question: str, options: list[str] | None, reason: str | None =
     return text
 
 
+def result_text(kind: str, outcome: dict[str, Any]) -> str | None:
+    """A short status line for a ``Done``/``Waiting`` turn that sent no message, else ``None``.
+
+    ``Done: <explanation>`` or ``Waiting on <targets>: <explanation>``.
+    """
+    explanation = str(outcome.get("explanation") or "").strip()
+    if kind == "done":
+        label = "Done"
+    elif kind == "waiting":
+        on = [str(target) for target in outcome.get("on") or []]
+        label = f"Waiting on {', '.join(on)}" if on else "Waiting"
+    else:
+        return None
+    return f"{label}: {explanation}" if explanation else f"{label}."
+
+
 def end_line(update: Any) -> Any:
     """``update``, with its text ending in a blank line when it is a whole agent message.
 
@@ -343,6 +359,9 @@ class ACPEventBridge:
         # Live admission dedup, including a steer's same-ID queued fallback.
         # Replay deliberately goes through publish(), not this set.
         self._echoed_items: set[str] = set()
+        # Whether this session's own agent sent a message in the current turn;
+        # a Done/Waiting turn that did not gets a status line instead.
+        self._turn_spoke = False
         # Recently taken item ids, for a steer registered after its item was taken.
         self._taken: dict[str, None] = {}
         # By event type. Cards come from this session's agent and, mirrored,
@@ -617,6 +636,7 @@ class ACPEventBridge:
                 CurrentModeUpdate(session_update="current_mode_update", current_mode_id=update.mode)
             )
         elif getattr(update, "kind", None) == "turn_started":
+            self._turn_spoke = False
             self._reset_rolling("A new turn started.")
         elif isinstance(update, CancelledUpdate):
             self._reset_rolling(cancel_text(update.by), title="Cancelled")
@@ -646,6 +666,11 @@ class ACPEventBridge:
                     text_block(question_text(question, options, str(reason) if reason else None))
                 )
             )
+        elif update.outcome_kind in {"done", "waiting"} and not self._turn_spoke:
+            # Nothing in the chat says the turn ended, or what it waits on.
+            text = result_text(update.outcome_kind, update.outcome)
+            if text:
+                self._enqueue(update_agent_message(text_block(text)))
         elif update.outcome_kind == "error":
             # A turn ending on an error does not always write the PythonOutput
             # for a cell it announced; close its card rather than leave it
@@ -658,6 +683,7 @@ class ACPEventBridge:
                 f"Returned {update.outcome_kind}: "
                 + str(update.outcome.get("explanation") or update.outcome.get("question", "")),
             )
+        self._turn_spoke = False
         self._publish_plan()
 
     def _on_child_created(self, update: ChildCreatedUpdate) -> None:
@@ -686,6 +712,7 @@ class ACPEventBridge:
     def _on_agent_message(self, event: EventBase) -> None:
         if not isinstance(event, AgentMessage):
             return
+        self._turn_spoke = True
         self._enqueue(update_agent_message(text_block(event.content)))
 
     def _on_tool_call(self, event: EventBase, source: str | None) -> None:
