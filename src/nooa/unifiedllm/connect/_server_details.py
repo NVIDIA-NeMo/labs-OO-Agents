@@ -88,7 +88,11 @@ def listing_facts(item):
         }
         if hints:
             result["architecture"] = hints
-    result.update(media_metadata(item))
+    media = media_metadata(item)
+    media_architecture = media.pop("architecture", {})
+    result.update(media)
+    if media_architecture:
+        result.setdefault("architecture", {}).update(media_architecture)
     return result
 
 

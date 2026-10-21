@@ -49,6 +49,8 @@ from ._server_details import bounded_json, openrouter_facts, token_limit
 from ._server_details import server_details as server_details
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
+# OpenRouter defaults to text output, excluding native decision models.
+OPENROUTER_MODEL_OUTPUTS = "text,decisions"
 # Effectively unlimited: no real check plan approaches this, so an unset
 # --budget-tokens never causes checks to be skipped. A finite sentinel (not
 # float("inf")) keeps every arithmetic site, type annotation, and JSON
@@ -399,6 +401,8 @@ async def discover(
     models: dict[str, dict] = {}
     cursors: set[str] = set()
     params = {"limit": "100"} if style == "anthropic" else {}
+    if url == CATALOGUE_URL:
+        params["output_modalities"] = OPENROUTER_MODEL_OUTPUTS
     size = 0
     count = 0
     request_count = 0
@@ -597,7 +601,9 @@ async def discover(
 async def catalogue() -> list[dict]:
     """Fetch public metadata without sending the endpoint's credentials."""
     async with asyncio.timeout(30), httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-        payload = await bounded_json(client, CATALOGUE_URL)
+        payload = await bounded_json(
+            client, CATALOGUE_URL, params={"output_modalities": OPENROUTER_MODEL_OUTPUTS}
+        )
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
             raise ValueError("Catalogue response must contain a list of model objects")

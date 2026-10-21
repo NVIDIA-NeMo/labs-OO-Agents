@@ -259,7 +259,8 @@ async def test_openrouter_public_exact_metadata_no_key_and_no_route_config(monke
 
     def handle(request):
         calls.append(request)
-        assert str(request.url) == connect.CATALOGUE_URL and request.method == "GET"
+        assert str(request.url).split("?")[0] == connect.CATALOGUE_URL and request.method == "GET"
+        assert request.url.params["output_modalities"] == "text,decisions"
         assert "authorization" not in request.headers
         return httpx.Response(
             200,

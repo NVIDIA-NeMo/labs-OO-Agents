@@ -549,8 +549,18 @@ def select_request_interface(state: WizardState) -> bool:
         return True
     view.line(scrub_setup(state, f"Selected model: {state.model}"), bold=True)
     choices = ("discover", "chat", "responses", "anthropic", "systemone", "openai")
-    # Descriptive interface hints can be shown; never dispatch by model name/class.
-    hints = (state.selected_endpoint_model or {}).get("supported_interfaces")
+    # Use declared output type, not the model name, to suggest an interface.
+    metadata = state.selected_endpoint_model or state.candidate or {}
+    outputs = (metadata.get("architecture") or {}).get("output_modalities") or metadata.get(
+        "output_modalities", []
+    )
+    decision_output = isinstance(outputs, list) and "decisions" in outputs and "text" not in outputs
+    if decision_output:
+        view.line("Model output: structured decisions")
+    suggested = (
+        "systemone" if decision_output and "systemone" in state.interface_endpoints else "discover"
+    )
+    hints = metadata.get("supported_interfaces")
     if hints:
         view.line(
             "Server lists interfaces: "
@@ -559,7 +569,7 @@ def select_request_interface(state: WizardState) -> bool:
     choice = prompts.prompt(
         "Request interface",
         choices=choices,
-        default="discover",
+        default=suggested,
         open_menu=True,
         labels={style: prompts.choice_label(style) for style in choices},
     )

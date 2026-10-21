@@ -232,7 +232,10 @@ async def test_catalogue_keeps_architecture_without_generation(monkeypatch):
 
     def handle(request):
         calls.append(request)
-        assert request.method == "GET" and str(request.url) == connect.CATALOGUE_URL
+        assert request.method == "GET" and (
+            str(request.url).split("?")[0] == connect.CATALOGUE_URL
+            and request.url.params.get("output_modalities") == "text,decisions"
+        )
         return httpx.Response(200, json={"data": [metadata(["image", "file"])]})
 
     mock_http(monkeypatch, handle)

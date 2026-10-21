@@ -488,6 +488,16 @@ stage mode. The canonical [Connect skill](../skills/nooa-connect/SKILL.md) cover
 permissions, manual suggestions versus generated checks, source validation and
 headless review. Full checks remain available for unknown shared hubs.
 
+## OpenRouter decision models
+
+Connect requests both text and decision-output models from OpenRouter using
+`output_modalities=text,decisions`. The default OpenRouter list omits models
+such as `typesafe/jev-1.14`; no separate search API is needed.
+
+A model declaring `output_modalities: [decisions]` suggests **System One
+Decisions** when the provider has that endpoint. You can still choose another
+interface. Jev Router is a separate model whose declared output is text.
+
 ## Independent stages for agents
 
 Agents should follow the [nooa-connect skill](../skills/nooa-connect/SKILL.md)

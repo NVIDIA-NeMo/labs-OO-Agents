@@ -140,7 +140,10 @@ def test_wizard_exact_or_explicit_mapping_fetches_only_public_get(monkeypatch, e
 
     def handle(request):
         requests.append(request)
-        assert request.method == "GET" and str(request.url) == connect.CATALOGUE_URL
+        assert request.method == "GET" and (
+            str(request.url).split("?")[0] == connect.CATALOGUE_URL
+            and request.url.params.get("output_modalities") == "text,decisions"
+        )
         assert "authorization" not in request.headers
         return httpx.Response(200, json={"data": [META]})
 

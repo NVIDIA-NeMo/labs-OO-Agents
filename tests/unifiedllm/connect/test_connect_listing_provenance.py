@@ -148,7 +148,10 @@ def test_independent_source_and_exact_id_override_record_media_attribution(style
 async def test_live_catalogue_cannot_inject_internal_endpoint_or_media_attribution(monkeypatch):
     def handle(request):
         assert request.method == "GET"
-        assert str(request.url) == connect.CATALOGUE_URL
+        assert (
+            str(request.url).split("?")[0] == connect.CATALOGUE_URL
+            and request.url.params.get("output_modalities") == "text,decisions"
+        )
         return httpx.Response(
             200,
             json={

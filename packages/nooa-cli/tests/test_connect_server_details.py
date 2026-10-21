@@ -223,7 +223,10 @@ def test_openrouter_reuses_one_public_get_and_never_imports_different_profile(
 
     def handle(request):
         calls.append(request)
-        assert request.method == "GET" and str(request.url) == connect.CATALOGUE_URL
+        assert request.method == "GET" and (
+            str(request.url).split("?")[0] == connect.CATALOGUE_URL
+            and request.url.params.get("output_modalities") == "text,decisions"
+        )
         assert "authorization" not in request.headers
         return httpx.Response(
             200,
@@ -466,7 +469,10 @@ def test_empty_fetched_listing_reused_without_get(monkeypatch):
 
     def handle(request):
         calls.append(request)
-        assert str(request.url) == connect.CATALOGUE_URL
+        assert (
+            str(request.url).split("?")[0] == connect.CATALOGUE_URL
+            and request.url.params.get("output_modalities") == "text,decisions"
+        )
         return httpx.Response(200, json={"data": []})
 
     mock_http(monkeypatch, handle)
@@ -521,7 +527,10 @@ def test_openrouter_model_picker_reuses_public_metadata_without_second_get(monke
 
     def handle(request):
         calls.append(request)
-        assert request.method == "GET" and str(request.url) == connect.CATALOGUE_URL
+        assert request.method == "GET" and (
+            str(request.url).split("?")[0] == connect.CATALOGUE_URL
+            and request.url.params.get("output_modalities") == "text,decisions"
+        )
         return httpx.Response(
             200,
             json={
@@ -649,7 +658,10 @@ def test_shared_public_listing_and_explicit_mapping_reused_once(monkeypatch, loc
 
     def handle(request):
         calls.append(request)
-        assert request.method == "GET" and str(request.url) == connect.CATALOGUE_URL
+        assert request.method == "GET" and (
+            str(request.url).split("?")[0] == connect.CATALOGUE_URL
+            and request.url.params.get("output_modalities") == "text,decisions"
+        )
         assert "authorization" not in request.headers
         return httpx.Response(
             200,
