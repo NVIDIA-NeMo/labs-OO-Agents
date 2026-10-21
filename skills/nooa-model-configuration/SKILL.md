@@ -1,78 +1,34 @@
 ---
 name: nooa-model-configuration
-description: Configure and troubleshoot NOOA model registry entries with Connect or the library, including endpoints, credentials, reply budgets, reasoning levels, cache reuse and reasoning replay. Use for model onboarding, editing aliases, or Connect diagnostic handoffs, not Agent class authoring.
+description: Understand NOOA model registry precedence and saved settings, client selection, reply caps, reasoning levels, caching and replay semantics. For model onboarding, checks and writes use the canonical nooa-connect skill.
 ---
 
-# Configure NOOA models
+# NOOA registry settings and semantics
 
-Produce a usable registry entry for the user's actual route, and state what was
-verified. Keep model configuration separate from agent prompts and strategies.
+For onboarding, network checks, credentials, budgets, diagnostic handoffs and
+configuration writes, follow [nooa-connect](../nooa-connect/SKILL.md), the
+canonical permission-first headless guide. Do not configure a model merely
+because you are authoring an agent or have a key available. Use existing aliases
+where appropriate; obtain scoped permission before changes or checks.
 
-## Locate the configuration before changing it
+This skill explains saved registry settings, precedence and client selection,
+not an alternative Connect workflow. See
+[Model configuration](../../docs/model-configuration.md) for file discovery and
+[Connect reference](../../docs/model-connect.md) for guided human setup/library APIs.
+Copied skills need sibling skills and the source docs matching the installed
+release/commit; use absolute installation references from a diagnostic handoff.
 
-- For a diagnostic handoff, inspect its running package/version, target file,
-  effective alias source, registry chain, credential source and remaining token budget.
-- Use `nooa.llm_config.llm_config_chain()` to inspect active sources and
-  `nooa.unifiedllm.registry.reload_registry(Path(...))` to load a specific file.
-  An explicit output file is not necessarily in the runtime's discovery chain;
-  a higher-priority alias can shadow the saved entry.
-- Confirm the target alias/file and preserve other aliases and unknown fields.
-  Prefer Connect's edit/write path over rebuilding a registry from selected entries.
-- Keep keys in environment variables or NOOA's layered `secrets.yaml`, never in
-  registry entries, shell arguments, reports or commits. `--prompt-key` provides
-  masked input. Persisting a pasted key requires separate consent; check whether
-  a project secrets file shadows the user file.
+## Locate the effective configuration
 
-Read [Connect](../../docs/model-connect.md) for CLI stages, editing, budgets and
-library contracts, or [Model configuration](../../docs/model-configuration.md)
-for saved settings and file discovery. These paths are relative to the source
-checkout. If the skill was copied elsewhere, use the absolute installation references in the handoff;
-a wheel without docs needs the matching source version/commit, not arbitrary main.
-
-## Choose the relevant workflow
-
-**Guided setup:** recommend `uv add "nooa[cli]"` and `uv run nooa connect`.
-Connect suggests/configures the reply token cap, records known or supplied
-context size, lists chosen media formats, and tests tools, reasoning, and caching.
-`--edit-model ALIAS` edits an existing entry; `--edit-model` alone opens the
-registry selector. Wizard `--yes` confirms checks and saving without asking,
-but does not save a newly pasted key. Confirm consent before transmitting user data.
-
-**Agent CLI:** stage mode produces JSON and never saves implicitly.
-`plan` and `save` send no requests; `discover` and `catalogue` fetch metadata.
-`interfaces`, `routing`, `tools`, `reasoning`, `media`, `session`, and `all` run
-model checks without confirmation. Set explicit reply caps and token budgets,
-inspect the planned timeouts, and stop on exhaustion. Failed calls consume
-tokens too. Run only relevant stages to investigate a known failure.
-
-**Planning reference:** build an unsaved entry with `connect.plan` or `--stage plan`.
-Validate saved YAML with `reload_registry(Path(...))`; that proves local loading,
-not credentials or endpoint support. Unknown capabilities stay unknown.
-`--no-probe` skips model checks but may fetch discovery/catalogue metadata;
-supply an exact model/interface/endpoint plus `--no-catalogue` to skip that too.
-
-```sh
-# Unsaved proposal, not a verified connection:
-uv run nooa connect your-model --stage plan --as work \
-  --endpoint https://gateway.example/v1 --api-style chat \
-  --api-key-env MODEL_KEY --max-tokens 32768 > model-plan.json
-
-# Save the proposal explicitly:
-uv run nooa connect --stage save --input model-plan.json --output llm_config.yaml
-# Make this explicit output discoverable to the application:
-export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
-```
-
-Stage `save` requires `--yes` to confirm replacement of an existing alias.
-Read `checks`, `warnings` and `run_context`, not just exit
-status: 0 means that stage met its criterion, 1 means failure or missing evidence,
-and 2 means invalid options. Saving an untested plan is not successful validation.
-
-**Library:** import `from nooa.unifiedllm import connect`. Use `plan` to propose,
-`check_stage` or `run_steps` for checks, and `write` for explicit
-persistence. The library never prompts. Run through the same
-registry client and formatter as the application; do not substitute raw SDK
-probes and call that validation of a NOOA entry.
+- Inspect `nooa.llm_config.llm_config_chain()` and the effective alias source.
+  An explicit output file is not necessarily in that chain, and a higher-priority
+  entry may shadow it. `reload_registry(Path(...))` loads a specific file; local
+  loading does not prove endpoint support or credential validity.
+- Preserve unrelated aliases/comments and review the selected alias's custom
+  fields: stage save replaces that alias as a whole, not a merge.
+- Registry entries contain key variable names, never literal credentials.
+  Environment variables override layered `secrets.yaml`; credential persistence
+  requires separate consent. Follow the canonical skill for headless key use.
 
 ## Keep settings truthful
 
@@ -105,46 +61,19 @@ probes and call that validation of a NOOA entry.
   Responses and recognized Anthropic routes have explicit marker mappings.
   `cache_breakpoint: null` opts out of NOOA markers, not provider implicit caching.
 
-## Configure media
+## Media declarations and diagnostic evidence
 
-Set each model's `media_inputs` to the formats its provider accepts: `image`,
-`audio`, `video`, `pdf`. `File` supports PDFs with MIME type `application/pdf`.
-Use [nooa-media](../nooa-media/SKILL.md) for examples.
+Each model's `media_inputs` declares accepted `image`, `audio`, `video`, `pdf`
+formats; omitted/null/empty means text-only. `File` supports PDFs with
+`application/pdf`. Use [nooa-media](../nooa-media/SKILL.md) for typed examples and
+[nooa-connect](../nooa-connect/SKILL.md) for authorized checks before changing
+these settings. Declaration alone is not verification.
 
-- `--media-inputs image,pdf` saves your chosen formats without testing them.
-  An empty list means text-only. Formats left out become text notices in requests.
-- `--stage media --test-media-inputs image,pdf` runs the text check and generated
-  samples. Audio/video checks run only for Chat. Read passed, failed and skipped
-  results before saving; a pass confirms access, not general accuracy.
-- To skip checks and metadata lookup in the wizard, supply the exact model,
-  endpoint and API style plus `--no-probe --no-catalogue`.
-
-Keep the existing formats when editing the same model. Check the provider's
-supported formats when configuring a different model or endpoint.
-
-## Interpret failures and evidence separately
-
-Model listing may be public: it does not validate inference credentials.
-A timeout or server error does not prove an unsupported API. A truncated reply
-is inconclusive. To test a larger limit, explicitly change the configuration,
-rebuild the plan, and rerun within the token budget and known ceiling.
-Connect does not silently retry with a different cap than the saved configuration.
-
-For reasoning, distinguish request acceptance, settings reaching the wire,
-reasoning observed in the reply, and state replayed in the next request. An
-accepted effort field may be ignored; a correct puzzle answer alone does not
-prove reasoning support. A route that exposes no reasoning is unconfirmed, not
-necessarily non-reasoning. Session checks must retain both settings and available
-state. Never print reasoning text, signatures, encrypted state or raw error bodies.
-
-For caching, compare a stable prefix and continuation cache-read usage. A later
-miss does not erase a successful continuation hit; implicit provider cache misses
-are warnings, not proof that an otherwise working entry is broken. Report missing
-markers separately from markers sent with no reported reuse.
-
-After a fix, rerun only affected checks within the existing token budget. Hand off
-the alias, target/effective file, change, sanitized outcomes and unverified
-capabilities. Do not overwrite unrelated entries or raise budgets implicitly.
+Distinguish request acceptance, configured wire settings, observed reasoning,
+cache reuse and reasoning replay. A correct answer alone does not prove a level
+was honored; no visible reasoning is unknown, not necessarily unsupported.
+A cache miss does not erase a previous continuation hit. Preserve explicit
+retention/transport choices and never publish raw reasoning/signatures/state.
 
 ## Configure reasoning levels
 

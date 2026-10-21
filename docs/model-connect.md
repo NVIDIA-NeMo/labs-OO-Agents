@@ -1,5 +1,11 @@
 # Configure a model with NOOA Connect
 
+**Agents: start with [nooa-connect](../skills/nooa-connect/SKILL.md), the canonical
+permission-first headless guide.** Obtain scoped permission before configuration,
+network/media checks and file/alias writes. Use `--stage`, not piped wizard
+answers or unattended masked-key prompts. This page also covers guided human
+setup and the library reference.
+
 `nooa connect` configures a model so your agents can run smoothly. It suggests
 and saves a reply/output token limit, records the context window when known
 (or supplied by you), and lists your chosen media formats. It tests the route,
@@ -77,8 +83,11 @@ uv run nooa connect gpt-6-luna --as openai-decisions \
   --api-style openai --api-key-env OPENAI_API_KEY
 ```
 
-Connect sends one small decision request to test the setup. Add `--no-probe` to
-save without sending it. Decision models do not take `media_inputs`.
+Connect sends one small Boolean routing request. Add `--no-probe` in the human
+wizard to save without sending it. Native decisions have no tools, reasoning
+levels, images/media, reply-token caps or session checks. There is no separate
+decision stage. `openai` means OpenAI Decisions, not Chat or Responses; IDs are
+saved exactly, without a provider prefix.
 
 In stage mode, decision models support only `plan`, `interfaces`, `routing`,
 `all`, and `save`. `--stage discover` and `--discovery-file` are rejected,
@@ -121,7 +130,9 @@ cannot return structured output, save it without checks (`--no-probe`) instead.
 ## Token budget and reply limit
 
 - `--budget-tokens N` limits the estimated total tokens for all checks. The
-  default is no limit. Actual token use can differ from the estimate.
+  default is effectively unlimited (`10**15`). Actual use can differ from the
+  estimate; this is not a spending cap. Each invocation starts a new budget;
+  agents must track allowance across commands and get consent to raise it.
 - A check that does not fit the remaining budget is skipped. Connect does not
   lower limits or ask for more budget.
 - `--max-tokens N` (also `--reply-tokens`) sets the reply limit saved as
@@ -131,8 +142,14 @@ cannot return structured output, save it without checks (`--no-probe`) instead.
 - `--context-window N` supplies a known context window. Connect uses endpoint
   or catalogue metadata when available; it does not measure context capacity.
   Unknown limits remain unknown.
-- `--output-tokens N` sets the smaller cap for interface discovery only; it does
-  not change the saved reply limit.
+- `--output-tokens N` sets the smaller cap for interface discovery only (default
+  2,048); it does not change the saved reply limit. Configured probes use the saved
+  cap, normally with 120-second timeouts. Initial interface checks use 30 seconds.
+  Routing/tools reserve cap + 512 input tokens, media cap + 4,096 per format;
+  sessions reserve three times `(8192 + 3 * selected reply cap)`.
+- Optional interface reasoning still uses `--reasoning-output-tokens` (default
+  4,096), despite its deprecated help. Configured reasoning checks instead use
+  the saved or selected-level cap.
 
 ## Reasoning levels
 
@@ -156,10 +173,25 @@ public model list. Use `--catalogue-model ID` to pick the entry, or
 
 ## Independent stages for agents
 
-`--stage NAME` runs one step and prints one JSON report to stdout. Check stages
-run requests without confirmation. Only `save` writes the registry. Stages
-normally do not prompt, but `--prompt-key` asks for a masked credential on
-endpoint checks; use `--api-key-env` for unattended use.
+Follow [the canonical agent guide](../skills/nooa-connect/SKILL.md) first.
+`--stage NAME` prints one JSON report to stdout. Checks run without confirmation;
+that is not user authorization. Only save writes the registry. Agents use key
+variable names with `--api-key-env`, not `--prompt-key` or piped wizard answers.
+Report redirection is also a local write.
+
+Stage mode rejects `--provider`, `--catalogue-model`, `--edit-model`, `--levels`,
+`--no-probe`, nondefault `--probe`, and `--show-config`. Reasoning templates/level
+flags apply only to interfaces. `--input` is save-only: checks construct fresh
+plans from flags, so repeat the same approved settings/files. `--output` and
+`--working-dir` are save-only in stage mode; redirect other reports.
+
+Explicit chat/responses/anthropic `--api-style` on **interfaces still compares
+all three**; for a known interface use routing. Decision interfaces checks only
+the selected decision style. Plan and save are offline. Plan does not fetch
+catalogue metadata and does not enable session checks, so its estimate is not a
+full all-stage estimate. Use library `plan(..., session_checks=True)` for that
+preview. This CLI has no catalogue-file, shared listing, mixed-endpoint or native
+decision media options.
 
 | Stage | What it does |
 |---|---|
@@ -172,15 +204,21 @@ endpoint checks; use `--api-key-env` for unattended use.
 | `reasoning` | Check levels from `--levels-file`. |
 | `media` | Run the text baseline and the media tests. |
 | `session` | Check caching and reasoning across turns. |
-| `all` | Run the basic and conversation checks. |
+| `all` | Routing, tools, declared levels, selected media, then session; decisions routing only. |
 | `save` | Write an entry from a plan or result file. |
 
-Example:
+Minimal approved routing example (not an automatic save pipeline):
 
 ```sh
 uv run nooa connect your-model --stage routing --as work \
   --endpoint https://gateway.example/v1 --api-style chat \
-  --api-key-env MODEL_KEY > result.json
+  --api-key-env MODEL_KEY --max-tokens 1024 --budget-tokens 4096 > result.json
+```
+
+Review `ok`, `checks`, `warnings` and the entry, then confirm file/alias writes
+are authorized. Save as a separate step:
+
+```sh
 uv run nooa connect --stage save --input result.json --output llm_config.yaml
 # Register this explicit output path for the application:
 export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
@@ -193,8 +231,19 @@ export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
   unverified plan or a failed result; inspect the report before saving.
 - Exit code `0` means the stage passed, `1` means it failed or was inconclusive,
   and `2` means the options were invalid.
-- The report's `diagnostic_prompt` describes the failure for an agent to fix.
-  It never contains key values.
+- Reports contain `version`, `stage`, `ok`, `data`, `error`, `checks`, `warnings`,
+  `run_context` and `diagnostic_prompt`. Inspect them, not exit status alone.
+  Parser/prevalidation failures can be plain Click stderr rather than JSON.
+  Library validation errors can return stage failure/exit 1 (for example decision
+  tools/media/session or reply-cap misuse), not invalid-option/exit 2.
+- `diagnostic_prompt` describes the failure. Active credentials are redacted,
+  but keep artifacts private: plan deliberately includes synthetic requests.
+- Save strips transient provenance and replaces the selected alias as a whole,
+  not a merge. Preserve other aliases and review/carry forward approved custom
+  fields from the selected alias. Retain reports as evidence.
+- Wizard exit 0 is not proof of save: failed baseline can return normally with
+  “Nothing was saved”. Stage save can succeed on an untested or failed proposal
+  (the latter emits a stderr warning); neither proves route support.
 
 ## When something fails
 
@@ -265,14 +314,18 @@ uv run nooa connect your-model --as vision --endpoint https://gateway.example/v1
   --api-style chat --api-key-env MODEL_KEY --test-media-inputs image,audio,video,pdf \
   --yes
 
-# Same, as a stage:
-uv run nooa connect your-model --stage media --endpoint https://gateway.example/v1 \
-  --api-style chat --api-key-env MODEL_KEY --test-media-inputs image,pdf \
-  > result.json
-uv run nooa connect --stage save --input result.json --output llm_config.yaml
-# Register this explicit output path for the application:
-export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
 ```
+
+For agents, first authorize generated formats/samples and the check allowance:
+
+```sh
+uv run nooa connect your-model --stage media --as vision \
+  --endpoint https://gateway.example/v1 --api-style chat --api-key-env MODEL_KEY \
+  --max-tokens 1024 --budget-tokens 16384 --test-media-inputs image,pdf > result.json
+```
+
+Review routing/media evidence before separately saving as shown above. Media
+pass confirms strict typed Boolean access, not general accuracy.
 
 Rules:
 

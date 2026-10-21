@@ -17,8 +17,10 @@ See [the media guide](../../docs/media.md), the
   if needed; see [model configuration](../../docs/model-configuration.md).
 - Confirm consent before transmitting user data. Media bytes and URLs,
   including signed query strings, may disclose private data.
-- Recommend `uv run nooa connect` to configure the reply cap, known or supplied
-  context size, and chosen media formats, and test the route.
+- Before configuration, network/media checks or registry writes, follow
+  [nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first
+  headless guide. Bound synthetic samples separately from private user media;
+  permission to attach media is not permission to replace an alias.
 - NOOA assumes models are text-only until configured. Set `media_inputs` on the
   registry entry or client constructor: `image`, `audio`, `video`, `pdf`.
   Omitted/null/empty lists mean text-only. Python also accepts tuples; bare

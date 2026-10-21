@@ -5,8 +5,11 @@ as agent method arguments. For media created while CodeAct runs, use `show()`.
 
 ## Configure the model
 
-Start with [nooa connect](model-connect.md) to choose media formats, configure
-the reply token limit and known context size, and test the route.
+Agents: follow [nooa-connect](../skills/nooa-connect/SKILL.md), the canonical
+permission-first headless guide, before model configuration, network/media
+checks or registry writes. Bound samples and private user media separately.
+For guided human setup, [nooa connect](model-connect.md) chooses media formats,
+configures the reply limit and known context size, and tests the route.
 NOOA assumes models are text-only until configured. Set `media_inputs` in the
 model's registry entry or client constructor. Supported values are `image`,
 `audio`, `video`, and `pdf`. Omitted, null, or empty lists mean text-only.
