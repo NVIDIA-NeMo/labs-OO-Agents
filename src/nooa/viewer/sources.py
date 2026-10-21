@@ -206,7 +206,9 @@ def ensure_session(session_id: str):
         journals = []
         for record in records:
             for resource in record.get("resourceSpans", []):
-                attrs = resource.setdefault("resource", {}).setdefault("attributes", [])
+                # Plugins may return cached objects; never mutate them, so a
+                # retry after a failed import does not duplicate attributes.
+                attrs = list(resource.get("resource", {}).get("attributes", []))
                 identity = next(
                     (a["value"].get("stringValue") for a in attrs if a["key"] == "session.id"), None
                 )
@@ -218,7 +220,9 @@ def ensure_session(session_id: str):
                         {"key": "viewer.source.version", "value": {"stringValue": source.version}},
                     ]
                 )
-                body["resourceSpans"].append(resource)
+                body["resourceSpans"].append(
+                    {**resource, "resource": {**resource.get("resource", {}), "attributes": attrs}}
+                )
             journal = record.get("nooaJournal")
             if journal and journal.get("type") != "manifest":
                 if journal.get("session_id") != session_id:

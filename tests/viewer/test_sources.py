@@ -260,6 +260,37 @@ def test_namespaced_call_collision_preserves_native_journal(source_store):
     assert otlp_store.get_session_blocks("example-task") == {}
 
 
+def test_retry_does_not_mutate_cached_plugin_records(source_store, monkeypatch):
+    cached = source_store.load_session("example-task")
+    attributes = cached[-1]["resourceSpans"][0]["resource"]["attributes"]
+    original = [dict(a) for a in attributes]
+    monkeypatch.setattr(source_store, "load_session", lambda sid: cached)
+    real_ingest = otlp_store.ingest_session_with_journal
+    calls = []
+
+    def fail_once(body, journals):
+        calls.append(True)
+        if len(calls) == 1:
+            raise RuntimeError("interrupted")
+        return real_ingest(body, journals)
+
+    monkeypatch.setattr(otlp_store, "ingest_session_with_journal", fail_once)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        sources.ensure_session("example-task")
+    assert attributes == original
+    sources.ensure_session("example-task")
+    assert attributes == original
+    resource = otlp_store.get_session_resource("example-task")
+    assert resource["viewer.source.name"] == "example"
+    keys = [
+        a["key"]
+        for a in otlp_store.export_session_otlp("example-task")[0]["resourceSpans"][0]["resource"][
+            "attributes"
+        ]
+    ]
+    assert keys.count("viewer.source.name") == 1
+
+
 def test_empty_trace_does_not_cache_and_can_retry(source_store, monkeypatch):
     original = source_store.load_session
 
