@@ -386,6 +386,8 @@ def get_trace(session_id: str, limit: int | None = None, offset: int = 0) -> dic
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}") from e
+    except sources.SourceUnavailableError:
+        raise  # Mapped to a client-safe 502 by the application handler.
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error loading session: {str(e)}") from e
 

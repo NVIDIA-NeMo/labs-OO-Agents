@@ -10,6 +10,7 @@ same implementation as local traces. Remote stores are never written to.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -21,6 +22,16 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import otlp_store
+
+log = logging.getLogger(__name__)
+
+
+class SourceUnavailableError(RuntimeError):
+    """A configured source failed; the message is safe to show to clients."""
+
+    def __init__(self, name: str):
+        super().__init__(f"Trace source is unavailable: {name}")
+        self.source = name
 
 
 class TraceSource(Protocol):
@@ -94,7 +105,9 @@ def add_run(name: str, run_id: str) -> dict[str, Any]:
         # Validate across sources too: names may have overlapping prefixes.
         catalog = [
             session
-            for owner, _, session in _catalog({**configured_sources(), name: replacement}).values()
+            for owner, _, session in _catalog(
+                {**configured_sources(), name: replacement}, required={name}
+            ).values()
             if owner == name
         ]
         changed = options != item.get("options", {})
@@ -124,10 +137,18 @@ def add_run(name: str, run_id: str) -> dict[str, Any]:
         }
 
 
-def _catalog(plugins=None) -> dict[str, tuple[str, TraceSource, dict[str, Any]]]:
+def _catalog(plugins=None, required=()) -> dict[str, tuple[str, TraceSource, dict[str, Any]]]:
+    """Merge source catalogs; a failing source is skipped unless it is required."""
     rows = {}
     for name, source in (configured_sources() if plugins is None else plugins).items():
-        for session in source.list_sessions():
+        try:
+            sessions = list(source.list_sessions())
+        except Exception as exc:
+            if name in required:
+                raise SourceUnavailableError(name) from exc
+            log.warning("Skipping trace source %s: listing sessions failed: %r", name, exc)
+            continue
+        for session in sessions:
             sid = session["id"]
             if sid in rows:
                 raise ValueError(f"Trace-source session ID collision: {sid}")
@@ -186,7 +207,8 @@ def ensure_session(session_id: str):
             if resource.get("viewer.source.version") == plugins[owner].version:
                 return  # Opening a cached trace does not need a remote catalog.
             raise ValueError("Cached source version changed; clear its cache before reopening")
-    entry = _catalog().get(session_id)
+    owners = {name for name in plugins if session_id.startswith(name + "-")}
+    entry = _catalog(required=owners).get(session_id)
     if entry is None:
         return
     name, source, _ = entry
@@ -201,7 +223,10 @@ def ensure_session(session_id: str):
                 return
             # Do not silently replace traces with annotations during upgrades.
             raise ValueError("Cached source version changed; clear its cache before reopening")
-        records = list(source.load_session(session_id))
+        try:
+            records = list(source.load_session(session_id))
+        except Exception as exc:
+            raise SourceUnavailableError(name) from exc
         body = {"resourceSpans": []}
         journals = []
         for record in records:

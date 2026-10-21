@@ -173,6 +173,56 @@ def test_cached_detail_does_not_need_remote_catalog(source_store, monkeypatch):
     assert len(otlp_store.get_session_spans("example-task")) == 1
 
 
+class FailingSource:
+    version = "1"
+
+    def list_sessions(self):
+        raise RuntimeError("secret upstream detail")
+
+    def load_session(self, session_id):
+        raise RuntimeError("secret upstream detail")
+
+
+def test_failing_source_does_not_break_other_listings(source_store, monkeypatch, caplog):
+    otlp_store.ingest(ExampleSource().load_session("native")[-1])
+    monkeypatch.setattr(
+        sources, "configured_sources", lambda: {"broken": FailingSource(), "example": source_store}
+    )
+    with caplog.at_level("WARNING", logger="nooa.viewer.sources"):
+        assert {s["id"] for s in sources.list_sessions()} == {"native", "example-task"}
+    assert "broken" in caplog.text
+    client = TestClient(main.app)
+    traces = client.get("/api/traces").json()["traces"]
+    assert {t["id"] for t in traces} == {"native", "example-task"}
+    assert client.get("/api/experiments").json() == ["Example"]
+    response = client.get("/api/eval/experiments/all")
+    assert response.status_code == 200
+    assert [e["id"] for e in response.json()] == ["Example"]
+
+
+@pytest.mark.parametrize("fail", ["list_sessions", "load_session"])
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/trace?session_id=broken-task",
+        "/api/trace-count?session_id=broken-task",
+        "/api/traces/broken-task/calls",
+    ],
+)
+def test_failing_source_session_load_is_client_error(source_store, monkeypatch, fail, endpoint):
+    broken = ExampleSource()
+    catalog = {**broken.list_sessions()[0], "id": "broken-task"}
+    monkeypatch.setattr(broken, "list_sessions", lambda: [catalog])
+    monkeypatch.setattr(broken, fail, getattr(FailingSource(), fail))
+    monkeypatch.setattr(
+        sources, "configured_sources", lambda: {"broken": broken, "example": source_store}
+    )
+    response = TestClient(main.app, raise_server_exceptions=False).get(endpoint)
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Trace source is unavailable: broken"}
+    assert not otlp_store.session_exists("broken-task")
+
+
 def test_duplicate_source_identity_rejected(source_store, monkeypatch):
     monkeypatch.setattr(
         sources, "configured_sources", lambda: {"a": source_store, "b": source_store}

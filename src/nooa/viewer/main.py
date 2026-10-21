@@ -28,7 +28,7 @@ from starlette.staticfiles import StaticFiles
 
 load_dotenv()
 
-from . import FRONTEND_DIR, memory_routes, otlp_store  # noqa: E402
+from . import FRONTEND_DIR, memory_routes, otlp_store, sources  # noqa: E402
 from .annotation_routes import router as annotation_router  # noqa: E402
 from .eval_routes import router as eval_router  # noqa: E402
 from .explorer_routes import router as explorer_router  # noqa: E402
@@ -189,6 +189,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NVIDIA OO Agents Viewer", version="2.0.0", lifespan=lifespan)
+
+
+@app.exception_handler(sources.SourceUnavailableError)
+async def _source_unavailable(request: Request, exc: sources.SourceUnavailableError):
+    """A failing plugin is an upstream problem, not a viewer crash."""
+    log.warning("Trace source %s failed for %s", exc.source, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 
 SESSION_COOKIE = "nooa_viewer_session"
