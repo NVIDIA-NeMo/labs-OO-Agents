@@ -114,6 +114,15 @@ async def test_run_timeout_kills_and_reports_124(agent):
     assert item.items[0].stdout == "start\n"
 
 
+async def test_run_timeout_applies_when_the_output_is_redirected(agent):
+    # The pipes close at once, so only the wait for the process can time out.
+    started = time.monotonic()
+    await agent.jobs.run("sleep 30 > /dev/null 2>&1", label="quiet", timeout=0.5)
+    item = await _next(agent)
+    assert item.done and item.items[0].timed_out and item.items[0].returncode == 124
+    assert time.monotonic() - started < 5.0
+
+
 async def test_cancel_kills_the_process_and_its_group(agent, tmp_path):
     pidfile, childfile = tmp_path / "pid", tmp_path / "child"
     await agent.jobs.run(
@@ -397,6 +406,15 @@ async def test_tail_delivers_only_lines_appended_after_the_call(agent, tmp_path)
     assert (await _next(agent)).items == ["partial"]
     assert await agent.jobs.cancel("log") is True
     assert agent.jobs.get("log").state == "cancelled"
+
+
+async def test_tail_follows_a_file_that_is_truncated(agent, tmp_path):
+    log = tmp_path / "out.log"
+    log.write_text("old line 1\nold line 2\n")
+    agent.jobs.tail("out.log", label="log")
+    log.write_text("new\n")  # truncate and rewrite, as `cmd > out.log` does
+    assert (await _next(agent)).items == ["new"]
+    assert await agent.jobs.cancel("log") is True
 
 
 async def test_tail_batches_and_rethrottles(agent, tmp_path):

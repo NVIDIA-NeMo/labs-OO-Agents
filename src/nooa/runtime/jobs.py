@@ -281,6 +281,11 @@ async def _tail_lines(handle: Any) -> AsyncIterator[str]:
         while True:
             chunk = handle.read(_CHUNK_BYTES)
             if not chunk:
+                with contextlib.suppress(OSError):
+                    if os.fstat(handle.fileno()).st_size < handle.tell():
+                        handle.seek(0)  # truncated (e.g. rewritten): follow it from the top
+                        splitter = LineSplitter(_LINE_CHARS)
+                        continue
                 await asyncio.sleep(_TAIL_POLL_SECONDS)
                 continue
             for line in splitter.feed(chunk):
@@ -491,7 +496,7 @@ class JobsApi(Skill):
             return cwd, env
         try:
             out, _err, code, timed_out = await session.run_with_timeout_flag(
-                'printf "%s\\n" "$PWD"; env -0 | base64 -w0', timeout=5.0
+                'printf "%s\\n" "$PWD"; env -0 | base64 | tr -d "\\n"', timeout=5.0
             )
         except Exception:
             return cwd, env
@@ -585,9 +590,17 @@ class JobsApi(Skill):
                     continue
                 kind, text = entry
                 yield StreamEvent(kind=kind, text=text)
+            if not timed_out:
+                # The pipes can close long before the process ends (`cmd > out.txt 2>&1`),
+                # so the deadline covers the wait too.
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                try:
+                    await asyncio.wait_for(proc.wait(), remaining)
+                except TimeoutError:
+                    timed_out = True
             if timed_out:
                 _kill_group(proc)
-            await proc.wait()
+                await proc.wait()
             code = 124 if timed_out else (proc.returncode or 0)
             yield StreamDone(kind="done", returncode=code, timed_out=timed_out)
         finally:
