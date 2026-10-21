@@ -160,6 +160,27 @@ def test_broker_round_trip(session):
     assert result.returned_value == "probe:hi"
 
 
+def test_a_method_fetched_as_a_value_is_still_callable(session):
+    """``f = self.echo`` then ``f('hi')`` must work, not hand back a pickled method.
+
+    The parent answers an attribute request with a ``callable`` flag and no
+    value; the worker builds a broker callable from that flag. If the parent
+    ever ships the bound method instead, the cell receives a pickled copy bound
+    to a *different* instance and calls it locally — silently bypassing the
+    broker, so the agent's state stops being the one the cell reads.
+    """
+    result = session.run("f = self.echo\nf('hi')")
+    assert result.error is None, result.error
+    assert result.returned_value == "probe:hi"
+
+    # And the identity check: a bound method pickled across would carry its own
+    # copy of ``label``. Mutating it in the parent must be visible through the
+    # callable, which only holds if the call is brokered.
+    result = session.run("self.label = 'changed'\ng = self.echo\ng('hi')")
+    assert result.error is None, result.error
+    assert result.returned_value == "changed:hi"
+
+
 def test_agent_built_on_the_quickstart_helpers_runs(tmp_path):
     """An agent written like the examples must start in the container.
 

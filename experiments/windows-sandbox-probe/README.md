@@ -13,7 +13,7 @@ This is the gating experiment for adding a Windows backend to
 
 ## Experiment design
 
-`runner.py` drives six scenarios against a real AppContainer process. Every
+`runner.py` drives eight scenarios against a real AppContainer process. Every
 child runs a **private copy** of the interpreter (`.rt/`, built by
 `_mkroot.py`), because the base interpreter directory denies DACL writes to a
 non-admin user.
@@ -166,7 +166,7 @@ control and a wire capture, omitting capability SIDs blocks UDP as well.
 | Metric | Value |
 |---|---|
 | Memory cap 64 MB → allocation probe | `MemoryError` at 48 MB allocated |
-| CPU cap 2 s → process terminated | exit code `3221225540` (`0xC000013A`) |
+| CPU cap 2 s → process terminated | exit code `3221225540` (`0xC0000044`, `STATUS_QUOTA_EXCEEDED`) |
 | CPU-cap wall clock | 2.6–5.9 s (container overhead varies) |
 | `TerminateJobObject` reap | 0.003–0.006 s |
 | Hard-kill exit code | 1 |

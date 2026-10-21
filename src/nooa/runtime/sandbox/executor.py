@@ -385,13 +385,28 @@ class SandboxedExecutor:
         if _is_container_proc(proc):
             await asyncio.to_thread(_release_worker, proc)
 
+    async def _spawn_worker(self) -> None:
+        """Start the worker without blocking the loop when that is safe.
+
+        The container path creates a process, waits for a ready handshake, and
+        prepares the runtime root — seconds of blocking work. The ``fork`` path
+        must stay on the loop thread: forking from a worker thread duplicates a
+        process whose other threads do not exist in the child, which is the
+        documented way to deadlock a fork. ``spawn`` on a non-container backend
+        is a fresh interpreter with no inherited state, so it can move too.
+        """
+        if self._config.start_method == "fork":
+            self._start_worker()  # fork stays on the loop thread
+            return
+        await asyncio.to_thread(self._start_worker)
+
     async def _restart_worker(self) -> None:
         await self._aterminate_worker()
         if self._config.recovery == "disabled":
             # Do not resurrect the worker; subsequent cells fail deterministically.
             self._disabled = True
             return
-        self._start_worker()  # fork stays on the loop thread (fork-from-thread is unsafe)
+        await self._spawn_worker()
 
     async def _ensure_worker(self) -> None:
         if self._disabled:
@@ -400,7 +415,7 @@ class SandboxedExecutor:
             )
         if self._proc is None or not self._proc.is_alive():
             await self._aterminate_worker()
-            self._start_worker()  # fork on the loop thread
+            await self._spawn_worker()
 
     def _next_id(self) -> int:
         self._req_id += 1
@@ -660,6 +675,12 @@ class SandboxedExecutor:
                     "callable": is_callable,
                     "is_async": is_callable and asyncio.iscoroutinefunction(target),
                 }
+                # The worker turns a callable into a broker callable before it
+                # looks at ``result``, so shipping the callable itself would be
+                # a pickle nobody reads — and a bound method drags its instance
+                # across for nothing. Send the flag alone.
+                if is_callable:
+                    return {"ok": True, "result": None, **flags}
                 # Picklable state crosses; a live object becomes a nested proxy.
                 if is_picklable(target):
                     return {"ok": True, "result": target, **flags}

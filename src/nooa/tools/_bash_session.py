@@ -387,9 +387,16 @@ class BashSession:
             )
         if stdin is not None:
             blob = base64.b64encode(stdin.encode()).decode()
+            # The temporary path is quoted everywhere it is used. ``mktemp``
+            # honours TMPDIR, which a caller can set to a path with spaces, and
+            # an unquoted expansion there turns one redirection into two words
+            # — the command then reads from the wrong file or fails outright.
+            # ``rm -f --`` stops a path that begins with ``-`` from being read
+            # as an option.
             command = (
-                f"__nemo_in=$(mktemp); base64 -d <<<'{blob}' > $__nemo_in; "
-                f"{{ {command}\n}} < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
+                f'__nemo_in="$(mktemp)"; base64 -d <<<"{blob}" > "$__nemo_in"; '
+                f'{{ {command}\n}} < "$__nemo_in"; __nemo_rc=$?; '
+                'rm -f -- "$__nemo_in"; '
                 "( exit $__nemo_rc )"
             )
         return command
