@@ -198,6 +198,12 @@ async def _source_unavailable(request: Request, exc: sources.SourceUnavailableEr
     return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 
+@app.exception_handler(sources.SourceConflictError)
+async def _source_conflict(request: Request, exc: sources.SourceConflictError):
+    """Cached-version, ownership and identity conflicts are client-visible 409s."""
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
 SESSION_COOKIE = "nooa_viewer_session"
 
 

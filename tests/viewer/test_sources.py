@@ -162,6 +162,36 @@ def test_version_change_preserves_cached_data(source_store):
     assert len(otlp_store.get_session_spans("example-task")) == 1
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/trace?session_id=example-task",
+        "/api/trace-count?session_id=example-task",
+        "/api/trace/resource?session_id=example-task",
+        "/api/traces/example-task/calls",
+    ],
+)
+def test_source_conflicts_are_http_409(source_store, endpoint):
+    sources.ensure_session("example-task")
+    source_store.version = "2"
+    response = TestClient(main.app, raise_server_exceptions=False).get(endpoint)
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Cached source version changed; clear its cache before reopening"
+    }
+
+
+def test_source_import_conflict_is_http_409(source_store, monkeypatch):
+    monkeypatch.setattr(
+        source_store, "load_session", lambda sid: ExampleSource().load_session("other")
+    )
+    response = TestClient(main.app, raise_server_exceptions=False).get(
+        "/api/traces/example-task/calls"
+    )
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Source returned a mismatched journal identity"}
+
+
 def test_cached_detail_does_not_need_remote_catalog(source_store, monkeypatch):
     sources.ensure_session("example-task")
 

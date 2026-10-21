@@ -26,6 +26,10 @@ from . import otlp_store
 log = logging.getLogger(__name__)
 
 
+class SourceConflictError(ValueError):
+    """A source session cannot be imported; messages are fixed and client-safe."""
+
+
 class SourceUnavailableError(RuntimeError):
     """A configured source failed; the message is safe to show to clients."""
 
@@ -206,7 +210,9 @@ def ensure_session(session_id: str):
         if owner in plugins:
             if resource.get("viewer.source.version") == plugins[owner].version:
                 return  # Opening a cached trace does not need a remote catalog.
-            raise ValueError("Cached source version changed; clear its cache before reopening")
+            raise SourceConflictError(
+                "Cached source version changed; clear its cache before reopening"
+            )
     owners = {name for name in plugins if session_id.startswith(name + "-")}
     entry = _catalog(required=owners).get(session_id)
     if entry is None:
@@ -218,11 +224,15 @@ def ensure_session(session_id: str):
         if otlp_store.session_exists(session_id):
             resource = otlp_store.get_session_resource(session_id)
             if resource.get("viewer.source.name") != name:
-                raise ValueError(f"Source cannot overwrite an existing local session: {session_id}")
+                raise SourceConflictError(
+                    f"Source cannot overwrite an existing local session: {session_id}"
+                )
             if resource.get("viewer.source.version") == source.version:
                 return
             # Do not silently replace traces with annotations during upgrades.
-            raise ValueError("Cached source version changed; clear its cache before reopening")
+            raise SourceConflictError(
+                "Cached source version changed; clear its cache before reopening"
+            )
         try:
             records = list(source.load_session(session_id))
         except Exception as exc:
@@ -238,7 +248,7 @@ def ensure_session(session_id: str):
                     (a["value"].get("stringValue") for a in attrs if a["key"] == "session.id"), None
                 )
                 if identity != session_id:
-                    raise ValueError("Source returned a mismatched session identity")
+                    raise SourceConflictError("Source returned a mismatched session identity")
                 attrs.extend(
                     [
                         {"key": "viewer.source.name", "value": {"stringValue": name}},
@@ -251,11 +261,11 @@ def ensure_session(session_id: str):
             journal = record.get("nooaJournal")
             if journal and journal.get("type") != "manifest":
                 if journal.get("session_id") != session_id:
-                    raise ValueError("Source returned a mismatched journal identity")
+                    raise SourceConflictError("Source returned a mismatched journal identity")
                 if journal["type"] not in ("blocks", "call"):
-                    raise ValueError("Unsupported source journal record")
+                    raise SourceConflictError("Unsupported source journal record")
                 if journal["type"] == "call" and journal["call"].get("session_id") != session_id:
-                    raise ValueError("Source returned a mismatched call identity")
+                    raise SourceConflictError("Source returned a mismatched call identity")
                 if journal["type"] == "call":
                     # Call IDs in the native journal table are globally keyed.
                     # Portable traces may reuse IDs, so scope them by session.
@@ -272,7 +282,7 @@ def ensure_session(session_id: str):
             for resource in body["resourceSpans"]
             for scope in resource.get("scopeSpans", [])
         ):
-            raise ValueError("Source returned no OTLP trace")
+            raise SourceConflictError("Source returned no OTLP trace")
 
         def write():
             # A native exporter may have published this identity while the
@@ -280,15 +290,18 @@ def ensure_session(session_id: str):
             if otlp_store.session_exists(session_id):
                 resource = otlp_store.get_session_resource(session_id)
                 if resource.get("viewer.source.name") != name:
-                    raise ValueError(
+                    raise SourceConflictError(
                         f"Source cannot overwrite an existing local session: {session_id}"
                     )
                 if resource.get("viewer.source.version") != source.version:
-                    raise ValueError(
+                    raise SourceConflictError(
                         "Cached source version changed; clear its cache before reopening"
                     )
                 return
-            otlp_store.ingest_session_with_journal(body, journals)
+            try:
+                otlp_store.ingest_session_with_journal(body, journals)
+            except ValueError as exc:  # otlp_store raises fixed, client-safe messages.
+                raise SourceConflictError(str(exc)) from exc
 
         # Serialize with native ingestion and annotation writes.
         from .main import _write_executor
