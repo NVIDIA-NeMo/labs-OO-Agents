@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Authenticated management of explicitly configured trace sources."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from . import sources
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sources")
 
@@ -24,7 +28,11 @@ def add_source_run(name: str, body: AddRunRequest):
     except NotImplementedError as exc:
         raise HTTPException(status_code=405, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Plugin and catalog validation messages may carry internal details.
+        log.warning("Selecting run on trace source %s failed: %r", name, exc)
+        raise HTTPException(
+            status_code=400, detail="The source rejected this run or returned an invalid catalog"
+        ) from exc
     except OSError as exc:
         raise HTTPException(
             status_code=503, detail="Could not persist source configuration"

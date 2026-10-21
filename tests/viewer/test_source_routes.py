@@ -84,6 +84,10 @@ def test_failed_validation_preserves_config_and_active_source(selection):
         assert response.status_code == status
         assert path.read_text() == before
         assert registry["example"] is active
+    response = client.post("/api/sources/example/runs", json={"run_id": "invalid"})
+    assert response.json() == {
+        "detail": "The source rejected this run or returned an invalid catalog"
+    }
     assert client.post("/api/sources/unknown/runs", json={"run_id": "second"}).status_code == 404
     assert client.post("/api/sources/example/runs", json={"run_id": ""}).status_code == 422
 
@@ -152,6 +156,7 @@ def test_selection_collision_with_another_source_preserves_config(selection):
     before, active = path.read_text(), registry["example"]
     response = TestClient(main.app).post("/api/sources/example/runs", json={"run_id": "b-task"})
     assert response.status_code == 400
+    assert "example-b-task" not in response.text
     assert path.read_text() == before
     assert registry["example"] is active
     assert len(sources._catalog()) == 2
