@@ -122,9 +122,11 @@ def test_litellm_details_first_review_zero_posts_then_optional_test(monkeypatch,
     assert entry["media_inputs"] == ["image"] and entry["api_style"] == "chat"
     assert not entry.get("reasoning_levels")
     assert "normal-work-key" not in result.output + local.read_text()
-    assert "Input limit: 1,048,576 tokens" in result.output
-    assert "Output limit: 128,000 tokens" in result.output
-    assert "evaluation model" in result.output
+    summary = " ".join(result.output.split())
+    assert "Context window: 60,000 tokens" in summary
+    assert "Reply limit: 2,000 tokens" in summary
+    assert "Reply maximum: 128,000 tokens" in summary
+    assert "Server: LiteLLM" in summary
 
 
 @pytest.mark.parametrize(

@@ -42,7 +42,7 @@ def test_local_media_skips_do_not_warn_or_consume_budget(monkeypatch, capsys, st
     state.remaining_estimate = state.proposal.token_estimate
     assert wizard.run_checks(state)
     output = capsys.readouterr()
-    assert "approved budget is too small" not in output.err + output.out
+    assert "Some tests will be skipped" not in output.err + output.out
     assert len(sent) == 2
     assert state.result.entry["provenance"]["tokens_charged_to_budget"] == 3024
     for kind in ("audio", "video"):
@@ -55,4 +55,4 @@ def test_local_media_skips_do_not_warn_or_consume_budget(monkeypatch, capsys, st
     state.remaining_estimate = state.proposal.token_estimate
     assert wizard.run_checks(state)
     output = capsys.readouterr()
-    assert "approved budget is too small" in output.err + output.out
+    assert "Some tests will be skipped" in output.err + output.out

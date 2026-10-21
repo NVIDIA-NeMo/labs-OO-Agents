@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from nooa_cli.commands import _connect_view as view
 
 
-def test_intro_is_wrapped_and_keeps_cost_notice_and_manual_routes(monkeypatch):
+def test_intro_is_wrapped_without_budget_boilerplate_and_keeps_manual_routes(monkeypatch):
     monkeypatch.setattr(
         view.shutil, "get_terminal_size", lambda *args, **kwargs: os.terminal_size((58, 24))
     )
@@ -22,15 +22,15 @@ def test_intro_is_wrapped_and_keeps_cost_notice_and_manual_routes(monkeypatch):
     result = CliRunner().invoke(command)
     assert result.exit_code == 0, result.output
     assert all(len(line) <= 58 for line in result.output.splitlines())
-    assert "may incur charges" in result.output
-    assert "200" in result.output and "4,096" in result.output
+    assert "may incur charges" not in result.output
+    assert "approved" not in result.output and "spending cap" not in result.output
     assert "--no-probe" in result.output
     assert "F1" in result.output
     assert "docs/model-configuration.md" in result.output
     assert "nooa-connect" in result.output
 
 
-def test_no_color_keeps_readable_titles_and_warning(monkeypatch):
+def test_no_color_keeps_readable_titles(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
 
     @click.command()
@@ -41,7 +41,7 @@ def test_no_color_keeps_readable_titles_and_warning(monkeypatch):
     result = CliRunner().invoke(command, color=True)
     assert "\x1b[" not in result.output
     assert "Connection" in result.output
-    assert "may incur charges" in result.output
+    assert "may incur charges" not in result.output
 
 
 def test_model_details_show_published_limits_separately_from_setup_cap():
@@ -781,7 +781,7 @@ def test_media_request_errors_are_not_mismatched_answers(kind):
     assert "answer did not match" not in output
 
 
-def test_intro_has_one_plain_spend_warning_and_visible_call_caps():
+def test_intro_omits_budget_and_approval_explanations():
     @click.command()
     def command():
         view.intro(
@@ -790,14 +790,16 @@ def test_intro_has_one_plain_spend_warning_and_visible_call_caps():
 
     result = CliRunner().invoke(command)
     output = " ".join(result.output.split())
-    assert output.count("Checks may incur charges.") == 1
-    assert "The token budget is an estimate, not a spending cap." in output
-    assert "Check budget: 100,000" in output
-    assert "chat reply limit 200 tokens" in output
-    assert "Decision calls have no reply limit." in output
-    assert "4,096 output tokens per call" in output
-    for jargon in ("baseline", "native", "wire", "capacity probes", "billing limits"):
-        assert jargon not in output
+    assert "NOOA / CONNECT" in output and "Skip tests: --no-probe" in output
+    for boilerplate in (
+        "approved",
+        "approves",
+        "spending cap",
+        "incur charges",
+        "output tokens per call",
+        "Check budget:",
+    ):
+        assert boilerplate not in output
 
 
 @pytest.mark.parametrize("kind", ["audio", "video"])

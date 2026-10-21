@@ -117,7 +117,7 @@ from ._connect_stages import STAGES
 @click.option(
     "--budget-tokens",
     type=click.IntRange(min=1),
-    help="Estimated check budget in tokens (default: unlimited). Checks may cost money; charges can exceed this estimate.",
+    help="Token budget for tests (default: unlimited).",
 )
 @click.option(
     "--output-tokens",
@@ -156,7 +156,7 @@ from ._connect_stages import STAGES
 )
 @click.option(
     "--test-media-inputs",
-    help="Test image,audio,video,pdf inputs with generated samples and the approved check budget. No user files are used. Decision models can test images only.",
+    help="Test image,audio,video,pdf inputs with generated samples. Decision models can test images only.",
 )
 @click.option(
     "--decision-image-transport",

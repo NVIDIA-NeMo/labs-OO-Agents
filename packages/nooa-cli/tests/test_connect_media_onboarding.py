@@ -146,9 +146,8 @@ def test_initial_decline_prevents_all_probes_and_writes(monkeypatch, tmp_path):
     )
     assert result.exit_code == 0
     assert not calls and not path.exists()
-    assert "generated" in result.output and "No user files" in " ".join(
-        re.sub(r" · \d+\.\ds", "", result.output).split()
-    )
+    assert "Media samples: Images" in " ".join(result.output.split())
+    assert "approved token budget" not in result.output
 
 
 def test_interactive_test_choice_after_single_approval_review_can_manually_enable_unverified(
@@ -165,7 +164,7 @@ def test_interactive_test_choice_after_single_approval_review_can_manually_enabl
     assert "Test all media inputs (generated samples)" in result.output
     assert "Choose media inputs manually" in result.output
     assert "Formats to TEST" not in result.output
-    assert "Selected media tests: image, audio, video, pdf" in result.output
+    assert "Media samples: Images, Audio, Video, PDFs" in " ".join(result.output.split())
     for kind in ["image", "audio", "video", "pdf"]:
         assert f"Generated {kind} sample:" not in result.output
     assert "check budget used up" in result.output
@@ -389,7 +388,7 @@ def test_guided_edit_all_formats_retains_prior_declarations(
     assert result.exit_code == 0, result.output
     assert len(calls) == count
     assert "Formats to TEST" not in result.output
-    assert "Selected media tests: image, audio, video, pdf" in result.output
+    assert "Media samples: Images, Audio, Video, PDFs" in " ".join(result.output.split())
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == ["audio", "video"]
 
 
@@ -612,7 +611,8 @@ def test_approved_checks_do_not_repeat_charge_or_price_messages(monkeypatch, tmp
         command, options(tmp_path / "models.yaml") + ["--yes", "--test-media-inputs", "image"]
     )
     assert result.exit_code == 0, result.output
-    assert result.output.count("Checks may incur charges.") == 1
+    assert "Checks may incur charges." not in result.output
+    assert "Uses the approved token budget" not in result.output
     progress = result.output.split("Checking connection", 1)[1]
     for wording in ("charges", "spending cap", "billing", "estimated price", "catalogue prices"):
         assert wording not in progress

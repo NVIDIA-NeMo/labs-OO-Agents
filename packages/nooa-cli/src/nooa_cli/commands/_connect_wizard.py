@@ -743,12 +743,10 @@ def check_interfaces(state: WizardState) -> bool:
                 remaining = max(0, state.budget_tokens - state.interface_spent)
                 if remaining < state.output_tokens + 512:
                     view.line(
-                        "The approved check budget is exhausted. Nothing was saved; restart setup to approve a new budget."
+                        "Check budget used up. Nothing was saved. Restart with a larger --budget-tokens value."
                     )
                     return False
-                view.line(
-                    f"You can correct the connection here. {remaining:,} estimated tokens remain in the approved budget."
-                )
+                view.line("Change the connection settings and try again.")
                 action = prompts.prompt(
                     "Next step",
                     choices=("key", "server", "retry", "longer", "cancel"),
@@ -1368,11 +1366,8 @@ def configure_media_inputs(state: WizardState) -> bool:
         # preview, not permission to forward to a subsequently changed route.
         state.inherit_media_inputs = True
         state.media_inputs = list(previous)
-        view.line(
-            "Selected media tests: "
-            + ", ".join(state.test_media_inputs)
-            + ". Uses the approved token budget."
-        )
+        if not state.guided:
+            view.line("Media tests: " + ", ".join(state.test_media_inputs))
     else:
         state.inherit_media_inputs = bool(state.yes)
         state.media_inputs = list(previous) if state.yes else prompts.choose_media_inputs(previous)
@@ -1630,7 +1625,7 @@ def run_checks(state: WizardState) -> bool:
     )
     if state.remaining_estimate > state.proposal.budget_tokens:
         click.echo(
-            "Warning: the approved budget is too small for all checks. Some will be skipped. Restart with a larger --budget-tokens value to run them all.",
+            "Some tests will be skipped. Increase --budget-tokens to run them all.",
             err=True,
         )
     state.result = asyncio.run(
@@ -1888,23 +1883,30 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
     maximum = entry.get("provenance", {}).get("catalogue_limits", {}).get("max_completion_tokens")
     if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
         maximum = None
-    view.line("Proposed configuration" + (" (updated)" if updated else ""), bold=True)
-    view.line(scrub_setup(state, f"{state.model} · {state.endpoint}"))
-    view.line(
-        "Request style: "
-        + prompts.choice_label(state.api_style)
-        + (" (preset; discovery deferred until testing)" if deferred_style else "")
-    )
+    view.section("Proposed configuration" + (" (updated)" if updated else ""))
+    rows = [
+        ("Model", scrub_setup(state, state.model)),
+        ("Endpoint", scrub_setup(state, state.endpoint)),
+        ("Interface", prompts.choice_label(state.api_style)),
+    ]
+    if deferred_style:
+        rows.append(("Discovery", "When you choose Test now"))
     if state.api_style not in connect.DECISION_API_STYLES:
-        view.line(
-            "Context: "
-            + (f"{entry['context_window']:,}" if entry.get("context_window") else "unknown")
-            + f" · reply limit: {entry['max_tokens']:,} tokens"
-            + (f" · model reply maximum: {maximum:,}" if maximum else "")
-            + " · reasoning: "
-            + (", ".join(entry.get("reasoning_levels", {})) or "server default")
+        rows.extend(
+            (
+                (
+                    "Context window",
+                    f"{entry['context_window']:,} tokens"
+                    if entry.get("context_window")
+                    else "Not set",
+                ),
+                ("Reply limit", f"{entry['max_tokens']:,} tokens"),
+            )
         )
-    if state.api_style in connect.DECISION_API_STYLES:
+        if maximum:
+            rows.append(("Reply maximum", f"{maximum:,} tokens"))
+        rows.append(("Reasoning", ", ".join(entry.get("reasoning_levels", {})) or "Server default"))
+    else:
         transport = (
             "OpenAI Decisions"
             if state.api_style == "openai"
@@ -1912,13 +1914,12 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             if state.decision_image_transport == "typesafe_multipart"
             else "System One JSON"
         )
-        view.line(
-            "Image requests: "
-            + transport
-            + (" · experimental images on" if state.typesafe_danger_zone_images else "")
-        )
+        rows.append(("Image requests", transport))
+        if state.typesafe_danger_zone_images:
+            rows.append(("Image option", "experimental images on"))
+    view.fields(scrub_setup(state, rows))
     if state.edited_settings:
-        view.line("Your edited settings.")
+        view.fields([("Model details", "Your edits")])
     elif (
         state.candidate is not None
         and state.editing is None
@@ -1940,31 +1941,44 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             state.api_style in connect.DECISION_API_STYLES and endpoint_media
         )
         if server_details:
-            view.line("Model details from this server")
+            view.fields([("Model details", "This server")])
             if "catalogue" in sources:
-                view.line("Additional model details from OpenRouter")
+                view.fields([("Additional details", "OpenRouter")])
         elif state.candidate:
-            view.line("Model details from OpenRouter")
-    if state.server_details is not None:
-        facts = state.server_details.model
-        if facts.get("max_input_tokens"):
-            view.line(f"Input limit: {facts['max_input_tokens']:,} tokens")
-        if facts.get("max_output_tokens"):
-            view.line(f"Output limit: {facts['max_output_tokens']:,} tokens")
-        if (
-            facts.get("model_type") == "decision"
-            and state.api_style not in connect.DECISION_API_STYLES
-        ):
-            view.line(
-                "Server describes an evaluation model. Choose its known decision interface, or test to discover an interface."
-            )
-    view.media_settings(entry)
+            view.fields([("Model details", "OpenRouter")])
+    view.section("Media inputs")
+    enabled = entry.get("media_inputs", [])
+    selected = state.test_media_inputs or []
+    kinds = (
+        ("image",)
+        if state.api_style in connect.DECISION_API_STYLES
+        else ("image", "audio", "video", "pdf")
+    )
+    media_rows = []
+    for kind in kinds:
+        value = (
+            "Enabled; test again"
+            if kind in enabled and kind in selected
+            else "Test before enabling"
+            if kind in selected
+            else "Enabled (not tested)"
+            if kind in enabled
+            else "Off"
+        )
+        media_rows.append((view.media_label(kind), value))
+    view.fields(media_rows)
+    view.section("Tests")
     if state.no_probe or state.probe == "none":
-        view.line("Testing is disabled; save without model calls.")
+        view.fields([("Status", "Off")])
     else:
-        view.line("Test now approves the selected checks within the displayed check budget.")
-    if state.test_media_inputs:
-        view.line("Selected media tests: " + ", ".join(state.test_media_inputs))
+        test_rows = []
+        if selected:
+            test_rows.append(("Media samples", ", ".join(view.media_label(k) for k in selected)))
+        if state.budget_tokens is not None and state.budget_tokens < connect.DEFAULT_CHECK_BUDGET:
+            test_rows.append(("Check budget", view.format_budget(state.budget_tokens) + " tokens"))
+        if not test_rows:
+            test_rows.append(("Status", "Optional — choose Test now to run"))
+        view.fields(test_rows)
 
 
 def review_guided_proposal(state: WizardState, *, deferred_style=False):

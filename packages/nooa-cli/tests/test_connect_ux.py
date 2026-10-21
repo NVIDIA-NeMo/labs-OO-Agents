@@ -147,7 +147,9 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
     assert "No tool call returned" not in plain
     assert "temporary-secret" not in output and "private-reasoning" not in output
     assert "reasoning chars" not in output and "Reasoning tokens ·" not in output
-    assert plain.count("Checks may incur charges.") == 1
+    assert "Checks may incur charges." not in plain
+    assert "Uses the approved token budget" not in plain
+    assert "Test now approves" not in plain
     rows = [row for row in output.splitlines() if re.match(r"  [✓!–] ", row)]
     assert rows and all(
         re.search(r": (Passed|Not available|Failed|Skipped)( · 0.0s)?$", row) for row in rows

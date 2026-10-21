@@ -401,8 +401,8 @@ def test_pipe_decision_image_actions(current, action, numeric):
     result = CliRunner().invoke(command, input=answer + "\n")
     assert result.exit_code == 0, result.output
     assert selected == [expected]
-    assert "No user files are used." in result.output
-    assert "small generated sample" in result.output and "approved check budget" in result.output
+    assert "Image tests use a generated sample." in result.output
+    assert "approved check budget" not in result.output
     for index, token in enumerate(actions, 1):
         assert f"{index} ({token}):" in result.output
     assert current == (["image"] if current else [])

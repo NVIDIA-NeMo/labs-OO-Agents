@@ -817,7 +817,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
             return httpx.Response(200, json={"data": [{"id": "example-model"}]})
         # Feedback appears before the HTTP operation, not only at the end.
         assert any("— checking" in line for line in output)
-        assert any("may incur charges" in line for line in output)
+        assert any("Would you like to test these settings?" in line for line in output)
+        assert not any("may incur charges" in line for line in output)
         if request.url.path != "/v1/chat/completions":
             return httpx.Response(404)
         return httpx.Response(
@@ -1037,7 +1038,7 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 4
-    assert "budget is exhausted" in result.output
+    assert "Check budget used up" in result.output
     assert result.output.count("Would you like to test these settings?") == 1
     assert "Approve setup" not in result.output
     assert not path.exists()
@@ -1103,9 +1104,9 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     assert "Nothing was saved" in result.output
     assert "--no-probe" in result.output
     assert "Write model entry" not in result.output
-    assert "approved budget is too small" in result.output
+    assert "Some tests will be skipped" in result.output
     assert "setup is incomplete; check budget used up before Connection" in result.output
-    assert result.output.index("approved budget is too small") < result.output.index(
+    assert result.output.index("Some tests will be skipped") < result.output.index(
         "Connection: Not tested: check budget used up"
     )
 
@@ -1140,10 +1141,8 @@ def test_model_details_appear_before_accepting_published_settings(
     )
     assert result.exit_code == 0, result.output
     assert "8,192" not in result.output  # This is another provider's reply ceiling.
-    for text in ("128,000", "Model details from OpenRouter"):
-        assert result.output.index(text) < result.output.index(
-            "Would you like to test these settings?"
-        )
+    proposal = " ".join(result.output.split()).split("Would you like to test these settings?")[0]
+    assert "128,000" in proposal and "Model details: OpenRouter" in proposal
     assert "not proof" not in result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["context_window"] == 128000
@@ -1353,7 +1352,7 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
         input="discover\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert "Check budget: unlimited" in result.output
+    assert "Check budget: unlimited" not in result.output
     assert "budget remaining:" not in result.output
     assert "Estimated tokens:" not in result.output
     assert "too small for all checks" not in result.output

@@ -474,7 +474,8 @@ def test_deferred_decision_revises_default_all_media_with_explicit_review(
         assert "audio" not in proposal and "video" not in proposal and "pdf" not in proposal
         if revision == "image":
             assert "TypeSafe multipart" in proposal and "experimental images on" in proposal
-            assert "Selected media tests: image" in proposal
+            assert "Media samples: Images" in " ".join(proposal.split())
+            assert "Images: Test before enabling" in " ".join(proposal.split())
 
 
 def test_selected_typesafe_missing_optin_warning_is_not_json(monkeypatch, tmp_path):
@@ -552,10 +553,10 @@ def test_guided_decision_permission_change_supersedes_inheritance(
     assert entry["typesafe_danger_zone_images"] is False
     updated = result.output.index("Proposed configuration (updated)")
     consent = result.output.index("Would you like to test these settings?", updated)
-    assert ("Images: off" if previous else "Images: enabled (not tested)") in result.output[
-        updated:consent
-    ]
-    assert "Selected media tests:" not in result.output[updated:consent]
+    assert ("Images: Off" if previous else "Images: Enabled (not tested)") in " ".join(
+        result.output[updated:consent].split()
+    )
+    assert "Media samples:" not in result.output[updated:consent]
     assert not original.get("provenance")
 
 
@@ -609,8 +610,8 @@ def test_guided_source_uses_effective_facts_not_id_only_server(
     end = result.output.index("Would you like to test these settings?", start)
     summary = result.output[start:end]
     assert "Model details from your server" not in summary
-    assert ("Model details from OpenRouter" in summary) is public_details
-    assert "Images: off" in summary
+    assert ("Model details: OpenRouter" in " ".join(summary.split())) is public_details
+    assert "Images: Off" in " ".join(summary.split())
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["media_inputs"] == []
     if public_details:

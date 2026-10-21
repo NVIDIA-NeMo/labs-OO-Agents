@@ -300,6 +300,42 @@ def line(text, *, fg=None, bold=False, dim=False):
         click.echo("  " + part)
 
 
+def fields(rows):
+    """Aligned values; stacked labels on narrow terminals. Never wrap ANSI codes."""
+    rows = [(label + ":", str(value)) for label, value in rows]
+    if not rows:
+        return
+    columns = max(12, shutil.get_terminal_size((80, 24)).columns)
+    width = min(100, columns - 4)
+    label_width = max(len(label) for label, _ in rows)
+    value_width = width - label_width - 2
+    stacked = value_width < 16
+    for label, value in rows:
+        if stacked:
+            for part in textwrap.wrap(label, width=width, break_on_hyphens=False):
+                if "NO_COLOR" not in os.environ:
+                    part = click.style(part, bold=True)
+                click.echo("    " + part)
+            for part in textwrap.wrap(value, width=width, break_on_hyphens=False) or [""]:
+                click.echo("    " + part)
+        else:
+            parts = textwrap.wrap(value, width=value_width, break_on_hyphens=False) or [""]
+            for index, part in enumerate(parts):
+                key = label.ljust(label_width) if index == 0 else " " * label_width
+                if "NO_COLOR" not in os.environ and index == 0:
+                    key = click.style(key, bold=True)
+                click.echo("    " + key + "  " + part)
+
+
+def section(title):
+    click.echo()
+    width = max(10, min(100, shutil.get_terminal_size((80, 24)).columns - 2))
+    for part in textwrap.wrap(title, width=width, break_on_hyphens=False):
+        if "NO_COLOR" not in os.environ:
+            part = click.style(part, bold=True, fg="bright_cyan")
+        click.echo("  " + part)
+
+
 def progress_result(icon, label, detail, *, elapsed="", headline=None, fg=None):
     """Keep outcome and duration on the header; explanations always follow below."""
     width = max(8, shutil.get_terminal_size((80, 24)).columns - 2)
@@ -374,43 +410,9 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
     line("NOOA  /  CONNECT", fg="bright_cyan", bold=True)
     line("Add a model to your workspace.", dim=True)
     click.echo()
-    if checks:
-        line(
-            "Checks may incur charges. The token budget is an estimate, not a spending cap.",
-            fg="yellow",
-        )
-        line(
-            f"Check budget: {format_budget(budget_tokens)}"
-            if budget_tokens is not None
-            else "Check budget: unlimited",
-            dim=True,
-        )
-        line(
-            f"API discovery: one connection call per candidate; chat reply limit {output_tokens:,} tokens. Decision calls have no reply limit.",
-            dim=True,
-        )
-        line(
-            f"Each chat API format may also get a reasoning check: {reasoning_output_tokens:,} output tokens per call.",
-            dim=True,
-        )
-        line(
-            "After setup: connection, tools, reasoning levels and up to 3 conversation replies, using your saved reply limits. Checks that exceed the token budget are skipped.",
-            dim=True,
-        )
-        line(
-            "Optional media tests: one generated sample per selected format (up to 4), after the connection check passes. No user files are used.",
-            dim=True,
-        )
-        line(
-            "Conversation checks include a longer prompt to test caching. If encrypted reasoning is rejected, one check without it may follow within the same token budget.",
-            dim=True,
-        )
-    else:
-        line(
-            "Connection: not tested. Model lists and public details may still be fetched.",
-            dim=True,
-        )
-    line("Skip paid checks: --no-probe    Help: F1", dim=True)
+    if not checks:
+        line("Tests are off.", dim=True)
+    line("Skip tests: --no-probe    Help: F1", dim=True)
     if not sys.stdin.isatty():
         line("Manual setup: docs/model-configuration.md", dim=True)
         line("Agent workflow: nooa-connect", dim=True)

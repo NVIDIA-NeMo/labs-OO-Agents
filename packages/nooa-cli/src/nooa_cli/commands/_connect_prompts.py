@@ -120,7 +120,7 @@ def prompt(
                 [
                     (
                         "class:help",
-                        " No paid calls: restart with --no-probe\n"
+                        " Skip tests: restart with --no-probe\n"
                         " Manual setup: docs/model-configuration.md\n"
                         " Agent workflow: nooa-connect\n"
                         " Enter uses the suggested default. Typing replaces it. Right Arrow edits it.\n"
@@ -429,9 +429,7 @@ def choose_media_mode(*, editing=False):
 
 def choose_decision_images(current=()):
     """Human actions with unchanged image setup tokens and Enter defaults."""
-    click.echo(
-        "Image tests use a small generated sample and the approved check budget. No user files are used."
-    )
+    click.echo("Image tests use a generated sample.")
     options = (("keep", "Keep current image settings"),) if current else ()
     return labelled_choice(
         "Should this decision model receive images?",
