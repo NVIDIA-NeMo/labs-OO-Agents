@@ -417,7 +417,7 @@ async def test_recovery_does_not_resurrect_superseded_form(root_options, session
 
 @pytest.mark.parametrize("kind", ["done", "waiting", "need_input", "need_input_form"])
 @pytest.mark.parametrize("payload", ["", "{broken", "null", "[]", '"scalar"', "{}"])
-async def test_load_ignores_irrelevant_json_and_keeps_corrupt_forms_unavailable(
+async def test_load_ignores_irrelevant_or_corrupt_outcome_json(
     root_options, sessions_dir, kind, payload
 ):
     from nooa_atom.session.events import TurnEnded
@@ -434,16 +434,10 @@ async def test_load_ignores_irrelevant_json_and_keeps_corrupt_forms_unavailable(
     try:
         loaded = await registry.load(session.id)
         assert loaded._pending_form is None
-        assert loaded._unavailable_form == (
-            kind == "need_input_form" or (kind == "need_input" and payload != "{}")
-        )
         assert not loaded._agent.llm.calls
         loaded.transcript()  # corrupt input records must remain viewable too
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="No pending"):
             await loaded.submit(FormResponse(action="accept", content={"answer": "stale"}))
-        if loaded._unavailable_form:
-            loaded._agent.turns.pause()
-            await loaded.submit(FormResponse(action="cancel"))
     finally:
         await registry.close_all()
 
@@ -451,11 +445,7 @@ async def test_load_ignores_irrelevant_json_and_keeps_corrupt_forms_unavailable(
 @pytest.mark.parametrize(
     "data",
     [
-        {"question": "Name?", "options": "ab"},
-        {"question": "Name?", "options": {}},
-        {"question": "Name?", "options": 1},
-        {"question": "Name?", "options": [None]},
-        {"question": " ", "options": []},
+        {"question": "Name?"},
         {"heading": "Name?", "questions": [None]},
         {"heading": "Name?", "questions": [{"id": "answer", "kind": "pick_one", "choices": 2}]},
         {"question": "Name?", "request_id": ["bad"]},
@@ -480,9 +470,9 @@ async def test_load_malformed_nested_forms_never_fabricates_answer_owner(
     registry = SessionRegistry(store, agent_factory=ScriptedModels({None: []}))
     try:
         loaded = await registry.load(session.id)
-        assert loaded._pending_form is None and loaded._unavailable_form
+        assert loaded._pending_form is None
         loaded.transcript()
-        with pytest.raises(ValueError, match="cannot be restored"):
+        with pytest.raises(ValueError, match="No pending"):
             await loaded.submit(FormResponse(action="accept", content={"answer": "stale"}))
         assert not loaded._agent.llm.calls
     finally:

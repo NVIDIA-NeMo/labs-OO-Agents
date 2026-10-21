@@ -240,10 +240,6 @@ class SessionPort:
         if request_id is None and _is_form_response(item):
             question = self._registry.pending_question(self._session, child_id)
             if question is not None and question.request_kind == "form":
-                if question.request_id is None:
-                    raise ValueError(
-                        "Legacy child form has no request ownership token; request a fresh form."
-                    )
                 request_id = question.request_id
         if request_id is not None:
             # Validate against the child's form before the question is cleared.

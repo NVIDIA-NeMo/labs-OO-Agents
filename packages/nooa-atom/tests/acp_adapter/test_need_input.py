@@ -160,24 +160,3 @@ def test_descriptor_json_roundtrip():
 def test_pick_one_allows_other_by_default():
     question = PickOneQuestion(id="x", label="X?", choices=[FormChoice(value="a", title="A")])
     assert question.allow_other is True
-
-
-def test_legacy_question_records_migrate():
-    from nooa_atom.session.loader import migrate_input_request
-
-    choices = [{"value": "a", "title": "A"}]
-    record = migrate_input_request(
-        {
-            "kind": "form",
-            "heading": "H",
-            "questions": [
-                {"kind": "pick_one", "id": "strict", "label": "S", "choices": choices},
-                {"kind": "pick_one_or_text", "id": "other", "label": "O", "choices": choices},
-            ],
-        },
-        form=True,
-    )
-    need = NeedInputForm.model_validate(record)
-    assert [q.allow_other for q in need.questions] == [False, True]
-    question = migrate_input_request({"question": "Which?", "options": ["main", "dev"]})
-    assert NeedInput.model_validate(question).question == "Which?\n\n- main\n- dev"

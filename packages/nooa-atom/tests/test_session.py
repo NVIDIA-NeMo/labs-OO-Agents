@@ -32,7 +32,7 @@ from nooa_atom.session.store import SessionStore
 
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification, PythonOutput, ResultStatus
-from nooa.interactive import Done, FormResponse, NeedInput, NeedInputForm
+from nooa.interactive import Done, FormResponse, NeedInput
 from nooa.llm_types import LLMUsage
 from nooa.storage.json_snapshot import snapshot_to_json
 
@@ -890,60 +890,10 @@ async def test_explicit_form_external_submission_is_admitted_unchanged(make_sess
     assert json.loads(row["item_json"])["action"] == action
 
 
-async def test_unavailable_original_model_recovery_refuses_accept(make_session):
-    session, _ = make_session(start=False)
-    session.restore_input_request(
-        "need_input_form",
-        {
-            "question": "Details?",
-            "answer_schema": {"type": "object"},
-            "answer_type": "nonexistent.module:Answer",
-        },
-    )
-    with pytest.raises(ValueError, match="cannot be restored"):
-        await session.submit(FormResponse(action="accept", content={"count": "2"}))
-    receipt = await session.submit(FormResponse(action="cancel"))
-    assert receipt.delivered == "queued"
-
-
-def test_saved_legacy_input_migrates_only_at_loader_boundary():
-    from nooa_atom.session.loader import load_typed
-
-    for record in (
-        {"question": "Details?", "presentation": "form", "answer_type": "atom_test_agents:Answer"},
-        {"question": "Details?", "answer_type": "atom_test_agents:Answer"},
-    ):
-        loaded = load_typed("nooa.interactive:NeedInput", record)
-        assert loaded == record  # no restoration of old classes or validators
-    question = load_typed(
-        "nooa.interactive:NeedInput",
-        {"question": "Why?", "presentation": "auto", "options": ["yes", "no"]},
-    )
-    assert isinstance(question, NeedInput)
-    missing = {
-        "question": "Details?",
-        "answer_type": "not_available:Answer",
-        "presentation": "form",
-    }
-    assert load_typed("nooa.interactive:NeedInput", missing) == missing
-
-    for type_name, record in (
-        ("nooa.interactive:NeedInput", {"question": "Name?", "presentation": "form"}),
-        (
-            "nooa.interactive:NeedInputForm",
-            {"kind": "form", "question": "Branch?", "options": ["main", "dev"]},
-        ),
-    ):
-        loaded = load_typed(type_name, record)
-        assert isinstance(loaded, NeedInputForm)
-        assert loaded.questions[0].id == "answer"
-
-
 @pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
 async def test_form_claim_is_one_shot_and_withdrawal_does_not_resurrect(make_session, action):
     session, _ = make_session(start=False)
-    session.restore_input_request(
-        "need_input_form",
+    session.restore_pending_form(
         {
             "kind": "form",
             "heading": "Name?",
@@ -971,7 +921,7 @@ async def test_raw_submission_and_request_tokens_supersede_old_forms(make_sessio
         "request_id": "a",
         "questions": [{"kind": "text", "id": "answer", "label": "A?"}],
     }
-    session.restore_input_request("need_input_form", data)
+    session.restore_pending_form(data)
     need = session._pending_form
     receipt = await getattr(session, admission)("never mind")
     assert session.withdraw(receipt)
@@ -980,7 +930,7 @@ async def test_raw_submission_and_request_tokens_supersede_old_forms(make_sessio
         session.admit_form_response(need, FormResponse(action="cancel"), source="acp:form-answer")
         is None
     )
-    session.restore_input_request("need_input_form", {**data, "heading": "B", "request_id": "b"})
+    session.restore_pending_form({**data, "heading": "B", "request_id": "b"})
     for action in ("accept", "decline", "cancel"):
         response = FormResponse(
             action=action, content={"answer": "a"} if action == "accept" else None
@@ -1014,8 +964,7 @@ async def test_a_form_response_without_a_pending_form_is_rejected(make_session):
 async def test_domain_action_data_remains_ordinary_input(make_session, pending, item):
     session, _ = make_session(start=False)
     if pending:
-        session.restore_input_request(
-            "need_input_form",
+        session.restore_pending_form(
             {
                 "kind": "form",
                 "heading": "Name",
@@ -1030,31 +979,6 @@ async def test_domain_action_data_remains_ordinary_input(make_session, pending, 
 
 
 @pytest.mark.parametrize(
-    "data",
-    [
-        None,
-        [],
-        "bad",
-        {},
-        {"question": "Name?", "options": 42},
-        {"question": "Name?", "options": {"a": "A"}},
-        {"questions": [None]},
-        {"heading": "Name", "questions": {}},
-    ],
-)
-async def test_corrupt_form_restore_fails_closed_and_replaces_previous_owner(make_session, data):
-    session, _ = make_session(start=False)
-    session.restore_input_request("need_input_form", {"question": "Old?", "request_id": "old"})
-    old = session._pending_form
-    session.restore_input_request("need_input_form", data)
-    assert not session.form_is_current(old)
-    assert session._pending_form is None and session._unavailable_form
-    with pytest.raises(ValueError, match="cannot be restored"):
-        await session.submit(FormResponse(action="accept", content={"answer": "stale"}))
-    assert _rows(session, "ItemAdmitted") == []
-
-
-@pytest.mark.parametrize(
     "item",
     [
         {"action": "unknown", "content": {"answer": "a"}},
@@ -1065,7 +989,14 @@ async def test_corrupt_form_restore_fails_closed_and_replaces_previous_owner(mak
 )
 async def test_request_token_declares_response_intent_even_for_ambiguous_data(make_session, item):
     session, _ = make_session(start=False)
-    session.restore_input_request("need_input_form", {"question": "Name?", "request_id": "current"})
+    session.restore_pending_form(
+        {
+            "kind": "form",
+            "heading": "Name?",
+            "request_id": "current",
+            "questions": [{"kind": "text", "id": "answer", "label": "Name?"}],
+        }
+    )
     owner = session._pending_form
     with pytest.raises(ValueError):
         await session.submit(item, request_id="current")
@@ -1073,14 +1004,10 @@ async def test_request_token_declares_response_intent_even_for_ambiguous_data(ma
     assert _rows(session, "ItemAdmitted") == []
 
 
-async def test_restoration_replaces_form_intent_with_new_conversational_request(make_session):
+@pytest.mark.parametrize("data", [None, [], "bad", {}, {"questions": [None]}])
+async def test_corrupt_form_restore_leaves_no_pending_form(make_session, data):
     session, _ = make_session(start=False)
-    session.restore_input_request("need_input_form", {"question": "Old?", "request_id": "old"})
-    old = session._pending_form
-    session.restore_input_request("need_input", {"question": "Why?"})
-    assert not session.form_is_current(old)
-    assert session._pending_form is None and not session._unavailable_form
-    assert session._form_request_id is None
-    session.restore_input_request("need_input_form", {"question": "New?", "request_id": "new"})
-    assert session._pending_form.heading == "New?"
-    assert session._form_request_id == "new"
+    session.restore_pending_form(data)
+    assert session._pending_form is None and session._form_request_id is None
+    with pytest.raises(ValueError, match="No pending"):
+        await session.submit(FormResponse(action="accept", content={"answer": "stale"}))

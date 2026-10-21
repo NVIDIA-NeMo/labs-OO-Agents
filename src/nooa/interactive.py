@@ -491,8 +491,6 @@ def _default_text(question: Any, default: Any) -> str:
 def recorded_form_text(record: dict[str, Any]) -> str | None:
     """A recorded form request as readable text; ``None`` if it no longer validates."""
     data = {k: v for k, v in record.items() if k not in ("request_id", "question_id")}
-    if isinstance(data.get("questions"), list):
-        data["questions"] = [migrate_form_question(q) for q in data["questions"]]
     try:
         return NeedInputForm.model_validate(data).as_text()
     except ValueError:
@@ -508,23 +506,6 @@ def recorded_item_text(item_json: str, item_type: str = "") -> str | None:
         return FormResponse.model_validate_json(item_json).as_text()
     except ValueError:
         return None
-
-
-def migrate_form_question(value: Any) -> Any:
-    """Map a stored legacy question record onto the current descriptors.
-
-    ``pick_one_or_text`` became ``pick_one`` with ``allow_other=True``; legacy
-    ``pick_one`` records (no ``allow_other`` key) were strict pickers.
-    Only for persisted data: authored dicts get the ``allow_other`` default.
-    """
-    if not isinstance(value, dict):
-        return value
-    kind = value.get("kind")
-    if kind == "pick_one_or_text":
-        return {**value, "kind": "pick_one", "allow_other": True}
-    if kind == "pick_one" and "allow_other" not in value:
-        return {**value, "allow_other": False}
-    return value
 
 
 InputRequest = Annotated[NeedInput | NeedInputForm, Field(discriminator="kind")]

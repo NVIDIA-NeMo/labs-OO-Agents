@@ -880,13 +880,12 @@ class SessionRegistry:
                 event_type == "ItemAdmitted" and raw.get("channel") == "user_messages"
             ):
                 pending = None
-        if pending and pending.get("outcome_kind") in ("need_input", "need_input_form"):
-            # Other outcomes need no descriptor restoration (and may have no JSON).
+        if pending and pending.get("outcome_kind") == "need_input_form":
             try:
                 data = json.loads(pending.get("result_json", ""))
             except (ValueError, TypeError):
                 data = None
-            session.restore_input_request(str(pending["outcome_kind"]), data)
+            session.restore_pending_form(data)
         rows = self.store.load_rows(
             session.id,
             frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn", "ItemDiscarded")),
@@ -1053,23 +1052,13 @@ def _question_from_outcome(ref: ChildRef, outcome: dict[str, Any]) -> ChildQuest
     (``question_id``), so the question read back from the record after a
     reload has the same id.
     """
-    from nooa.interactive import migrate_form_question
-
-    form = (
-        outcome.get("kind") == "form"
-        or outcome.get("presentation") == "form"
-        or outcome.get("answer_schema") is not None
-    )
-    questions = outcome.get("questions")
+    form = outcome.get("kind") == "form"
     return ChildQuestion(
         id=str(outcome.get("question_id") or question_id(ref.id, 0)),
         child=ref,
         question=str(outcome.get("heading", outcome.get("question", ""))),
         request_kind="form" if form else "question",
         reason=outcome.get("reason"),
-        questions=[migrate_form_question(q) for q in questions]
-        if isinstance(questions, list)
-        else None,
+        questions=outcome.get("questions") if form else None,
         request_id=outcome.get("request_id"),
-        answer_schema=outcome.get("answer_schema"),
     )

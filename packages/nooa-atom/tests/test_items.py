@@ -50,7 +50,7 @@ def test_models_validate():
     assert info.usage == Usage() and info.status == "on_disk"
 
 
-def test_child_question_from_need_input_carries_the_json_schema():
+def test_child_question_from_need_input_carries_the_questions():
     question = ChildQuestion.from_need_input(
         _CHILD,
         NeedInputForm(
@@ -61,11 +61,7 @@ def test_child_question_from_need_input_carries_the_json_schema():
     assert ChildQuestion.model_validate_json(question.model_dump_json()) == question
 
     choice = ChildQuestion.from_need_input(_CHILD, NeedInput(question="Which?"))
-    assert (choice.question, choice.request_kind, choice.answer_schema) == (
-        "Which?",
-        "question",
-        None,
-    )
+    assert (choice.question, choice.request_kind) == ("Which?", "question")
 
 
 _LEAVES = {str, int, float, bool, type(None), typing.Any}

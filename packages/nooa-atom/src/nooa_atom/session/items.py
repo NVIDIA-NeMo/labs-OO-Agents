@@ -210,7 +210,6 @@ class ChildQuestion(BaseModel):
     reason: str | None = None
     questions: list[FormQuestion] | None = None
     request_id: str | None = None
-    answer_schema: dict[str, Any] | None = None  # legacy typed requests only
 
     @classmethod
     def from_need_input(

@@ -15,8 +15,6 @@ from nooa.interactive import (
     PickManyQuestion,
     PickOneQuestion,
     TextQuestion,
-    recorded_form_text,
-    recorded_item_text,
 )
 
 CHOICES = [FormChoice(value="a", title="Alpha"), FormChoice(value="b", title="Beta")]
@@ -88,33 +86,3 @@ def test_typed_content_roundtrips_json():
         action="accept", content={"a": ["x"], "b": None, "c": False, "d": 1.5, "e": 2, "f": "s"}
     )
     assert FormResponse.model_validate_json(response.model_dump_json()) == response
-
-
-def test_legacy_records_still_load():
-    record = {
-        "request_id": "r1",
-        "kind": "form",
-        "heading": "H",
-        "questions": [
-            {
-                "kind": "pick_one",
-                "id": "s",
-                "label": "S",
-                "choices": [{"value": "a", "title": "A"}],
-            },
-            {
-                "kind": "pick_one_or_text",
-                "id": "o",
-                "label": "O",
-                "choices": [{"value": "a", "title": "A"}],
-            },
-            {"kind": "text", "id": "t", "label": "T", "required": False},
-            {"kind": "integer", "id": "n", "label": "N", "minimum": 1},
-            {"kind": "boolean", "id": "b", "label": "B"},
-        ],
-    }
-    assert recorded_form_text(record) == (
-        "H\n\n- S: A\n- O: A\n- T\n- N: a whole number of at least 1\n- B: yes or no"
-    )
-    item = FormResponse(action="accept", content={"n": 3, "b": False}).model_dump_json()
-    assert recorded_item_text(item, "nooa.interactive:FormResponse") == "n: 3\nb: no"
