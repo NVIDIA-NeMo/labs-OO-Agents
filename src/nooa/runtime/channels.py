@@ -87,11 +87,16 @@ class ChannelItemsDiscarded(EventBase):
 
 
 class StreamEnd(EventBase):
-    """Emitted to the agent's event channel when a spawned job finishes.
+    """Published through the agent's event manager when a spawned job finishes.
 
-    Signals that no more values will arrive on ``channel_name``.
-    Lives here (not in events.py) per the additive-only constraint.
+    Signals that no more values will arrive on ``channel_name``. A runtime
+    event, like ``ChannelItemConsumed``: subscribers
+    (``event_manager.on("StreamEnd", ...)``) receive it, but it is never
+    recorded and never shown to the model (the job's own result says it
+    ended). Lives here (not in events.py) per the additive-only constraint.
     """
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
     channel_name: str
 
@@ -1185,7 +1190,7 @@ class QueueManager:
 
         Coroutine input
             ``await`` once; ``put(result)`` to the named channel on
-            completion; emit ``StreamEnd`` to the event channel.
+            completion; publish a runtime ``StreamEnd`` (never shown to the model).
 
         Async generator input
             Iterate; ``put(value)`` per yield until exhaustion or

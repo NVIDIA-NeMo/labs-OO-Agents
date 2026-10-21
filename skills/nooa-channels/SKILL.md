@@ -61,7 +61,7 @@ qm.spawn(fetch_report(url), channel="reports")             # coroutine: one put 
 ```
 
 - A **coroutine** job puts its single result on completion; an **async generator** puts each yielded value.
-- Lifecycle events go to the agent's event log: `StreamEnd(channel_name=...)` when a job finishes, `JobError(channel_name, error_type, error_message)` on failure — `JobError` is also put on the data channel so `race()` wakes the agent to react.
+- Lifecycle events: `StreamEnd(channel_name=...)` when a job finishes is a runtime event (subscribe with `event_manager.on("StreamEnd", ...)`; never recorded or shown to the model); `JobError(channel_name, error_type, error_message)` on failure goes to the event log and is also put on the data channel so `race()` wakes the agent to react.
 - `JobHandle`: `.state` (`running/done/cancelled/failed`), `await handle.cancel()` (awaits generator `finally` cleanup), `.values` (buffered outputs — `buffer=True` unbounded, `buffer=N` ring of last N, default off).
 
 ## `self.jobs` — the model-facing view (interactive agents)
@@ -94,5 +94,5 @@ await self.jobs.run("make serve", label="srv", replace=True)  # restart a runnin
 ## Related skills
 
 - `nooa-agent-authoring` — the orchestrator pattern the dispatch loop lives in.
-- `nooa-context-and-state` — `QueueOutput`/`StreamEnd`/`JobError` are events; query them like any others.
+- `nooa-context-and-state` — `QueueOutput`/`JobError` are recorded events; query them like any others (`StreamEnd` is runtime-only).
 - `nooa-middleware-hooks` — `on()` observers if you only need to react to recorded events, not consume input.

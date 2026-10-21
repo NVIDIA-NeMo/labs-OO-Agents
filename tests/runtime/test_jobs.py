@@ -491,6 +491,25 @@ async def test_a_cancelled_job_has_nothing_pending(agent):
     assert agent.jobs.get("tick").pending == 0
 
 
+async def test_a_finished_job_leaves_no_stream_end_in_the_models_history(tmp_path):
+    from nooa.runtime.channels import StreamEnd
+    from nooa.runtime.event_manager import EventManager
+
+    events = EventManager()
+    ended: list = []
+    events.on("StreamEnd", ended.append)
+    agent = _Agent(tmp_path, shell=False)
+    agent.queue_manager = QueueManager(event_manager=events)
+    agent.queue_manager.queue("jobs")
+    agent.jobs = JobsApi(agent)
+    agent.jobs.after(0, label="t")
+    assert (await _next(agent)).done
+    await _until(lambda: ended)
+    assert ended[0].channel_name == "jobs"  # subscribers still get it
+    assert not [tag for tag in events.keys() if isinstance(events[tag], StreamEnd)]
+    await agent.queue_manager.shutdown()
+
+
 # ---- process isolation (ported from the removed monitor() tests) ----
 
 
