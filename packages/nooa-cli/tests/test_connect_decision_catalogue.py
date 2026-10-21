@@ -206,8 +206,9 @@ def test_explicit_missing_match_and_no_catalogue_conflict(monkeypatch):
         return [META]
 
     monkeypatch.setattr(connect, "catalogue", catalogue)
-    with pytest.raises(Exception, match="exactly once"):
-        wizard.prepare_metadata(state(catalogue_model="absent"))
+    missing = state(catalogue_model="absent")
+    assert wizard.prepare_metadata(missing)
+    assert missing.candidate is None  # Missing optional details never block tests.
     with pytest.raises(Exception, match="cannot be used"):
         wizard.prepare_metadata(state(catalogue_model=META["id"], no_catalogue=True))
 

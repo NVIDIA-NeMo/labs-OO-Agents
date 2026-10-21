@@ -226,8 +226,8 @@ def test_offline_catalogue_plan_and_save_are_zero_http(monkeypatch, tmp_path, fu
     assert entry["context_window"] == 16384
     assert entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 4096
     assert "max_output_tokens" not in entry  # Ceiling is not a request allocation.
-    assert entry["max_tokens"] == 4096  # Recommendation is clipped to ceiling.
-    assert entry["reasoning_default"] == "low" and set(entry["reasoning_levels"]) == {"low", "high"}
+    assert entry["max_tokens"] == 4096  # Default allocation is clipped to the fallback ceiling.
+    assert not entry.get("reasoning_levels") and "reasoning_default" not in entry
     assert entry["media_inputs"] == []
     assert entry["provenance"]["media_suggestions"]["suggested"] == ["image"]
     assert not any(probe["name"].startswith("media:") for probe in report["data"]["probes"])

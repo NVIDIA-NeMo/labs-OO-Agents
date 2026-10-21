@@ -554,11 +554,16 @@ connect.write(proposal.entry, Path(sys.argv[1]), alias='local')
 
 
 def test_catalogue_efforts_propose_complete_blocks_and_default():
-    proposal = make_plan(
+    proposal = connect.plan(
+        "local",
+        "provider/model",
+        "chat",
+        "https://openrouter.ai/api/v1",
+        "",
         catalogue={
             "id": "provider/model",
             "reasoning": {"supported_efforts": ["low", "high"], "default_effort": "high"},
-        }
+        },
     )
     assert proposal.entry["reasoning_levels"] == {
         "low": {"reasoning_effort": "low"},

@@ -19,9 +19,13 @@ uv run nooa connect
 ```
 
 Choose a provider (NVIDIA, NVIDIA Inference Hub, OpenAI, Anthropic,
-Google, OpenRouter, or a custom endpoint), a known request interface or
-**Discover request interfaces**, your key, and the model. Connect first reads
-available model metadata using GET requests, not model calls. It fills in a
+Google, OpenRouter, or a custom endpoint), the connection/key, then choose the
+**model** from its list (or enter an exact ID). Connect reads server/OpenRouter
+metadata with GET requests. **Only after the model is selected** does it ask for
+its **Request interface**: a known interface or **Discover request interfaces**.
+The selected model is shown beside this choice; it never asks for an inference
+interface before the model picker. Provider defaults or `--listing-style` determine
+listing headers independently. No model call is used for these steps. It fills in a
 proposal while retaining your explicit limits, reasoning settings and media
 choices, then shows one concise **Proposed configuration** summary for the current
 proposal and asks:
@@ -71,7 +75,7 @@ uv run nooa connect your-model --as my-model \
   Completions), `responses` (OpenAI Responses), `anthropic` (Anthropic Messages),
   `systemone` (System One Decisions), or `openai` (OpenAI Decisions, not Chat).
   An explicit style checks only that style. In guided setup, omit it to choose
-  **Discover request interfaces** or a known interface before model listing.
+  **Discover request interfaces** or a known interface **after selecting the model**.
   After **Test now**, Discover compares chat interfaces plus System One when
   a known or explicit decision endpoint is available. It sends the exact same
   model ID to every candidate; it never translates a completion model into a
@@ -85,6 +89,109 @@ uv run nooa connect your-model --as my-model \
   `MODEL`, `--as`, and either `--provider` or `--endpoint` plus `--api-style`.
 
 Run `uv run nooa connect --help` for all options.
+
+### Model details from this server
+
+Connect reads **server details first**, then uses the public OpenRouter catalogue
+to fill missing facts. The selected model ID stays unchanged. Unknown limits stay
+unknown until you supply them or select an explicit catalogue mapping; missing
+metadata never prevents choosing **Test now**. Listing failures do not trigger
+new authentication attempts: continue with an exact ID, or correct the connection
+in another run.
+
+- **Native OpenAI:** GET `/v1/models` with the configured Bearer key. Standard
+  listings often contain identity only; Connect does not invent model limits or
+  capability endpoints.
+- **Native Anthropic:** the same paginated `/v1/models` listing uses `x-api-key`
+  and `anthropic-version: 2023-06-01`. Connect reads `max_input_tokens`,
+  `max_tokens` (output limit), and the exact
+  `capabilities.image_input.supported` / `capabilities.pdf_input.supported`
+  booleans (Anthropic SDK 0.109.2 shape). These are advertisements, not test results.
+- **OpenRouter:** the public `https://openrouter.ai/api/v1/models` catalogue
+  supplies exact model records without an inference key. Global
+  `context_length`, `top_provider.context_length` and
+  `top_provider.max_completion_tokens` retain their field meanings; the tighter
+  context ceiling is used. The listing/picker is reused rather than fetched twice.
+  `--catalogue-model ID` explicitly maps a public metadata ID; automatic matches
+  must be exact, and suggestions require your selection. An OpenRouter reasoning
+  profile/default request allocation or price is not automatically imported into
+  a different inference route or different model ID. Limits and input advertisements
+  can fill gaps; explicit reasoning blocks and media permissions remain yours.
+- **LiteLLM:** use `--server-metadata litellm` for a custom deployment, or the
+  Hub preset (which validates LiteLLM automatically). This authorizes a bounded,
+  unauthenticated GET of the configured origin's `/openapi.json`, preserving a
+  deployment prefix and removing only a trailing `/v1`. The document must identify
+  `info.title: LiteLLM API` and advertise GET `/model_group/info` with the
+  `model_group` query parameter. Only then does Connect send one GET for the
+  **exact chosen group**, with the already configured work key. No hostname guess
+  or version header is required. Root or `/v1` bases are supported; other custom
+  paths use their listing only. No `/v2/model/info`, `/model/info`, `/health`,
+  admin/master key, or inference call is used to obtain details.
+
+LiteLLM group maxima aggregate backends. Group limits can only **tighten** a
+smaller listing/input ceiling; your smaller input/reply allocations remain in
+place. Positive finite integral numbers (including integral JSON floats) are
+accepted; null, fractional, nonpositive and boolean values are ignored. Group
+flags must be booleans and effort arrays must be bounded strings. False flags and
+empty/null effort lists remain descriptive; they do not remove media permissions,
+filter request parameters, or select a reasoning template. `mode: evaluation`
+suggests a decision-model class, not a wire API path: choose its known interface
+or approve test discovery.
+
+Metadata GETs have no redirects or retries. Model discovery and enrichment each
+have a 30-second overall deadline, 15-second request timeout, and 5 MiB response
+bounds; listings/groups are limited to 5,000 entries (Anthropic pagination is also
+bounded). HTTP 401/403/404, invalid JSON and missing details continue with known
+facts or manual settings. An already fetched selected listing is reused.
+Credentials/configuration embedded in provider objects are discarded. There is
+no persistent metadata/key cache, and supplied listing records must be reused
+only within their original approved connection/credential scope.
+
+For an **exact known connection**, `--no-metadata` bypasses all metadata, including
+the picker, server/OpenAPI/group details, and public catalogue. Supply MODEL,
+endpoint and interface; testing remains an independent choice. Combine it with
+`--no-probe` for zero network. Metadata URLs/files/mappings cannot be combined
+with this bypass. The historical exact MODEL + `--no-catalogue` bypass still
+works; without MODEL, `--no-catalogue` can still request the model picker.
+
+```sh
+# Metadata only: no inference and no registry/key writes.
+uv run nooa connect exact-model --stage model-info \
+  --endpoint https://gateway.example/v1 --api-style chat \
+  --api-key-env MODEL_KEY --server-metadata litellm
+
+# Exact connection; review and decide whether to test, without any metadata GETs.
+uv run nooa connect exact-model --as work \
+  --endpoint https://gateway.example/v1 --api-style chat \
+  --api-key-env MODEL_KEY --no-metadata
+```
+
+`--stage model-info` emits selected `model_id`, effective `model` facts,
+source-bearing `records` (with raw field paths), concise `notices`, attempted GET
+`requests`, and an optional exact `catalogue_model` record for OpenRouter. Metadata
+unavailability is a successful stage result with notices, not a failed inference
+check. `--discovery-file` reuses a bounded saved listing; `--models-url`,
+`--listing-style`, and `--discovery-api-key-env` retain the independent listing
+URL/authentication contract. Across origins, explicitly supply the listing key
+variable (or `-` for no authentication). Neither `--no-metadata` nor
+`--no-catalogue` can authorize this metadata stage. `plan`, routing/interfaces and
+`all` remain metadata-independent; **plan is always offline**, even with
+`--server-metadata litellm`. Model-info is explicit, never inserted into `all`.
+
+The public library API is `await nooa.unifiedllm.connect.server_details(endpoint,
+model_id, ...) -> ModelDetails`. Pass a fetched `Discovery` as `listing` to avoid
+another GET, `litellm=True` to authorize validated group enrichment, or
+`metadata=False` for a complete bypass. `api_style`/`listing_style` choose known
+header/listing contracts, not a guessed runtime interface. `api_key` is used for
+server/group requests; a separately supplied `listing_api_key` is used only for
+an explicit listing (`None` means anonymous, while omission inherits the current
+server key for same-origin listing). `catalogue_id` selects an explicit additional
+OpenRouter mapping in the same public fetch. `connect.plan` enforces the same
+foreign-profile restriction for headless/library users; `catalogue_settings=True`
+is an explicit user-authored editor override, not automatic provider import.
+ID-less legacy library dictionaries remain hand-authored settings. Same-origin
+shared-list replay on a decision route requires an explicit decision style and
+listing URL; it never applies across unrelated server origins. No SDK implementation is changed.
 
 ### Guided interaction
 
@@ -160,11 +267,34 @@ the model, endpoint, interface or image transport resets inherited permissions.
 No fixtures, encoded images, raw replies or credentials are saved.
 
 The Hub preset knows its System One route at
-`https://inference-api.nvidia.com/v1/systemone`. Select System One in the early
-menu, or use `--provider hub --api-style systemone`. An explicit `--endpoint`
+`https://inference-api.nvidia.com/v1/systemone`. Select **System One Decisions**
+in the post-model interface menu, or use `--provider hub --api-style systemone`. An explicit `--endpoint`
 always overrides the preset for a known style. Discover on Hub compares that
 known System One route with the chat-family routes and lists from the shared
 `/v1/models` catalogue regardless of your generation style.
+
+The **OpenRouter preset** also knows the published System One endpoint
+`https://openrouter.ai/api/alpha/decisions`. Its post-model **Discover request
+interfaces** choice compares Chat, Responses, Anthropic and **System One
+Decisions** only after **Test now**, using the **same exact selected model ID**,
+configured Bearer work key and existing shared request budget. A router may
+accept both chat-family and decision interfaces: choose among the observed working
+formats; its name or metadata never forces a class. Decision requests contain no
+chat reply limit, reasoning settings or chat media parameters. An accepted decision
+routing request is reused rather than repeated before saving.
+
+`--provider openrouter --api-style systemone` uses the alpha endpoint when
+`--endpoint` is omitted. An explicit full `--endpoint` overrides a known style;
+`--systemone-endpoint` overrides the preset's discovery/mapped System One route.
+Known styles check only that style; **Save without testing** sends no model calls.
+If a post-model selection switches to a different origin, reusing the current key
+requires `--share-interface-key`, just like mixed discovery. No admin/master key
+or repeated authentication request is added.
+
+The preset mapping is wizard-only. Headless `--stage interfaces` still needs the
+full decision URL through `--systemone-endpoint`; `--provider` remains a wizard
+option. Custom endpoints never acquire a guessed decision suffix, even when a
+model name includes “router” or “decision”.
 
 For mixed discovery on a custom chat server, pass `--systemone-endpoint` with
 the **full System One POST URL**. Connect never guesses a decision suffix from
@@ -274,7 +404,9 @@ cannot return structured output, save it without checks (`--no-probe`) instead.
 
 ## Reasoning levels
 
-Connect uses published reasoning levels when they exist. To supply your own:
+Connect can use published reasoning levels for the exact OpenRouter model/route.
+A different server or metadata mapping does not import that profile. To supply
+your own known settings:
 
 ```sh
 uv run nooa connect gateway/model --as work-model \
@@ -288,9 +420,9 @@ request settings, use `--levels-file` with a YAML mapping from each level name t
 its request settings. Quote names like `"off"`. See
 [reasoning levels](reasoning-levels.md).
 
-Model details such as context window and reasoning levels come from OpenRouter's
-public model list and exact endpoint listing facts, with server facts taking
-priority. Use `--catalogue-model ID` to pick the public entry, or `--no-catalogue`
+Model details come from exact endpoint listing facts and the public OpenRouter
+catalogue, with server facts taking priority. Foreign-route reasoning defaults,
+reply recommendations and prices remain descriptive rather than request settings. Use `--catalogue-model ID` to pick the public entry, or `--no-catalogue`
 to skip public and automatic limit lookups. Missing limits stay unknown in the
 proposal; continue with NOOA defaults or choose **Change settings** to enter
 known limits. The proposal names its source; edits are your settings, not

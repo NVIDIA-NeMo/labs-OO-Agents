@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Inference selection precedes listing/auth; discovery never guesses decision routes."""
+"""Model selection precedes inference choice; discovery never guesses custom decision routes."""
 
 import json
 
@@ -44,7 +44,7 @@ def options(path):
 
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic", "systemone", "openai"])
-def test_early_known_interface_skips_comparison(monkeypatch, tmp_path, style):
+def test_known_interface_after_model_skips_comparison(monkeypatch, tmp_path, style):
     path = tmp_path / "models.yaml"
     requests = []
     menu_seen = []
@@ -105,7 +105,7 @@ def test_early_known_interface_skips_comparison(monkeypatch, tmp_path, style):
 
 
 @pytest.mark.parametrize("mode", ["explicit", "edit", "yes"])
-def test_explicit_edit_and_yes_bypass_early_menu(monkeypatch, tmp_path, mode):
+def test_explicit_edit_and_yes_bypass_interface_menu(monkeypatch, tmp_path, mode):
     path = tmp_path / "models.yaml"
     real_prompt = prompts.prompt
 
@@ -135,7 +135,7 @@ def test_explicit_edit_and_yes_bypass_early_menu(monkeypatch, tmp_path, mode):
     assert yaml.safe_load(path.read_text())["models"]["local"]["api_style"] == "chat"
 
 
-def test_menu_order_provider_interface_url_key_model(monkeypatch, tmp_path):
+def test_menu_order_provider_url_key_model_interface(monkeypatch, tmp_path):
     path = tmp_path / "models.yaml"
     sequence = []
     real_prompt = prompts.prompt
@@ -151,16 +151,16 @@ def test_menu_order_provider_interface_url_key_model(monkeypatch, tmp_path):
     result = CliRunner().invoke(
         command,
         ["--as", "local", "--no-probe", "--no-catalogue", "--output", str(path)],
-        input=f"custom\nchat\n{BASE}\n-\nexact/model\nsave\ny\n",
+        input=f"custom\n{BASE}\n-\nexact/model\nchat\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert sequence[:4] == [
+    assert sequence[:5] == [
         "Choose a provider",
-        "Request interface",
         "Model server URL",
         "Key environment variable (new to enter a key; - for no authentication)",
+        "Search available models (type to search; Tab to select)",
+        "Request interface",
     ]
-    assert sequence[4] == "Search available models (type to search; Tab to select)"
     assert "API format" not in sequence
 
 
@@ -201,7 +201,7 @@ def test_hub_shared_listing_and_default_full_systemone_url(monkeypatch, tmp_path
             "--output",
             str(path),
         ],
-        input=f"{choice}\nexact/model\ntest\ny\n",
+        input=f"exact/model\n{choice}\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -569,7 +569,7 @@ def test_discover_selected_decision_media_rejected_after_routing_only(monkeypatc
             "--output",
             str(path),
         ],
-        input="discover\nexact/model\ntest\ncancel\n",
+        input="exact/model\ndiscover\ntest\ncancel\n",
     )
     assert result.exit_code == 2, result.output
     assert "accept images only. Use media_inputs: [image]" in result.output
@@ -685,7 +685,7 @@ def test_picker_discover_anthropic_retains_endpoint_limits(
         flags += ["--no-catalogue"]
     if listing_url:
         flags += ["--models-url", listing_url, "--discovery-api-key-env", "-"]
-    result = CliRunner().invoke(command, flags, input="discover\nexact/model\ntest\ny\n")
+    result = CliRunner().invoke(command, flags, input="exact/model\ndiscover\ntest\ny\n")
     assert result.exit_code == 0, result.output
     assert "Found 1 models" in result.output
     assert path.exists(), result.output

@@ -78,6 +78,17 @@ from ._connect_stages import STAGES
     help="Catalogue key variable; - for no authentication. Required for a different origin.",
 )
 @click.option("--prompt-key", is_flag=True, help="Read a masked key; offer to save it at the end.")
+@click.option(
+    "--no-metadata",
+    is_flag=True,
+    help="Bypass all metadata GETs; supply the exact model and known interface. Testing remains optional.",
+)
+@click.option(
+    "--server-metadata",
+    type=click.Choice(["listing", "litellm"]),
+    default="listing",
+    help="Reuse model listing, or validate public LiteLLM OpenAPI then fetch one selected model group. Hub preset validates LiteLLM automatically.",
+)
 @click.option("--no-catalogue", is_flag=True, help="Do not fetch public model metadata.")
 @click.option(
     "--reasoning-template",
@@ -207,6 +218,8 @@ def command(
     listing_style,
     discovery_api_key_env,
     no_catalogue,
+    no_metadata,
+    server_metadata,
     reasoning_template,
     levels,
     levels_file,
@@ -236,6 +249,17 @@ def command(
     MODEL is the exact endpoint model ID, without a LiteLLM routing prefix.
     """
     from ._connect_prompts import parse_media_inputs
+
+    if no_metadata and (catalogue_model or models_url or discovery_file or catalogue_file):
+        raise click.UsageError("--no-metadata cannot be combined with metadata mappings/files/URLs")
+    if no_catalogue and stage in {"catalogue", "model-info"}:
+        raise click.UsageError(
+            "--no-catalogue disables automatic server metadata; omit it for model-info"
+        )
+    if no_metadata and stage in {"discover", "catalogue", "model-info"}:
+        raise click.UsageError("--no-metadata disables metadata stages")
+    # Historical --no-catalogue + exact MODEL bypass remains supported.
+    no_catalogue = no_catalogue or no_metadata
 
     try:
         parse_media_inputs(media_inputs)
@@ -284,6 +308,8 @@ def command(
 
             code = run_stage(
                 stage,
+                server_metadata=server_metadata,
+                no_metadata=no_metadata,
                 model=model,
                 alias=alias,
                 endpoint=endpoint,
@@ -354,6 +380,8 @@ def command(
             listing_style=listing_style,
             discovery_api_key_env=discovery_api_key_env,
             no_catalogue=no_catalogue,
+            no_metadata=no_metadata,
+            server_metadata=server_metadata,
             reasoning_template=reasoning_template,
             reasoning_level=reasoning_level,
             levels=levels,

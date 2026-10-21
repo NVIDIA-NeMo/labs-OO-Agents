@@ -103,9 +103,9 @@ def test_discovery_files_match_catalogue_source_not_decision_url(tmp_path):
     path.write_text(
         json.dumps(asdict(connect.Discovery("https://hub.test/v1", (MODEL,), MODELS_URL)))
     )
-    assert read_discovery(path, "https://hub.test/v1/systemone", models_url=MODELS_URL) == [
-        {**MODEL, "media_source": MODELS_URL}
-    ]
+    assert read_discovery(
+        path, "https://hub.test/v1/systemone", models_url=MODELS_URL, api_style="systemone"
+    ) == [{**MODEL, "media_source": MODELS_URL}]
     with pytest.raises(ValueError, match="different endpoint"):
         read_discovery(path, ENDPOINT, models_url="https://other.test/v1/models")
     path.write_text(json.dumps({"api_base": ENDPOINT, "models": [MODEL]}))

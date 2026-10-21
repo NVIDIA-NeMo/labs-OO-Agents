@@ -44,6 +44,9 @@ from ._records import (
     text_baseline_passed,
     text_baseline_reason,
 )
+from ._server_details import ModelDetails as ModelDetails
+from ._server_details import bounded_json, openrouter_facts, token_limit
+from ._server_details import server_details as server_details
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
 # Effectively unlimited: no real check plan approaches this, so an unset
@@ -320,14 +323,16 @@ class Discovery:
     api_base: str
     models: tuple[dict[str, Any], ...]
     models_url: str | None = None
+    request_count: int = 0
 
 
 class DiscoveryError(ValueError):
     """Safe discovery failure; frontends can offer a new key on 401 or 403."""
 
-    def __init__(self, message: str, *, status_code: int | None = None):
+    def __init__(self, message: str, *, status_code: int | None = None, request_count: int = 0):
         super().__init__(message)
         self.status_code = status_code
+        self.request_count = request_count
 
 
 def normalize_endpoint(endpoint: str) -> str:
@@ -396,12 +401,14 @@ async def discover(
     params = {"limit": "100"} if style == "anthropic" else {}
     size = 0
     count = 0
+    request_count = 0
     try:
         async with (
             asyncio.timeout(30),
             httpx.AsyncClient(timeout=15, follow_redirects=False) as client,
         ):
             while True:
+                request_count += 1
                 async with client.stream(
                     "GET", url, headers=_headers(style, api_key), params=params
                 ) as response:
@@ -414,20 +421,27 @@ async def discover(
                         raise DiscoveryError(
                             f"Model discovery returned HTTP {response.status_code}",
                             status_code=response.status_code,
+                            request_count=request_count,
                         )
                     chunks = []
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
                         if size > 5 * 1024 * 1024:
-                            raise DiscoveryError("Model discovery exceeds 5 MiB")
+                            raise DiscoveryError(
+                                "Model discovery exceeds 5 MiB", request_count=request_count
+                            )
                         chunks.append(chunk)
                 payload = json.loads(b"".join(chunks))
                 data = payload.get("data") if isinstance(payload, dict) else None
                 if not isinstance(data, list):
-                    raise DiscoveryError("Model discovery must contain a data list")
+                    raise DiscoveryError(
+                        "Model discovery must contain a data list", request_count=request_count
+                    )
                 count += len(data)
                 if count > 5000:
-                    raise DiscoveryError("Model discovery exceeds 5,000 entries")
+                    raise DiscoveryError(
+                        "Model discovery exceeds 5,000 entries", request_count=request_count
+                    )
                 for item in data:
                     name = item.get("id") if isinstance(item, dict) else None
                     if (
@@ -457,11 +471,21 @@ async def discover(
                     ):
                         for candidate in candidates:
                             value = item.get(candidate)
-                            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                                model[field] = value
+                            if token_limit(value) is not None:
+                                model[field] = token_limit(value)
+                                if field != candidate:
+                                    model.setdefault("metadata_fields", {})[field] = (
+                                        "data[]." + candidate
+                                    )
                                 break
                     # Advertised hints only: do not enable interfaces or media from these.
-                    for field in ("name", "description", "client_type", "model_type"):
+                    for field in (
+                        "name",
+                        "display_name",
+                        "description",
+                        "client_type",
+                        "model_type",
+                    ):
                         value = item.get(field)
                         if (
                             isinstance(value, str)
@@ -504,6 +528,22 @@ async def discover(
                         }
                         if hints:
                             model["architecture"] = hints
+                    # Published OpenRouter route ceilings can only tighten a listing.
+                    top = item.get("top_provider")
+                    if isinstance(top, dict):
+                        for raw, field in (
+                            ("context_length", "context_window"),
+                            ("max_completion_tokens", "max_output_tokens"),
+                        ):
+                            value = top.get(raw)
+                            if token_limit(value) is not None:
+                                value = token_limit(value)
+                                old = model.get(field)
+                                model[field] = min(old, value) if isinstance(old, int) else value
+                                if old is None or value < old:
+                                    model.setdefault("metadata_fields", {})[field] = (
+                                        "data[].top_provider." + raw
+                                    )
                     media = media_metadata(item)
                     if "architecture" in media:
                         media["architecture"] = {
@@ -513,6 +553,13 @@ async def discover(
                     model.update(media)
                     if media:
                         model["media_source"] = url
+                    if url == CATALOGUE_URL:
+                        model["public_model"] = openrouter_facts(item)
+                    if name in models:
+                        raise DiscoveryError(
+                            "Model listing contains duplicate model IDs",
+                            request_count=request_count,
+                        )
                     models[name] = model
                 if style != "anthropic" or not payload.get("has_more"):
                     break
@@ -523,47 +570,45 @@ async def discover(
                     or cursor in cursors
                     or len(cursors) >= 50
                 ):
-                    raise DiscoveryError("Invalid or excessive model discovery pagination")
+                    raise DiscoveryError(
+                        "Invalid or excessive model discovery pagination",
+                        request_count=request_count,
+                    )
                 cursors.add(cursor)
                 params["after_id"] = cursor
     except (httpx.HTTPError, TimeoutError):
-        raise DiscoveryError("Model discovery connection failed or timed out") from None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise DiscoveryError("Model discovery did not return valid JSON") from None
+        raise DiscoveryError(
+            "Model discovery connection failed or timed out", request_count=request_count
+        ) from None
+    except (ValueError, UnicodeDecodeError) as exc:
+        if isinstance(exc, DiscoveryError):
+            raise
+        raise DiscoveryError(
+            "Model discovery did not return valid JSON", request_count=request_count
+        ) from None
     if not models:
-        raise DiscoveryError("Endpoint advertised no usable model IDs; supply a model explicitly")
-    return Discovery(base, tuple(models[name] for name in sorted(models)), url)
+        raise DiscoveryError(
+            "Endpoint advertised no usable model IDs; supply a model explicitly",
+            request_count=request_count,
+        )
+    return Discovery(base, tuple(models[name] for name in sorted(models)), url, request_count)
 
 
 async def catalogue() -> list[dict]:
     """Fetch public metadata without sending the endpoint's credentials."""
     async with asyncio.timeout(30), httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-        response = await client.get(CATALOGUE_URL)
-        response.raise_for_status()
-        payload = response.json()
+        payload = await bounded_json(client, CATALOGUE_URL)
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
             raise ValueError("Catalogue response must contain a list of model objects")
+        if len(data) > 5000:
+            raise ValueError("Catalogue exceeds 5,000 entries")
+        data = [openrouter_facts(item) for item in data]
+        if len({item["id"] for item in data}) != len(data):
+            raise ValueError("Catalogue contains duplicate model IDs")
         for item in data:
-            # Attribution is ours, not provider-supplied model information.
-            for key in ("media_source", "media_model_id", "limit_sources", "endpoint_limits"):
-                item.pop(key, None)
             if media_metadata(item):
                 item["media_source"] = CATALOGUE_URL
-            if not isinstance(item.get("id"), str) or not item["id"].strip():
-                raise ValueError("Catalogue models must have a non-empty string id")
-            for field in ("top_provider", "reasoning", "default_parameters"):
-                if not isinstance(item.get(field), dict):
-                    item[field] = {}
-            reasoning = item["reasoning"]
-            efforts = reasoning.get("supported_efforts")
-            reasoning["supported_efforts"] = (
-                [value for value in efforts if isinstance(value, str) and value.strip()]
-                if isinstance(efforts, list)
-                else []
-            )
-            if not isinstance(reasoning.get("default_effort"), str):
-                reasoning.pop("default_effort", None)
         return data
 
 
@@ -898,6 +943,14 @@ def model_metadata(
     """
     result = deepcopy(catalogue or {"id": model})
     sources = result.setdefault("limit_sources", {})
+    route_context = (result.get("top_provider") or {}).get("context_length")
+    if token_limit(route_context) is not None:
+        context = result.get("context_length")
+        result["context_length"] = (
+            min(context, token_limit(route_context))
+            if token_limit(context) is not None
+            else token_limit(route_context)
+        )
     for field, value in (
         ("context_length", result.get("context_length")),
         ("max_completion_tokens", (result.get("top_provider") or {}).get("max_completion_tokens")),
@@ -1132,6 +1185,7 @@ def plan(
     api_key_env: str,
     *,
     catalogue: dict | None = None,
+    catalogue_settings: bool = False,
     endpoint_model: dict | None = None,
     endpoint_models_url: str | None = None,
     reasoning_levels: dict | None = None,
@@ -1157,12 +1211,27 @@ def plan(
     Reported usage can increase that charge. Servers can ignore
     caps, so this is not a billing limit. Media facts never change declarations.
     Non-Chat video and audio remain transparently not tested. For decisions, a
-    supplied ``catalogue`` is an explicit OpenRouter ID mapping: only bounded
+    ``catalogue_settings=True`` is reserved for explicitly user-authored settings
+    (e.g. a settings editor), not automatic provider metadata. Published foreign
+    route/model profiles never supply reasoning defaults, allocations or prices.
+    For decisions, supplied ``catalogue`` is an explicit OpenRouter ID mapping: only bounded
     descriptions, media facts and provenance are retained, never chat settings.
     """
     if api_style not in _PATHS:
         raise ValueError("api_style must be chat, responses, anthropic, systemone or openai")
     api_base = normalize_endpoint(api_base)
+    if (
+        not catalogue_settings
+        and catalogue is not None
+        and "id" in catalogue
+        and (api_base + "/models" != CATALOGUE_URL or catalogue["id"] != model)
+        and api_style not in DECISION_API_STYLES
+    ):
+        # Published OpenRouter records fill facts, not unrelated route profiles.
+        # ID-less dictionaries remain explicit hand-authored legacy settings.
+        catalogue = deepcopy(catalogue)
+        for field in ("reasoning", "default_parameters", "pricing"):
+            catalogue.pop(field, None)
     if endpoint_models_url is not None:
         endpoint_models_url = validate_models_url(endpoint_models_url)
     if (

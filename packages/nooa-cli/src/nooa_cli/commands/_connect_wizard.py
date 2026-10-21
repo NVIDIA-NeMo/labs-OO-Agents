@@ -41,6 +41,7 @@ class WizardState:
     default_style: Any = None
     discovery_endpoint: Any = None
     endpoint_models_url: Any = None
+    listing_api_base: Any = None
     discovery_file: Any = None
     discovery_style: Any = None
     models_url: Any = None
@@ -58,6 +59,7 @@ class WizardState:
     explicit_key_env: Any = None
     interface_spent: Any = None
     share_interface_key: bool = False
+    connection_endpoint_explicit: bool = False
     interfaces: Any = None
     levels: Any = None
     levels_file: Any = None
@@ -74,6 +76,9 @@ class WizardState:
     typesafe_danger_zone_images: Any = None
     model: Any = None
     no_catalogue: Any = None
+    no_metadata: bool = False
+    server_metadata: str = "listing"
+    server_details: Any = None
     no_probe: Any = None
     output: Any = None
     output_tokens: Any = None
@@ -286,20 +291,10 @@ def select_connection(state: WizardState) -> bool:
             },
             open_menu=True,
         )
-    # Choose the inference operation before listing/auth; listing remains independent.
+    # Model listing/auth follows provider or an independent listing style.
+    # Choose the inference interface only after selecting the model.
     explicit_endpoint = state.endpoint
-    if not state.api_style and not state.yes and state.editing is None:
-        choice = prompts.prompt(
-            "Request interface",
-            choices=("discover", "chat", "responses", "anthropic", "systemone", "openai"),
-            default="discover",
-            open_menu=True,
-            labels={
-                style: prompts.choice_label(style)
-                for style in ("discover", "chat", "responses", "anthropic", "systemone", "openai")
-            },
-        )
-        state.api_style = None if choice == "discover" else choice
+    state.connection_endpoint_explicit = explicit_endpoint is not None
     state.interface_endpoints = {}
     if state.systemone_endpoint:
         state.interface_endpoints["systemone"] = connect.normalize_endpoint(
@@ -307,6 +302,8 @@ def select_connection(state: WizardState) -> bool:
         )
     elif state.provider == "hub":
         state.interface_endpoints["systemone"] = connect.PROVIDERS["hub"].api_base + "/systemone"
+    elif state.provider == "openrouter":
+        state.interface_endpoints["systemone"] = "https://openrouter.ai/api/alpha/decisions"
     if state.provider and state.provider != "custom":
         preset = connect.PROVIDERS[state.provider]
         if state.api_style in connect.DECISION_API_STYLES and not explicit_endpoint:
@@ -374,9 +371,11 @@ def select_connection(state: WizardState) -> bool:
         if state.api_style in {"chat", "responses", "anthropic"}
         else state.default_style
     )
-    if state.provider == "hub":
-        # Hub's shared catalogue is independent of the full decision POST URL.
-        state.models_url = state.models_url or connect.PROVIDERS["hub"].api_base + "/models"
+    if state.provider in {"hub", "openrouter"}:
+        # Shared provider catalogues are independent of the full decision POST URL.
+        state.models_url = (
+            state.models_url or connect.PROVIDERS[state.provider].api_base + "/models"
+        )
     if state.models_url:
         connect.validate_models_url(state.models_url)
     if state.api_key_env is None:
@@ -420,7 +419,10 @@ def select_connection(state: WizardState) -> bool:
         and (
             state.approval != "none"
             or (
-                not state.model and not state.discovery_file and state.discovery_api_key_env is None
+                not state.no_metadata
+                and not state.model
+                and not state.discovery_file
+                and state.discovery_api_key_env is None
             )
         )
         and state.api_key_env
@@ -441,29 +443,6 @@ def select_connection(state: WizardState) -> bool:
     return True
 
 
-def ask_for_rejected_key(state: WizardState) -> None:
-    """The server refused the key: say where it came from and ask for another.
-
-    The new key is used for this setup; the save step offers to store it
-    under ``state.api_key_env``, as for any key typed during setup.
-    """
-    source = (
-        f"the key in {state.api_key_env}"
-        if state.api_key_env and state.api_key == os.environ.get(state.api_key_env)
-        else "that key"
-        if state.api_key
-        else "the request without a key"
-    )
-    view.line(f"The server rejected {source}. Enter a key to try again (Ctrl-C to cancel).")
-    if not state.api_key_env:
-        state.api_key_env = prompts.prompt(
-            "Save key under variable name",
-            default="NOOA_MODEL_API_KEY",
-            suggestions=prompts.environment_names(),
-        )
-    state.api_key = prompts.prompt("API key (used only for this setup)", hide_input=True)
-
-
 def select_model(state: WizardState) -> bool:
     """Select model; return False when the user cancels."""
     if state.editing is None:
@@ -472,15 +451,20 @@ def select_model(state: WizardState) -> bool:
     state.discovery_endpoint = None
     state.endpoint_models = ()
     state.endpoint_models_url = None
+    state.listing_api_base = None
     if state.discovery_file:
         if state.api_style in connect.DECISION_API_STYLES and not state.models_url:
             raise click.UsageError("--discovery-file for decision routes requires --models-url")
         from ._connect_stages import read_discovery_listing
 
         listing = read_discovery_listing(
-            state.discovery_file, state.endpoint, models_url=state.models_url
+            state.discovery_file,
+            state.endpoint,
+            models_url=state.models_url,
+            api_style=state.api_style,
         )
         state.endpoint_models = listing.models
+        state.listing_api_base = listing.api_base
         state.endpoint_models_url = listing.models_url
         state.discovery_endpoint = state.endpoint
     if (
@@ -496,6 +480,10 @@ def select_model(state: WizardState) -> bool:
             choices=[item["id"] for item in state.endpoint_models],
             searchable=True,
         )
+    if state.no_metadata and not state.model:
+        if state.yes:
+            raise click.UsageError("--no-metadata requires an exact MODEL")
+        state.model = prompts.prompt("Exact model ID (metadata is disabled; Ctrl-C to cancel)")
     while not state.model:
         click.echo("Connecting to the server and listing models...")
         try:
@@ -504,6 +492,11 @@ def select_model(state: WizardState) -> bool:
             key = listing_key(
                 state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
             )
+            if (
+                state.models_url == connect.CATALOGUE_URL
+                or state.endpoint + "/models" == connect.CATALOGUE_URL
+            ):
+                key = None
             state.discovery_api_key = key
             found = asyncio.run(
                 connect.discover(
@@ -524,12 +517,13 @@ def select_model(state: WizardState) -> bool:
             state.discovery_endpoint = state.endpoint
             click.echo(f"Could not list models: {exc}", err=True)
             if exc.status_code in {401, 403}:
-                if state.yes or state.discovery_api_key_env is not None:
-                    raise click.ClickException(
-                        "Authentication failed. Check the listing key and try again."
-                    ) from None
-                ask_for_rejected_key(state)
-                continue
+                view.line("Model listing unavailable. Continue with an exact model ID or cancel.")
+            if state.yes:
+                raise click.ClickException(
+                    "Authentication failed. Supply an exact MODEL or check the listing key."
+                    if exc.status_code in {401, 403}
+                    else "Model listing unavailable. Supply an exact MODEL."
+                ) from None
             state.model = prompts.prompt("Exact model ID (if known; Ctrl-C to cancel)")
         else:
             if not state.models_url and state.api_style not in connect.DECISION_API_STYLES:
@@ -537,6 +531,7 @@ def select_model(state: WizardState) -> bool:
             state.discovery_succeeded = True
             state.discovery_endpoint = state.endpoint
             state.endpoint_models = found.models
+            state.listing_api_base = found.api_base
             state.endpoint_models_url = found.models_url
             names = [item["id"] for item in found.models]
             click.echo(f"Found {len(names)} models. Type part of a name, then Tab to select.")
@@ -545,6 +540,79 @@ def select_model(state: WizardState) -> bool:
                 choices=names,
                 searchable=True,
             )
+    return True
+
+
+def select_request_interface(state: WizardState) -> bool:
+    """Choose after the selected model/metadata, before any inference consent."""
+    if state.api_style or state.yes or state.editing is not None:
+        return True
+    view.line(scrub_setup(state, f"Selected model: {state.model}"), bold=True)
+    choices = ("discover", "chat", "responses", "anthropic", "systemone", "openai")
+    # Descriptive interface hints can be shown; never dispatch by model name/class.
+    hints = (state.selected_endpoint_model or {}).get("supported_interfaces")
+    if hints:
+        view.line(
+            "Server lists interfaces: "
+            + ", ".join(prompts.choice_label(s) for s in hints if s in choices)
+        )
+    choice = prompts.prompt(
+        "Request interface",
+        choices=choices,
+        default="discover",
+        open_menu=True,
+        labels={style: prompts.choice_label(style) for style in choices},
+    )
+    if choice == "discover":
+        return True
+    state.api_style = choice
+    if choice in connect.DECISION_API_STYLES:
+        preset_base = (
+            connect.PROVIDERS[state.provider].api_base
+            if state.provider in connect.PROVIDERS
+            else None
+        )
+        mapped = state.interface_endpoints.get(choice)
+        if mapped and (
+            state.systemone_endpoint
+            or not state.connection_endpoint_explicit
+            or state.endpoint == preset_base
+        ):
+            selected_endpoint = mapped
+        elif state.connection_endpoint_explicit:
+            selected_endpoint = state.endpoint
+        else:
+            selected_endpoint = prompts.prompt(
+                "Full decision request URL",
+                default=mapped or state.endpoint,
+                suggestions=state.server_urls,
+            )
+        selected_endpoint = connect.normalize_endpoint(selected_endpoint)
+        if (state.api_key or state.api_key_env) and not state.share_interface_key:
+            from urllib.parse import urlsplit
+
+            def origin(url):
+                address = urlsplit(url)
+                return (
+                    address.scheme,
+                    address.hostname,
+                    address.port or (443 if address.scheme == "https" else 80),
+                )
+
+            if origin(selected_endpoint) != origin(state.endpoint):
+                raise click.UsageError(
+                    "Changing the server origin requires --share-interface-key to reuse this key, "
+                    "or supply the target directly with --endpoint and --api-style."
+                )
+        state.endpoint = selected_endpoint
+        # The explicit shared catalogue retains descriptive selected-model facts.
+        # Decision plans do not apply chat budgets/profiles from the listing.
+        state.candidate = (
+            connect.decision_metadata(state.model, state.candidate, state.selected_endpoint_model)
+            or None
+        )
+        state.media_hints = state.candidate
+    reject_decision_media(state)
     return True
 
 
@@ -821,6 +889,37 @@ def check_interfaces(state: WizardState) -> bool:
     return True
 
 
+def public_models_for_setup(state: WizardState):
+    """Use a fetched public route record rather than repeating its GET."""
+    public_listing = (
+        state.endpoint_models_url == connect.CATALOGUE_URL
+        or state.models_url == connect.CATALOGUE_URL
+    )
+    if state.discovery_succeeded is False and (
+        public_listing or state.endpoint + "/models" == connect.CATALOGUE_URL
+    ):
+        return []
+    if (
+        public_listing
+        and state.endpoint_models is not None
+        and state.discovery_endpoint == state.endpoint
+        and not any(
+            record["schema"] == "openrouter.models"
+            for record in (state.server_details.records if state.server_details else ())
+        )
+    ):
+        from nooa.unifiedllm.connect._server_details import openrouter_facts
+
+        return [openrouter_facts(item.get("public_model", item)) for item in state.endpoint_models]
+    if state.server_details is not None and any(
+        record["schema"] == "openrouter.models" for record in state.server_details.records
+    ):
+        return (
+            [state.server_details.catalogue_model] if state.server_details.catalogue_model else []
+        )
+    return asyncio.run(connect.catalogue())
+
+
 def prepare_metadata(state: WizardState) -> bool:
     """Fetch allowed metadata before media choice, without settings prompts."""
     state.metadata_prepared = True
@@ -838,56 +937,70 @@ def prepare_metadata(state: WizardState) -> bool:
     )
     state.candidate = None
     state.edited_settings = False
+    state.server_details = None
+    if not state.no_metadata and not state.no_catalogue and state.editing is None:
+        from ._connect_stages import listing_key
+
+        state.discovery_api_key = listing_key(
+            state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
+        )
+        listing = (
+            connect.Discovery(
+                state.listing_api_base or state.endpoint,
+                tuple(state.endpoint_models),
+                state.endpoint_models_url,
+            )
+            if state.endpoint == state.discovery_endpoint and state.discovery_succeeded is not False
+            else None
+        )
+        view.line("Model details from this server (metadata only)...")
+        state.server_details = (
+            connect.ModelDetails(state.model, {"id": state.model})
+            if state.discovery_succeeded is False and state.endpoint == state.discovery_endpoint
+            else asyncio.run(
+                connect.server_details(
+                    state.endpoint,
+                    state.model,
+                    api_style=state.api_style or state.discovery_style or "chat",
+                    api_key=state.api_key,
+                    listing_api_key=state.discovery_api_key,
+                    models_url=state.models_url,
+                    listing_style=state.discovery_style,
+                    listing=listing,
+                    litellm=state.server_metadata == "litellm" or state.provider == "hub",
+                    catalogue_id=state.catalogue_model,
+                )
+            )
+        )
+        for notice in state.server_details.notices:
+            view.line(scrub_setup(state, notice), fg="yellow")
+        if state.server_details.records:
+            state.selected_endpoint_model = state.server_details.model
+            if listing is None:
+                state.endpoint_models = (state.selected_endpoint_model,)
+                state.discovery_endpoint = state.endpoint
+                state.endpoint_models_url = state.server_details.records[0]["source"]
     if state.api_style in connect.DECISION_API_STYLES:
         if state.no_catalogue and state.catalogue_model:
             raise click.UsageError("--catalogue-model cannot be used with --no-catalogue")
         if not state.no_catalogue and state.editing is None:
             from ._connect_stages import listing_key
 
-            if state.models_url and not state.endpoint_models:
-                # An exact decision ID skips the picker, not an explicitly supplied
-                # metadata GET URL. Never derive that URL from a decision POST route.
-                state.discovery_api_key = listing_key(
-                    state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
-                )
-                try:
-                    listing = asyncio.run(
-                        connect.discover(
-                            state.endpoint,
-                            api_style=state.api_style,
-                            api_key=state.discovery_api_key,
-                            models_url=state.models_url,
-                            listing_style=state.discovery_style,
-                        )
-                    )
-                except connect.DiscoveryError:
-                    view.line(
-                        "Endpoint metadata unavailable; continuing with public details.",
-                        fg="yellow",
-                    )
-                else:
-                    state.endpoint_models = listing.models
-                    state.endpoint_models_url = listing.models_url
-                    state.discovery_endpoint = state.endpoint
-                    state.selected_endpoint_model = next(
-                        (item for item in listing.models if item.get("id") == state.model), None
-                    )
             # Validate explicit credential configuration before any public lookup.
             listing_key(
                 state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
             )
             click.echo("Looking up OpenRouter model details (metadata only)...")
             try:
-                models = asyncio.run(connect.catalogue())
-            except (httpx.HTTPError, ValueError, KeyError):
-                if state.catalogue_model:
-                    raise click.ClickException(
-                        "Could not load the requested catalogue entry."
-                    ) from None
+                models = public_models_for_setup(state)
+            except (httpx.HTTPError, TimeoutError, ValueError, KeyError):
+                view.line(
+                    "Public model details unavailable; continuing with server details or manual settings."
+                )
                 models = []
             selected_id = state.catalogue_model or state.model
             matches = [item for item in models if item.get("id") == selected_id]
-            if state.catalogue_model and len(matches) != 1:
+            if len(matches) > 1:
                 raise click.ClickException("Requested catalogue model must match exactly once.")
             if len(matches) == 1:
                 state.candidate = matches[0]
@@ -896,7 +1009,7 @@ def prepare_metadata(state: WizardState) -> bool:
                 click.echo(
                     "Use --catalogue-model with an explicit OpenRouter ID, or continue without details (--no-catalogue)."
                 )
-                if not state.yes and models:
+                if not state.yes and models and not state.catalogue_model:
                     selected = prompts.prompt(
                         "Explicit OpenRouter match (blank continues without details)",
                         default="",
@@ -945,21 +1058,22 @@ def prepare_metadata(state: WizardState) -> bool:
             )
         click.echo("Looking up public model information...")
         try:
-            models = asyncio.run(connect.catalogue())
-        except (httpx.HTTPError, ValueError, KeyError):
-            if state.catalogue_model:
-                raise click.ClickException(
-                    "Could not load the requested catalogue entry."
-                ) from None
-            click.echo("Public catalogue unavailable; continuing with unknown limits.", err=True)
+            models = public_models_for_setup(state)
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError):
+            click.echo(
+                "Public catalogue unavailable; continuing with server details or manual settings.",
+                err=True,
+            )
             models = []
         matches = (
             [item for item in models if item.get("id") == state.catalogue_model]
             if state.catalogue_model
-            else connect.match_models(state.model, models)
+            else [item for item in models if item.get("id") == state.model]
         )
         if state.catalogue_model and not matches:
-            raise click.ClickException("Requested catalogue model was not found.")
+            view.line(
+                "Requested OpenRouter model details unavailable; continuing with server details or manual settings."
+            )
         if len(matches) == 1:
             state.candidate = matches[0]
         elif matches:
@@ -982,7 +1096,11 @@ def prepare_metadata(state: WizardState) -> bool:
             # An exact/suffix match found nothing — likely a gateway prefix
             # (aws/..., bedrock-..., vertex/...) the catalogue never records.
             # Never auto-select a fuzzy guess; only offer it for confirmation.
-            fuzzy = [] if state.yes else connect.fuzzy_match_models(state.model, models)
+            fuzzy = (
+                []
+                if state.yes or state.catalogue_model
+                else connect.fuzzy_match_models(state.model, models)
+            )
             if fuzzy:
                 click.echo(
                     "Model not found; did you mean one of these? "
@@ -999,45 +1117,44 @@ def prepare_metadata(state: WizardState) -> bool:
                     if state.candidate is None:
                         raise click.ClickException("Choose one of the displayed model IDs.")
             if state.candidate is None:
-                click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
-    endpoint_model = (
-        next(
-            (item for item in (state.endpoint_models or ()) if item.get("id") == state.model), None
-        )
-        if state.endpoint == state.discovery_endpoint
-        else None
-    )
+                if state.selected_endpoint_model and len(state.selected_endpoint_model) > 1:
+                    click.echo(
+                        "No OpenRouter details found; continuing with model details from this server."
+                    )
+                else:
+                    click.echo(
+                        "No catalogue match; model limits and reasoning levels remain unknown."
+                    )
     if (
-        endpoint_model is None
-        and not state.no_catalogue
-        and (state.guided or state.candidate is not None)
+        state.candidate is not None
+        and (
+            state.endpoint + "/models" != connect.CATALOGUE_URL
+            or state.candidate.get("id") != state.model
+        )
         and state.editing is None
-        and not state.endpoint_models
     ):
-        # Explicit MODEL skips the picker, not the endpoint's own limit metadata.
-        try:
-            limits_listing = asyncio.run(
-                connect.discover(
-                    state.endpoint,
-                    api_style=state.discovery_style,
-                    api_key=state.discovery_api_key,
-                    **(
-                        {"models_url": state.models_url, "listing_style": state.discovery_style}
-                        if state.models_url
-                        else {}
-                    ),
-                )
+        # OpenRouter limits/media fill gaps, but its route-specific reasoning
+        # profiles/default request settings do not configure a different server.
+        public_facts = deepcopy(state.candidate)
+        state.candidate = deepcopy(state.candidate)
+        state.candidate.pop("reasoning", None)
+        state.candidate.pop("default_parameters", None)
+        state.candidate.pop("pricing", None)
+        if state.server_details is not None:
+            state.server_details = replace(
+                state.server_details,
+                records=(
+                    *state.server_details.records,
+                    {
+                        "source": connect.CATALOGUE_URL,
+                        "schema": "openrouter.fallback",
+                        "id": public_facts.get("id"),
+                        "selected_id": state.model,
+                        "facts": public_facts,
+                    },
+                ),
             )
-        except connect.DiscoveryError:
-            view.line(
-                "Endpoint limits unavailable; catalogue limits are fallback information.",
-                fg="yellow",
-            )
-        else:
-            state.endpoint_models_url = limits_listing.models_url
-            endpoint_model = next(
-                (item for item in limits_listing.models if item.get("id") == state.model), None
-            )
+    endpoint_model = state.selected_endpoint_model
     state.selected_endpoint_model = endpoint_model
     state.media_hints = deepcopy(state.candidate)
     if state.media_hints is not None and state.editing is None:
@@ -1287,6 +1404,7 @@ def configure_checks(state: WizardState) -> bool:
         state.endpoint,
         state.api_key_env,
         catalogue=state.candidate,
+        catalogue_settings=bool(state.edited_settings),
         endpoint_model=state.selected_endpoint_model,
         endpoint_models_url=state.endpoint_models_url,
         media_inputs=state.media_inputs,
@@ -1304,6 +1422,10 @@ def configure_checks(state: WizardState) -> bool:
         and state.api_style not in connect.DECISION_API_STYLES,
         reply_tokens=state.reply_tokens,
     )
+    if state.server_details is not None:
+        state.proposal.entry["provenance"]["server_details"] = scrub_setup(
+            state, {"id": state.model, "records": list(state.server_details.records)}
+        )
     if state.interfaces:
         state.proposal.entry["provenance"]["interface_endpoint"] = deepcopy(
             state.interfaces.results[state.api_style]
@@ -1794,12 +1916,24 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             state.api_style in connect.DECISION_API_STYLES and endpoint_media
         )
         if server_details:
-            source = state.endpoint_models_url or "your server"
-            view.line("Model details from " + source)
+            view.line("Model details from this server")
             if "catalogue" in sources:
                 view.line("Additional model details from OpenRouter")
         elif state.candidate:
             view.line("Model details from OpenRouter")
+    if state.server_details is not None:
+        facts = state.server_details.model
+        if facts.get("max_input_tokens"):
+            view.line(f"Input limit: {facts['max_input_tokens']:,} tokens")
+        if facts.get("max_output_tokens"):
+            view.line(f"Output limit: {facts['max_output_tokens']:,} tokens")
+        if (
+            facts.get("model_type") == "decision"
+            and state.api_style not in connect.DECISION_API_STYLES
+        ):
+            view.line(
+                "Server describes an evaluation model. Choose its known decision interface, or test to discover an interface."
+            )
     view.media_settings(entry)
     if state.no_probe or state.probe == "none":
         view.line("Testing is disabled; save without model calls.")
@@ -1887,7 +2021,12 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
 
 def guided_setup(state: WizardState) -> bool:
     """Prepare a proposal using GETs only; the action below is model-call consent."""
-    if not select_connection(state) or not select_model(state) or not prepare_metadata(state):
+    if (
+        not select_connection(state)
+        or not select_model(state)
+        or not prepare_metadata(state)
+        or not select_request_interface(state)
+    ):
         return False
     deferred_style = state.api_style is None
     explicit_reply_tokens = state.reply_tokens

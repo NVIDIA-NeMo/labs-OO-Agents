@@ -566,8 +566,8 @@ def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkey
         )
 
 
-def test_a_rejected_key_is_asked_for_again_and_the_listing_retried(tmp_path, monkeypatch):
-    """A stale key in the preset's variable must not end the wizard: it says so and asks."""
+def test_a_rejected_listing_key_continues_manually_without_retry(tmp_path, monkeypatch):
+    """Metadata failure does not reauthenticate or prevent a manual untested save."""
     import httpx
 
     sent = []
@@ -590,17 +590,18 @@ def test_a_rejected_key_is_asked_for_again_and_the_listing_retried(tmp_path, mon
             "CONNECT_TEST_KEY",
             "--no-catalogue",
             "--no-probe",
+            "--media-inputs",
+            "",
             "--output",
             str(path),
         ],
-        # The new key; then input ends at the model choice, which cancels.
-        input="discover\nfresh-private-key\n",
+        input="wire/model\ndiscover\nsave\nchat\nlocal\ny\n",
     )
-    assert "The server rejected the key in CONNECT_TEST_KEY" in result.output
-    assert "Found 1 models" in result.output
-    assert [auth for _, auth in sent] == ["Bearer stale-private-key", "Bearer fresh-private-key"]
+    assert result.exit_code == 0, result.output
+    assert "Continue with an exact model ID" in result.output
+    assert [auth for _, auth in sent] == ["Bearer stale-private-key"]
     assert "private-key" not in result.output
-    assert not path.exists()
+    assert path.exists()
 
 
 def test_a_rejected_key_still_stops_a_yes_run(tmp_path, monkeypatch):
@@ -846,8 +847,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         command,
         [],
         input=(
-            "custom\ndiscover\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
-            "example-model\ntest\nmy-model\ny\nn\n"
+            "custom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
+            "example-model\ndiscover\ntest\nmy-model\ny\nn\n"
         ),
     )
     assert result.exit_code == 0, result.output
@@ -1138,14 +1139,17 @@ def test_model_details_appear_before_accepting_published_settings(
         command, options, input=("wire/model\n" if ambiguous else "") + "save\ny\n"
     )
     assert result.exit_code == 0, result.output
-    for text in ("128,000", "8,192", "low, high", "Model details from OpenRouter"):
+    for text in ("128,000", "8,192", "Model details from OpenRouter"):
         assert result.output.index(text) < result.output.index(
             "Would you like to test these settings?"
         )
     assert "not proof" not in result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["context_window"] == 128000
-    assert entry["reasoning_default"] == "low"
+    assert not entry.get("reasoning_levels")
+    assert (
+        "reasoning_default" not in entry
+    )  # Foreign OpenRouter route profiles are descriptive only.
 
 
 @pytest.mark.parametrize("select", [True, False])
@@ -1451,10 +1455,13 @@ def test_provider_menu_fills_connection_defaults(
     result = CliRunner().invoke(
         command,
         ["--no-catalogue", "--no-probe"],
-        input=f"{provider}\ndiscover\ntest-model\n-\nsave\n{style}\nmy-model\ny\n",
+        input=f"{provider}\ntest-model\ndiscover\n-\nsave\n{style}\nmy-model\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert seen == [(base, {"api_style": style, "api_key": "preset-test-key"})]
+    expected_listing = {"api_style": style, "api_key": "preset-test-key"}
+    if provider == "openrouter":
+        expected_listing.update(api_key=None, models_url=base + "/models", listing_style=style)
+    assert seen == [(base, expected_listing)]
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     saved_base = base.removesuffix("/v1") if style == "anthropic" else base
     assert (entry["api_base"], entry["api_style"], entry["api_key_env"]) == (
@@ -1465,7 +1472,12 @@ def test_provider_menu_fills_connection_defaults(
     assert "preset-test-key" not in result.output
     assert "Model server URL:" not in result.output
     assert "Key environment variable" not in result.output
-    assert result.output.index("Search available models") < result.output.index("API format [")
+    assert (
+        result.output.index("Search available models")
+        < result.output.index("Request interface")
+        < result.output.index("Would you like to test these settings?")
+        < result.output.index("API format [")
+    )
 
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
@@ -1496,11 +1508,16 @@ def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeyp
             "--output",
             str(path),
         ],
-        input=f"discover\nvendor-b/model\nsave\n{style}\nselected\ny\n",
+        input=f"vendor-b/model\ndiscover\nsave\n{style}\nselected\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(seen) == 1
-    assert result.output.index("Search available models") < result.output.index("API format [")
+    assert (
+        result.output.index("Search available models")
+        < result.output.index("Request interface")
+        < result.output.index("Would you like to test these settings?")
+        < result.output.index("API format [")
+    )
     entry = yaml.safe_load(path.read_text())["models"]["selected"]
     assert entry["api_style"] == style
     assert entry["model_name"].endswith("/vendor-b/model")
@@ -1574,9 +1591,6 @@ def test_server_url_suggestions_include_existing_file_without_credentials(
     seen = []
 
     def prompt(text, **kwargs):
-        if text == "Request interface":
-            assert kwargs["default"] == "discover"
-            return "discover"
         assert text == "Model server URL"
         assert kwargs.get("open_menu") is True
         seen.extend(kwargs["suggestions"])

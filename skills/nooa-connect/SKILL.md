@@ -70,6 +70,7 @@ Capture stderr separately if needed. A stage report has `version`, `stage`, `ok`
 | Stage | Operation |
 |---|---|
 | `discover` | Fetch the endpoint's advertised model list. No model test. |
+| `model-info` | GET-only selected server facts; optional validated LiteLLM group enrichment. No model test or writes. |
 | `catalogue` | Fetch public model metadata; useful for suggestions, not route verification. |
 | `plan` | Build an unsaved proposal locally. No network. |
 | `interfaces` | Try request interfaces with bounded routing requests; optionally compare chat reasoning. |
@@ -82,11 +83,79 @@ Capture stderr separately if needed. A stage report has `version`, `stage`, `ok`
 | `all` | All applicable checks: chat tools/reasoning/conversation, or native decision smoke cases, plus selected media. |
 | `save` | Write one alias from a plan/result JSON file. No model requests. |
 
+### Selected server facts (explicit metadata permission)
+
+For a permitted metadata lookup, use:
+
+```sh
+uv run nooa connect EXACT_MODEL --stage model-info \
+  --endpoint https://approved-gateway.example/v1 --api-style chat \
+  --api-key-env MODEL_KEY --server-metadata litellm
+```
+
+`--server-metadata listing` (default) uses known listing headers/shapes for native
+OpenAI/Anthropic and custom servers. Native OpenAI identity-only records leave
+limits unknown. Native Anthropic reads exact `max_input_tokens`, `max_tokens`,
+`capabilities.image_input.supported` and `capabilities.pdf_input.supported` fields.
+The exact OpenRouter API base uses the public catalogue without an inference key.
+`litellm` additionally permits a public OpenAPI product/GET-contract check on the
+configured root (or a root obtained by removing its trailing `/v1`, retaining a
+deployment prefix), then **one** selected `/model_group/info?model_group=EXACT_MODEL`
+GET with the same approved work key. No hostname-only detection, new origin,
+admin endpoints, master key, health call, or inference is used.
+
+`model-info` returns `model_id`, effective `model`, source/field `records`, concise
+`notices`, GET `requests`, and optional exact OpenRouter `catalogue_model` facts.
+Null/denied/unavailable metadata is a normal result: retain known facts/manual
+settings and continue to an independently authorized check. Group maxima cannot
+raise tighter listing limits, false flags do not revoke permissions, and
+`mode: evaluation` does not choose a decision URL/interface. No false flag means
+"tested unsupported". Source facts remain separate from runtime configuration.
+Lookups are bounded (30-second discovery and 30-second enrichment components,
+5 MiB, 5,000 records), have no redirects/retries, and do not store keys.
+
+`--discovery-file` reuses an approved fetched listing without a duplicate GET;
+`--models-url` and `--listing-style` stay separate from inference routing.
+Different origins require `--discovery-api-key-env NAME` (or `-` for anonymous
+listing); no automatic credential forwarding. Keep invocation-local records
+within their original connection/key visibility scope. The public helper is
+`await connect.server_details(endpoint, model_id, listing=..., litellm=True)`;
+`metadata=False` is its zero-GET bypass.
+
+For known connections use `--no-metadata`: it blocks all metadata GETs in wizard
+or stage execution; metadata stages and metadata files/URLs/mappings then reject
+as contradictory options. Routing/interfaces still send only their explicitly
+authorized tests. `--no-probe` remains a wizard inference bypass and still permits
+metadata; `--no-catalogue` retains its historical exact-MODEL metadata bypass.
+The explicit model-info stage requires metadata to be enabled. **Plan remains
+offline**, and `all` never adds metadata GETs. OpenRouter fallback mappings must
+be exact/user-selected, never guessed route profiles; do not import a different
+server/model's reasoning defaults, reply allocation or price.
+
 Only `save` writes the model registry. Redirecting reports to files is still a
 local write: choose an approved workspace. Exit **0** means that stage met its
 criterion, **1** means failure or missing evidence, and **2** means invalid
 options. Inspect the report, not just the exit code. CLI parser errors can appear
 on stderr without a JSON report.
+
+Guided humans see provider/connection credentials **first**, then the model
+picker/exact ID, metadata, and **Request interface** for that selected model—not
+an interface menu immediately after provider selection. Explicit `--api-style`,
+`--yes`, and edit flows retain their nonprompted/current interface behavior. No
+inference occurs before **Test now** (or explicit `--yes` approval).
+
+Wizard presets know System One routes for Hub
+(`https://inference-api.nvidia.com/v1/systemone`) and OpenRouter
+(`https://openrouter.ai/api/alpha/decisions`). OpenRouter Discover offers all
+accepted chat/Responses/decision formats for the same exact ID rather than
+classifying a router by name. Decision probes have no chat limits/reasoning/media
+parameters and share the existing capped budget without retries. Explicit full
+endpoint/mapped route overrides remain authoritative. Native System One is
+labelled **System One Decisions**. This is a wizard convenience, not automatic
+headless routing: stage interfaces still requires an explicit
+`--systemone-endpoint` for a decision comparison. Custom decision paths are never
+guessed. Key reuse across origins also requires explicit `--share-interface-key`
+when a post-model known-interface choice changes the server.
 
 Wizard options such as `--provider`, `--edit-model`,
 `--levels`, `--no-probe`, a nondefault `--probe`, and `--show-config` are not

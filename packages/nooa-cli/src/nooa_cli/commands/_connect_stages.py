@@ -4,6 +4,7 @@
 
 STAGES = (
     "discover",
+    "model-info",
     "catalogue",
     "interfaces",
     "plan",
@@ -18,15 +19,18 @@ STAGES = (
 )
 
 
-def read_discovery(path, endpoint, *, models_url=None):
+def read_discovery(path, endpoint, *, models_url=None, api_style=None):
     """Compatibility list view of a validated discovery listing."""
-    return list(read_discovery_listing(path, endpoint, models_url=models_url).models)
+    return list(
+        read_discovery_listing(path, endpoint, models_url=models_url, api_style=api_style).models
+    )
 
 
-def read_discovery_listing(path, endpoint, *, models_url=None):
+def read_discovery_listing(path, endpoint, *, models_url=None, api_style=None):
     """Read bounded metadata with listing source separate from model records."""
     import json
     from pathlib import Path
+    from urllib.parse import urlsplit
 
     from nooa.unifiedllm import connect
 
@@ -38,15 +42,28 @@ def read_discovery_listing(path, endpoint, *, models_url=None):
     if not isinstance(document, dict):
         raise ValueError("Discovery metadata requires an object")
     data = document.get("data", document)
-    if (
-        not isinstance(data, dict)
-        or not isinstance(data.get("api_base"), str)
-        or (
-            data.get("models_url") != connect.validate_models_url(models_url)
-            if models_url is not None
-            else connect.normalize_endpoint(data["api_base"]).removesuffix("/v1")
-            != connect.normalize_endpoint(endpoint).removesuffix("/v1")
-        )
+    if not isinstance(data, dict) or not isinstance(data.get("api_base"), str):
+        raise ValueError("Discovery metadata belongs to a different endpoint")
+    listed_base = connect.normalize_endpoint(data["api_base"])
+    requested_base = connect.normalize_endpoint(endpoint)
+    same_base = listed_base == requested_base or (
+        not urlsplit(requested_base).path and listed_base == requested_base + "/v1"
+    )
+    if api_style in connect.DECISION_API_STYLES and models_url is not None:
+
+        def origin(url):
+            address = urlsplit(url)
+            return (
+                address.scheme,
+                address.hostname,
+                address.port or (443 if address.scheme == "https" else 80),
+            )
+
+        # An explicitly selected same-origin decision route may reuse its shared
+        # catalogue, but unrelated server/key scopes can never reuse it.
+        same_base = same_base or origin(listed_base) == origin(requested_base)
+    if not same_base or (
+        models_url is not None and data.get("models_url") != connect.validate_models_url(models_url)
     ):
         raise ValueError("Discovery metadata belongs to a different endpoint")
     models = data.get("models")
@@ -72,13 +89,30 @@ def read_discovery_listing(path, endpoint, *, models_url=None):
         or connect.normalize_endpoint(data["api_base"]) + "/models"
     )
     source = connect.validate_models_url(source)
+    from nooa.unifiedllm.connect._server_details import listing_facts, openrouter_facts
+
     records = [
         {
-            **{
-                key: value
-                for key, value in item.items()
-                if key not in {"media_model_id", "limit_sources", "endpoint_limits", "media_source"}
-            },
+            **listing_facts(item),
+            **(
+                {
+                    "metadata_fields": {
+                        key: value
+                        for key, value in item["metadata_fields"].items()
+                        if key in {"context_window", "max_input_tokens", "max_output_tokens"}
+                        and isinstance(value, str)
+                        and len(value) <= 100
+                    }
+                }
+                if isinstance(item.get("metadata_fields"), dict)
+                and len(item["metadata_fields"]) <= 10
+                else {}
+            ),
+            **(
+                {"public_model": openrouter_facts(item["public_model"])}
+                if source == connect.CATALOGUE_URL and isinstance(item.get("public_model"), dict)
+                else {}
+            ),
             **({"media_source": source} if connect.media_metadata(item) else {}),
         }
         for item in models
@@ -89,15 +123,16 @@ def read_discovery_listing(path, endpoint, *, models_url=None):
 def read_catalogue(path, model, *, catalogue_model=None):
     """Read explicitly sourced OpenRouter facts; never guess a native model match."""
     import json
-    from copy import deepcopy
     from pathlib import Path
 
     from nooa.unifiedllm import connect
 
     source = Path(path)
-    if source.stat().st_size > 5 * 1024 * 1024:
+    with source.open("rb") as source_file:
+        raw = source_file.read(5 * 1024 * 1024 + 1)
+    if len(raw) > 5 * 1024 * 1024:
         raise ValueError("Catalogue file exceeds 5 MiB")
-    document = json.loads(source.read_text())
+    document = json.loads(raw)
     if not isinstance(document, dict):
         raise ValueError("Catalogue file requires an object with source and models")
     if "stage" in document:
@@ -132,45 +167,16 @@ def read_catalogue(path, model, *, catalogue_model=None):
         raise ValueError(
             "Catalogue model must match exactly once; supply --catalogue-model for an explicit OpenRouter ID mapping"
         )
-    # Internal attribution keys are never provider facts. Do not accept a forged
-    # media_model_id/limit_sources/endpoint_limits from a local catalogue record.
-    selected = {
-        key: deepcopy(value)
-        for key, value in matches[0].items()
-        if key
-        in {
-            "id",
-            "description",
-            "context_length",
-            "top_provider",
-            "reasoning",
-            "default_parameters",
-            "architecture",
-            "input_modalities",
-            "capabilities",
-            "pricing",
-        }
-    }
-    # Same safe shaping as the public catalogue reader. Chat plan uses only
-    # allowlisted limits/reasoning/reply recommendations; decision plan keeps
-    # bounded descriptive/media facts only. Neither copies arbitrary parameters.
-    for key in ("top_provider", "reasoning", "default_parameters"):
-        if not isinstance(selected.get(key), dict):
-            selected[key] = {}
-    efforts = selected["reasoning"].get("supported_efforts")
+    from nooa.unifiedllm.connect._server_details import openrouter_facts
+
+    efforts = (
+        (matches[0].get("reasoning") or {}).get("supported_efforts")
+        if isinstance(matches[0].get("reasoning"), dict)
+        else None
+    )
     if isinstance(efforts, list) and len(efforts) > 100:
         raise ValueError("Catalogue reasoning efforts exceed 100 values")
-    selected["reasoning"]["supported_efforts"] = (
-        [
-            value
-            for value in efforts
-            if isinstance(value, str) and value.strip() and len(value) <= 200
-        ]
-        if isinstance(efforts, list)
-        else []
-    )
-    if not isinstance(selected["reasoning"].get("default_effort"), str):
-        selected["reasoning"].pop("default_effort", None)
+    selected = openrouter_facts(matches[0])
     selected["media_source"] = data["source"]
     return selected
 
@@ -243,6 +249,8 @@ def run_stage(
     discovery_api_key_env=None,
     invalid_options=(),
     working_dir=False,
+    no_metadata=False,
+    server_metadata="listing",
 ):
     """Return JSON; only an explicit --prompt-key enables a masked stdin prompt."""
     import asyncio
@@ -357,6 +365,41 @@ def run_stage(
                 data["shadowed_by"] = shadow
                 click.echo(f"Warning: alias is still resolved from {shadow}.", err=True)
             ok = True
+        elif stage == "model-info":
+            if not endpoint or not model:
+                raise click.UsageError("Model-info requires MODEL and --endpoint")
+            key = (
+                click.prompt("API key (metadata only)", hide_input=True, err=True)
+                if prompt_key
+                else os.environ.get(api_key_env)
+                if api_key_env
+                else None
+            )
+            discovery_key = listing_key(models_url, endpoint, key, discovery_api_key_env)
+            listing = (
+                read_discovery_listing(
+                    discovery_file, endpoint, models_url=models_url, api_style=api_style
+                )
+                if discovery_file
+                else None
+            )
+            data = asdict(
+                asyncio.run(
+                    connect.server_details(
+                        endpoint,
+                        model,
+                        api_style=api_style or "chat",
+                        api_key=key,
+                        listing_api_key=discovery_key,
+                        listing=listing,
+                        models_url=models_url,
+                        listing_style=listing_style,
+                        metadata=not no_metadata,
+                        litellm=server_metadata == "litellm",
+                    )
+                )
+            )
+            ok = True
         elif stage == "catalogue":
             models = asyncio.run(connect.catalogue())
             matches = connect.match_models(model, models) if model else models
@@ -395,7 +438,9 @@ def run_stage(
                     levels = yaml.safe_load(source)
             try:
                 listing = (
-                    read_discovery_listing(discovery_file, endpoint, models_url=models_url)
+                    read_discovery_listing(
+                        discovery_file, endpoint, models_url=models_url, api_style=style
+                    )
                     if discovery_file and stage != "discover"
                     else None
                 )

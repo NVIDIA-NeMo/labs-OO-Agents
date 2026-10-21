@@ -93,6 +93,18 @@ def test_documented_headless_workflow_with_mocked_native_requests(monkeypatch, t
                         ]
                     },
                 )
+            if request.url.path == "/openapi.json":
+                from tests.unifiedllm.connect.test_server_details import SCHEMA
+
+                assert "authorization" not in request.headers
+                return httpx.Response(200, json=SCHEMA)
+            if request.url.path == "/model_group/info":
+                from tests.unifiedllm.connect.test_server_details import GROUP
+
+                return httpx.Response(
+                    200,
+                    json={"data": [{**GROUP, "model_group": request.url.params["model_group"]}]},
+                )
             assert request.url.path == "/v1/models"
             return httpx.Response(200, json={"data": [{"id": "your-model"}]})
         if request.url.path.endswith(("/decisions", "/systemone")):
@@ -132,6 +144,11 @@ def test_documented_headless_workflow_with_mocked_native_requests(monkeypatch, t
             assert report["ok"] is True
             if report["stage"] in {"plan", "save"}:
                 assert len(seen) == before
+        if "--stage" in args and args[args.index("--stage") + 1] == "model-info":
+            info = json.loads(result.stdout)["data"]
+            assert info["requests"] == len(seen) - before == 3
+            assert all(request.method == "GET" for request in seen[before:])
+            assert info["model_id"] == "EXACT_MODEL"
         if "--stage" in args and args[args.index("--stage") + 1] in {"plan", "save"}:
             assert len(seen) == before  # Includes the metadata-only save with no redirect.
         assert result.stderr == "" or "Warning" in result.stderr
@@ -145,7 +162,9 @@ def test_documented_headless_workflow_with_mocked_native_requests(monkeypatch, t
     assert image["data"]["entry"]["media_inputs"] == ["image"]
     assert image["checks"]["media:image"]["attachment_observed"] is True
     assert image["checks"]["media:image"]["answer_correct"] is True
-    assert len(seen) == 12  # 1 routing, 2 metadata GETs, 4 interface, 5 native decision/image.
+    assert (
+        len(seen) == 15
+    )  # 3 model-info GETs, 1 routing, 2 metadata GETs, 4 interface, 5 decision/image.
     metadata_entry = yaml.safe_load(Path("llm_config.yaml").read_text())["models"]["work"]
     assert metadata_entry["model_name"] == "openai/example-model"
     assert metadata_entry["media_inputs"] == []
