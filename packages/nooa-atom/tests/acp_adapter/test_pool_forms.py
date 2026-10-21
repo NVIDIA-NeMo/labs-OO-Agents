@@ -224,6 +224,12 @@ def test_unparseable_answers_stay_raw_and_fail_the_checks():
     )
 
 
+def test_huge_whole_numbers_parse_or_stay_raw():
+    assert pool_content(ALL, {"i": "1" + "0" * 400}) == {"i": 10**400}
+    digits = "1" * 5000  # past Python's int-from-text digit limit
+    assert pool_content(ALL, {"i": digits}) == {"i": digits}
+
+
 def test_content_passes_through_non_strings_and_malformed_payloads():
     assert pool_content(ALL, None) is None
     assert pool_content(ALL, ["x"]) == ["x"]

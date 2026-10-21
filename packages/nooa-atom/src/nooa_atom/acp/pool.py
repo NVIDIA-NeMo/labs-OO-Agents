@@ -39,6 +39,7 @@ supports standard ACP elicitation.
 
 import math
 import re
+from contextlib import suppress
 from typing import Any
 
 from nooa.interactive import FormValue, NeedInput, NeedInputForm, form_hints
@@ -149,7 +150,10 @@ def pool_content(need: NeedInputForm, content: Any) -> Any:
 def _decoded(question: Any, text: str, raw: str) -> FormValue:
     kind = question.kind
     if kind == "integer":
-        return int(text) if re.fullmatch(r"[+-]?\d+", text) else raw
+        if re.fullmatch(r"[+-]?\d+", text):
+            with suppress(ValueError):  # past Python's int-from-text digit limit
+                return int(text)
+        return raw
     if kind == "number":
         if re.fullmatch(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", text):
             number = float(text)
