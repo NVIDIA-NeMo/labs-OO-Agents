@@ -184,7 +184,7 @@ in the settings files, and the servers an ACP client sends). The model uses:
   skill's instructions arrive on the `system_messages` channel at the start
   of the next turn.
 - `read(name)`: a text skill's instructions, as text.
-- `doc(name)`: the full description of one skill, with an MCP server's tools.
+- `doc(name)`: the full description of one skill, with an MCP server's tools. An unconnected MCP skill returns a connection-status message instead of its tools.
 
 The prompt holds one small block, which changes only when something is
 activated:
@@ -192,7 +192,7 @@ activated:
 ```text
 <skills>
 Active: libwriting, methodwriting, repo, shell, todo, workspace_settings, github (mcp)
-38 more (code, text, MCP): self.skills.search('query') (sync); await self.skills.activate(['name']) (async); self.skills.read('name') (sync) for text skills
+38 more (code, text, MCP): self.skills.search('query') (sync); self.skills.doc('name') (sync) for one skill's full docs (an unconnected MCP skill returns its connection status); await self.skills.activate(['name']) (async); self.skills.read('name') (sync) for text skills
 </skills>
 ```
 

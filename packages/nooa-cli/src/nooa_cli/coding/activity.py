@@ -272,7 +272,9 @@ class ActivityShellTools(Skill):
         stdin: Annotated[
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
-        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        timeout: Annotated[
+            float | None, spec(description="Max seconds; None uses the shell's default_timeout")
+        ] = None,
     ) -> ShellResult:
         command_id = str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
@@ -337,7 +339,9 @@ class ActivityShellTools(Skill):
         stdin: Annotated[
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
-        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        timeout: Annotated[
+            float | None, spec(description="Max seconds; None uses the shell's default_timeout")
+        ] = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         command_id = str(uuid4())
         bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)

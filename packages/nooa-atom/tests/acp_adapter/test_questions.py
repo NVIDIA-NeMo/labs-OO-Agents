@@ -250,7 +250,10 @@ async def test_done_message_is_sent_before_prompt_completion(make_adapter, works
     adapter = await make_adapter(models)
     session_id, response = await _run(adapter, workspace)
     assert response.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id) == ["All set.\n\n"]
+    assert client.texts(AgentMessageChunk, session_id) == [
+        "All set.\n\n",
+        "> **Done:** answered\n\n",
+    ]
 
 
 async def test_mcp_sign_in_callback_is_not_admitted_or_echoed(

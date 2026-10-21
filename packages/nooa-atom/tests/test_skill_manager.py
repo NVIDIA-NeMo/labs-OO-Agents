@@ -30,7 +30,9 @@ _PROXY_VARIABLES = (
     "all_proxy",
 )
 BLOCK_TAIL = (
-    "self.skills.search('query') (sync); await self.skills.activate(['name']) (async); "
+    "self.skills.search('query') (sync); self.skills.doc('name') (sync) for one skill's full "
+    "docs (an unconnected MCP skill returns its connection status); "
+    "await self.skills.activate(['name']) (async); "
     "self.skills.read('name') (sync) for text skills"
 )
 

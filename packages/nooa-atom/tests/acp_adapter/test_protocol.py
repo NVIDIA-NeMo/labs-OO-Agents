@@ -233,7 +233,7 @@ async def test_an_explicit_form_is_answered_over_the_wire(tmp_path):
     [(message, mode)] = client.elicitations
     assert message == "Which branch?"
     assert [o.const for o in mode.requested_schema.properties["answer"].one_of] == ["main", "dev"]
-    assert client.texts()[-1] == "Using the answer.\n\n"
+    assert client.texts()[-2:] == ["Using the answer.\n\n", "> **Done:** answered\n\n"]
 
 
 async def test_the_delete_extension_works_over_the_wire(tmp_path):
