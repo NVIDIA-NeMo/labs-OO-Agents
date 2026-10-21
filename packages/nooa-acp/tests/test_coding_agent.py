@@ -249,6 +249,8 @@ def test_coding_agent_generation_names_include_both_input_constructors():
         "FormResponse",
         "TextQuestion",
         "PickOneQuestion",
+        "PickManyQuestion",
+        "NumberQuestion",
         "IntegerQuestion",
         "BooleanQuestion",
         "FormChoice",

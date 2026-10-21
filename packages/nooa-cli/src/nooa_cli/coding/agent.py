@@ -22,6 +22,8 @@ from nooa.interactive import (
     InteractiveAgent,
     NeedInput,  # noqa: F401 - visible generation constructor
     NeedInputForm,  # noqa: F401 - visible generation constructor
+    NumberQuestion,  # noqa: F401 - generation constructor
+    PickManyQuestion,  # noqa: F401 - generation constructor
     PickOneQuestion,  # noqa: F401 - generation constructor
     SummarizationConfig,
     TextQuestion,  # noqa: F401 - generation constructor
@@ -216,12 +218,11 @@ class CodingAgent(InteractiveAgent):
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. The host shows the question, so do not also send it with
           ``self.message()``; put any suggested answers in it. The answer is plain text.
-        - ``NeedInputForm(heading=..., questions=[...])`` — an explicit form of
-          ``TextQuestion``, ``PickOneQuestion`` (``FormChoice(value=..., title=...)``
-          choices; typed answers allowed unless ``allow_other=False``),
-          ``IntegerQuestion(minimum=..., maximum=...)`` and ``BooleanQuestion``. Answers
-          arrive as a ``FormResponse`` whose ``content`` maps ids to a checked ``str``,
-          ``int`` or ``bool`` (by question), or decline/cancel. Re-ask only bad fields.
+        - ``NeedInputForm(heading=..., questions=[...])`` — a form of ``TextQuestion``,
+          ``PickOneQuestion``, ``PickManyQuestion``, ``NumberQuestion``,
+          ``IntegerQuestion`` and ``BooleanQuestion`` fields (see ``doc()`` for their
+          constraints). The answer is a ``FormResponse`` (accept with checked
+          ``content`` by id, or decline/cancel), or text when no form could be used.
         - ``Waiting(message=..., explanation=..., on=[...])`` — a background
           job is still running; ``on`` names the job or channel.
         """

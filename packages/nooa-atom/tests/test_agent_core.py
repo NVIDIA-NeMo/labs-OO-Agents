@@ -367,6 +367,8 @@ def test_cells_see_the_turn_types_but_not_the_helpers():
         "FormResponse",
         "TextQuestion",
         "PickOneQuestion",
+        "PickManyQuestion",
+        "NumberQuestion",
         "IntegerQuestion",
         "BooleanQuestion",
         "FormChoice",

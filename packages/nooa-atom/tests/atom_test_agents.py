@@ -36,6 +36,8 @@ from nooa.interactive import (  # noqa: F401
     InteractiveAgent,
     NeedInput,
     NeedInputForm,
+    NumberQuestion,  # noqa: F401 - generation constructor
+    PickManyQuestion,  # noqa: F401 - generation constructor
     PickOneQuestion,  # noqa: F401 - generation constructor
     TextQuestion,  # noqa: F401 - generation constructor
     Waiting,

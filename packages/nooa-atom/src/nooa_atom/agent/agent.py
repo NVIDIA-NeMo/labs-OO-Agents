@@ -21,6 +21,8 @@ from nooa.interactive import (
     InteractiveAgent,
     NeedInput,
     NeedInputForm,
+    NumberQuestion,  # noqa: F401 - generation constructor
+    PickManyQuestion,  # noqa: F401 - generation constructor
     PickOneQuestion,  # noqa: F401 - generation constructor
     SummarizationConfig,
     TextQuestion,  # noqa: F401 - generation constructor
@@ -515,11 +517,10 @@ class AtomAgent(InteractiveAgent):
         - ``NeedInput(question=...)`` for a quick question; the next message
           answers as text. Suggest answers in it.
 
-        - ``NeedInputForm(heading=..., questions=[...])``: fields ``TextQuestion``,
-          ``PickOneQuestion(choices=[FormChoice(value=, title=)])``
-          (``allow_other=False``: no typing), ``IntegerQuestion(minimum=, maximum=)``,
-          ``BooleanQuestion``. Answer: ``FormResponse``, ``accept`` with checked ``content``
-          by id (str/int/bool), or ``decline``/``cancel``. Form-less clients send text.
+        - ``NeedInputForm(heading=..., questions=[...])`` of ``TextQuestion``,
+          ``PickOneQuestion``, ``PickManyQuestion``, ``NumberQuestion``,
+          ``IntegerQuestion``, ``BooleanQuestion`` (see ``doc()``); the answer is a
+          ``FormResponse``, or text when no form could be used.
 
         - ``Waiting(explanation=..., on=[...])`` when a job you started is
           still running and nothing else is left to do. ``on`` names what
