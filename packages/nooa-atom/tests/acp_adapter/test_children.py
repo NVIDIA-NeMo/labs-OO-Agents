@@ -96,8 +96,7 @@ async def test_detaching_open_child_form_revokes_only_old_attachment(
         ElicitationCapabilities,
         ElicitationFormCapabilities,
     )
-
-    from nooa.interactive import FormResponse
+    from nooa_atom.session.forms import FormResponse
 
     models = _models()
     models.scripts["helper"].extend(

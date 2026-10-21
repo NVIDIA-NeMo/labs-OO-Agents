@@ -8,9 +8,24 @@ from nooa.interactive import (  # noqa: F401  (re-exported)
     ONE_SHOT_QUESTION,
     Done,
     Waiting,
-    require_task_result,
 )
+from nooa.interactive import require_task_result as _core_require_task_result
 from nooa.strategy_validation import InvariantError
+from nooa_atom.session.forms import NeedInputForm
+
+
+def require_task_result(agent: Any, result: Any, call: Any) -> None:
+    """Core's worker postcondition, extended to Atom's ``NeedInputForm``.
+
+    A form is a question like ``NeedInput``: a kept child may return one, a
+    one-shot worker (``agent.session.may_ask`` false) may not.
+    """
+    if isinstance(result, NeedInputForm):
+        port = getattr(agent, "session", None)
+        if port is not None and not getattr(port, "may_ask", True):
+            raise InvariantError(ONE_SHOT_QUESTION)
+        return
+    _core_require_task_result(agent, result, call)
 
 
 def require_result(agent: Any, result: Any, call: Any) -> None:

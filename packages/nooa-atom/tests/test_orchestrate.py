@@ -71,7 +71,9 @@ def test_handle_orchestrate_has_the_orchestrator_prompt():
 def test_handle_orchestrate_returns_only_done_or_waiting():
     import typing
 
-    from nooa.interactive import Done, NeedInput, NeedInputForm, Waiting
+    from nooa_atom.session.forms import NeedInputForm
+
+    from nooa.interactive import Done, NeedInput, Waiting
 
     def returns(method):
         return typing.get_type_hints(getattr(AtomAgent, method))["return"]

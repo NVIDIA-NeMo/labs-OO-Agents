@@ -19,8 +19,7 @@ from acp.schema import (
     UserMessageChunk,
 )
 from atom_test_agents import ScriptedModels, cell, reply
-
-from nooa.interactive import FormResponse
+from nooa_atom.session.forms import FormResponse
 
 TIMEOUT = 30
 FORMS = ClientCapabilities(elicitation=ElicitationCapabilities(form=ElicitationFormCapabilities()))

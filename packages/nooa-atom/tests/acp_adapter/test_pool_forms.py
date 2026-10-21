@@ -3,17 +3,17 @@
 """Pool adapter: downgraded schemas for every question type ."""
 
 from nooa_atom.acp.pool import POOL_FORM_METHOD, pool_form_params, pool_form_schema
-
-from nooa.interactive import (
+from nooa_atom.session.forms import (
     BooleanQuestion,
     FormChoice,
-    NeedInput,
     NeedInputForm,
     NumberQuestion,
     PickManyQuestion,
     PickOneQuestion,
     TextQuestion,
 )
+
+from nooa.interactive import NeedInput
 
 CHOICES = [
     FormChoice(value="main", title="Main branch"),

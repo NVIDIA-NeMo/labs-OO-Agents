@@ -19,13 +19,9 @@ from nooa.interactive import (
     AgentMessage,
     AgentVars,
     Done,
-    FormResponse,
-    InputRequest,
     InteractiveAgent,
     NeedInput,
-    NeedInputForm,
     SummarizationConfig,
-    TextQuestion,
     Waiting,
     install_summarizer,
 )
@@ -138,14 +134,6 @@ def test_blank_text_is_rejected_with_one_message(build):
         build()
 
 
-def test_form_rejects_obsolete_authoring():
-    for kwargs in ({"question": "Why?"}, {"answer_type": BaseModel}, {"options": ["yes"]}):
-        with pytest.raises(ValidationError):
-            NeedInputForm(
-                heading="Why?", questions=[TextQuestion(id="answer", label="Why?")], **kwargs
-            )
-
-
 class _Opaque:
     """An object pydantic cannot turn into JSON."""
 
@@ -161,14 +149,6 @@ def test_done_result_serialises_when_it_holds_an_arbitrary_object():
     assert json.loads(Done(explanation="x", result={"a": 1}).model_dump_json())["result"] == {
         "a": 1
     }
-
-
-def test_form_descriptors_serialise_in_tool_events():
-    form = NeedInputForm(heading="Details", questions=[TextQuestion(id="name", label="Name?")])
-    event = ToolCallEvent(tool_call_id="c1", name="return_result", arguments={"result": form})
-    data = json.loads(event.model_dump_json())["arguments"]["result"]
-    assert data == form.model_dump(mode="json")
-    assert NeedInputForm.model_validate_json(form.model_dump_json()) == form
 
 
 def test_need_input_has_no_options():
@@ -203,10 +183,6 @@ _NOTIFICATION = {"user_messages": ["hi"]}
     [
         ('return_result(Done(explanation="finished"))', Done),
         ('return_result(NeedInput(question="Which branch?"))', NeedInput),
-        (
-            'return_result(NeedInputForm(heading="Details?", questions=[TextQuestion(id="answer", label="Details?")]))',
-            NeedInputForm,
-        ),
         ('return_result(Waiting(explanation="waiting for job ci-42", on=["jobs:ci-42"]))', Waiting),
     ],
 )
@@ -245,20 +221,10 @@ async def test_handle_rejects_other_results():
     assert "return_result validation error" in error
 
 
-@pytest.mark.parametrize("name", ["NeedInput", "NeedInputForm"])
-async def test_handle_batch_rejects_need_input_and_names_allowed_types(name):
+async def test_handle_batch_rejects_need_input_and_names_allowed_types():
     llm = FakeLLMClient(
         [
-            _cell(
-                "return_result("
-                + (
-                    'NeedInput(question="Which?")'
-                    if name == "NeedInput"
-                    else 'NeedInputForm(heading="Which?", questions=[TextQuestion(id="answer", label="Which?")])'
-                )
-                + ")",
-                "c1",
-            ),
+            _cell('return_result(NeedInput(question="Which branch?"))', "c1"),
             _cell('return_result(Done(explanation="blocked: branch not given"))', "c2"),
         ]
     )
@@ -268,7 +234,7 @@ async def test_handle_batch_rejects_need_input_and_names_allowed_types(name):
     [error] = _cell_errors(agent)
     assert "return_result validation error" in error
     assert "Done | " in error and "Waiting" in error
-    assert name in error  # names what was returned
+    assert "NeedInput" in error  # names what was returned
 
 
 class _NarrowHost(InteractiveAgent, llm=FakeLLMClient()):
@@ -352,137 +318,14 @@ def test_interactive_agent_has_no_web_attribute(monkeypatch):
         assert "web" not in agent.context
 
 
-def test_explicit_input_roundtrip_and_extra_rejection():
-    for need in (
-        NeedInput(question="Which?", reason="Safety."),
-        NeedInputForm(heading="Which?", questions=[TextQuestion(id="name", label="Name?")]),
-    ):
-        assert type(need).model_validate_json(need.model_dump_json()) == need
-        with pytest.raises(ValidationError):
-            type(need).model_validate({**need.model_dump(), "presentation": "auto"})
+def test_need_input_roundtrip_and_extra_rejection():
+    need = NeedInput(question="Which?", reason="Safety.")
+    assert NeedInput.model_validate_json(need.model_dump_json()) == need
+    assert need.kind == "question"
+    with pytest.raises(ValidationError):
+        NeedInput.model_validate({**need.model_dump(), "presentation": "auto"})
 
 
-def test_question_rejects_typed_answer_and_form_response_actions():
+def test_need_input_rejects_a_typed_answer():
     with pytest.raises(ValidationError):
         NeedInput(question="How many?", answer_type=BaseModel)
-    for action in ("decline", "cancel"):
-        assert FormResponse(action=action).action == action
-        with pytest.raises(ValidationError):
-            FormResponse(action=action, content={"count": "1"})
-    with pytest.raises(ValidationError):
-        FormResponse(action="accept")
-
-
-def test_return_union_disambiguates_forms():
-    from pydantic import TypeAdapter
-
-    adapter = TypeAdapter(Done | InputRequest | Waiting)
-    assert isinstance(
-        adapter.validate_python(
-            {
-                "kind": "form",
-                "heading": "Details?",
-                "questions": [{"kind": "text", "id": "answer", "label": "Details?"}],
-            }
-        ),
-        NeedInputForm,
-    )
-    assert isinstance(adapter.validate_python({"kind": "question", "question": "Why?"}), NeedInput)
-    assert not issubclass(NeedInputForm, NeedInput)
-    with pytest.raises(ValidationError):
-        adapter.validate_python({"kind": "form", "question": "Why?", "presentation": "auto"})
-
-
-def test_untagged_request_dicts_are_not_guessed():
-    from pydantic import TypeAdapter
-
-    for value in ({"question": "Why?"}, {"question": "Why?", "answer_type": None}):
-        with pytest.raises(ValidationError, match="union_tag_not_found"):
-            TypeAdapter(InputRequest).validate_python(value)
-
-
-@pytest.mark.parametrize("value", [object(), float("nan"), {"opaque": object()}])
-def test_form_response_rejects_opaque_content(value):
-    with pytest.raises(ValidationError):
-        FormResponse(action="accept", content=value)
-
-
-@pytest.mark.parametrize("strategy_name", ["codeact", "predict"])
-def test_strategy_return_wrappers_preserve_explicit_discriminator(strategy_name):
-    annotation = Done | InputRequest | Waiting
-    if strategy_name == "codeact":
-        from nooa.strategies.codeact import CodeActStrategy
-
-        model, validated = CodeActStrategy()._create_return_model(annotation, "handle")
-        assert validated
-        field = "result"
-    else:
-        from nooa.strategies.predict import PredictStrategy
-
-        model = PredictStrategy()._create_response_model(annotation, "handle")
-        field = "value"
-    assert "discriminator" in json.dumps(model.model_json_schema())
-    output = model.model_validate(
-        {
-            field: {
-                "kind": "form",
-                "heading": "Details?",
-                "questions": [{"kind": "text", "id": "answer", "label": "Details?"}],
-            }
-        }
-    )
-    assert isinstance(getattr(output, field), NeedInputForm)
-    with pytest.raises(ValidationError):
-        model.model_validate({field: {"question": "Details?"}})
-
-
-@pytest.mark.parametrize("as_json", [False, True])
-async def test_handle_tagged_form_dictionary_and_json_return(as_json):
-    data = {
-        "kind": "form",
-        "heading": "Details?",
-        "questions": [{"kind": "text", "id": "answer", "label": "Details?"}],
-    }
-    code = f"return_result({json.dumps(data)!r})" if as_json else f"return_result({data!r})"
-    agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
-    assert isinstance(await agent.handle(_NOTIFICATION), NeedInputForm)
-
-
-def test_forms_and_responses_render_as_readable_text():
-    from nooa.interactive import (
-        FormChoice,
-        PickOneQuestion,
-        recorded_form_text,
-        recorded_item_text,
-    )
-
-    form = NeedInputForm(
-        heading="Release",
-        reason="Pick a target.",
-        questions=[
-            PickOneQuestion(
-                id="color",
-                label="Color",
-                allow_other=False,
-                choices=[
-                    FormChoice(value="red", title="Red"),
-                    FormChoice(value="blue", title="Blue"),
-                ],
-            ),
-            TextQuestion(id="note", label="Note", help="optional", required=False),
-        ],
-    )
-    assert form.as_text() == "Release\n\nPick a target.\n\n- Color: Red, Blue\n- Note (optional)"
-    record = {**form.model_dump(mode="json"), "request_id": "r1", "question_id": "q1"}
-    assert recorded_form_text(record) == form.as_text()
-    assert recorded_form_text({"kind": "form", "heading": "H", "questions": "bad"}) is None
-
-    accepted = FormResponse(action="accept", content={"color": "red", "note": " "})
-    assert accepted.as_text() == "color: red"
-    assert FormResponse(action="accept", content={}).as_text() == "Submitted the form."
-    assert FormResponse(action="decline").as_text() == "Declined the form."
-    assert FormResponse(action="cancel").as_text() == "Cancelled the form."
-    assert recorded_item_text(accepted.model_dump_json(), "nooa.interactive:FormResponse") == (
-        "color: red"
-    )
-    assert recorded_item_text('{"action": "accept"}', "builtins:dict") is None

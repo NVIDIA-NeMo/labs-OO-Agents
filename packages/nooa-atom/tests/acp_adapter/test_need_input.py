@@ -4,18 +4,18 @@
 
 import pytest
 from nooa_atom.acp.need_input import need_input_schema
-from pydantic import ValidationError
-
-from nooa.interactive import (
+from nooa_atom.session.forms import (
     BooleanQuestion,
     FormChoice,
-    NeedInput,
     NeedInputForm,
     NumberQuestion,
     PickManyQuestion,
     PickOneQuestion,
     TextQuestion,
 )
+from pydantic import ValidationError
+
+from nooa.interactive import NeedInput
 
 CHOICES = [
     FormChoice(value="main", title="Main branch"),

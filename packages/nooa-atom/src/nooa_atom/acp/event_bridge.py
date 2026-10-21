@@ -53,20 +53,14 @@ from acp.schema import (
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput, Summary
-from nooa.interactive import (
-    AgentMessage,
-    Done,
-    NeedInput,
-    NeedInputForm,
-    Waiting,
-    recorded_form_text,
-)
+from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa_atom.agent.activity import (
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
     TerminalCommandStarted,
 )
+from nooa_atom.session.forms import NeedInputForm, recorded_form_text
 from nooa_atom.session.items import (
     INPUT_KINDS,
     USAGE_FIELDS,

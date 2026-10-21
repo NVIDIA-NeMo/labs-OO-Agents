@@ -701,7 +701,7 @@ async def test_child_question_answer_rejects_superseded_same_id_form(
 async def test_idle_child_steer_withdraw_and_reload_cannot_revive_form(
     registry, root_options, models, action
 ):
-    from nooa.interactive import FormResponse
+    from nooa_atom.session.forms import FormResponse
 
     models.scripts[None] = [
         cell(
@@ -742,7 +742,7 @@ async def test_idle_child_steer_withdraw_and_reload_cannot_revive_form(
 async def test_parent_send_child_preserves_domain_action_data(
     registry, root_options, models, pending
 ):
-    from nooa.interactive import NeedInputForm
+    from nooa_atom.session.forms import NeedInputForm
 
     models.scripts[None] = [
         cell(

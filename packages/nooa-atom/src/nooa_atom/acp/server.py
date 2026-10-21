@@ -58,7 +58,6 @@ from acp.schema import (
 )
 
 from nooa.errors import GenerationError
-from nooa.interactive import FormChoice, FormResponse, NeedInputForm, PickOneQuestion
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
@@ -76,6 +75,7 @@ from nooa_atom.acp.protocol import INJECT_CAPABILITY, initialize_response, open_
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
 from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
+from nooa_atom.session.forms import FormChoice, FormResponse, NeedInputForm, PickOneQuestion
 from nooa_atom.session.items import (
     CommandInfo,
     CommandsChangedUpdate,

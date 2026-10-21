@@ -15,7 +15,8 @@ from acp.schema import (
     TitledMultiSelectItems,
 )
 
-from nooa.interactive import NeedInput, NeedInputForm
+from nooa.interactive import NeedInput
+from nooa_atom.session.forms import NeedInputForm
 
 
 def need_input_schema(need: NeedInputForm | NeedInput) -> ElicitationSchema | None:

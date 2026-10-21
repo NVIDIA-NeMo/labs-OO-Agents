@@ -354,7 +354,7 @@ async def test_recover_after_descriptor_form_preserves_questions_without_reopeni
     try:
         loaded = await registry.load(fork.id)
         assert not loaded._agent.llm.calls  # history does not reopen a form/turn
-        from nooa.interactive import FormResponse
+        from nooa_atom.session.forms import FormResponse
 
         receipt = await loaded.submit(
             FormResponse(
@@ -379,8 +379,7 @@ async def test_recovery_does_not_resurrect_superseded_form(root_options, session
     import json
 
     from nooa_atom.session.events import ItemAdmitted, ItemConsumed, TurnEnded, TurnStarted
-
-    from nooa.interactive import FormResponse
+    from nooa_atom.session.forms import FormResponse
 
     store = SessionStore(sessions_dir)
     registry = SessionRegistry(store, agent_factory=ScriptedModels({None: []}))
@@ -421,8 +420,7 @@ async def test_load_ignores_irrelevant_or_corrupt_outcome_json(
     root_options, sessions_dir, kind, payload
 ):
     from nooa_atom.session.events import TurnEnded
-
-    from nooa.interactive import FormResponse
+    from nooa_atom.session.forms import FormResponse
 
     store = SessionStore(sessions_dir)
     models = ScriptedModels({None: []})
@@ -457,8 +455,7 @@ async def test_load_malformed_nested_forms_never_fabricates_answer_owner(
     import json
 
     from nooa_atom.session.events import TurnEnded
-
-    from nooa.interactive import FormResponse
+    from nooa_atom.session.forms import FormResponse
 
     store = SessionStore(sessions_dir)
     registry = SessionRegistry(store, agent_factory=ScriptedModels({None: []}))

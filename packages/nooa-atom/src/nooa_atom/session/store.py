@@ -17,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
-from nooa.interactive import recorded_form_text, recorded_item_text
 from nooa.runtime.event_manager import EventManager
 from nooa.storage import read_lock_owner
 from nooa.storage.sqlite import (
@@ -35,6 +34,7 @@ from nooa_atom.session.events import (
     SessionStarted,
     SessionTitleUpdated,
 )
+from nooa_atom.session.forms import recorded_form_text, recorded_item_text
 from nooa_atom.session.items import (
     INPUT_KINDS,
     USAGE_FIELDS,

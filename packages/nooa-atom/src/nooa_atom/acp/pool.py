@@ -9,7 +9,8 @@ Delete this module (and its branch in ``AtomACPAgent._ask``) once Pool supports 
 
 from typing import Any
 
-from nooa.interactive import NeedInput, NeedInputForm, form_default_text, form_hints
+from nooa.interactive import NeedInput
+from nooa_atom.session.forms import NeedInputForm, form_default_text, form_hints
 
 POOL_FORM_METHOD = "poolside/elicitation"
 """Pool's form request; ``ext_method`` sends it as ``_poolside/elicitation``."""

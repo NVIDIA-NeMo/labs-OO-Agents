@@ -13,6 +13,7 @@ import atom_test_agents as agents
 import pytest
 from atom_test_agents import ask, cell, done, plain_agent_factory, reply, until, wait_on
 from nooa_atom.session import session as session_module
+from nooa_atom.session.forms import FormResponse
 from nooa_atom.session.items import (
     CommandInfo,
     CommandResult,
@@ -32,7 +33,7 @@ from nooa_atom.session.store import SessionStore
 
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification, PythonOutput, ResultStatus
-from nooa.interactive import Done, FormResponse, NeedInput
+from nooa.interactive import Done, NeedInput
 from nooa.llm_types import LLMUsage
 from nooa.storage.json_snapshot import snapshot_to_json
 

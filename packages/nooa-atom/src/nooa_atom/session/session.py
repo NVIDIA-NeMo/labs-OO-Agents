@@ -25,16 +25,7 @@ from pydantic import BaseModel
 
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification
-from nooa.interactive import (
-    AgentMessage,
-    Done,
-    FormResponse,
-    InputRequest,
-    InteractiveAgent,
-    NeedInputForm,
-    Waiting,
-    apply_model_limits,
-)
+from nooa.interactive import AgentMessage, Done, InteractiveAgent, Waiting, apply_model_limits
 from nooa.llm_types import LLMResponse
 from nooa.runtime.turn_loop import TurnLoopEnded, TurnSettled
 from nooa.storage.json_snapshot import snapshot_to_json
@@ -48,6 +39,7 @@ from nooa_atom.session.events import (
     TurnStarted,
     UsageAttributed,
 )
+from nooa_atom.session.forms import FormResponse, InputRequest, NeedInputForm
 from nooa_atom.session.items import (
     INPUT_KINDS,
     USAGE_FIELDS,
@@ -886,6 +878,8 @@ class Session:
         # Items stay in self._consumed / self._waiting until the end, so a
         # failure part way leaves them for _fail_turn to resolve.
         kind: OutcomeKind = event.kind
+        if kind == "need_input" and isinstance(event.result, NeedInputForm):
+            kind = "need_input_form"  # core settles a form as an input request
         outcome: Any
         if kind == "cancelled":
             outcome = TurnCancelledOutcome(by=event.cancelled_by or "host")

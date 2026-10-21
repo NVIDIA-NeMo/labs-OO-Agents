@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from nooa import hidden
 from nooa.agentdoc import spec
-from nooa.interactive import FormResponse, InteractiveAgent
+from nooa.interactive import InteractiveAgent
+from nooa_atom.session.forms import FormResponse
 from nooa_atom.session.items import (
     ChildFailedError,
     ChildQuestion,

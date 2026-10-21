@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from nooa_atom.session import items
+from nooa_atom.session.forms import NeedInputForm, TextQuestion
 from nooa_atom.session.items import (
     ChildFailed,
     ChildQuestion,
@@ -25,7 +26,7 @@ from nooa_atom.session.items import (
 from nooa_atom.session.options import SessionOptions
 from pydantic import BaseModel, ValidationError
 
-from nooa.interactive import Done, NeedInput, NeedInputForm, TextQuestion
+from nooa.interactive import Done, NeedInput
 
 _CHILD = ChildRef(id="c1", name="Review auth", depth=1, status="running")
 

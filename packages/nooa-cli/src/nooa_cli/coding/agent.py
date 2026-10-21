@@ -12,20 +12,10 @@ from nooa.agentdoc import doc, spec
 from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
-    BooleanQuestion,  # noqa: F401 - generation constructor
     Done,
-    FormChoice,  # noqa: F401 - generation constructor
-    FormQuestion,  # noqa: F401 - generation descriptor union
-    FormResponse,  # noqa: F401 - visible to generated cells
-    InputRequest,
     InteractiveAgent,
-    NeedInput,  # noqa: F401 - visible generation constructor
-    NeedInputForm,  # noqa: F401 - visible generation constructor
-    NumberQuestion,  # noqa: F401 - generation constructor
-    PickManyQuestion,  # noqa: F401 - generation constructor
-    PickOneQuestion,  # noqa: F401 - generation constructor
+    NeedInput,
     SummarizationConfig,
-    TextQuestion,  # noqa: F401 - generation constructor
     Waiting,
     install_summarizer,
 )
@@ -206,7 +196,7 @@ class CodingAgent(InteractiveAgent):
 
     @hidden
     @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))
-    async def handle(self, notification: dict[str, list[Any]]) -> Done | InputRequest | Waiting:
+    async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
         """Fulfill the newest coding request delivered in ``notification``.
 
         Work until the request is complete or genuinely needs user input. Use
@@ -221,10 +211,6 @@ class CodingAgent(InteractiveAgent):
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. The host shows the question, so do not also send it with
           ``self.message()``; put any suggested answers in it. The answer is plain text.
-        - ``NeedInputForm(heading=..., questions=[...])`` — pickers or several
-          fields (see ``doc(NeedInputForm)``). The answer is a ``FormResponse``
-          (accept with ``content`` by id, or decline/cancel), or text when no
-          form could be used.
         - ``Waiting(message=..., explanation=..., on=[...])`` — a background
           job is still running; ``on`` names the job or channel.
         """

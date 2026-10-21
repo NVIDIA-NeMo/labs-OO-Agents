@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 PrepareTurn = Callable[[], Awaitable[None]]
 CommitTurn = Callable[[dict[str, list[Any]]], None]
 
-TurnKind = Literal["done", "need_input", "need_input_form", "waiting", "cancelled", "error"]
+TurnKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
 
 
 class TurnCancelled(EventBase):
@@ -62,7 +62,8 @@ class TurnSettled(EventBase):
     """Published once a turn has finished, however it finished.
 
     - ``done`` / ``need_input`` / ``waiting``: ``result`` is the turn's
-      ``Done`` / ``NeedInput`` / ``Waiting``.
+      ``Done`` / ``NeedInput`` / ``Waiting``, or a host result type whose
+      class sets ``__turn_kind__`` to that kind.
     - ``cancelled``: ``cancel(by=...)`` stopped it. ``cancelled_by`` names
       who; ``interrupted`` is the tag of the interrupted cell's output (or
       ``None``). ``TurnCancelled`` is already in the agent's events, unless
@@ -104,18 +105,26 @@ class TurnLoopEnded(EventBase):
     message: str = ""
 
 
+_RESULT_KINDS = ("done", "need_input", "waiting")
+
+
 def _settled_from(result: Any) -> TurnSettled:
-    """Map a turn method's return value to a ``TurnSettled``."""
-    from nooa.interactive import Done, NeedInput, NeedInputForm, Waiting
+    """Map a turn method's return value to a ``TurnSettled``.
+
+    A host's own result type settles as the kind its class names in
+    ``__turn_kind__`` (``"done"``, ``"need_input"`` or ``"waiting"``).
+    """
+    from nooa.interactive import Done, NeedInput, Waiting
 
     if isinstance(result, Done):
         return TurnSettled(kind="done", result=result)
     if isinstance(result, NeedInput):
         return TurnSettled(kind="need_input", result=result)
-    if isinstance(result, NeedInputForm):
-        return TurnSettled(kind="need_input_form", result=result)
     if isinstance(result, Waiting):
         return TurnSettled(kind="waiting", result=result)
+    kind = getattr(type(result), "__turn_kind__", None)
+    if kind in _RESULT_KINDS:
+        return TurnSettled(kind=kind, result=result)
     return TurnSettled(
         kind="error", message=f"turn returned {type(result).__name__}, not a turn result"
     )

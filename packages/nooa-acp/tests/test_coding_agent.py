@@ -10,7 +10,7 @@ from nooa_cli.coding import CodingAgent
 
 from nooa.context_blocks.events import ToolCallEvent
 from nooa.events import PythonOutput
-from nooa.interactive import AgentMessage, Done, NeedInput, NeedInputForm, TextQuestion, Waiting
+from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 
@@ -212,47 +212,21 @@ async def test_dispatcher_shows_a_need_input_question(tmp_path):
     await dispatcher.close()
 
 
-class _TypedQuestionAgent(CodingAgent):
-    async def handle(self, notification: dict[str, list[Any]]) -> NeedInputForm:
-        return NeedInputForm(
-            heading="Which release?",
-            reason="The version decides the changelog heading.",
-            questions=[
-                TextQuestion(id="version", label="Version?", help="The version number"),
-                TextQuestion(id="notes", label="Notes?"),
-            ],
+class _ReasonQuestionAgent(CodingAgent):
+    async def handle(self, notification: dict[str, list[Any]]) -> NeedInput:
+        return NeedInput(
+            question="Which release?", reason="The version decides the changelog heading."
         )
 
 
-async def test_dispatcher_shows_a_form_as_its_questions(tmp_path):
-    """A form's heading, reason and questions reach the person, who answers as text."""
-    agent = _TypedQuestionAgent(llm=FakeLLMClient(), cwd=tmp_path)
+async def test_dispatcher_shows_a_need_input_reason(tmp_path):
+    """The question and its reason reach the person, who answers as text."""
+    agent = _ReasonQuestionAgent(llm=FakeLLMClient(), cwd=tmp_path)
     dispatcher = InteractiveSessionDispatcher(agent)
 
     await dispatcher.submit("release it")
 
     assert _agent_messages(agent) == [
-        "Which release?\n\n"
-        "The version decides the changelog heading.\n\n"
-        "- Version? (The version number)\n"
-        "- Notes?"
+        "Which release?\n\nThe version decides the changelog heading."
     ]
     await dispatcher.close()
-
-
-def test_coding_agent_generation_names_include_both_input_constructors():
-    from nooa.agentdoc._visibility import filter_mro_module_globals
-
-    assert {
-        "NeedInput",
-        "NeedInputForm",
-        "FormResponse",
-        "TextQuestion",
-        "PickOneQuestion",
-        "PickManyQuestion",
-        "NumberQuestion",
-        "BooleanQuestion",
-        "FormChoice",
-        "FormQuestion",
-        "InputRequest",
-    } <= set(filter_mro_module_globals(CodingAgent))

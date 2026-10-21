@@ -9,16 +9,10 @@ from typing import Any
 
 from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
 
-from nooa.interactive import (
-    Done,
-    InputRequest,
-    NeedInput,
-    NeedInputForm,
-    Waiting,
-)
+from nooa.interactive import Done, NeedInput, Waiting
 from nooa.slash_dispatch import SlashCommandResult
 
-TurnResult = Done | InputRequest | Waiting
+TurnResult = Done | NeedInput | Waiting
 
 
 class InteractiveSessionDispatcher:
@@ -94,18 +88,17 @@ class InteractiveSessionDispatcher:
             return result
 
     def _show(self, result: TurnResult) -> None:
-        """Show the person a turn result's text: a reply, a question, or a form as text.
+        """Send the person the text a typed result carries, as an agent message.
 
-        This host has no dialogs, so a form is rendered as its questions; the
-        person's next message is the answer, as plain text.
+        ``Done.message`` is the reply, ``Waiting.message`` the line shown while
+        waiting, and a ``NeedInput`` shows its question and its reason; the
+        person's next message is the answer, as plain text. The agent is told
+        not to send these itself, so the host must.
         """
         if isinstance(result, NeedInput):
-            parts = [result.question, result.reason]
-        elif isinstance(result, NeedInputForm):
-            parts = [result.as_text()]
+            text: str | None = "\n\n".join(p for p in (result.question, result.reason) if p)
         else:
-            parts = [result.message]
-        text = "\n\n".join(part for part in parts if part)
+            text = result.message
         if text:
             self.agent.message(text)
 

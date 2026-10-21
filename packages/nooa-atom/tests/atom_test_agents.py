@@ -14,6 +14,19 @@ import contextvars
 import json
 from typing import Any, ClassVar
 
+from nooa_atom.agent.conditions import require_task_result
+from nooa_atom.session.forms import (  # noqa: F401
+    BooleanQuestion,  # noqa: F401 - generation constructor
+    FormChoice,  # noqa: F401 - generation constructor
+    FormQuestion,  # noqa: F401 - generation descriptor union
+    FormResponse,
+    InputRequest,
+    NeedInputForm,
+    NumberQuestion,  # noqa: F401 - generation constructor
+    PickManyQuestion,  # noqa: F401 - generation constructor
+    PickOneQuestion,  # noqa: F401 - generation constructor
+    TextQuestion,  # noqa: F401 - generation constructor
+)
 from nooa_atom.session.items import (  # noqa: F401
     ChildFailed,
     ChildFailedError,
@@ -24,39 +37,52 @@ from nooa_atom.session.items import (  # noqa: F401
 from nooa_atom.session.loader import load_agent_class
 from pydantic import BaseModel, Field
 
+from nooa import hidden, strategy
+from nooa.config import CodeActConfig
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
-from nooa.interactive import (  # noqa: F401
-    BooleanQuestion,  # noqa: F401 - generation constructor
-    Done,
-    FormChoice,  # noqa: F401 - generation constructor
-    FormQuestion,  # noqa: F401 - generation descriptor union
-    FormResponse,
-    InteractiveAgent,
-    NeedInput,
-    NeedInputForm,
-    NumberQuestion,  # noqa: F401 - generation constructor
-    PickManyQuestion,  # noqa: F401 - generation constructor
-    PickOneQuestion,  # noqa: F401 - generation constructor
-    TextQuestion,  # noqa: F401 - generation constructor
-    Waiting,
-)
+from nooa.interactive import Done, InteractiveAgent, NeedInput, Waiting  # noqa: F401
+from nooa.strategies import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage, ToolCall
+
+
+class FormTurnsAgent(InteractiveAgent, llm=FakeLLMClient()):
+    """Core's turn methods with Atom's ``NeedInputForm`` as an extra result, as on ``AtomAgent``.
+
+    Core ``InteractiveAgent`` turns return ``Done | NeedInput | Waiting``; the
+    scripted test agents stand in for an Atom host, so their turns may also
+    return a form. The docstrings the model sees are core's.
+    """
+
+    async def handle(self, notification: dict[str, list]) -> Done | InputRequest | Waiting: ...
+
+    handle.__doc__ = InteractiveAgent.handle.__doc__
+    handle = hidden(strategy(CodeActStrategy())(handle))
+
+    async def handle_work(self, notification: dict[str, list]) -> Done | InputRequest | Waiting: ...
+
+    handle_work.__doc__ = InteractiveAgent.handle_work.__doc__
+    handle_work = hidden(
+        strategy(CodeActStrategy(config=CodeActConfig(postconditions=[require_task_result])))(
+            handle_work
+        )
+    )
+
 
 # Cells can reach these; tests replace them with fresh events per test.
 STARTED: asyncio.Event | None = None
 BLOCK: asyncio.Event | None = None
 
 
-class EchoAgent(InteractiveAgent, llm=FakeLLMClient()):
+class EchoAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """An interactive agent whose turns are scripted through a fake model."""
 
 
-class BatchAgent(InteractiveAgent, llm=FakeLLMClient()):
+class BatchAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """An agent run unattended (``handle_batch``) that reports a TaskResult."""
 
 
-class FailingAgent(InteractiveAgent, llm=FakeLLMClient()):
+class FailingAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """An agent whose constructor fails, for the registry's two-phase create."""
 
     def __init__(self, **kwargs: Any) -> None:
@@ -294,7 +320,7 @@ class FakeSlashCommands:
         return _CommandOutput(f"model is {raw_args or 'default'}", {"alias": raw_args}, False)
 
 
-class CommandAgent(InteractiveAgent, llm=FakeLLMClient()):
+class CommandAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """An agent with a slash command registry."""
 
     def __init__(self, **kwargs: Any) -> None:
@@ -351,7 +377,7 @@ class ModelFactory:
         return llm
 
 
-class SelfCancelAgent(InteractiveAgent, llm=FakeLLMClient()):
+class SelfCancelAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """Its first turn is cancelled from inside (not by Session.cancel()); later turns finish."""
 
     async def handle(self, notification: dict[str, list[Any]]) -> Done:
@@ -364,7 +390,7 @@ class SelfCancelAgent(InteractiveAgent, llm=FakeLLMClient()):
         return Done(explanation="finished")
 
 
-class HiddenPortAgent(InteractiveAgent, llm=FakeLLMClient()):
+class HiddenPortAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """An agent that exposes delegation its own way, so the port is hidden from the model."""
 
     session_port_visible: ClassVar[bool] = False
@@ -401,7 +427,7 @@ class AtomModels(ScriptedModels):
         return create_session_agent(options.model_copy(update={"llm": llm}), storage)
 
 
-class PlanAgent(InteractiveAgent, llm=FakeLLMClient()):
+class PlanAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """An agent that offers a plan (``plan``), one entry as a dict."""
 
     def plan(self) -> list[Any]:
@@ -410,14 +436,14 @@ class PlanAgent(InteractiveAgent, llm=FakeLLMClient()):
         return [PlanEntry(content="write the test", status="in_progress"), {"content": "run it"}]
 
 
-class BrokenPlanAgent(InteractiveAgent, llm=FakeLLMClient()):
+class BrokenPlanAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """An agent whose ``plan`` raises."""
 
     def plan(self) -> list[Any]:
         raise RuntimeError("plan unavailable")
 
 
-class ToolPrepAgent(InteractiveAgent, llm=FakeLLMClient()):
+class ToolPrepAgent(FormTurnsAgent, llm=FakeLLMClient()):
     """An agent with an async ``prepare_tools`` hook that reports one warning."""
 
     def __init__(self, **kwargs: Any) -> None:

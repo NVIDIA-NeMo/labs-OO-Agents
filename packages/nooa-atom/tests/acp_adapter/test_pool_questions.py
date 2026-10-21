@@ -8,8 +8,7 @@ import pytest
 from acp import RequestError, text_block
 from acp.schema import AgentMessageChunk, Implementation, UserMessageChunk
 from atom_test_agents import ScriptedModels, cell
-
-from nooa.interactive import FormResponse
+from nooa_atom.session.forms import FormResponse
 
 POOL = Implementation(name="pool", version="1.0.16")
 TIMEOUT = 30

@@ -11,20 +11,10 @@ from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
-    BooleanQuestion,  # noqa: F401 - generation constructor
     Done,
-    FormChoice,  # noqa: F401 - generation constructor
-    FormQuestion,  # noqa: F401 - generation descriptor union
-    FormResponse,
-    InputRequest,
     InteractiveAgent,
     NeedInput,
-    NeedInputForm,
-    NumberQuestion,  # noqa: F401 - generation constructor
-    PickManyQuestion,  # noqa: F401 - generation constructor
-    PickOneQuestion,  # noqa: F401 - generation constructor
     SummarizationConfig,
-    TextQuestion,  # noqa: F401 - generation constructor
     Waiting,
     install_summarizer,
 )
@@ -36,6 +26,18 @@ from nooa.tools.shell_tools import ShellTools
 from nooa_atom.agent.activity import ActivityShellTools
 from nooa_atom.agent.instructions import render_agent_instructions
 from nooa_atom.agent.slash_commands import SlashCommandRegistry
+from nooa_atom.session.forms import (
+    BooleanQuestion,  # noqa: F401 - generation constructor
+    FormChoice,  # noqa: F401 - generation constructor
+    FormQuestion,  # noqa: F401 - generation descriptor union
+    FormResponse,
+    InputRequest,
+    NeedInputForm,
+    NumberQuestion,  # noqa: F401 - generation constructor
+    PickManyQuestion,  # noqa: F401 - generation constructor
+    PickOneQuestion,  # noqa: F401 - generation constructor
+    TextQuestion,  # noqa: F401 - generation constructor
+)
 
 # Visible to generated cells (cells see this module's globals): the model
 # builds TaskResult for unattended turns, matches what arrives on the

@@ -3,9 +3,7 @@
 """Form questions: constraints, defaults and text rendering."""
 
 import pytest
-from pydantic import ValidationError
-
-from nooa.interactive import (
+from nooa_atom.session.forms import (
     BooleanQuestion,
     FormChoice,
     FormResponse,
@@ -15,6 +13,7 @@ from nooa.interactive import (
     PickOneQuestion,
     TextQuestion,
 )
+from pydantic import ValidationError
 
 CHOICES = [FormChoice(value="a", title="Alpha"), FormChoice(value="b", title="Beta")]
 
