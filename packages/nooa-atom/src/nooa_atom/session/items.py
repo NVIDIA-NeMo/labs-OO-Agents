@@ -197,7 +197,7 @@ class ChildQuestion(BaseModel):
 
     It is data. Reply with ``await item.child.send(...)``: text for a question,
     a ``FormResponse`` for a form (``request_kind == "form"``; ``questions`` are
-    its descriptors), which is checked against the child's current form. Any
+    its descriptors), which must answer the child's current form. Any
     ``send()`` to the child, and the child's next turn, end it as the child's
     pending question; ``id`` names it until then. An unanswered question does
     not stop you from ending your own turn with ``Done``.
