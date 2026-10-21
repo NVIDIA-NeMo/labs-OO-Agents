@@ -1587,74 +1587,91 @@ def _remembering_llm() -> FakeLLMClient:
     )
 
 
+async def _session_that_remembered(tmp_path) -> tuple[CodingACPAdapter, str]:
+    """A session whose one finished turn set ``self.v.remembered``; adapter still open."""
+    adapter = CodingACPAdapter(_remembering_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    await adapter.prompt(created.session_id, [text_block("remember this")])
+    return adapter, created.session_id
+
+
+async def _reload(tmp_path, session_id: str, client=None) -> tuple[CodingACPAdapter, object]:
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client or _RecordingClient())  # type: ignore[arg-type]
+    await adapter.load_session(str(tmp_path), session_id)
+    return adapter, await _session(adapter, session_id)
+
+
+def _count_saves(session) -> list[str]:
+    saved: list[str] = []
+    session.handle.storage.save_snapshot_json = saved.append
+    return saved
+
+
 async def test_load_session_restores_the_agent_state_from_the_last_turn(tmp_path):
-    first = CodingACPAdapter(_remembering_llm)
-    first.on_connect(_RecordingClient())  # type: ignore[arg-type]
-    created = await first.new_session(str(tmp_path))
-    await first.prompt(created.session_id, [text_block("remember this")])
+    first, session_id = await _session_that_remembered(tmp_path)
     await first.close()
 
-    second = CodingACPAdapter(_completed_llm)
-    second.on_connect(_RecordingClient())  # type: ignore[arg-type]
-    await second.load_session(str(tmp_path), created.session_id)
-    session = await _session(second, created.session_id)
+    second, session = await _reload(tmp_path, session_id)
     assert session.agent.v.remembered == "kept across a reload"
     await second.close()
 
 
-async def test_an_unchanged_turn_does_not_save_another_snapshot(tmp_path):
-    adapter = CodingACPAdapter(_completed_llm)
-    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
-    created = await adapter.new_session(str(tmp_path))
-    session = await _session(adapter, created.session_id)
-    saved: list[str] = []
-    original = session.handle.storage.save_snapshot_json
-    session.handle.storage.save_snapshot_json = lambda blob: saved.append(blob) or original(blob)
-    await adapter.prompt(created.session_id, [text_block("one")])
-    digest = session.snapshot_digest
-    CodingACPAdapter._checkpoint(session)
+async def test_an_unchanged_state_is_not_saved_again(tmp_path):
+    adapter, session_id = await _session_that_remembered(tmp_path)
+    session = await _session(adapter, session_id)
+    saved = _count_saves(session)
+    session.checkpoint()
+    assert saved == []
+    await adapter.close()
+
+
+async def test_a_reloaded_session_does_not_save_its_unchanged_state_again(tmp_path):
+    first, session_id = await _session_that_remembered(tmp_path)
+    await first.close()
+
+    second, session = await _reload(tmp_path, session_id)
+    saved = _count_saves(session)
+    session.checkpoint()
+    assert saved == []
+    await second.close()
+
+
+async def test_a_cancelled_turn_does_not_save_its_state(tmp_path):
+    adapter, session_id = await _session_that_remembered(tmp_path)
+    session = await _session(adapter, session_id)
+    saved = _count_saves(session)
+
+    session.cancel_complete.clear()
+    async with session.saving_state():
+        session.agent.v.half_done = True
+        session.cancel_complete.set()  # what cancel() does
+    with pytest.raises(asyncio.CancelledError):
+        async with session.saving_state():
+            session.cancel_complete.clear()
+            session.agent.v.half_done = 2
+            raise asyncio.CancelledError
+    assert saved == []
+
+    session.cancel_complete.clear()
+    async with session.saving_state():
+        pass  # a turn that finishes saves what changed
     assert len(saved) == 1
-    assert session.snapshot_digest == digest
     await adapter.close()
 
 
 async def test_load_session_with_an_unreadable_snapshot_starts_a_fresh_agent(tmp_path, caplog):
-    first = CodingACPAdapter(_remembering_llm)
-    first.on_connect(_RecordingClient())  # type: ignore[arg-type]
-    created = await first.new_session(str(tmp_path))
-    await first.prompt(created.session_id, [text_block("remember this")])
-    session = await _session(first, created.session_id)
-    session.handle.storage.save_snapshot_json('{"version": 999}')
+    first, session_id = await _session_that_remembered(tmp_path)
+    (await _session(first, session_id)).handle.storage.save_snapshot_json('{"version": 999}')
     await first.close()
 
     client = _RecordingClient()
-    second = CodingACPAdapter(_completed_llm)
-    second.on_connect(client)  # type: ignore[arg-type]
     with caplog.at_level("WARNING", logger="nooa_acp.server"):
-        await second.load_session(str(tmp_path), created.session_id)
+        second, session = await _reload(tmp_path, session_id, client)
     assert "could not restore its saved state" in caplog.text
-    session = await _session(second, created.session_id)
     assert "remembered" not in session.agent.v
     replayed = [u.content.text for u in client.updates if isinstance(u, UserMessageChunk)]
     assert replayed == ["remember this\n"]
-    await second.prompt(created.session_id, [text_block("still usable")])
-    await second.close()
-
-
-async def test_a_reloaded_session_does_not_save_its_unchanged_state_again(tmp_path):
-    first = CodingACPAdapter(_remembering_llm)
-    first.on_connect(_RecordingClient())  # type: ignore[arg-type]
-    created = await first.new_session(str(tmp_path))
-    await first.prompt(created.session_id, [text_block("remember this")])
-    await first.close()
-
-    second = CodingACPAdapter(_remembering_llm)
-    second.on_connect(_RecordingClient())  # type: ignore[arg-type]
-    await second.load_session(str(tmp_path), created.session_id)
-    session = await _session(second, created.session_id)
-    assert session.snapshot_digest is not None
-    saved: list[str] = []
-    session.handle.storage.save_snapshot_json = saved.append
-    CodingACPAdapter._checkpoint(session)
-    assert saved == []
+    await second.prompt(session_id, [text_block("still usable")])
     await second.close()
