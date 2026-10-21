@@ -473,6 +473,10 @@ def capability_sid(name: str) -> ctypes.c_void_p:
 # named mutex twice from one process would deadlock.
 _DACL_LOCK = threading.RLock()
 _DACL_MUTEX_NAME = "Global\\nooa-sandbox-dacl"
+_DACL_MUTEX_LOCAL_NAME = "Local\\nooa-sandbox-dacl"
+# The name this process actually opened, for callers that need to hand the
+# same object to a child (the concurrency test does). None until first use.
+_DACL_MUTEX_USED: str | None = None
 _DACL_MUTEX: int | None = None
 _DACL_MUTEX_GUARD = threading.Lock()
 
@@ -492,16 +496,18 @@ def _dacl_mutex() -> int | None:
     with _DACL_MUTEX_GUARD:
         if _DACL_MUTEX is not None:
             return _DACL_MUTEX
-        for name in (_DACL_MUTEX_NAME, "Local\\nooa-sandbox-dacl"):
+        for name in (_DACL_MUTEX_NAME, _DACL_MUTEX_LOCAL_NAME):
             handle = _k32.CreateMutexW(None, False, name)
             if handle:
                 _DACL_MUTEX = handle
+                globals()["_DACL_MUTEX_USED"] = name
                 return handle
-            if ctypes.get_last_error() == ERROR_ACCESS_DENIED:
-                # The name exists and we may not open it; the other process is
-                # already serialising, which is the goal, so keep going unlocked
-                # rather than deadlock on a handle we cannot wait on.
-                return None
+            # Any failure moves on to the next namespace. In particular a
+            # denied Global\ means only that this process may not create an
+            # object there — it says nothing about Local\, which is where an
+            # ordinary user is expected to succeed. Giving up on the first
+            # refusal would leave the edit unserialised while the docstring
+            # claimed otherwise.
         return None
 
 

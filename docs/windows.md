@@ -142,10 +142,20 @@ Five behaviours differ from Linux and are worth knowing:
 Verify containment — these tests fail when isolation leaks, not when a feature
 breaks:
 
+Build the runtime root once (about 4.5 minutes, ~420 MB), then point the tests
+at it:
+
 ```powershell
+python -m nooa.runtime.sandbox.win_runtime --build --root "$PWD\experiments\windows-sandbox-probe\.rt"
 $env:NOOA_SANDBOX_RUNTIME = "$PWD\experiments\windows-sandbox-probe\.rt"
+$env:NOOA_SANDBOX_REQUIRE_ROOT = "1"
 uv run pytest -m sandbox tests\runtime\sandbox\test_windows_appcontainer.py
 ```
+
+`NOOA_SANDBOX_REQUIRE_ROOT=1` is not optional in the command above: without it
+a missing or broken root makes every test **skip**, and the run reports green
+while proving nothing. With it, the same situation fails loudly. CI sets it for
+exactly that reason.
 
 The suite covers what a cell *cannot* reach: a file beside the workspace, the
 project checkout, the parent environment, and outbound TCP/UDP. It does not

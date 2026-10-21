@@ -169,8 +169,14 @@ def test_a_second_process_cannot_edit_between_the_read_and_the_write(tmp_path):
         k32.ReleaseMutex(handle)
         """
     )
+    # Ask the module which namespace it actually opened: Global\ needs a
+    # privilege an ordinary user lacks, so on most machines this is Local\.
+    mutex = win_api._dacl_mutex()
+    assert mutex is not None, "no DACL mutex could be created on this host"
+    name = win_api._DACL_MUTEX_USED
+    assert name, "the module opened a mutex but did not record its name"
     child = subprocess.Popen(
-        [sys.executable, "-I", "-c", script, win_api._DACL_MUTEX_NAME, "1.0"],
+        [sys.executable, "-I", "-c", script, name, "1.0"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -179,8 +185,6 @@ def test_a_second_process_cannot_edit_between_the_read_and_the_write(tmp_path):
         assert child.stdout is not None
         assert child.stdout.readline().strip() == "held", "the child never took the mutex"
         started = time.monotonic()
-        mutex = win_api._dacl_mutex()
-        assert mutex is not None
         win_api._k32.WaitForSingleObject(mutex, win_api.INFINITE)
         win_api._k32.ReleaseMutex(mutex)
         elapsed = time.monotonic() - started
@@ -255,3 +259,38 @@ def test_an_empty_argument_keeps_its_slot():
     assert split == argv, f"the empty slot moved: {split}"
     assert split[3] == ""
     assert split[4] == r"C:\cache"
+
+
+def test_a_denied_global_mutex_falls_back_to_the_session_namespace(monkeypatch):
+    r"""``Global\`` needs a privilege an ordinary user lacks; ``Local\`` does not.
+
+    The first version returned ``None`` on the Global refusal, so on any machine
+    without SeCreateGlobalPrivilege the edit ran unserialised while the
+    docstring said it was locked. A refusal of one namespace says nothing about
+    the next.
+    """
+    import ctypes
+
+    from nooa.runtime.sandbox import win_api
+
+    real = win_api._k32.CreateMutexW
+    attempts: list[str] = []
+
+    def refuse_global(attributes, initial, name):
+        attempts.append(name)
+        if name.startswith("Global"):
+            ctypes.set_last_error(win_api.ERROR_ACCESS_DENIED)
+            return None
+        return real(attributes, initial, name)
+
+    monkeypatch.setattr(win_api._k32, "CreateMutexW", refuse_global)
+    monkeypatch.setattr(win_api, "_DACL_MUTEX", None)
+    monkeypatch.setattr(win_api, "_DACL_MUTEX_USED", None)
+
+    handle = win_api._dacl_mutex()
+
+    assert attempts == [win_api._DACL_MUTEX_NAME, win_api._DACL_MUTEX_LOCAL_NAME], (
+        f"the Global refusal did not fall through to Local: {attempts}"
+    )
+    assert handle is not None, "no mutex was opened even though Local was available"
+    assert win_api._DACL_MUTEX_USED == win_api._DACL_MUTEX_LOCAL_NAME

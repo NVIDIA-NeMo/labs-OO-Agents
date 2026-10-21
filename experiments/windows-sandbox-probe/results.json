@@ -26,7 +26,7 @@
     "identity": {
       "is_app_container": true,
       "container_sid": "S-1-15-2-606662641-3925652526-1492479246-3038711736-1790286020-728567492-4016704499",
-      "username": "QinGu",
+      "username": "%USERNAME%",
       "cwd": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.work",
       "prefix": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt",
       "executable": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt\\python.exe"
@@ -44,13 +44,13 @@
         "winerror": null,
         "msg": "Permission denied"
       },
-      "C:\\Users\\QinGu\\.ssh": {
+      "%USERPROFILE%\\.ssh": {
         "ok": false,
         "errno": 13,
         "winerror": null,
         "msg": "Permission denied"
       },
-      "C:\\Users\\QinGu\\.claude\\CLAUDE.md": {
+      "%USERPROFILE%\\.claude\\CLAUDE.md": {
         "ok": false,
         "errno": 13,
         "winerror": null,
@@ -79,7 +79,7 @@
         "winerror": null,
         "msg": "Permission denied"
       },
-      "C:\\Users\\QinGu\\nooa_probe.txt": {
+      "%USERPROFILE%\\nooa_probe.txt": {
         "ok": false,
         "errno": 13,
         "winerror": null,
@@ -97,13 +97,13 @@
         "ok": false,
         "errno": 13,
         "winerror": 10013,
-        "msg": "\u4ee5\u4e00\u79cd\u8bbf\u95ee\u6743\u9650\u4e0d\u5141\u8bb8\u7684\u65b9\u5f0f\u505a\u4e86\u4e00\u4e2a\u8bbf\u95ee\u5957\u63a5\u5b57\u7684\u5c1d\u8bd5\u3002"
+        "msg": "以一种访问权限不允许的方式做了一个访问套接字的尝试。"
       },
       "tcp_dns": {
         "ok": false,
         "errno": 13,
         "winerror": 10013,
-        "msg": "\u4ee5\u4e00\u79cd\u8bbf\u95ee\u6743\u9650\u4e0d\u5141\u8bb8\u7684\u65b9\u5f0f\u505a\u4e86\u4e00\u4e2a\u8bbf\u95ee\u5957\u63a5\u5b57\u7684\u5c1d\u8bd5\u3002"
+        "msg": "以一种访问权限不允许的方式做了一个访问套接字的尝试。"
       },
       "udp_dns": {
         "ok": true,
@@ -132,13 +132,13 @@
     "exit_code": 0,
     "read[C:\\Windows\\System32\\config\\SAM]": "DENIED",
     "read[C:\\Windows\\System32\\config\\SYSTEM]": "DENIED",
-    "read[C:\\Users\\QinGu\\.ssh]": "DENIED",
-    "read[C:\\Users\\QinGu\\.claude\\CLAUDE.md]": "DENIED",
+    "read[%USERPROFILE%\\.ssh]": "DENIED",
+    "read[%USERPROFILE%\\.claude\\CLAUDE.md]": "DENIED",
     "read[E:\\labs-OO-Agents\\AGENTS.md]": "DENIED",
     "write[E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.work\\granted_probe.txt]": "ALLOWED (expect=ALLOWED)",
     "write[C:\\Windows\\System32\\nooa_probe.txt]": "DENIED (expect=DENIED)",
     "write[C:\\Windows\\Temp\\nooa_probe.txt]": "DENIED (expect=DENIED)",
-    "write[C:\\Users\\QinGu\\nooa_probe.txt]": "DENIED (expect=DENIED)",
+    "write[%USERPROFILE%\\nooa_probe.txt]": "DENIED (expect=DENIED)",
     "write[E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\_outside_grant.txt]": "DENIED (expect=DENIED)"
   },
   "_denied_report": {
@@ -146,7 +146,7 @@
     "identity": {
       "is_app_container": true,
       "container_sid": "S-1-15-2-606662641-3925652526-1492479246-3038711736-1790286020-728567492-4016704499",
-      "username": "QinGu",
+      "username": "%USERNAME%",
       "cwd": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.work",
       "prefix": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt",
       "executable": "E:\\labs-OO-Agents\\experiments\\windows-sandbox-probe\\.rt\\python.exe"
@@ -164,13 +164,13 @@
         "winerror": null,
         "msg": "Permission denied"
       },
-      "C:\\Users\\QinGu\\.ssh": {
+      "%USERPROFILE%\\.ssh": {
         "ok": false,
         "errno": 13,
         "winerror": null,
         "msg": "Permission denied"
       },
-      "C:\\Users\\QinGu\\.claude\\CLAUDE.md": {
+      "%USERPROFILE%\\.claude\\CLAUDE.md": {
         "ok": false,
         "errno": 13,
         "winerror": null,
@@ -199,7 +199,7 @@
         "winerror": null,
         "msg": "Permission denied"
       },
-      "C:\\Users\\QinGu\\nooa_probe.txt": {
+      "%USERPROFILE%\\nooa_probe.txt": {
         "ok": false,
         "errno": 13,
         "winerror": null,
@@ -217,13 +217,13 @@
         "ok": false,
         "errno": 13,
         "winerror": 10013,
-        "msg": "\u4ee5\u4e00\u79cd\u8bbf\u95ee\u6743\u9650\u4e0d\u5141\u8bb8\u7684\u65b9\u5f0f\u505a\u4e86\u4e00\u4e2a\u8bbf\u95ee\u5957\u63a5\u5b57\u7684\u5c1d\u8bd5\u3002"
+        "msg": "以一种访问权限不允许的方式做了一个访问套接字的尝试。"
       },
       "tcp_dns": {
         "ok": false,
         "errno": 13,
         "winerror": 10013,
-        "msg": "\u4ee5\u4e00\u79cd\u8bbf\u95ee\u6743\u9650\u4e0d\u5141\u8bb8\u7684\u65b9\u5f0f\u505a\u4e86\u4e00\u4e2a\u8bbf\u95ee\u5957\u63a5\u5b57\u7684\u5c1d\u8bd5\u3002"
+        "msg": "以一种访问权限不允许的方式做了一个访问套接字的尝试。"
       },
       "udp_dns": {
         "ok": true,

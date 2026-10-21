@@ -824,9 +824,33 @@ def main() -> int:
         except OSError as exc:
             results["_meta"]["profile_deleted"] = f"failed: {exc}"
 
-    RESULTS.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
+    RESULTS.write_text(json.dumps(_redact(results), indent=2, default=str), encoding="utf-8")
     print(f"\nresults -> {RESULTS}")
     return 0
+
+
+def _redact(value):
+    """Replace this machine's home directory and user name before writing.
+
+    ``results.json`` is committed, so it must not carry the path layout of the
+    machine that produced it. The denials are the evidence; the exact home
+    directory is not, and ``.ssh`` under a named user is not something to
+    publish in a pull request.
+    """
+    home = os.environ.get("USERPROFILE") or str(Path.home())
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    if isinstance(value, dict):
+        return {_redact(key): _redact(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    if isinstance(value, str):
+        redacted = value
+        for variant in {home, home.replace("\\", "\\\\")}:
+            redacted = redacted.replace(variant, "%USERPROFILE%")
+        if user and redacted == user:
+            return "%USERNAME%"
+        return redacted
+    return value
 
 
 def _dir_size(path: Path) -> int:
