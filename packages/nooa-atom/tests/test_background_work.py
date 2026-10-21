@@ -147,3 +147,31 @@ async def test_an_unknown_name_lists_what_is_running(tmp_path, sessions_dir):
     assert "self.jobs.get('lint')" in text and "label='lint'" in text
     running = text.split("Running right now:", 1)[1]
     assert "'tests'" in running and "'Worker'" in running
+
+
+async def test_a_child_with_an_unread_question_says_so_until_it_is_read(tmp_path, sessions_dir):
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "await self.spawn('Asker', 'ask which branch')\n"
+                "delegates = self.queue_manager.get_channel('delegates')\n"
+                "async with asyncio.timeout(10):\n"
+                "    while not delegates.qsize():\n"
+                "        await asyncio.sleep(0.01)\n"
+                "print('ASKED<<' + self._queue_status() + '>>')\n"
+                "q = await self.delegates.get()\n"
+                "assert isinstance(q, ChildQuestion), q\n"
+                "print('READ<<' + self._queue_status() + '>>')"
+            ),
+            cell(DONE),
+        ],
+        {"Asker": [cell("return_result(NeedInput(question='Which branch?', options=['main']))")]},
+    )
+    asked = calls[1].split("ASKED<<", 1)[1].split(">>", 1)[0]
+    read = calls[1].split("READ<<", 1)[1].split(">>", 1)[0]
+    assert "Background work:\n  • Asker · child · has a question for you" in asked
+    # Once read, the question is no longer buffered: the kept child shows as retained.
+    assert "has a question for you" not in read
+    assert "  • Asker · child · retained" in read
