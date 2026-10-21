@@ -389,12 +389,24 @@ The baseline uses your exact settings and one request with no retry. It fails if
 the answer is wrong, cut off, or not in the structured format. If your endpoint
 cannot return structured output, save it without checks (`--no-probe`) instead.
 
-## Token budget and reply limit
+## Profile controls, token budget and reply limit
 
 - `--budget-tokens N` limits the estimated total tokens for all checks. The
   default is no limit. It is an estimate, not a spending cap.
 - A check that does not fit the remaining budget is skipped. Connect does not
   lower limits or ask for more budget.
+- For chat-family routes, `--no-cache` explicitly saves `cache_breakpoint: null`
+  for this profile, disabling explicit prompt-cache options and markers. It does
+  **not** disable provider automatic caching or prove live compatibility. The
+  library equivalent is `connect.plan(..., cache_enabled=False)` (or
+  `connect.configure_entry(entry, cache_enabled=False)`). Unspecified preserves
+  existing behavior, including a manually disabled cache when editing. Plan,
+  routing/all/check stages and save accept this control; metadata/interface
+  discovery stages do not. Decision models do not configure chat caching and
+  reject the option. Changes invalidate reusable routing evidence; there is no
+  automatic retry or silent cache fallback. Conflicting explicit cache options
+  in custom settings are rejected, not silently removed. Structured-output schemas remain
+  required for the configured typed baseline.
 - For chat-family routes, `--max-tokens N` (also `--reply-tokens`) sets the reply limit saved as
   `max_tokens`. It covers reasoning and the answer. Without it, Connect suggests
   the published recommendation, or 32,768. It must be less than the context

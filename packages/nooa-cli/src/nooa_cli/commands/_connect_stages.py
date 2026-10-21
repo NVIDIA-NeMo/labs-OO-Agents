@@ -231,6 +231,7 @@ def run_stage(
     reasoning_template=None,
     reasoning_level="medium",
     reply_tokens=None,
+    cache_enabled=None,
     media_inputs=None,
     test_media_inputs=None,
     decision_image_transport=None,
@@ -276,6 +277,13 @@ def run_stage(
     from ._connect_prompts import parse_media_inputs
 
     try:
+        if cache_enabled is not None and stage in {
+            "discover",
+            "catalogue",
+            "model-info",
+            "interfaces",
+        }:
+            raise click.UsageError("--no-cache is a profile control; use a plan/check/save stage")
         if catalogue_file and stage not in {
             "plan",
             "routing",
@@ -342,6 +350,7 @@ def run_stage(
                             ),
                         },
                         reply_tokens=reply_tokens,
+                        cache_enabled=cache_enabled,
                     ),
                 )
             except ValueError as exc:
@@ -462,6 +471,7 @@ def run_stage(
                         output_tokens=output_tokens,
                         reasoning_output_tokens=reasoning_output_tokens,
                         reply_tokens=reply_tokens,
+                        cache_enabled=cache_enabled,
                         media_inputs=declared_media,
                         decision_image_transport=decision_image_transport,
                         typesafe_danger_zone_images=typesafe_danger_zone_images,

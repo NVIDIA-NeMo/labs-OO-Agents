@@ -96,6 +96,7 @@ class WizardState:
     registry: Any = None
     remaining_estimate: Any = None
     reply_tokens: Any = None
+    cache_enabled: bool | None = None
     result: Any = None
     server_urls: Any = None
     systemone_endpoint: Any = None
@@ -1387,6 +1388,10 @@ def configure_metadata(state: WizardState) -> bool:
 def reject_decision_media(state: WizardState) -> None:
     """Validate image-only permissions once the decision style is known."""
     if state.api_style in connect.DECISION_API_STYLES:
+        if state.cache_enabled is not None:
+            raise click.UsageError(
+                "--no-cache does not apply to decision models; they do not configure chat caching"
+            )
         from nooa.decisions.media import decision_media_inputs
 
         try:
@@ -1584,6 +1589,7 @@ def configure_checks(state: WizardState) -> bool:
         session_checks=state.approval == "all"
         and state.api_style not in connect.DECISION_API_STYLES,
         reply_tokens=state.reply_tokens,
+        cache_enabled=state.cache_enabled,
     )
     if state.server_details is not None:
         state.proposal.entry["provenance"]["server_details"] = scrub_setup(
@@ -1677,7 +1683,7 @@ def configure_checks(state: WizardState) -> bool:
             )
         )
     state.configured = connect.configure_entry(
-        state.proposal.entry, reply_tokens=state.reply_tokens
+        state.proposal.entry, reply_tokens=state.reply_tokens, cache_enabled=state.cache_enabled
     )
     if state.api_style in connect.DECISION_API_STYLES:
         state.proposal = connect.refresh_plan(replace(state.proposal, entry=state.configured))
@@ -2017,6 +2023,10 @@ def save_model(state: WizardState) -> bool:
                 + str(state.result.entry.get("reasoning_default", "server default")),
             )
         )
+    if state.api_style not in connect.DECISION_API_STYLES and (
+        "cache_breakpoint" in state.result.entry and state.result.entry["cache_breakpoint"] is None
+    ):
+        view.fields([("Caching", "Off")])
     if state.yes or prompts.confirm(f"Write model entry to {state.path}?", default=True):
         save_key = False
         if (
@@ -2123,6 +2133,8 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
         )
         if maximum:
             rows.append(("Reply maximum", f"{maximum:,} tokens"))
+        if "cache_breakpoint" in entry and entry["cache_breakpoint"] is None:
+            rows.append(("Caching", "Off"))
         rows.append(("Reasoning", ", ".join(entry.get("reasoning_levels", {})) or "Server default"))
     else:
         transport = (

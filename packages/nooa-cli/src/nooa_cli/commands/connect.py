@@ -135,6 +135,11 @@ class ConnectCommand(click.Command):
 )
 @click.option("--no-probe", is_flag=True, help="Save an untested entry without model calls.")
 @click.option(
+    "--no-cache",
+    is_flag=True,
+    help="Disable explicit chat cache options/markers for this profile; provider automatic caching is unchanged.",
+)
+@click.option(
     "--budget-tokens",
     type=click.IntRange(min=1),
     help="Token budget for tests (default: unlimited).",
@@ -246,6 +251,7 @@ def command(
     context_window,
     probe,
     no_probe,
+    no_cache,
     budget_tokens,
     output_tokens,
     reasoning_output_tokens,
@@ -343,6 +349,7 @@ def command(
                 reasoning_template=reasoning_template if stage == "interfaces" else None,
                 reasoning_level=reasoning_level,
                 reply_tokens=reply_tokens,
+                cache_enabled=False if no_cache else None,
                 media_inputs=media_inputs,
                 test_media_inputs=test_media_inputs,
                 decision_image_transport=decision_image_transport,
@@ -413,6 +420,7 @@ def command(
             output_tokens=output_tokens,
             reasoning_output_tokens=reasoning_output_tokens,
             reply_tokens=reply_tokens,
+            cache_enabled=False if no_cache else None,
             media_inputs=media_inputs,
             test_media_inputs=test_media_inputs,
             decision_image_transport=decision_image_transport,

@@ -747,12 +747,16 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
     return missing
 
 
-def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
+def configure_entry(
+    entry: dict, *, reply_tokens: int | None = None, cache_enabled: bool | None = None
+) -> dict:
     """Apply safe persisted defaults to a detached entry, without doing any I/O.
 
     ``max_tokens`` is the runtime cap on every interface. Published ceilings
     remain provenance, not request allocations. ``include: []`` is an explicit
     opt-out from carrying encrypted reasoning on stateless Responses calls.
+    ``cache_enabled=False`` disables explicit cache options/markers, not provider
+    automatic caching. None preserves the entry; True selects the runtime auto policy.
     """
 
     def reject_credentials(value):
@@ -776,6 +780,8 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             for child in value:
                 reject_credentials(child)
 
+    if cache_enabled is not None and not isinstance(cache_enabled, bool):
+        raise ValueError("cache_enabled must be a boolean or None")
     reject_credentials(entry)
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
@@ -786,6 +792,8 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             raise ValueError("media_inputs belongs on the connection, not a reasoning level")
     result.setdefault("transport", "direct")
     if result.get("client_type") == "decision":
+        if cache_enabled is not None:
+            raise ValueError("Decision models do not configure chat caching")
         from nooa.decisions.media import decision_media_inputs
 
         result["media_inputs"] = list(decision_media_inputs(result["media_inputs"]))
@@ -814,6 +822,7 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             "reasoning_default",
             "store",
             "include",
+            "cache_breakpoint",
         }
         present = sorted(forbidden & result.keys())
         if present:
@@ -829,6 +838,39 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             ["context_window", "reasoning", "tools", "sessions", "reply_limit"],
         )
         return result
+    provenance = result.setdefault("provenance", {})
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be a mapping")
+    if cache_enabled is False:
+
+        def reject_cache_options(value):
+            if isinstance(value, dict):
+                if {
+                    "prompt_cache_options",
+                    "prompt_cache_breakpoint",
+                    "cache_control",
+                    "nooa_cache_boundary",
+                } & value.keys():
+                    raise ValueError(
+                        "cache_enabled=False conflicts with explicit cache options/markers; "
+                        "remove them from the profile settings first"
+                    )
+                for child in value.values():
+                    reject_cache_options(child)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    reject_cache_options(child)
+
+        # Custom bodies/level patches are preserved, not silently rewritten.
+        reject_cache_options({k: v for k, v in result.items() if k != "provenance"})
+    if cache_enabled is not None:
+        cache_breakpoint = "auto" if cache_enabled else None
+        if result.get("cache_breakpoint", "auto") != cache_breakpoint:
+            provenance["probes"] = {}
+            provenance.pop("session_checks", None)
+            for field in ("requests_accepted", "reasoning_observed"):
+                provenance.pop(field, None)
+        result["cache_breakpoint"] = cache_breakpoint
     extra = result.get("extra_body") or {}
     if not isinstance(extra, dict):
         raise ValueError("extra_body must be a mapping")
@@ -1201,6 +1243,7 @@ def plan(
     existing_entry: dict | None = None,
     session_checks: bool = False,
     reply_tokens: int | None = None,
+    cache_enabled: bool | None = None,
     media_inputs: list[str] | tuple[str, ...] | None = None,
     test_media_inputs: list[str] | tuple[str, ...] | None = None,
     decision_image_transport: str | None = None,
@@ -1208,6 +1251,11 @@ def plan(
     decision_checks: bool = True,
 ) -> ConnectPlan:
     """Prepare requests without reading credentials, files or network resources.
+
+    ``cache_enabled=False`` saves ``cache_breakpoint: null`` (no explicit cache
+    options/markers). None preserves the default or same-route existing policy;
+    True explicitly selects auto. This does not disable provider automatic caching
+    or establish live compatibility.
 
     ``model`` is the exact endpoint model ID, without a LiteLLM prefix. The
     returned entry adds the prefix needed by today's runtime. Each request reserves
@@ -1223,6 +1271,10 @@ def plan(
     For decisions, supplied ``catalogue`` is an explicit OpenRouter ID mapping: only bounded
     descriptions, media facts and provenance are retained, never chat settings.
     """
+    if cache_enabled is not None and not isinstance(cache_enabled, bool):
+        raise ValueError("cache_enabled must be a boolean or None")
+    if api_style in DECISION_API_STYLES and cache_enabled is not None:
+        raise ValueError("Decision models do not configure chat caching")
     if api_style not in _PATHS:
         raise ValueError("api_style must be chat, responses, anthropic, systemone or openai")
     api_base = normalize_endpoint(api_base)
@@ -1445,6 +1497,9 @@ def plan(
     }
     if media_inputs is None and existing_entry and same_media_route(existing_entry, entry):
         entry["media_inputs"] = list(validate_media_inputs(existing_entry.get("media_inputs")))
+    if existing_entry and same_media_route(existing_entry, entry):
+        if "cache_breakpoint" in existing_entry:
+            entry["cache_breakpoint"] = deepcopy(existing_entry["cache_breakpoint"])
     provenance: dict[str, Any] = {
         "media_suggestions": media_suggestions,
         "probes": {},
@@ -1609,7 +1664,7 @@ def plan(
                 "source": "catalogue_recommendation",
                 "value": entry["max_tokens"],
             }
-    entry = configure_entry(entry, reply_tokens=reply_tokens)
+    entry = configure_entry(entry, reply_tokens=reply_tokens, cache_enabled=cache_enabled)
     provenance = entry["provenance"]
     for probe in probes:
         if probe.name.startswith("level:"):
@@ -1618,7 +1673,9 @@ def plan(
         # Each probe is also compared to its exact request in run_steps. Adding
         # a level must not invalidate an unchanged routing or tool check.
         keys = ("model_name", "api_base", "api_key_env", "api_style")
-        if all(existing_entry.get(key) == entry.get(key) for key in keys):
+        if all(existing_entry.get(key) == entry.get(key) for key in keys) and existing_entry.get(
+            "cache_breakpoint", "auto"
+        ) == entry.get("cache_breakpoint", "auto"):
             previous = existing_entry.get("provenance", {}).get("probes", {})
             provenance["probes"] = {
                 probe.name: deepcopy(previous[probe.name])
