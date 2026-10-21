@@ -485,12 +485,13 @@ class Session:
         return self._pending_form is request and not self.closing and self.info.status != "running"
 
     def admit_form_response(
-        self, request: NeedInputForm, response: FormResponse, *, source: str
+        self, request: NeedInputForm, response: FormResponse | str, *, source: str
     ) -> Receipt | None:
-        """Admit an adapter-validated response only while its request is current.
+        """Admit an adapter-checked answer only while its request is current.
 
-        No await separates identity checking and admission. The adapter validates
-        protocol shape once; later turns supersede old dialog ownership.
+        ``response`` is the checked ``FormResponse``, or text with the person's
+        answers when they failed the form's checks. No await separates identity
+        checking and admission; later turns supersede old dialog ownership.
         """
         self._ensure_external_admission()
         if not self.form_is_current(request):

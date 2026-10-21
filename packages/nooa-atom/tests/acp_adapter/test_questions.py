@@ -161,19 +161,50 @@ async def test_standard_decline_and_cancel_remain_distinct(
 
 
 @pytest.mark.parametrize(
-    "typed,content",
+    "typed,content,reason",
     [
-        (False, None),
-        (False, {}),
-        (False, {"answer": ""}),
-        (False, {"answer": " "}),
-        (False, {"answer": 2}),
-        (False, {"answer": "unlisted"}),
-        (True, {"target": "prod"}),
-        (True, {"target": "prod", "replicas": "bad", "dry_run": False}),
+        (False, {}, "answer: an answer is required"),
+        (False, {"answer": ""}, "answer: an answer is required"),
+        (False, {"answer": " "}, "answer: an answer is required"),
+        (False, {"answer": 2}, "answer: enter text"),
+        (False, {"answer": "unlisted"}, "answer: choose a listed option"),
+        (
+            True,
+            {"target": "prod"},
+            "replicas: an answer is required; dry_run: an answer is required",
+        ),
+        (True, {"target": "prod", "replicas": "bad", "dry_run": False}, "dry_run: enter text"),
     ],
 )
-async def test_invalid_standard_content_is_not_admitted(
+async def test_standard_content_failing_checks_reaches_agent_as_text(
+    make_adapter, workspace, client, typed, content, reason
+):
+    models = ScriptedModels(
+        {None: [_form(typed, ["main", "dev"] if not typed else None), _inspect_answer()]}
+    )
+    client.elicitation_answers = [AcceptElicitationResponse(action="accept", content=content)]
+    adapter = await make_adapter(models, capabilities=FORMS)
+    session_id, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    assert len(models.llms[None].calls) == 2
+    answer = adapter.session(session_id)._agent.v.answer
+    assert isinstance(answer, str)
+    assert answer.endswith(f"These answers didn't pass the form's checks: {reason}.")
+    if content.get("target"):
+        assert answer.startswith("target: prod")
+    [echo] = client.texts(UserMessageChunk, session_id)
+    assert echo == answer
+    assert len([e for e in client.log if e[0] == "elicitation"]) == 1  # never re-asked
+    assert not any(
+        "form answer wasn't used" in t for t in client.texts(AgentMessageChunk, session_id)
+    )
+
+
+@pytest.mark.parametrize(
+    "typed,content",
+    [(False, None), (False, {"answer": [2]}), (True, {"target": {"x": "y"}})],
+)
+async def test_malformed_standard_content_is_not_admitted(
     make_adapter, workspace, client, typed, content
 ):
     models = ScriptedModels({None: [_form(typed, ["main", "dev"] if not typed else None)]})
@@ -639,7 +670,7 @@ async def test_form_failure_uses_ordered_bridge_and_revocable_flush(
 
     async def malformed(*args, **kwargs):
         bridge.publish(update_agent_message(text_block("before failure")))
-        return {"action": "accept", "content": {"answer": 42}}
+        return {"action": "accept", "content": {"answer": [42]}}
 
     client.session_update = ordered_send
     if pool:

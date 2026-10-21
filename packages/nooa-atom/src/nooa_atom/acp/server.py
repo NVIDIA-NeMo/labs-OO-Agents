@@ -64,6 +64,7 @@ from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
+from nooa_atom.acp import pool
 from nooa_atom.acp.event_bridge import (
     VERBOSITY_LEVELS,
     ACPEventBridge,
@@ -71,10 +72,7 @@ from nooa_atom.acp.event_bridge import (
     pool_input_event,
 )
 from nooa_atom.acp.listing import list_sessions, validate_workspace
-from nooa_atom.acp.need_input import (
-    need_input_schema,
-    pool_form_schema,
-)
+from nooa_atom.acp.need_input import need_input_schema
 from nooa_atom.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
@@ -116,8 +114,6 @@ DEFAULT_REASONING = "default"
 
 _INJECT_METHOD = "nooa/session/inject"
 _REVOKE_METHOD = "nooa/session/revoke_inject"
-_POOL_FORM_METHOD = "poolside/elicitation"
-"""Pool's form request; ``ext_method`` sends it as ``_poolside/elicitation``."""
 _POOL_STEER_METHOD = "poolside/session_steer"
 """``_poolside/session_steer`` as ``ext_method`` receives it (without the underscore)."""
 
@@ -863,82 +859,33 @@ class AtomACPAgent:
     ) -> Any:
         """Ask the client to answer ``need``: ``(item, source)``, ``None`` or ``_CANCELLED``.
 
-        Only explicit forms route here: Pool's own form extension, then standard
-        ACP form capability. Unsupported schemas/clients leave a clearly marked
-        request in the conversation. Client failure never manufactures an answer.
-        ``local`` forms are the adapter's own (``/verbosity``), not the session's
-        pending form: only a stop of the client request (``_client_call``) ends them.
+        Only explicit forms route here: standard ACP ``elicitation/create`` when
+        the client advertises form elicitation (Pool: its own extension, see
+        ``pool``). ``None`` means no form could be shown; client failure never
+        manufactures an answer, and a malformed answer is reported once, not
+        retried. ``local`` forms are the adapter's own (``/verbosity``), not the
+        session's pending form: only a stop of the client request ends them.
         """
         if bridge not in self._attachments or (not local and session.id in self._stopped_forms):
             return _CANCELLED
-        if not isinstance(need, NeedInputForm):
+        if not isinstance(need, NeedInputForm) or (not local and not session.form_is_current(need)):
             return None
         conn = self._require_conn()
-        pool_schema = pool_form_schema(need) if self._pool_forms else None
-        if pool_schema is not None:
-            return await self._ask_pool(session, bridge, need, pool_schema, local=local)
-        capabilities = self.client_capabilities
-        forms = (
-            capabilities is not None
-            and capabilities.elicitation is not None
-            and capabilities.elicitation.form is not None
-        )
-        schema = need_input_schema(need)
-        if forms and schema is not None:
-            mode = ElicitationFormSessionMode(session_id=session.id, requested_schema=schema)
-            response = await self._client_call(
-                session.id,
-                conn.create_elicitation(
-                    message=f"{need.heading}\n\n{need.reason}" if need.reason else need.heading,
-                    mode=mode,
-                ),
+        via_pool = self._pool_forms
+        if via_pool:
+            request = conn.ext_method(
+                pool.POOL_FORM_METHOD, pool.pool_form_params(session.id, need)
             )
-            if response is None or response is _CANCELLED:
-                return response
-            if not local and not session.form_is_current(need):
-                return None
-            if not local and session.id in self._stopped_forms:
-                return _CANCELLED
-            try:
-                envelope = (
-                    response
-                    if isinstance(response, dict)
-                    else response.model_dump(mode="json", exclude_none=True)
-                )
-                # SDK/protocol metadata belongs to transport, not the strict answer.
-                outcome = FormResponse(
-                    action=envelope.get("action"), content=envelope.get("content")
-                )
-                return need.validate_response(outcome), FORM_ANSWER_SOURCE
-            except (ValidationError, ValueError, AttributeError, TypeError) as exc:
-                await self._form_failure(bridge, exc)
-                return None
-        return None
-
-    async def _ask_pool(
-        self,
-        session: Session,
-        bridge: ACPEventBridge,
-        need: NeedInputForm,
-        schema: dict[str, Any],
-        *,
-        local: bool = False,
-    ) -> Any:
-        """One Pool request. Malformed payload fails closed once, never a wizard retry."""
-        conn = self._require_conn()
-        if not local and session.id in self._stopped_forms:
-            return _CANCELLED
-        if not local and not session.form_is_current(need):
+        elif self._client_shows_forms():
+            schema = need_input_schema(need)
+            assert schema is not None
+            request = conn.create_elicitation(
+                message=f"{need.heading}\n\n{need.reason}" if need.reason else need.heading,
+                mode=ElicitationFormSessionMode(session_id=session.id, requested_schema=schema),
+            )
+        else:
             return None
-        params: dict[str, Any] = {
-            "sessionId": session.id,
-            "mode": "form",
-            "message": f"{need.heading}\n\n{need.reason}" if need.reason else need.heading,
-            "requestedSchema": schema,
-        }
-        if len(schema["properties"]) > 1:
-            params["_meta"] = {"poolside/field_order": list(schema["properties"])}
-        response = await self._client_call(session.id, conn.ext_method(_POOL_FORM_METHOD, params))
+        response = await self._client_call(session.id, request)
         if response is _CANCELLED:
             return response
         if not local and session.id in self._stopped_forms:
@@ -946,17 +893,36 @@ class AtomACPAgent:
         if not local and not session.form_is_current(need):
             return None
         if response is None:
-            self._pool_forms = False
+            if via_pool:
+                self._pool_forms = False
             return None
         try:
-            outcome = FormResponse(action=response.get("action"), content=response.get("content"))
-            return need.validate_response(outcome), FORM_ANSWER_SOURCE
+            envelope = (
+                response
+                if isinstance(response, dict)
+                else response.model_dump(mode="json", exclude_none=True)
+            )
+            content = envelope.get("content")
+            if via_pool:
+                content = pool.pool_content(need, content)
+            # SDK/protocol metadata belongs to transport, not the strict answer.
+            outcome = FormResponse(action=envelope.get("action"), content=content)
         except (ValidationError, ValueError, AttributeError, TypeError) as exc:
             await self._form_failure(bridge, exc)
             return None
+        return _checked_or_text(need, outcome)
+
+    def _client_shows_forms(self) -> bool:
+        """Whether the client advertised standard ACP form elicitation."""
+        capabilities = self.client_capabilities
+        return (
+            capabilities is not None
+            and capabilities.elicitation is not None
+            and capabilities.elicitation.form is not None
+        )
 
     async def _form_failure(self, bridge: ACPEventBridge, exc: Exception) -> None:
-        """Flush an ordered fallback notice; the owning form wait remains revocable."""
+        """Report a malformed client payload; the owning form wait remains revocable."""
         bridge.publish(
             update_agent_message(
                 text_block(
@@ -1152,7 +1118,8 @@ class AtomACPAgent:
         answer = await self._wait_attached(self._ask(session, bridge, need, local=True), lifetime)
         if answer is _CANCELLED or lifetime.done():
             return PromptResponse(stop_reason="cancelled")
-        if answer is None:
+        if answer is None or not isinstance(answer[0], FormResponse):
+            # No form, or an answer that failed its checks: point to the typed command.
             return await self._say(
                 bridge,
                 f"ACP verbosity: {bridge.verbosity}. Usage: /verbosity silent|concise|verbose",
@@ -1627,6 +1594,21 @@ def _trace_scope(session: Session) -> AbstractContextManager[object]:
     except ImportError:
         return nullcontext()
     return session_scope(session.id)
+
+
+def _checked_or_text(need: NeedInputForm, response: FormResponse) -> tuple[Any, str]:
+    """The checked answer; or, if it fails the form's checks, the answers as text.
+
+    No re-asking: the agent gets what the person entered, with the reason, as an
+    ordinary unvalidated text message, and decides what to do next.
+    """
+    try:
+        return need.validate_response(response), FORM_ANSWER_SOURCE
+    except ValueError as exc:
+        return (
+            f"{response.as_text()}\n\nThese answers didn't pass the form's checks: {exc}.",
+            FORM_ANSWER_SOURCE,
+        )
 
 
 def _failure_reason(exc: Exception) -> str:

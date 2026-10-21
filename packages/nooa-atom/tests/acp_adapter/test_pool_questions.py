@@ -115,10 +115,8 @@ async def test_pool_actions_survive_transport_and_replay(make_adapter, workspace
     assert not _requests(client)
 
 
-@pytest.mark.parametrize(
-    "invalid", [None, {}, {"answer": " "}, {"answer": 2}, {"answer": "unlisted"}]
-)
-async def test_pool_invalid_choice_fails_closed_once(make_adapter, workspace, client, invalid):
+@pytest.mark.parametrize("invalid", [None, {"answer": [2]}, {"answer": {"x": "y"}}])
+async def test_pool_malformed_answer_fails_closed_once(make_adapter, workspace, client, invalid):
     models = ScriptedModels({None: [_ask(False, ["main", "dev"])]})
     client.ext_answers = [
         {"action": "accept", "content": invalid},
@@ -132,12 +130,44 @@ async def test_pool_invalid_choice_fails_closed_once(make_adapter, workspace, cl
     assert "form answer wasn't used" in client.texts(AgentMessageChunk, sid)[-1]
 
 
+@pytest.mark.parametrize(
+    "invalid,reason",
+    [
+        ({}, "answer: an answer is required"),
+        ({"answer": " "}, "answer: an answer is required"),
+        ({"answer": 2}, "answer: enter text"),
+        ({"answer": "unlisted"}, "answer: choose a listed option"),
+    ],
+)
+async def test_pool_answer_failing_checks_reaches_agent_as_text(
+    make_adapter, workspace, client, invalid, reason
+):
+    models = ScriptedModels({None: [_ask(False, ["main", "dev"]), _inspect()]})
+    client.ext_answers = [
+        {"action": "accept", "content": invalid},
+        {"action": "accept", "content": {"answer": "dev"}},
+    ]
+    adapter = await make_adapter(models, client_info=POOL)
+    sid, response = await _run(adapter, workspace)
+    assert response.stop_reason == "end_turn"
+    assert len(_requests(client)) == 1  # never re-asked
+    assert len(models.llms[None].calls) == 2
+    answer = adapter.session(sid)._agent.v.answer
+    assert isinstance(answer, str)
+    assert f"didn't pass the form's checks: {reason}." in answer
+    if invalid.get("answer") in (2, "unlisted"):
+        assert f"answer: {invalid['answer']}" in answer
+    [echo] = client.texts(UserMessageChunk, sid)
+    assert echo == answer
+    assert not any("form answer wasn't used" in t for t in client.texts(AgentMessageChunk, sid))
+
+
 @pytest.mark.parametrize("failure", ["bad-content", "unknown-action", "client-error"])
 async def test_pool_unsupported_or_invalid_never_manufactures_response(
     make_adapter, workspace, client, failure
 ):
     ask = _ask()
-    bad = {"action": "accept", "content": {"target": "prod", "replicas": 2, "dry_run": "no"}}
+    bad = {"action": "accept", "content": {"target": "prod", "replicas": [2], "dry_run": "no"}}
     client.ext_answers = [bad, bad]
     if failure == "unknown-action":
         client.ext_answers = [{"action": "unknown"}]
@@ -187,3 +217,24 @@ async def test_pool_literal_or_text_field_explicitly_accepts_alternative(
     sid, _ = await _run(adapter, workspace)
     assert "anyOf" in _requests(client)[0]["requestedSchema"]["properties"]["name"]
     assert adapter.session(sid)._agent.v.answer.content["name"] == "release"
+
+
+async def test_pool_string_answers_reach_the_agent_typed(make_adapter, workspace, client):
+    form = (
+        "return_result(NeedInputForm(heading='Deploy', questions=["
+        "IntegerQuestion(id='replicas', label='Replicas?', minimum=1, maximum=10), "
+        "BooleanQuestion(id='dry_run', label='Dry run?'), "
+        "PickManyQuestion(id='regions', label='Regions?', choices=["
+        "FormChoice(value='us', title='US'), FormChoice(value='eu', title='EU')])]))"
+    )
+    models = ScriptedModels({None: [cell(form), _inspect()]})
+    client.ext_answers = [
+        {"action": "accept", "content": {"replicas": "3", "dry_run": "false", "regions": "us, EU"}}
+    ]
+    adapter = await make_adapter(models, client_info=POOL)
+    sid, _ = await _run(adapter, workspace)
+    [params] = _requests(client)
+    props = params["requestedSchema"]["properties"]
+    assert all(prop["type"] == "string" for prop in props.values())
+    answer = adapter.session(sid)._agent.v.answer
+    assert answer.content == {"replicas": 3, "dry_run": False, "regions": ["us", "eu"]}

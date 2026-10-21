@@ -56,6 +56,7 @@ with hidden:
 import asyncio  # noqa: F401
 import datetime  # noqa: F401
 import json  # noqa: F401
+import math  # noqa: F401
 import re  # noqa: F401
 
 from nooa.runtime import producers  # noqa: F401
@@ -152,113 +153,180 @@ class NeedInput(BaseModel):
 
 
 class FormChoice(BaseModel):
-    """A stored string value and the label shown in a picker."""
+    """One option of a picker: the stored ``value`` and the ``title`` shown."""
 
     model_config = {"extra": "forbid", "strict": True}
-    value: str
-    title: str
+    value: str = Field(description="What the answer contains when this option is chosen")
+    title: str = Field(description="What the person sees")
     _check_value = field_validator("value")(_non_blank)
     _check_title = field_validator("title")(_non_blank)
-
-
-def _required(required: bool) -> bool:
-    # Pool 1.0.16 rejects optional non-text fields and aborts the whole form.
-    if not required:
-        raise ValueError(
-            "Only text questions can be optional. For an optional answer, use a "
-            "TextQuestion and describe the expected value in help."
-        )
-    return required
 
 
 class _FormQuestionBase(BaseModel):
     """Fields shared by every form question."""
 
     model_config = {"extra": "forbid", "strict": True}
-    id: str
-    label: str
-    help: str | None = None
-    required: bool = True
+    id: str = Field(description="Key of this answer in FormResponse.content")
+    label: str = Field(description="The question shown to the person")
+    help: str | None = Field(default=None, description="Optional hint shown with the question")
+    required: bool = Field(default=True, description="False lets the person leave it empty")
     _check_id = field_validator("id")(_non_blank)
     _check_label = field_validator("label")(_non_blank)
 
-
-class TextQuestion(_FormQuestionBase):
-    """One text input. Optional omitted/blank answers become the empty string."""
-
-    kind: Literal["text"] = "text"
-
-
-class PickOneQuestion(_FormQuestionBase):
-    """Choose one listed value (its ``value``, not its title), or type another string.
-
-    ``allow_other=True`` (default) lets the person type a different answer;
-    set ``allow_other=False`` only when the answer must be one of ``choices``.
-    Pickers must be ``required=True``; for an optional answer use a
-    ``TextQuestion`` and list the suggestions in ``help``.
-    """
-
-    kind: Literal["pick_one"] = "pick_one"
-    choices: list[FormChoice] = Field(min_length=1)
-    allow_other: bool = True
-
-    _required = field_validator("required")(classmethod(lambda cls, value: _required(value)))
-
-    @field_validator("choices")
-    @classmethod
-    def _unique_values(cls, choices: list[FormChoice]) -> list[FormChoice]:
-        if len({choice.value for choice in choices}) != len(choices):
-            raise ValueError("choice values must be unique")
-        return choices
-
-
-class IntegerQuestion(_FormQuestionBase):
-    """A whole number, optionally between ``minimum`` and ``maximum`` (inclusive).
-
-    The answer is an ``int`` already checked against the range. Must be
-    ``required=True``.
-    """
-
-    kind: Literal["integer"] = "integer"
-    minimum: int | None = None
-    maximum: int | None = None
-
-    _required = field_validator("required")(classmethod(lambda cls, value: _required(value)))
-
     @model_validator(mode="after")
-    def _ordered_range(self) -> "IntegerQuestion":
-        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
-            raise ValueError("minimum must not exceed maximum")
+    def _check_default(self) -> Any:
+        default = getattr(self, "default", None)
+        if default is not None:
+            problem = _problem(self, default)
+            if problem:
+                raise ValueError(f"default {default!r} is invalid: {problem}")
         return self
 
 
+TextFormat = Literal["email", "uri", "date", "date-time"]
+
+
+class TextQuestion(_FormQuestionBase):
+    """Free text; the answer is a ``str`` ("" when optional and left empty)."""
+
+    kind: Literal["text"] = "text"
+    min_length: int | None = Field(default=None, ge=0, description="Fewest characters")
+    max_length: int | None = Field(default=None, ge=1, description="Most characters")
+    pattern: str | None = Field(default=None, description="Regex the whole answer must match")
+    format: TextFormat | None = Field(
+        default=None, description="email, uri, date (YYYY-MM-DD) or date-time (ISO 8601)"
+    )
+    default: str | None = Field(default=None, description="Prefilled answer")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_constraints(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            _ordered(data.get("min_length"), data.get("max_length"), "min_length", "max_length")
+            if isinstance(data.get("pattern"), str):
+                try:
+                    re.compile(data["pattern"])
+                except re.error as exc:
+                    raise ValueError(f"pattern is not a valid regex: {exc}") from None
+        return data
+
+
+class PickOneQuestion(_FormQuestionBase):
+    """Pick one of ``choices``; the answer is the chosen ``value`` (a ``str``)."""
+
+    kind: Literal["pick_one"] = "pick_one"
+    choices: list[FormChoice] = Field(min_length=1, description="The options, in order")
+    allow_other: bool = Field(
+        default=True, description="True also accepts a typed answer that is not listed"
+    )
+    default: str | None = Field(default=None, description="Preselected value")
+
+    _unique = field_validator("choices")(classmethod(lambda cls, value: _unique_choices(value)))
+
+
+class PickManyQuestion(_FormQuestionBase):
+    """Pick any of ``choices``; the answer is a ``list[str]`` of chosen values."""
+
+    kind: Literal["pick_many"] = "pick_many"
+    choices: list[FormChoice] = Field(min_length=1, description="The options, in order")
+    min_items: int | None = Field(default=None, ge=0, description="Fewest options to pick")
+    max_items: int | None = Field(default=None, ge=1, description="Most options to pick")
+    default: list[str] | None = Field(default=None, description="Preselected values")
+
+    _unique = field_validator("choices")(classmethod(lambda cls, value: _unique_choices(value)))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_counts(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            _ordered(data.get("min_items"), data.get("max_items"), "min_items", "max_items")
+            low, choices = data.get("min_items"), data.get("choices")
+            if isinstance(low, int) and isinstance(choices, list) and low > len(choices):
+                raise ValueError("min_items must not exceed the number of choices")
+        return data
+
+
+class NumberQuestion(_FormQuestionBase):
+    """A number; the answer is a ``float``."""
+
+    kind: Literal["number"] = "number"
+    minimum: float | None = Field(default=None, description="Smallest allowed value")
+    maximum: float | None = Field(default=None, description="Largest allowed value")
+    default: float | None = Field(default=None, description="Prefilled answer")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_range(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            _ordered(data.get("minimum"), data.get("maximum"), "minimum", "maximum")
+        return data
+
+
+class IntegerQuestion(_FormQuestionBase):
+    """A whole number; the answer is an ``int``."""
+
+    kind: Literal["integer"] = "integer"
+    minimum: int | None = Field(default=None, description="Smallest allowed value")
+    maximum: int | None = Field(default=None, description="Largest allowed value")
+    default: int | None = Field(default=None, description="Prefilled answer")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_range(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            _ordered(data.get("minimum"), data.get("maximum"), "minimum", "maximum")
+        return data
+
+
 class BooleanQuestion(_FormQuestionBase):
-    """A yes/no answer, as a ``bool``. Must be ``required=True``."""
+    """Yes or no; the answer is a ``bool``."""
 
     kind: Literal["boolean"] = "boolean"
-
-    _required = field_validator("required")(classmethod(lambda cls, value: _required(value)))
+    default: bool | None = Field(default=None, description="Preselected answer")
 
 
 FormQuestion = Annotated[
-    TextQuestion | PickOneQuestion | IntegerQuestion | BooleanQuestion,
+    TextQuestion
+    | PickOneQuestion
+    | PickManyQuestion
+    | NumberQuestion
+    | IntegerQuestion
+    | BooleanQuestion,
     Field(discriminator="kind"),
 ]
-FormValue = str | int | bool
-"""An accepted answer: ``str`` for text and pickers, ``int`` for integers, ``bool`` for yes/no."""
+FormValue = str | int | float | bool | list[str] | None
+"""One answer: ``str``, ``list[str]``, ``float``, ``int``, ``bool``; ``None`` if optional and empty."""
+
+
+def _ordered(low: Any, high: Any, low_name: str, high_name: str) -> None:
+    numbers = (int, float)
+    if (
+        isinstance(low, numbers)
+        and isinstance(high, numbers)
+        and not isinstance(low, bool)
+        and not isinstance(high, bool)
+        and low > high
+    ):
+        raise ValueError(f"{low_name} must not exceed {high_name}")
+
+
+def _unique_choices(choices: list[FormChoice]) -> list[FormChoice]:
+    if len({choice.value for choice in choices}) != len(choices):
+        raise ValueError("choice values must be unique")
+    return choices
 
 
 class FormResponse(BaseModel):
-    """Form outcome; accepted content maps question ids to answers (see ``FormValue``).
-
-    Decline and cancel carry no content. If the person stops the turn (e.g.
-    Esc) while the form is open, no FormResponse arrives: the turn just ends
-    and the next turn starts with whatever they type next.
-    """
+    """The person's answer to a form: ``accept`` with ``content``, ``decline`` or ``cancel``."""
 
     model_config = {"extra": "forbid", "strict": True}
-    action: Literal["accept", "decline", "cancel"]
-    content: dict[str, FormValue] | None = None
+    action: Literal["accept", "decline", "cancel"] = Field(
+        description="accept (answered), decline or cancel"
+    )
+    content: dict[str, FormValue] | None = Field(
+        default=None,
+        description="On accept: question id -> answer (None if optional and left empty)",
+    )
 
     @model_validator(mode="after")
     def _content_for_action(self) -> "FormResponse":
@@ -275,26 +343,24 @@ class FormResponse(BaseModel):
         lines = [
             f"{key}: {_answer_text(value)}"
             for key, value in (self.content or {}).items()
-            if not (isinstance(value, str) and not value.strip())
+            if not _empty(value)
         ]
         return "\n".join(lines) or "Submitted the form."
 
 
 class NeedInputForm(BaseModel):
-    """An explicit form of ordered questions; answered by a ``FormResponse``.
+    """Ask the person to fill in a form; the answer is a ``FormResponse``.
 
-    If the person's client cannot show a form, the answer arrives as a plain
-    ``str`` instead of a ``FormResponse``: read it as unvalidated free text.
-    Accepted answers are checked against their questions (required, strict
-    choices, integer range, types); other checks are yours, with a follow-up
-    form for just the bad fields.
+    Answers are checked against each question's constraints. When the client
+    can't show the form, or the answers fail the checks, you get a plain
+    ``str`` instead (with the reason): read it as unchecked text.
     """
 
     model_config = {"extra": "forbid", "strict": True}
     kind: Literal["form"] = "form"
-    heading: str
-    reason: str | None = None
-    questions: list[FormQuestion] = Field(min_length=1)
+    heading: str = Field(description="What the form is for")
+    reason: str | None = Field(default=None, description="Optional: why you are asking")
+    questions: list[FormQuestion] = Field(min_length=1, description="The fields, in order")
     _check_heading = field_validator("heading")(_non_blank)
 
     @field_validator("questions")
@@ -309,85 +375,202 @@ class NeedInputForm(BaseModel):
         lines = []
         for question in self.questions:
             line = f"- {question.label}" + (f" ({question.help})" if question.help else "")
-            if isinstance(question, PickOneQuestion):
-                line += ": " + ", ".join(choice.title for choice in question.choices)
-            elif isinstance(question, IntegerQuestion):
-                line += ": " + _range_text(question)
-            elif isinstance(question, BooleanQuestion):
-                line += ": yes or no"
+            hints = _hints(question)
+            if hints:
+                line += ": " + "; ".join(hints)
             lines.append(line)
         return "\n\n".join(part for part in (self.heading, self.reason, "\n".join(lines)) if part)
 
+    @hidden
     def validate_response(self, response: FormResponse) -> FormResponse:
-        """Check an accepted answer against the questions, not domain rules.
+        """Check accepted answers; raise one ``ValueError`` naming every failing field.
 
-        Text and pickers answer a ``str`` (nonblank text kept verbatim; a
-        missing or blank optional text becomes ""). An ``IntegerQuestion``
-        answers an ``int`` in range and a ``BooleanQuestion`` a ``bool``; a
-        client that only shows text boxes may send their decimal or
-        ``true``/``false`` string, which is converted for that question only.
+        Types are strict (no conversion). Every question id is in the result:
+        an empty optional text answer is "", any other empty optional answer None.
         """
         response = FormResponse.model_validate(response)
         if response.action != "accept":
             return response
         content = response.content
         assert content is not None
+        errors = []
         unknown = content.keys() - {question.id for question in self.questions}
         if unknown:
-            raise ValueError(f"Unknown answer ids: {sorted(unknown)}")
+            errors.append(f"unknown answer ids {sorted(unknown)}")
         answers: dict[str, FormValue] = {}
         for question in self.questions:
-            answers[question.id] = _checked_answer(question, content.get(question.id))
+            value = content.get(question.id)
+            if _empty(value):
+                if question.required:
+                    errors.append(f"{question.id}: an answer is required")
+                answers[question.id] = "" if question.kind == "text" else None
+                continue
+            problem = _problem(question, value)
+            if problem:
+                errors.append(f"{question.id}: {problem}")
+            else:
+                answers[question.id] = float(value) if question.kind == "number" else value
+        if errors:
+            raise ValueError("; ".join(errors))
         return FormResponse(action="accept", content=answers)
 
 
-def _checked_answer(question: Any, value: FormValue | None) -> FormValue:
-    """One answer, checked against (and for numbers/booleans converted to) its question."""
-    if value is None or (isinstance(value, str) and not value.strip()):
-        if question.required:
-            raise ValueError(f"{question.id}: an answer is required")
-        return ""
-    if isinstance(question, IntegerQuestion):
-        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
-            value = int(value.strip())
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(f"{question.id}: enter a whole number")
-        if (question.minimum is not None and value < question.minimum) or (
-            question.maximum is not None and value > question.maximum
-        ):
-            raise ValueError(f"{question.id}: enter {_range_text(question)}")
-        return value
-    if isinstance(question, BooleanQuestion):
-        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
-            value = value.strip().lower() == "true"
-        if not isinstance(value, bool):
-            raise ValueError(f"{question.id}: answer yes or no")
-        return value
+def _empty(value: Any) -> bool:
+    """No answer: missing, blank text, or nothing picked."""
+    return value is None or value == [] or (isinstance(value, str) and not value.strip())
+
+
+_FORMAT_TEXT = {
+    "email": "an email address",
+    "uri": "a URI such as https://example.com",
+    "date": "a date (YYYY-MM-DD)",
+    "date-time": "a date and time (YYYY-MM-DDThh:mm)",
+}
+
+
+def _problem(question: Any, value: Any) -> str | None:
+    """Why ``value`` does not answer ``question`` (a person-readable phrase), or None."""
+    kind = question.kind
+    if kind == "boolean":
+        return None if isinstance(value, bool) else "answer yes or no"
+    if kind in ("integer", "number"):
+        whole = kind == "integer"
+        if isinstance(value, bool) or not isinstance(value, int if whole else (int, float)):
+            return f"enter {_range_text(question)}"
+        if not math.isfinite(value) or not _in_range(value, question.minimum, question.maximum):
+            return f"enter {_range_text(question)}"
+        return None
+    if kind == "pick_many":
+        values = {choice.value for choice in question.choices}
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return "choose from the list"
+        if len(set(value)) != len(value):
+            return "choose each option at most once"
+        if not set(value) <= values:
+            return "choose only listed options"
+        if not _in_range(len(value), question.min_items, question.max_items):
+            return f"choose {_count_text(question)}"
+        return None
     if not isinstance(value, str):
-        raise ValueError(f"{question.id}: expected text")
-    if (
-        isinstance(question, PickOneQuestion)
-        and not question.allow_other
-        and value not in {choice.value for choice in question.choices}
-    ):
-        raise ValueError(f"{question.id}: choose a listed value")
-    return value
+        return "enter text"
+    if kind == "pick_one":
+        if not question.allow_other and value not in {c.value for c in question.choices}:
+            return "choose a listed option"
+        return None
+    if not _in_range(len(value), question.min_length, question.max_length):
+        return f"enter {_length_text(question)}"
+    if question.format and not _has_format(value, question.format):
+        return f"enter {_FORMAT_TEXT[question.format]}"
+    if question.pattern and re.fullmatch(question.pattern, value) is None:
+        return f"enter text matching {question.pattern}"
+    return None
 
 
-def _range_text(question: "IntegerQuestion") -> str:
-    if question.minimum is not None and question.maximum is not None:
-        return f"a whole number from {question.minimum} to {question.maximum}"
-    if question.minimum is not None:
-        return f"a whole number of at least {question.minimum}"
-    if question.maximum is not None:
-        return f"a whole number of at most {question.maximum}"
-    return "a whole number"
+def _in_range(value: float, low: float | None, high: float | None) -> bool:
+    return (low is None or value >= low) and (high is None or value <= high)
+
+
+def _has_format(value: str, kind: str) -> bool:
+    if kind == "email":
+        return re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value) is not None
+    if kind == "uri":
+        return re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*:[^\s]+", value) is not None
+    try:
+        if kind == "date":
+            datetime.date.fromisoformat(value)
+            return re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is not None
+        datetime.datetime.fromisoformat(value)
+        return re.fullmatch(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}.*", value) is not None
+    except ValueError:
+        return False
+
+
+def _number_text(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def _range_text(question: Any) -> str:
+    noun = "a whole number" if question.kind == "integer" else "a number"
+    low, high = question.minimum, question.maximum
+    if low is not None and high is not None:
+        return f"{noun} from {_number_text(low)} to {_number_text(high)}"
+    if low is not None:
+        return f"{noun} of at least {_number_text(low)}"
+    if high is not None:
+        return f"{noun} of at most {_number_text(high)}"
+    return noun
+
+
+def _bounds_text(low: int | None, high: int | None, noun: str) -> str:
+    last = high if high is not None else low
+    if last == 1:
+        noun = noun.removesuffix("s")
+    if low is not None and high is not None:
+        return f"{low} {noun}" if low == high else f"{low} to {high} {noun}"
+    if low is not None:
+        return f"at least {low} {noun}"
+    if high is not None:
+        return f"at most {high} {noun}"
+    return ""
+
+
+def _length_text(question: Any) -> str:
+    return _bounds_text(question.min_length, question.max_length, "characters")
+
+
+def _count_text(question: Any) -> str:
+    return _bounds_text(question.min_items, question.max_items, "options")
 
 
 def _answer_text(value: FormValue) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
+    if isinstance(value, list):
+        return ", ".join(value)
+    if isinstance(value, float):
+        return _number_text(value)
     return str(value)
+
+
+@hidden
+def form_hints(question: Any) -> list[str]:
+    """Readable constraint hints for one question (shared by text renderers)."""
+    return _hints(question)
+
+
+def _hints(question: Any) -> list[str]:
+    kind = question.kind
+    hints: list[str] = []
+    if kind == "pick_one":
+        hints.append(", ".join(choice.title for choice in question.choices))
+    elif kind == "pick_many":
+        hints.append("choose any of: " + ", ".join(choice.title for choice in question.choices))
+        if _count_text(question):
+            hints.append(_count_text(question))
+    elif kind in ("integer", "number"):
+        hints.append(_range_text(question))
+    elif kind == "boolean":
+        hints.append("yes or no")
+    else:
+        if _length_text(question):
+            hints.append(_length_text(question))
+        if question.format:
+            hints.append(_FORMAT_TEXT[question.format])
+        if question.pattern:
+            hints.append(f"matching {question.pattern}")
+    default = getattr(question, "default", None)
+    if default is not None:
+        hints.append(f"default: {_default_text(question, default)}")
+    return hints
+
+
+def _default_text(question: Any, default: Any) -> str:
+    titles = {choice.value: choice.title for choice in getattr(question, "choices", [])}
+    if isinstance(default, list):
+        return ", ".join(titles.get(value, value) for value in default)
+    if isinstance(default, str):
+        return titles.get(default, default)
+    return _answer_text(default)
 
 
 @hidden
@@ -899,21 +1082,21 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
               return_result(NeedInput(question="Which branch should I push to: main or dev?"))
 
-        - ``NeedInputForm(heading=..., questions=[...])`` — an explicit form
-          of ``TextQuestion``, ``PickOneQuestion`` (typed answers allowed
-          unless ``allow_other=False``), ``IntegerQuestion`` (optional
-          ``minimum``/``maximum``) and ``BooleanQuestion`` fields. The answer is a
-          ``FormResponse``: ``accept`` with ``content`` mapping each question id
-          to its checked answer (``str`` for text and pickers, ``int``, ``bool``),
-          or ``decline``/``cancel``. Re-ask only fields that fail your own checks.
-          If the client has no form support you get plain text instead::
+        - ``NeedInputForm(heading=..., questions=[...])`` — a form of
+          ``TextQuestion``, ``PickOneQuestion``, ``PickManyQuestion``,
+          ``NumberQuestion``, ``IntegerQuestion`` and ``BooleanQuestion`` fields
+          (``doc()`` shows their constraints). The answer is a ``FormResponse``:
+          ``accept`` with ``content`` mapping each question id to its checked
+          answer, or ``decline``/``cancel``; plain text when no form could be used::
 
               return_result(NeedInputForm(heading="Release", questions=[
                   PickOneQuestion(id="branch", label="Branch?", choices=[
                       FormChoice(value="main", title="Main"), FormChoice(value="dev", title="Dev")]),
+                  PickManyQuestion(id="regions", label="Regions?", choices=[
+                      FormChoice(value="us", title="US"), FormChoice(value="eu", title="EU")]),
                   IntegerQuestion(id="replicas", label="Replicas?", minimum=1, maximum=10),
-                  BooleanQuestion(id="dry_run", label="Dry run?"),
-                  TextQuestion(id="notes", label="Release notes?", required=False),
+                  BooleanQuestion(id="dry_run", label="Dry run?", default=True),
+                  TextQuestion(id="contact", label="Contact?", format="email", required=False),
               ]))
 
         - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
