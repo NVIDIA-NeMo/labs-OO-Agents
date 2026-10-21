@@ -37,8 +37,9 @@ UNCHANGED_PROMPTS = {
     # handle() as on dev/atom after #447 and #451 (#451's "or from your parent
     # agent if you are a child" line and #447's NeedInput free-text wording),
     # plus the regular progress-update guidance. Re-pinned for the explicit
-    # NeedInput / NeedInputForm (FormResponse) guidance (#432).
-    "handle": "2f91c68c9a6dd02aac36d310f976831eb1c8b308ab0e17dd81bbf225233d83e8",
+    # NeedInput / NeedInputForm (FormResponse) guidance (#432), then for the
+    # shorter form line that points at doc(NeedInputForm).
+    "handle": "a71d59ae6c7552984b0dd293d89baae8159da32b16b0a56063a3ba190c2e6b95",
     "handle_batch": "9124c2874abd30f61a26f313abacbdc925f02a20efac8b4d7e3319a22ab545f0",
 }
 
