@@ -27,7 +27,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -111,26 +111,37 @@ class JobInfo(BaseModel):
 
 
 class JobUpdate(BaseModel):
-    """What a job delivers to ``notification["jobs"]``.
+    """What a job delivers to ``notification["jobs"]``: new items while it runs, then its end.
 
-    While it runs: new values in ``items`` (``StreamEvent`` lines for a
-    throttled ``run``, yielded values, tail lines, ticks). Every job ends with
-    exactly one ``done=True`` update. For ``run``, coroutine ``spawn`` and
-    ``after`` its result is ``items[0]``: a ``ShellResult``, the return value,
-    the payload. Async-iterator ``spawn``, ``tail`` and ``every`` end with their
-    last pending values (or ``[]``). On error ``items`` is ``[]`` and ``error``
-    is set. A cancelled job delivers nothing more. Any job's update starts the next turn; check ``u.label`` / ``u.done`` and return ``Waiting`` again if yours has not finished.
+    Every job ends with exactly one ``done=True`` update; a cancelled job
+    delivers nothing more. Any job's update starts the next turn; check
+    ``u.label`` / ``u.done`` and return ``Waiting`` again if yours has not
+    finished.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     label: str = Field(description="The job's label")
     items: list[Any] = Field(
-        default_factory=list, description="New values; result in items[0] when done"
+        default_factory=list,
+        description=(
+            "New values: StreamEvent output lines (throttled run), tail lines (str), yielded"
+            " values, ticks. On the done update: [ShellResult] (run), [return value]"
+            " (coroutine spawn), [payload] (after), else values still pending or []."
+            " [] when error is set"
+        ),
     )
-    done: bool = Field(default=False, description="True on the one update that ends the job")
-    error: str | None = Field(default=None, description="Why the job failed, on the done update")
-    log_path: str | None = Field(default=None, description="Full stdout+stderr log (run only)")
+    done: bool = Field(default=False, description="True on the job's one final update")
+    error: str | None = Field(
+        default=None,
+        description=(
+            "Why the job failed ('ExceptionType: message'), on the done update only; items"
+            " is then [] (e.g. a spawn whose coroutine raised). None otherwise"
+        ),
+    )
+    log_path: str | None = Field(
+        default=None, description="Full stdout+stderr log file (run only, else None)"
+    )
 
 
 _LOST_KEYS = ("label", "kind", "target", "description", "started_at")
@@ -331,6 +342,10 @@ class JobsApi(Skill):
     label. ``list()``/``get(label)`` show state; ``await cancel(label)`` stops
     a job (and kills its process).
     """
+
+    # Not in any signature, but it is what arrives in notification["jobs"]:
+    # referencing it here lists it under doc(self.jobs)'s Referenced Types.
+    JobUpdate: ClassVar[type[JobUpdate]] = JobUpdate
 
     def __init__(self, agent: Any):
         self._agent = agent
