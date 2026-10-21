@@ -893,7 +893,7 @@ async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
         (
             "waiting",
             {"explanation": "tests running", "on": ["jobs", "delegates"]},
-            "Waiting on jobs, delegates: tests running",
+            "Waiting: tests running",
         ),
         ("waiting", {"explanation": "tests running", "on": []}, "Waiting: tests running"),
     ],
@@ -937,7 +937,7 @@ async def test_each_turn_ends_with_its_own_status_line(bridged):
     await bridge.flush()
     assert _messages(client) == [
         "Started the job.\n\n",
-        "Waiting on jobs: job running\n\n",
+        "Waiting: job running\n\n",
         "Done: ok\n\n",
     ]
 
@@ -1768,7 +1768,7 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
     assert answers == (
         ["Which target?\nFull question\n\n- first\n- second\n\n"]
         if kind == "need_input"
-        else ["Waiting on delegates: Waiting for review\nMore detail\n\n"]
+        else ["Waiting: Waiting for review\nMore detail\n\n"]
     )
     await bridge.close()
     await agent.aclose()

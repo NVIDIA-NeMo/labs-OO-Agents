@@ -224,14 +224,13 @@ def question_text(question: str, options: list[str] | None, reason: str | None =
 def result_text(kind: str, outcome: dict[str, Any]) -> str | None:
     """The status line that ends a ``Done``/``Waiting`` turn, else ``None``.
 
-    ``Done: <explanation>`` or ``Waiting on <targets>: <explanation>``.
+    ``Done: <explanation>`` or ``Waiting: <explanation>``.
     """
     explanation = str(outcome.get("explanation") or "").strip()
     if kind == "done":
         label = "Done"
     elif kind == "waiting":
-        on = [str(target) for target in outcome.get("on") or []]
-        label = f"Waiting on {', '.join(on)}" if on else "Waiting"
+        label = "Waiting"
     else:
         return None
     return f"{label}: {explanation}" if explanation else f"{label}."
