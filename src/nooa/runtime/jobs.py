@@ -31,7 +31,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nooa.agentdoc import hidden
+from nooa.agentdoc import (
+    FileBackedTruncatingStringIO,
+    LineSplitter,
+    TruncatingStringIO,
+    bounded_lines,
+    hidden,
+)
 from nooa.context_blocks import EventBase
 from nooa.skill import Skill
 from nooa.tools._results import StreamDone, StreamEvent
@@ -48,6 +54,17 @@ JOBS_CHANNEL = "jobs"
 _TAIL_CHARS = 3_000
 # Per-job log cap; output beyond it is counted but not written.
 _LOG_CAP_BYTES = 50 * 1024 * 1024
+# Longest delivered line (run progress, tail), in characters; the rest of the
+# line is replaced by a "[... N chars of this line omitted]" marker.
+_LINE_CHARS = 8_000
+# Bytes read from a pipe or a tailed file at a time.
+_CHUNK_BYTES = 64 * 1024
+# A batch is delivered early once it holds this many items or chars of text.
+_BATCH_ITEMS = 200
+_BATCH_CHARS = 20_000
+# Items buffered between a job's reader and its batching loop; a full buffer
+# makes the reader wait (backpressure on the pipe or iterator).
+_QUEUE_ITEMS = 256
 # Finished jobs remembered for list()/get().
 _KEEP_FINISHED = 100
 # Delivered items remembered per job for get().
@@ -164,6 +181,7 @@ class _Job:
         self.last: deque[Any] = deque(maxlen=_KEEP_ITEMS)
         self.pending = 0
         self.wake: asyncio.Queue[Any] | None = None
+        self.rethrottled = False  # set by throttle(); the batching loop flushes and clears it
         self.final_state: JobStateName | None = None
 
     @property
@@ -239,39 +257,6 @@ def _throttle(lines: int | None, seconds: float | None) -> Throttle | None:
     return Throttle(lines=lines, seconds=seconds)
 
 
-class _Log:
-    """Bounded append-only log file for one job (internal)."""
-
-    def __init__(self, path: Path):
-        self.path = path
-        self._fh = open(path, "wb")  # noqa: SIM115 - closed in close()
-        self._written = 0
-        self._dropped = 0
-
-    def write(self, data: bytes) -> None:
-        room = _LOG_CAP_BYTES - self._written
-        if room > 0:
-            chunk = data[:room]
-            self._fh.write(chunk)
-            self._fh.flush()
-            self._written += len(chunk)
-        self._dropped += max(0, len(data) - max(room, 0))
-
-    def close(self) -> None:
-        if self._dropped:
-            self._fh.write(f"\n[log truncated: {self._dropped} more bytes not written]\n".encode())
-        self._fh.close()
-
-
-def _tail(text: str, omitted: int, log_path: str | None) -> str:
-    """The end of the output; ``omitted`` more characters came before it."""
-    cut = max(0, len(text) - _TAIL_CHARS)
-    omitted += cut
-    if not omitted:
-        return text
-    return f"[... {omitted} chars omitted; full output: {log_path}]\n" + text[cut:]
-
-
 def _kill_group(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is not None:
         return
@@ -282,19 +267,24 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
             proc.kill()
 
 
+def _text_chars(value: Any) -> int:
+    """Characters of text in a delivered item (for the batch cap); 0 for non-text values."""
+    if isinstance(value, StreamEvent):
+        return len(value.text)
+    return len(value) if isinstance(value, str) else 0
+
+
 async def _tail_lines(handle: Any) -> AsyncIterator[str]:
     """Yield complete lines appended to an open binary file, polling for more."""
-    partial = b""
+    splitter = LineSplitter(_LINE_CHARS)
     try:
         while True:
-            chunk = handle.readline()
+            chunk = handle.read(_CHUNK_BYTES)
             if not chunk:
                 await asyncio.sleep(_TAIL_POLL_SECONDS)
                 continue
-            partial += chunk
-            if partial.endswith(b"\n"):
-                yield partial[:-1].decode("utf-8", errors="replace").removesuffix("\r")
-                partial = b""
+            for line in splitter.feed(chunk):
+                yield line.removesuffix("\n").removesuffix("\r")
     finally:
         handle.close()
 
@@ -530,7 +520,7 @@ class JobsApi(Skill):
         stdin: str | None,
         timeout: float | None,
         cwd: str | Path | None,
-        log: _Log,
+        log: FileBackedTruncatingStringIO,
         context: tuple[str, dict],
         job: _Job,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
@@ -548,22 +538,19 @@ class JobsApi(Skill):
             env=env,
             start_new_session=True,
         )
-        queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
+        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(_QUEUE_ITEMS)
 
         async def pump(stream: asyncio.StreamReader, kind: str) -> None:
             try:
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    log.write(line)
-                    queue.put_nowait((kind, line))
-            except (ValueError, asyncio.LimitOverrunError):
-                rest = await stream.read()
-                log.write(rest)
-                queue.put_nowait((kind, rest))
+                async for line in bounded_lines(
+                    stream,
+                    max_line_chars=_LINE_CHARS,
+                    chunk_bytes=_CHUNK_BYTES,
+                    on_bytes=log.write_bytes,
+                ):
+                    await queue.put((kind, line))
             finally:
-                queue.put_nowait(None)
+                await queue.put(None)
 
         async def feed() -> None:
             assert proc.stdin is not None and stdin is not None
@@ -596,8 +583,8 @@ class JobsApi(Skill):
                 if entry is None:
                     open_streams -= 1
                     continue
-                kind, data = entry
-                yield StreamEvent(kind=kind, text=data.decode("utf-8", errors="replace"))
+                kind, text = entry
+                yield StreamEvent(kind=kind, text=text)
             if timed_out:
                 _kill_group(proc)
             await proc.wait()
@@ -623,10 +610,16 @@ class JobsApi(Skill):
     ) -> AsyncIterator[JobUpdate]:
         """Run one command; yield progress updates (if throttled), then the done update."""
         assert job.log_path is not None
-        log = _Log(Path(job.log_path))
-        # Per stream: the kept end of the output and how much was dropped before it.
-        kept = {"stdout": [], "stderr": []}
-        dropped = {"stdout": 0, "stderr": 0}
+        # The combined log (file only) and, per stream, the kept end of the output.
+        log = FileBackedTruncatingStringIO(
+            limit=0, tail_chars=0, path=job.log_path, max_file_bytes=_LOG_CAP_BYTES
+        )
+        tails = {
+            kind: TruncatingStringIO(
+                limit=_TAIL_CHARS, tail_chars=_TAIL_CHARS, full_output_path=job.log_path
+            )
+            for kind in ("stdout", "stderr")
+        }
         done = [StreamDone(kind="done", returncode=0, timed_out=False)]
 
         async def source() -> AsyncIterator[Any]:
@@ -641,19 +634,14 @@ class JobsApi(Skill):
             if isinstance(event, StreamDone):
                 done[0] = event
                 return False
-            target = kept[event.kind]
-            target.append(event.text)
-            if len(target) > 4096:  # keep memory bounded; the end is enough
-                text = "".join(target)
-                dropped[event.kind] += max(0, len(text) - _TAIL_CHARS)
-                target[:] = [text[-_TAIL_CHARS:]]
+            tails[event.kind].write(event.text)
             return True
 
         def finish() -> list[Any]:
             return [
                 ShellResult(
-                    stdout=_tail("".join(kept["stdout"]), dropped["stdout"], job.log_path),
-                    stderr=_tail("".join(kept["stderr"]), dropped["stderr"], job.log_path),
+                    stdout=tails["stdout"].getvalue(),
+                    stderr=tails["stderr"].getvalue(),
                     returncode=done[0].returncode,
                     timed_out=done[0].timed_out,
                 )
@@ -692,25 +680,26 @@ class JobsApi(Skill):
         values still pending then are dropped (the result covers them). On an
         error the pending values go out first, then a done update with ``[]``.
         """
-        inbox: asyncio.Queue[Any] = asyncio.Queue()
+        inbox: asyncio.Queue[Any] = asyncio.Queue(_QUEUE_ITEMS)
         job.wake = inbox
         failure: list[str] = []
 
         async def pump() -> None:
             try:
                 async for value in source:
-                    inbox.put_nowait(value)
+                    await inbox.put(value)
             except Exception as exc:
                 failure.append(f"{type(exc).__name__}: {exc}")
             finally:
-                inbox.put_nowait(_END)
+                await inbox.put(_END)
 
         reader = asyncio.create_task(pump())
         batch: list[Any] = []
+        batch_chars = 0
         batch_started: float | None = None
 
         def update(done: bool = False) -> JobUpdate:
-            nonlocal batch, batch_started
+            nonlocal batch, batch_chars, batch_started
             item = JobUpdate(
                 label=job.label,
                 items=batch,
@@ -718,13 +707,18 @@ class JobsApi(Skill):
                 log_path=job.log_path,
                 error=failure[0] if done and failure else None,
             )
-            batch, batch_started = [], None
+            batch, batch_chars, batch_started = [], 0, None
             job.pending = 0
             job.last.append(item)
             return item
 
         try:
             while True:
+                if job.rethrottled:
+                    # Throttle changed: deliver what was batched under the old setting.
+                    job.rethrottled = False
+                    if batch:
+                        yield update()
                 throttle = job.throttle
                 timeout = None
                 if throttle is not None and throttle.seconds is not None and batch:
@@ -738,10 +732,7 @@ class JobsApi(Skill):
                 if value is _END:
                     break
                 if value is _WAKE:
-                    # Throttle changed: deliver what was batched under the old setting.
-                    if batch:
-                        yield update()
-                    continue
+                    continue  # job.rethrottled is handled at the top of the loop
                 if collect is not None and not collect(value):
                     continue
                 throttle = job.throttle
@@ -750,9 +741,13 @@ class JobsApi(Skill):
                 if not batch:
                     batch_started = time.monotonic()
                 batch.append(value)
+                batch_chars += _text_chars(value)
                 job.pending = len(batch)
-                if throttle is None or (
-                    throttle.lines is not None and len(batch) >= throttle.lines
+                if (
+                    throttle is None
+                    or (throttle.lines is not None and len(batch) >= throttle.lines)
+                    or len(batch) >= _BATCH_ITEMS
+                    or batch_chars >= _BATCH_CHARS
                 ):
                     yield update()
                 elif (
@@ -804,8 +799,9 @@ class JobsApi(Skill):
         ``notification["jobs"]``: ``items[0]`` is a ``ShellResult`` (output
         tail; on timeout returncode 124), ``log_path`` the full stdout+stderr
         log. With ``lines``/``seconds`` it also sends progress while running:
-        ``JobUpdate`` batches of ``StreamEvent`` lines (see ``throttle``); lines
-        still batched when it ends arrive only in the ``ShellResult``.
+        ``JobUpdate`` batches of ``StreamEvent`` lines (see ``throttle``; a line
+        is cut at 8,000 chars); lines still batched when it ends arrive only in
+        the ``ShellResult``.
 
             await self.jobs.run("uv run pytest -q", label="tests")
             return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
@@ -944,7 +940,7 @@ class JobsApi(Skill):
         """Batch a running job's deliveries: one per ``lines`` items or ``seconds``.
 
         Whichever comes first triggers a delivery; the rest is flushed at the
-        end. Each call replaces the previous setting (omitted arguments become
+        end. A batch is also sent early once it holds 200 items or 20,000 chars. Each call replaces the previous setting (omitted arguments become
         None), first delivering what was already batched. ``throttle(label)``
         turns batching off: a ``run`` goes quiet until its done update (whose
         ``ShellResult`` holds the output), other jobs deliver every item.
@@ -958,8 +954,10 @@ class JobsApi(Skill):
         if not job.streaming:
             raise ValueError(f"job {label!r} is not a streaming job")
         job.throttle = _throttle(lines, seconds)
+        job.rethrottled = True
         if job.wake is not None:
-            job.wake.put_nowait(_WAKE)
+            with contextlib.suppress(asyncio.QueueFull):  # a full inbox wakes it anyway
+                job.wake.put_nowait(_WAKE)
         return job.info()
 
     def list(self) -> list[JobInfo]:

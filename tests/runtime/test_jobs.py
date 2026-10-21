@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 import time
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -715,9 +716,16 @@ async def test_a_big_run_result_keeps_the_end_and_points_to_the_log(agent):
     item = await _next(agent)
     result = item.items[0]
     marker, _, kept = result.stdout.partition("\n")
-    assert marker == f"[... {55_000 - 3_000} chars omitted; full output: {item.log_path}]"
+    assert marker == f"[... {55_000 - 3_000:,} chars omitted; full output: {item.log_path}]"
     assert len(kept) == 3_000 and kept.endswith("line 04999\n")
-    assert result.stderr.startswith(f"[... 6000 chars omitted; full output: {item.log_path}]\n")
+    # The 9,000-char stderr line was cut at 8,000 chars; the result keeps its end.
+    line_marker = "[... 1,000 chars of this line omitted]"
+    omitted = 8_000 + len(line_marker) - 3_000
+    assert result.stderr == (
+        f"[... {omitted:,} chars omitted; full output: {item.log_path}]\n"
+        + "e" * (3_000 - len(line_marker))
+        + line_marker
+    )
     assert len(Path(item.log_path).read_text()) == 55_000 + 9_000
 
 
@@ -767,3 +775,55 @@ async def test_spawn_of_an_uncalled_async_function_says_to_call_it(agent):
     with pytest.raises(TypeError, match=re.escape("pass numbers(), not numbers")):
         agent.jobs.spawn(numbers, label="n")
     assert agent.jobs.list() == []
+
+
+# ---- bounded memory: long lines, chatty output ---------------------------
+
+_BIG_LINE = (
+    "python3 -c \"import sys; sys.stdout.write('x' * 5_000_000); sys.stdout.flush()\";"
+    " echo; echo after-1; echo after-2"
+)
+
+
+async def test_a_5mb_line_stays_bounded_and_later_lines_still_arrive(agent):
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        await agent.jobs.run(_BIG_LINE, label="big", lines=1)
+        updates = await _stream_updates(agent, "big")
+        peak = tracemalloc.get_traced_memory()[1] - baseline
+    finally:
+        tracemalloc.stop()
+    assert peak < 2_000_000, f"peak {peak:,} bytes above baseline"
+    lines = [event.text for update in updates[:-1] for event in update.items]
+    assert lines[0] == "x" * 8_000 + "[... 4,992,000 chars of this line omitted]\n"
+    assert lines[1:] == ["after-1\n", "after-2\n"]
+    done = updates[-1]
+    assert done.done and len(done.items[0].stdout) <= 3_100
+    assert done.items[0].stdout.endswith("after-1\nafter-2\n")
+    assert Path(done.log_path).stat().st_size == 5_000_000 + len("\nafter-1\nafter-2\n")
+
+
+async def test_a_throttled_chatty_run_sends_batches_early_at_the_cap(agent):
+    cmd = "python3 -c \"[print(f'line {i}') for i in range(10_000)]\""
+    await agent.jobs.run(cmd, label="chatty", seconds=60)
+    started = time.monotonic()
+    updates = await _stream_updates(agent, "chatty")
+    assert time.monotonic() - started < 30  # did not wait for the 60 s window
+    progress = [len(update.items) for update in updates[:-1]]
+    assert progress and max(progress) == 200
+    assert sum(progress) >= 9_800  # the last partial batch goes to the ShellResult only
+    assert updates[-1].done and updates[-1].items[0].stdout.endswith("line 9999\n")
+
+
+async def test_tail_caps_a_5mb_line(agent, tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text("")
+    agent.jobs.tail(log, label="log")
+    with log.open("a") as handle:
+        handle.write("y" * 5_000_000 + "\nshort\n")
+    first = await _next(agent)
+    second = await _next(agent)
+    assert first.items == ["y" * 8_000 + "[... 4,992,000 chars of this line omitted]"]
+    assert second.items == ["short"]
+    await agent.jobs.cancel("log")
