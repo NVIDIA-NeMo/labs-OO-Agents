@@ -61,7 +61,10 @@ async def test_concise_python_is_full_tool_card_not_message(make_adapter, worksp
     client.log.clear()
     response = await adapter.prompt(session_id, [text_block("Check it")])
     assert response.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id) == ["User-facing answer\n\n"]
+    assert client.texts(AgentMessageChunk, session_id) == [
+        "User-facing answer\n\n",
+        "Done: Checked repository\nExtra detail\n\n",
+    ]
     assert client.texts(AgentThoughtChunk, session_id) == []
     [start] = client.updates(session_id, ToolCallStart)
     [end] = client.updates(session_id, ToolCallProgress)

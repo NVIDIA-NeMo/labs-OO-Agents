@@ -898,15 +898,17 @@ async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
         ("waiting", {"explanation": "tests running", "on": []}, "Waiting: tests running"),
     ],
 )
-async def test_a_silent_done_or_waiting_turn_ends_with_a_status_line(bridged, kind, outcome, line):
+async def test_a_done_or_waiting_turn_ends_with_a_status_line(bridged, kind, outcome, line):
     _agent, session, client, bridge = bridged
     session.emit(TurnEndedUpdate(session_id="session-1", outcome_kind=kind, outcome=outcome))
     await bridge.flush()
     assert _messages(client) == [f"{line}\n\n"]
 
 
-@pytest.mark.parametrize("kind", ["done", "waiting"])
-async def test_a_turn_that_sent_a_message_gets_no_status_line(bridged, kind):
+@pytest.mark.parametrize(
+    ("kind", "line"), [("done", "Done: answered"), ("waiting", "Waiting: answered")]
+)
+async def test_a_status_line_follows_the_turns_messages(bridged, kind, line):
     agent, session, client, bridge = bridged
     session.emit(SimpleNamespace(kind="turn_started", session_id="session-1"))
     agent.event_manager.add(AgentMessage(content="Here is the answer."))
@@ -916,10 +918,10 @@ async def test_a_turn_that_sent_a_message_gets_no_status_line(bridged, kind):
         )
     )
     await bridge.flush()
-    assert _messages(client) == ["Here is the answer.\n\n"]
+    assert _messages(client) == ["Here is the answer.\n\n", f"{line}\n\n"]
 
 
-async def test_the_status_line_depends_only_on_the_turn_that_ended(bridged):
+async def test_each_turn_ends_with_its_own_status_line(bridged):
     agent, session, client, bridge = bridged
     agent.event_manager.add(AgentMessage(content="Started the job."))
     session.emit(
@@ -933,7 +935,11 @@ async def test_the_status_line_depends_only_on_the_turn_that_ended(bridged):
         TurnEndedUpdate(session_id="session-1", outcome_kind="done", outcome={"explanation": "ok"})
     )
     await bridge.flush()
-    assert _messages(client) == ["Started the job.\n\n", "Done: ok\n\n"]
+    assert _messages(client) == [
+        "Started the job.\n\n",
+        "Waiting on jobs: job running\n\n",
+        "Done: ok\n\n",
+    ]
 
 
 async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):
@@ -1659,7 +1665,8 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
     thoughts = [u.content.text for u in updates if isinstance(u, AgentThoughtChunk)]
     cards = [u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
     assert [u.content.text for u in updates if isinstance(u, AgentMessageChunk)] == [
-        "User-facing answer\nStill visible\n\n"
+        "User-facing answer\nStill visible\n\n",
+        "Done: Task completed\nMore details\n\n",
     ]
     if level == "silent":
         assert thoughts == []

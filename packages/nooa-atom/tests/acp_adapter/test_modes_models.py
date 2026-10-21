@@ -72,7 +72,10 @@ async def test_choosing_a_model_switches_the_next_turn(make_adapter, workspace, 
     assert [alias for alias, _ in factory.calls][-1] == "smart"
     result = await asyncio.wait_for(adapter.prompt(session_id, [text_block("hi")]), TIMEOUT)
     assert result.stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "From the smart model.\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
+        "From the smart model.\n\n",
+        "Done: answered\n\n",
+    ]
 
 
 async def test_the_model_option_reports_the_chosen_model_at_once_and_after_a_load(

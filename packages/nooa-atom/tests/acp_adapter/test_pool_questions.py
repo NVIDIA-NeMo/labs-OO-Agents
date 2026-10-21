@@ -37,15 +37,17 @@ async def _run(adapter, workspace, text="push it"):
 
 
 def _assert_echo(client, adapter, session_id, expected):
-    """Exactly one admitted answer, before the agent's reply; no prompt echo."""
+    """Exactly one admitted answer, then the agent's reply and status line; no prompt echo."""
     assert client.texts(UserMessageChunk, session_id) == [expected]
     conversation = [
         u
         for u in client.updates(session_id)
         if isinstance(u, (AgentMessageChunk, UserMessageChunk))
     ]
-    assert isinstance(conversation[-2], UserMessageChunk)
+    assert isinstance(conversation[-3], UserMessageChunk)
+    assert isinstance(conversation[-2], AgentMessageChunk)
     assert isinstance(conversation[-1], AgentMessageChunk)
+    assert conversation[-1].content.text == "Done: answered\n\n"
     assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
         "push it",
         expected,
@@ -93,7 +95,10 @@ async def test_a_free_text_question_is_a_one_field_pool_form(make_adapter, works
         )
     ]
     _assert_echo(client, adapter, session_id, "Aurora")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "'Aurora'\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
+        "'Aurora'\n\n",
+        "Done: answered\n\n",
+    ]
 
 
 async def test_a_string_answer_type_is_a_pool_form(make_adapter, workspace, client):
@@ -120,7 +125,10 @@ async def test_a_string_answer_type_is_a_pool_form(make_adapter, workspace, clie
     [echo] = client.texts(UserMessageChunk, session_id)
     assert json.loads(echo) == {"branch": "dev"}
     _assert_echo(client, adapter, session_id, echo)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "Answer(branch='dev')\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
+        "Answer(branch='dev')\n\n",
+        "Done: answered\n\n",
+    ]
 
 
 def _ask_rollout():
@@ -156,9 +164,10 @@ async def test_non_string_fields_are_asked_as_strings_and_converted(
     [echo] = client.texts(UserMessageChunk, session_id)
     assert json.loads(echo) == {"target": "prod", "replicas": 3, "dry_run": False}
     _assert_echo(client, adapter, session_id, echo)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "Rollout(target='prod', replicas=3, dry_run=False)\n\n"
-    )
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
+        "Rollout(target='prod', replicas=3, dry_run=False)\n\n",
+        "Done: answered\n\n",
+    ]
 
 
 async def test_a_value_that_does_not_convert_is_asked_again_with_the_error(
@@ -181,9 +190,10 @@ async def test_a_value_that_does_not_convert_is_asked_again_with_the_error(
     [echo] = client.texts(UserMessageChunk, session_id)
     assert json.loads(echo) == {"target": "prod", "replicas": 2, "dry_run": False}
     _assert_echo(client, adapter, session_id, echo)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == (
-        "Rollout(target='prod', replicas=2, dry_run=False)\n\n"
-    )
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
+        "Rollout(target='prod', replicas=2, dry_run=False)\n\n",
+        "Done: answered\n\n",
+    ]
 
 
 async def test_a_second_bad_value_falls_back_to_text(make_adapter, workspace, client):
@@ -296,7 +306,7 @@ async def test_a_choice_question_is_a_one_field_pool_form(make_adapter, workspac
         )
     ]
     _assert_echo(client, adapter, session_id, "dev")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == ["'dev'\n\n", "Done: answered\n\n"]
 
 
 async def test_a_choice_answer_matches_ignoring_case_and_spaces(make_adapter, workspace, client):
@@ -307,7 +317,7 @@ async def test_a_choice_answer_matches_ignoring_case_and_spaces(make_adapter, wo
 
     assert response.stop_reason == "end_turn"
     _assert_echo(client, adapter, session_id, "main")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "'main'\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == ["'main'\n\n", "Done: answered\n\n"]
 
 
 @pytest.mark.parametrize(
@@ -345,7 +355,7 @@ async def test_an_invalid_choice_answer_is_asked_again(make_adapter, workspace, 
     assert second["message"] == "Which branch?\n\n" + error
     assert second["requestedSchema"] == BRANCH_SCHEMA
     _assert_echo(client, adapter, session_id, "dev")
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "'dev'\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == ["'dev'\n\n", "Done: answered\n\n"]
 
 
 async def test_a_second_blank_choice_answer_falls_back_to_text(make_adapter, workspace, client):
@@ -382,7 +392,10 @@ async def test_an_alternative_is_submitted_without_retry(make_adapter, workspace
     assert len(_requests(client)) == 1
     assert _requests(client)[0][1]["requestedSchema"] == BRANCH_SCHEMA
     _assert_echo(client, adapter, session_id, text)
-    assert client.texts(AgentMessageChunk, session_id)[-1] == repr(text) + "\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
+        repr(text) + "\n\n",
+        "Done: answered\n\n",
+    ]
 
 
 async def test_cancel_while_a_pool_choice_form_is_open(make_adapter, workspace, client):
@@ -429,7 +442,10 @@ async def test_a_typed_literal_or_string_accepts_an_alternative(make_adapter, wo
             {"type": "string"},
         ],
     }
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "BranchAnswer(branch='release')\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
+        "BranchAnswer(branch='release')\n\n",
+        "Done: answered\n\n",
+    ]
 
 
 async def test_a_typed_literal_retries_an_unlisted_answer(make_adapter, workspace, client):
@@ -446,4 +462,7 @@ async def test_a_typed_literal_retries_an_unlisted_answer(make_adapter, workspac
     assert "anyOf" not in first["requestedSchema"]["properties"]["branch"]
     assert second["message"].startswith("Which branch?\n\nThat answer was not accepted: branch:")
     assert second["requestedSchema"] == first["requestedSchema"]
-    assert client.texts(AgentMessageChunk, session_id)[-1] == "BranchAnswer(branch='dev')\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
+        "BranchAnswer(branch='dev')\n\n",
+        "Done: answered\n\n",
+    ]
