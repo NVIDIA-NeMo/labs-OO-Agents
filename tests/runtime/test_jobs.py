@@ -26,6 +26,7 @@ class _Agent:
         self.queue_manager.queue("jobs")
         self.shell = ShellTools(cwd=str(cwd)) if shell else None
         self.cwd = cwd
+        self._jobs_running: dict = {}  # set by InteractiveAgent.__init__
 
 
 @pytest.fixture

@@ -212,15 +212,6 @@ def _short(text: str, limit: int = _TARGET_CHARS) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
-def _seconds(value: float) -> str:
-    return f"{value:g}s"
-
-
-def _callable_target(work: Any) -> str:
-    name = getattr(work, "__qualname__", None) or type(work).__name__
-    return f"{name}()"
-
-
 _SECONDS_HELP = "seconds must be a number of seconds (e.g. 600 for 10 minutes)"
 
 
@@ -376,27 +367,34 @@ class JobsApi(Skill):
         kind: JobKind,
         throttle: Throttle | None,
         *,
-        log: bool,
-        streaming: bool,
-        target: str = "",
-        description: str = "",
+        target: str,
+        description: str,
+        replace: bool,
+        streaming: bool = True,
     ) -> _Job:
+        """Claim ``label`` (stopping its running job if ``replace``) for a new job.
+
+        Only a ``run`` gets a log; ``after`` and a coroutine ``spawn`` pass
+        ``streaming=False`` (they cannot be throttled).
+        """
         if not isinstance(description, str):
             raise TypeError("description must be a string")
-        self._check_label(label)
-        current = self._jobs.get(label)
+        self._claim(label, replace)
         log_path = None
-        if log:
+        if kind == "run":
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)[:60]
             log_path = str(self._logs() / f"{safe}-{uuid.uuid4().hex[:6]}.log")
         job = _Job(label, kind, throttle, log_path, streaming, _short(target), description.strip())
-        if current is not None:
-            self._finished.append(current)
+        if label in self._jobs:
+            self._finished.append(self._jobs[label])
         self._jobs[label] = job
         return job
 
     @hidden
-    def _check_label(self, label: str) -> None:
+    def _claim(self, label: str, replace: bool) -> None:
+        """Check ``label`` is free, first stopping its running job if ``replace``."""
+        if replace:
+            self._stop_now(label)
         if not isinstance(label, str) or not label.strip():
             raise ValueError("label must be a non-empty string")
         current = self._jobs.get(label)
@@ -411,30 +409,22 @@ class JobsApi(Skill):
         self._channel()
         job.handle = self._queues.spawn(work, channel=JOBS_CHANNEL, label=job.label)
         job.handle.describe = job.status_line
-        self._running_record()[job.label] = job.record()
+        self._agent._jobs_running[job.label] = job.record()
         job.handle._task.add_done_callback(lambda task: self._forget(job, task))
         return job.info()
 
     @hidden
-    def _running_record(self) -> dict[str, dict[str, str]]:
-        """``agent._jobs_running``: label -> record of each running job.
-
-        A plain dict on the agent, so it is saved with the agent's snapshot;
-        ``after_restore`` reads what the previous process left there.
-        """
-        record = getattr(self._agent, "_jobs_running", None)
-        if not isinstance(record, dict):
-            record = {}
-            self._agent._jobs_running = record
-        return record
-
-    @hidden
     def _forget(self, job: _Job, task: asyncio.Task[Any]) -> None:
+        """Drop a finished job from ``agent._jobs_running``.
+
+        That dict (label -> ``_Job.record()`` of each running job) is saved
+        with the agent's snapshot; ``after_restore`` reads what the previous
+        process left there.
+        """
         if task.cancelled() and job.final_state is None:
             return  # stopped by a shutdown, not by the job or the model: it did not survive
-        record = self._running_record()
-        entry = record.get(job.label)
-        if isinstance(entry, dict) and entry.get("id") == job.id:
+        record = self._agent._jobs_running
+        if record.get(job.label, {}).get("id") == job.id:
             del record[job.label]
 
     @hidden
@@ -463,16 +453,15 @@ class JobsApi(Skill):
         jobs. Adds one ``JobsLost`` event (the model sees it in the next turn)
         and clears the record, so it is reported once.
         """
-        record = self._running_record()
-        lost = [
-            entry
-            for label, entry in record.items()
-            if isinstance(entry, dict)
-            and not (label in self._jobs and self._jobs[label].id == entry.get("id"))
-        ]
-        self._agent._jobs_running = {
-            label: entry for label, entry in record.items() if entry not in lost
-        }
+        kept: dict[str, dict[str, str]] = {}
+        lost: list[dict[str, str]] = []
+        for label, entry in self._agent._jobs_running.items():
+            current = self._jobs.get(label)
+            if current is not None and current.id == entry.get("id"):
+                kept[label] = entry
+            else:
+                lost.append(entry)
+        self._agent._jobs_running = kept
         if not lost:
             return
         events = getattr(self._agent, "event_manager", None)
@@ -533,12 +522,20 @@ class JobsApi(Skill):
         return cwd, env
 
     @hidden
-    async def _spawn_process(
-        self, command: str, stdin: str | None, cwd: str | Path | None, context: tuple[str, dict]
-    ) -> asyncio.subprocess.Process:
+    async def _lines(
+        self,
+        command: str,
+        stdin: str | None,
+        timeout: float | None,
+        cwd: str | Path | None,
+        log: _Log,
+        context: tuple[str, dict],
+        job: _Job,
+    ) -> AsyncIterator[StreamEvent | StreamDone]:
+        """Run one command in its own process; yield its lines, then a ``StreamDone``."""
         base, env = context
         directory = Path(base) if cwd is None else (Path(base) / Path(cwd)).resolve()
-        return await asyncio.create_subprocess_exec(
+        proc = job.proc = await asyncio.create_subprocess_exec(
             "bash",
             "-c",
             command,
@@ -549,22 +546,6 @@ class JobsApi(Skill):
             env=env,
             start_new_session=True,
         )
-
-    @hidden
-    async def _lines(
-        self,
-        command: str,
-        stdin: str | None,
-        timeout: float | None,
-        cwd: str | Path | None,
-        log: _Log,
-        context: tuple[str, dict],
-        job: _Job | None = None,
-    ) -> AsyncIterator[StreamEvent | StreamDone]:
-        """Run one command in its own process; yield its lines, then a ``StreamDone``."""
-        proc = await self._spawn_process(command, stdin, cwd, context)
-        if job is not None:
-            job.proc = proc
         queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
 
         async def pump(stream: asyncio.StreamReader, kind: str) -> None:
@@ -827,13 +808,11 @@ class JobsApi(Skill):
             await self.jobs.run("uv run pytest -q", label="tests")
             return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
         """
-        if replace:
-            self._stop_now(label)
         throttle = _throttle(lines, seconds)
-        self._check_label(label)
+        self._claim(label, replace)  # fail before the await
         context = await self._shell_context()
         job = self._new_job(
-            label, "run", throttle, log=True, streaming=True, target=cmd, description=description
+            label, "run", throttle, target=cmd, description=description, replace=replace
         )
         return self._start(job, self._run_job(job, cmd, stdin, timeout, cwd, context))
 
@@ -860,19 +839,16 @@ class JobsApi(Skill):
         if inspect.iscoroutinefunction(work) or inspect.isasyncgenfunction(work):
             name = getattr(work, "__name__", "work")
             raise TypeError(f"pass {name}(), not {name}: spawn() takes the call's result")
-        if replace:
-            self._stop_now(label)
-        about = {"target": _callable_target(work), "description": description}
+        name = getattr(work, "__qualname__", None) or type(work).__name__
+        about = {"target": f"{name}()", "description": description, "replace": replace}
         if hasattr(work, "__aiter__"):
-            job = self._new_job(
-                label, "spawn", _throttle(lines, seconds), log=False, streaming=True, **about
-            )
+            job = self._new_job(label, "spawn", _throttle(lines, seconds), **about)
             return self._start(job, self._stream_job(job, work.__aiter__()))
-        if not asyncio.iscoroutine(work) and not isinstance(work, Awaitable):
+        if not isinstance(work, Awaitable):
             raise TypeError("spawn() takes a coroutine or an async iterator")
         if lines is not None or seconds is not None:
             raise ValueError("lines/seconds apply to async iterators only")
-        job = self._new_job(label, "spawn", None, log=False, streaming=False, **about)
+        job = self._new_job(label, "spawn", None, streaming=False, **about)
         return self._start(job, self._call_job(job, work))
 
     def tail(
@@ -893,22 +869,14 @@ class JobsApi(Skill):
 
             self.jobs.tail("logs/server.log", label="server-log", seconds=60)
         """
-        if replace:
-            self._stop_now(label)
         throttle = _throttle(lines, seconds)
-        self._check_label(label)
+        self._claim(label, replace)  # fail before opening the file
         resolved = (Path(self._shell_dir()) / Path(path)).resolve()
         handle = open(resolved, "rb")  # noqa: SIM115 - closed by the generator
         handle.seek(0, os.SEEK_END)
         target = str(resolved) if str(resolved) == str(path) else f"{path} ({resolved})"
         job = self._new_job(
-            label,
-            "tail",
-            throttle,
-            log=False,
-            streaming=True,
-            target=target,
-            description=description,
+            label, "tail", throttle, target=target, description=description, replace=replace
         )
         return self._start(job, self._stream_job(job, _tail_lines(handle)))
 
@@ -928,16 +896,14 @@ class JobsApi(Skill):
             self.jobs.after(600, label="check-ci", payload="check CI on PR #462 and report")
         """
         _check_seconds(seconds, zero_ok=True)
-        if replace:
-            self._stop_now(label)
         job = self._new_job(
             label,
             "after",
             None,
-            log=False,
-            streaming=False,
-            target=f"after {_seconds(seconds)}",
+            target=f"after {seconds:g}s",
             description=description,
+            replace=replace,
+            streaming=False,
         )
         job.payload = payload
         return self._start(job, self._call_job(job, asyncio.sleep(seconds, result=payload)))
@@ -958,17 +924,14 @@ class JobsApi(Skill):
 
             self.jobs.every(300, label="poll-ci", payload="check CI and report changes")
         """
-        if replace:
-            self._stop_now(label)
         _check_seconds(seconds)
         job = self._new_job(
             label,
             "every",
             None,
-            log=False,
-            streaming=True,
-            target=f"every {_seconds(seconds)}",
+            target=f"every {seconds:g}s",
             description=description,
+            replace=replace,
         )
         job.payload = payload
         return self._start(job, self._stream_job(job, _ticks(seconds, payload)))
@@ -1012,12 +975,8 @@ class JobsApi(Skill):
         job = self._jobs.get(label)
         if job is None or job.handle is None or job.state != "running":
             return False
-        job.final_state = "cancelled"  # first: the done callback then forgets the job
-        if job.proc is not None:
-            _kill_group(job.proc)
-        await job.handle.cancel()
-        if job.finished_at is None:
-            job.finished_at = _now()
+        self._stop_now(label)
+        await job.handle.cancel()  # waits for the task to unwind
         return True
 
     def __repr__(self) -> str:
