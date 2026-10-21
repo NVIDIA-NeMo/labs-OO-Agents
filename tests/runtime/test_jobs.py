@@ -194,7 +194,7 @@ async def test_run_with_progress_delivers_lines_then_its_result(agent):
     updates, result = await _collect_run(agent)
     assert all(len(u.items) == 1 and isinstance(u.items[0], StreamEvent) for u in updates)
     lines = sorted((u.items[0].kind, u.items[0].text) for u in updates)
-    assert lines == [("stderr", "b\n"), ("stdout", "a\n"), ("stdout", "c\n")]
+    assert lines == [("stderr", "b"), ("stdout", "a"), ("stdout", "c")]  # no trailing newline
     assert result.label == "s" and result.items[0].returncode == 0
     assert result.items[0].stdout == "a\nc\n" and result.items[0].stderr == "b\n"
     assert "a\n" in Path(result.log_path).read_text()
@@ -205,7 +205,7 @@ async def test_throttle_by_items_batches_and_flushes_before_the_result(agent):
     updates, result = await _collect_run(agent)
     texts = [[e.text for e in u.items] for u in updates]
     # "5" is still pending at the end: not sent alone, the ShellResult has it.
-    assert texts == [["1\n", "2\n"], ["3\n", "4\n"]]
+    assert texts == [["1", "2"], ["3", "4"]]
     assert result.items == [result.items[0]] and result.items[0].stdout == "1\n2\n3\n4\n5\n"
 
 
@@ -215,7 +215,7 @@ async def test_run_progress_by_seconds(agent):
     )
     updates, result = await _collect_run(agent)
     sent = [e.text for u in updates for e in u.items]
-    assert sent == [f"{i}\n" for i in range(1, len(sent) + 1)] and len(sent) >= 2
+    assert sent == [f"{i}" for i in range(1, len(sent) + 1)] and len(sent) >= 2
     assert 1 <= len(updates) <= 3 and len(updates[0].items) >= 2
     assert result.items[0].returncode == 0
     assert result.items[0].stdout == "".join(f"{i}\n" for i in range(1, 7))
@@ -235,8 +235,8 @@ async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
     (tmp_path / "go1").touch()
     update = await _next(agent)
     assert isinstance(update, JobUpdate) and [e.text for e in update.items] == [
-        "loud1\n",
-        "loud2\n",
+        "loud1",
+        "loud2",
     ]
     assert agent.jobs.throttle("r").throttle is None  # progress off again
     (tmp_path / "go2").touch()
@@ -502,8 +502,21 @@ async def test_undecodable_output_does_not_end_the_stream(agent):
     await agent.jobs.run(r"printf 'first\ncaf\xe9\nlast\n'", label="bytes", items=1)
     updates, result = await _collect_run(agent)
     texts = [e.text for u in updates for e in u.items]
-    assert texts == ["first\n", "caf\ufffd\n", "last\n"]
+    assert texts == ["first", "caf\ufffd", "last"]
     assert result.items[0].stdout == "first\ncaf\ufffd\nlast\n"
+
+
+async def test_delivered_line_items_never_end_in_a_newline(agent, tmp_path):
+    await agent.jobs.run(r"printf 'crlf\r\nlf\nlast'", label="nl", items=1)
+    updates, result = await _collect_run(agent)
+    assert [e.text for u in updates for e in u.items] == ["crlf", "lf", "last"]
+    assert result.items[0].stdout == "crlf\r\nlf\nlast"  # the ShellResult keeps the output as is
+    log = tmp_path / "nl.log"
+    log.write_text("")
+    agent.jobs.tail(str(log), label="t", items=2)
+    log.write_bytes(b"one\r\ntwo\n")
+    assert (await _next(agent)).items == ["one", "two"]
+    await agent.jobs.cancel("t")
 
 
 # ---- target and description ----
@@ -817,8 +830,8 @@ async def test_a_5mb_line_stays_bounded_and_later_lines_still_arrive(agent):
         tracemalloc.stop()
     assert peak < 2_000_000, f"peak {peak:,} bytes above baseline"
     lines = [event.text for update in updates[:-1] for event in update.items]
-    assert lines[0] == "x" * 8_000 + "[... 4,992,000 chars of this line omitted]\n"
-    assert lines[1:] == ["after-1\n", "after-2\n"]
+    assert lines[0] == "x" * 8_000 + "[... 4,992,000 chars of this line omitted]"
+    assert lines[1:] == ["after-1", "after-2"]
     done = updates[-1]
     assert done.done and len(done.items[0].stdout) <= 3_100
     assert done.items[0].stdout.endswith("after-1\nafter-2\n")

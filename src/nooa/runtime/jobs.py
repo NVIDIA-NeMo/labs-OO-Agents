@@ -126,7 +126,7 @@ class JobUpdate(BaseModel):
         default_factory=list,
         description=(
             "New values: StreamEvent output lines (throttled run), tail lines (str), yielded"
-            " values, ticks. On the done update: [ShellResult] (run), [return value]"
+            " values, ticks; a line item never ends in a newline. On the done update: [ShellResult] (run), [return value]"
             " (coroutine spawn), [payload] (after), else values still pending or []."
             " [] when error is set"
         ),
@@ -160,6 +160,12 @@ class JobsLost(EventBase):
 
 _WAKE = object()  # throttle changed: re-evaluate batching
 _END = object()  # source exhausted
+_SKIP = object()  # collect(): nothing to deliver for this value
+
+
+def _strip_newline(line: str) -> str:
+    """A delivered line item never ends in a newline (``\\n`` or ``\\r\\n``)."""
+    return line.removesuffix("\n").removesuffix("\r")
 
 
 @hidden
@@ -300,7 +306,7 @@ async def _tail_lines(handle: Any) -> AsyncIterator[str]:
                 await asyncio.sleep(_TAIL_POLL_SECONDS)
                 continue
             for line in splitter.feed(chunk):
-                yield line.removesuffix("\n").removesuffix("\r")
+                yield _strip_newline(line)
     finally:
         handle.close()
 
@@ -659,13 +665,13 @@ class JobsApi(Skill):
             finally:
                 log.close()
 
-        def collect(event: Any) -> bool:
-            """Keep the output tail; return whether ``event`` is progress to deliver."""
+        def collect(event: Any) -> Any:
+            """Keep the output tail; return the progress item to deliver, or ``_SKIP``."""
             if isinstance(event, StreamDone):
                 done[0] = event
-                return False
+                return _SKIP
             tails[event.kind].write(event.text)
-            return True
+            return StreamEvent(kind=event.kind, text=_strip_newline(event.text))
 
         def finish() -> list[Any]:
             return [
@@ -698,14 +704,15 @@ class JobsApi(Skill):
         job: _Job,
         source: AsyncIterator[Any],
         *,
-        collect: Callable[[Any], bool] | None = None,
+        collect: Callable[[Any], Any] | None = None,
         finish: Callable[[], list[Any]] | None = None,
     ) -> AsyncIterator[JobUpdate]:
         """Pump ``source`` and yield ``JobUpdate`` batches per the job's live throttle.
 
         Plain streams deliver every value (batched when throttled) and end with
         a done update carrying the last pending values. With ``finish``
-        (``run``), values pass ``collect`` first and are delivered only while
+        (``run``), values pass ``collect`` first (it returns what to deliver, or
+        ``_SKIP``) and are delivered only while
         throttled; the done update's items are what ``finish`` returns, and
         values still pending then are dropped (the result covers them). On an
         error the pending values go out first, then a done update with ``[]``.
@@ -763,8 +770,10 @@ class JobsApi(Skill):
                     break
                 if value is _WAKE:
                     continue  # job.rethrottled is handled at the top of the loop
-                if collect is not None and not collect(value):
-                    continue
+                if collect is not None:
+                    value = collect(value)
+                    if value is _SKIP:
+                        continue
                 throttle = job.throttle
                 if finish is not None and throttle is None:
                     continue  # a quiet run: its output goes to the done update only
@@ -891,7 +900,7 @@ class JobsApi(Skill):
     ) -> JobInfo:
         """Deliver lines appended to a file from now on, until cancelled.
 
-        Each ``JobUpdate`` item is one line (without its newline); batch with
+        Each ``JobUpdate`` item is one line (a str); batch with
         ``items``/``seconds``. A relative ``path`` is relative to the shell's
         directory.
 
