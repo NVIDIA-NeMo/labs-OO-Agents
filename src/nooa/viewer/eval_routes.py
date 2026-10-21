@@ -81,9 +81,10 @@ _TRACE_METRIC_KEYS = {"duration_ms", "span_count"}
 
 
 def _numeric_score(metadata: dict[str, Any]) -> float | None:
-    value = metadata.get("score")
+    # Match the frontend score cell: weighted_score takes precedence.
+    value = metadata.get("weighted_score")
     if value is None:
-        value = metadata.get("weighted_score")
+        value = metadata.get("score")
     try:
         score = float(value)
         return score if math.isfinite(score) else None

@@ -353,6 +353,17 @@ def test_experiment_listing_reads_catalog_once(source_store, monkeypatch, endpoi
             0,
         ),
         ([{"passed": None}, {"passed": None}], 0, 0, None, 0, 0),
+        (
+            [
+                {"passed": True, "score": 1, "weighted_score": 0.5},
+                {"passed": False, "score": 0, "weighted_score": 0.25},
+            ],
+            2,
+            2,
+            0.375,
+            1,
+            1,
+        ),
     ],
 )
 def test_summary_distinguishes_grades_scores_and_missing_results(
