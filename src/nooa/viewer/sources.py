@@ -27,7 +27,7 @@ class TraceSource(Protocol):
     """An installed source factory receives its name and JSON options.
 
     Catalog rows use the local store's session shape: id, name, experiment,
-    modified (epoch seconds), span_count (or None), and eval metadata. IDs must
+    modified (epoch seconds; numbers are normalised to strings), span_count (or None), and eval metadata. IDs must
     be globally unique and stable. version changes invalidate cached details.
     load_session returns OTLP bodies and nooaJournal blocks/call records.
     """
@@ -154,7 +154,8 @@ def list_sessions(experiment=None, eval_only=False, batch_id=None):
             continue
         cached = cached_rows.get(sid)
         # The catalog owns grades; the local cache owns measured trace metrics.
-        rows[sid] = {**session, "source": name}
+        # Plugins report epoch seconds; the local store serves them as strings.
+        rows[sid] = {**session, "source": name, "modified": str(session.get("modified", 0))}
         if cached:
             rows[sid]["span_count"] = cached["span_count"]
             rows[sid]["eval"] = {**cached.get("eval", {}), **session.get("eval", {})}

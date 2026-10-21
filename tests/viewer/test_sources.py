@@ -24,7 +24,7 @@ class ExampleSource:
                 "id": "example-task",
                 "name": "Task",
                 "experiment": "Example",
-                "modified": 1,
+                "modified": "1",
                 "span_count": None,
                 "eval": {"passed": False},
             }
@@ -110,6 +110,16 @@ def test_catalog_is_lazy_and_materialization_is_idempotent(source_store):
         == "text"
     )
     assert otlp_store.get_session_blocks("example-task")["text"] == "stdout"
+
+
+@pytest.mark.parametrize("modified", ["1", 1, 1.5])
+def test_trace_listing_accepts_source_catalog(source_store, monkeypatch, modified):
+    catalog = source_store.list_sessions()[0]
+    monkeypatch.setattr(source_store, "list_sessions", lambda: [{**catalog, "modified": modified}])
+    response = TestClient(main.app).get("/api/traces")
+    assert response.status_code == 200
+    traces = response.json()["traces"]
+    assert [(t["id"], t["modified"]) for t in traces] == [("example-task", str(modified))]
 
 
 def test_source_cannot_overwrite_local_session(source_store):
