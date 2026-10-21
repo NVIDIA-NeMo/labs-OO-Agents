@@ -515,7 +515,11 @@ async def test_failed_decision_does_not_retry_or_prevent_next_style(monkeypatch,
     else:
         assert record["outcome"] == "not_probed"
         assert record["status_code"] == failure
-    assert result.tokens_charged_to_budget == 512 + 712
+    assert result.tokens_charged_to_budget == 512 + connect.DISCOVERY_OUTPUT_TOKENS + 512
+    assert (
+        result.results["chat"].entry["provenance"]["probes"]["routing"]["tested_reply_tokens"]
+        == connect.DISCOVERY_OUTPUT_TOKENS
+    )
 
 
 @pytest.mark.asyncio

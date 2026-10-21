@@ -415,7 +415,7 @@ def test_user_selects_decision_among_multiple_successes_and_reuses_full_route(
             "--probe",
             "minimal",
             "--budget-tokens",
-            "10000",
+            "20000",
         ],
         input="y\ndiscover\nsystemone\ny\n",
     )
@@ -427,7 +427,9 @@ def test_user_selects_decision_among_multiple_successes_and_reuses_full_route(
     assert "api_base" not in entry
     assert len([request for request in requests if str(request.url) == DECISION]) == 1
     provenance = reviewed[0]["provenance"]
-    assert provenance["tokens_charged_to_budget"] == 3 * 712 + 4608 + 512
+    assert provenance["tokens_charged_to_budget"] == (
+        3 * (connect.DISCOVERY_OUTPUT_TOKENS + 512) + 4608 + 512
+    )
     assert provenance["probes"]["routing"]["outcome"] == "accepted"
     assert set(provenance["interfaces"]) == {"chat", "responses", "anthropic", "systemone"}
 
