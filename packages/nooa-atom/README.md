@@ -244,14 +244,15 @@ Verified against Pool 1.0.16: it shows one question per page, renders `type:
 string` as a text box (multi-line descriptions are fine) and a required strict
 picker (`type: string` + `oneOf` const/title) as a radio list, and honours
 `required` and the field order. A picker-or-text (`anyOf: [{oneOf}, {type:
-string}]`) shows as a bare text box without the choices, so it is not used. It
-**automatically declines** the whole form (wire `{"action": "decline"}` within
-milliseconds, indistinguishable from a person pressing Escape) when any property
-is `type: integer` or `type: boolean`, and when a non-text field is optional.
-`number`, `array`, `minLength`/`maxLength`, `pattern`, `format` and `default` are
-untested and treated as unsupported. So only `title`, `description`, `type:
-string`, `oneOf` and the top-level `required` are sent, and the rest is
-downgraded:
+string}]`) shows as a bare text box without the choices, so it is not used.
+Given a schema with a `type: integer` or `type: boolean` property, or an
+optional property that is not a plain string, Pool declines the whole form
+itself (wire `{"action": "decline"}`, indistinguishable from Escape). `number`,
+`array`, `minLength`/`maxLength`, `pattern`, `format` and `default` are
+untested. The adapter therefore never sends any of these: every property it
+sends is `type: string` (a `oneOf` picker only when required), with only
+`title`, `description`, `oneOf` and the top-level `required`. Every Atom
+question is shown; the others are downgraded to strings:
 
 | Question | Sent to Pool |
 |---|---|

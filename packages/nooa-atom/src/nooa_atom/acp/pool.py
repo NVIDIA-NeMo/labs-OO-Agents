@@ -12,15 +12,16 @@ was checked against Pool:
   and ``_meta["poolside/field_order"]``;
 - a picker-or-text (``anyOf: [{oneOf: ...}, {type: string}]``) shows as a bare
   text box without the choices, so it is not used;
-- it declines the whole form at once (``{"action": "decline"}``) when a
-  property is ``type: integer`` or ``type: boolean``, or when a non-text field
-  is optional.
+- it declines the whole form itself (``{"action": "decline"}``) when a
+  property is ``type: integer`` or ``type: boolean``, or when an optional
+  property is not a plain string.
 
 ``number``, ``array``, ``minLength``/``maxLength``, ``pattern``, ``format`` and
-``default`` are untested, so they are treated as unsupported. Only the checked
-keys are sent (``title``, ``description``, ``type: string``, ``oneOf`` and
-the top-level ``required``); every other question type or
-constraint is downgraded to a string whose description says what to enter:
+``default`` are untested. So every property sent is ``type: string`` (a
+``oneOf`` picker only when required) with only ``title``, ``description``,
+``oneOf`` and the top-level ``required``, and every question is shown; other
+question types and constraints become a string whose description says what
+to enter:
 
 - text constraints, formats and defaults -> hints in the description;
 - integer / number -> a string with the range ("A whole number from 1 to 10.");
