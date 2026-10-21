@@ -190,7 +190,7 @@ async def test_a_quiet_run_ends_with_one_done_update_holding_the_shell_result(ag
 
 
 async def test_run_with_progress_delivers_lines_then_its_result(agent):
-    await agent.jobs.run("echo a; echo b >&2; echo c", label="s", lines=1)
+    await agent.jobs.run("echo a; echo b >&2; echo c", label="s", items=1)
     updates, result = await _collect_run(agent)
     assert all(len(u.items) == 1 and isinstance(u.items[0], StreamEvent) for u in updates)
     lines = sorted((u.items[0].kind, u.items[0].text) for u in updates)
@@ -200,8 +200,8 @@ async def test_run_with_progress_delivers_lines_then_its_result(agent):
     assert "a\n" in Path(result.log_path).read_text()
 
 
-async def test_throttle_by_lines_batches_and_flushes_before_the_result(agent):
-    await agent.jobs.run("for i in 1 2 3 4 5; do echo $i; done", label="b", lines=2)
+async def test_throttle_by_items_batches_and_flushes_before_the_result(agent):
+    await agent.jobs.run("for i in 1 2 3 4 5; do echo $i; done", label="b", items=2)
     updates, result = await _collect_run(agent)
     texts = [[e.text for e in u.items] for u in updates]
     # "5" is still pending at the end: not sent alone, the ShellResult has it.
@@ -231,7 +231,7 @@ async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
     await agent.jobs.run(script, label="r")
     await asyncio.sleep(0.2)
     assert agent.queue_manager.get_channel("jobs").qsize() == 0  # quiet by default
-    assert agent.jobs.throttle("r", lines=2).throttle.lines == 2  # progress on
+    assert agent.jobs.throttle("r", items=2).throttle.items == 2  # progress on
     (tmp_path / "go1").touch()
     update = await _next(agent)
     assert isinstance(update, JobUpdate) and [e.text for e in update.items] == [
@@ -268,7 +268,7 @@ async def test_throttle_off_flushes_pending_items(agent):
         yield "b"
         await gate.wait()
 
-    agent.jobs.spawn(two_then_wait(), label="p", lines=10)
+    agent.jobs.spawn(two_then_wait(), label="p", items=10)
     await _until(lambda: agent.jobs.get("p").pending == 2)
     assert agent.jobs.throttle("p").throttle is None
     # Turning batching off delivers what is pending as soon as more arrives or the job ends.
@@ -282,11 +282,11 @@ async def test_throttle_off_flushes_pending_items(agent):
 async def test_throttle_rejects_non_streaming_jobs(agent):
     agent.jobs.after(5, label="r")
     with pytest.raises(ValueError, match="not a streaming job"):
-        agent.jobs.throttle("r", lines=2)
+        agent.jobs.throttle("r", items=2)
     with pytest.raises(KeyError):
         agent.jobs.throttle("missing")
     with pytest.raises(ValueError):
-        await agent.jobs.run("true", label="bad", lines=0)
+        await agent.jobs.run("true", label="bad", items=0)
 
 
 async def test_spawn_a_coroutine_delivers_one_result_or_its_error(agent):
@@ -373,15 +373,15 @@ async def test_each_throttle_call_replaces_the_setting_and_flushes_the_batch(age
     gates[0].set()
     await _until(lambda: agent.jobs.get("r").pending == 4)
     # Next setting: lines only; seconds is dropped, the old batch is delivered first.
-    info = agent.jobs.throttle("r", lines=3)
-    assert info.throttle.lines == 3 and info.throttle.seconds is None
+    info = agent.jobs.throttle("r", items=3)
+    assert info.throttle.items == 3 and info.throttle.seconds is None
     assert agent.jobs.get("r").throttle == info.throttle
     assert (await _next(agent)).items == [2, 3, 4, 5]
     gates[1].set()
     assert (await _next(agent)).items == [6, 7, 8]
     assert (await _next(agent)).items == [9, 10, 11]
-    # lines=2 replaces lines=3.
-    assert agent.jobs.throttle("r", lines=2).throttle.lines == 2
+    # items=2 replaces items=3.
+    assert agent.jobs.throttle("r", items=2).throttle.items == 2
     gates[2].set()
     assert (await _next(agent)).items == [12, 13]
     assert (await _next(agent)).items == [14, 15]
@@ -421,7 +421,7 @@ async def test_tail_follows_a_file_that_is_truncated(agent, tmp_path):
 async def test_tail_batches_and_rethrottles(agent, tmp_path):
     log = tmp_path / "batch.log"
     log.write_text("")
-    agent.jobs.tail(str(log), label="b", lines=3)
+    agent.jobs.tail(str(log), label="b", items=3)
     with log.open("a") as fh:
         fh.write("".join(f"{i}\n" for i in range(5)))
     assert (await _next(agent)).items == ["0", "1", "2"]
@@ -499,7 +499,7 @@ async def test_cancelling_one_job_leaves_the_other_running(agent):
 
 
 async def test_undecodable_output_does_not_end_the_stream(agent):
-    await agent.jobs.run(r"printf 'first\ncaf\xe9\nlast\n'", label="bytes", lines=1)
+    await agent.jobs.run(r"printf 'first\ncaf\xe9\nlast\n'", label="bytes", items=1)
     updates, result = await _collect_run(agent)
     texts = [e.text for u in updates for e in u.items]
     assert texts == ["first\n", "caf\ufffd\n", "last\n"]
@@ -584,7 +584,7 @@ async def test_every_delivers_its_payload_each_tick(agent):
 
 async def test_replace_restarts_a_running_run_job(agent, tmp_path):
     pidfile = tmp_path / "old.pid"
-    await agent.jobs.run(f"echo $$ > {pidfile}; exec sleep 60", label="srv", lines=1)
+    await agent.jobs.run(f"echo $$ > {pidfile}; exec sleep 60", label="srv", items=1)
     await _until(lambda: pidfile.exists() and pidfile.read_text().strip())
     old_pid = int(pidfile.read_text())
     with pytest.raises(ValueError, match="already running"):
@@ -706,7 +706,7 @@ async def test_a_failing_stream_sends_its_pending_values_then_an_empty_done_upda
         yield 2
         raise RuntimeError("boom")
 
-    agent.jobs.spawn(breaks(), label="b", lines=10)
+    agent.jobs.spawn(breaks(), label="b", items=10)
     updates = await _stream_updates(agent, "b")
     assert [(u.items, u.done, u.error) for u in updates] == [
         ([1, 2], False, None),
@@ -720,7 +720,7 @@ async def test_a_stream_ends_with_its_last_pending_values(agent):
         for i in range(3):
             yield i
 
-    agent.jobs.spawn(three(), label="s", lines=2)
+    agent.jobs.spawn(three(), label="s", items=2)
     updates = await _stream_updates(agent, "s")
     assert [(u.items, u.done) for u in updates] == [([0, 1], False), ([2], True)]
 
@@ -765,12 +765,12 @@ async def test_seconds_must_be_a_number(agent, bad):
 
 
 @pytest.mark.parametrize("bad", ["200", 2.5, True])
-async def test_lines_must_be_a_whole_number(agent, bad):
+async def test_items_must_be_a_whole_number(agent, bad):
     agent.jobs.every(30, label="t")
-    with pytest.raises(TypeError, match="lines must be a whole number"):
-        agent.jobs.throttle("t", lines=bad)
-    with pytest.raises(TypeError, match="lines must be a whole number"):
-        await agent.jobs.run("true", label="r", lines=bad)
+    with pytest.raises(TypeError, match="items must be a whole number"):
+        agent.jobs.throttle("t", items=bad)
+    with pytest.raises(TypeError, match="items must be a whole number"):
+        await agent.jobs.run("true", label="r", items=bad)
     await agent.jobs.cancel("t")
 
 
@@ -810,7 +810,7 @@ async def test_a_5mb_line_stays_bounded_and_later_lines_still_arrive(agent):
     tracemalloc.start()
     try:
         baseline = tracemalloc.get_traced_memory()[0]
-        await agent.jobs.run(_BIG_LINE, label="big", lines=1)
+        await agent.jobs.run(_BIG_LINE, label="big", items=1)
         updates = await _stream_updates(agent, "big")
         peak = tracemalloc.get_traced_memory()[1] - baseline
     finally:

@@ -83,9 +83,9 @@ def _now() -> str:
 
 
 class Throttle(BaseModel):
-    """Batching for a streaming job: one delivery per ``lines`` items or ``seconds``."""
+    """Batching for a streaming job: one delivery per ``items`` values or ``seconds``."""
 
-    lines: int | None = None
+    items: int | None = None
     seconds: float | None = None
 
 
@@ -244,17 +244,17 @@ def _check_seconds(value: Any, *, zero_ok: bool = False) -> float:
     return value
 
 
-def _throttle(lines: int | None, seconds: float | None) -> Throttle | None:
-    if lines is not None:
-        if isinstance(lines, bool) or not isinstance(lines, int):
-            raise TypeError(f"lines must be a whole number, got {lines!r}")
-        if lines < 1:
-            raise ValueError("lines must be at least 1")
+def _throttle(items: int | None, seconds: float | None) -> Throttle | None:
+    if items is not None:
+        if isinstance(items, bool) or not isinstance(items, int):
+            raise TypeError(f"items must be a whole number, got {items!r}")
+        if items < 1:
+            raise ValueError("items must be at least 1")
     if seconds is not None:
         _check_seconds(seconds)
-    if lines is None and seconds is None:
+    if items is None and seconds is None:
         return None
-    return Throttle(lines=lines, seconds=seconds)
+    return Throttle(items=items, seconds=seconds)
 
 
 def _kill_group(proc: asyncio.subprocess.Process) -> None:
@@ -317,7 +317,7 @@ class JobsApi(Skill):
         # next turn: u = notification["jobs"][0]  -> JobUpdate with done=True
         # u.items[0] is the ShellResult (.returncode, .stdout tail); u.log_path the full log
 
-        await self.jobs.run("make build", label="build", lines=200, seconds=60)
+        await self.jobs.run("make build", label="build", items=200, seconds=60)
         # -> JobUpdate batches of output lines while it runs, then the done update
 
     Any job's update starts the next turn; check ``u.label`` / ``u.done`` and
@@ -760,7 +760,7 @@ class JobsApi(Skill):
                 job.pending = len(batch)
                 if (
                     throttle is None
-                    or (throttle.lines is not None and len(batch) >= throttle.lines)
+                    or (throttle.items is not None and len(batch) >= throttle.items)
                     or len(batch) >= _BATCH_ITEMS
                     or batch_chars >= _BATCH_CHARS
                 ):
@@ -800,7 +800,7 @@ class JobsApi(Skill):
         stdin: str | None = None,
         timeout: float | None = None,
         cwd: str | Path | None = None,
-        lines: int | None = None,
+        items: int | None = None,
         seconds: float | None = None,
         description: str = "",
         replace: bool = False,
@@ -813,7 +813,7 @@ class JobsApi(Skill):
         it ends, a ``JobUpdate`` with ``done=True`` arrives in
         ``notification["jobs"]``: ``items[0]`` is a ``ShellResult`` (output
         tail; on timeout returncode 124), ``log_path`` the full stdout+stderr
-        log. With ``lines``/``seconds`` it also sends progress while running:
+        log. With ``items``/``seconds`` it also sends progress while running:
         ``JobUpdate`` batches of ``StreamEvent`` lines (see ``throttle``; a line
         is cut at 8,000 chars); lines still batched when it ends arrive only in
         the ``ShellResult``.
@@ -821,7 +821,7 @@ class JobsApi(Skill):
             await self.jobs.run("uv run pytest -q", label="tests")
             return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
         """
-        throttle = _throttle(lines, seconds)
+        throttle = _throttle(items, seconds)
         self._claim(label, replace)  # fail before the await
         context = await self._shell_context()
         job = self._new_job(
@@ -834,7 +834,7 @@ class JobsApi(Skill):
         work: Any,
         *,
         label: str,
-        lines: int | None = None,
+        items: int | None = None,
         seconds: float | None = None,
         description: str = "",
         replace: bool = False,
@@ -843,7 +843,7 @@ class JobsApi(Skill):
 
         A coroutine delivers one done update with ``items == [return value]``
         (``error`` set if it raised). An async iterator delivers one
-        ``JobUpdate`` per yielded value (batched with ``lines``/``seconds``),
+        ``JobUpdate`` per yielded value (batched with ``items``/``seconds``),
         then a done update with any values still pending.
 
             self.jobs.spawn(fetch_report(url), label="report")  # any coroutine
@@ -855,12 +855,12 @@ class JobsApi(Skill):
         name = getattr(work, "__qualname__", None) or type(work).__name__
         about = {"target": f"{name}()", "description": description, "replace": replace}
         if hasattr(work, "__aiter__"):
-            job = self._new_job(label, "spawn", _throttle(lines, seconds), **about)
+            job = self._new_job(label, "spawn", _throttle(items, seconds), **about)
             return self._start(job, self._stream_job(job, work.__aiter__()))
         if not isinstance(work, Awaitable):
             raise TypeError("spawn() takes a coroutine or an async iterator")
-        if lines is not None or seconds is not None:
-            raise ValueError("lines/seconds apply to async iterators only")
+        if items is not None or seconds is not None:
+            raise ValueError("items/seconds apply to async iterators only")
         job = self._new_job(label, "spawn", None, streaming=False, **about)
         return self._start(job, self._call_job(job, work))
 
@@ -869,7 +869,7 @@ class JobsApi(Skill):
         path: str | Path,
         *,
         label: str,
-        lines: int | None = None,
+        items: int | None = None,
         seconds: float | None = None,
         description: str = "",
         replace: bool = False,
@@ -877,12 +877,12 @@ class JobsApi(Skill):
         """Deliver lines appended to a file from now on, until cancelled.
 
         Each ``JobUpdate`` item is one line (without its newline); batch with
-        ``lines``/``seconds``. A relative ``path`` is relative to the shell's
+        ``items``/``seconds``. A relative ``path`` is relative to the shell's
         directory.
 
             self.jobs.tail("logs/server.log", label="server-log", seconds=60)
         """
-        throttle = _throttle(lines, seconds)
+        throttle = _throttle(items, seconds)
         self._claim(label, replace)  # fail before opening the file
         resolved = (Path(self._shell_dir()) / Path(path)).resolve()
         handle = open(resolved, "rb")  # noqa: SIM115 - closed by the generator
@@ -950,9 +950,9 @@ class JobsApi(Skill):
         return self._start(job, self._stream_job(job, _ticks(seconds, payload)))
 
     def throttle(
-        self, label: str, *, lines: int | None = None, seconds: float | None = None
+        self, label: str, *, items: int | None = None, seconds: float | None = None
     ) -> JobInfo:
-        """Batch a running job's deliveries: one per ``lines`` items or ``seconds``.
+        """Batch a running job's deliveries: one per ``items`` values or ``seconds``.
 
         Whichever comes first triggers a delivery; the rest is flushed at the
         end. A batch is also sent early once it holds 200 items or 20,000 chars. Each call replaces the previous setting (omitted arguments become
@@ -961,14 +961,14 @@ class JobsApi(Skill):
         ``ShellResult`` holds the output), other jobs deliver every item.
         Applies at once, without restarting the job.
 
-            self.jobs.throttle("build", lines=200)
+            self.jobs.throttle("build", items=200)
         """
         job = self._jobs.get(label)
         if job is None:
             raise KeyError(f"no job labelled {label!r}")
         if not job.streaming:
             raise ValueError(f"job {label!r} is not a streaming job")
-        job.throttle = _throttle(lines, seconds)
+        job.throttle = _throttle(items, seconds)
         job.rethrottled = True
         if job.wake is not None:
             with contextlib.suppress(asyncio.QueueFull):  # a full inbox wakes it anyway

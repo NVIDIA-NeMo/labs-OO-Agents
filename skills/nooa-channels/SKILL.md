@@ -70,12 +70,12 @@ qm.spawn(fetch_report(url), channel="reports")             # coroutine: one put 
 
 ```python
 await self.jobs.run("uv run pytest -q", label="tests")       # own bash process; one done update (items[0] is the ShellResult)
-await self.jobs.run("make build", label="build", lines=200, seconds=60)  # + JobUpdate progress batches
+await self.jobs.run("make build", label="build", items=200, seconds=60)  # + JobUpdate progress batches
 self.jobs.spawn(fetch_report(url), label="report")            # any coroutine or async iterator
 self.jobs.tail("app.log", label="log", seconds=30)            # lines appended from now on
 self.jobs.after(300, label="wakeup")                          # one done update after 5 minutes
 self.jobs.every(60, label="tick")                             # ticks 1, 2, 3, ... until cancelled
-self.jobs.throttle("log", lines=100)                          # re-batch a running stream
+self.jobs.throttle("log", items=100)                          # re-batch a running stream
 await self.jobs.cancel("build")                               # kills the process group
 await self.jobs.run("make serve", label="srv", replace=True)  # restart a running job with that label
 ```
