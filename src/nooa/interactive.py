@@ -451,7 +451,7 @@ def _problem(question: Any, value: Any) -> str | None:
         whole = kind == "integer"
         if isinstance(value, bool) or not isinstance(value, int if whole else (int, float)):
             return f"enter {_range_text(question)}"
-        if not math.isfinite(value) or not _in_range(value, question.minimum, question.maximum):
+        if not _finite(value, whole) or not _in_range(value, question.minimum, question.maximum):
             return f"enter {_range_text(question)}"
         return None
     if kind == "pick_many":
@@ -478,6 +478,19 @@ def _problem(question: Any, value: Any) -> str | None:
     if question.pattern and re.fullmatch(question.pattern, value) is None:
         return f"enter text matching {question.pattern}"
     return None
+
+
+def _finite(value: int | float, whole: bool) -> bool:
+    """Whether ``value`` is a usable number; a number answer must also fit a float."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if whole:
+        return True
+    try:
+        float(value)
+    except OverflowError:
+        return False
+    return True
 
 
 def _in_range(value: float, low: float | None, high: float | None) -> bool:

@@ -43,6 +43,7 @@ VALID = [
     (NumberQuestion(id="q", label="Q", minimum=0, maximum=1), 1, 1.0),
     (NumberQuestion(id="q", label="Q"), 0.25, 0.25),
     (IntegerQuestion(id="q", label="Q", minimum=1, maximum=10), 10, 10),
+    (IntegerQuestion(id="q", label="Q"), 10**400, 10**400),
     (BooleanQuestion(id="q", label="Q"), False, False),
 ]
 
@@ -92,6 +93,12 @@ INVALID = [
     (NumberQuestion(id="q", label="Q"), True, "q: enter a number"),
     (NumberQuestion(id="q", label="Q"), "0.5", "q: enter a number"),
     (NumberQuestion(id="q", label="Q"), float("nan"), "q: enter a number"),
+    (NumberQuestion(id="q", label="Q"), 10**400, "q: enter a number"),
+    (
+        IntegerQuestion(id="q", label="Q", minimum=1, maximum=10),
+        10**400,
+        "q: enter a whole number from 1 to 10",
+    ),
     (
         IntegerQuestion(id="q", label="Q", minimum=1, maximum=10),
         11,
