@@ -163,13 +163,15 @@ class FormChoice(BaseModel):
 
 
 class _FormQuestionBase(BaseModel):
-    """Fields shared by every form question."""
+    """Fields every form question has (documented once on ``NeedInputForm``)."""
 
     model_config = {"extra": "forbid", "strict": True}
-    id: str = Field(description="Key of this answer in FormResponse.content")
-    label: str = Field(description="The question shown to the person")
-    help: str | None = Field(default=None, description="Optional hint shown with the question")
-    required: bool = Field(default=True, description="False lets the person leave it empty")
+    id: Annotated[str, hidden] = Field(description="Key of this answer in FormResponse.content")
+    label: Annotated[str, hidden] = Field(description="The question shown to the person")
+    help: Annotated[str | None, hidden] = Field(default=None, description="Optional hint")
+    required: Annotated[bool, hidden] = Field(
+        default=True, description="False lets the person skip it"
+    )
     _check_id = field_validator("id")(_non_blank)
     _check_label = field_validator("label")(_non_blank)
 
@@ -178,9 +180,9 @@ TextFormat = Literal["email", "uri", "date", "date-time"]
 
 
 class TextQuestion(_FormQuestionBase):
-    """Free text; the answer is a ``str`` ("" when optional and left empty)."""
+    """Free text; the answer is a ``str``."""
 
-    kind: Literal["text"] = Field(default="text", description="Set for you")
+    kind: Annotated[Literal["text"], hidden] = "text"
     default: str | None = Field(default=None, description="Prefilled answer")
     min_length: int | None = Field(default=None, ge=0, description="Fewest characters")
     max_length: int | None = Field(default=None, ge=1, description="Most characters")
@@ -205,7 +207,7 @@ class TextQuestion(_FormQuestionBase):
 class PickOneQuestion(_FormQuestionBase):
     """Pick one of ``choices``; the answer is the chosen ``value`` (a ``str``)."""
 
-    kind: Literal["pick_one"] = Field(default="pick_one", description="Set for you")
+    kind: Annotated[Literal["pick_one"], hidden] = "pick_one"
     default: str | None = Field(default=None, description="Preselected value")
     choices: list[FormChoice] = Field(min_length=1, description="The options, in order")
     allow_other: bool = Field(
@@ -218,7 +220,7 @@ class PickOneQuestion(_FormQuestionBase):
 class PickManyQuestion(_FormQuestionBase):
     """Pick any of ``choices``; the answer is a ``list[str]`` of chosen values."""
 
-    kind: Literal["pick_many"] = Field(default="pick_many", description="Set for you")
+    kind: Annotated[Literal["pick_many"], hidden] = "pick_many"
     default: list[str] | None = Field(default=None, description="Preselected values")
     choices: list[FormChoice] = Field(min_length=1, description="The options, in order")
     min_items: int | None = Field(default=None, ge=0, description="Fewest options to pick")
@@ -238,28 +240,13 @@ class PickManyQuestion(_FormQuestionBase):
 
 
 class NumberQuestion(_FormQuestionBase):
-    """A number; the answer is a ``float``."""
+    """A number; ``whole=True`` asks for a whole number (an ``int``)."""
 
-    kind: Literal["number"] = Field(default="number", description="Set for you")
-    default: float | None = Field(default=None, description="Prefilled answer")
-    minimum: float | None = Field(default=None, description="Smallest allowed value")
-    maximum: float | None = Field(default=None, description="Largest allowed value")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _check_range(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            _ordered(data.get("minimum"), data.get("maximum"), "minimum", "maximum")
-        return data
-
-
-class IntegerQuestion(_FormQuestionBase):
-    """A whole number; the answer is an ``int``."""
-
-    kind: Literal["integer"] = Field(default="integer", description="Set for you")
-    default: int | None = Field(default=None, description="Prefilled answer")
-    minimum: int | None = Field(default=None, description="Smallest allowed value")
-    maximum: int | None = Field(default=None, description="Largest allowed value")
+    kind: Annotated[Literal["number"], hidden] = "number"
+    whole: bool = Field(default=False, description="True for a whole number")
+    default: int | float | None = Field(default=None, description="Prefilled answer")
+    minimum: int | float | None = Field(default=None, description="Smallest allowed value")
+    maximum: int | float | None = Field(default=None, description="Largest allowed value")
 
     @model_validator(mode="before")
     @classmethod
@@ -272,21 +259,16 @@ class IntegerQuestion(_FormQuestionBase):
 class BooleanQuestion(_FormQuestionBase):
     """Yes or no; the answer is a ``bool``."""
 
-    kind: Literal["boolean"] = Field(default="boolean", description="Set for you")
+    kind: Annotated[Literal["boolean"], hidden] = "boolean"
     default: bool | None = Field(default=None, description="Preselected answer")
 
 
 FormQuestion = Annotated[
-    TextQuestion
-    | PickOneQuestion
-    | PickManyQuestion
-    | NumberQuestion
-    | IntegerQuestion
-    | BooleanQuestion,
+    TextQuestion | PickOneQuestion | PickManyQuestion | NumberQuestion | BooleanQuestion,
     Field(discriminator="kind"),
 ]
 FormValue = str | int | float | bool | list[str] | None
-"""One answer: ``str``, ``list[str]``, ``float``, ``int``, ``bool``; ``None`` if optional and empty."""
+"""One answer: ``str``, ``list[str]``, ``int``, ``float`` or ``bool``."""
 
 
 def _ordered(low: Any, high: Any, low_name: str, high_name: str) -> None:
@@ -316,7 +298,7 @@ class FormResponse(BaseModel):
     )
     content: dict[str, FormValue] | None = Field(
         default=None,
-        description='On accept: question id -> answer (left-empty optional: "" for text, None otherwise)',
+        description="On accept: question id -> answer; skipped questions may be missing",
     )
 
     @model_validator(mode="after")
@@ -342,7 +324,9 @@ class FormResponse(BaseModel):
 class NeedInputForm(BaseModel):
     """Ask the person to fill in a form; the answer is a ``FormResponse``.
 
-    Most questions need only ``id``, ``label`` and maybe ``default``::
+    Every question has ``id`` (its key in ``FormResponse.content``), ``label``
+    (the question shown), optional ``help`` and ``required`` (default True).
+    Most need nothing else, or maybe ``default``::
 
         NeedInputForm(heading="Release", questions=[
             TextQuestion(id="branch", label="Which branch should I use?", default="main"),
@@ -404,7 +388,7 @@ def _number_text(value: float) -> str:
 
 
 def _range_text(question: Any) -> str:
-    noun = "a whole number" if question.kind == "integer" else "a number"
+    noun = "a whole number" if question.whole else "a number"
     low, high = question.minimum, question.maximum
     if low is not None and high is not None:
         return f"{noun} from {_number_text(low)} to {_number_text(high)}"
@@ -461,7 +445,7 @@ def _hints(question: Any) -> list[str]:
         hints.append("choose any of: " + ", ".join(choice.title for choice in question.choices))
         if _count_text(question):
             hints.append(_count_text(question))
-    elif kind in ("integer", "number"):
+    elif kind == "number":
         hints.append(_range_text(question))
     elif kind == "boolean":
         hints.append("yes or no")
@@ -977,22 +961,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
               return_result(NeedInput(question="Which branch should I push to: main or dev?"))
 
-        - ``NeedInputForm(heading=..., questions=[...])`` — a form of
-          ``TextQuestion``, ``PickOneQuestion``, ``PickManyQuestion``,
-          ``NumberQuestion``, ``IntegerQuestion`` and ``BooleanQuestion`` fields
-          (``doc()`` shows their constraints). The answer is a ``FormResponse``:
-          ``accept`` with ``content`` mapping each question id to its checked
-          answer, or ``decline``/``cancel``; plain text when no form could be used::
-
-              return_result(NeedInputForm(heading="Release", questions=[
-                  PickOneQuestion(id="branch", label="Branch?", choices=[
-                      FormChoice(value="main", title="Main"), FormChoice(value="dev", title="Dev")]),
-                  PickManyQuestion(id="regions", label="Regions?", choices=[
-                      FormChoice(value="us", title="US"), FormChoice(value="eu", title="EU")]),
-                  IntegerQuestion(id="replicas", label="Replicas?", minimum=1, maximum=10),
-                  BooleanQuestion(id="dry_run", label="Dry run?", default=True),
-                  TextQuestion(id="contact", label="Contact?", format="email", required=False),
-              ]))
+        - ``NeedInputForm(heading=..., questions=[...])`` — a form with
+          pickers or several fields; see ``doc(NeedInputForm)``. The answer is a
+          ``FormResponse`` (``accept`` with ``content``, ``decline`` or
+          ``cancel``), or plain text when the client can't show forms.
 
         - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
           background job or queue, not on a person. ``message`` is shown to

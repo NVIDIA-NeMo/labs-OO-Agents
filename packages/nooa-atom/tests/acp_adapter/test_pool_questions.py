@@ -205,7 +205,7 @@ async def test_pool_literal_or_text_field_explicitly_accepts_alternative(
 async def test_pool_string_answers_reach_the_agent_unchanged(make_adapter, workspace, client):
     form = (
         "return_result(NeedInputForm(heading='Deploy', questions=["
-        "IntegerQuestion(id='replicas', label='Replicas?', minimum=1, maximum=10), "
+        "NumberQuestion(whole=True, id='replicas', label='Replicas?', minimum=1, maximum=10), "
         "BooleanQuestion(id='dry_run', label='Dry run?'), "
         "PickManyQuestion(id='regions', label='Regions?', choices=["
         "FormChoice(value='us', title='US'), FormChoice(value='eu', title='EU')])]))"

@@ -9,7 +9,6 @@ from nooa.interactive import (
     BooleanQuestion,
     FormChoice,
     FormResponse,
-    IntegerQuestion,
     NeedInputForm,
     NumberQuestion,
     PickManyQuestion,
@@ -29,7 +28,7 @@ CHOICES = [FormChoice(value="a", title="Alpha"), FormChoice(value="b", title="Be
         lambda: PickManyQuestion(id="q", label="Q", choices=CHOICES, min_items=3),
         lambda: PickManyQuestion(id="q", label="Q", choices=CHOICES, min_items=2, max_items=1),
         lambda: NumberQuestion(id="q", label="Q", minimum=2, maximum=1),
-        lambda: IntegerQuestion(id="q", label="Q", default=True),
+        lambda: NumberQuestion(whole=True, id="q", label="Q", default=True),
         lambda: BooleanQuestion(id="q", label="Q", default="yes"),
     ],
 )
@@ -55,7 +54,7 @@ def test_as_text_renders_hints():
             PickOneQuestion(id="one", label="One?", choices=CHOICES, default="b"),
             PickManyQuestion(id="many", label="Many?", choices=CHOICES, min_items=1),
             NumberQuestion(id="r", label="Ratio?", minimum=0, maximum=0.5),
-            IntegerQuestion(id="n", label="Count?", minimum=1),
+            NumberQuestion(whole=True, id="n", label="Count?", minimum=1),
             BooleanQuestion(id="dry", label="Dry run?", default=True),
         ],
     )

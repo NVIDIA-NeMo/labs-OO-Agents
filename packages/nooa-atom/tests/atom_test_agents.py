@@ -32,7 +32,6 @@ from nooa.interactive import (  # noqa: F401
     FormChoice,  # noqa: F401 - generation constructor
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,
-    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
     NeedInput,
     NeedInputForm,

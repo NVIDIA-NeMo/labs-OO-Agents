@@ -50,17 +50,12 @@ def need_input_schema(need: NeedInputForm | NeedInput) -> ElicitationSchema | No
 def _property(question: Any) -> Any:
     common = {"title": question.label, "description": question.help}
     kind = question.kind
-    if kind == "integer":
-        return ElicitationIntegerPropertySchema(
-            type="integer",
-            minimum=question.minimum,
-            maximum=question.maximum,
-            default=question.default,
-            **common,
-        )
     if kind == "number":
-        return ElicitationNumberPropertySchema(
-            type="number",
+        schema = (
+            ElicitationIntegerPropertySchema if question.whole else ElicitationNumberPropertySchema
+        )
+        return schema(
+            type="integer" if question.whole else "number",
             minimum=question.minimum,
             maximum=question.maximum,
             default=question.default,

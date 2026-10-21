@@ -17,7 +17,6 @@ from nooa.interactive import (
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,
     InputRequest,
-    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
     NeedInput,
     NeedInputForm,
@@ -517,9 +516,8 @@ class AtomAgent(InteractiveAgent):
         - ``NeedInput(question=...)`` for a quick question; the next message
           answers as text. Suggest answers in it.
 
-        - ``NeedInputForm(heading=..., questions=[...])`` of ``TextQuestion``,
-          ``PickOneQuestion``, ``PickManyQuestion``, ``NumberQuestion``,
-          ``IntegerQuestion``, ``BooleanQuestion`` (see ``doc()``); the answer is a
+        - ``NeedInputForm(heading=..., questions=[...])`` for pickers or
+          several fields (see ``doc(NeedInputForm)``); the answer is a
           ``FormResponse``, or text when no form could be used.
 
         - ``Waiting(explanation=..., on=[...])`` when a job you started is

@@ -9,7 +9,6 @@ from pydantic import ValidationError
 from nooa.interactive import (
     BooleanQuestion,
     FormChoice,
-    IntegerQuestion,
     NeedInput,
     NeedInputForm,
     NumberQuestion,
@@ -86,7 +85,9 @@ def test_standard_schema_for_every_type_and_constraint():
                 default=["main"],
             ),
             NumberQuestion(id="ratio", label="Ratio?", minimum=0, maximum=1, default=0.5),
-            IntegerQuestion(id="count", label="Count?", minimum=1, maximum=10, default=3),
+            NumberQuestion(
+                whole=True, id="count", label="Count?", minimum=1, maximum=10, default=3
+            ),
             BooleanQuestion(id="dry", label="Dry run?", help="No changes", default=True),
         ],
     )
@@ -133,7 +134,7 @@ def test_standard_schema_for_every_type_and_constraint():
     [
         [],
         [{"kind": "multi_select", "id": "x", "label": "X"}],
-        [{"kind": "integer", "id": "x", "label": "X", "minimum": 5, "maximum": 1}],
+        [{"kind": "number", "whole": True, "id": "x", "label": "X", "minimum": 5, "maximum": 1}],
         [{"kind": "text", "id": "x", "label": "X", "default": 3}],
         [{"kind": "text", "id": 1, "label": "X"}],
         [{"kind": "text", "id": "x", "label": "X"}, {"kind": "text", "id": "x", "label": "Y"}],

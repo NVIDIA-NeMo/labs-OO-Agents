@@ -7,7 +7,6 @@ from nooa_atom.acp.pool import POOL_FORM_METHOD, pool_form_params, pool_form_sch
 from nooa.interactive import (
     BooleanQuestion,
     FormChoice,
-    IntegerQuestion,
     NeedInput,
     NeedInputForm,
     NumberQuestion,
@@ -96,8 +95,8 @@ def test_text_constraints_and_default_become_hints():
 
 def test_numbers_become_strings_with_a_range():
     props = _props(
-        IntegerQuestion(id="n", label="N?", minimum=1, maximum=10, default=3),
-        IntegerQuestion(id="m", label="M?", minimum=0),
+        NumberQuestion(whole=True, id="n", label="N?", minimum=1, maximum=10, default=3),
+        NumberQuestion(whole=True, id="m", label="M?", minimum=0),
         NumberQuestion(id="r", label="R?", minimum=0, maximum=1),
         NumberQuestion(id="x", label="X?", required=False),
     )
@@ -167,7 +166,7 @@ ALL = NeedInputForm(
         PickOneQuestion(id="p", label="P", choices=CHOICES, allow_other=False, required=False),
         PickManyQuestion(id="m", label="M", choices=CHOICES, required=False),
         NumberQuestion(id="r", label="R", required=False),
-        IntegerQuestion(id="i", label="I", required=False, default=7),
+        NumberQuestion(whole=True, id="i", label="I", required=False, default=7),
         BooleanQuestion(id="b", label="B", required=False),
     ],
 )

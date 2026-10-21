@@ -18,7 +18,6 @@ from nooa.interactive import (
     FormQuestion,  # noqa: F401 - generation descriptor union
     FormResponse,  # noqa: F401 - visible to generated cells
     InputRequest,
-    IntegerQuestion,  # noqa: F401 - generation constructor
     InteractiveAgent,
     NeedInput,  # noqa: F401 - visible generation constructor
     NeedInputForm,  # noqa: F401 - visible generation constructor
@@ -218,11 +217,10 @@ class CodingAgent(InteractiveAgent):
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. The host shows the question, so do not also send it with
           ``self.message()``; put any suggested answers in it. The answer is plain text.
-        - ``NeedInputForm(heading=..., questions=[...])`` — a form of ``TextQuestion``,
-          ``PickOneQuestion``, ``PickManyQuestion``, ``NumberQuestion``,
-          ``IntegerQuestion`` and ``BooleanQuestion`` fields (see ``doc()`` for their
-          constraints). The answer is a ``FormResponse`` (accept with checked
-          ``content`` by id, or decline/cancel), or text when no form could be used.
+        - ``NeedInputForm(heading=..., questions=[...])`` — pickers or several
+          fields (see ``doc(NeedInputForm)``). The answer is a ``FormResponse``
+          (accept with ``content`` by id, or decline/cancel), or text when no
+          form could be used.
         - ``Waiting(message=..., explanation=..., on=[...])`` — a background
           job is still running; ``on`` names the job or channel.
         """
