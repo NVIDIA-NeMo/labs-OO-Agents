@@ -2676,3 +2676,94 @@ async def test_failed_transport_invalidates_queued_ended_helper_epoch(tmp_path):
     await bridge.close()
     for agent in agents.values():
         await agent.aclose()
+
+
+def _cards_and_messages(client):
+    """(kind, tool_call_id or text, status) for each card update and message, in order."""
+    found = []
+    for _, update in client.updates:
+        if isinstance(update, AgentMessageChunk):
+            found.append(("message", update.content.text.strip(), None))
+        elif isinstance(update, ToolCallStart):
+            found.append(("start", update.tool_call_id, update.status))
+        elif isinstance(update, ToolCallProgress):
+            found.append(("update", update.tool_call_id, update.status))
+    return found
+
+
+async def test_concise_message_then_a_new_cell_starts_a_new_card_below_it(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+
+    def cell(number):
+        agent.event_manager.add(
+            ToolCallEvent(
+                tool_call_id=f"cell-{number}",
+                name="python_cell",
+                arguments={"code": f"x = {number}"},
+            )
+        )
+        agent.event_manager.add(
+            PythonOutput(
+                tool_call_id=f"cell-{number}",
+                execution_status=ResultStatus.COMPLETE,
+                execution_count=number,
+                stdout=f"out-{number}",
+            )
+        )
+
+    cell(1)
+    agent.event_manager.add(AgentMessage(content="Halfway there."))
+    cell(2)
+    await bridge.flush()
+    seen = _cards_and_messages(client)
+    first, second = seen[0][1], seen[3][1]
+    assert seen == [
+        ("start", first, "in_progress"),
+        ("update", first, "completed"),
+        ("message", "Halfway there.", None),
+        ("start", second, "in_progress"),  # a new card, below the message
+        ("update", second, "completed"),
+    ]
+    assert first != second
+    await bridge.close()
+    await agent.aclose()
+
+
+async def test_concise_message_during_a_running_cell_moves_its_card_below(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge.set_verbosity("concise")
+    code = "self.message('Running the tests.')\nrun_tests()"
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="cell-1", name="python_cell", arguments={"code": code})
+    )
+    agent.event_manager.add(AgentMessage(content="Running the tests."))
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="cell-1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="12 passed",
+        )
+    )
+    await bridge.flush()
+    seen = _cards_and_messages(client)
+    old, new = seen[0][1], seen[3][1]
+    assert seen == [
+        ("start", old, "in_progress"),
+        ("message", "Running the tests.", None),
+        ("update", old, "completed"),  # closed with a note pointing below
+        ("start", new, "in_progress"),  # the running cell, now below the message
+        ("update", new, "completed"),  # its output lands on the new card
+    ]
+    progress = [u for _, u in client.updates if isinstance(u, ToolCallProgress)]
+    assert "Continued below." in _content_text(progress[0].content[1])
+    assert "12 passed" in _content_text(progress[1].content[1])
+    start = [u for _, u in client.updates if isinstance(u, ToolCallStart)][1]
+    assert start.raw_input == {"code": code}
+    await bridge.close()
+    await agent.aclose()

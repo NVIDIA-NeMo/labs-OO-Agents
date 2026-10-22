@@ -696,6 +696,41 @@ class ACPEventBridge:
         if not isinstance(event, AgentMessage):
             return
         self._enqueue(update_agent_message(text_block(event.content)))
+        self._move_rolling_below()
+
+    def _move_rolling_below(self) -> None:
+        """Keep concise activity below the newest message.
+
+        A client shows a card where it was started and changes it in place, so
+        a rolling card updated after a message would stay above that message
+        and the agent would look idle. A slot whose cell has finished is
+        dropped: the next cell starts a new card below. A cell still running
+        moves: its old card is closed with a note, and a new card below the
+        message gets its later output.
+        """
+        for source, slot in list(self._rolling.items()):
+            card = self._open.get(slot.key)
+            if card is None or card.wire_id != slot.wire_id:
+                del self._rolling[source]
+                continue
+            self._enqueue(
+                update_tool_call(
+                    slot.wire_id,
+                    status="completed",
+                    content=_python_content(card.code, "Continued below."),
+                )
+            )
+            slot.wire_id = card.wire_id = f"concise-python-{uuid4()}"
+            self._enqueue(
+                start_tool_call(
+                    card.wire_id,
+                    self._card_title(slot.key, card),
+                    kind="other",
+                    status="in_progress",
+                    content=_python_content(card.code),
+                    raw_input={"code": card.code},
+                )
+            )
 
     def _on_tool_call(self, event: EventBase, source: str | None) -> None:
         if (
