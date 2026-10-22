@@ -21,7 +21,9 @@ async def test_compact_is_advertised(atom_adapter, workspace, client):
     await client.wait_for(lambda: client.updates(session_id, AvailableCommandsUpdate))
     [commands] = client.updates(session_id, AvailableCommandsUpdate)[-1:]
     [compact] = [c for c in commands.available_commands if c.name == "compact"]
-    assert "self.events.collapse()" in compact.description
+    assert compact.description == (
+        "Summarize older conversation history to free up context while preserving key details."
+    )
 
 
 async def test_compact_sends_the_directive_to_the_agent(atom_adapter, workspace, client):
@@ -36,7 +38,4 @@ async def test_compact_sends_the_directive_to_the_agent(atom_adapter, workspace,
     assert "slash_commands" in sent
     assert "self.events.collapse(start_tag, end_tag, summary_text=...)" in sent
     assert "keep the API notes" in sent
-    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
-        "Compacted.\n\n",
-        "> **Done:** answered\n\n",
-    ]
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Compacted.\n\n"

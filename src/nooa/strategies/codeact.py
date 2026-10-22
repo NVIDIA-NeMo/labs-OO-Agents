@@ -667,7 +667,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             "",
             f"These names are already in scope inside `{self._python_tool_name()}()` (state "
             "persists across cells) — call them, don't re-import or re-define. "
-            "Use `doc(name)` to inspect any type or function in detail.",
+            "Use `print(doc(name))` to inspect any type or function in detail.",
             "",
             "```python",
             "\n".join(code) if code else "# (no module-level symbols)",
@@ -716,6 +716,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
         return (
             f"Always available without import: {names}, plus stdlib `asyncio` and `typing`. "
+            "`print(doc(x))` explains any object, function or skill: its signature, docs and methods (`doc()` returns text, so print it). "
             + " ".join(self.SHOW_NOTE_LINES)
         )
 
@@ -763,7 +764,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         ## Strategy
 
-        Jupyter-like Python session. Parameters pre-loaded as locals; state persists across cells. Use `await` directly, `print`/`pprint` to debug, `doc(obj)` to inspect types. You MUST call a tool each turn — **plain-text responses do NOT end the session**. To finish, call `return_result(value)`. Repeated text-only responses will abort the run with an error.
+        Jupyter-like Python session. Parameters pre-loaded as locals; state persists across cells. Use `await` directly, `print`/`pprint` to debug, `print(doc(obj))` to inspect types. You MUST call a tool each turn — **plain-text responses do NOT end the session**. To finish, call `return_result(value)`. Repeated text-only responses will abort the run with an error.
 
         **Your two tools:**
         - `execute_python(code)` — run a code cell
@@ -810,7 +811,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         ### Subagents
 
-        If `self` exposes a delegation method, use it for bounded work that benefits from an independent context; inspect its documentation with `doc(...)`. For other iterative sub-tasks that need code execution, use `@strategy(CodeActStrategy())`. A delegated task must be strictly simpler than the current call to avoid infinite recursion.
+        If `self` exposes a delegation method, use it for bounded work that benefits from an independent context; inspect its documentation with `print(doc(...))`. For other iterative sub-tasks that need code execution, use `@strategy(CodeActStrategy())`. A delegated task must be strictly simpler than the current call to avoid infinite recursion.
 
         ## Restrictions (will throw)
 

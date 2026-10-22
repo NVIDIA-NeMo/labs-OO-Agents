@@ -324,7 +324,7 @@ class SkillManager(Skill):
         output_to_agent=True,
     )
     async def mcp_add_command(self, args: str) -> str:
-        """Add a new MCP server: hand the details to the agent to wire it up.
+        """Ask the agent to configure a new MCP server from the details you provide.
 
         The person pastes what they have about a server (a name and URL, a
         ``claude mcp add ...`` line, a docs snippet, an OAuth client id). This

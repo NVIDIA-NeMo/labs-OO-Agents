@@ -38,7 +38,7 @@ UNCHANGED_PROMPTS = {
     # agent if you are a child" line and #447's NeedInput free-text wording),
     # plus the regular progress-update guidance, and NeedInput as a plain-text
     # question (no options).
-    "handle": "222eaf64542e26bdd5d805040ba96832147ce049837e4ebcef0969366d34b133",
+    "handle": "4e6aa53b2bb8ad8d061843e9917dff06d27b5e6bb05dec64426fd4162eecdf95",
     "handle_batch": "9124c2874abd30f61a26f313abacbdc925f02a20efac8b4d7e3319a22ab545f0",
 }
 

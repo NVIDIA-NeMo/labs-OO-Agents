@@ -336,7 +336,7 @@ def variables(
 
             # Add drill-down hint if it's a complex object
             if cfg.include_hints and _should_show_hint(value):
-                line += f"  # use doc(self.{name}) for details"
+                line += f"  # use print(doc(self.{name})) for details"
 
             lines.append(line)
 
@@ -374,7 +374,7 @@ def variables(
 
                 # Append hint within the existing comment if present
                 if cfg.include_hints and _should_show_hint(attr):
-                    hint_text = f"use doc(self.{name}) for details"
+                    hint_text = f"use print(doc(self.{name})) for details"
                     if "  #" in line:
                         # Append to existing comment with semicolon
                         line += f"; {hint_text}"
@@ -394,7 +394,7 @@ def variables(
 
                 # Add hint as separate comment for non-class objects
                 if cfg.include_hints and _should_show_hint(attr):
-                    line += f"  # use doc(self.{name}) for details"
+                    line += f"  # use print(doc(self.{name})) for details"
 
             lines.append(line)
     except (TypeError, AttributeError):

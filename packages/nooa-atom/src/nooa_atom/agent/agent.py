@@ -587,7 +587,7 @@ class AtomAgent(InteractiveAgent):
     async def handle(
         self,
         notification: Annotated[
-            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+            dict[str, list[Any]], spec(max_string=50_000, max_length=100, max_depth=10)
         ],
     ) -> Done | NeedInput | Waiting:
         """Handle one interactive turn: the newest request and anything else that arrived.
@@ -599,6 +599,10 @@ class AtomAgent(InteractiveAgent):
         and ``"delegates"`` (results of children you spawned). Do all the work
         the request needs before ending the turn; use as many cells as it
         takes, and run checks rather than assume them.
+
+        You are event-driven: queues shows running producers and pending
+        inputs, while notification contains events delivered for this turn; a
+        producer may finish before its result is consumed.
 
         Use ``self.message()`` regularly to keep the user informed with brief
         progress updates while you work, especially during tool use or longer
@@ -644,7 +648,7 @@ class AtomAgent(InteractiveAgent):
     async def handle_batch(
         self,
         notification: Annotated[
-            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+            dict[str, list[Any]], spec(max_string=50_000, max_length=100, max_depth=10)
         ],
     ) -> Done | Waiting:
         """Work on one task unattended and return a structured result.
@@ -691,7 +695,7 @@ class AtomAgent(InteractiveAgent):
     async def handle_orchestrate(
         self,
         notification: Annotated[
-            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+            dict[str, list[Any]], spec(max_string=50_000, max_length=100, max_depth=10)
         ],
     ) -> Done | Waiting:
         """You are a recursive language model agent.
@@ -768,7 +772,7 @@ class AtomAgent(InteractiveAgent):
     async def handle_work(
         self,
         notification: Annotated[
-            dict[str, list[Any]], spec(max_string=100_000, max_length=100, max_depth=10)
+            dict[str, list[Any]], spec(max_string=50_000, max_length=100, max_depth=10)
         ],
     ) -> Done | NeedInput | Waiting:
         """Work on a task for your parent agent and report back to it.
