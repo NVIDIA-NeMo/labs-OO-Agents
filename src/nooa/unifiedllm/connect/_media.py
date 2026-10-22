@@ -81,18 +81,10 @@ def pdf_fixture():
 
 def media_content(kind, style):
     """Return planned attachment content or an honest local skip reason."""
-    if kind == "video" and style != "chat":
-        return (
-            None,
-            None,
-            "Video testing not implemented for this route/input format; select video manually as unverified.",
-        )
-    if kind == "audio" and style != "chat":
-        return (
-            None,
-            None,
-            "Audio testing not implemented for this route/input format; select audio manually as unverified.",
-        )
+    from nooa.media_policy import implemented_input_kinds, unsupported_input_reason
+
+    if kind not in implemented_input_kinds(style):
+        return None, None, unsupported_input_reason(style, [kind])
     if kind == "image":
         block = {"type": "image_url", "image_url": {"url": _data_url("image/png", png_fixture())}}
     elif kind == "video":

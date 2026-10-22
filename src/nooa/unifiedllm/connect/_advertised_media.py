@@ -6,7 +6,7 @@ Only documented field paths are read. Names/descriptions, output modalities,
 model-family guesses and arbitrary nested flags are not input evidence.
 """
 
-FORMATS = ("image", "audio", "video", "pdf")
+from nooa.media_policy import ALL_INPUT_KINDS as FORMATS
 
 
 def _strings(value):
@@ -53,6 +53,7 @@ def advertised_media_suggestions(
     *,
     source="unknown",
     api_style="chat",
+    entry=None,
     decision_image_transport="json",
     typesafe_danger_zone_images=False,
 ):
@@ -98,15 +99,27 @@ def advertised_media_suggestions(
     if unknown:
         notes.append("Inputs unavailable in Connect: " + ", ".join(dict.fromkeys(unknown)) + ".")
     decision = api_style in {"systemone", "openai"}
-    suggested = [kind for kind in advertised if not decision or kind == "image"]
+    from nooa.media_policy import (
+        entry_input_interface,
+        implemented_input_kinds,
+        unsupported_input_reason,
+    )
+
+    interface = (
+        entry_input_interface(entry)
+        if entry is not None
+        else ("decision" if decision else api_style)
+    )
+    implemented = implemented_input_kinds(interface)
+    suggested = [kind for kind in advertised if kind in implemented]
     unavailable = {}
     for kind in advertised:
-        if decision and kind != "image":
+        if interface == "decision" and kind != "image":
             unavailable[kind] = (
                 "The NOOA decision client currently supports image attachments only. Use a chat model for this input format."
             )
-        elif api_style in {"anthropic", "responses"} and kind in {"audio", "video"}:
-            unavailable[kind] = "Native audio/video input is not supported by this API format."
+        elif kind not in implemented:
+            unavailable[kind] = unsupported_input_reason(interface, [kind])
         elif (
             api_style == "systemone"
             and kind == "image"

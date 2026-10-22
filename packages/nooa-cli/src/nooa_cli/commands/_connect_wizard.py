@@ -180,6 +180,10 @@ async def display_checks(
 
 def select_connection(state: WizardState) -> bool:
     """Select connection; return False when the user cancels."""
+    from ._connect_input_policy import validate_native_declaration
+
+    if state.api_style:
+        validate_native_declaration(state)
     state.registry = entries(state.path if state.output else None)
     if state.edit_model is not None:
         if any(
@@ -210,7 +214,20 @@ def select_connection(state: WizardState) -> bool:
             raise click.ClickException(f"Unknown registry model {state.edit_model!r}")
         state.editing, source_path = state.registry[state.edit_model]
         state.editing = deepcopy(state.editing)
-        connect.configure_entry(state.editing)  # Validate saved declarations before credentials.
+        from ._connect_input_policy import repair_native_media
+
+        current = (
+            prompts.parse_media_inputs(state.media_inputs)
+            if state.media_inputs is not None
+            else state.editing.get("media_inputs", [])
+        )
+        repaired = repair_native_media(
+            state, current, entry=state.editing, explicit=state.media_inputs is not None
+        )
+        if repaired is None:
+            return False
+        # Validate a detached candidate; preserve the raw source profile/evidence.
+        connect.configure_entry({**state.editing, "media_inputs": repaired})
         if not state.output:
             from nooa.llm_config import bundled_config_paths
 
@@ -709,6 +726,10 @@ def check_interfaces(state: WizardState) -> bool:
             "--structured-output-mode requires an explicit Completion interface, not interface discovery"
         )
     reject_decision_media(state)
+    from ._connect_input_policy import validate_native_declaration
+
+    if state.api_style:
+        validate_native_declaration(state)
     view.step(3, "Connection checks")
     if state.api_style == "responses":
         view.line(scrub_setup(state, connect.ENCRYPTED_REASONING_EXPLANATION), dim=True)
@@ -1621,11 +1642,14 @@ def reject_decision_media(state: WizardState) -> None:
 
 def select_manual_media(state: WizardState, previous, *, available=None):
     """Plan explicitly selected tests; selection alone never grants new permissions."""
-    selected = (
-        prompts.choose_media_inputs(previous, available=available)
-        if available is not None
-        else prompts.choose_media_inputs(previous)
-    )
+    from ._connect_input_policy import picker_options, repair_native_media
+
+    repaired = repair_native_media(state, previous)
+    if repaired is None:
+        raise click.Abort()
+    options = {"available": available} if available is not None else picker_options(state)
+    selected = prompts.choose_media_inputs(repaired, **options)
+    repair_native_media(state, selected, explicit=True)
     state.test_media_inputs = None
     state.inherit_media_inputs = False
     state.media_inputs = selected
@@ -1729,6 +1753,9 @@ def configure_media_inputs(state: WizardState) -> bool:
             previous = validate_media_inputs((state.editing or {}).get("media_inputs"))
         except ValueError:
             pass  # An explicit choice can repair an invalid legacy declaration.
+        from ._connect_input_policy import validate_native_declaration
+
+        validate_native_declaration(state)
         offer_suggestions(state, previous)
         state.media_inputs = prompts.parse_media_inputs(state.media_inputs)
         if state.test_media_inputs is not None:
@@ -1746,10 +1773,31 @@ def configure_media_inputs(state: WizardState) -> bool:
             state.endpoint,
             state.api_key_env or "",
             existing_entry=previous_entry,
+            media_inputs=[],  # route preview only; no mutation or permission revocation
         ).entry
-        previous = validate_media_inputs(route.get("media_inputs"))
+        saved_inputs = validate_media_inputs(previous_entry.get("media_inputs"))
+        from ._connect_input_policy import available_media
+
+        if connect.same_media_route(previous_entry, route) or state.editing is not None:
+            previous = saved_inputs
+        elif len(available_media(state, entry=route)) == 2 and {"audio", "video"}.intersection(
+            saved_inputs
+        ):
+            # A GUI route change cannot silently erase an invalid previous
+            # selection. Obtain an explicit repair for the replacement route.
+            previous = saved_inputs
+        else:
+            previous = ()
     elif state.editing:
         previous = validate_media_inputs(state.editing.get("media_inputs"))
+    from ._connect_input_policy import repair_native_media
+
+    repaired = repair_native_media(state, previous)
+    if repaired is None:
+        return False
+    previous = tuple(repaired)
+    if state.media_inputs is not None:
+        return True  # explicit repair; do not restore inherited unsupported permissions
     if offer_suggestions(state, previous):
         return True
     if state.test_media_inputs is not None:
@@ -1905,6 +1953,18 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
 def configure_checks(state: WizardState) -> bool:
     """Configure checks; return False when the user cancels."""
     reject_decision_media(state)
+    from ._connect_input_policy import repair_native_media
+
+    current = (
+        prompts.parse_media_inputs(state.media_inputs)
+        if state.media_inputs is not None
+        else (state.editing or state.existing or {}).get("media_inputs", [])
+    )
+    repaired = repair_native_media(
+        state, current, explicit=state.guided_media_explicit or state.yes
+    )
+    if repaired is None:
+        return False
     require_manual_limits(state)
     profile = connect.plan(
         state.alias or "candidate",
@@ -1913,6 +1973,7 @@ def configure_checks(state: WizardState) -> bool:
         state.endpoint,
         state.api_key_env,
         existing_entry=state.editing or state.existing,
+        media_inputs=[] if state.editing is not None else repaired,
         **(
             {"structured_output_mode": state.structured_output_mode}
             if state.structured_output_mode_set
@@ -1938,10 +1999,13 @@ def configure_checks(state: WizardState) -> bool:
             state.endpoint,
             state.api_key_env,
             existing_entry=state.existing,
+            media_inputs=[] if state.editing is not None else state.media_inputs,
             decision_image_transport=state.decision_image_transport,
             typesafe_danger_zone_images=state.typesafe_danger_zone_images,
         ).entry
-        state.media_inputs = previous.get("media_inputs", [])
+        state.media_inputs = (
+            list(repaired) if state.editing is not None else previous.get("media_inputs", [])
+        )
     if state.levels_file and (state.levels or state.reasoning_template):
         raise click.UsageError("Use either --levels-file or --reasoning-template with --levels.")
     state.patches = deepcopy(state.edited_level_patches)
@@ -1987,7 +2051,7 @@ def configure_checks(state: WizardState) -> bool:
         catalogue_settings=bool(state.edited_settings),
         endpoint_model=state.selected_endpoint_model,
         endpoint_models_url=state.endpoint_models_url,
-        media_inputs=state.media_inputs,
+        media_inputs=[] if state.editing is not None else state.media_inputs,
         test_media_inputs=state.test_media_inputs,
         decision_image_transport=state.decision_image_transport,
         typesafe_danger_zone_images=state.typesafe_danger_zone_images,
@@ -2032,6 +2096,10 @@ def configure_checks(state: WizardState) -> bool:
             merged.pop(field, None)
             if field in state.proposal.entry:
                 merged[field] = deepcopy(state.proposal.entry[field])
+        # The temporary proposal did not claim permissions for its synthetic
+        # route. Restore the explicit selection on the preserved actual route;
+        # refresh_plan below validates it before any check or save.
+        merged["media_inputs"] = list(state.media_inputs or [])
         merged["api_key_env"] = state.api_key_env
         merged.setdefault("api_style", state.api_style)
         if state.proposal.entry.get("allowed_openai_params"):
@@ -2285,8 +2353,15 @@ def run_checks(state: WizardState) -> bool:
     if state.test_media_inputs:
         facts = state.result.entry["provenance"]["probes"]
         enabled = list(state.media_inputs)
+        from ._connect_input_policy import available_media
+
+        available = available_media(state, entry=state.result.entry)
         for kind in state.test_media_inputs:
-            if facts.get(f"media:{kind}", {}).get("outcome") == "passed" and kind not in enabled:
+            if (
+                kind in available
+                and facts.get(f"media:{kind}", {}).get("outcome") == "passed"
+                and kind not in enabled
+            ):
                 enabled.append(kind)
         state.result.entry["media_inputs"] = enabled
     decision = connect.verdict(state.result.entry)
@@ -2380,14 +2455,27 @@ def save_model(state: WizardState) -> bool:
             if facts.get(f"media:{kind}", {}).get("outcome") == "unavailable"
         ]
         if unavailable:
+            from ._connect_input_policy import available_media
+
             view.line(scrub_setup(state, "Not available in this test: " + ", ".join(unavailable)))
             view.line(
                 scrub_setup(
                     state,
-                    "Unavailable inputs were not tested on this connection. Keep these settings, or enable inputs manually as unverified.",
+                    "Inputs not supported by this request interface cannot be enabled. Other implemented inputs may be selected manually as not tested."
+                    if len(available_media(state, entry=state.result.entry)) == 2
+                    else "Unavailable inputs were not tested on this connection. Keep these settings, or enable inputs manually as unverified.",
                 ),
                 dim=True,
             )
+    from ._connect_input_policy import repair_native_media
+
+    repaired = repair_native_media(
+        state, state.result.entry.get("media_inputs", []), entry=state.result.entry
+    )
+    if repaired is None:
+        return False
+    state.result.entry["media_inputs"] = repaired
+    connect.configure_entry(state.result.entry)  # local policy gate before any save side effect
     tested_media_inputs = list(state.result.entry.get("media_inputs", []))
     if not state.yes and state.test_media_inputs:
         action = prompts.review_media_inputs(state.result.entry["media_inputs"])
@@ -2396,14 +2484,14 @@ def save_model(state: WizardState) -> bool:
                 scrub_setup(state, "Inputs enabled manually will be saved as not tested."),
                 fg="yellow",
             )
-            state.result.entry["media_inputs"] = prompts.choose_media_inputs(
+            from ._connect_input_policy import picker_options
+
+            selected = prompts.choose_media_inputs(
                 state.result.entry["media_inputs"],
-                **(
-                    {"available": ("image",)}
-                    if state.api_style in connect.DECISION_API_STYLES
-                    else {}
-                ),
+                **picker_options(state, entry=state.result.entry),
             )
+            connect.configure_entry({**state.result.entry, "media_inputs": selected})
+            state.result.entry["media_inputs"] = selected
     if tested_media_inputs != state.result.entry.get("media_inputs", []):
         view.media_settings(state.result.entry)
     if state.test_media_inputs:
@@ -2724,9 +2812,11 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             if kind in enabled
             else "Off"
         )
-        if kind in {"audio", "video"} and state.api_style in {"anthropic", "responses"}:
+        from ._connect_input_policy import available_media
+
+        if kind not in available_media(state, entry=entry):
             value = (
-                "Enabled; interface doesn’t support this format"
+                "Repair required; interface doesn’t support this format"
                 if kind in enabled
                 else "Off; interface doesn’t support this format"
             )

@@ -216,6 +216,10 @@ def check_reason(reason):
 def media_test_detail(kind, record, *, media_inputs=None):
     """Display effective permissions separately from unchanged test evidence."""
     outcome = record.get("outcome")
+    if record.get("implementation_supported") is False or record.get("reason", "").startswith(
+        "Unsupported media input for "
+    ):
+        return "Unsupported by this request interface · cannot be enabled."
     if outcome == "passed":
         if record.get("client") == "decision":
             return "Passed · Image sent; access and sample color confirmed"

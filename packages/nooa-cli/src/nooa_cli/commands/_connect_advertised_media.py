@@ -14,6 +14,8 @@ def offer_suggestions(state, previous):
         from ._connect_wizard import show_model_metadata
 
         show_model_metadata(state)
+    from ._connect_input_policy import media_route
+
     hints = state.media_hints
     report = connect.advertised_media_suggestions(
         hints,
@@ -21,6 +23,7 @@ def offer_suggestions(state, previous):
             "media_source", "published model information" if hints else "unknown"
         ),
         api_style=state.api_style,
+        entry=media_route(state),
         decision_image_transport=state.decision_image_transport or "json",
         typesafe_danger_zone_images=state.typesafe_danger_zone_images,
     )
@@ -74,6 +77,7 @@ def offer_suggestions(state, previous):
     all_report = connect.advertised_media_suggestions(
         {"id": state.model, "input_modalities": all_inputs},
         api_style=state.api_style,
+        entry=media_route(state),
         decision_image_transport=state.decision_image_transport or "json",
         typesafe_danger_zone_images=state.typesafe_danger_zone_images,
     )

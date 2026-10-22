@@ -57,6 +57,7 @@ class ProbeRecord(TypedDict, total=False):
     request_accepted: bool
     access_reported: bool
     attachment_observed: bool
+    implementation_supported: bool  # Derived implementation ceiling, not model support.
     output_settings_observed: bool
     structured_output_mode: str | None
     structured_output_carrier: str
@@ -127,6 +128,11 @@ def check_status(
 ) -> str:
     """One verdict policy for progress rows, JSON stages and final summaries."""
     outcome = record.get("outcome")
+    if name.startswith("media:") and entry is not None:
+        from nooa.media_policy import entry_input_interface, implemented_input_kinds
+
+        if name[6:] not in implemented_input_kinds(entry_input_interface(entry)):
+            return "skipped" if outcome == "not_probed" else "attention"
     current = False
     if outcome not in {"not_probed", "running"}:
         from ._verification import verification_is_current

@@ -867,7 +867,14 @@ def configure_entry(
         result.setdefault("provenance", {})["structured_output_profile"] = {"mode": effective_mode}
     if structured_output_mode is not STRUCTURED_OUTPUT_UNSET:
         result["structured_output_mode"] = structured_output_mode
-    result["media_inputs"] = list(validate_media_inputs(result.get("media_inputs")))
+    from nooa.media_policy import entry_input_interface, validate_implemented_media_inputs
+
+    interface = entry_input_interface(result)
+    result["media_inputs"] = list(
+        validate_implemented_media_inputs(result.get("media_inputs"), interface)
+        if interface in {"anthropic", "responses"}
+        else validate_media_inputs(result.get("media_inputs"))
+    )
     for patch in (result.get("reasoning_levels") or {}).values():
         if "media_inputs" in patch or "media_inputs" in (patch.get("extra_body") or {}):
             raise ValueError("media_inputs belongs on the connection, not a reasoning level")
@@ -2629,6 +2636,10 @@ async def run_steps(
             yield ProbeUpdate(probe.name, deepcopy(record))
             continue
         if probe.name.startswith("media:"):
+            from nooa.media_policy import entry_input_interface, implemented_input_kinds
+
+            if probe.name[6:] not in implemented_input_kinds(entry_input_interface(entry)):
+                record["implementation_supported"] = False
             baseline = records.get("routing", {})
             if probe.skip_reason or not routing_allows_save(entry, entry):
                 record["reason"] = (

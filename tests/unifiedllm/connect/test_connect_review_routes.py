@@ -50,10 +50,16 @@ async def test_route_local_plan_and_history(model, style, endpoint, expected):
         assert history == before and original == OLD
     finally:
         await client.aclose()
-    explicit = connect.plan(
-        "local", model, style, endpoint, "", existing_entry=original, media_inputs=["audio"]
-    )
-    assert explicit.entry["media_inputs"] == ["audio"]
+    if style in {"anthropic", "responses"}:
+        with pytest.raises(ValueError, match="Unsupported media input.*audio"):
+            connect.plan(
+                "local", model, style, endpoint, "", existing_entry=original, media_inputs=["audio"]
+            )
+    else:
+        explicit = connect.plan(
+            "local", model, style, endpoint, "", existing_entry=original, media_inputs=["audio"]
+        )
+        assert explicit.entry["media_inputs"] == ["audio"]
     cleared = connect.plan(
         "local", model, style, endpoint, "", existing_entry=original, media_inputs=[]
     )

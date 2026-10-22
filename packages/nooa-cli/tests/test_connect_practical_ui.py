@@ -245,12 +245,19 @@ def test_manual_unavailable_checks_never_imply_permissions(
 ):
     current = state()
     current.api_style = style
-    monkeypatch.setattr(prompts, "choose_media_inputs", lambda values: selected)
+    monkeypatch.setattr(prompts, "choose_media_inputs", lambda values, **kw: selected)
     monkeypatch.setattr(
         prompts,
         "labelled_choice",
         lambda *a, **k: "test" if checkable else pytest.fail("No tests available"),
     )
+    if style == "responses" and {"audio", "video"}.intersection(selected):
+        import click
+
+        with pytest.raises(click.UsageError, match="Unsupported media input"):
+            wizard.select_manual_media(current, [])
+        assert current.media_inputs is None and current.test_media_inputs is None
+        return
     wizard.select_manual_media(current, [])
     assert current.test_media_inputs == (selected if checkable else None)
     assert current.media_inputs == (
@@ -272,8 +279,13 @@ def test_listed_test_all_selects_known_types_even_unlisted_or_unavailable(
     current.api_style = style
 
     def choose(label, options, *, default):
+        if style == "responses":
+            # Audio is advertised, not implementable/suggested. The fallback
+            # media menu can still explicitly test all and report skipped rows.
+            assert dict(options)["test"] == "Test all media inputs (generated samples)"
+            return "test"
         assert dict(options)["test-all"] == "Test all media inputs"
-        assert default == ("test-all" if style == "responses" else "test")
+        assert default == "test"
         return "test-all"
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
@@ -457,15 +469,15 @@ def test_audio_video_unsupported_native_format_is_scoped_and_zero_sample_send(mo
     )
     assert report["checkable"] == []
     for kind, reason in report["unavailable_checks"].items():
-        assert "Native audio/video input is not supported by this API format." in reason
+        assert "Unsupported media input" in reason and kind in reason
         detail = view.media_test_detail(kind, {"outcome": "not_probed", "reason": reason})
-        assert "Use Chat" not in detail and "unsupported" not in detail
+        assert "Unsupported by this request interface" in detail and "cannot be enabled" in detail
     mock_http(monkeypatch, lambda r: pytest.fail("Unavailable media fixture must not be sent"))
     from nooa.unifiedllm.connect._media import media_content
 
     for kind in ("audio", "video"):
         content, _, reason = media_content(kind, style)
-        assert content is None and "not implemented" in reason
+        assert content is None and "Unsupported media input" in reason
 
 
 @pytest.mark.parametrize("style", ["responses", "anthropic"])
@@ -475,6 +487,13 @@ def test_guided_test_all_proposal_marks_unimplemented_checks_before_consent(
 ):
     current = state(guided=True, test_media_inputs=KINDS)
     current.api_style = style
+    if previous:
+        with pytest.raises(ValueError, match="Unsupported media input.*audio"):
+            connect.plan(
+                "local", WIRE, style, BASE, "", media_inputs=previous, test_media_inputs=KINDS
+            )
+        assert current.media_inputs is None  # No permission is silently revoked to plan.
+        return
     current.proposal = connect.plan(
         "local", WIRE, style, BASE, "", media_inputs=previous, test_media_inputs=KINDS
     )
@@ -491,6 +510,6 @@ def test_guided_test_all_proposal_marks_unimplemented_checks_before_consent(
         in text
     )
     assert "Video: Off; interface doesn’t support this format" in text
-    assert "Native audio/video input is not supported by this API format" in text
+    assert "Unsupported media input" in text
     assert "Use Chat" not in text
     assert current.proposal.entry["media_inputs"] == previous

@@ -25,7 +25,9 @@ def sdk_credentials(monkeypatch):
     monkeypatch.setattr(
         _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
     )
-    monkeypatch.setattr(_connect_prompts, "choose_media_inputs", lambda current=(): list(current))
+    monkeypatch.setattr(
+        _connect_prompts, "choose_media_inputs", lambda current=(), **kw: list(current)
+    )
     # Media choice has focused UI tests; these legacy scenarios select manual.
     monkeypatch.setattr(_connect_prompts, "choose_media_mode", lambda **kw: "manual")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")

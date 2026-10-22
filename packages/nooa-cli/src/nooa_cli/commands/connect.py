@@ -183,7 +183,7 @@ class ConnectCommand(click.Command):
 )
 @click.option(
     "--media-inputs",
-    help="Enable image,audio,video,pdf inputs without testing (comma-separated). The NOOA decision client currently supports image attachments only. Empty or - turns media off.",
+    help="Enable implemented inputs without testing (comma-separated): native Messages/Responses image,pdf; Chat image,audio,video,pdf; The NOOA decision client currently supports image attachments only. Empty or - turns media off.",
 )
 @click.option(
     "--test-media-inputs",

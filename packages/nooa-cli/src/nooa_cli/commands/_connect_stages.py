@@ -626,11 +626,14 @@ def run_stage(
                     result = asyncio.run(connect.check_stage(proposal, stage, api_key=key))
                 entry = result.entry
                 if test_media_inputs is not None:
+                    from ._connect_input_policy import available_media
+
                     retained = list(entry.get("media_inputs", []))
                     entry["media_inputs"] = retained + [
                         kind
                         for kind in parse_media_inputs(test_media_inputs)
                         if kind not in retained
+                        and kind in available_media(state=None, entry=entry)
                         and entry["provenance"]["probes"].get(f"media:{kind}", {}).get("outcome")
                         == "passed"
                     ]

@@ -739,8 +739,11 @@ Decision suggestions allow **image only**, even if a shared model list includes
 other inputs. System One JSON reports that image testing is unavailable; use
 OpenAI Decisions, or direct TypeSafe with explicit multipart transport and
 experimental opt-in, or leave images off. Responses/Anthropic audio and video
-listings can be shown; use Chat to test those formats, or enable them without
-testing. No transport is chosen from a model listing.
+listings remain visible as advertised facts, but native Messages and Responses
+implement image/PDF inputs only. Audio/video cannot be selected, enabled without
+testing, or saved on those interfaces. Choose Chat for implemented audio/video
+extensions; backend support remains unverified until tested. No transport is
+chosen from a model listing.
 
 The decision image menu offers **Leave images off** (the new-entry default),
 **Enable images without testing**, and **Test images before enabling**. An entry
@@ -769,9 +772,10 @@ Test limits:
 
 - For chat-family interfaces, image and PDF are tested on all three API styles.
 - Connect tests audio and video only with `--api-style chat`. Elsewhere it says
-  “testing isn't available for this API format.” Use Chat to test those inputs,
-  or enable them without testing. Responses audio request mapping remains
-  unresolved here. Decision checks remain image-only.
+  “unsupported media input” and sends no attachment request for those rows.
+  Native Messages/Responses audio/video permissions are invalid, not merely
+  untested. Choose Chat for audio/video extensions. Decision checks remain
+  image-only.
 - **Not available** means the check did not show that this model accepts that
   format through this connection.
 

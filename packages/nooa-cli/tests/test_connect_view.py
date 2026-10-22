@@ -843,8 +843,8 @@ def test_native_media_skip_reports_unsupported_api_format(kind):
 
     _, _, reason = media_content(kind, "responses")
     detail = view.media_test_detail(kind, {"outcome": "not_probed", "reason": reason})
-    assert "check skipped" in detail
-    assert f"Native {kind} input is not supported by this API format." in detail
+    assert "Unsupported by this request interface" in detail
+    assert "cannot be enabled" in detail
     assert "not implemented" not in detail
     assert "Use Chat" not in detail
 

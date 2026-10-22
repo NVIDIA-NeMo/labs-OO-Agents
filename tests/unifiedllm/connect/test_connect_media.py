@@ -17,6 +17,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
+from nooa.media_policy import unsupported_input_reason
 from nooa.unifiedllm import connect
 from nooa.unifiedllm.connect._media import pdf_fixture, png_fixture, video_fixture, wav_fixture
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
@@ -292,11 +293,8 @@ async def test_unsupported_portable_probe_is_honestly_not_tested(monkeypatch, st
     assert len(calls) == 1
     assert result.entry["provenance"]["probes"][f"media:{kind}"] == {
         "outcome": "not_probed",
-        "reason": (
-            "Video testing not implemented for this route/input format; select video manually as unverified."
-            if kind == "video"
-            else "Audio testing not implemented for this route/input format; select audio manually as unverified."
-        ),
+        "reason": unsupported_input_reason(style, [kind]),
+        "implementation_supported": False,
     }
 
 

@@ -1316,7 +1316,19 @@ class UnifiedLLM(ABC):
 
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
-        return filter_media_messages(messages, enabled)
+        filtered = filter_media_messages(messages, enabled)
+        self._validate_implemented_media(filtered, call_config)
+        return filtered
+
+    def _validate_implemented_media(self, messages, call_config):
+        from nooa.media_policy import reject_unsupported_media, resolved_input_interface
+
+        interface = resolved_input_interface(
+            self._effective_model(call_config),
+            call_config,
+            client_type="responses" if isinstance(self, ResponsesClient) else "completion",
+        )
+        reject_unsupported_media(messages, interface)
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -2316,6 +2328,8 @@ class CompletionClient(UnifiedLLM):
             media_inputs=self._request_media_inputs(call_config),
         )
 
+        self._validate_implemented_media(prepared_messages, call_config)
+
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
             prepared_messages, responses=False, model=effective_model
@@ -2434,6 +2448,8 @@ class CompletionClient(UnifiedLLM):
             anthropic_cache_marking=cache_mapping == "anthropic",
             media_inputs=self._request_media_inputs(call_config),
         )
+
+        self._validate_implemented_media(prepared_messages, call_config)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
@@ -2745,6 +2761,8 @@ class ResponsesClient(UnifiedLLM):
             media_inputs=self._request_media_inputs(call_config),
         )
 
+        self._validate_implemented_media(input_messages, call_config)
+
         api_params = {
             "model": self.model,
             "truncation": "disabled",
@@ -2831,6 +2849,8 @@ class ResponsesClient(UnifiedLLM):
             native_encrypted_reasoning,
             media_inputs=self._request_media_inputs(call_config),
         )
+
+        self._validate_implemented_media(input_messages, call_config)
 
         api_params = {
             "model": self.model,
@@ -2931,6 +2951,9 @@ class ResponsesClient(UnifiedLLM):
     @staticmethod
     def _transform_content_blocks(blocks, text_kind="input_text"):
         """Project documented public slots, preserving request-owned metadata."""
+        from nooa.media_policy import reject_unsupported_media
+
+        reject_unsupported_media([{"content": blocks}], "responses")
         result = copy.deepcopy(blocks)
         for block in result:
             if block.get("type") == "text":

@@ -109,7 +109,8 @@ def test_audio_video_advertised_but_checks_unavailable(style):
     result = connect.advertised_media_suggestions(
         metadata(["image", "audio", "video", "pdf"]), api_style=style
     )
-    assert result["suggested"] == ["image", "audio", "video", "pdf"]
+    assert result["advertised"] == ["image", "audio", "video", "pdf"]
+    assert result["suggested"] == ["image", "pdf"]
     assert result["checkable"] == ["image", "pdf"]
     assert set(result["unavailable_checks"]) == {"audio", "video"}
 
@@ -194,7 +195,8 @@ def test_same_route_edits_preserve_explicit_permissions_and_native_metadata_wins
         catalogue=catalogue,
         endpoint_model={**native, "id": "neighbour"},
     )
-    assert wrong.entry["provenance"]["media_suggestions"]["suggested"] == ["image", "audio"]
+    assert wrong.entry["provenance"]["media_suggestions"]["advertised"] == ["image", "audio"]
+    assert wrong.entry["provenance"]["media_suggestions"]["suggested"] == ["image"]
 
 
 @pytest.mark.parametrize("style", ["chat", "anthropic"])

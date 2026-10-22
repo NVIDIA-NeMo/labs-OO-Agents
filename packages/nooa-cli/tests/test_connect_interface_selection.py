@@ -24,7 +24,7 @@ def isolated_registry(monkeypatch):
     monkeypatch.setattr(wizard, "entries", lambda *a, **kw: {})
     monkeypatch.setattr(wizard, "shadowing_source", lambda *a, **kw: None)
     monkeypatch.setattr(prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested)
-    monkeypatch.setattr(prompts, "choose_media_inputs", lambda current=(): list(current))
+    monkeypatch.setattr(prompts, "choose_media_inputs", lambda current=(), **kw: list(current))
     monkeypatch.setattr(prompts, "choose_media_mode", lambda **kw: "manual")
 
 
