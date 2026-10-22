@@ -85,7 +85,7 @@ def test_message_records_event_and_renders(agent):
 def test_turn_results_require_their_text():
     assert Done(explanation=" finished ").explanation == "finished"
     assert Waiting(explanation="job ci-42", on=["jobs:ci-42"]).on == ["jobs:ci-42"]
-    assert NeedInput(question="Which branch?", options=["main", "dev"]).options == ["main", "dev"]
+    assert NeedInput(question=" Which branch? ").question == "Which branch?"
     with pytest.raises(ValidationError):
         Done(explanation="  ")
     with pytest.raises(ValidationError):
@@ -134,17 +134,6 @@ def test_blank_text_is_rejected_with_one_message(build):
         build()
 
 
-def test_need_input_takes_options_or_answer_type_not_both():
-    class HowMany(BaseModel):
-        n: int
-
-    assert NeedInput(question="How many?", answer_type=HowMany).answer_type is HowMany
-    with pytest.raises(ValidationError):
-        NeedInput(question="How many?", options=["1", "2"], answer_type=HowMany)
-    with pytest.raises(ValidationError):
-        NeedInput(question="How many?", answer_type=int)  # type: ignore[arg-type]
-
-
 class _Opaque:
     """An object pydantic cannot turn into JSON."""
 
@@ -162,32 +151,9 @@ def test_done_result_serialises_when_it_holds_an_arbitrary_object():
     }
 
 
-def test_need_input_answer_type_serialises_as_a_class_name():
-    class HowMany(BaseModel):
-        n: int
-
-    event = ToolCallEvent(
-        tool_call_id="c1",
-        name="return_result",
-        arguments={"result": NeedInput(question="How many?", answer_type=HowMany)},
-    )
-    dumped = json.loads(event.model_dump_json())
-    answer_type = dumped["arguments"]["result"]["answer_type"]
-    assert answer_type == f"{__name__}:{HowMany.__qualname__}"
-    assert json.loads(NeedInput(question="Why?").model_dump_json())["answer_type"] is None
-
-
-def test_need_input_options_must_not_be_empty():
-    assert NeedInput(question="Anything else?").options is None
-    with pytest.raises(ValidationError) as error:
-        NeedInput(question="Which branch?", options=[])
-    assert "omit options for a free-text answer" in str(error.value)
-
-
-def test_need_input_options_must_not_be_blank():
-    assert NeedInput(question="Which branch?", options=[" main "]).options == ["main"]
+def test_need_input_has_no_options():
     with pytest.raises(ValidationError):
-        NeedInput(question="Which branch?", options=["main", "  "])
+        NeedInput(question="Which branch?", options=["main", "dev"])
 
 
 def _cell(code: str, call_id: str) -> LLMResponse:
@@ -350,3 +316,15 @@ def test_interactive_agent_has_no_web_attribute(monkeypatch):
         assert "WebPublisher" not in rendered
         assert "web:" not in rendered
         assert "web" not in agent.context
+
+
+def test_need_input_roundtrip_and_extra_rejection():
+    need = NeedInput(question="Which?", reason="Safety.")
+    assert NeedInput.model_validate_json(need.model_dump_json()) == need
+    with pytest.raises(ValidationError):
+        NeedInput.model_validate({**need.model_dump(), "presentation": "auto"})
+
+
+def test_need_input_rejects_a_typed_answer():
+    with pytest.raises(ValidationError):
+        NeedInput(question="How many?", answer_type=BaseModel)

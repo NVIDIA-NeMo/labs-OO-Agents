@@ -189,30 +189,20 @@ class ChildQuestion(BaseModel):
     """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``.
 
     It is data. Any ``send()`` to the child, and the child's next turn, end
-    it as the child's pending question; ``id`` names it until then.
-    ``answer_schema`` is the JSON schema of the child's ``answer_type`` when
-    it gave one; the reply is then a dict matching it. An unanswered
-    question does not stop you from ending your own turn with ``Done``.
+    it as the child's pending question; ``id`` names it until then. The
+    reply is plain text. An unanswered question does not stop you from
+    ending your own turn with ``Done``.
     """
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
     child: ChildRef
     question: str
-    options: list[str] | None = None
     reason: str | None = None
-    answer_schema: dict[str, Any] | None = None
 
     @classmethod
     def from_need_input(cls, child: ChildRef, need: NeedInput) -> "ChildQuestion":
-        """Convert a child's ``NeedInput``; its answer class becomes a JSON schema."""
-        schema = need.answer_type.model_json_schema() if need.answer_type is not None else None
-        return cls(
-            child=child,
-            question=need.question,
-            options=need.options,
-            reason=getattr(need, "reason", None),
-            answer_schema=schema,
-        )
+        """Convert a child's ``NeedInput``."""
+        return cls(child=child, question=need.question, reason=need.reason)
 
 
 class ChildFailed(BaseModel):
@@ -426,7 +416,7 @@ class TurnEndedUpdate(_Update):
     """A turn ended.
 
     ``outcome`` is the outcome as data (``Done``/``Waiting`` fields; for a
-    question: ``question``, ``options``, ``answer_schema``; for a cancel:
+    question: ``question``, ``reason``; for a cancel:
     ``by``; for an error: ``error``). ``result_type`` is the
     ``module:qualname`` of a pydantic ``Done.result``, so a receiver can
     rebuild it. ``usage`` is this turn's own delta.

@@ -211,11 +211,9 @@ def cancel_text(by: str) -> str:
     return "Stopped at your request." if by == "user" else f"Stopped by {by}."
 
 
-def question_text(question: str, options: list[str] | None, reason: str | None = None) -> str:
+def question_text(question: str, reason: str | None = None) -> str:
     """A ``NeedInput`` question as the agent's final message of the turn; its reason last."""
     text = question
-    if options:
-        text += "\n\n" + "\n".join(f"- {option}" for option in options)
     if reason:
         text += "\n\n" + reason
     return text
@@ -655,14 +653,12 @@ class ACPEventBridge:
     def _on_turn_ended(self, update: TurnEndedUpdate) -> None:
         self._reset_rolling("Turn ended before this finished.")
         if update.outcome_kind == "need_input":
-            # Rendered once per turn, here; the prompt that owns the consumed
-            # item decides whether to also open a form.
+            # Rendered once per turn, here; the next prompt answers it as text.
             question = str(update.outcome.get("question", ""))
-            options = update.outcome.get("options")
             reason = update.outcome.get("reason")
             self._enqueue(
                 update_agent_message(
-                    text_block(question_text(question, options, str(reason) if reason else None))
+                    text_block(question_text(question, str(reason) if reason else None))
                 )
             )
         elif update.outcome_kind in {"done", "waiting"}:

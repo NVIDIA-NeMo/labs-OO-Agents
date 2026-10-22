@@ -214,7 +214,7 @@ async def test_session_close_works_over_the_wire(tmp_path):
     assert capabilities.delete is None
 
 
-async def test_a_question_is_answered_through_a_form_over_the_wire(tmp_path):
+async def test_a_question_is_text_answered_by_the_next_prompt_over_the_wire(tmp_path):
     client = _RecordingClient()
     async with _spawn(client, "--question", cwd=tmp_path) as (connection, _process):
         await connection.initialize(
@@ -227,10 +227,14 @@ async def test_a_question_is_answered_through_a_form_over_the_wire(tmp_path):
         response = await asyncio.wait_for(
             connection.prompt(session.session_id, [text_block("push it")]), _HANG_TIMEOUT
         )
+        # Even a client that shows forms gets the question as the agent's text.
+        assert response.stop_reason == "end_turn"
+        assert client.texts()[-1] == "Which branch?\n\n"
+        response = await asyncio.wait_for(
+            connection.prompt(session.session_id, [text_block("main")]), _HANG_TIMEOUT
+        )
     assert response.stop_reason == "end_turn"
-    [(message, mode)] = client.elicitations
-    assert message == "Which branch?"
-    assert mode.requested_schema.properties["answer"].enum == ["main", "dev"]
+    assert client.elicitations == []
     assert client.texts()[-2:] == ["Using the answer.\n\n", "> **Done:** answered\n\n"]
 
 

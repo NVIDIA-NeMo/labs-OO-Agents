@@ -36,8 +36,9 @@ ORCHESTRATOR_TEXT = (
 UNCHANGED_PROMPTS = {
     # handle() as on dev/atom after #447 and #451 (#451's "or from your parent
     # agent if you are a child" line and #447's NeedInput free-text wording),
-    # plus the regular progress-update guidance.
-    "handle": "4b8cac52ffa8278c0fbf5ea358df39b57b029b3cc7a555df016211e5e77d6e43",
+    # plus the regular progress-update guidance, and NeedInput as a plain-text
+    # question (no options).
+    "handle": "222eaf64542e26bdd5d805040ba96832147ce049837e4ebcef0969366d34b133",
     "handle_batch": "9124c2874abd30f61a26f313abacbdc925f02a20efac8b4d7e3319a22ab545f0",
 }
 
@@ -84,7 +85,7 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
     """Return-type validation turns a NeedInput into feedback the model sees."""
     llm = CellLLM(
         [
-            cell("return_result(NeedInput(question='which one?', options=['a', 'b']))"),
+            cell("return_result(NeedInput(question='which one: a or b?'))"),
             cell(RESULT),
         ]
     )

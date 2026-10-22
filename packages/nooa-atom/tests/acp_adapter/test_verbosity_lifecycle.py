@@ -7,7 +7,7 @@ import asyncio
 import pytest
 from acp import text_block
 from acp.schema import AgentMessageChunk, Implementation
-from atom_test_agents import ScriptedModels, cell
+from atom_test_agents import ScriptedModels
 from nooa_atom.workspace.settings import settings_path
 
 POOL = Implementation(name="pool", version="1.0.16")
@@ -59,26 +59,6 @@ async def test_stop_cancels_all_concurrent_local_pickers(
     assert not settings_path(workspace=workspace).exists()
     assert adapter.bridge(session_id).verbosity == "verbose"
     assert adapter.session(session_id).info.reply_count == 0
-    assert session_id not in adapter._asks
-
-
-async def test_stop_cancels_agent_question_and_local_picker_together(
-    make_adapter, workspace, client, monkeypatch
-):
-    models = ScriptedModels({None: [cell("return_result(NeedInput(question='Which branch?'))")]})
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id = (await adapter.new_session(str(workspace))).session_id
-    forms = GatedForms()
-    monkeypatch.setattr(client, "ext_method", forms.request)
-    agent_prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("Ask a question")]))
-    await wait(forms.entered[0])
-    local_prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("/verbosity")]))
-    await wait(forms.entered[1])
-    await adapter.cancel(session_id)
-    results = await asyncio.wait_for(asyncio.gather(agent_prompt, local_prompt), 5)
-    assert [r.stop_reason for r in results] == ["cancelled", "cancelled"]
-    assert all(e.is_set() for e in forms.cancelled)
-    assert not settings_path(workspace=workspace).exists()
     assert session_id not in adapter._asks
 
 
@@ -175,33 +155,6 @@ async def test_external_prompt_cancellation_survives_client_swallowing_cancel(
     assert not settings_path(workspace=workspace).exists()
     assert adapter.bridge(session_id).verbosity == "verbose"
     assert session_id not in adapter._asks
-
-
-async def test_stop_before_agent_form_registration_does_not_open_or_resume_question(
-    make_adapter, workspace, client, monkeypatch
-):
-    models = ScriptedModels({None: [cell("return_result(NeedInput(question='Which branch?'))")]})
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id = (await adapter.new_session(str(workspace))).session_id
-    bridge = adapter.bridge(session_id)
-    entered, release = asyncio.Event(), asyncio.Event()
-    original_flush = bridge.flush
-
-    async def gated_flush():
-        if session_id in adapter._asking and not entered.is_set():
-            entered.set()
-            await release.wait()
-        await original_flush()
-
-    monkeypatch.setattr(bridge, "flush", gated_flush)
-    request = asyncio.create_task(adapter.prompt(session_id, [text_block("Ask a question")]))
-    await wait(entered)
-    await adapter.cancel(session_id)
-    release.set()
-    assert (await asyncio.wait_for(request, 5)).stop_reason == "cancelled"
-    assert not any(entry[0] == "ext" for entry in client.log)
-    assert adapter.session(session_id).info.reply_count == 1
-    assert not settings_path(workspace=workspace).exists()
 
 
 @pytest.mark.parametrize("cancel_source", ["caller", "stop"])

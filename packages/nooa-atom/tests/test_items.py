@@ -30,11 +30,6 @@ from nooa.interactive import Done, NeedInput
 _CHILD = ChildRef(id="c1", name="Review auth", depth=1, status="running")
 
 
-class _Answer(BaseModel):
-    branch: str
-    force: bool = False
-
-
 def test_models_validate():
     assert Receipt(session_id="s", channel="user_messages", item_id="i", delivered="queued")
     with pytest.raises(ValidationError):
@@ -55,18 +50,12 @@ def test_models_validate():
     assert info.usage == Usage() and info.status == "on_disk"
 
 
-def test_child_question_from_need_input_carries_the_json_schema():
+def test_child_question_from_need_input_carries_question_and_reason():
     question = ChildQuestion.from_need_input(
-        _CHILD, NeedInput(question="Which branch?", answer_type=_Answer)
+        _CHILD, NeedInput(question="Which branch?", reason="Both have the fix.")
     )
-    assert question.answer_schema == _Answer.model_json_schema()
-    assert question.options is None
+    assert (question.question, question.reason) == ("Which branch?", "Both have the fix.")
     assert ChildQuestion.model_validate_json(question.model_dump_json()) == question
-
-    choice = ChildQuestion.from_need_input(
-        _CHILD, NeedInput(question="Which?", options=["main", "dev"])
-    )
-    assert (choice.options, choice.answer_schema) == (["main", "dev"], None)
 
 
 _LEAVES = {str, int, float, bool, type(None), typing.Any}

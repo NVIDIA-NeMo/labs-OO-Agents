@@ -126,8 +126,7 @@ class AtomAgent(InteractiveAgent):
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=...)`` only when a person must answer (``options=[...]``
-    for fixed choices),
+    ``NeedInput(question=...)`` only when a person must answer,
     and ``Waiting(explanation=..., on=[...])`` only while something you started
     is still running, naming the channel or job it waits on.
     """
@@ -507,10 +506,8 @@ class AtomAgent(InteractiveAgent):
 
         - ``NeedInput(question=...)`` when you cannot go on without an
           answer from the person. The host shows ``question``, so do not also
-          send it with ``self.message()``. Omit ``options`` for a free-text
-          answer; add ``options=[...]`` only for one choice among fixed values
-          (the answer is then just the chosen option). The answer arrives in
-          the next notification.
+          send it with ``self.message()``. The next message answers it as
+          plain text; put any suggested answers in the question.
 
         - ``Waiting(explanation=..., on=[...])`` when a job you started is
           still running and nothing else is left to do. ``on`` names what

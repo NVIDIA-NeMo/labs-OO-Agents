@@ -1039,7 +1039,5 @@ def _question_from_outcome(ref: ChildRef, outcome: dict[str, Any]) -> ChildQuest
         id=str(outcome.get("question_id") or question_id(ref.id, 0)),
         child=ref,
         question=str(outcome.get("question", "")),
-        options=outcome.get("options"),
         reason=outcome.get("reason"),
-        answer_schema=outcome.get("answer_schema"),
     )

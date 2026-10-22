@@ -8,7 +8,6 @@ from contextlib import suppress
 from typing import Any
 
 from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
-from pydantic import BaseModel
 
 from nooa.interactive import Done, NeedInput, Waiting
 from nooa.slash_dispatch import SlashCommandResult
@@ -92,21 +91,12 @@ class InteractiveSessionDispatcher:
         """Send the person the text a typed result carries, as an agent message.
 
         ``Done.message`` is the reply, ``Waiting.message`` the line shown while
-        waiting, and a ``NeedInput`` shows its question, its reason, and its
-        choices or the fields of its ``answer_type`` with their types and
-        descriptions. This server has no forms, so a typed answer still
-        arrives as the person's text reply. The agent is told not to send
-        these itself, so the host must.
+        waiting, and a ``NeedInput`` shows its question and its reason; the
+        person's next message is the answer, as plain text. The agent is told
+        not to send these itself, so the host must.
         """
         if isinstance(result, NeedInput):
-            parts = [result.question]
-            if result.reason:
-                parts.append(result.reason)
-            if result.options:
-                parts.append("\n".join(f"- {option}" for option in result.options))
-            if result.answer_type is not None:
-                parts.append("Reply with these fields:\n" + _describe_fields(result.answer_type))
-            text: str | None = "\n\n".join(parts)
+            text: str | None = "\n\n".join(p for p in (result.question, result.reason) if p)
         else:
             text = result.message
         if text:
@@ -134,16 +124,3 @@ class InteractiveSessionDispatcher:
     async def close(self) -> None:
         await self.cancel()
         await self.agent.close()
-
-
-def _describe_fields(model: type[BaseModel]) -> str:
-    """One ``- name (type): description`` line per field of ``model``."""
-    lines = []
-    for name, field in model.model_fields.items():
-        annotation = field.annotation
-        type_name = annotation.__name__ if isinstance(annotation, type) else str(annotation)
-        line = f"- {name} ({type_name})"
-        if field.description:
-            line += f": {field.description}"
-        lines.append(line)
-    return "\n".join(lines)

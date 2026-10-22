@@ -794,7 +794,7 @@ async def test_pool_steers_taken_by_one_turn_end_the_prompt_with_it(
 
 
 async def test_a_pool_steer_the_running_turn_takes_is_done_with_it(make_adapter, workspace, client):
-    """The model can take a pending message itself; its question is asked once."""
+    """The model can take a pending message itself; its question is shown once, as text."""
     started, block = fresh_events()
     models = ScriptedModels(
         {
@@ -804,11 +804,9 @@ async def test_a_pool_steer_the_running_turn_takes_is_done_with_it(make_adapter,
                     "await self.queue_manager.get_channel('user_messages').get()\n"
                     "return_result(NeedInput(question='Which branch?'))"
                 ),
-                reply("Pushed."),
             ]
         }
     )
-    client.ext_answers = [{"action": "accept", "content": {"answer": "main"}}]
     adapter = await make_adapter(models, client_info=POOL)
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
@@ -819,19 +817,13 @@ async def test_a_pool_steer_the_running_turn_takes_is_done_with_it(make_adapter,
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
-    assert [entry[1] for entry in client.log if entry[0] == "ext"] == ["poolside/elicitation"]
-    assert _order(client, session_id)[-3:] == [
-        "Pushed.\n\n",
-        "> **Done:** answered\n\n",
-        "response",
-    ]
+    assert not [entry for entry in client.log if entry[0] == "ext"]
+    assert _order(client, session_id)[-2:] == ["Which branch?\n\n", "response"]
     await asyncio.sleep(0.1)  # nothing is left to start another turn
-    assert len(models.llms[None].calls) == 3
+    assert len(models.llms[None].calls) == 2
 
 
-async def test_a_pool_steers_question_is_a_pool_form_inside_the_prompt(
-    make_adapter, workspace, client
-):
+async def test_a_pool_steers_question_ends_the_prompt_as_text(make_adapter, workspace, client):
     started, block = fresh_events()
     models = ScriptedModels(
         {
@@ -839,15 +831,9 @@ async def test_a_pool_steers_question_is_a_pool_form_inside_the_prompt(
                 cell(BLOCKING_CELL),
                 reply("First."),
                 cell("return_result(NeedInput(question='Name the release?'))"),
-                cell(
-                    "[a] = notification['user_messages']\n"
-                    "self.message(repr(a))\n"
-                    "return_result(Done(explanation='answered'))"
-                ),
             ]
         }
     )
-    client.ext_answers = [{"action": "accept", "content": {"answer": "Aurora"}}]
     adapter = await make_adapter(models, client_info=POOL)
     session_id = await _new(adapter, workspace)
     prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
@@ -858,15 +844,8 @@ async def test_a_pool_steers_question_is_a_pool_form_inside_the_prompt(
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
-    [(_, method, params)] = [entry for entry in client.log if entry[0] == "ext"]
-    assert method == "poolside/elicitation"
-    assert params["message"] == "Name the release?"
-    assert _order(client, session_id)[-3:] == [
-        "'Aurora'\n\n",
-        "> **Done:** answered\n\n",
-        "response",
-    ]
-    assert _order(client, session_id).index("ext") < _order(client, session_id).index("response")
+    assert not [entry for entry in client.log if entry[0] == "ext"]
+    assert _order(client, session_id)[-2:] == ["Name the release?\n\n", "response"]
 
 
 async def test_cancel_withdraws_pool_steers_no_turn_took_and_says_so(
@@ -990,41 +969,6 @@ async def test_a_question_waits_while_a_pool_steer_is_queued(make_adapter, works
     calls = models.llms[None].calls
     assert len(calls) == 3
     assert "wait, use main" in str(calls[2].messages)
-
-
-async def test_a_pool_steer_is_answered_while_a_form_is_open(make_adapter, workspace, client):
-    client.ext_gate = asyncio.Event()
-    client.ext_answers = [{"action": "accept", "content": {"answer": "Aurora"}}]
-    models = ScriptedModels(
-        {
-            None: [
-                cell("return_result(NeedInput(question='Name the release?'))"),
-                reply("Noted."),
-                cell(
-                    "[a] = notification['user_messages']\n"
-                    "self.message(repr(a))\n"
-                    "return_result(Done(explanation='answered'))"
-                ),
-            ]
-        }
-    )
-    adapter = await make_adapter(models, client_info=POOL)
-    session_id = await _new(adapter, workspace)
-    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("tag it")]))
-    await client.wait_for(lambda: any(entry[0] == "ext" for entry in client.log))
-    steer = await _pool_steer(adapter, session_id, "a note")
-    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-1"}
-    assert not prompt.done()
-    # The steered message's turn runs while the form is open (the session is idle).
-    await client.wait_for(lambda: "Noted.\n\n" in client.texts(AgentMessageChunk, session_id))
-    client.ext_gate.set()
-    response = await asyncio.wait_for(prompt, TIMEOUT)
-    client.log.append(("response", "prompt", response))
-
-    assert response.stop_reason == "end_turn"
-    order = _order(client, session_id)
-    assert {"Noted.\n\n", "'Aurora'\n\n"} <= set(order[order.index("ext") :])
-    assert order[-1] == "response"
 
 
 # ---- Pool's input events: how Pool places a person's input in the conversation ----

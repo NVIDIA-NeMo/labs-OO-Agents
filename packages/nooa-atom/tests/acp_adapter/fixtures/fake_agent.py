@@ -58,7 +58,7 @@ def llm_factory(alias, workspace) -> FakeLLMClient:
         script = [_cell("await asyncio.Event().wait()")]
     elif "--question" in sys.argv:
         script = [
-            _cell("return_result(NeedInput(question='Which branch?', options=['main', 'dev']))"),
+            _cell("return_result(NeedInput(question='Which branch?'))"),
             _cell("self.message('Using the answer.')\nreturn_result(Done(explanation='answered'))"),
         ]
     else:

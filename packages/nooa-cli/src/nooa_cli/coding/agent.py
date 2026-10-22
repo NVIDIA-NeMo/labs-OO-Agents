@@ -210,7 +210,7 @@ class CodingAgent(InteractiveAgent):
           is a short status line. Add ``evidence=[...]`` for checks you ran.
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. The host shows the question, so do not also send it with
-          ``self.message()``. Add ``options=[...]`` for a single choice.
+          ``self.message()``; put any suggested answers in it. The answer is plain text.
         - ``Waiting(message=..., explanation=..., on=[...])`` — a background
           job is still running; ``on`` names the job or channel.
         """
