@@ -17,7 +17,8 @@ import yaml
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux PTY smoke test")
 @pytest.mark.parametrize("columns,no_color", [(40, True), (80, False)])
 @pytest.mark.parametrize("cancel", [False, True])
-def test_real_pty_offline_save_help_and_cancel(tmp_path, columns, no_color, cancel):
+@pytest.mark.parametrize("native", [False, True])
+def test_real_pty_offline_save_help_and_cancel(tmp_path, columns, no_color, cancel, native):
     import fcntl
     import pty
     import struct
@@ -38,6 +39,21 @@ socket.socket.connect_ex = blocked
 import nooa.tracing
 nooa.tracing._probe_failed = True
 nooa.tracing._probe = lambda *a, **k: "down"
+from nooa import llm_config
+llm_config.llm_config_chain = lambda: []
+if os.environ.get("PTY_NATIVE_REASONING") == "1":
+    from nooa.unifiedllm import connect
+    from nooa.unifiedllm.connect._server_details import listing_facts
+    from tests.unifiedllm.connect.reasoning_fixture import MODEL_ID, NATIVE_MODEL
+    async def details(endpoint, model, **kwargs):
+        facts = listing_facts(NATIVE_MODEL)
+        return connect.ModelDetails(model, facts, ({"source": endpoint + "/models",
+                                                  "schema": "models", "id": model,
+                                                  "facts": facts, "fields": {}},))
+    async def catalogue():
+        return []
+    connect.server_details = details
+    connect.catalogue = catalogue
 from nooa_cli.commands.connect import command
 try:
     command.main()
@@ -49,6 +65,7 @@ finally:
     env = dict(
         os.environ,
         TERM="xterm-256color",
+        PTY_NATIVE_REASONING="1" if native else "0",
         NEMO_OO_USER_DIR=str(tmp_path / "user"),
         NEMO_OO_PROJECT_DIR=str(tmp_path / "project"),
     )
@@ -64,16 +81,16 @@ finally:
         [
             sys.executable,
             str(child),
-            "model",
+            "claude-opus-4-7" if native else "model",
             "--as",
             "local",
             "--endpoint",
-            "https://server.test/v1",
+            "https://api.anthropic.com/v1" if native else "https://server.test/v1",
             "--api-style",
-            "chat",
+            "anthropic" if native else "chat",
             "--api-key-env",
             "",
-            "--no-metadata",
+            *([] if native else ["--no-metadata"]),
             "--no-probe",
             "--media-inputs",
             "",
@@ -108,7 +125,10 @@ finally:
                 os.write(master, b"\x1b[1;1R")
             screen = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.decode(errors="replace"))
             compact = "".join(re.sub(r"[│┌┐└┘─┬┴├┤┼]", "", screen).split())
-            if phase == 0 and "Contextwindow(tokens)" in compact:
+            if native and phase == 0 and "Cancelsetup" in compact:
+                os.write(master, b"\x03" if cancel else b"\x1b[B\x1b[B\x1b[B\r")
+                phase = 1 if cancel else -1
+            if not native and phase == 0 and "Contextwindow(tokens)" in compact:
                 os.write(master, b"262144\r262144\r")
                 phase = -1
             if phase == -1 and "Wouldyouliketotestthesesettings?" in compact:
@@ -133,4 +153,14 @@ finally:
     if not cancel:
         assert phase == 3, transcript
         assert "F1Closehelp" in "".join(re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", transcript).split())
-        assert yaml.safe_load(target.read_text())["models"]["local"]["media_inputs"] == []
+        entry = yaml.safe_load(target.read_text())["models"]["local"]
+        assert entry["media_inputs"] == []
+        if native:
+            assert entry["reasoning_level"] == "high"
+            assert entry["reasoning_levels"]["high"] == {
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "high"},
+            }
+            assert entry["max_tokens"] == 2000
+            assert compact.index("Modeldetails") < compact.index("Choosehowmuchreasoning")
+            assert compact.index("Choosehowmuchreasoning") < compact.index("Proposedconfiguration")

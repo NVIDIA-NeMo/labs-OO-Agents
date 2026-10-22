@@ -95,6 +95,11 @@ class WizardState:
     proposal: Any = None
     provider: Any = None
     reasoning_level: Any = None
+    guided_reasoning_choice: Any = None
+    guided_reasoning_levels: Any = None
+    guided_reasoning_route: Any = None
+    guided_reasoning_active: Any = None
+    guided_reasoning_current: Any = None
     reasoning_output_tokens: Any = None
     reasoning_template: Any = None
     registry: Any = None
@@ -1774,6 +1779,130 @@ def configure_media_inputs(state: WizardState) -> bool:
     return True
 
 
+def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
+    """Plain route-specific selection. Nothing is activated by merely listing levels."""
+    if state.api_style in connect.DECISION_API_STYLES:
+        state.guided_reasoning_choice = state.guided_reasoning_levels = None
+        state.guided_reasoning_route = state.guided_reasoning_active = None
+        return True
+    if deferred:
+        view.note("Reasoning: choose after the request interface is known.")
+        return True
+    from nooa.unifiedllm.connect._reasoning import native_levels
+
+    route = (state.model, state.api_style, state.endpoint)
+    saved = state.editing or state.existing or {}
+    routed = {
+        "model_name": ("anthropic/" if state.api_style == "anthropic" else "openai/") + state.model,
+        "api_base": connect.normalize_endpoint(state.endpoint),
+        "api_style": state.api_style,
+        "client_type": "responses" if state.api_style == "responses" else "completion",
+    }
+    if saved and not connect.same_media_route(saved, routed):
+        saved = {}
+    same_previous_route = state.guided_reasoning_route in {None, route}
+    levels = deepcopy(state.edited_level_patches) if same_previous_route else None
+    if state.levels_file:
+        with Path(state.levels_file).open() as source:
+            levels = yaml.safe_load(source)
+    elif state.levels or state.reasoning_template:
+        if not state.levels or not state.reasoning_template:
+            raise click.UsageError("--reasoning-template and --levels must be supplied together.")
+        levels = {
+            label.strip(): connect.reasoning_settings(
+                state.reasoning_template, state.api_style, label.strip()
+            )
+            for label in state.levels.split(",")
+        }
+    elif levels is None and saved:
+        levels = deepcopy(saved.get("reasoning_levels"))
+    if levels is None:
+        levels = native_levels(
+            state.selected_endpoint_model,
+            model_id=state.model,
+            api_style=state.api_style,
+            source=state.endpoint_models_url,
+            endpoint=state.endpoint,
+        )
+    if levels is None:
+        # Only exact OpenRouter metadata retains known effort templates here.
+        candidate = state.candidate or {}
+        if (
+            state.endpoint + "/models" == connect.CATALOGUE_URL
+            and candidate.get("id") == state.model
+        ):
+            labels = (candidate.get("reasoning") or {}).get("supported_efforts") or []
+            levels = {
+                label: connect.reasoning_settings("effort", state.api_style, label)
+                for label in labels
+            } or None
+    if levels is not None:
+        from nooa.unifiedllm.reasoning import ReasoningConfig
+
+        ReasoningConfig(levels=levels)
+    current = state.proposal.entry if edit and state.proposal else saved
+    if state.guided_reasoning_route not in {None, route}:
+        current = {}
+        state.guided_reasoning_active = None
+    raw_controls = {
+        "thinking",
+        "reasoning",
+        "reasoning_effort",
+        "output_config",
+        "chat_template_kwargs",
+    }
+    keep = bool(
+        current.get("reasoning_level")
+        or raw_controls & current.keys()
+        or raw_controls & (current.get("extra_body") or {}).keys()
+    )
+    if not levels and not keep:
+        view.note(
+            "Reasoning: Model default (controls unknown)."
+            if levels is None
+            else "Reasoning: Model default (selection unsupported)."
+        )
+        state.guided_reasoning_choice = None
+        state.guided_reasoning_levels = None
+        state.guided_reasoning_route = route
+        return True
+    options = [("keep", "Keep current settings")] if keep else []
+    options.append(("default", "Model default (no new override)"))
+    selections = {}
+    occupied = {"keep", "default", "cancel"}
+    for label in levels or {}:
+        token = label
+        while token in occupied:
+            token = "level:" + token
+        occupied.add(token)
+        selections[token] = label
+        options.append((token, "Off" if label in {"off", "disabled", "none"} else label.title()))
+    options.append(("cancel", "Cancel setup"))
+    options = tuple(options)
+    default = "keep" if keep else "default"
+    if state.guided_reasoning_route == route and state.guided_reasoning_choice in dict(options):
+        default = state.guided_reasoning_choice
+    view.note("Choose how much reasoning to request. Listed choices are not yet tested.")
+    choice = prompts.labelled_choice("Reasoning", options, default=default)
+    if choice == "cancel":
+        view.note("Setup cancelled. Nothing saved.")
+        return False
+    state.guided_reasoning_current = deepcopy(current) if choice == "keep" else None
+    state.guided_reasoning_active = (
+        current.get("reasoning_level")
+        if choice == "keep"
+        else None
+        if choice == "default"
+        else selections[choice]
+    )
+    if choice == "keep" and current.get("reasoning_levels"):
+        levels = deepcopy(current["reasoning_levels"])
+    state.guided_reasoning_choice = choice
+    state.guided_reasoning_levels = levels
+    state.guided_reasoning_route = route
+    return True
+
+
 def configure_checks(state: WizardState) -> bool:
     """Configure checks; return False when the user cancels."""
     reject_decision_media(state)
@@ -1838,6 +1967,8 @@ def configure_checks(state: WizardState) -> bool:
             )
             for label in state.levels.split(",")
         }
+    if state.guided_reasoning_levels is not None and state.guided_reasoning_choice is not None:
+        state.patches = deepcopy(state.guided_reasoning_levels)
     planning_candidate = state.candidate
     if state.manual_limits and planning_candidate is not None:
         # User edits must use the current manual bound, not a stale provisional
@@ -1937,6 +2068,33 @@ def configure_checks(state: WizardState) -> bool:
                 "source": "user",
                 "value": state.proposal.entry.get(field),
             }
+    choice = state.guided_reasoning_choice
+    if state.api_style not in connect.DECISION_API_STYLES and choice is not None:
+        entry = state.proposal.entry
+        if choice == "keep":
+            current = state.guided_reasoning_current or {}
+            for field in (
+                "thinking",
+                "reasoning",
+                "reasoning_effort",
+                "output_config",
+                "chat_template_kwargs",
+            ):
+                if field in current:
+                    entry[field] = deepcopy(current[field])
+            if current.get("extra_body"):
+                entry.setdefault("extra_body", {}).update(deepcopy(current["extra_body"]))
+            if state.guided_reasoning_active is not None:
+                entry["reasoning_level"] = state.guided_reasoning_active
+        elif choice == "default":
+            entry.pop("reasoning_level", None)
+        else:
+            entry["reasoning_level"] = state.guided_reasoning_active
+        entry["provenance"]["reasoning_selection"] = {
+            "source": "user",
+            "choice": choice,
+            "active": entry.get("reasoning_level"),
+        }
     state.interface_spent = state.interfaces.tokens_charged_to_budget if state.interfaces else 0
     state.proposal = replace(
         state.proposal,
@@ -2333,10 +2491,14 @@ def save_model(state: WizardState) -> bool:
         view.line(
             scrub_setup(
                 state,
-                "Reasoning levels: "
-                + (", ".join(state.result.entry.get("reasoning_levels", {})) or "none configured")
-                + "; default: "
-                + str(state.result.entry.get("reasoning_default", "server default")),
+                "Reasoning: "
+                + (
+                    state.result.entry["reasoning_level"].title()
+                    if state.result.entry.get("reasoning_level")
+                    else "Keep current settings"
+                    if state.guided_reasoning_choice == "keep"
+                    else "Model default (no new override)"
+                ),
             )
         )
     if state.api_style not in connect.DECISION_API_STYLES and (
@@ -2485,7 +2647,14 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             rows.append(("Reply maximum", f"{maximum:,} tokens"))
         if "cache_breakpoint" in entry and entry["cache_breakpoint"] is None:
             rows.append(("Caching", "Off"))
-        rows.append(("Reasoning", ", ".join(entry.get("reasoning_levels", {})) or "Server default"))
+        active = entry.get("reasoning_level")
+        label = active.title() if active else "Model default (no new override)"
+        if state.guided_reasoning_choice == "keep" and active is None:
+            label = "Keep current settings"
+        rows.append(("Reasoning", label))
+        rows.append(("Reasoning check", "Not tested yet"))
+        if entry.get("reasoning_levels"):
+            rows.append(("Other available choices", ", ".join(entry["reasoning_levels"])))
         rows.extend(structured_output_rows(entry))
     else:
         transport = (
@@ -2686,18 +2855,10 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
                     "supported_efforts": list(entry.get("reasoning_levels", {})),
                     "default_effort": entry.get("reasoning_default"),
                 }
-                state.candidate = prompts.edit_model_details(current)
+                state.candidate = prompts.edit_model_details(current, reasoning=False)
                 state.context_window = state.candidate.get("context_length")
-                state.levels_file = state.levels = state.reasoning_template = None
                 state.edited_settings = True
-                labels = state.candidate.get("reasoning", {}).get("supported_efforts", [])
-                original = entry.get("reasoning_levels", {})
-                state.edited_level_patches = {
-                    label: deepcopy(original[label])
-                    if label in original
-                    else connect.reasoning_settings("effort", state.api_style, label)
-                    for label in labels
-                } or None
+                state.edited_level_patches = deepcopy(entry.get("reasoning_levels"))
                 limits = [
                     v
                     for v in (
@@ -2716,6 +2877,8 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
                     source=entry.get("provenance", {}).get("reply_limit", {}).get("source", "user"),
                 )
             # Profile/media declarations and explicit test selections remain unchanged.
+        if not choose_reasoning(state, deferred=deferred_style, edit=True):
+            return None
         if not configure_checks(state):
             return None
         show_guided_proposal(state, deferred_style=deferred_style, updated=True)
@@ -2741,7 +2904,11 @@ def guided_setup(state: WizardState) -> bool:
     state.api_style = state.api_style or state.default_style
     # Unknown interfaces already have their provisional literal limits upfront.
     state.manual_limits_deferred = deferred_style and known_decision_model(state)
-    if not configure_media_inputs(state) or not configure_checks(state):
+    if (
+        not configure_media_inputs(state)
+        or not choose_reasoning(state, deferred=deferred_style)
+        or not configure_checks(state)
+    ):
         return False
     show_guided_proposal(state, deferred_style=deferred_style)
     action = review_guided_proposal(state, deferred_style=deferred_style)
@@ -2760,13 +2927,16 @@ def guided_setup(state: WizardState) -> bool:
             discard_chat_limits(state)
             if not configure_media_inputs(state):
                 return False
+        # No provisional native control can carry to another discovered interface.
+        if not choose_reasoning(state):
+            return False
         # Re-plan for the selected route using the already reviewed limits.
         if not configure_checks(state):
             return False
     elif action == "save":
         if not configure_checks(state):
             return False
-    if state.guided_media_revised:
+    if state.guided_media_revised or (deferred_style and state.guided_reasoning_choice):
         show_guided_proposal(state, updated=True)
         action = review_guided_proposal(state)
         if action is None:

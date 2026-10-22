@@ -251,7 +251,7 @@ def manual_model_limits(context=None, input_limit=None, *, edit=False):
     )
 
 
-def edit_model_details(model):
+def edit_model_details(model, *, reasoning=True):
     """Edit a detached copy of published settings; no request or file writes."""
     from copy import deepcopy
 
@@ -275,6 +275,8 @@ def edit_model_details(model):
         "Model reply maximum (tokens)",
         edited["top_provider"].get("max_completion_tokens"),
     )
+    if not reasoning:
+        return edited
     reasoning = edited["reasoning"] = dict(model.get("reasoning") or {})
     while True:
         value = prompt(

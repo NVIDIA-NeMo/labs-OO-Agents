@@ -110,7 +110,7 @@ def test_change_then_test_uses_actual_configured_controls(guided):
     result = CliRunner().invoke(
         command,
         [*flags, "--api-style", "chat"],
-        input="change\n48000\n8192\n-\ncustom\n3000\ntest\ny\n",
+        input="change\n48000\n8192\ncustom\n3000\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(decisions) == 2
@@ -204,7 +204,7 @@ def test_exact_offline_edit_preserves_caps_media_and_custom_params(monkeypatch, 
             "pdf",
             *(["--yes"] if yes else []),
         ],
-        input="save\ny\ny\n",
+        input="default\nsave\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -368,7 +368,7 @@ def test_change_preserves_explicit_level_request_blocks_caps_and_media(guided):
     result = CliRunner().invoke(
         command,
         [*flags, "--api-style", "chat", "--levels-file", str(levels), "--media-inputs", "pdf"],
-        input="change\n\n\n\n\nrecommended\nsave\ny\n",
+        input="default\nchange\n\n\nrecommended\ndefault\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)

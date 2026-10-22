@@ -136,7 +136,11 @@ async def test_native_registry_session_settings_and_signed_replay(monkeypatch, p
         **(
             settings
             if placement == "top"
-            else {"reasoning_levels": {"on": settings}, "reasoning_default": "on"}
+            else {
+                "reasoning_levels": {"on": settings},
+                "reasoning_default": "on",
+                "reasoning_level": "on",
+            }
         ),
     )
     before = deepcopy(config)

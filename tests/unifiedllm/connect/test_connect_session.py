@@ -218,6 +218,7 @@ async def test_selected_reasoning_level_and_cache_defaults_reach_wire(monkeypatc
         "https://api.test/v1",
         "",
         reasoning_levels={"high": {"reasoning_effort": "high"}},
+        reasoning_level="high",
         reply_tokens=2048,
     )
     before = deepcopy(proposal.entry)
@@ -256,6 +257,7 @@ async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
         "https://api.test/v1",
         "",
         reasoning_levels={"max": {"reasoning_effort": "max"}},
+        reasoning_level="max",
         reply_tokens=2048,
     )
     proposal.entry.pop("allowed_openai_params", None)  # A pre-fix saved entry.
@@ -291,13 +293,14 @@ async def test_unlisted_model_declared_effort_reaches_level_and_session_requests
         "https://api.test/v1",
         "",
         reasoning_levels={"max": {"reasoning_effort": "max"}},
+        reasoning_level="max",
         session_checks=True,
         budget_tokens=65536,
         reply_tokens=2048,
     )
     result = await connect.run(proposal, approved="all", api_key="test-key")
     assert result.entry["provenance"]["probes"]["level:max"]["settings_sent"] is True
-    assert all(body["reasoning_effort"] == "max" for body in sent[2:])
+    assert all(body["reasoning_effort"] == "max" for body in sent if "reasoning_effort" in body)
     retention = result.entry["provenance"]["session_checks"]["reasoning_retention"]
     assert retention["state_retained"] is True
     assert retention["settings_retained"] is True

@@ -56,7 +56,7 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
     monkeypatch.setattr(connect, "discover", forbidden)
     monkeypatch.setattr(connect, "catalogue", forbidden)
 
-    def edit(data):
+    def edit(data, **kwargs):
         assert data["context_length"] == 50000
         data["context_length"] = 64000
         return data
@@ -65,7 +65,8 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
     result = CliRunner().invoke(
         command,
         ["--edit-model", *selector, "--media-inputs", "", "--no-probe"],
-        input=("saved\n" if not selector else "") + "change\nsave\ny\ny\n",
+        input=("saved\n" if not selector else "")
+        + "default\nchange\nrecommended\ndefault\nsave\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
     actual = yaml.safe_load(path.read_text())["models"]["saved"]
@@ -89,9 +90,11 @@ def test_edit_cancel_preserves_file(registry, monkeypatch):
 
     path, _ = registry
     before = path.read_bytes()
-    monkeypatch.setattr(_connect_prompts, "edit_model_details", lambda data: data)
+    monkeypatch.setattr(_connect_prompts, "edit_model_details", lambda data, **kwargs: data)
     result = CliRunner().invoke(
-        command, ["--edit-model", "saved", "--media-inputs", "", "--no-probe"], input="save\nn\n"
+        command,
+        ["--edit-model", "saved", "--media-inputs", "", "--no-probe"],
+        input="default\nsave\nn\n",
     )
     assert result.exit_code == 0, result.output
     assert path.read_bytes() == before

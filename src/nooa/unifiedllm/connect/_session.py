@@ -20,12 +20,15 @@ SESSION_CALL_PACING_SECONDS = 0.5
 
 def reply_budget(entry, budget_tokens):
     """Reserve the configured request, never substitute a smaller check cap."""
+    from nooa.unifiedllm.reasoning import ReasoningConfig
+
     from . import configured_reply_cap
 
-    levels = entry.get("reasoning_levels", {})
-    level = entry.get("reasoning_default")
-    if level not in levels:
-        level = next(iter(levels), None)
+    level = entry.get("reasoning_level")
+    if level is not None:
+        ReasoningConfig(
+            levels=entry.get("reasoning_levels"), default=entry.get("reasoning_default")
+        ).settings(level)
     cap = configured_reply_cap(entry, level)
     return cap, cap, 8192 + 3 * cap
 
@@ -198,10 +201,8 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             {"outcome": "not_probed", "reason": "context window too small for this check"},
         )
         return
-    levels = entry.get("reasoning_levels", {})
-    level = entry.get("reasoning_default")
-    if level not in levels:
-        level = next(iter(levels), None)
+    levels = entry.get("reasoning_levels") or {}
+    level = entry.get("reasoning_level")
     settings = levels.get(level, {})
     controls = {
         key: value

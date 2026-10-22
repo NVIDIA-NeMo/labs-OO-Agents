@@ -856,3 +856,29 @@ transient `provenance.interface_endpoint` describing the selected style/URL and
 whether it came from `endpoints` or the base argument. Accepted interfaces
 record which connections passed. Test media separately and review answers on
 your own examples before relying on the model.
+
+### Choose reasoning in guided setup
+
+After model details and the request interface, Connect offers **Reasoning**
+when the selected route has known controls: for example **Low**, **Medium**,
+**High**, **Xhigh**, **Max**, or **Off**. Native Anthropic adaptive thinking uses
+the exact selected model's advertised mode and effort capabilities; model names
+and generic “supports reasoning” flags do not create choices. Unknown controls
+remain **Model default** rather than guessed settings. Native Decisions do not
+use chat reasoning.
+
+Your choice appears in the proposed configuration. **Change settings** lets you
+choose again; existing manual profiles offer **Keep current settings**.
+**Model default** clears an active level without adding a new override; existing
+base request settings remain intact. **Off** is offered only with a known route
+control. No manual thinking budget is invented and choosing an effort does not
+change your reply limit.
+
+A selected choice is saved as the active `reasoning_level`, alongside its exact
+`reasoning_levels` request settings. Loading that alias in an ordinary client or
+Agent uses the selected setting without additional flags or per-call arguments.
+`reasoning_default` remains descriptive metadata, not activation. Connection and
+session checks use the active selection and its saved reply cap; additional
+declared levels may be checked separately. Advertised support, request acceptance,
+reasoning observed, and replay are distinct results. **Save without testing**
+keeps the choice but clearly marks the setup untested.

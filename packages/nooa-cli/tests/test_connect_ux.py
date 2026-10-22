@@ -99,7 +99,8 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         ["--output", str(path), "--reasoning-template", "effort", "--levels", "low,high"],
         input=(
             "custom\nhttps://api.test/v1\nnew\nUX_KEY\ntemporary-secret\n"
-            "model\ndiscover\ntest\ntest\nkeep\nlocal\n" + ("y\nn\n" if save else "n\n")
+            "model\ndiscover\ntest\ntest\ndefault\ntest\nkeep\nlocal\n"
+            + ("y\nn\n" if save else "n\n")
         ),
     )
     assert result.exit_code == 0, result.output

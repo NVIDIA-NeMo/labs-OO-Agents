@@ -93,6 +93,11 @@ def listing_facts(item):
     result.update(media)
     if media_architecture:
         result.setdefault("architecture", {}).update(media_architecture)
+    from ._reasoning import reasoning_metadata
+
+    reasoning = reasoning_metadata(item)
+    if reasoning:
+        result.setdefault("capabilities", {}).update(reasoning["capabilities"])
     return result
 
 
@@ -480,6 +485,9 @@ async def server_details(
                 fields["capabilities." + kind + ".supported"] = (
                     "data[].capabilities." + kind + ".supported"
                 )
+        from ._reasoning import metadata_fields
+
+        fields.update(metadata_fields(selected))
         records.append(
             {
                 "source": source,

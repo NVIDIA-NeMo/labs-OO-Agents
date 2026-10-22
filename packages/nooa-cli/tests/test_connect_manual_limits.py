@@ -529,11 +529,11 @@ def test_guided_skip_after_edit_discards_generated_reasoning_and_context(manual_
     result = CliRunner().invoke(
         command,
         flags,
-        input="gateway/wired-model\nchange\n\n\ncustom\n-\nrecommended\nskip\n128000\n64000\nsave\ny\n",
+        input="gateway/wired-model\nchange\n\n\nrecommended\nskip\n128000\n64000\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(proposals) == 3 and all(r.method == "GET" for r in calls)
-    assert proposals[1].get("reasoning_levels")  # Before explicit discard.
+    assert not proposals[1].get("reasoning_levels")  # Foreign metadata never invents controls.
     assert not proposals[2].get("reasoning_levels")
     assert "catalogue" not in proposals[2]["provenance"]
     assert proposals[2]["provenance"]["manual_limits"] == {
@@ -549,7 +549,7 @@ def test_guided_skip_after_edit_restores_explicit_context_flag_prefill(manual_se
     result = CliRunner().invoke(
         command,
         flags + ["--context-window", "48000"],
-        input="gateway/wired-model\nchange\n96000\n\n\n\nrecommended\nskip\n24000\nsave\ny\n",
+        input="gateway/wired-model\nchange\n96000\n\nrecommended\nskip\n24000\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)

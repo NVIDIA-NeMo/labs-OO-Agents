@@ -592,6 +592,11 @@ async def discover(
                             **media["architecture"],
                         }
                     model.update(media)
+                    from ._reasoning import reasoning_metadata
+
+                    reasoning_facts = reasoning_metadata(item)
+                    if reasoning_facts:
+                        model.setdefault("capabilities", {}).update(reasoning_facts["capabilities"])
                     if media:
                         model["media_source"] = url
                     if url == CATALOGUE_URL:
@@ -909,6 +914,7 @@ def configure_entry(
             "max_output_tokens",
             "reasoning_levels",
             "reasoning_default",
+            "reasoning_level",
             "store",
             "include",
             "cache_breakpoint",
@@ -960,6 +966,13 @@ def configure_entry(
             for field in ("requests_accepted", "reasoning_observed"):
                 provenance.pop(field, None)
         result["cache_breakpoint"] = cache_breakpoint
+    from nooa.unifiedllm.reasoning import ReasoningConfig
+
+    declaration = ReasoningConfig(
+        levels=result.get("reasoning_levels"), default=result.get("reasoning_default")
+    )
+    if result.get("reasoning_level") is not None:
+        declaration.settings(result["reasoning_level"])
     extra = result.get("extra_body") or {}
     if not isinstance(extra, dict):
         raise ValueError("extra_body must be a mapping")
@@ -1066,6 +1079,28 @@ def configure_entry(
             elif result["include"] and "reasoning.encrypted_content" not in result["include"]:
                 result["include"].append("reasoning.encrypted_content")
                 provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
+    active = result.get("reasoning_level")
+    controls = {
+        "thinking",
+        "reasoning",
+        "reasoning_effort",
+        "output_config",
+        "chat_template_kwargs",
+    }
+    base = {k: deepcopy(result[k]) for k in controls if k in result}
+    extra_controls = {
+        k: deepcopy(v) for k, v in (result.get("extra_body") or {}).items() if k in controls
+    }
+    effective = {**extra_controls, **base}
+    if active is not None:
+        effective.update((result.get("reasoning_levels") or {})[active])
+    snapshot = {"level": active, "settings": effective, "reply_cap": configured_reply_cap(result)}
+    previous = provenance.get("active_reasoning")
+    if previous != snapshot and (previous is not None or active is not None):
+        provenance["probes"] = {}
+        for field in ("session_checks", "requests_accepted", "reasoning_observed"):
+            provenance.pop(field, None)
+    provenance["active_reasoning"] = snapshot
     provenance["warnings"] = entry_warnings(result)
     return result
 
@@ -1256,7 +1291,7 @@ def configured_reply_cap(entry: dict, level: str | None = None) -> int:
     """The saved request cap, optionally replaced by a selected reasoning level."""
     if level is None:
         level = entry.get("reasoning_level")
-    settings = entry.get("reasoning_levels", {}).get(level, {})
+    settings = (entry.get("reasoning_levels") or {}).get(level, {})
     return next((settings[k] for k in REPLY_CAP_KEYS if k in settings), entry["max_tokens"])
 
 
@@ -1283,7 +1318,20 @@ def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
             level = (
                 probe.name[6:] if probe.name.startswith("level:") else entry.get("reasoning_level")
             )
-            settings = entry.get("reasoning_levels", {}).get(level, {})
+            settings = (entry.get("reasoning_levels") or {}).get(level, {})
+            # refresh can start from a previously selected patch. Remove owned
+            # fields before applying the new selection (e.g. adaptive -> Off
+            # must not retain the old effort block or manual thinking budget).
+            controlled = {
+                key for patch in (entry.get("reasoning_levels") or {}).values() for key in patch
+            }
+            controlled.update(
+                (proposal.entry.get("provenance") or {})
+                .get("active_reasoning", {})
+                .get("settings", {})
+            )
+            for key in controlled:
+                body.pop(key, None)
             body.update(settings)
             cap = configured_reply_cap(
                 entry, probe.name[6:] if probe.name.startswith("level:") else None
@@ -1314,6 +1362,9 @@ def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
     )
 
 
+REASONING_SELECTION_UNSET = object()
+
+
 def plan(
     alias: str,
     model: str,
@@ -1326,6 +1377,7 @@ def plan(
     endpoint_model: dict | None = None,
     endpoint_models_url: str | None = None,
     reasoning_levels: dict | None = None,
+    reasoning_level=REASONING_SELECTION_UNSET,
     budget_tokens: int = DEFAULT_CHECK_BUDGET,
     output_tokens: int = DISCOVERY_OUTPUT_TOKENS,
     reasoning_output_tokens: int = DEFAULT_REASONING_OUTPUT_TOKENS,
@@ -1351,6 +1403,9 @@ def plan(
     True explicitly selects auto. This does not disable provider automatic caching
     or establish live compatibility.
 
+    ``reasoning_level`` is the active saved selection, not ``reasoning_default``.
+    Omission preserves a compatible same-route selection; None clears it.
+
     ``model`` is the exact endpoint model ID, without a LiteLLM prefix. The
     returned entry adds the prefix needed by today's runtime. Each request reserves
     its output cap plus 512 estimated input tokens (4,096 for selected generated
@@ -1367,6 +1422,8 @@ def plan(
     """
     if cache_enabled is not None and not isinstance(cache_enabled, bool):
         raise ValueError("cache_enabled must be a boolean or None")
+    if api_style in DECISION_API_STYLES and reasoning_level is not REASONING_SELECTION_UNSET:
+        raise ValueError("Decision models do not configure chat reasoning")
     if api_style in DECISION_API_STYLES and cache_enabled is not None:
         raise ValueError("Decision models do not configure chat caching")
     _validate_structured_output({"api_style": api_style}, structured_output_mode)
@@ -1676,6 +1733,31 @@ def plan(
         entry["allowed_openai_params"] = sorted({key for patch in levels.values() for key in patch})
     if (default := reasoning.get("default_effort")) in levels:
         entry["reasoning_default"] = default
+    if existing_entry and same_media_route(existing_entry, entry):
+        if reasoning_levels is None and "reasoning_levels" in existing_entry:
+            entry["reasoning_levels"] = deepcopy(existing_entry["reasoning_levels"])
+            levels = entry["reasoning_levels"] or {}
+        if existing_entry.get("reasoning_default") in levels:
+            entry["reasoning_default"] = existing_entry["reasoning_default"]
+        if existing_entry.get("reasoning_level") in levels:
+            entry["reasoning_level"] = existing_entry["reasoning_level"]
+        retained = existing_entry.get("allowed_openai_params") or []
+        if retained:
+            entry["allowed_openai_params"] = sorted(
+                set(entry.get("allowed_openai_params", [])) | set(retained)
+            )
+    # Inherited declarations need the same filtering permissions as newly
+    # authored ones; retaining an active selector alone must not drop controls.
+    if levels:
+        entry["allowed_openai_params"] = sorted(
+            set(entry.get("allowed_openai_params", []))
+            | {key for patch in levels.values() for key in patch}
+        )
+    if reasoning_level is not REASONING_SELECTION_UNSET:
+        if reasoning_level is None:
+            entry.pop("reasoning_level", None)
+        else:
+            entry["reasoning_level"] = reasoning_level
     if api_style == "responses":
         entry["store"] = False
         entry["include"] = ["reasoning.encrypted_content"]
@@ -1786,6 +1868,8 @@ def plan(
             "api_style",
             "client_type",
             "structured_output_mode",
+            "reasoning_level",
+            "reasoning_levels",
         )
         if all(existing_entry.get(key) == entry.get(key) for key in keys) and existing_entry.get(
             "cache_breakpoint", "auto"
@@ -1860,7 +1944,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         # A level can set the cap itself; do not pass a conflicting override.
         params["reasoning_level"] = label
     elif selected := entry.get("reasoning_level"):
-        settings = entry.get("reasoning_levels", {}).get(selected, {})
+        settings = (entry.get("reasoning_levels") or {}).get(selected, {})
         for key in settings:
             params.pop(key, None)
         if REPLY_CAP_KEYS & settings.keys():
@@ -1998,7 +2082,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             # call. Observe request settings, not catalogue/declaration metadata.
             resolved = client._prepare_call_config({})
             selected_level = entry.get("reasoning_level", client.reasoning_level)
-            selected_settings = entry.get("reasoning_levels", {}).get(selected_level, {})
+            selected_settings = (entry.get("reasoning_levels") or {}).get(selected_level, {})
             expected = {
                 **{
                     k: resolved[k]

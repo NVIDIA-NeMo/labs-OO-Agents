@@ -271,7 +271,7 @@ def test_openrouter_reuses_one_public_get_and_never_imports_different_profile(
             str(local),
             *(["--catalogue-model", mapping] if mapping else []),
         ],
-        input="save\ny\n",
+        input=("default\n" if mapping is None else "") + "save\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(calls) == 1

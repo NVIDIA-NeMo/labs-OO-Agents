@@ -352,7 +352,9 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
             str(path),
             *(["--no-probe"] if mode == "unprobed" else []),
         ],
-        input="262144\n262144\n" + ("save\ny\n" if mode == "unprobed" else "test\ny\n"),
+        input="262144\n262144\n"
+        + ("default\n" if mode == "rejected" else "high\n")
+        + ("save\ny\n" if mode == "unprobed" else "test\ny\n"),
     )
     assert result.exit_code == 0, result.output
     warning = "Warning: no reasoning information was returned for: high."
@@ -362,7 +364,7 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
     assert result.output.count(warning) == (1 if mode in {"missing", "usage"} else 0)
     assert "returned for: none" not in result.output
     assert "private reasoning" not in result.output
-    assert len(sent) == (0 if mode == "unprobed" else 5 if mode == "rejected" else 7)
+    assert len(sent) == (0 if mode == "unprobed" else 7)
     if mode == "missing":
         assert result.output.index(warning) < result.output.index("Write model entry")
         assert "Try another API format or review the server settings" in result.output
@@ -863,7 +865,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     # previously have been skipped by the old 131072-token default budget
     # now actually runs (3 more than before). check_interfaces now also
     # probes reasoning by default for the one accepted (chat) interface.
-    assert [r.method for r in requests] == ["GET"] + ["POST"] * 9
+    assert [r.method for r in requests] == ["GET"] + ["POST"] * 10
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
@@ -1106,7 +1108,7 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\ntest\ny\n",
+        input="262144\n262144\ndiscover\ntest\ndefault\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
@@ -1237,8 +1239,8 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(
     path = tmp_path / "models.yaml"
     options = [arg for arg in args(path) if arg != "--no-catalogue"]
     answers = {
-        "edit": "change\n0\n64000\n2048\nlow,medium\nmedium\nsave\ny\n",
-        "keep_context": "change\n\n2048\nlow,medium\nmedium\nsave\ny\n",
+        "edit": "change\n0\n64000\n2048\nrecommended\nsave\ny\n",
+        "keep_context": "change\n\n2048\nrecommended\nsave\ny\n",
         "skip": "change\n-\n-\n-\nsave\ny\n",
         "cancel": "",
     }
@@ -1258,11 +1260,8 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(
         if action == "edit":
             assert "Enter a positive whole number" in result.output
         assert entry["context_window"] == (128000 if action == "keep_context" else 64000)
-        assert entry["reasoning_levels"] == {
-            "low": {"reasoning_effort": "low"},
-            "medium": {"reasoning_effort": "medium"},
-        }
-        assert entry["reasoning_default"] == "medium"
+        assert not entry.get("reasoning_levels")
+        assert "reasoning_level" not in entry and "reasoning_default" not in entry
         assert "provenance" not in entry  # edit sources and probe plans stay in the session
 
 
@@ -1310,7 +1309,7 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\ntest\ny\n",
+        input="262144\n262144\ndiscover\ntest\ndefault\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [body["reasoning_effort"] for body in bodies if "reasoning_effort" in body] == [
@@ -1321,8 +1320,8 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     # check_interfaces also probes the first level (max) per interface, cheaply,
     # to recommend which interface actually surfaces reasoning. Routing is then
     # rechecked at the configured cap; tools and all six levels run for real.
-    # The session seed returns no tools, so its follow-on replies do not run.
-    assert len(bodies) == 12
+    # Model default does not select max for the session; all three base-setting turns run.
+    assert len(bodies) == 14
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert "provenance" not in entry  # outcomes were checked on the wire; see bodies
 
@@ -1357,7 +1356,7 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\ntest\ny\n",
+        input="262144\n262144\ndiscover\ntest\ndefault\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Check budget: unlimited" not in result.output
