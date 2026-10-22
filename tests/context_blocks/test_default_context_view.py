@@ -340,7 +340,7 @@ async def test_strategy_order_lists_keys_first_and_keeps_remainder_stable():
 
 
 def test_visible_events_includes_active_history_without_call_filter():
-    event = Task(prompt="task", metadata={"call_id": "outer"}, tag="1")
+    event = Task(prompt="task", call_id="outer", tag="1")
     agent = SimpleNamespace(event_manager=SimpleNamespace(values=lambda: [event]))
 
     assert visible_events(agent) == (event,)

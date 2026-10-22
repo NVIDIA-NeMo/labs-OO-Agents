@@ -15,7 +15,7 @@ import itertools
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -162,8 +162,8 @@ class EventManager:
         # Auto-inject call_id from the agent call stack context variable.
         # This tags every event with the current method invocation ID.
         stack = _get_agent_call_stack()
-        if stack and "call_id" not in event.metadata:
-            event.metadata["call_id"] = stack[-1]
+        if stack and event.call_id is None:
+            event.call_id = stack[-1]
         event_format = _current_event_format_var.get()
         if event_format is not None and "truncation_event_format" not in event.metadata:
             event.metadata["truncation_event_format"] = event_format
@@ -434,6 +434,7 @@ class EventManager:
         *,
         type: str | None = None,
         call_id: str | None = None,
+        related_call_ids: Collection[str] | None = None,
         execution_status: str | None = None,
         query: str | None = None,
         regex: bool = False,
@@ -443,7 +444,9 @@ class EventManager:
 
         Args:
             type: Event type filter (e.g., "Task", "PythonOutput")
-            call_id: Call ID filter (matches metadata.call_id)
+            call_id: Exact originating call ID.
+            related_call_ids: Match any represented call ID, including mixed-call summaries.
+                None disables this filter; an empty collection matches nothing.
             execution_status: PythonOutput status filter (e.g. "error" or "complete")
             query: Text search (case-insensitive substring, or regex if regex=True)
             regex: If True, treat query as regex pattern
@@ -463,7 +466,15 @@ class EventManager:
 
         # Apply call_id filter
         if call_id is not None:
-            events = [e for e in events if e.metadata.get("call_id") == call_id]
+            events = [e for e in events if e.call_id == call_id]
+
+        if related_call_ids is not None:
+            if isinstance(related_call_ids, (str, bytes)):
+                raise TypeError("related_call_ids must be a collection of strings, not a string")
+            wanted = frozenset(related_call_ids)
+            if any(not isinstance(value, str) for value in wanted):
+                raise TypeError("related_call_ids must contain only strings")
+            events = [e for e in events if e.related_call_ids & wanted]
 
         # Apply execution status filter
         if execution_status is not None:
@@ -639,6 +650,11 @@ class EventManager:
         if not tags_to_collapse:
             raise ValueError(f"No active events in range '{start_tag}'..'{end_tag}'")
 
+        # Uniform provenance includes nested summaries without traversing archives.
+        source_call_ids: set[str] = set()
+        for tag in tags_to_collapse:
+            source_call_ids.update(self[tag].related_call_ids)
+
         # Archive the events and remove from active list
         for tag in tags_to_collapse:
             self._backend.set_status(tag, EventStatus.ARCHIVED)
@@ -664,6 +680,7 @@ class EventManager:
 
         # Create the Summary
         summary = Summary(
+            source_call_ids=sorted(source_call_ids),
             summary_tag=summary_tag,
             replaced_range=(actual_start, actual_end),
             children_tags=tags_to_collapse,

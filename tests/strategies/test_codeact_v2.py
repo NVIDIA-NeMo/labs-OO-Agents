@@ -74,7 +74,7 @@ async def test_current_call_id_matches_events(strategy_type, tool_name):
         result = await agent.answer()
         assert result["count"] > 0
         task = next(event for event in agent.events.query(type="Task"))
-        assert task.metadata["call_id"] == result["id"]
+        assert task.call_id == result["id"]
         assert task.tag == result["tag"]
         assert result["id"] != result["tag"]
     finally:

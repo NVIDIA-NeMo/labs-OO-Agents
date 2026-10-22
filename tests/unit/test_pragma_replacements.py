@@ -355,7 +355,7 @@ class TestApplyPendingSummaryExceptionHandler:
 
 
 class TestMethodSummarizerComputeRange:
-    """MethodSummarizer._compute_range — matches events by call_id metadata."""
+    """MethodSummarizer._compute_range — matches events by call_id field."""
 
     def _make_summarizer(self, min_events=2):
         from nooa.agent import Agent
@@ -385,7 +385,7 @@ class TestMethodSummarizerComputeRange:
             is_final=True,
             success=True,
         )
-        event.metadata["call_id"] = call_id
+        event.call_id = call_id
         return event
 
     def test_returns_range_when_enough_matching_events(self):
@@ -397,11 +397,11 @@ class TestMethodSummarizerComputeRange:
 
         # Add events with matching call_id
         msg1 = Message(content="first")
-        msg1.metadata["call_id"] = "call-abc"
+        msg1.call_id = "call-abc"
         em.add(msg1)
 
         msg2 = Message(content="second")
-        msg2.metadata["call_id"] = "call-abc"
+        msg2.call_id = "call-abc"
         em.add(msg2)
 
         event = self._make_after_turn(call_id="call-abc")
@@ -420,17 +420,17 @@ class TestMethodSummarizerComputeRange:
 
         # Parent event
         msg1 = Message(content="parent start")
-        msg1.metadata["call_id"] = "call-parent"
+        msg1.call_id = "call-parent"
         em.add(msg1)
 
         # Child event (different call_id, but chronologically between parent events)
         msg2 = Message(content="child work")
-        msg2.metadata["call_id"] = "call-child"
+        msg2.call_id = "call-child"
         em.add(msg2)
 
         # Parent event again
         msg3 = Message(content="parent end")
-        msg3.metadata["call_id"] = "call-parent"
+        msg3.call_id = "call-parent"
         em.add(msg3)
 
         event = self._make_after_turn(call_id="call-parent")
@@ -448,7 +448,7 @@ class TestMethodSummarizerComputeRange:
         em = summarizer.target_event_manager
 
         msg = Message(content="only one")
-        msg.metadata["call_id"] = "call-abc"
+        msg.call_id = "call-abc"
         em.add(msg)
 
         event = self._make_after_turn(call_id="call-abc")
@@ -456,7 +456,7 @@ class TestMethodSummarizerComputeRange:
         assert result is None
 
     def test_returns_none_when_no_call_id(self):
-        """AfterTurn without call_id in metadata returns None."""
+        """AfterTurn without call_id returns None."""
         from nooa.events import AfterTurn
 
         summarizer = self._make_summarizer(min_events=1)
@@ -470,7 +470,7 @@ class TestMethodSummarizerComputeRange:
             is_final=True,
             success=True,
         )
-        # No call_id in metadata
+        # No call_id
         result = summarizer._compute_range(event)
         assert result is None
 

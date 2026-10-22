@@ -99,12 +99,12 @@ class TestEventManagerAdd:
         manager = EventManager()
         event = Task(prompt="Response")
         event.metadata["source"] = "llm"
-        event.metadata["call_id"] = "call_123"
+        event.call_id = "call_123"
 
         manager.add(event)
 
         assert manager.values()[0].metadata.get("source") == "llm"
-        assert manager.values()[0].metadata.get("call_id") == "call_123"
+        assert manager.values()[0].call_id == "call_123"
 
 
 class TestEventManagerOn:
@@ -292,20 +292,20 @@ class TestEventManagerQuery:
         manager = EventManager()
 
         event1 = Task(prompt="Call 1")
-        event1.metadata["call_id"] = "call_1"
+        event1.call_id = "call_1"
         manager.add(event1)
 
         event2 = LLMResponse(content="Response 1")
-        event2.metadata["call_id"] = "call_1"
+        event2.call_id = "call_1"
         manager.add(event2)
 
         event3 = Task(prompt="Call 2")
-        event3.metadata["call_id"] = "call_2"
+        event3.call_id = "call_2"
         manager.add(event3)
 
         call_1_events = manager.filter(call_id="call_1")
         assert len(call_1_events) == 2
-        assert all(e.metadata.get("call_id") == "call_1" for e in call_1_events)
+        assert all(e.call_id == "call_1" for e in call_1_events)
 
 
 class TestCallIdAutoInjection:
@@ -351,7 +351,7 @@ class TestCallIdAutoInjection:
             event = Task(prompt="Not recorded")
             manager.add(event, record=False)
             # call_id is injected before the record decision
-            assert event.metadata["call_id"] == "call-xyz"
+            assert event.call_id == "call-xyz"
         finally:
             _pop_agent_call_id()
 

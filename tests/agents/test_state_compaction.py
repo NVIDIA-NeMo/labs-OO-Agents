@@ -14,6 +14,7 @@ from nooa.agents.summarization import summary_fork_active
 from nooa.config.summarizer_config import TokenBudgetConfig
 from nooa.context_blocks import ScopedContext
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
+from nooa.default_context_view import DefaultAgentView
 from nooa.events import Message
 from nooa.runtime.middleware import LLMCallContext
 from nooa.strategies import PredictStrategy
@@ -46,7 +47,8 @@ async def trigger(agent, ctx):
     return await agent.event_manager.run_middleware("llm_call", ctx, dispatch)
 
 
-async def test_real_parent_overrides_do_not_leak_into_state_summary():
+@pytest.mark.parametrize("custom_view", [False, True])
+async def test_real_parent_uses_cache_only_with_default_view(custom_view):
     class RecordingClient(FakeLLMClient):
         def __init__(self):
             super().__init__(
@@ -68,7 +70,11 @@ async def test_real_parent_overrides_do_not_leak_into_state_summary():
             ...
 
     client = RecordingClient()
-    agent = Parent(llm=client)
+
+    class CustomView(DefaultAgentView):
+        pass
+
+    agent = Parent(llm=client, context_view=CustomView() if custom_view else DefaultAgentView())
     agent.event_manager.add(Message(content="STORED_SOURCE_FACT"))
     summarizer = TokenBudgetSummarizer.install(
         agent, config=TokenBudgetConfig(max_tokens=1, preserve_recent=1)
@@ -77,12 +83,14 @@ async def test_real_parent_overrides_do_not_leak_into_state_summary():
         with ScopedContext(context={"system_prompt": "PARENT_SCOPED_MARKER"}):
             assert await agent.run() == "parent"
             await summarizer._pending_task
-        assert summarizer._pending_summary == "summary"
+        assert summarizer._pending_summary == ("summary" if custom_view else '{"value":"summary"}')
         assert len(client.requests) == 2
         parent, summary = client.requests
         for marker in ("PARENT_DECORATOR_MARKER", "PARENT_SCOPED_MARKER"):
             assert marker in parent
-            assert marker not in summary
+            assert (marker in summary) is not custom_view
+        if not custom_view:
+            assert json.loads(summary)[:-1] == json.loads(parent)
         assert "STORED_SOURCE_FACT" in summary
     finally:
         await agent.aclose()
@@ -144,14 +152,17 @@ async def test_source_is_independent_of_view_and_frozen_before_dispatch():
         return await dispatch(request)
 
     try:
-        await agent.event_manager.run_middleware("llm_call", ctx, parent)
+        parent_call = asyncio.create_task(
+            agent.event_manager.run_middleware("llm_call", ctx, parent)
+        )
         await asyncio.wait_for(entered.wait(), 2)
+        assert not parent_call.done()
         assert all(f"STORED FACT {i}" in seen[0] for i in range(3))
         assert "STORED FACT 3" not in seen[0]
         assert "PARENT PROJECTION ONLY" not in seen[0] and "NEW WORK" not in seen[0]
         assert agent.event_manager.keys() == ["1", "2", "3", "4", "5"]
         release.set()
-        await summarizer._pending_task
+        await parent_call
         assert agent.event_manager.keys() == ["1", "2", "3", "4", "5"]
         summarizer._apply_pending_summary()
         assert agent.event_manager.keys() == ["1..3", "4", "5"]
@@ -341,7 +352,7 @@ def test_compaction_keeps_whole_tool_batches(cut):
         )
         ctx.client._context_window = int(cost / 0.7) + 2
     elif cut == "nested":
-        agent.event_manager.add(Message(content="child task", metadata={"call_id": "child"}))
+        agent.event_manager.add(Message(content="child task", call_id="child"))
     elif cut == "running":
         from nooa.context_blocks.events import ResultStatus
 
@@ -602,9 +613,11 @@ async def test_aclose_cancels_and_awaits_background_work():
             cancelled.set()
 
     summarizer.summarize = AsyncMock(side_effect=wait)
-    await trigger(agent, ctx)
+    parent_call = asyncio.create_task(trigger(agent, ctx))
     await asyncio.wait_for(entered.wait(), 2)
     await agent.aclose()
+    with pytest.raises(asyncio.CancelledError):
+        await parent_call
     assert cancelled.is_set()
     assert summarizer._pending_task is None
     assert not agent.event_manager._middleware["llm_call"]

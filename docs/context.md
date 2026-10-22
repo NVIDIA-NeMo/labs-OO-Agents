@@ -86,7 +86,7 @@ Views select active history directly. For example, a current-invocation view use
 
 ```python
 for event in agent.event_manager.values():
-    if event.metadata.get("call_id") == call.invocation_id and is_model_visible(event):
+    if event.call_id == call.invocation_id and is_model_visible(event):
         yield event
 ```
 
@@ -164,7 +164,8 @@ resolve view
 ```
 
 - The selected agent view owns content, membership, materialization, filtering, global order, adaptation, and budget policy.
-- Views own prompt compression and may call a summarizer on selected content. State compaction operates independently on stored state and replaces only the events it actually summarized. `TokenBudgetSummarizer` uses request usage as a trigger, not the rendered request as summary input.
+- Views may compress their output. State summarizers independently compact stored events; `TokenBudgetSummarizer` pauses the agent and applies completed summaries before the next turn. Parent-request cache reuse is an optimization, not a requirement for custom views.
+- Events expose `call_id` (origin) and `related_call_ids` (represented calls; summaries retain their sources' union). Views filter with `id in event.related_call_ids`. `events.query(call_id=id)` matches origin; `events.query(related_call_ids={a, b})` matches either represented call. Both filters combine with AND; relevance is not call isolation.
 - A nested view owns the content and local order of its contribution.
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
 - The renderer expands items in place and emits no boundary text. A canonical assistant tool-call turn and its linked results form one atomic replay group; a boundary cannot split it.

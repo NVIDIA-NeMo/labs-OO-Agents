@@ -601,9 +601,7 @@ class TestViewCurrentCallFiltering:
             async def assemble(self, owner, call):
                 yield Block(key="instructions", content="Use execute_python and return_result.")
                 for event in owner.event_manager.values():
-                    if event.metadata.get("call_id") == call.invocation_id and is_model_visible(
-                        event
-                    ):
+                    if event.call_id == call.invocation_id and is_model_visible(event):
                         yield event
 
         class AnalysisAgent(Agent, llm=fake_llm):
@@ -616,7 +614,7 @@ class TestViewCurrentCallFiltering:
                 ...
 
         agent = AnalysisAgent()
-        agent.event_manager.add(Task(prompt="EARLIER INVOCATION", metadata={"call_id": "old"}))
+        agent.event_manager.add(Task(prompt="EARLIER INVOCATION", call_id="old"))
         result = await agent.analyze_feedback("Great product, but shipping was slow")
 
         assert result == "sentiment: positive"

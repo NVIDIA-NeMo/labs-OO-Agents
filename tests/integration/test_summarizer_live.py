@@ -57,6 +57,8 @@ async def exercise_summarization(client, family, monkeypatch):
     real_call, real_send = client.acall, httpx.AsyncClient.send
     host = urlparse(client.config["api_base"]).hostname
     call_count = 0
+    parent_messages = None
+    parent_params = None
 
     async def capture(http_client, request, **kwargs):
         if request.url.host == host and request.method == "POST":
@@ -71,15 +73,23 @@ async def exercise_summarization(client, family, monkeypatch):
         return await real_send(http_client, request, **kwargs)
 
     async def call(messages, **params):
-        nonlocal call_count
+        nonlocal call_count, parent_messages, parent_params
         call_count += 1
         assert call_count <= 3, "Model-call budget exceeded"
+        if call_count == 1:
+            parent_messages = list(messages)
+            parent_params = dict(params)
         if call_count == 2:
-            assert "history_markdown" in str(messages)
-            assert not params.get("tools"), "State compaction must not borrow parent tools"
+            assert messages[:-1] == parent_messages, "Summary changed the parent prefix"
+            assert params == parent_params, "Summary changed cache-relevant settings"
             started.set()
             await release.wait()
+        before = [(tag, e.id) for tag, e in parent.event_manager.items()]
         response = await real_call(messages, **params)
+        if call_count == 2:
+            assert [(tag, e.id) for tag, e in parent.event_manager.items()] == before, (
+                "Summary wrote parent events or executed tools"
+            )
         responses.append(response)
         usage = response.usage
         print(
@@ -114,21 +124,21 @@ async def exercise_summarization(client, family, monkeypatch):
     summarizer = TokenBudgetSummarizer.install(
         parent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=1, target_chars=600)
     )
+    parent_call = asyncio.create_task(parent.reply("Acknowledge the notes with READY."))
+    started_wait = asyncio.create_task(started.wait())
     try:
-        assert "READY" in await parent.reply("Acknowledge the notes with READY.")
+        await asyncio.wait_for(
+            asyncio.wait({parent_call, started_wait}, return_when=asyncio.FIRST_COMPLETED), 150
+        )
         assert summarizer._pending_task is not None, "Installed summarizer did not schedule"
         await asyncio.wait_for(started.wait(), 5)
-        assert not summarizer._pending_task.done(), "Parent must return before summary completes"
+        assert not parent_call.done(), "Parent advanced before summary completed"
         assert not any(isinstance(e, Summary) for e in parent.event_manager.values())
         source = {tag: identity for tag, identity, _ in summarizer._pending_source}
         recent = {tag: e.id for tag, e in parent.event_manager.items() if tag not in source}
-        before_summary = [(tag, e.id) for tag, e in parent.event_manager.items()]
         release.set()
-        await asyncio.wait_for(summarizer._pending_task, 150)
+        assert "READY" in await asyncio.wait_for(parent_call, 150)
         text = summarizer._pending_summary
-        assert [(tag, e.id) for tag, e in parent.event_manager.items()] == before_summary, (
-            "Summary wrote parent events or executed tools"
-        )
         assert text, "Background summary failed or returned unusable text"
         missing = [fact for fact in FACTS if fact not in text.lower()]
         assert not missing, f"Summary lost a key fact: {missing}"
@@ -154,9 +164,9 @@ async def exercise_summarization(client, family, monkeypatch):
 
         first, summary_request, continuation = bodies
         key = "input" if family == "openai" else "messages"
-        assert summary_request[key] != first[key], "Summary reused the parent projection"
-        assert "summary smoke test" not in json.dumps(summary_request)
-        assert not summary_request.get("tools"), "Summary borrowed parent tools"
+        assert summary_request[key] != first[key], "Summary instruction was not appended"
+        assert "summary smoke test" in json.dumps(summary_request)
+        assert summary_request.get("tools") == first.get("tools")
         # Summary renderers may quote/escape multiline text. Check its facts in
         # the outgoing request as well as the exact stored summary above.
         assert all(fact in json.dumps(continuation).lower() for fact in FACTS), (
@@ -180,6 +190,9 @@ async def exercise_summarization(client, family, monkeypatch):
     finally:
         release.set()
         await parent.aclose()
+        parent_call.cancel()
+        started_wait.cancel()
+        await asyncio.gather(parent_call, started_wait, return_exceptions=True)
 
 
 @pytest.mark.parametrize("family", ["openai", "anthropic"])

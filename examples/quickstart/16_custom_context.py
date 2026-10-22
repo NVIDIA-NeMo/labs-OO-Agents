@@ -62,7 +62,7 @@ class ResearchContextView:
         )
         # This view chooses only this invocation's active task and feedback.
         for event in owner.event_manager.values():
-            if event.metadata.get("call_id") == call.invocation_id and is_model_visible(event):
+            if call.invocation_id in event.related_call_ids and is_model_visible(event):
                 yield event
         yield CacheBoundary()
 

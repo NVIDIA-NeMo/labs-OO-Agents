@@ -1,7 +1,7 @@
-# Background state compaction
+# State compaction
 
-`TokenBudgetSummarizer` replaces older stored events with a summary while the
-agent keeps working. Actual request usage triggers compaction; the summary
+`TokenBudgetSummarizer` pauses the agent while it summarizes older stored events.
+Actual request usage triggers compaction after a model response; the summary
 input comes directly from stored history, independently of the context view.
 Views remain responsible for prompt selection and any prompt-only compression.
 
@@ -21,9 +21,12 @@ diagnostics and tool-call group integrity. Oversized, unfinished and image-beari
 groups remain active. Events created during the request are outside this snapshot. Summary input
 contains public event content; persistence metadata and opaque provider state stay private.
 
-The dedicated Predict request uses the parent's effective client, without its
-prompt, tools, output schema or cache-key contract. Parent-prefix cache reuse is
-not guaranteed. At most one summary runs or waits for application.
+With the unmodified default view, a summary request reuses the completed parent
+request and appends a summary instruction, preserving its cache prefix, tools,
+schema and settings. Tools are never executed by the summary request. Custom
+views use a dedicated Predict request built from stored events with the parent's
+effective client, without inheriting its prompt, tools, schema or cache key.
+At most one summary runs or waits for application.
 
 A completed summary applies at the next `BeforeTurn` only if the source range,
 identities and contents still match. Raw events remain accessible in storage.

@@ -130,15 +130,15 @@ def test_filter_by_call_id():
     events = EventManager()
 
     t1 = Task(prompt="First")
-    t1.metadata["call_id"] = "call-1"
+    t1.call_id = "call-1"
     events.add(t1)
 
     t2 = Task(prompt="Second")
-    t2.metadata["call_id"] = "call-2"
+    t2.call_id = "call-2"
     events.add(t2)
 
     t3 = Task(prompt="Third")
-    t3.metadata["call_id"] = "call-1"
+    t3.call_id = "call-1"
     events.add(t3)
 
     result = events.filter(call_id="call-1")
@@ -154,15 +154,15 @@ def test_filter_by_call_id_and_type():
     events = EventManager()
 
     t1 = Task(prompt="Task for call-1")
-    t1.metadata["call_id"] = "call-1"
+    t1.call_id = "call-1"
     events.add(t1)
 
     llm1 = LLMResponse(content="LLM for call-1")
-    llm1.metadata["call_id"] = "call-1"
+    llm1.call_id = "call-1"
     events.add(llm1)
 
     t2 = Task(prompt="Task for call-2")
-    t2.metadata["call_id"] = "call-2"
+    t2.call_id = "call-2"
     events.add(t2)
 
     # Only tasks for call-1
@@ -184,7 +184,7 @@ def test_filter_by_call_id_with_limit():
 
     for i in range(10):
         t = Task(prompt=f"Event {i}")
-        t.metadata["call_id"] = "call-1"
+        t.call_id = "call-1"
         events.add(t)
 
     result = events.filter(call_id="call-1", limit=3)

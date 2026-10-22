@@ -23,6 +23,7 @@ Example:
 
 import asyncio
 import contextvars
+import json
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -39,12 +40,21 @@ logger = logging.getLogger(__name__)
 _in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
 
 
+def _copy_request_containers(value: Any) -> Any:
+    """Detach mutable request containers while preserving native response state."""
+    if isinstance(value, dict):
+        return {key: _copy_request_containers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_request_containers(item) for item in value]
+    return value
+
+
 @hidden
 def summary_fork_active() -> bool:
     """Whether this task is running best-effort compaction, not parent execution.
 
     Shared-client integrations can distinguish contained summary failures from
-    terminal parent failures. The summary request is independent of the parent.
+    terminal parent failures. Summary replies never execute parent tools.
     """
     return _in_summary_fork.get()
 
@@ -622,8 +632,9 @@ class TokenBudgetSummarizer(SummarizationAgent):
     Summary input is a frozen, bounded range of public stored-event content,
     independent of the parent's context view. Recent events, non-model records
     and incomplete tool-call groups stay active. Completed summaries apply only if the
-    source contents still match. The summary uses a dedicated Predict request
-    with the parent's effective client; parent tools and prompts are not copied.
+    source contents still match. The default view can reuse the parent's request
+    prefix; custom views use a dedicated Predict request built from stored events.
+    The agent waits for summary generation, then applies it at BeforeTurn.
     """
 
     _unsub_llm: Annotated[Callable[[], None] | None, hidden] = None
@@ -792,8 +803,15 @@ class TokenBudgetSummarizer(SummarizationAgent):
     @no_trace
     async def _compact_after_call(self, ctx: Any, nxt: Any) -> Any:
         """Observe usage; compact stored state rather than the parent's projection."""
-        if self._pending_task is not None or self._unsub_llm is None:
+        from nooa.default_context_view import DefaultAgentView
+
+        if _in_summary_fork.get() or self._pending_task is not None or self._unsub_llm is None:
             return await nxt(ctx)
+        original_messages = (
+            _copy_request_containers(ctx.messages)
+            if type(ctx.context_view) is DefaultAgentView
+            else None
+        )
         source, text = (), ""
         try:
             if ctx.client is not None:
@@ -822,8 +840,80 @@ class TokenBudgetSummarizer(SummarizationAgent):
         self._pending_source = source
         self._pending_source_text = text
         self._pending_range = (source[0][0], source[-1][0])
-        self._pending_task = asyncio.create_task(self._run_state_summary(text, ctx.client))
+        # Exact type intentionally excludes customized subclasses. This is only
+        # an optimization: unknown views still get independent state compaction.
+        if type(ctx.context_view) is DefaultAgentView and ctx.messages == original_messages:
+            self._pending_task = asyncio.create_task(self._run_cached_summary(ctx))
+        else:
+            self._pending_task = asyncio.create_task(self._run_state_summary(text, ctx.client))
+        # Match harness compaction on main: pause this invocation, but apply the
+        # completed summary only at the next BeforeTurn boundary.
+        await self._pending_task
         return ctx
+
+    @hidden
+    @no_trace
+    async def _run_cached_summary(self, ctx: Any) -> None:
+        """Append a summary instruction to the completed default-view request."""
+        from nooa.runtime.middleware import LLMCallContext
+
+        token = _in_summary_fork.set(True)
+        try:
+            assert self._pending_range is not None
+            assert self.target_event_manager is not None
+            messages = _copy_request_containers(ctx.messages)
+            params = _copy_request_containers(ctx.params)
+            params.setdefault("output_model", None)
+            start, end = self._pending_range
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Summarize only events {start} through {end} in approximately "
+                        f"{self.config.target_chars} characters. Other events are context only. "
+                        "Preserve decisions, exact values, constraints, outcomes and pending work. "
+                        "Return the memory summary as text, not an answer to the original task. "
+                        "Do not execute tools or code."
+                    ),
+                }
+            )
+            fork = ctx.model_copy(update={"messages": messages, "params": params, "response": None})
+
+            async def dispatch(request: Any) -> Any:
+                request.response = await ctx.client.acall(
+                    _copy_request_containers(messages), **_copy_request_containers(params)
+                )
+                return request
+
+            result = cast(
+                LLMCallContext,
+                await self.target_event_manager.run_middleware("llm_call", fork, dispatch),
+            )
+            response = result.response
+            if response is None or response.finish_reason in {"length", "error"}:
+                raise ValueError("Summary response did not complete")
+            text = response.content
+            if response.tool_calls:
+                if len(response.tool_calls) != 1 or response.tool_calls[0].name != "return_result":
+                    raise ValueError("Summary requested executable tools")
+                text = json.loads(response.tool_calls[0].arguments).get("result")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("Summary must be nonempty text")
+            self._pending_summary = text
+            self._failed_summaries = 0
+        except Exception:
+            logger.warning("Cache-sharing summary failed; history is unchanged", exc_info=True)
+            self._pending_summary = None
+            self._failed_summaries += 1
+            if self._failed_summaries >= 2 and self._unsub_llm is not None:
+                self._unsub_llm()
+                self._unsub_llm = None
+                logger.warning(
+                    "Token-budget summarization disabled after two consecutive failures; "
+                    "history is unchanged. Fix the cause before reinstalling."
+                )
+        finally:
+            _in_summary_fork.reset(token)
 
     @hidden
     @no_trace
@@ -961,14 +1051,14 @@ class MethodSummarizer(SummarizationAgent):
     def _compute_range(self, event: "AfterTurn") -> tuple[str, str] | None:
         """Summarize all events from this method invocation (including children).
 
-        Uses call_id from event metadata to find the range. Child method calls
+        Uses call_id from the event field to find the range. Child method calls
         (nested call_ids) are included because they fall chronologically between
         the first and last event with the parent call_id.
         """
         if self.target_event_manager is None:
             return None
 
-        call_id = event.metadata.get("call_id")
+        call_id = event.call_id
         if call_id is None:
             return None
 
@@ -980,7 +1070,7 @@ class MethodSummarizer(SummarizationAgent):
         match_count = 0
         for tag in self.target_event_manager.keys():
             evt = self.target_event_manager[tag]
-            if evt.metadata.get("call_id") == call_id:
+            if evt.call_id == call_id:
                 if first_tag is None:
                     first_tag = tag
                 last_tag = tag

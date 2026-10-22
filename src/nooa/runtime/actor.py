@@ -824,7 +824,7 @@ class ActorRuntime:
         Example:
             # Inside a context view's assemble(agent, call):
             for event in agent.event_manager.values():
-                if event.metadata.get("call_id") == call.invocation_id:
+                if event.call_id == call.invocation_id:
                     yield event
 
             # Or directly in code
@@ -974,6 +974,7 @@ class ActorRuntime:
                     agent=self.agent,
                     runtime=self,
                     client=llm_client,
+                    context_view=_current_context_view_var.get(),
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
@@ -2706,7 +2707,7 @@ class ActorRuntime:
                 pre_ellipsis_code = get_pre_ellipsis_code(original_method)
 
                 # Use the call_id already pushed by the wrapper so events added
-                # during this call have metadata["call_id"] matching the agent
+                # during this call have call_id matching the agent
                 # call stack and runtime.current_call.id. CodeAct stores its
                 # display-only Task event tag separately on call.task_tag.
                 call_id = self._agent_call_id or str(uuid4())

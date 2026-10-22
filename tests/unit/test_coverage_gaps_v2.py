@@ -367,6 +367,7 @@ class TestEventManagerSummaryWithTag:
 
         em = EventManager()
         summary = Summary(
+            source_call_ids=[],
             summary_tag="0..5",
             replaced_range=(0, 5),
             children_tags=["0", "1", "2"],
@@ -514,6 +515,7 @@ class TestEventManagerAllOriginals:
 
         # Create inner Summary
         inner_summary = Summary(
+            source_call_ids=[],
             summary_tag="0..1",
             replaced_range=(0, 1),
             children_tags=["0", "1"],
@@ -523,6 +525,7 @@ class TestEventManagerAllOriginals:
 
         # Create outer Summary containing the inner Summary
         outer_summary = Summary(
+            source_call_ids=[],
             summary_tag="0..2",
             replaced_range=(0, 2),
             children_tags=["0..1", "2"],  # one child is itself a Summary
@@ -546,6 +549,7 @@ class TestEventManagerAllOriginals:
         em._backend.store("0", t1)
 
         summary = Summary(
+            source_call_ids=[],
             summary_tag="0..5",
             replaced_range=(0, 5),
             children_tags=["0", "999"],  # 999 doesn't exist
