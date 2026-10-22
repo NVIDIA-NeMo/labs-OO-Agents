@@ -200,8 +200,7 @@ class _Wizard:
                     continue
                 if len(matching) > MAX_CHOICES:
                     message = (
-                        f"{len(matching)} models match {values['search']!r}. "
-                        "Type more of the name."
+                        f"{len(matching)} models match {values['search']!r}. Type more of the name."
                     )
                     shown = matching
                     continue
