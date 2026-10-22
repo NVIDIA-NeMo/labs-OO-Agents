@@ -2085,6 +2085,30 @@ def server_effort_levels(state: WizardState):
     } or None
 
 
+def discovered_effort_levels(state: WizardState):
+    """Standard effort choices when interface discovery saw reasoning respond to effort.
+
+    Discovery sends one effort request per interface. If the chosen interface
+    returned reasoning for it, low/medium/high are offered; the chosen one is
+    tested before saving.
+    """
+    result = (state.interfaces.results or {}).get(state.api_style) if state.interfaces else None
+    if result is None:
+        return None
+    for name, record in result.entry.get("provenance", {}).get("probes", {}).items():
+        if (
+            name.startswith("level:")
+            and record.get("outcome") == "accepted"
+            and record.get("reasoning_observed")
+        ):
+            template = state.reasoning_template or "effort"
+            return {
+                label: connect.reasoning_settings(template, state.api_style, label)
+                for label in ("low", "medium", "high")
+            }
+    return None
+
+
 def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     """Plain route-specific selection. Nothing is activated by merely listing levels."""
     if state.api_style in connect.DECISION_API_STYLES:
@@ -2148,6 +2172,8 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
             levels["on"] = previous_on  # retain the wizard's reviewed allowance across edits
     if levels is None:
         levels = server_effort_levels(state)
+    if levels is None:
+        levels = discovered_effort_levels(state)
     if levels is None:
         # Only exact OpenRouter metadata retains known effort templates here.
         candidate = state.candidate or {}
@@ -2401,6 +2427,7 @@ def configure_checks(state: WizardState) -> bool:
         }
     if state.guided_reasoning_levels is not None and state.guided_reasoning_choice is not None:
         state.patches = deepcopy(state.guided_reasoning_levels)
+
     if not bound_simple_reasoning(state, state.patches):
         return False
     planning_candidate = state.candidate
@@ -2441,11 +2468,22 @@ def configure_checks(state: WizardState) -> bool:
         # Guided setup tests only the reasoning level the user chose.
         checked_levels=([state.guided_reasoning_active] if state.guided_reasoning_active else [])
         if state.guided
-        and state.guided_reasoning_choice is not None
+        and state.editing is None
         and not (state.levels or state.levels_file or state.reasoning_template)
         else None,
         **mode_kwargs,
     )
+    if (
+        state.guided
+        and state.editing is None
+        and state.interfaces
+        and state.guided_reasoning_choice is None
+        and not (state.levels or state.levels_file or state.reasoning_template)
+    ):
+        # No reasoning choice was offered; the single discovery probe level is
+        # not a saved choice.
+        state.proposal.entry.pop("reasoning_levels", None)
+        state.proposal.entry.pop("reasoning_default", None)
     if state.server_details is not None:
         state.proposal.entry["provenance"]["server_details"] = scrub_setup(
             state, {"id": state.model, "records": list(state.server_details.records)}

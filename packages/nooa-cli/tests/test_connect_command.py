@@ -868,7 +868,9 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         [],
         input=(
             "custom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
-            "example-model\ndiscover\ntest\nmy-model\ny\nn\n"
+            # Discovery saw reasoning respond to effort, so a reasoning menu is
+            # offered; Enter keeps the model default.
+            "example-model\ndiscover\n\ntest\nmy-model\ny\nn\n"
         ),
     )
     assert result.exit_code == 0, result.output
@@ -876,7 +878,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     # previously have been skipped by the old 131072-token default budget
     # now actually runs (3 more than before). check_interfaces now also
     # probes reasoning by default for the one accepted (chat) interface.
-    assert [r.method for r in requests] == ["GET"] + ["POST"] * 10
+    # Keeping the model-default reasoning choice adds no separate level check.
+    assert [r.method for r in requests] == ["GET"] + ["POST"] * 9
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
