@@ -52,22 +52,18 @@ class Receipt(BaseModel):
 class ChildRef(BaseModel):
     """A handle on a child session: data plus ``wait()``, ``send()`` and ``close()``.
 
-    It holds the child's id, name, path (``/root/review_pr_462``) and a few
-    facts, never the child itself. The methods find the parent's port at
-    call time from the running turn, so a ``ChildRef`` kept in ``self.v``
-    still works after a checkpoint and a reload, and one that arrives in a
-    ``ChildResult`` can be acted on directly (``item.child.send(...)``).
-    Only the child's parent can control it (``send()``, ``close()``):
-    ``parent_id`` is that parent. An ancestor further up may read its
-    ``status`` and ``wait()`` for it; other sessions get
-    ``ChildFailedError``. Its repr shows a question of the child's that
-    you have not answered.
+    It holds the child's id and a few facts, never the child itself. The
+    methods find the parent's port at call time from the running turn, so
+    a ``ChildRef`` kept in ``self.v`` still works after a checkpoint and a
+    reload, and one that arrives in a ``ChildResult`` can be acted on
+    directly (``item.child.send(...)``). Only the child's parent can use
+    it: ``parent_id`` is that parent, and the methods raise
+    ``ChildFailedError`` in any other session. Its repr shows a question
+    of the child's that you have not answered.
     """
 
     id: str
     name: str
-    path: str = ""
-    """Where it is in the session tree: its parent's path, ``/`` and its name."""
     depth: int
     status: ChildStatus
     parent_id: str | None = None
@@ -80,7 +76,7 @@ class ChildRef(BaseModel):
         # the stored value, the status when the ref was made. Dumps,
         # snapshots and comparisons read the stored field, so they are stable.
         if name == "status":
-            port = _reader_port(self)
+            port = _parent_port(self)
             if port is not None:
                 with suppress(ChildFailedError):
                     return port.child_status(object.__getattribute__(self, "id"))
@@ -100,8 +96,6 @@ class ChildRef(BaseModel):
 
     def __repr_args__(self) -> Any:
         for name, value in super().__repr_args__():
-            if name == "id":
-                continue  # the uuid stays on the ref; the repr shows name and path
             yield (name, self.status) if name == "status" else (name, value)
         port = _parent_port(self)
         question = None
@@ -118,7 +112,7 @@ class ChildRef(BaseModel):
         once when waiting could never end: the child is idle with nothing
         queued, or it waits for your answer. A ``ChildMessage`` does not end it.
         """
-        return await _port(self, control=False).wait_child(self.id)
+        return await _port(self).wait_child(self.id)
 
     async def send(self, item: Any, *, channel: str = "user_messages") -> "Receipt":
         """Send the child a message: a running turn reads it next, an idle child starts a turn."""
@@ -150,37 +144,16 @@ def _parent_port(ref: ChildRef) -> "SessionPort | None":
     return port
 
 
-def _reader_port(ref: ChildRef) -> "SessionPort | None":
-    """The running turn's port when it is ``ref``'s parent or an ancestor further up."""
-    from nooa_atom.session.port import current_port
-
-    port = current_port.get()
-    if port is None or ref.parent_id is None or ref.parent_id == port.id:
-        return port
-    return port if port.is_ancestor_of(ref.id) else None
-
-
-def _port(ref: ChildRef, *, control: bool = True) -> "SessionPort":
-    """The running turn's port, if its session is ``ref``'s parent.
-
-    With ``control=False`` (``wait()``), an ancestor further up will do too:
-    it may watch a deeper session, but only its parent controls it.
-    """
+def _port(ref: ChildRef) -> "SessionPort":
+    """The running turn's port, if its session is ``ref``'s parent."""
     from nooa_atom.session.port import require_port
 
     port = require_port()
-    if ref.parent_id is None or ref.parent_id == port.id:
-        return port
-    if port.is_ancestor_of(ref.id):
-        if not control:
-            return port
+    if ref.parent_id is not None and ref.parent_id != port.id:
         raise ChildFailedError(
-            f"{ref.path or ref.id} is not your child but a deeper session: you can read "
-            "its status and wait() for it; control it through its parent"
+            f"Child {ref.id!r} belongs to session {ref.parent_id!r}, not to {port.id!r}"
         )
-    raise ChildFailedError(
-        f"Child {ref.path or ref.id!r} belongs to session {ref.parent_id!r}, not to {port.id!r}"
-    )
+    return port
 
 
 class ChildFailedError(RuntimeError):
@@ -210,10 +183,6 @@ class ChildResult(BaseModel):
                 return done
             done = done.model_copy(update={"result": result})
         return done
-
-    def status_preview(self) -> str:
-        """One line for the pending ``delegates`` list."""
-        return f"{self.child.path or self.child.name} finished: {self.done.explanation}"
 
 
 class ChildQuestion(BaseModel):
@@ -245,20 +214,12 @@ class ChildQuestion(BaseModel):
             answer_schema=schema,
         )
 
-    def status_preview(self) -> str:
-        """One line for the pending ``delegates`` list: who asks what."""
-        return f"{self.child.path or self.child.name} asks: {self.question}"
-
 
 class ChildFailed(BaseModel):
     """A child's turn failed or the child ended without a result."""
 
     child: ChildRef
     error: str
-
-    def status_preview(self) -> str:
-        """One line for the pending ``delegates`` list."""
-        return f"{self.child.path or self.child.name} failed: {self.error}"
 
 
 class ChildMessage(BaseModel):
@@ -271,10 +232,6 @@ class ChildMessage(BaseModel):
 
     child: ChildRef
     text: str
-
-    def status_preview(self) -> str:
-        """One line for the pending ``delegates`` list."""
-        return f"{self.child.path or self.child.name} says: {self.text}"
 
 
 class TurnCancelledOutcome(BaseModel):

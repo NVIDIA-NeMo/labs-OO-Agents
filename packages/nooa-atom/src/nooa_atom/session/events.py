@@ -169,19 +169,6 @@ class ChildDeleted(Metadata):
     name: str | None = None
 
 
-class ChildNamed(Metadata):
-    """The name this session gave an older child record that had no valid one (``child_<n>``).
-
-    Written the first time the name is derived, so it stays the same across
-    processes and when siblings are deleted.
-    """
-
-    _role: ClassVar[Role] = Role.METADATA
-
-    child_id: str = ""
-    name: str = ""
-
-
 class ChildClosed(Metadata):
     """Tombstone: this session closed one of its children for good.
 
@@ -253,7 +240,6 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     TurnEnded,
     ChildDeleted,
     ChildClosed,
-    ChildNamed,
     TurnCancelled,
     SnapshotRestoreFailed,
     UsageAttributed,

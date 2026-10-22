@@ -25,7 +25,6 @@ from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_atom.agent.activity import ActivityShellTools
 from nooa_atom.agent.instructions import render_agent_instructions
-from nooa_atom.agent.jobs import JobInfo, JobsApi, JobUpdate  # noqa: F401  (visible to cells)
 from nooa_atom.agent.slash_commands import SlashCommandRegistry
 
 # Visible to generated cells (cells see this module's globals): the model
@@ -98,9 +97,9 @@ class AtomAgent(InteractiveAgent):
     independently verifiable change) to a child session with its own history.
     Hand it a Todo whose description carries the task's requirements and its
     rules or constraints: the child sees nothing else of your task.
-    ``done = await self.delegate(description, todo, name="fix_parser")`` runs a one-shot
-    worker and returns its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
-    ``child = await self.spawn(description, todo, name="review")`` starts a kept child and returns
+    ``done = await self.delegate(description, todo)`` runs a one-shot worker and
+    returns its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
+    ``child = await self.spawn(description, todo)`` starts a kept child and returns
     at once; it may ask you questions and takes ``await child.send(...)`` follow-ups
     until ``await child.close()``. When nothing else is left, end the turn with
     ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
@@ -122,12 +121,8 @@ class AtomAgent(InteractiveAgent):
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
-    check passed without running it. Run anything that may take more than a
-    minute or two (test suites, builds, long scripts) with ``self.jobs.run(...)``
-    instead of blocking a cell, and if nothing else is left end the turn with
-    ``Waiting(explanation=..., on=["<name>"])``; ``on`` takes the name of a job or
-    child you started. Jobs and children share one set of names (identifiers). Send each user-facing answer
-    through ``self.message()`` as a complete Markdown document.
+    check passed without running it. Send each user-facing answer through
+    ``self.message()`` as a complete Markdown document.
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
     completing the request (reply with ``self.message()`` first),
@@ -170,15 +165,6 @@ class AtomAgent(InteractiveAgent):
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _delegates_in: Annotated[Any, hidden, nosnapshot]
     delegates: Annotated[ChannelReader, nosnapshot]
-    # Background jobs (``self.jobs``): the model-facing view of
-    # ``queue_manager.spawn``. Their results arrive on the ``jobs`` channel.
-    # JobsApi is a Skill, so it is never snapshotted; its doc line is set
-    # with spec() below the class (this module postpones annotations).
-    _jobs_in: Annotated[Channel, hidden, nosnapshot]
-    jobs: JobsApi
-    # label -> small record of each running job, saved with the snapshot so a
-    # resumed session can report the jobs that did not survive (JobsApi).
-    _jobs_running: Annotated[dict, hidden]
     # The Session port, installed by the session that runs this agent. The
     # model uses the flat delegation methods below, not the port.
     session: Annotated[SessionPort | None, hidden, nosnapshot]
@@ -207,9 +193,6 @@ class AtomAgent(InteractiveAgent):
         # The Session port finds this channel and does not declare its own.
         self._delegates_in = self.queue_manager.queue("delegates")
         self.delegates = self._delegates_in.reader
-        self._jobs_in = self.queue_manager.queue("jobs")
-        self._jobs_running = {}
-        self.jobs = JobsApi(self)
         self.todo = TodoManager()
         # Libraries live at <project>/.nooa/libs. get_project_dir() resolves
         # that per process, which is what a one-workspace host like the TUI
@@ -233,17 +216,13 @@ class AtomAgent(InteractiveAgent):
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
         # Memory integration is deferred; do not auto-load its entry point.
-        # Also ignore the retired web publisher and producers entry points in
-        # older installed package metadata (``self.jobs`` replaced producers).
+        # Also ignore the retired web publisher entry point in older installed
+        # package metadata.
         loaded = set(self.skills.loaded())
         installed = []
         for name in self.skills.discovered():
             attr_name = name.rsplit(".", 1)[-1].replace("-", "_")
-            if (
-                name in {"nemo.memory", "nemo.web", "nemo.producers"}
-                or name in loaded
-                or hasattr(self, attr_name)
-            ):
+            if name in {"nemo.memory", "nemo.web"} or name in loaded or hasattr(self, attr_name):
                 continue
             installed.append(name)
         if installed:
@@ -308,7 +287,6 @@ class AtomAgent(InteractiveAgent):
         description: str,
         prompt: str | Todo,
         *,
-        name: str,
         brief: str | None = None,
         model: str | None = None,
         **removed: Any,
@@ -327,20 +305,17 @@ class AtomAgent(InteractiveAgent):
         ``DepthLimitError`` when a child would exceed the depth limit.
 
         Args:
-            description: Short title (2-6 words) for people.
+            description: Short label (2-6 words); the child's name and title.
             prompt: A ``Todo`` carrying the task's requirements, rules and
                 acceptance checks, or the full task as text.
-            name: Its name, a Python identifier such as ``"fix_parser"``, not
-                used by a running job or open child; its path is yours plus
-                ``/name``.
             brief: Extra instructions sent with the prompt.
             model: Model alias for the child; yours when omitted.
         """
         _reject_removed("delegate", removed)
-        child = await _start_child(self, description, prompt, brief, model, name=name, kept=False)
+        child = await _start_child(self, description, prompt, brief, model, kept=False)
         outcome = await child.wait()
         if not isinstance(outcome, ChildResult):  # a one-shot worker's question is a failure
-            raise ChildFailedError(f"Child {child.path} did not return a result")
+            raise ChildFailedError(f"Child {description!r} did not return a result")
         return outcome.done
 
     async def spawn(
@@ -348,7 +323,6 @@ class AtomAgent(InteractiveAgent):
         description: str,
         prompt: str | Todo,
         *,
-        name: str,
         brief: str | None = None,
         model: str | None = None,
         **removed: Any,
@@ -359,7 +333,7 @@ class AtomAgent(InteractiveAgent):
         ``ChildResult`` (``item.done.result`` is a ``TaskResult``), a
         ``ChildQuestion`` (reply with ``await item.child.send(...)``) or a
         ``ChildFailed``, after any ``ChildMessage`` progress notes;
-        ``item.child.name`` matches the returned ref (also ``self.child(name)``).
+        ``item.child.id`` matches the returned ref (keep it in ``self.v``).
         Send follow-ups with ``await ref.send(text)``; it stays open until
         ``await ref.close()``.
 
@@ -371,17 +345,14 @@ class AtomAgent(InteractiveAgent):
         decides how to update its own Todo.
 
         Args:
-            description: Short title (2-6 words) for people.
+            description: Short label (2-6 words); the child's name and title.
             prompt: A ``Todo`` carrying the task's requirements, rules and
                 acceptance checks, or the full task as text.
-            name: Its name, a Python identifier such as ``"review_pr_462"``,
-                not used by a running job or open child (a closed child's
-                name is free again); its path is yours plus ``/name``.
             brief: Extra instructions sent with the prompt.
             model: Model alias for the child; yours when omitted.
         """
         _reject_removed("spawn", removed)
-        return await _start_child(self, description, prompt, brief, model, name=name, kept=True)
+        return await _start_child(self, description, prompt, brief, model, kept=True)
 
     @hidden
     def receive_delegated_todo(self, todo: Todo) -> None:
@@ -399,86 +370,11 @@ class AtomAgent(InteractiveAgent):
         """Handles on the child sessions you started, with live status and any unanswered question."""
         return self._port().children()
 
-    def child(self, name: str) -> ChildRef:
-        """The child you started with this name, e.g. ``await self.child("review").close()``.
-
-        Also takes its full path (``"/root/review"``) or id. A deeper path
-        (``"/root/review/verifier"``) gives a read-only ref: ``status`` and
-        ``wait()``; control it through its parent. The open child wins over
-        closed ones with the same name. Raises ``KeyError`` if there is none.
-        """
-        port = self._port()
-        if name.startswith("/") and name.count("/") > port.path.count("/") + 1:
-            return port.descendant(name)
-        children = self.children()
-        matches = [c for c in children if name in (c.name, c.path, c.id)]
-        open_ = [c for c in matches if c.status != "closed"]
-        found = open_ or matches
-        if found:
-            return found[-1]
-        names = sorted({c.name for c in children if c.status != "closed"})
-        raise KeyError(f"no child named {name!r}; open children: {names}")
-
-    @hidden
-    @no_trace
-    def _child_using_name(self, name: str) -> str | None:
-        """The path of the open child named ``name``, if any: jobs share the children's names."""
-        if self.session is None:
-            return None
-        for child in self._port().children():
-            if child.name == name and child.status != "closed":
-                return child.path
-        return None
-
-    @hidden
-    @no_trace
-    def _session_path(self) -> str:
-        """This session's path in the tree (``/root`` outside a session)."""
-        return self.session.path if self.session is not None else "/root"
-
-    def message(self, text: str, *, echo: bool = False) -> None:
-        """Send a Markdown message to the user.
-
-        In a child session the text goes to the parent instead, as a
-        ``ChildMessage`` on its ``delegates`` channel: a progress note, not
-        the child's result.
-
-        Each call renders as an independent block — so every call must be a
-        complete, self-contained Markdown document.  In particular, never split
-        a table across calls: the header row and all data rows must be in the
-        same ``message()`` call, otherwise the table will not render correctly.
-
-        Args:
-            text: Markdown content to send.
-            echo: If True, also ``print()`` the text so the LLM can see it
-                in the execution output. By default the LLM does NOT see the
-                content of ``message()`` calls — only the user does. Use
-                ``echo=True`` when you need to reference the sent content in
-                subsequent cells.
-        """
-        super().message(text, echo=echo)
-
-    @hidden
-    @no_trace
-    def _queue_status(self) -> str:
-        """The ``queues`` block: pending items, then jobs and live children as "Background work"."""
-        from nooa_atom.agent.background import CLOSE_HINT, child_status_lines
-
-        children = child_status_lines(self)
-        status = self.queue_manager.status(more_work=children)
-        return f"{status}\n{CLOSE_HINT}" if children else status
-
     @hidden
     def after_restore(self) -> None:
-        """Called by the session registry after it restores a snapshot into this agent.
-
-        Reports, once, the ``self.jobs`` jobs that were running when the saved
-        session stopped (a ``JobsLost`` event); they did not survive.
-        """
+        """Called by the session registry after it restores a snapshot into this agent."""
         from nooa_atom.workspace.options import drop_stale_memory_context
 
-        super().after_restore()
-        self.jobs.after_restore()
         drop_stale_memory_context(self)
         self.skills.after_restore()
 
@@ -714,8 +610,8 @@ class AtomAgent(InteractiveAgent):
            example a failing test), decide who writes it, and confirm it fails
            before the work starts.
         3. Do the work: hand each Todo to a child with
-           ``child = await self.spawn(description, todo, name=...)`` and keep
-           ``child`` in ``self.v``. The Todo is all the child sees of the task: put the
+           ``child = await self.spawn(description, todo)`` and keep ``child`` in
+           ``self.v``. The Todo is all the child sees of the task: put the
            task's requirements and its rules or constraints in it. Children
            share one checkout: run one editing child at a time; read-only work
            can run in parallel. While children run, end the turn with
@@ -832,11 +728,6 @@ class AtomAgent(InteractiveAgent):
 
 # A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.
 spec(AtomAgent, "session_port_visible", hidden=True)
-spec(
-    AtomAgent,
-    "jobs",
-    description='Background commands and timers; results arrive in notification["jobs"]',
-)
 
 
 @hidden
@@ -884,7 +775,6 @@ async def _start_child(
     brief: str | None,
     model: str | None,
     *,
-    name: str,
     kept: bool,
 ) -> ChildRef:
     """Start a child for ``spawn()``/``delegate()`` (a plain function: no agent-method wrapper).
@@ -895,42 +785,34 @@ async def _start_child(
     is built by ``as_data``, as ``ref.send(todo)`` builds it, so a var that is
     not plain JSON is refused here too, naming its key, before any child starts.
     """
-    from nooa_atom.session.names import child_path
     from nooa_atom.session.session import as_data
 
     port = agent._port()
-    port.check_child_name(name)
-    job = agent.jobs.get(name) if isinstance(name, str) else None
-    if job is not None and job.state == "running":
-        raise ValueError(
-            f"name {name!r} is already used by the running job {job.path}; pick another "
-            f"name, or cancel the job first (await self.jobs.cancel({name!r}))"
-        )
     handed = as_data(prompt) if isinstance(prompt, Todo) else None
-    path = child_path(port.path, name)
-    text = _child_prompt(path, port.path, prompt, handed, brief, kept=kept)
-    return await port.delegate(description, text, name=name, model=model, kept=kept, todo=handed)
+    text = _child_prompt(port.name, port.id, prompt, handed, brief, kept=kept)
+    return await port.delegate(description, text, model=model, kept=kept, todo=handed)
 
 
 @hidden
 def _child_prompt(
-    path: str,
-    parent_path: str,
+    parent_name: str,
+    parent_id: str,
     prompt: Any,
     todo: Todo | None,
     brief: str | None,
     *,
     kept: bool,
 ) -> str:
-    """A child's first message: its path and its parent's, what kind of child it is, the task and the brief."""
-    task = f", working on Todo {todo.id}: {todo.title}" if todo is not None else ""
+    """A child's first message: who its parent is, what kind of child it is, the task and the brief."""
+    parent = f"parent {parent_name} ({parent_id})"
+    task = f" on Todo {todo.id}: {todo.title}" if todo is not None else ""
     kind = (
         "You can ask your parent questions and may get follow-ups."
         if kept
         else "One-shot task: you can't ask questions; decide, and state your assumptions in "
         "the report."
     )
-    lines = [f"You are {path}, a child of {parent_path}{task}. {kind}", ""]
+    lines = [f"You are working for {parent}{task}. {kind}", ""]
     lines.append(_todo_prompt(todo) if todo is not None else str(prompt))
     if brief:
         lines += ["", "Brief:", str(brief)]

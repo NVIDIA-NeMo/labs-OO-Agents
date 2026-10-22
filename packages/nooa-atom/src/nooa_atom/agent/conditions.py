@@ -71,25 +71,26 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
     """Reject a ``Waiting`` whose ``on`` names something that is not running.
 
     The host runs the next turn only when something the turn waits on
-    delivers. Each name in ``Waiting.on`` must be one of:
+    delivers. Each name in ``Waiting.on`` must be a running background job
+    or a running or queued background agent:
 
-    - a running ``self.jobs`` job by its label (``"tests"``) or path
-      (``"/root/tests"``), or a job with its result already buffered;
-    - one of your children by name, path or id, while it is running,
-      ``working`` (its last turn ended Waiting on its own job) or has
-      queued input;
-    - ``"jobs"`` (any job; needs one running or a result buffered) or
-      ``"delegates"`` (a child is running or has queued input, or an item
-      is already buffered on ``delegates``);
-    - any other running job registered with the queue manager, by its
-      channel name or label (``"mesh"`` while the mesh inbox pump runs), or
-      any channel with an item already buffered on it.
+    - a running job registered with the queue manager, by its channel name
+      (``"mesh"`` while the mesh inbox pump runs) or label;
+      ``"jobs:<label>"`` names a job by label; ``"jobs"`` means any job
+      and needs at least one running;
+    - ``"delegates"``: a child of this session is running or has queued
+      input, or an item is already buffered on ``delegates`` (a child that
+      just finished, or a follow-up sent with ``child.send()`` that has not
+      started yet, both count);
+    - a child's name or id: that child is running, ``working`` (its last
+      turn ended Waiting on its own job) or has queued input.
 
-    A deeper session (``/root/review/verifier``) is not a target: what it
-    delivers goes to its parent, so wait on that child. The person
-    (``"user_messages"``) is never a valid target. Anything else raises
-    ``WaitingTargetNotRunning``, which the strategy shows the model as the
-    error from its ``return_result`` cell; the turn then continues.
+    - any channel with an item already buffered on it (a job that finished
+      during the turn with its result queued, by its channel name).
+
+    The person (``"user_messages"``) is never a valid target. Anything else
+    raises ``WaitingTargetNotRunning``, which the strategy shows the model
+    as the error from its ``return_result`` cell; the turn then continues.
     """
     if not isinstance(result, Waiting):
         return
@@ -111,32 +112,12 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
                 f"Waiting on child {name!r}, but it is not running and has nothing "
                 "queued, so nothing will arrive from it."
             )
-        elif name == "jobs":
-            reasons.append(
-                "Waiting on 'jobs', but no job is running and nothing is queued; "
-                "see self.jobs.list() for finished ones."
-            )
-        elif name in running["known_jobs"]:
-            reasons.append(
-                f"Waiting on {name!r}, but no job labelled {name!r} is running: it may "
-                f"have finished already (see self.jobs.get({name!r})), or start it with "
-                f"self.jobs.run(..., label={name!r})."
-            )
-        elif (
-            name.startswith(running["path"] + "/")
-            and name.count("/") > running["path"].count("/") + 1
-        ):
-            top = name[len(running["path"]) + 1 :].split("/", 1)[0]
-            reasons.append(
-                f"Waiting on {name!r}, but it is not your child: what it delivers goes "
-                f"to its parent. Wait on your child {top!r} instead."
-            )
+        elif name == "jobs" or name.startswith("jobs:") or name in running["known_jobs"]:
+            reasons.append(f"Waiting on {name!r}, but no such job is running.")
         else:
             reasons.append(
-                f"Waiting on {name!r}, but no running job or child has that name (nor is it "
-                "'jobs' or 'delegates'), so nothing will arrive. If it was a job, it may have "
-                f"finished already (see self.jobs.get({name!r})), or start it with "
-                f"self.jobs.run(..., label={name!r})."
+                f"Waiting on {name!r}, but it is not a running job, 'delegates', or a "
+                "child's name or id, so nothing will arrive."
             )
     now = sorted(running["now"])
     raise WaitingTargetNotRunning(
@@ -150,17 +131,13 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
 def _running_names(agent: Any) -> dict[str, Any]:
     """What can deliver right now, from the session registry and the job registry.
 
-    ``children`` maps each of your children's names, paths and ids to
-    whether it is running, working or has queued input; ``known_jobs``
-    holds every ``self.jobs`` label, running or not; ``now`` the names that
-    are accepted (shown short: a job's label, a child's name); ``also`` the
-    other accepted spellings (paths and ids); ``path`` your own path.
+    ``children`` maps every child's name and id to whether it is running,
+    working or has queued input; ``jobs`` holds every running job's channel name and
+    label; ``known_jobs`` every job's, running or not; ``now`` the names
+    that are accepted.
     """
     children: dict[str, bool] = {}
-    now: set[str] = set()
-    also: set[str] = set()
     port = getattr(agent, "session", None)
-    path = port.path if port is not None else "/root"
     if port is not None:
         registry = port._registry
         for info in registry.children(port.id):
@@ -170,56 +147,29 @@ def _running_names(agent: Any) -> dict[str, Any]:
             active = info.status in ("running", "working") or (
                 live is not None and not live.closing and live.has_queued_input()
             )
-            child_path = registry.path(info.id)
-            for key in (info.id, info.name, child_path):
+            for key in (info.id, info.name):
                 if key:
                     children[key] = children.get(key, False) or active
-            if active:
-                if info.name:
-                    now.add(info.name)
-                also.update(key for key in (info.id, child_path) if key)
     queues = agent.queue_manager
     handles = queues.running_handles()
-    now |= {key for handle in handles for key in (handle.name, handle.label)}
-    channels = queues.channels()
+    jobs = {key for handle in handles for key in (handle.name, handle.label)}
+    known_jobs = set(queues.jobs())
+    now = {name for name, active in children.items() if active} | jobs
     # A channel with an item already buffered delivers at once: a job that
     # finished during the turn (its result queued on its channel) or a
     # child's outcome on ``delegates``.
-    now |= {name for name, channel in channels.items() if channel.qsize() > 0}
-    jobs = getattr(agent, "jobs", None)
-    # Every job's channel name and every self.jobs label, running or not.
-    known_jobs = set(queues.jobs())
-    if jobs is not None:
-        known_jobs |= {info.label for info in jobs.list()}
-    if jobs is not None:
-        for info in jobs.list():
-            if info.state == "running":
-                now.add(info.label)
-                also.add(info.path)
-    # A ``self.jobs`` job that already delivered: its labelled item is buffered.
-    if "jobs" in channels:
-        for item in channels["jobs"].snapshot():
-            label = getattr(item, "label", None)
-            if isinstance(label, str) and label:
-                now.add(label)
-                item_path = getattr(item, "path", None)
-                if item_path:
-                    also.add(item_path)
+    now |= {name for name, channel in queues.channels().items() if channel.qsize() > 0}
     if any(children.values()):
         now.add("delegates")
     if handles:
         now.add("jobs")
     now -= PERSON_NAMES
-    return {
-        "children": children,
-        "known_jobs": known_jobs,
-        "now": now,
-        "also": also,
-        "path": path,
-    }
+    return {"children": children, "jobs": jobs, "known_jobs": known_jobs, "now": now}
 
 
 def _is_running(name: str, running: dict[str, Any]) -> bool:
     if name in PERSON_NAMES:
         return False
-    return name in running["now"] or name in running["also"]
+    if name in running["now"]:
+        return True
+    return name.startswith("jobs:") and name.removeprefix("jobs:") in running["jobs"]

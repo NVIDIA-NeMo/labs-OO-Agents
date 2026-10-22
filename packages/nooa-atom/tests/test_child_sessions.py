@@ -93,9 +93,7 @@ async def test_a_spawned_child_must_return_a_task_result_and_the_parent_gets_it(
     atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
-        _wait_then(
-            "self.v.ref = await self.spawn('fix_parser', 'fix the parser', name='fix_parser')"
-        ),
+        _wait_then("self.v.ref = await self.spawn('Fix parser', 'fix the parser')"),
         cell(
             "[item] = notification['delegates']\n"
             "assert isinstance(item, ChildResult)\n"
@@ -103,7 +101,7 @@ async def test_a_spawned_child_must_return_a_task_result_and_the_parent_gets_it(
             "return_result(Done(explanation=item.done.result.report))"
         ),
     ]
-    atom_models.scripts["fix_parser"] = [
+    atom_models.scripts["Fix parser"] = [
         # A worker's Done without a TaskResult is rejected and it tries again.
         cell("return_result(Done(explanation='fixed'))"),
         cell(CHILD_RESULT),
@@ -111,7 +109,7 @@ async def test_a_spawned_child_must_return_a_task_result_and_the_parent_gets_it(
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="REPORT: off-by-one fixed")
-    assert "A worker turn must end with Done" in _messages(atom_models, "fix_parser", 1)
+    assert "A worker turn must end with Done" in _messages(atom_models, "Fix parser", 1)
     [child] = atom_registry.children(root.id)
     assert (child.turn_method, child.retained) == ("handle_work", True)
 
@@ -121,11 +119,11 @@ async def test_a_delegated_result_that_is_not_a_task_result_is_rejected(
 ):
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\n"
+            "done = await self.delegate('Fix', 'fix it')\n"
             "return_result(Done(explanation=type(done.result).__name__))"
         )
     ]
-    atom_models.scripts["fix"] = [
+    atom_models.scripts["Fix"] = [
         cell("return_result(Done(explanation='fixed', result='just a string'))"),
         cell(CHILD_RESULT),
     ]
@@ -137,12 +135,12 @@ async def test_a_delegated_result_that_is_not_a_task_result_is_rejected(
 
 async def test_the_worker_prompt_is_written_for_a_parent(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
-        cell("await self.delegate('W', 'w', name='w')\nreturn_result(Done(explanation='ok'))")
+        cell("await self.delegate('W', 'w')\nreturn_result(Done(explanation='ok'))")
     ]
-    atom_models.scripts["w"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["W"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
-    prompt = _messages(atom_models, "w")
+    prompt = _messages(atom_models, "W")
     assert "Work on a task for your parent agent and report back to it." in prompt
     assert "remove scratch files" in prompt
     assert "only one editing this checkout" in prompt
@@ -153,7 +151,7 @@ async def test_a_delegated_child_is_closed_after_its_result_and_send_then_raises
 ):
     atom_models.scripts[None] = [
         cell(
-            "await self.delegate('once', 'do it once', name='once')\n"
+            "await self.delegate('Once', 'do it once')\n"
             "[ref] = self.children()\n"
             "try:\n"
             "    await ref.send('more work')\n"
@@ -161,11 +159,11 @@ async def test_a_delegated_child_is_closed_after_its_result_and_send_then_raises
             "    return_result(Done(explanation=f'{ref.status}: {exc}'))"
         ),
     ]
-    atom_models.scripts["once"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Once"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     # Closed for good as soon as its result is delivered, even before the close finishes.
-    assert outcome.explanation.startswith("closed: Child 'once' is closed")
+    assert outcome.explanation.startswith("closed: Child 'Once' is closed")
     [child] = atom_registry.children(root.id)
     await until(lambda: atom_registry.get(child.id) is None)
     assert atom_registry.children(root.id)[0].status == "closed"
@@ -175,7 +173,7 @@ async def test_a_spawned_child_persists_and_takes_follow_ups(
     atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
-        _wait_then("self.v.ref = await self.spawn('kept', 'first task', name='kept')"),
+        _wait_then("self.v.ref = await self.spawn('Kept', 'first task')"),
         cell(
             "[item] = notification['delegates']\n"
             "self.v.first = item.done.result.report\n"
@@ -188,7 +186,7 @@ async def test_a_spawned_child_persists_and_takes_follow_ups(
             "return_result(Done(explanation=self.v.first + ' / ' + item.done.result.report))"
         ),
     ]
-    atom_models.scripts["kept"] = [
+    atom_models.scripts["Kept"] = [
         cell(CHILD_RESULT),
         cell(
             "[m] = notification['user_messages']\n"
@@ -209,7 +207,7 @@ async def test_send_steers_a_running_child(atom_registry, atom_options, atom_mod
     started, block = fresh_events()
     atom_models.scripts[None] = [
         cell(
-            "ref = await self.spawn('busy', 'work', name='busy')\n"
+            "ref = await self.spawn('Busy', 'work')\n"
             "import atom_test_agents as _t\n"
             "await _t.STARTED.wait()\n"
             "receipt = await ref.send('STEERED-TEXT')\n"
@@ -218,17 +216,17 @@ async def test_send_steers_a_running_child(atom_registry, atom_options, atom_mod
             "return_result(Done(explanation=f'{receipt.delivered}: {r.done.result.report}'))"
         )
     ]
-    atom_models.scripts["busy"] = [cell(BLOCKING), _result("steered")]
+    atom_models.scripts["Busy"] = [cell(BLOCKING), _result("steered")]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="steered: steered")
-    assert "STEERED-TEXT" in _messages(atom_models, "busy", 1)
+    assert "STEERED-TEXT" in _messages(atom_models, "Busy", 1)
     assert not hasattr(ChildRef, "steer")
 
 
 async def test_closing_a_kept_child_is_final(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
-        _wait_then("self.v.ref = await self.spawn('kept', 'task', name='kept')"),
+        _wait_then("self.v.ref = await self.spawn('Kept', 'task')"),
         cell(
             "await self.v.ref.close()\n"
             "try:\n"
@@ -237,7 +235,7 @@ async def test_closing_a_kept_child_is_final(atom_registry, atom_options, atom_m
             "    return_result(Done(explanation=self.v.ref.status))"
         ),
     ]
-    atom_models.scripts["kept"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Kept"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="closed")
 
@@ -246,14 +244,14 @@ async def test_removed_keywords_raise_a_one_line_type_error(
     atom_registry, atom_options, atom_models
 ):
     calls = [
-        "self.spawn('X', 'x', retain=True, name='x')",
-        "self.spawn('X', 'x', mode='conversation', name='x')",
-        "self.spawn('X', 'x', keep=True, name='x')",
-        "self.spawn('X', 'x', context={'a': 1}, name='x')",
-        "self.delegate('X', 'x', keep=False, name='x')",
-        "self.delegate('X', 'x', context={'a': 1}, name='x')",
-        "self.session.delegate('X', 'x', retain=True, name='x')",
-        "self.session.delegate('X', 'x', keep=True, name='x')",
+        "self.spawn('X', 'x', retain=True)",
+        "self.spawn('X', 'x', mode='conversation')",
+        "self.spawn('X', 'x', keep=True)",
+        "self.spawn('X', 'x', context={'a': 1})",
+        "self.delegate('X', 'x', keep=False)",
+        "self.delegate('X', 'x', context={'a': 1})",
+        "self.session.delegate('X', 'x', retain=True)",
+        "self.session.delegate('X', 'x', keep=True)",
     ]
     code = "errors = []\n" + "".join(
         f"try:\n    await {call}\nexcept TypeError as exc:\n    errors.append(str(exc))\n"
@@ -270,14 +268,12 @@ async def test_removed_keywords_raise_a_one_line_type_error(
     assert atom_registry.children(root.id) == []
 
 
-def test_the_verbs_take_only_description_prompt_name_brief_and_model():
+def test_the_verbs_take_only_description_prompt_brief_and_model():
     from nooa_atom.agent.agent import AtomAgent
 
     for method in (AtomAgent.spawn, AtomAgent.delegate):
         params = inspect.signature(method).parameters
-        assert list(params) == ["self", "description", "prompt", "name", "brief", "model"]
-        assert params["name"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert params["name"].default is inspect.Parameter.empty  # required: no slug fallback
+        assert list(params) == ["self", "description", "prompt", "brief", "model"]
     assert {name for name in dir(ChildRef) if not name.startswith("_")} >= {"wait", "send", "close"}
     for removed in ("steer", "info", "pending_question"):
         assert not hasattr(ChildRef, removed)
@@ -314,7 +310,7 @@ def test_a_child_ref_dumps_status_without_serialize_by_alias():
     assert "serialize_by_alias" not in ChildRef.model_config
     assert "status_when_made" not in ChildRef.model_fields
     ref = ChildRef(id="c", name="kid", depth=1, status="retained", parent_id="p")
-    keys = {"id", "name", "path", "depth", "status", "parent_id", "todo_id"}
+    keys = {"id", "name", "depth", "status", "parent_id", "todo_id"}
     assert set(ref.model_dump()) == keys
     assert set(ref.model_dump(mode="json")) == keys
     assert set(ref.model_dump(by_alias=True)) == keys
@@ -338,9 +334,9 @@ async def test_a_waiting_child_is_working_and_sends_no_item(
     atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
-        _wait_then("self.v.ref = await self.spawn('slow', 'start a job', name='slow')"),
+        _wait_then("self.v.ref = await self.spawn('Slow', 'start a job')"),
     ]
-    atom_models.scripts["slow"] = [
+    atom_models.scripts["Slow"] = [
         cell("return_result(Waiting(explanation='job running', on=['jobs']))")
     ]
     root = await atom_registry.create(atom_options)
@@ -363,17 +359,17 @@ async def test_a_todo_and_a_brief_both_reach_a_spawned_child_with_the_parent_lin
             "t = self.todo.add('Fix the parser', description='REQ: parse() keeps the last line')\n"
             "self.todo.comment(t, 'NOTE: suspect the loop bound')\n"
             "self.v.todo_id = t.id\n"
-            "self.v.ref = await self.spawn('parser', t, brief='BRIEF: start from parse_header()', name='parser')"
+            "self.v.ref = await self.spawn('Parser', t, brief='BRIEF: start from parse_header()')"
         ),
         done("received"),
     ]
-    atom_models.scripts["parser"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Parser"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     todo_id = root._agent.v.todo_id
-    prompt = _messages(atom_models, "parser")
+    prompt = _messages(atom_models, "Parser")
     assert (
-        f"You are /root/parser, a child of /root, working on Todo {todo_id}: Fix the parser. "
+        f"You are working for parent root ({root.id}) on Todo {todo_id}: Fix the parser. "
         "You can ask your parent questions and may get follow-ups." in prompt
     )
     assert f"Task [{todo_id}]: Fix the parser" in prompt
@@ -387,15 +383,15 @@ async def test_a_delegated_text_prompt_says_it_is_one_shot(
 ):
     atom_models.scripts[None] = [
         cell(
-            "await self.delegate('W', 'TEXT-TASK', brief='TEXT-BRIEF', name='w')\n"
+            "await self.delegate('W', 'TEXT-TASK', brief='TEXT-BRIEF')\n"
             "return_result(Done(explanation='ok'))"
         )
     ]
-    atom_models.scripts["w"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["W"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
-    prompt = _messages(atom_models, "w")
-    assert "You are /root/w, a child of /root. One-shot task: you can" in prompt
+    prompt = _messages(atom_models, "W")
+    assert f"You are working for parent root ({root.id}). One-shot task: you can" in prompt
     assert "TEXT-TASK" in prompt and "TEXT-BRIEF" in prompt
 
 
@@ -408,7 +404,7 @@ async def test_the_child_works_on_a_local_copy_and_nothing_flows_back(
             "self.todo.comment(t, 'parent note')\n"
             "self.v.todo_id = t.id\n"
             "self.v.before = t.model_dump(mode='json')\n"
-            "self.v.ref = await self.spawn('parser', t, name='parser')"
+            "self.v.ref = await self.spawn('Parser', t)"
         ),
         cell(
             "[item] = notification['delegates']\n"
@@ -418,7 +414,7 @@ async def test_the_child_works_on_a_local_copy_and_nothing_flows_back(
             "return_result(Done(explanation=item.done.result.report))"
         ),
     ]
-    atom_models.scripts["parser"] = [
+    atom_models.scripts["Parser"] = [
         cell(
             "t = self.todo.active()\n"
             "self.v.seen = (t.id, t.title, t.description, [c.body for c in t.comments])\n"
@@ -455,7 +451,7 @@ async def test_a_kept_childs_results_never_touch_the_parents_todo(
         _wait_then(
             "t = self.todo.add('Task')\n"
             "self.v.todo_id = t.id\n"
-            "self.v.ref = await self.spawn('kept', t, name='kept')"
+            "self.v.ref = await self.spawn('Kept', t)"
         ),
         cell(
             "self.todo.comment(self.v.todo_id, 'parent review: one more check')\n"
@@ -469,7 +465,7 @@ async def test_a_kept_childs_results_never_touch_the_parents_todo(
             "return_result(Done(explanation='finished'))"
         ),
     ]
-    atom_models.scripts["kept"] = [
+    atom_models.scripts["Kept"] = [
         cell("self.todo.comment(self.todo.active(), 'round 1')\n" + CHILD_RESULT),
         cell(
             "t = self.todo.list_todos()[0]\n"
@@ -499,7 +495,7 @@ async def test_a_hand_built_todo_works_as_a_brief(atom_registry, atom_options, a
             "self.v.todo_id = t.id\n"
             "import atom_test_agents as _t\n"
             "_t.HELD = t\n"
-            "self.v.ref = await self.spawn('X', t, name='x')\n"
+            "self.v.ref = await self.spawn('X', t)\n"
             "assert self.todo.get(t.id) is None  # read, not adopted"
         ),
         cell(
@@ -509,7 +505,7 @@ async def test_a_hand_built_todo_works_as_a_brief(atom_registry, atom_options, a
             "return_result(Done(explanation=f'{_t.HELD.status} {len(_t.HELD.comments)}'))"
         ),
     ]
-    atom_models.scripts["x"] = [
+    atom_models.scripts["X"] = [
         cell(
             "t = self.todo.active()\n"
             "assert (t.title, t.description, t.deps) == ('stray', 'REQ', ['not-yet'])\n"
@@ -520,7 +516,7 @@ async def test_a_hand_built_todo_works_as_a_brief(atom_registry, atom_options, a
     root = await atom_registry.create(atom_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="open 0")
     todo_id = root._agent.v.todo_id
-    assert f"Task [{todo_id}]: stray" in _messages(atom_models, "x")
+    assert f"Task [{todo_id}]: stray" in _messages(atom_models, "X")
     [child] = atom_registry.children(root.id)
     assert child.todo_id == todo_id
 
@@ -535,12 +531,12 @@ async def test_a_second_object_with_a_managed_id_works_as_a_brief(
             "self.v.todo_id = kept.id\n"
             "copy = kept.model_copy(deep=True)\n"
             "copy.description = 'the copy'\n"
-            "done = await self.delegate('X', copy, name='x')\n"
+            "done = await self.delegate('X', copy)\n"
             "assert self.todo.get(kept.id) is kept and kept.description == 'keep me'\n"
             "return_result(Done(explanation=kept.status))"
         )
     ]
-    atom_models.scripts["x"] = [
+    atom_models.scripts["X"] = [
         cell(
             "assert self.todo.active().description == 'the copy'\n"
             "self.todo.complete(self.todo.active())\n" + CHILD_RESULT
@@ -591,7 +587,7 @@ def test_receive_delegated_todo_refuses_a_same_id_todo_instead_of_replacing_it()
 async def test_wait_returns_a_question_then_the_result(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
         cell(
-            "ref = await self.spawn('pusher', 'push the branch', name='pusher')\n"
+            "ref = await self.spawn('Pusher', 'push the branch')\n"
             "q = await ref.wait()\n"
             "assert isinstance(q, ChildQuestion) and q.options == ['main', 'dev']\n"
             "assert f'pending_question=\\'[{q.id}] Which branch?' in repr(self.children()[0])\n"
@@ -605,7 +601,7 @@ async def test_wait_returns_a_question_then_the_result(atom_registry, atom_optio
             "return_result(Done(explanation=f'{type(r).__name__}: {r.done.result.report}'))"
         )
     ]
-    atom_models.scripts["pusher"] = [
+    atom_models.scripts["Pusher"] = [
         cell(ASK),
         cell(
             "[a] = notification['user_messages']\n"
@@ -623,7 +619,7 @@ async def test_wait_returns_a_question_then_the_result(atom_registry, atom_optio
 
 async def test_wait_fails_fast_on_an_idle_kept_child(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
-        _wait_then("self.v.ref = await self.spawn('kept', 'task', name='kept')"),
+        _wait_then("self.v.ref = await self.spawn('Kept', 'task')"),
         cell(
             "[item] = notification['delegates']\n"
             "try:\n"
@@ -632,7 +628,7 @@ async def test_wait_fails_fast_on_an_idle_kept_child(atom_registry, atom_options
             "    return_result(Done(explanation=str(exc)))"
         ),
     ]
-    atom_models.scripts["kept"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Kept"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), 10)
     assert "is idle with nothing queued" in outcome.explanation
@@ -641,7 +637,7 @@ async def test_wait_fails_fast_on_an_idle_kept_child(atom_registry, atom_options
 async def test_wait_withdraws_a_queued_question(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
         cell(
-            "ref = await self.spawn('asker', 'ask', name='asker')\n"
+            "ref = await self.spawn('Asker', 'ask')\n"
             "delegates = self.queue_manager.get_channel('delegates')\n"
             "async with asyncio.timeout(10):\n"
             "    while delegates.qsize() == 0:\n"
@@ -650,7 +646,7 @@ async def test_wait_withdraws_a_queued_question(atom_registry, atom_options, ato
             "return_result(Done(explanation=f'{type(q).__name__}: {q.question}'))"
         )
     ]
-    atom_models.scripts["asker"] = [cell(ASK)]
+    atom_models.scripts["Asker"] = [cell(ASK)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="ChildQuestion: Which branch?")
@@ -662,13 +658,13 @@ async def test_wait_withdraws_a_queued_question(atom_registry, atom_options, ato
 async def test_a_message_does_not_end_wait(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
         cell(
-            "ref = await self.spawn('chatty', 'work', name='chatty')\n"
+            "ref = await self.spawn('Chatty', 'work')\n"
             "r = await ref.wait()\n"
             "return_result(Done(explanation=type(r).__name__))"
         ),
         done("saw the message"),
     ]
-    atom_models.scripts["chatty"] = [cell("self.message('progress note')\n" + CHILD_RESULT)]
+    atom_models.scripts["Chatty"] = [cell("self.message('progress note')\n" + CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ChildResult")
     assert _admitted_delegates(atom_registry, root.id) == ["ChildMessage"]
@@ -681,7 +677,7 @@ async def test_an_unanswered_question_is_pending_and_does_not_block_done(
         _wait_then(
             "t = self.todo.add('Push')\n"
             "self.v.todo_id = t.id\n"
-            "self.v.ref = await self.spawn('asker', t, name='asker')"
+            "self.v.ref = await self.spawn('Asker', t)"
         ),
         cell(
             "[q] = notification['delegates']\n"
@@ -691,7 +687,7 @@ async def test_an_unanswered_question_is_pending_and_does_not_block_done(
             "return_result(Done(explanation=f'asked {q.id}'))"
         ),
     ]
-    atom_models.scripts["asker"] = [
+    atom_models.scripts["Asker"] = [
         cell("self.todo.comment(self.todo.active(), 'found two branches')\n" + ASK)
     ]
     root = await atom_registry.create(atom_options)
@@ -711,7 +707,7 @@ async def test_send_answers_and_clears_the_pending_question(
     """``ChildQuestion`` is data: the reply is ``child.send()``, which clears it."""
     atom_models.scripts[None] = [
         cell(
-            "ref = await self.spawn('asker', 'ask', name='asker')\n"
+            "ref = await self.spawn('Asker', 'ask')\n"
             "q = await ref.wait()\n"
             "assert not hasattr(q, 'answer')\n"
             "assert self.session.pending_question(ref.id).id == q.id\n"
@@ -722,7 +718,7 @@ async def test_send_answers_and_clears_the_pending_question(
             "return_result(Done(explanation=r.done.result.report))"
         )
     ]
-    atom_models.scripts["asker"] = [
+    atom_models.scripts["Asker"] = [
         cell(ASK),
         cell(
             "[a] = notification['user_messages']\n"
@@ -743,14 +739,14 @@ async def test_a_delegated_worker_that_asks_is_told_to_decide(
 ):
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('pusher', 'push the branch', name='pusher')\n"
+            "done = await self.delegate('Pusher', 'push the branch')\n"
             "return_result(Done(explanation=done.result.report))"
         )
     ]
-    atom_models.scripts["pusher"] = [cell(ASK), _result("assumed main")]
+    atom_models.scripts["Pusher"] = [cell(ASK), _result("assumed main")]
     root = await atom_registry.create(atom_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="assumed main")
-    assert "answer a one-shot worker" in _messages(atom_models, "pusher", 1)
+    assert "answer a one-shot worker" in _messages(atom_models, "Pusher", 1)
     [child] = atom_registry.children(root.id)
     await until(lambda: atom_registry.get(child.id) is None)
     assert atom_registry.children(root.id)[0].status == "closed"
@@ -762,9 +758,9 @@ async def test_a_one_shot_question_from_an_agent_without_the_check_fails_and_clo
 ):
     """The backstop: an agent class whose turn lets a one-shot child ask anyway."""
     root = await registry.create(root_options)
-    models.scripts["asker"] = [cell("return_result(NeedInput(question='which?'))")]
+    models.scripts["Asker"] = [cell("return_result(NeedInput(question='which?'))")]
     child = await registry.create(
-        root.options.inherit(name="asker", turn_method="handle"),
+        root.options.inherit(name="Asker", turn_method="handle"),
         parent_id=root.id,
         initial_items=[("user_messages", "go")],
     )
@@ -797,8 +793,8 @@ async def test_a_question_answered_by_the_host_is_cleared_and_wait_waits(
     started, block = fresh_events()
     root = await atom_registry.create(atom_options)
     port = root._agent.session
-    atom_models.scripts["asker"] = [cell(ASK), cell(BLOCKING), _result("r")]
-    ref = await port.delegate("asker", "ask", kept=True, name="asker")
+    atom_models.scripts["Asker"] = [cell(ASK), cell(BLOCKING), _result("r")]
+    ref = await port.delegate("Asker", "ask", kept=True)
     child = atom_registry.get(ref.id)
     await until(lambda: port.pending_question(ref.id) is not None, TIMEOUT)
     # A person answers through the host, not through the parent.
@@ -822,14 +818,14 @@ async def test_a_pending_question_survives_a_reload_with_its_id(
 ):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
     atom_models.scripts[None] = [
-        _wait_then("self.v.ref = await self.spawn('asker', 'ask', name='asker')"),
+        _wait_then("self.v.ref = await self.spawn('Asker', 'ask')"),
         cell(
             "[q] = notification['delegates']\n"
             "self.v.question_id = q.id\n"
             "return_result(Done(explanation='not answering yet'))"
         ),
     ]
-    atom_models.scripts["asker"] = [cell(ASK)]
+    atom_models.scripts["Asker"] = [cell(ASK)]
     root = await registry.create(atom_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     question_id = root._agent.v.question_id
@@ -851,7 +847,7 @@ async def test_a_pending_question_survives_a_reload_with_its_id(
                     "return_result(Done(explanation=r.done.result.report))"
                 )
             ],
-            "asker": [
+            "Asker": [
                 cell(
                     "[a] = notification['user_messages']\n"
                     "return_result(Done(explanation='pushed', result=TaskResult("
@@ -878,13 +874,13 @@ async def test_a_queued_outcome_is_withdrawn_by_wait_after_a_reload(
 ):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
     root = await registry.create(atom_options)
-    atom_models.scripts["kid"] = [_result("QUEUED")]
+    atom_models.scripts["Kid"] = [_result("QUEUED")]
     # The parent is busy in a blocked turn, so the result stays queued on delegates.
     started, _block = fresh_events()
     atom_models.llms[None]._response_queue.append(cell(BLOCKING))
     await root.submit("block")
     await asyncio.wait_for(started.wait(), TIMEOUT)
-    ref = await root._agent.session.delegate("kid", "work", kept=True, name="kid")
+    ref = await root._agent.session.delegate("Kid", "work", kept=True)
     await until(lambda: root._agent.queue_manager.get_channel("delegates").qsize() == 1, TIMEOUT)
     await registry.close_all()
 
@@ -902,10 +898,10 @@ async def test_a_queued_outcome_is_withdrawn_by_wait_after_a_reload(
 async def test_a_waiting_child_reads_idle_after_a_reload(atom_options, atom_models, sessions_dir):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
     root = await registry.create(atom_options)
-    atom_models.scripts["slow"] = [
+    atom_models.scripts["Slow"] = [
         cell("return_result(Waiting(explanation='job running', on=['jobs']))")
     ]
-    ref = await root._agent.session.delegate("slow", "start a job", kept=True, name="slow")
+    ref = await root._agent.session.delegate("Slow", "start a job", kept=True)
     await until(lambda: registry.child_status(root, ref.id) == "working", TIMEOUT)
     await registry.close_all()
 
@@ -946,7 +942,7 @@ async def test_waiting_on_a_finished_job_with_its_result_queued_is_accepted():
     with pytest.raises(WaitingTargetNotRunning, match="'lint'"):
         check_waiting_targets(agent, Waiting(explanation="lint", on=["lint"]), fix=UNATTENDED_FIX)
     queues.channels()["build"].flush()
-    with pytest.raises(WaitingTargetNotRunning, match="no job labelled 'build' is running"):
+    with pytest.raises(WaitingTargetNotRunning, match="no such job is running"):
         check_waiting_targets(agent, Waiting(explanation="build", on=["build"]), fix=UNATTENDED_FIX)
 
 
@@ -989,10 +985,10 @@ async def test_a_done_message_also_sent_with_message_is_delivered_once(
     atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
-        _wait_then("await self.spawn('kid', 'work', name='kid')"),
+        _wait_then("await self.spawn('Kid', 'work')"),
         done("got it"),
     ]
-    atom_models.scripts["kid"] = [
+    atom_models.scripts["Kid"] = [
         cell(
             "self.message('final words')\n"
             "return_result(Done(explanation='ok', message='final words', result=TaskResult("
@@ -1011,7 +1007,7 @@ async def test_a_result_message_handled_late_is_not_relayed(registry, root_optio
     from nooa.interactive import AgentMessage
 
     root = await registry.create(root_options)
-    child = await registry.create(root.options.inherit(name="kid", kept=True), parent_id=root.id)
+    child = await registry.create(root.options.inherit(name="Kid", kept=True), parent_id=root.id)
     late = AgentMessage(content="the Done's text", is_result_text=True)
     registry._deliver(child, AgentEventUpdate(session_id=child.id, event=late))
     registry._deliver(
@@ -1080,7 +1076,7 @@ def test_a_todo_with_a_non_json_var_is_refused_when_sent_naming_the_key():
 
 async def test_send_hands_a_todo_to_a_kept_child(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
-        _wait_then("self.v.ref = await self.spawn('kept', 'first task', name='kept')"),
+        _wait_then("self.v.ref = await self.spawn('Kept', 'first task')"),
         cell(
             "a = self.todo.add('Empty vars')\n"
             "b = self.todo.add('With vars', description='REQ', owner='root')\n"
@@ -1094,7 +1090,7 @@ async def test_send_hands_a_todo_to_a_kept_child(atom_registry, atom_options, at
             "return_result(Done(explanation=item.done.result.report))"
         ),
     ]
-    atom_models.scripts["kept"] = [
+    atom_models.scripts["Kept"] = [
         cell(CHILD_RESULT),
         cell(
             "items = notification['user_messages']\n"
@@ -1121,7 +1117,7 @@ async def test_sending_the_briefed_todo_is_an_ordinary_item(
         _wait_then(
             "t = self.todo.add('Task', description='REQ v1')\n"
             "self.v.todo_id = t.id\n"
-            "self.v.ref = await self.spawn('kept', t, name='kept')"
+            "self.v.ref = await self.spawn('Kept', t)"
         ),
         cell(
             "[item] = notification['delegates']\n"
@@ -1136,7 +1132,7 @@ async def test_sending_the_briefed_todo_is_an_ordinary_item(
             "return_result(Done(explanation=item.done.result.report))"
         ),
     ]
-    atom_models.scripts["kept"] = [
+    atom_models.scripts["Kept"] = [
         cell("self.todo.complete(self.todo.active())\n" + CHILD_RESULT),
         cell(
             "items = notification['user_messages']\n"
@@ -1174,11 +1170,11 @@ async def test_an_old_record_with_a_child_todo_base_row_reloads(
         _wait_then(
             "t = self.todo.add('Task')\n"
             "self.v.todo_id = t.id\n"
-            "self.v.ref = await self.spawn('kept', t, name='kept')"
+            "self.v.ref = await self.spawn('Kept', t)"
         ),
         done("first"),
     ]
-    atom_models.scripts["kept"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Kept"] = [cell(CHILD_RESULT)]
     try:
         root = await registry.create(atom_options)
         assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="first")
@@ -1206,7 +1202,7 @@ async def test_an_old_record_with_a_child_todo_base_row_reloads(
                     "return_result(Done(explanation=item.done.result.report))"
                 ),
             ],
-            "kept": [cell(CHILD_RESULT)],
+            "Kept": [cell(CHILD_RESULT)],
         }
     )
     fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=later)
@@ -1226,18 +1222,18 @@ async def test_spawn_and_send_refuse_the_same_non_json_todo_var(
 ):
     """Review-3 finding 2: the in-process hand-over applies send()'s JSON check."""
     atom_models.scripts[None] = [
-        _wait_then("self.v.ref = await self.spawn('kept', 'first task', name='kept')"),
+        _wait_then("self.v.ref = await self.spawn('Kept', 'first task')"),
         cell(
             "from pydantic_core import PydanticSerializationError\n"
             "t = self.todo.add('With a tuple')\n"
             "self.todo.set_var(t, 'pair', (1, 2))\n"
             "errors = []\n"
             "try:\n"
-            "    await self.spawn('S', t, name='s')\n"
+            "    await self.spawn('S', t)\n"
             "except PydanticSerializationError as exc:\n"
             "    errors.append(\"var 'pair' holds a tuple\" in str(exc))\n"
             "try:\n"
-            "    await self.delegate('D', t, name='d')\n"
+            "    await self.delegate('D', t)\n"
             "except PydanticSerializationError as exc:\n"
             "    errors.append(\"var 'pair' holds a tuple\" in str(exc))\n"
             "try:\n"
@@ -1247,7 +1243,7 @@ async def test_spawn_and_send_refuse_the_same_non_json_todo_var(
             "return_result(Done(explanation=f'{errors} {len(self.children())}'))"
         ),
     ]
-    atom_models.scripts["kept"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Kept"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     # All three refuse naming the key, and no second child was started.
@@ -1262,9 +1258,9 @@ async def test_a_closed_childs_question_does_not_come_back_after_a_reload(
 ):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
     root = await registry.create(atom_options)
-    atom_models.scripts["asker"] = [cell("return_result(NeedInput(question='Which branch?'))")]
+    atom_models.scripts["Asker"] = [cell("return_result(NeedInput(question='Which branch?'))")]
     port = root._agent.session
-    ref = await port.delegate("asker", "do it", kept=True, name="asker")
+    ref = await port.delegate("Asker", "do it", kept=True)
     await until(lambda: registry.pending_question(root, ref.id) is not None, TIMEOUT)
     await port.close_child(ref.id)
     await registry.close_all()
@@ -1287,18 +1283,18 @@ async def test_a_question_keeps_its_id_after_a_reload_when_the_child_sent_messag
     # Turn 1: the child sends progress messages and finishes.
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
     root = await registry.create(atom_options)
-    atom_models.scripts["chatty"] = [
+    atom_models.scripts["Chatty"] = [
         cell("self.message('looking around')\nself.message('found two branches')"),
         work_done("looked"),
     ]
-    ref = await root._agent.session.delegate("chatty", "look", kept=True, name="chatty")
+    ref = await root._agent.session.delegate("Chatty", "look", kept=True)
     await root._agent.session.wait_child(ref.id)
     await registry.close_all()
 
     # Restart: the store seeds the child's reply_count from its messages
     # and ended turns. Turn 2 asks a question.
     models = AtomModels()
-    models.scripts["chatty"] = [cell("return_result(NeedInput(question='Which branch?'))")]
+    models.scripts["Chatty"] = [cell("return_result(NeedInput(question='Which branch?'))")]
     second = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
     try:
         loaded = await second.load(root.id)
@@ -1326,12 +1322,12 @@ async def test_answered_and_closed_children_leave_no_registry_entries(
 ):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
     root = await registry.create(atom_options)
-    atom_models.scripts["asker"] = [
+    atom_models.scripts["Asker"] = [
         cell("return_result(NeedInput(question='Which branch?'))"),
         work_done("used main"),
     ]
     port = root._agent.session
-    ref = await port.delegate("asker", "do it", kept=True, name="asker")
+    ref = await port.delegate("Asker", "do it", kept=True)
     await until(lambda: registry.pending_question(root, ref.id) is not None, TIMEOUT)
     await port.send_child(ref.id, "main", channel="user_messages")
     result = await port.wait_child(ref.id)
